@@ -1,4 +1,6 @@
 twisted
 python-dateutil
 requests
-netutils
+ipaddress
+net-utils
+netifaces
