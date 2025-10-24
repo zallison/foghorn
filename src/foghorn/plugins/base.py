@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, ClassVar, Sequence
 
 @dataclass
 class PluginDecision:
@@ -56,6 +56,13 @@ class BasePlugin:
         >>> plugin.pre_resolve("example.com", 1, None) is None
         True
     """
+    aliases: ClassVar[Sequence[str]] = ()
+
+    @classmethod
+    def get_aliases(cls) -> Sequence[str]:
+        # Always returns a sequence (even if empty) for discovery
+        return tuple(getattr(cls, "aliases", ()))
+
     def __init__(self, **config):
         """
         Initializes the BasePlugin.
@@ -107,3 +114,17 @@ class BasePlugin:
             True
         """
         return None
+
+
+def plugin_aliases(*aliases: str):
+    """
+    Decorator to set aliases on a plugin class.
+    Usage:
+        @plugin_aliases("acl", "access")
+        class AccessControlPlugin(BasePlugin):
+            ...
+    """
+    def _wrap(cls):
+        cls.aliases = tuple(aliases)
+        return cls
+    return _wrap

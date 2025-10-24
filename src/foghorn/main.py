@@ -10,6 +10,9 @@ from unittest.mock import patch, mock_open
 from .server import DNSServer
 from .plugins.base import BasePlugin
 from .logging_config import init_logging
+from .plugins.registry import discover_plugins, get_plugin_class
+
+
 
 
 def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
@@ -40,15 +43,7 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         >>> # Using aliases
         >>> plugins = load_plugins(["acl", {"module": "router", "config": {}}])
     """
-    aliases = {
-        "access_control": "foghorn.plugins.access_control.AccessControlPlugin",
-        "acl": "foghorn.plugins.access_control.AccessControlPlugin",
-        "new_domain_filter": "foghorn.plugins.new_domain_filter.NewDomainFilterPlugin",
-        "new_domain": "foghorn.plugins.new_domain_filter.NewDomainFilterPlugin",
-        "upstream_router": "foghorn.plugins.upstream_router.UpstreamRouterPlugin",
-        "router": "foghorn.plugins.upstream_router.UpstreamRouterPlugin",
-    }
-
+    alias_registry = discover_plugins()
     plugins: List[BasePlugin] = []
     for spec in plugin_specs or []:
         if isinstance(spec, str):
@@ -59,14 +54,9 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
             config = spec.get("config", {})
         if not module_path:
             continue
-        # Resolve alias if a short name was provided
-        if "." not in module_path:
-            module_path = aliases.get(module_path, module_path)
-        # Dynamically import the plugin class from the module path.
-        module_name, class_name = module_path.rsplit(".", 1)
-        mod = importlib.import_module(module_name)
-        cls = getattr(mod, class_name)
-        plugin = cls(**config)
+
+        plugin_cls = get_plugin_class(module_path, alias_registry)
+        plugin = plugin_cls(**config)
         plugins.append(plugin)
     return plugins
 

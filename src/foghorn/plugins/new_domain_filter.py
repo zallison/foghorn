@@ -5,10 +5,12 @@ from typing import Optional
 
 import whois
 
-from .base import BasePlugin, PluginDecision, PluginContext
+from .base import BasePlugin, PluginDecision, PluginContext, plugin_aliases
 
 logger = logging.getLogger(__name__)
 
+
+@plugin_aliases("new_domain", "new_domain_filter", "ndf")
 class NewDomainFilterPlugin(BasePlugin):
     """
     A plugin that filters out domains that have been registered recently.

@@ -2,10 +2,12 @@ from __future__ import annotations
 import logging
 import ipaddress
 from typing import List, Optional
-from .base import BasePlugin, PluginDecision, PluginContext
+from .base import BasePlugin, PluginDecision, PluginContext, plugin_aliases
 
 logger = logging.getLogger(__name__)
 
+
+@plugin_aliases("acl", "access_control")
 class AccessControlPlugin(BasePlugin):
     """
     A plugin that provides access control based on client IP addresses.
@@ -35,8 +37,8 @@ class AccessControlPlugin(BasePlugin):
         """
         super().__init__(**config)
         self.default = (self.config.get("default", "allow")).lower()
-        self.allow_nets = [ipaddress.ip_network(n) for n in self.config.get("allow", [])]
-        self.deny_nets = [ipaddress.ip_network(n) for n in self.config.get("deny", [])]
+        self.allow_nets = [ipaddress.ip_network(n, strict=False) for n in self.config.get("allow", [])]
+        self.deny_nets = [ipaddress.ip_network(n, strict=False) for n in self.config.get("deny", [])]
 
     def pre_resolve(self, qname: str, qtype: int, ctx: PluginContext) -> Optional[PluginDecision]:
         """
@@ -62,12 +64,12 @@ class AccessControlPlugin(BasePlugin):
         # Deny takes precedence
         for n in self.deny_nets:
             if ip in n:
-                logger.warning("Access denied for %s (deny rule: %s)", client_ip, str(n))
+                logger.warning("Access denied for %s (deny rule: %s)", ctx.client_ip, str(n))
                 return PluginDecision(action="deny")
         for n in self.allow_nets:
             if ip in n:
-                 logger.debug("Access allowed for %s (allow rule: %s)", client_ip, str(n))
+                logger.debug("Access allowed for %s (allow rule: %s)", ctx.client_ip, str(n))
                 return PluginDecision(action="allow")
 
-        logger.debug("Access %s for %s (default policy)", self.default, client_ip)
+        logger.debug("Access %s for %s (default policy)", self.default, ctx.client_ip)
         return PluginDecision(action=self.default)

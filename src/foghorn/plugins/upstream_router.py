@@ -2,29 +2,14 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Optional, Tuple
 
-from .base import BasePlugin, PluginContext, PluginDecision
+from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
 logger = logging.getLogger(__name__)
 
-class UpstreamRouterPlugin(BasePlugin):
-    """
-    Route queries to different upstream DNS servers based on the queried domain.
 
-    Example use:
-        In config.yaml:
-        plugins:
-          - module: foghorn.plugins.upstream_router.UpstreamRouterPlugin
-            config:
-              routes:
-                - domain: "internal.corp.com"
-                  upstream:
-                    host: 10.0.0.1
-                    port: 53
-                - suffix: ".dev.example.com"
-                  upstream:
-                    host: 192.168.1.1
-                    port: 53
-    """
+@plugin_aliases("upstream_router", "router", "upsream")
+class UpstreamRouterPlugin(BasePlugin):
+    """Route queries to different upstream DNS servers based on the queried domain."""
 
     def __init__(self, **config):
         """
