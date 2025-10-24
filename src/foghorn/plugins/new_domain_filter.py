@@ -2,7 +2,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Optional
 
-import requests
+import whois
 
 from .base import BasePlugin, PluginDecision, PluginContext
 
@@ -33,8 +33,6 @@ class NewDomainFilterPlugin(BasePlugin):
         """
         super().__init__(**config)
         self.threshold_days: int = int(self.config.get("threshold_days", 7))
-        self.rdap_endpoint: str = self.config.get("rdap_endpoint", "https://client.rdap.org/?type=domain&object=")
-        self.timeout = int(self.config.get("timeout_ms", 2000)) / 1000.0
 
     def pre_resolve(self, qname: str, qtype: int, ctx: PluginContext) -> Optional[PluginDecision]:
         """
@@ -66,7 +64,7 @@ class NewDomainFilterPlugin(BasePlugin):
 
     def _domain_age_days(self, domain: str) -> Optional[int]:
         """
-        Determines the age of a domain in days by querying an RDAP endpoint.
+        Determines the age of a domain in days by querying whois.
         Args:
             domain: The domain name to check.
         Returns:
@@ -77,37 +75,26 @@ class NewDomainFilterPlugin(BasePlugin):
             >>> from unittest.mock import patch, MagicMock
             >>> from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin
             >>> plugin = NewDomainFilterPlugin()
-            >>> with patch('requests.get') as mock_get:
-            ...     mock_response = MagicMock()
-            ...     mock_response.status_code = 200
-            ...     mock_response.json.return_value = {
-            ...         'events': [{'eventAction': 'registration', 'eventDate': '2023-01-01T00:00:00Z'}]
-            ...     }
-            ...     mock_get.return_value = mock_response
+            >>> with patch('whois.whois') as mock_whois:
+            ...     mock_whois.return_value.creation_date = dt.datetime(2023, 1, 1)
             ...     # The age will depend on the current date, so we just check it's an int
             ...     isinstance(plugin._domain_age_days("example.com"), int)
             True
         """
         try:
-            url = self.rdap_endpoint.rstrip("/") + "/" + domain.rstrip('.')
-            r = requests.get(url, timeout=self.timeout)
-            if r.status_code != 200:
+            w = whois.whois(domain)
+            if not w.creation_date:
                 return None
-            data = r.json()
-            # Look for registration events in the RDAP response.
-            events = data.get("events", [])
-            reg_dates = [e.get("eventDate") for e in events if e.get("eventAction") == "registration" and e.get("eventDate")]
-            if not reg_dates:
-                # Some RDAP servers use "registrationDate" instead of events.
-                reg = data.get("registrationDate")
-                if reg:
-                    reg_dates = [reg]
-            if not reg_dates:
-                return None
-            # Parse the earliest registration date.
-            reg_dt = min(dt.datetime.fromisoformat(d.replace("Z", "+00:00")) for d in reg_dates)
+
+            creation_date = w.creation_date
+            if isinstance(creation_date, list):
+                creation_date = min(creation_date)
+
             now = dt.datetime.now(dt.timezone.utc)
-            delta = now - reg_dt
+            if creation_date.tzinfo is None:
+                creation_date = creation_date.replace(tzinfo=dt.timezone.utc)
+
+            delta = now - creation_date
             return max(0, delta.days)
         except Exception:
             return None
