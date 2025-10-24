@@ -207,6 +207,14 @@ class DNSServer:
             plugins: A list of initialized plugins.
             timeout: The timeout for upstream queries.
 
+        Returns:
+            None
+
+        Notes:
+            Uses socketserver.ThreadingUDPServer to handle each UDP request in
+            its own thread for concurrency. Worker threads are daemonized for
+            fast shutdown.
+
         Example use:
             >>> from foghorn.server import DNSServer
             >>> server = DNSServer("127.0.0.1", 5353, ("8.8.8.8", 53), [], 2.0)
@@ -216,7 +224,9 @@ class DNSServer:
         DNSUDPHandler.upstream_addr = upstream
         DNSUDPHandler.plugins = plugins
         DNSUDPHandler.timeout = timeout
-        self.server = socketserver.UDPServer((host, port), DNSUDPHandler)
+        self.server = socketserver.ThreadingUDPServer((host, port), DNSUDPHandler)
+        # Ensure request handler threads do not block shutdown
+        self.server.daemon_threads = True
         logger.info("DNS UDP server bound to %s:%d", host, port)
 
     def serve_forever(self):

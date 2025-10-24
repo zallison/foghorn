@@ -1,10 +1,20 @@
 from __future__ import annotations
 import time
-from typing import Any, Dict, Tuple
+import threading
+from typing import Any, Dict, Tuple, Optional
 
 class TTLCache:
     """
-    An in-memory cache with Time-To-Live (TTL) support.
+    Thread-safe in-memory cache with Time-To-Live (TTL) support.
+
+    Inputs:
+        None (constructor)
+    Outputs:
+        TTLCache instance
+
+    Notes:
+        All dictionary operations are synchronized with an RLock.
+        Expired entries are purged opportunistically in get() and set().
 
     Example use:
         >>> import time
@@ -22,22 +32,28 @@ class TTLCache:
         """
         Initializes the TTLCache.
 
+        Inputs:
+            None
+        Outputs:
+            None
+
         Example use:
             >>> cache = TTLCache()
             >>> cache._store
             {}
         """
         self._store: Dict[Tuple[str, int], Tuple[float, bytes]] = {}
+        self._lock = threading.RLock()
 
     def get(self, key: Tuple[str, int]) -> bytes | None:
         """
         Retrieves an item from the cache.
         Returns the item if it exists and has not expired.
 
-        Args:
+        Inputs:
             key: The key to retrieve.
 
-        Returns:
+        Outputs:
             The cached data, or None if the key is not found or has expired.
 
         Example use:
@@ -47,24 +63,27 @@ class TTLCache:
             b'data'
         """
         now = time.time()
-        entry = self._store.get(key)
-        if not entry:
-            return None
-        expiry, data = entry
-        # Check if the entry has expired.
-        if now >= expiry:
-            self._store.pop(key, None)
-            return None
-        return data
+        with self._lock:
+            entry = self._store.get(key)
+            if not entry:
+                return None
+            expiry, data = entry
+            # Check if the entry has expired.
+            if now >= expiry:
+                self._store.pop(key, None)
+                return None
+            return data
 
     def set(self, key: Tuple[str, int], ttl: int, data: bytes) -> None:
         """
         Adds an item to the cache with a specified TTL.
 
-        Args:
+        Inputs:
             key: The key to store the data under.
             ttl: The Time-To-Live in seconds.
             data: The data to store.
+        Outputs:
+            None
 
         Example use:
             >>> cache = TTLCache()
@@ -73,4 +92,40 @@ class TTLCache:
             b'data'
         """
         expiry = time.time() + max(0, int(ttl))
-        self._store[key] = (expiry, data)
+        with self._lock:
+            self._store[key] = (expiry, data)
+            # Opportunistic cleanup
+            self._purge_expired_locked(now=time.time())
+
+    def purge_expired(self) -> int:
+        """
+        Remove all expired entries.
+
+        Inputs:
+            None
+        Outputs:
+            Number of entries removed.
+
+        Example use:
+            >>> cache = TTLCache()
+            >>> removed = cache.purge_expired()
+        """
+        with self._lock:
+            return self._purge_expired_locked(now=time.time())
+
+    def _purge_expired_locked(self, now: float) -> int:
+        """
+        Remove expired entries while holding the lock.
+
+        Inputs:
+            now: Current time as float epoch seconds
+        Outputs:
+            Number of entries removed
+        """
+        removed = 0
+        # Iterate on a list of items to avoid runtime dict size change issues
+        for k, (exp, _) in list(self._store.items()):
+            if exp <= now:
+                del self._store[k]
+                removed += 1
+        return removed
