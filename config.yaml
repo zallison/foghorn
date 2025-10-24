@@ -10,14 +10,14 @@ upstream:
 
 # Logging configuration
 logging:
-  level: debug          # Available levels: debug, info, warn, error, crit
+  level: debug         # Available levels: debug, info, warn, error, crit
   stderr: true         # Log to stderr (default: true)
   file: ./foghorn.log  # Optional: also log to this file
 
 plugins:
   - module: new_domain
     config:
-      threshold_days: 7
+      threshold_days: 14
 
   - module: router
     config:
@@ -26,3 +26,31 @@ plugins:
           upstream:
             host: 192.168.88.35
             port: 53
+
+  - module: filter
+    config:
+      # Pre-resolve (domain) filtering
+      blocked_domains:
+        - "malware.com"
+        - "phishing-site.org"
+        - "spam.example"
+
+      blocked_patterns:
+        - ".*\\.porn\\..*"      # Block any domain with "porn" in subdomain
+        - "casino[0-9]+\\..*"   # Block casino1.com, casino2.net, etc.
+        - ".*adult.*"           # Block domains containing "adult"
+
+      blocked_keywords:
+        - "porn"
+        - "gambling"
+        - "casino"
+        - "malware"
+        - "phishing"
+
+      # Post-resolve (IP) filtering with per-IP actions
+      blocked_ips:
+        # Deny entire response if these IPs are found
+        - ip: "23.220.75.245/16"
+          action: "remove"
+        - ip: "1.2.3.4"
+          action: "deny"
