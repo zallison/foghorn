@@ -54,3 +54,17 @@ plugins:
           action: "remove"
         - ip: "1.2.3.4"
           action: "deny"
+
+  - module: foghorn.plugins.examples.ExamplesPlugin
+    config:
+      # Pre-resolve policy
+      max_subdomains: 5
+      max_length_no_dots: 50
+      base_labels: 2
+
+      # Post-resolve IP rewrite rules
+      rewrite_first_ipv4:
+        - apply_to_qtypes: ["A"]
+          ip_override: 127.0.0.1
+        - apply_to_qtypes: ["AAAA"]
+          ip_override: ::1
