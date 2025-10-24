@@ -1,10 +1,30 @@
 from __future__ import annotations
+import logging
 import socketserver
 from typing import List, Tuple
 from dnslib import DNSRecord, QTYPE, RCODE
 
 from .cache import TTLCache
 from .plugins.base import BasePlugin, PluginDecision, PluginContext
+
+logger = logging.getLogger("foghorn.server")
+
+
+def _set_response_id(wire: bytes, req_id: int) -> bytes:
+    """Ensure the response DNS ID matches the request ID.
+
+    Fast path: DNS ID is the first 2 bytes (big-endian). We rewrite them
+    without parsing to avoid any packing differences.
+    """
+    try:
+        if len(wire) >= 2:
+            hi = (req_id >> 8) & 0xFF
+            lo = req_id & 0xFF
+            return bytes([hi, lo]) + wire[2:]
+        return wire
+    except Exception:
+        return wire
+
 
 class DNSUDPHandler(socketserver.BaseRequestHandler):
     """
@@ -15,6 +35,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         This handler is used internally by the DNSServer and is not
         typically instantiated directly by users.
     """
+
     cache = TTLCache()
     upstream_addr: Tuple[str, int] = ("1.1.1.1", 53)
     plugins: List[BasePlugin] = []
@@ -37,8 +58,10 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         try:
             req = DNSRecord.parse(data)
             q = req.questions[0]
-            qname = str(q.qname).rstrip('.')
+            qname = str(q.qname).rstrip(".")
             qtype = q.qtype
+
+            logger.debug("Query from %s: %s %s", client_ip, qname, qtype)
 
             ctx = PluginContext(client_ip=client_ip)
 
@@ -47,35 +70,74 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 decision = p.pre_resolve(qname, qtype, ctx)
                 if isinstance(decision, PluginDecision):
                     if decision.action == "deny":
+                        logger.warning(
+                            "Denied %s %s by %s", qname, qtype, p.__class__.__name__
+                        )
                         reply = req.reply()
                         reply.header.rcode = RCODE.NXDOMAIN
-                        sock.sendto(reply.pack(), self.client_address)
+                        wire = _set_response_id(reply.pack(), req.header.id)
+                        sock.sendto(wire, self.client_address)
                         return
                     if decision.action == "override" and decision.response is not None:
-                        sock.sendto(decision.response, self.client_address)
+                        logger.info(
+                            "Override %s %s by %s", qname, qtype, p.__class__.__name__
+                        )
+                        resp = _set_response_id(decision.response, req.header.id)
+                        sock.sendto(resp, self.client_address)
                         return
                     # allow -> continue
+                    logger.debug("Plugin %s: %s", p.__class__.__name__, decision.action)
 
             # Check cache for a response.
             cache_key = (qname.lower(), qtype)
             cached = self.cache.get(cache_key)
             if cached is not None:
-                sock.sendto(cached, self.client_address)
+                logger.debug("Cache hit: %s %s (%d bytes)", qname, qtype, len(cached))
+                resp = _set_response_id(cached, req.header.id)
+                sock.sendto(resp, self.client_address)
                 return
+            else:
+                logger.debug("Cache miss: %s %s", qname, qtype)
 
             # Forward to upstream
-            upstream_addr = getattr(ctx, "upstream_override", None) or self.upstream_addr
-            reply = req.send(upstream_addr, timeout=self.timeout)
+            upstream_addr = (
+                getattr(ctx, "upstream_override", None) or self.upstream_addr
+            )
+            logger.debug(
+                "Sending to upstream %s:%d", upstream_addr[0], upstream_addr[1]
+            )
+            try:
+                host, port = upstream_addr
+                reply = req.send(host, port, timeout=self.timeout)
+                logger.debug("Upstream response: %d bytes", len(reply))
+            except Exception as e:
+                logger.warning(
+                    "Upstream timeout/error for %s %s: %s", qname, qtype, str(e)
+                )
+                # Re-raise to let existing error handling deal with it
+                raise
             # Post-resolve plugin hooks (allow overrides like rewriting)
             for p in self.plugins:
                 decision = p.post_resolve(qname, qtype, reply, ctx)
                 if isinstance(decision, PluginDecision):
                     if decision.action == "deny":
+                        logger.warning(
+                            "Post-resolve denied %s %s by %s",
+                            qname,
+                            qtype,
+                            p.__class__.__name__,
+                        )
                         r = req.reply()
                         r.header.rcode = RCODE.NXDOMAIN
                         reply = r.pack()
                         break
                     if decision.action == "override" and decision.response is not None:
+                        logger.info(
+                            "Post-resolve override %s %s by %s",
+                            qname,
+                            qtype,
+                            p.__class__.__name__,
+                        )
                         reply = decision.response
                         break
 
@@ -83,22 +145,32 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             try:
                 r = DNSRecord.parse(reply)
                 ttls = [rr.ttl for rr in r.rr]
-                ttl = min(ttls) if ttls else 0
+                ttl = min(ttls) if ttls else 300
                 if ttl > 0:
+                    logger.debug("Caching %s %s with TTL %ds", qname, qtype, ttl)
                     self.cache.set(cache_key, ttl, reply)
-            except Exception:
-                pass
+                else:
+                    logger.debug("Not caching %s %s (TTL=%d)", qname, qtype, ttl)
+            except Exception as e:
+                logger.debug("Failed to parse response for caching: %s", str(e))
 
+            # Ensure the response ID matches the request ID before sending
+            reply = _set_response_id(reply, req.header.id)
             sock.sendto(reply, self.client_address)
-        except Exception:
+        except Exception as e:
+            logger.exception(
+                "Unhandled error during request handling from %s", client_ip
+            )
             try:
                 # On parse or other errors, return SERVFAIL
                 req = DNSRecord.parse(data)
                 r = req.reply()
                 r.header.rcode = RCODE.SERVFAIL
-                sock.sendto(r.pack(), self.client_address)
-            except Exception:
-                pass
+                wire = _set_response_id(r.pack(), req.header.id)
+                sock.sendto(wire, self.client_address)
+            except Exception as inner_e:
+                logger.error("Failed to send SERVFAIL response: %s", str(inner_e))
+
 
 class DNSServer:
     """
@@ -116,7 +188,15 @@ class DNSServer:
         >>> time.sleep(0.1)
         >>> server.server.shutdown()
     """
-    def __init__(self, host: str, port: int, upstream: Tuple[str,int], plugins: List[BasePlugin], timeout: float = 2.0) -> None:
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        upstream: Tuple[str, int],
+        plugins: List[BasePlugin],
+        timeout: float = 2.0,
+    ) -> None:
         """
         Initializes the DNSServer.
 
@@ -137,6 +217,7 @@ class DNSServer:
         DNSUDPHandler.plugins = plugins
         DNSUDPHandler.timeout = timeout
         self.server = socketserver.UDPServer((host, port), DNSUDPHandler)
+        logger.info("DNS UDP server bound to %s:%d", host, port)
 
     def serve_forever(self):
         """

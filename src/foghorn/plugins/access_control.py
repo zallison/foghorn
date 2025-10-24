@@ -1,7 +1,10 @@
 from __future__ import annotations
+import logging
 import ipaddress
 from typing import List, Optional
 from .base import BasePlugin, PluginDecision, PluginContext
+
+logger = logging.getLogger(__name__)
 
 class AccessControlPlugin(BasePlugin):
     """
@@ -59,8 +62,12 @@ class AccessControlPlugin(BasePlugin):
         # Deny takes precedence
         for n in self.deny_nets:
             if ip in n:
+                logger.warning("Access denied for %s (deny rule: %s)", client_ip, str(n))
                 return PluginDecision(action="deny")
         for n in self.allow_nets:
             if ip in n:
+                 logger.debug("Access allowed for %s (allow rule: %s)", client_ip, str(n))
                 return PluginDecision(action="allow")
+
+        logger.debug("Access %s for %s (default policy)", self.default, client_ip)
         return PluginDecision(action=self.default)

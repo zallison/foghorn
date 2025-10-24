@@ -180,7 +180,7 @@ plugins:
 
 ## Complete `config.yaml` Example
 
-Here is a complete `config.yaml` file that uses all the available plugins (with short aliases):
+Here is a complete `config.yaml` file that uses all the available features:
 
 ```yaml
 listen:
@@ -190,6 +190,10 @@ upstream:
   host: 1.1.1.1
   port: 53
   timeout_ms: 2000
+logging:
+  level: info
+  stderr: true
+  file: ./foghorn.log
 plugins:
   - acl
   - module: new_domain
@@ -208,6 +212,54 @@ plugins:
           upstream:
             host: 192.168.1.1
             port: 53
+```
+
+## Logging
+
+Foghorn includes configurable logging with bracketed level tags and UTC timestamps. Log output includes the timestamp, level tag, logger name, and message:
+
+```
+2025-10-24T05:56:01Z [info] foghorn.main: Starting Foghorn on 127.0.0.1:5354
+2025-10-24T05:56:01Z [debug] foghorn.server: Query from 127.0.0.1: example.com 1
+2025-10-24T05:56:02Z [warn] foghorn.plugins.new_domain_filter: Domain example-new.com blocked (age: 3 days, threshold: 7)
+```
+
+### Configuration
+
+Add a `logging` section to your `config.yaml`:
+
+```yaml
+logging:
+  level: info          # Available levels: debug, info, warn, error, crit
+  stderr: true         # Log to stderr (default: true)
+  file: ./foghorn.log  # Optional: also log to this file
+```
+
+### Available Levels
+
+*   **debug**: Detailed diagnostic information including each query, cache hits/misses, plugin decisions
+*   **info**: General information about server startup, configuration, and important events  
+*   **warn**: Warning conditions like denied queries, upstream timeouts, plugin errors
+*   **error**: Error conditions that don't stop the server
+*   **crit**: Critical errors that may cause the server to stop
+
+### File Logging
+
+When `file` is specified, Foghorn will:
+*   Create parent directories automatically if they don't exist
+*   Log to both stderr and the file (if `stderr: true`)
+*   Append to the file (it won't overwrite existing content)
+*   Use UTF-8 encoding
+
+### Plugin Logging
+
+Plugin authors can use Python's standard `logging` module and will inherit the same bracketed format:
+
+```python
+import logging
+
+logger = logging.getLogger(__name__)
+logger.warning("Custom plugin warning: %s", some_value)
 ```
 
 ## Plugin Development

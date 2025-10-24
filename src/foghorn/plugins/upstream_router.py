@@ -1,7 +1,10 @@
 from __future__ import annotations
+import logging
 from typing import Dict, List, Optional, Tuple
 
 from .base import BasePlugin, PluginContext, PluginDecision
+
+logger = logging.getLogger(__name__)
 
 class UpstreamRouterPlugin(BasePlugin):
     """
@@ -67,10 +70,11 @@ class UpstreamRouterPlugin(BasePlugin):
             >>> plugin.pre_resolve("server.corp.com", 1, ctx)
             >>> ctx.upstream_override
             ('10.0.0.1', 53)
-        
+        """
         q = qname.rstrip('.').lower()
         upstream = self._match_upstream(q)
         if upstream is not None:
+            logger.debug("Route matched for %s: upstream %s:%d", qname, upstream[0], upstream[1])
             ctx.upstream_override = upstream
         # Do not alter decision flow; just annotate context
         return None
@@ -78,6 +82,7 @@ class UpstreamRouterPlugin(BasePlugin):
     def _normalize_routes(self, routes: List[Dict]) -> List[Dict]:
         """
         Normalizes and validates the routing rules.
+
         Args:
             routes: A list of routing rules.
         Returns:
@@ -94,7 +99,7 @@ class UpstreamRouterPlugin(BasePlugin):
             'example.com'
             >>> norm_routes[0]["upstream"]
             ('1.1.1.1', 53)
-        
+        """
         norm: List[Dict] = []
         for r in routes or []:
             route = {}
@@ -145,7 +150,7 @@ class UpstreamRouterPlugin(BasePlugin):
             ('1.1.1.1', 53)
             >>> plugin._match_upstream("server.corp")
             ('10.0.0.1', 53)
-        
+        """
         for r in self.routes:
             if "domain" in r and q == r["domain"]:
                 return r["upstream"]

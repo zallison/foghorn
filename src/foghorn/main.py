@@ -2,12 +2,14 @@ from __future__ import annotations
 import importlib
 import sys
 import argparse
+import logging
 from typing import List
 import yaml
 from unittest.mock import patch, mock_open
 
 from .server import DNSServer
 from .plugins.base import BasePlugin
+from .logging_config import init_logging
 
 
 def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
@@ -107,6 +109,11 @@ def main(argv: List[str] | None = None) -> int:
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f) or {}
 
+    # Initialize logging before any other operations
+    init_logging(cfg.get("logging"))
+    logger = logging.getLogger("foghorn.main")
+    logger.info("Loaded config from %s", args.config)
+
     listen = cfg.get("listen", {})
     host = listen.get("host", "127.0.0.1")
     port = int(listen.get("port", 5353))
@@ -117,10 +124,19 @@ def main(argv: List[str] | None = None) -> int:
     timeout_ms = int(upstream.get("timeout_ms", 2000))
 
     plugins = load_plugins(cfg.get("plugins", []))
+    logger.debug("Loaded %d plugins: %s", len(plugins), [p.__class__.__name__ for p in plugins])
 
     server = DNSServer(host, port, (up_host, up_port), plugins, timeout=timeout_ms/1000.0)
-    print(f"DNS cache server listening on {host}:{port}, upstream {up_host}:{up_port}")
-    server.serve_forever()
+    logger.info("Starting Foghorn on %s:%d, upstream %s:%d", host, port, up_host, up_port)
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        logger.info("Received interrupt, shutting down")
+    except Exception:
+        logger.exception("Unhandled exception during server operation")
+        return 1
+
     return 0
 
 

@@ -1,10 +1,13 @@
 from __future__ import annotations
 import datetime as dt
+import logging
 from typing import Optional
 
 import whois
 
 from .base import BasePlugin, PluginDecision, PluginContext
+
+logger = logging.getLogger(__name__)
 
 class NewDomainFilterPlugin(BasePlugin):
     """
@@ -57,9 +60,13 @@ class NewDomainFilterPlugin(BasePlugin):
         """
         age_days = self._domain_age_days(qname)
         if age_days is None:
+            logger.debug("Domain age unknown for %s, allowing", qname)
             return None  # unknown; allow
         if age_days < self.threshold_days:
+            logger.warning("Domain %s blocked (age: %d days, threshold: %d)", qname, age_days, self.threshold_days)
             return PluginDecision(action="deny")
+
+        logger.debug("Domain %s allowed (age: %d days)", qname, age_days)
         return None
 
     def _domain_age_days(self, domain: str) -> Optional[int]:
@@ -96,5 +103,6 @@ class NewDomainFilterPlugin(BasePlugin):
 
             delta = now - creation_date
             return max(0, delta.days)
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to get domain age for %s: %s", domain, str(e))
             return None
