@@ -1,7 +1,7 @@
 # Example configuration for the DNS caching server
 listen:
   host: 127.0.0.1
-  port: 5353
+  port: 5354
 
 upstream:
   host: 1.1.1.1
@@ -9,15 +9,22 @@ upstream:
   timeout_ms: 2000
 
 plugins:
-  - module: foghorn.plugins.access_control.AccessControlPlugin
+  - module: acl
     config:
       default: allow  # or "deny"
       allow:
         - 127.0.0.0/8
       deny:
         - 10.0.0.0/8
-  - module: foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
+  - module: new_domain
     config:
       threshold_days: 7
       rdap_endpoint: https://rdap.org/domain/
       timeout_ms: 2000
+  # - module: router
+  #   config:
+  #     routes:
+  #       - suffix: ".internal"
+  #         upstream:
+  #           host: 127.0.0.1
+  #           port: 1053

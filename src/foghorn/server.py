@@ -7,12 +7,31 @@ from .cache import TTLCache
 from .plugins.base import BasePlugin, PluginDecision, PluginContext
 
 class DNSUDPHandler(socketserver.BaseRequestHandler):
+    """
+    Handles UDP DNS requests.
+    This class is instantiated for each incoming DNS query.
+
+    Example use:
+        This handler is used internally by the DNSServer and is not
+        typically instantiated directly by users.
+    """
     cache = TTLCache()
     upstream_addr: Tuple[str, int] = ("1.1.1.1", 53)
     plugins: List[BasePlugin] = []
     timeout = 2.0
 
     def handle(self):
+        """
+        Processes an incoming DNS query.
+        The method follows these steps:
+        1. Parses the query.
+        2. Runs pre-resolve plugins.
+        3. Checks the cache.
+        4. Forwards to an upstream server if needed.
+        5. Runs post-resolve plugins.
+        6. Caches the response.
+        7. Sends the final response to the client.
+        """
         data, sock = self.request
         client_ip = self.client_address[0]
         try:
@@ -37,13 +56,14 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         return
                     # allow -> continue
 
+            # Check cache for a response.
             cache_key = (qname.lower(), qtype)
             cached = self.cache.get(cache_key)
             if cached is not None:
                 sock.sendto(cached, self.client_address)
                 return
 
-            # Forward to upstream (allow plugin to override per-request)
+            # Forward to upstream
             upstream_addr = getattr(ctx, "upstream_override", None) or self.upstream_addr
             reply = req.send(upstream_addr, timeout=self.timeout)
             # Post-resolve plugin hooks (allow overrides like rewriting)
@@ -59,7 +79,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         reply = decision.response
                         break
 
-            # Cache based on minimum TTL in answers
+            # Cache the response based on the minimum TTL in the answer records.
             try:
                 r = DNSRecord.parse(reply)
                 ttls = [rr.ttl for rr in r.rr]
@@ -81,13 +101,51 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 pass
 
 class DNSServer:
+    """
+    A basic DNS server.
+
+    Example use:
+        >>> from foghorn.server import DNSServer
+        >>> import threading
+        >>> import time
+        >>> # Start server in a background thread
+        >>> server = DNSServer("127.0.0.1", 5355, ("8.8.8.8", 53), [], timeout=1.0)
+        >>> server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        >>> server_thread.start()
+        >>> # The server is now running in the background
+        >>> time.sleep(0.1)
+        >>> server.server.shutdown()
+    """
     def __init__(self, host: str, port: int, upstream: Tuple[str,int], plugins: List[BasePlugin], timeout: float = 2.0) -> None:
+        """
+        Initializes the DNSServer.
+
+        Args:
+            host: The host to listen on.
+            port: The port to listen on.
+            upstream: The upstream DNS server address.
+            plugins: A list of initialized plugins.
+            timeout: The timeout for upstream queries.
+
+        Example use:
+            >>> from foghorn.server import DNSServer
+            >>> server = DNSServer("127.0.0.1", 5353, ("8.8.8.8", 53), [], 2.0)
+            >>> server.server.server_address
+            ('127.0.0.1', 5353)
+        """
         DNSUDPHandler.upstream_addr = upstream
         DNSUDPHandler.plugins = plugins
         DNSUDPHandler.timeout = timeout
         self.server = socketserver.UDPServer((host, port), DNSUDPHandler)
 
     def serve_forever(self):
+        """
+        Starts the server and listens for requests.
+
+        Example use:
+            This method is typically run in a separate thread for testing.
+            See the DNSServer class docstring for an example.
+        """
         try:
             self.server.serve_forever()
         except KeyboardInterrupt:

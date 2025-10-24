@@ -7,26 +7,67 @@ class UpstreamRouterPlugin(BasePlugin):
     """
     Route queries to different upstream DNS servers based on the queried domain.
 
-    Config example:
-    {
-      "routes": [
-        {"domain": "corp.example.com", "upstream": {"host": "10.0.0.53", "port": 53}},
-        {"suffix": "internal", "upstream": {"host": "192.168.1.1", "port": 53}},
-        {"suffix": ".svc.cluster.local", "upstream": {"host": "127.0.0.1", "port": 1053}}
-      ]
-    }
-
-    Matching rules:
-    - If a route has "domain": exact match on qname (case-insensitive).
-    - If a route has "suffix": match if qname equals suffix or ends with "." + suffix (case-insensitive).
-    - First matching rule wins.
+    Example use:
+        In config.yaml:
+        plugins:
+          - module: foghorn.plugins.upstream_router.UpstreamRouterPlugin
+            config:
+              routes:
+                - domain: "internal.corp.com"
+                  upstream:
+                    host: 10.0.0.1
+                    port: 53
+                - suffix: ".dev.example.com"
+                  upstream:
+                    host: 192.168.1.1
+                    port: 53
     """
 
     def __init__(self, **config):
+        """
+        Initializes the UpstreamRouterPlugin.
+
+        Args:
+            **config: Configuration for the plugin.
+
+        Example use:
+            >>> from foghorn.plugins.upstream_router import UpstreamRouterPlugin
+            >>> config = {
+            ...     "routes": [
+            ...         {"domain": "example.com", "upstream": {"host": "1.1.1.1", "port": 53}}
+            ...     ]
+            ... }
+            >>> plugin = UpstreamRouterPlugin(**config)
+            >>> plugin.routes[0]["domain"]
+            'example.com'
+        """
         super().__init__(**config)
         self.routes: List[Dict] = self._normalize_routes(self.config.get("routes", []))
 
     def pre_resolve(self, qname: str, qtype: int, ctx: PluginContext) -> Optional[PluginDecision]:
+        """
+        Matches the query against the configured routes and sets an upstream override if a match is found.
+        Args:
+            qname: The queried domain name.
+            qtype: The query type.
+            ctx: The plugin context.
+        Returns:
+            None, as this plugin only annotates the context.
+
+        Example use:
+            >>> from foghorn.plugins.upstream_router import UpstreamRouterPlugin
+            >>> from foghorn.plugins.base import PluginContext
+            >>> config = {
+            ...     "routes": [
+            ...         {"suffix": "corp.com", "upstream": {"host": "10.0.0.1", "port": 53}}
+            ...     ]
+            ... }
+            >>> plugin = UpstreamRouterPlugin(**config)
+            >>> ctx = PluginContext("1.2.3.4")
+            >>> plugin.pre_resolve("server.corp.com", 1, ctx)
+            >>> ctx.upstream_override
+            ('10.0.0.1', 53)
+        
         q = qname.rstrip('.').lower()
         upstream = self._match_upstream(q)
         if upstream is not None:
@@ -35,6 +76,25 @@ class UpstreamRouterPlugin(BasePlugin):
         return None
 
     def _normalize_routes(self, routes: List[Dict]) -> List[Dict]:
+        """
+        Normalizes and validates the routing rules.
+        Args:
+            routes: A list of routing rules.
+        Returns:
+            A list of normalized routing rules.
+
+        Example use:
+            >>> from foghorn.plugins.upstream_router import UpstreamRouterPlugin
+            >>> plugin = UpstreamRouterPlugin()
+            >>> routes = [
+            ...     {"domain": "EXAMPLE.COM", "upstream": {"host": "1.1.1.1", "port": "53"}}
+            ... ]
+            >>> norm_routes = plugin._normalize_routes(routes)
+            >>> norm_routes[0]["domain"]
+            'example.com'
+            >>> norm_routes[0]["upstream"]
+            ('1.1.1.1', 53)
+        
         norm: List[Dict] = []
         for r in routes or []:
             route = {}
@@ -65,6 +125,27 @@ class UpstreamRouterPlugin(BasePlugin):
         return norm
 
     def _match_upstream(self, q: str) -> Optional[Tuple[str, int]]:
+        """
+        Finds an upstream server for a given query name.
+        Args:
+            q: The query name.
+        Returns:
+            The address of the upstream server, or None if no match is found.
+
+        Example use:
+            >>> from foghorn.plugins.upstream_router import UpstreamRouterPlugin
+            >>> config = {
+            ...     "routes": [
+            ...         {"domain": "example.com", "upstream": {"host": "1.1.1.1", "port": 53}},
+            ...         {"suffix": "corp", "upstream": {"host": "10.0.0.1", "port": 53}}
+            ...     ]
+            ... }
+            >>> plugin = UpstreamRouterPlugin(**config)
+            >>> plugin._match_upstream("example.com")
+            ('1.1.1.1', 53)
+            >>> plugin._match_upstream("server.corp")
+            ('10.0.0.1', 53)
+        
         for r in self.routes:
             if "domain" in r and q == r["domain"]:
                 return r["upstream"]

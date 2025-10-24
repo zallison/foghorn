@@ -4,13 +4,57 @@ from typing import List, Optional
 from .base import BasePlugin, PluginDecision, PluginContext
 
 class AccessControlPlugin(BasePlugin):
+    """
+    A plugin that provides access control based on client IP addresses.
+
+    Example use:
+        In config.yaml:
+        plugins:
+          - module: foghorn.plugins.access_control.AccessControlPlugin
+            config:
+              default: deny
+              allow:
+                - 192.168.1.0/24
+    """
     def __init__(self, **config):
+        """
+        Initializes the AccessControlPlugin.
+
+        Args:
+            **config: Configuration for the plugin.
+
+        Example use:
+            >>> from foghorn.plugins.access_control import AccessControlPlugin
+            >>> config = {"default": "deny", "allow": ["192.168.1.0/24"]}
+            >>> plugin = AccessControlPlugin(**config)
+            >>> plugin.default
+            'deny'
+        """
         super().__init__(**config)
         self.default = (self.config.get("default", "allow")).lower()
         self.allow_nets = [ipaddress.ip_network(n) for n in self.config.get("allow", [])]
         self.deny_nets = [ipaddress.ip_network(n) for n in self.config.get("deny", [])]
 
     def pre_resolve(self, qname: str, qtype: int, ctx: PluginContext) -> Optional[PluginDecision]:
+        """
+        Checks if the client's IP is in the allow or deny lists.
+        Args:
+            qname: The queried domain name.
+            qtype: The query type.
+            ctx: The plugin context.
+        Returns:
+            A PluginDecision to allow or deny the request.
+
+        Example use:
+            >>> from foghorn.plugins.access_control import AccessControlPlugin
+            >>> from foghorn.plugins.base import PluginContext
+            >>> config = {"default": "allow", "deny": ["192.168.1.10"]}
+            >>> plugin = AccessControlPlugin(**config)
+            >>> ctx = PluginContext(client_ip="192.168.1.10")
+            >>> decision = plugin.pre_resolve("example.com", 1, ctx)
+            >>> decision.action
+            'deny'
+        """
         ip = ipaddress.ip_address(ctx.client_ip)
         # Deny takes precedence
         for n in self.deny_nets:

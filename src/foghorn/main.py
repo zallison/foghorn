@@ -4,19 +4,63 @@ import sys
 import argparse
 from typing import List
 import yaml
+from unittest.mock import patch, mock_open
 
 from .server import DNSServer
 from .plugins.base import BasePlugin
 
 
 def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
+    """
+    Loads and initializes plugins from a list of plugin specifications.
+
+    Supports either full dotted class paths or short aliases:
+    - access_control | acl -> foghorn.plugins.access_control.AccessControlPlugin
+    - new_domain_filter | new_domain -> foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
+    - upstream_router | router -> foghorn.plugins.upstream_router.UpstreamRouterPlugin
+
+    Args:
+        plugin_specs: A list where each item is either a dict with keys
+                      {"module": <path-or-alias>, "config": {...}} or a string
+                      alias/dotted path.
+
+    Returns:
+        A list of initialized plugin instances.
+
+    Example use:
+        >>> from foghorn.plugins.base import BasePlugin
+        >>> class MyTestPlugin(BasePlugin):
+        ...     pass
+        >>> specs = [{"module": "__main__.MyTestPlugin"}]
+        >>> plugins = load_plugins(specs)
+        >>> isinstance(plugins[0], MyTestPlugin)
+        True
+        >>> # Using aliases
+        >>> plugins = load_plugins(["acl", {"module": "router", "config": {}}])
+    """
+    aliases = {
+        "access_control": "foghorn.plugins.access_control.AccessControlPlugin",
+        "acl": "foghorn.plugins.access_control.AccessControlPlugin",
+        "new_domain_filter": "foghorn.plugins.new_domain_filter.NewDomainFilterPlugin",
+        "new_domain": "foghorn.plugins.new_domain_filter.NewDomainFilterPlugin",
+        "upstream_router": "foghorn.plugins.upstream_router.UpstreamRouterPlugin",
+        "router": "foghorn.plugins.upstream_router.UpstreamRouterPlugin",
+    }
+
     plugins: List[BasePlugin] = []
     for spec in plugin_specs or []:
-        module_path = spec.get("module")
-        config = spec.get("config", {})
+        if isinstance(spec, str):
+            module_path = spec
+            config = {}
+        else:
+            module_path = spec.get("module")
+            config = spec.get("config", {})
         if not module_path:
             continue
-        # module_path is full dotted path to class
+        # Resolve alias if a short name was provided
+        if "." not in module_path:
+            module_path = aliases.get(module_path, module_path)
+        # Dynamically import the plugin class from the module path.
         module_name, class_name = module_path.rsplit(".", 1)
         mod = importlib.import_module(module_name)
         cls = getattr(mod, class_name)
@@ -26,6 +70,36 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
 
 
 def main(argv: List[str] | None = None) -> int:
+    """
+    Main entry point for the DNS server.
+    Parses arguments, loads configuration, initializes plugins, and starts the server.
+
+    Args:
+        argv: Command-line arguments.
+
+    Returns:
+        An exit code.
+
+    Example use:
+        CLI:
+            PYTHONPATH=src python -m foghorn.main --config config.yaml
+
+        Programmatic (for testing):
+        (This is a simplified example; real usage involves creating a config file)
+        >>> import threading
+        >>> import time
+        >>> with patch('builtins.open', mock_open(read_data='''
+        ... listen:
+        ...   host: 127.0.0.1
+        ...   port: 5354
+        ... upstream:
+        ...   host: 1.1.1.1
+        ...   port: 53
+        ... ''')):
+        ...     server_thread = threading.Thread(target=main, args=(["--config", "config.yaml"],), daemon=True)
+        ...     server_thread.start()
+        ...     time.sleep(0.1) # Give server time to start
+    """
     parser = argparse.ArgumentParser(description="Caching DNS server with plugins")
     parser.add_argument("--config", default="config.yaml", help="Path to YAML config")
     args = parser.parse_args(argv)
