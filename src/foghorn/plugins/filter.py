@@ -23,7 +23,7 @@ class FilterPlugin(BasePlugin):
     Post-resolve filtering blocks or modifies responses based on:
     - Specific IP addresses with per-IP actions
     - IP ranges/subnets with per-range actions
-    - Actions: "remove" (remove from response) or "deny" (return NXDOMAIN)
+    - Actions: "remove" (remove from response), "deny" (return NXDOMAIN), or "replace" (substitute with another IP)
     
     Example use:
         In config.yaml:
@@ -47,6 +47,9 @@ class FilterPlugin(BasePlugin):
                   action: "deny"
                 - ip: "198.51.100.0/24"
                   action: "remove"
+                - ip: "203.0.113.5"
+                  action: "replace"
+                  replace_with: "127.0.0.1"
                 - ip: "2001:db8::/32"
                   action: "deny"
               # Alternative simple format (defaults to deny)
@@ -92,8 +95,8 @@ class FilterPlugin(BasePlugin):
         
         # Post-resolve (IP) filtering configuration
         # Maps IP networks/addresses to their actions ("remove" or "deny")
-        self.blocked_networks: Dict[Union[ipaddress.IPv4Network, ipaddress.IPv6Network], str] = {}
-        self.blocked_ips: Dict[Union[ipaddress.IPv4Address, ipaddress.IPv6Address], str] = {}
+        self.blocked_networks: Dict[Union[ipaddress.IPv4Network, ipaddress.IPv6Network], Dict] = {}
+        self.blocked_ips: Dict[Union[ipaddress.IPv4Address, ipaddress.IPv6Address], Dict] = {}
         
         # Parse IP addresses and networks with actions
         for ip_config in self.config.get("blocked_ips", []):
@@ -109,19 +112,37 @@ class FilterPlugin(BasePlugin):
                     logger.error("Invalid blocked_ips entry format: %s", ip_config)
                     continue
                 
-                if action not in ("remove", "deny"):
+                if action not in ("remove", "deny", "replace"):
                     logger.warning("Invalid action '%s' for IP '%s', defaulting to 'deny'", 
                                  action, ip_spec)
                     action = "deny"
-                
+
+                if action == "replace":
+                    replace_with = ip_config.get("replace_with")
+                    if not replace_with:
+                        logger.error("Action 'replace' for IP '%s' requires 'replace_with' field.", ip_spec)
+                        continue
+                    try:
+                        # Validate the replacement IP
+                        ipaddress.ip_address(replace_with)
+                    except ValueError as e:
+                        logger.error("Invalid 'replace_with' IP address '%s' for rule '%s': %s", replace_with, ip_spec, e)
+                        continue
+
                 if "/" in ip_spec:
                     # It's a network/subnet
                     network = ipaddress.ip_network(ip_spec, strict=False)
-                    self.blocked_networks[network] = action
+                    if action == "replace":
+                        self.blocked_networks[network] = {"action": action, "replace_with": replace_with}
+                    else:
+                        self.blocked_networks[network] = {"action": action}
                 else:
                     # It's a single IP address
                     ip_addr = ipaddress.ip_address(ip_spec)
-                    self.blocked_ips[ip_addr] = action
+                    if action == "replace":
+                        self.blocked_ips[ip_addr] = {"action": action, "replace_with": replace_with}
+                    else:
+                        self.blocked_ips[ip_addr] = {"action": action}
                     
             except ValueError as e:
                 logger.error("Invalid IP address/network '%s': %s", ip_spec, e)
@@ -210,40 +231,51 @@ class FilterPlugin(BasePlugin):
         
         blocked_ips_deny = []  # IPs that should cause NXDOMAIN
         blocked_ips_remove = []  # IPs that should be removed
-        clean_records = []
+        modified_records = []
+        original_records = list(response.rr)
+        records_changed = False
         
         # Check each answer record
-        for rr in response.rr:
-            if rr.rtype == QTYPE.A:
+        for rr in original_records:
+            if rr.rtype in (QTYPE.A, QTYPE.AAAA):
                 try:
-                    ip_addr = ipaddress.IPv4Address(str(rr.rdata))
-                    action = self._get_ip_action(ip_addr)
-                    if action == "deny":
-                        blocked_ips_deny.append(str(ip_addr))
-                        logger.warning("Blocked IP %s for domain %s (action: deny)", ip_addr, qname)
-                    elif action == "remove":
-                        blocked_ips_remove.append(str(ip_addr))
-                        logger.warning("Blocked IP %s for domain %s (action: remove)", ip_addr, qname)
+                    ip_addr = ipaddress.ip_address(str(rr.rdata))
+                    action_config = self._get_ip_action(ip_addr)
+                    
+                    if action_config:
+                        action = action_config.get("action")
+                        if action == "deny":
+                            blocked_ips_deny.append(str(ip_addr))
+                            logger.warning("Blocked IP %s for domain %s (action: deny)", ip_addr, qname)
+                            records_changed = True
+                        elif action == "remove":
+                            blocked_ips_remove.append(str(ip_addr))
+                            logger.warning("Blocked IP %s for domain %s (action: remove)", ip_addr, qname)
+                            records_changed = True
+                        elif action == "replace":
+                            replace_ip_str = action_config.get("replace_with")
+                            try:
+                                replacement_ip = ipaddress.ip_address(replace_ip_str)
+                                # Ensure IP versions are compatible
+                                if ip_addr.version == replacement_ip.version:
+                                    rr.rdata = replacement_ip
+                                    modified_records.append(rr)
+                                    logger.info("Replaced IP %s with %s for domain %s", ip_addr, replacement_ip, qname)
+                                else:
+                                    logger.warning("Cannot replace IP %s with %s due to version mismatch.", ip_addr, replacement_ip)
+                                    modified_records.append(rr)
+                                records_changed = True
+                            except ValueError:
+                                logger.error("Invalid replacement IP: %s", replace_ip_str)
+                                modified_records.append(rr)
+                        else:
+                            modified_records.append(rr)
                     else:
-                        clean_records.append(rr)
+                        modified_records.append(rr)
                 except ValueError:
-                    clean_records.append(rr)  # Keep non-IP records
-            elif rr.rtype == QTYPE.AAAA:
-                try:
-                    ip_addr = ipaddress.IPv6Address(str(rr.rdata))
-                    action = self._get_ip_action(ip_addr)
-                    if action == "deny":
-                        blocked_ips_deny.append(str(ip_addr))
-                        logger.warning("Blocked IPv6 %s for domain %s (action: deny)", ip_addr, qname)
-                    elif action == "remove":
-                        blocked_ips_remove.append(str(ip_addr))
-                        logger.warning("Blocked IPv6 %s for domain %s (action: remove)", ip_addr, qname)
-                    else:
-                        clean_records.append(rr)
-                except ValueError:
-                    clean_records.append(rr)  # Keep non-IP records
+                    modified_records.append(rr) # Keep non-IP records
             else:
-                clean_records.append(rr)  # Keep non-A/AAAA records
+                modified_records.append(rr)  # Keep non-A/AAAA records
         
         # If any IP has "deny" action, return NXDOMAIN for entire response
         if blocked_ips_deny:
@@ -251,45 +283,44 @@ class FilterPlugin(BasePlugin):
                          qname, ", ".join(blocked_ips_deny))
             return PluginDecision(action="deny")
         
-        # If only "remove" action IPs were found, create modified response
-        if blocked_ips_remove:
-            if not clean_records:
-                # If all IPs were removed, return NXDOMAIN
-                logger.warning("All IPs removed for %s, returning NXDOMAIN", qname)
+        # If records were changed (removed or replaced), create a new response
+        if records_changed:
+            if not modified_records:
+                # If all IPs were removed or failed to be replaced, return NXDOMAIN
+                logger.warning("All IPs removed or failed to replace for %s, returning NXDOMAIN", qname)
                 return PluginDecision(action="deny")
             
-            # Create modified response with only clean records
+            # Create modified response with the updated records
             modified_response = response
-            modified_response.rr = clean_records
+            modified_response.rr = modified_records
             
             try:
                 modified_wire = modified_response.pack()
-                logger.info("Removed %d blocked IPs from %s response", 
-                           len(blocked_ips_remove), qname)
+                logger.info("Modified DNS response for %s", qname)
                 return PluginDecision(action="override", response=modified_wire)
             except Exception as e:
                 logger.error("Failed to create modified response: %s", e)
-                # Fall back to denying the entire response
                 return PluginDecision(action="deny")
         
         return None
 
-    def _get_ip_action(self, ip_addr: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]) -> Optional[str]:
+    def _get_ip_action(self, ip_addr: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]) -> Optional[Dict]:
         """
-        Gets the action for a blocked IP address.
+        Gets the action configuration for a blocked IP address.
 
         Args:
             ip_addr: The IP address to check.
 
         Returns:
-            The action ("deny", "remove") if blocked, None if not blocked.
+            The action configuration dictionary (e.g., {"action": "replace", "replace_with": "1.2.3.4"}) 
+            if blocked, None if not blocked.
 
         Example use:
             >>> from foghorn.plugins.filter import FilterPlugin
             >>> import ipaddress
-            >>> plugin = FilterPlugin(blocked_ips=[{"ip": "192.0.2.0/24", "action": "remove"}])
+            >>> plugin = FilterPlugin(blocked_ips=[{"ip": "192.0.2.0/24", "action": "replace", "replace_with": "127.0.0.1"}])
             >>> plugin._get_ip_action(ipaddress.IPv4Address("192.0.2.1"))
-            'remove'
+            {'action': 'replace', 'replace_with': '127.0.0.1'}
             >>> plugin._get_ip_action(ipaddress.IPv4Address("203.0.113.1")) is None
             True
         """

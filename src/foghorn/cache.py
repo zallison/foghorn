@@ -3,6 +3,7 @@ import time
 import threading
 from typing import Any, Dict, Tuple, Optional
 
+
 class TTLCache:
     """
     Thread-safe in-memory cache with Time-To-Live (TTL) support.
@@ -28,6 +29,7 @@ class TTLCache:
         >>> # time.sleep(61)
         >>> # cache.get(key) is None
     """
+
     def __init__(self) -> None:
         """
         Initializes the TTLCache.

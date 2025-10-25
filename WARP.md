@@ -79,3 +79,40 @@ Note: Logging defaults to stderr at level info if the logging block is omitted.
 - Implement a subclass of BasePlugin and expose it via an importable dotted path.
 - Return PluginDecision from pre_resolve/post_resolve to influence handling.
 - Add the plugin to config.yaml under plugins with its module path and config.
+
+### ExamplesPlugin
+The included ExamplesPlugin demonstrates both pre-resolve and post-resolve functionality:
+
+**Pre-resolve filtering:**
+- Denies queries with more than 5 subdomains (configurable)
+- Denies queries with domain length > 50 characters (excluding dots, configurable)
+- Subdomain counting is naive: labels - base_labels (default 2 for SLD.TLD)
+
+**Post-resolve modification:**
+- Rewrites the first IPv4 A record in responses to 127.0.0.1 (configurable)
+- Only affects A records; AAAA records are untouched
+- Applies to all query types by default (configurable via apply_to_qtypes)
+
+```yaml
+plugins:
+  - module: foghorn.plugins.examples.ExamplesPlugin
+    config:
+      # Pre-resolve policy
+      max_subdomains: 5           # deny if subdomains > 5
+      max_length_no_dots: 50      # deny if non-dot length > 50
+      base_labels: 2              # treat example.com as base (2 labels)
+      
+      # Scope (default all qtypes; configurable)
+      apply_to_qtypes: ["*"]      # e.g., ["A"] to limit to A queries
+      
+      # Post-resolve IP rewrite rules
+      rewrite_first_ipv4:
+        - apply_to_qtypes: ["A"]
+          ip_override: 127.0.0.1
+        - apply_to_qtypes: ["AAAA"]
+          ip_override: ::1
+```
+
+**Notes:**
+- For co.uk-style TLDs, adjust `base_labels` to 3 to account for the additional TLD component
+- The subdomain count for a.b.c.d.e.f.example.com is 6 (8 total labels - 2 base labels)

@@ -11,6 +11,7 @@ Foghorn is a lightweight, caching DNS server built with Python. It's designed to
     *   **Access Control:** Filter DNS queries based on the client's IP address (CIDR-based allow/deny).
     *   **New Domain Filter:** Block domains that were registered recently.
     *   **Upstream Router:** Route queries to different upstream servers based on the domain name.
+    *   **Filter:** Block queries based on domain names, keywords, and IP addresses in responses.
 
 ## Installation
 
@@ -70,6 +71,7 @@ You can use short aliases instead of full dotted paths:
 - access_control or acl -> foghorn.plugins.access_control.AccessControlPlugin
 - new_domain_filter or new_domain -> foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
 - upstream_router or router -> foghorn.plugins.upstream_router.UpstreamRouterPlugin
+- filter -> foghorn.plugins.filter.FilterPlugin
 
 Examples of plugin entries:
 - As a dict with module/config: `{ module: acl, config: {...} }`
@@ -176,6 +178,42 @@ plugins:
           upstream:
             host: 10.0.0.53
             port: 53
+```
+
+#### FilterPlugin
+
+This plugin provides flexible filtering of DNS queries based on domain names, patterns, keywords, and response IPs.
+
+**Configuration:**
+
+*   `blocked_domains`: A list of exact domain names to block.
+*   `blocked_patterns`: A list of regular expressions to match against the domain name.
+*   `blocked_keywords`: A list of keywords to block if they appear anywhere in the domain name.
+*   `blocked_ips`: A list of IP addresses or CIDR ranges to block in the response. You can specify an `action` for each (`deny` or `remove`).
+
+**Example (short alias):**
+
+```yaml
+plugins:
+  - module: filter
+    config:
+      # Pre-resolve (domain) filtering
+      blocked_domains:
+        - "malware.com"
+        - "phishing-site.org"
+
+      blocked_patterns:
+        - ".*\\.porn\\..*"
+
+      blocked_keywords:
+        - "gambling"
+
+      # Post-resolve (IP) filtering
+      blocked_ips:
+        - ip: "1.2.3.4"
+          action: "deny" # Deny the whole response
+        - ip: "8.8.8.8/24"
+          action: "remove" # Remove just this A/AAAA record
 ```
 
 ## Complete `config.yaml` Example
