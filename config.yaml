@@ -1,7 +1,7 @@
 # Example configuration for the DNS caching server
 listen:
   host: 127.0.0.1
-  port: 5354
+  port: 5300
 
 # Multiple upstream DNS servers with automatic failover
 upstream:
@@ -9,10 +9,11 @@ upstream:
     port: 53
   - host: 1.1.1.1
     port: 53
+
 # Global timeout applies to each upstream attempt
 timeout_ms: 2000
 
-# Minimum cache TTL (in seconds) applied to all cached responses.
+# Minimum cache TTL (in seconds) applied to ***all*** cached responses.
 # - For NOERROR with answers: cache TTL = max(min(answer TTLs), min_cache_ttl)
 # - For NOERROR with no answers, NXDOMAIN, and SERVFAIL: cache TTL = min_cache_ttl
 # Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
@@ -29,61 +30,66 @@ plugins:
     config:
       threshold_days: 14
 
-  - module: router
+  - module: greylist
     config:
-      routes:
-        # Single upstream (legacy format)
-        - suffix: ".zaa"
-          upstream:
-            host: 192.168.88.35
-            port: 53
-        
-        # Multiple upstreams with failover (new format)
-        - suffix: "corp.internal"
-          upstreams:
-            - host: 10.0.0.1
-              port: 53
-            - host: 10.0.0.2
-              port: 53
+      duration_seconds: 60
 
-  - module: filter
-    config:
-      # Pre-resolve (domain) filtering
-      blocked_domains:
-        - "malware.com"
-        - "phishing-site.org"
-        - "spam.example"
+  # - module: router
+  #   config:
+  #     routes:
+  #       # Single upstream (legacy format)
+  #       - suffix: ".mylan"
+  #         upstream:
+  #           host: 192.168.1.1
+  #           port: 53
+  #
+  #       # Multiple upstreams with failover (new format)
+  #       - suffix: "corp.internal"
+  #         upstreams:
+  #           - host: 10.0.0.1
+  #             port: 53
+  #           - host: 10.0.0.2
+  #             port: 53
 
-      blocked_patterns:
-        - ".*\\.porn\\..*"      # Block any domain with "porn" in subdomain
-        - "casino[0-9]+\\..*"   # Block casino1.com, casino2.net, etc.
-        - ".*adult.*"           # Block domains containing "adult"
+  # - module: filter
+  #   config:
+  #     # Pre-resolve (domain) filtering
+  #     blocked_domains:
+  #       - "malware.com"
+  #       - "phishing-site.org"
+  #       - "spam.example"
 
-      blocked_keywords:
-        - "porn"
-        - "gambling"
-        - "casino"
-        - "malware"
-        - "phishing"
+  #     blocked_patterns:
+  #       - ".*\\.porn\\..*"      # Block any domain with "porn" in subdomain
+  #       - "casino[0-9]+\\..*"   # Block casino1.com, casino2.net, etc.
+  #       - ".*adult.*"           # Block domains containing "adult"
 
-      # Post-resolve (IP) filtering with per-IP actions
-      blocked_ips:
-        # Deny entire response if these IPs are found
-        - ip: "23.220.75.245/16"
-          action: "remove"
-        - ip: "1.2.3.4"
-          action: "deny"
+  #     blocked_keywords:
+  #       - "porn"
+  #       - "gambling"
+  #       - "casino"
+  #       - "malware"
+  #       - "phishing"
 
-  - module: foghorn.plugins.examples.ExamplesPlugin
-    config:
-      # Pre-resolve policy
-      max_subdomains: 5
-      max_length_no_dots: 50
-      base_labels: 2
+  #     # Post-resolve (IP) filtering with per-IP actions
+  #     blocked_ips:
+  #       # Remove just the matching IP(s)
+  #       - ip: "23.220.75.245/16"
+  #         action: "remove"
+  #       # Deny entire response if any returned IPs are found
+  #       - ip: "1.2.3.4"
+  #         action: "deny"
 
-      # Post-resolve IP rewrite rules
-      rewrite_first_ipv4:
-        - apply_to_qtypes: ["A"]
-          ip_override: 127.0.0.1
-        - apply_to_qtypes: ["AAAA"]
-          ip_override: ::1
+  # - module: foghorn.plugins.examples.ExamplesPlugin
+  #   config:
+  #     # Pre-resolve policy
+  #     max_subdomains: 5
+  #     max_length_no_dots: 50
+  #     base_labels: 2
+
+  #     # Post-resolve IP rewrite rules
+  #     rewrite_first_ipv4:
+  #       - apply_to_qtypes: ["A"]
+  #         ip_override: 127.0.0.1
+  #       - apply_to_qtypes: ["AAAA"]
+  #         ip_override: ::1
