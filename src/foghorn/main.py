@@ -13,6 +13,25 @@ from .logging_config import init_logging
 from .plugins.registry import discover_plugins, get_plugin_class
 
 
+def _get_min_cache_ttl(cfg: dict) -> int:
+    """
+    Extracts and sanitizes min_cache_ttl from config.
+
+    Inputs:
+      - cfg: dict loaded from YAML
+    Outputs:
+      - int: non-negative min_cache_ttl in seconds (default 60)
+
+    Returns a sanitized min_cache_ttl value. Negative values are clamped to 0.
+    """
+    val = cfg.get("min_cache_ttl", 60)
+    try:
+        ival = int(val)
+    except (TypeError, ValueError):
+        ival = 60
+    return max(0, ival)
+
+
 def normalize_upstream_config(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Union[str, int]]], int]:
     """
     Normalize upstream configuration to a list-of-endpoints plus a timeout.
@@ -181,11 +200,12 @@ def main(argv: List[str] | None = None) -> int:
 
     # Normalize upstream configuration
     upstreams, timeout_ms = normalize_upstream_config(cfg)
+    min_cache_ttl = _get_min_cache_ttl(cfg)
 
     plugins = load_plugins(cfg.get("plugins", []))
     logger.debug("Loaded %d plugins: %s", len(plugins), [p.__class__.__name__ for p in plugins])
 
-    server = DNSServer(host, port, upstreams, plugins, timeout=timeout_ms/1000.0, timeout_ms=timeout_ms)
+    server = DNSServer(host, port, upstreams, plugins, timeout=timeout_ms/1000.0, timeout_ms=timeout_ms, min_cache_ttl=min_cache_ttl)
     
     # Log startup info
     upstream_info = ", ".join([f"{u['host']}:{u['port']}" for u in upstreams])

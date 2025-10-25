@@ -48,6 +48,7 @@ upstream:
   - host: 8.8.8.8
     port: 53
 timeout_ms: 2000    # applies to each upstream attempt
+min_cache_ttl: 60   # minimum cache TTL (seconds) applied to all cached responses
 logging:
   level: info          # debug, info, warn, error, crit (default: info if omitted)
   stderr: true         # log to stderr (default: true)
@@ -94,9 +95,13 @@ Failover does NOT occur for:
 
 ### Caching Policy
 
-- SERVFAIL responses are never cached (to allow retry on next request)
-- NOERROR responses with answer RRs are cached using minimum TTL from answers
-- NXDOMAIN responses are not cached (existing behavior preserved)
+- All responses are cached with a minimum TTL floor (configurable via `min_cache_ttl`, default 60s):
+  - NOERROR with answer RRs: cache TTL = max(min(answer TTLs), min_cache_ttl)
+  - NOERROR with no answers (NODATA): cache TTL = min_cache_ttl
+  - NXDOMAIN: cache TTL = min_cache_ttl
+  - SERVFAIL: cache TTL = min_cache_ttl
+- Note: The TTL value inside the DNS packet is not rewritten; the floor applies to cache expiry only
+- Plugin override responses are not cached (they may be dynamic)
 - Route-specific upstreams do NOT fall back to global upstreams if all fail
 
 ### Migration Guide
@@ -140,6 +145,13 @@ To migrate from single upstream to multi-upstream:
    ```
 
 Note: Logging defaults to stderr at level info if the logging block is omitted.
+
+### Behavior Changes
+
+Recent caching improvements:
+- **v2+**: SERVFAIL and NXDOMAIN responses are now cached using `min_cache_ttl` (previously uncached)
+- **v2+**: NOERROR responses without answer RRs are now cached using `min_cache_ttl` (previously uncached)
+- **v2+**: All cached responses respect a configurable minimum TTL floor
 
 ## Architecture and flow
 - Entry point: foghorn.main
