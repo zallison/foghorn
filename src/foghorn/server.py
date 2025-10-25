@@ -198,7 +198,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         qname = str(q.qname).rstrip(".")
         qtype = q.qtype
 
-        logger.debug("Query from %s: %s %s", client_ip, qname, qtype)
+        logger.debug("Query from %s: %s type: %s", client_ip, qname, qtype)
 
         ctx = PluginContext(client_ip=client_ip)
         return req, qname, qtype, ctx
@@ -457,6 +457,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         try:
             # 1. Parse the query
             req, qname, qtype, ctx = self._parse_query(data)
+            cache_key = (qname.lower(), qtype)
 
             # 2. Apply pre-resolve plugins
             pre_decision = self._apply_pre_plugins(req, qname, qtype, data, ctx)
@@ -499,7 +500,6 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     logger.debug("Plugin %s: %s", p.__class__.__name__, decision.action)
 
             # Check cache for a response.
-            cache_key = (qname.lower(), qtype)
             cached = self.cache.get(cache_key)
 
             if cached is not None:
