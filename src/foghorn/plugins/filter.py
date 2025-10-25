@@ -126,7 +126,7 @@ class FilterPlugin(BasePlugin):
             except ValueError as e:
                 logger.error("Invalid IP address/network '%s': %s", ip_spec, e)
 
-    def pre_resolve(self, qname: str, qtype: int, ctx: PluginContext) -> Optional[PluginDecision]:
+def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
         """
         Filters domains before DNS resolution based on blocked lists and patterns.
 

@@ -88,7 +88,7 @@ class BasePlugin:
         """
         self.config = config
 
-    def pre_resolve(self, qname: str, qtype: int, ctx: PluginContext) -> Optional[PluginDecision]:
+def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
         """
         A hook that runs before the DNS query is resolved.
         Args:

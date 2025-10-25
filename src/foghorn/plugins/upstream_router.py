@@ -2,14 +2,16 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Optional, Tuple
 
+from dnslib import DNSRecord, RCODE
+
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
 logger = logging.getLogger(__name__)
 
 
-@plugin_aliases("upstream_router", "router", "upsream")
+@plugin_aliases("upstream_router", "router", "upstream")
 class UpstreamRouterPlugin(BasePlugin):
-    """Route queries to different upstream DNS servers based on the queried domain."""
+    """Routes queries to different upstream DNS servers based on the queried domain, with failover."""
 
     def __init__(self, **config):
         """
@@ -32,21 +34,19 @@ class UpstreamRouterPlugin(BasePlugin):
         super().__init__(**config)
         self.routes: List[Dict] = self._normalize_routes(self.config.get("routes", []))
 
-    def pre_resolve(self, qname: str, qtype: int, ctx: PluginContext) -> Optional[PluginDecision]:
+    def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
         """
         Route queries to specific upstream(s) based on match rules.
-
         Inputs:
           - qname: queried domain name
           - qtype: DNS query type
+          - req: raw DNS request
           - ctx: PluginContext with client_ip etc.
-
         Outputs:
           - PluginDecision or None:
               * Typically returns None after setting ctx.upstream_candidates to a list
                 of {'host', 'port} if a route matches; server will honor it.
               * Return an override or deny decision only if explicitly configured.
-
         Example:
           # For qname ending with '.corp', route to two internal resolvers
           if qname.endswith('.corp'):
@@ -58,12 +58,11 @@ class UpstreamRouterPlugin(BasePlugin):
         if upstream_candidates:
             upstream_info = ", ".join([f"{u['host']}:{u['port']}" for u in upstream_candidates])
             logger.debug("Route matched for %s: upstreams [%s]", qname, upstream_info)
-            ctx.upstream_candidates = upstream_candidates
-            
-            # For backward compatibility, also set upstream_override if there's exactly one upstream
-            if len(upstream_candidates) == 1:
-                u = upstream_candidates[0]
-                ctx.upstream_override = (u["host"], u["port"])
+            success, response_wire = self._forward_with_failover(req, upstream_candidates, 2000)
+            return PluginDecision(action="override", response=response_wire)
+
+        # Do not alter decision flow; just annotate context
+        return None
         
         # Do not alter decision flow; just annotate context
         return None
@@ -137,6 +136,68 @@ class UpstreamRouterPlugin(BasePlugin):
                 norm.append(route)
                 
         return norm
+
+
+    def _forward_with_failover(self, request_wire: bytes, targets: List[Dict[str, any]], timeout_ms: int) -> Tuple[bool, bytes]:
+        """
+        Brief: Forward a DNS request to multiple upstreams with failover; synthesize SERVFAIL if all fail.
+
+        Inputs:
+        - request_wire (bytes): Original client DNS query wire (preserves transaction ID).
+        - targets (List[Dict[str, Any]]): List of upstream targets with host/port.
+        - timeout_ms (int): Per-attempt timeout in milliseconds.
+
+        Outputs:
+        - (bool, bytes): Tuple of (success flag, response wire). On failure, response is a SERVFAIL.
+
+        Example:
+        >>> success, resp = self._forward_with_failover(req_wire, [{"host":"1.1.1.1","port":53},{"host":"8.8.8.8","port":53}], 2000)
+        >>> success
+        True
+        """
+        req = DNSRecord.parse(request_wire)
+        qname = str(req.q.qname)
+        qtype = req.q.qtype
+        timeout_seconds = timeout_ms / 1000.0
+        total_upstreams = len(targets)
+
+        for i, upstream in enumerate(targets, 1):
+            host = upstream["host"]
+            port = upstream["port"]
+            
+            logger.debug("Upstream attempt %d/%d to %s:%d for %s %s", i, total_upstreams, host, port, qname, qtype)
+            
+            try:
+                reply_bytes = req.send(host, port, timeout=timeout_seconds)
+                
+                # Parse response to check rcode
+                try:
+                    reply_record = DNSRecord.parse(reply_bytes)
+                    rcode = reply_record.header.rcode
+                    
+                    if rcode == RCODE.SERVFAIL:
+                        logger.debug("Upstream %s:%d returned SERVFAIL for %s %s; failing over", host, port, qname, qtype)
+                        continue
+                    else:
+                        # Any other response code (including NXDOMAIN) is valid - don't failover
+                        rcode_name = RCODE.get(rcode, f"RCODE({rcode})")
+                        logger.debug("Upstream %s:%d returned %s for %s %s; accepting", host, port, rcode_name, qname, qtype)
+                        return True, reply_bytes
+                        
+                except Exception as parse_e:
+                    # If we can't parse the response, treat it as valid anyway
+                    logger.debug("Could not parse response from %s:%d, but accepting anyway: %s", host, port, str(parse_e))
+                    return True, reply_bytes
+                    
+            except Exception as e:
+                logger.debug("Upstream %s:%d error for %s %s: %s", host, port, qname, qtype, str(e))
+                continue
+        
+        # All upstreams failed
+        logger.warning("All %d upstreams failed for %s %s; returning SERVFAIL", total_upstreams, qname, qtype)
+        servfail_reply = req.reply()
+        servfail_reply.header.rcode = RCODE.SERVFAIL
+        return False, servfail_reply.pack()
 
     def _match_upstream_candidates(self, q: str) -> Optional[List[Dict[str, str | int]]]:
         """

@@ -1,4 +1,3 @@
-from __future__ import annotations
 import logging
 import socketserver
 from typing import List, Tuple, Dict, Optional
@@ -8,80 +7,6 @@ from .cache import TTLCache
 from .plugins.base import BasePlugin, PluginDecision, PluginContext
 
 logger = logging.getLogger("foghorn.server")
-
-
-def send_query_with_failover(req: DNSRecord, upstreams: List[Dict[str, str | int]], timeout_ms: int, qname: str, qtype: int) -> Tuple[Optional[bytes], Optional[Dict[str, str | int]], str]:
-    """
-    Try upstreams in order until a non-failing DNS response is obtained.
-
-    Inputs:
-      - req: DNSRecord query to send
-      - upstreams: list of {'host': str, 'port': int} in priority order
-      - timeout_ms: per-attempt timeout in milliseconds
-      - qname: query name for logging
-      - qtype: query type for logging
-
-    Outputs:
-      - (response_wire, used_upstream, reason):
-          - response_wire: bytes if a response was obtained, or None if all attempts failed
-          - used_upstream: dict of the endpoint that produced the response, or None
-          - reason: str describing the terminal condition ('ok', 'all_failed')
-
-    Behavior:
-      - For each upstream:
-          - logger.debug "Attempt i/N host:port"
-          - send using dnslib.DNSRecord.send(..., timeout=timeout_ms/1000.0)
-          - Parse response, inspect rcode:
-              * If rcode is SERVFAIL: logger.debug and continue to next upstream
-              * If rcode is NXDOMAIN or any valid non-SERVFAIL: return immediately (no failover)
-          - On exception/timeout: logger.debug and continue
-      - If none succeed: logger.warning and return (None, None, 'all_failed')
-
-    Example:
-      resp, used, reason = send_query_with_failover(req, [{'host':'1.1.1.1','port':53}, {'host':'1.0.0.1','port':53}], 2000, "example.com", 1)
-      if resp is None:
-          # return SERVFAIL to client
-      else:
-          # proceed with post-resolve and caching
-    """
-    timeout_seconds = timeout_ms / 1000.0
-    total_upstreams = len(upstreams)
-    
-    for i, upstream in enumerate(upstreams, 1):
-        host = upstream["host"]
-        port = upstream["port"]
-        
-        logger.debug("Upstream attempt %d/%d to %s:%d for %s %s", i, total_upstreams, host, port, qname, qtype)
-        
-        try:
-            reply_bytes = req.send(host, port, timeout=timeout_seconds)
-            
-            # Parse response to check rcode
-            try:
-                reply_record = DNSRecord.parse(reply_bytes)
-                rcode = reply_record.header.rcode
-                
-                if rcode == RCODE.SERVFAIL:
-                    logger.debug("Upstream %s:%d returned SERVFAIL for %s %s; failing over", host, port, qname, qtype)
-                    continue
-                else:
-                    # Any other response code (including NXDOMAIN) is valid - don't failover
-                    rcode_name = RCODE.get(rcode, f"RCODE({rcode})")
-                    logger.debug("Upstream %s:%d returned %s for %s %s; accepting", host, port, rcode_name, qname, qtype)
-                    return reply_bytes, upstream, "ok"
-                    
-            except Exception as parse_e:
-                # If we can't parse the response, treat it as valid anyway
-                logger.debug("Could not parse response from %s:%d, but accepting anyway: %s", host, port, str(parse_e))
-                return reply_bytes, upstream, "ok"
-                
-        except Exception as e:
-            logger.debug("Upstream %s:%d error for %s %s: %s", host, port, qname, qtype, str(e))
-            continue
-    
-    # All upstreams failed
-    logger.warning("All %d upstreams failed for %s %s; returning SERVFAIL", total_upstreams, qname, qtype)
-    return None, None, "all_failed"
 
 
 def _set_response_id(wire: bytes, req_id: int) -> bytes:
@@ -142,7 +67,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
             # Pre-resolve plugin checks
             for p in self.plugins:
-                decision = p.pre_resolve(qname, qtype, ctx)
+                decision = p.pre_resolve(qname, qtype, data, ctx)
                 if isinstance(decision, PluginDecision):
                     if decision.action == "deny":
                         logger.warning(
@@ -175,30 +100,14 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 logger.debug("Cache miss: %s %s", qname, qtype)
 
             # Determine upstream candidates to try
-            upstreams_to_try = []
-            
-            # Check if a plugin set upstream_candidates (new multi-upstream support)
-            if hasattr(ctx, 'upstream_candidates') and ctx.upstream_candidates:
-                upstreams_to_try = ctx.upstream_candidates
-                logger.debug("Using route-specific upstreams for %s %s", qname, qtype)
-            # Check for legacy upstream_override (backward compatibility)
-            elif hasattr(ctx, 'upstream_override') and ctx.upstream_override:
-                host, port = ctx.upstream_override
-                upstreams_to_try = [{'host': host, 'port': port}]
-                logger.debug("Using legacy upstream override for %s %s", qname, qtype)
-            else:
-                # Use global upstream configuration
-                upstreams_to_try = self.upstream_addrs
-                logger.debug("Using global upstreams for %s %s", qname, qtype)
+            upstreams_to_try = self.upstream_addrs
+            logger.debug("Using global upstreams for %s %s", qname, qtype)
             
             # Try upstreams with failover
-            reply, used_upstream, reason = send_query_with_failover(
-                req, upstreams_to_try, self.timeout_ms, qname, qtype
-            )
-            
-            if reply is None:
-                # All upstreams failed - return SERVFAIL
-                logger.debug("Returning SERVFAIL for %s %s (all upstreams failed)", qname, qtype)
+            try:
+                reply = req.send(upstreams_to_try[0]['host'], upstreams_to_try[0]['port'], timeout=self.timeout)
+            except Exception as e:
+                logger.debug("Upstream %s:%d error for %s %s: %s", upstreams_to_try[0]['host'], upstreams_to_try[0]['port'], qname, qtype, str(e))
                 r = req.reply()
                 r.header.rcode = RCODE.SERVFAIL
                 wire = _set_response_id(r.pack(), req.header.id)

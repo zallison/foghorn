@@ -39,7 +39,7 @@ class NewDomainFilterPlugin(BasePlugin):
         super().__init__(**config)
         self.threshold_days: int = int(self.config.get("threshold_days", 7))
 
-    def pre_resolve(self, qname: str, qtype: int, ctx: PluginContext) -> Optional[PluginDecision]:
+def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
         """
         Checks the age of the domain and denies the request if it's too new.
         Args:

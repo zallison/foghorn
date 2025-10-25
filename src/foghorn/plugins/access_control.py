@@ -40,7 +40,7 @@ class AccessControlPlugin(BasePlugin):
         self.allow_nets = [ipaddress.ip_network(n, strict=False) for n in self.config.get("allow", [])]
         self.deny_nets = [ipaddress.ip_network(n, strict=False) for n in self.config.get("deny", [])]
 
-    def pre_resolve(self, qname: str, qtype: int, ctx: PluginContext) -> Optional[PluginDecision]:
+def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
         """
         Checks if the client's IP is in the allow or deny lists.
         Args:
