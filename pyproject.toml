@@ -6,7 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "Foghorn"
 version = "0.1.0"
 description = "Caching DNS server with plugin-based access control and new-domain filter"
-authors = [ { name = "Your Name" } ]
+authors = [ { name = "Zack Allison" } ]
+license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -15,8 +16,15 @@ dependencies = [
   "PyYAML>=6.0.1"
 ]
 
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "black",
+  "ipython"
+]
+
 [project.scripts]
-dns-cache-server = "foghorn.main:main"
+foghorn = "foghorn.main:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

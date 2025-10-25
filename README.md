@@ -2,6 +2,8 @@
 
 Foghorn is a lightweight, caching DNS server built with Python. It's designed to be fast and extensible, featuring a pluggable policy system that allows you to customize its behavior to fit your needs.
 
+With special thanks to Fiona Weatherwax for their contributions.
+
 ## Features
 
 *   **DNS Caching:** Speeds up DNS resolution by caching responses from upstream servers.
@@ -22,21 +24,43 @@ Foghorn is a lightweight, caching DNS server built with Python. It's designed to
     source venv/bin/activate
     ```
 
-2.  **Install the required dependencies:**
+2.  **Install the package with development dependencies:**
 
     ```bash
-    pip install dnslib pyyaml requests
+    pip install -e ".[dev]"
     ```
+
+    This will install the project in editable mode, along with all runtime and development dependencies.
 
 ## Usage
 
-To run the server, you first need a `config.yaml` file. Then, you can start the server with the following command:
+To run the server, you first need a `config.yaml` file. Then, you can start the server with the `foghorn` command:
 
 ```bash
-PYTHONPATH=src python -m foghorn.main --config config.yaml
+foghorn --config config.yaml
+```
+Alternatively, you can run it as a module:
+```bash
+python -m foghorn.main --config config.yaml
 ```
 
 The server will start listening for DNS queries on the configured host and port.
+
+## Testing
+
+To run the test suite, use `pytest`:
+
+```bash
+pytest
+```
+
+## Code Formatting
+
+This project uses `black` for code formatting. To format the code, run:
+
+```bash
+black src tests
+```
 
 ## Configuration
 
