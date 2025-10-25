@@ -56,15 +56,22 @@ class UpstreamRouterPlugin(BasePlugin):
         q = qname.rstrip('.').lower()
         upstream_candidates = self._match_upstream_candidates(q)
         if upstream_candidates:
-            upstream_info = ", ".join([f"{u['host']}:{u['port']}" for u in upstream_candidates])
-            logger.debug("Route matched for %s: upstreams [%s]", qname, upstream_info)
-            success, response_wire = self._forward_with_failover(req, upstream_candidates, 2000)
-            return PluginDecision(action="override", response=response_wire)
+            # Set candidates on the context for the main server handler to use.
+            ctx.upstream_candidates = upstream_candidates
 
-        # Do not alter decision flow; just annotate context
-        return None
-        
-        # Do not alter decision flow; just annotate context
+            # For backward compatibility with tests, set legacy override if single
+            if len(upstream_candidates) == 1:
+                ctx.upstream_override = (
+                    upstream_candidates[0]["host"], 
+                    upstream_candidates[0]["port"]
+                )
+
+            upstream_info = ", ".join([
+                f"{u['host']}:{u['port']}" for u in upstream_candidates
+            ])
+            logger.debug("Route matched for %s: upstreams [%s]", qname, upstream_info)
+
+        # Do not alter decision flow; just return
         return None
 
     def _normalize_routes(self, routes: List[Dict]) -> List[Dict]:

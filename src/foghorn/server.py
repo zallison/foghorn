@@ -25,6 +25,74 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
         return wire
 
 
+def send_query_with_failover(
+    query: DNSRecord,
+    upstreams: List[Dict],
+    timeout_ms: int,
+    qname: str,
+    qtype: int,
+) -> Tuple[Optional[bytes], Optional[Dict], str]:
+    """
+    Sends a DNS query to a list of upstream servers, with failover.
+
+    Args:
+        query: The DNSRecord to send.
+        upstreams: A list of upstream server dicts to try.
+        timeout_ms: The timeout in milliseconds for each attempt.
+        qname: The query name (for logging).
+        qtype: The query type (for logging).
+
+    Returns:
+        A tuple of (response_wire_bytes, used_upstream, reason).
+        reason is 'ok', 'servfail', 'timeout', or 'all_failed'.
+    """
+    if not upstreams:
+        return None, None, "no_upstreams"
+
+    timeout_sec = timeout_ms / 1000.0
+    last_exception = None
+
+    for upstream in upstreams:
+        host, port = upstream["host"], upstream["port"]
+        try:
+            logger.debug("Forwarding %s %s to %s:%d", qname, qtype, host, port)
+            response_wire = query.send(host, port, timeout=timeout_sec)
+
+            # Check for SERVFAIL to trigger failover
+            try:
+                parsed_response = DNSRecord.parse(response_wire)
+                if parsed_response.header.rcode == RCODE.SERVFAIL:
+                    logger.warning(
+                        "Upstream %s:%d returned SERVFAIL for %s, trying next",
+                        host, port, qname
+                    )
+                    last_exception = Exception(f"SERVFAIL from {host}:{port}")
+                    continue  # Try next upstream
+            except Exception as e:
+                # If parsing fails, treat as a server failure
+                logger.warning(
+                    "Failed to parse response from %s:%d for %s: %s",
+                    host, port, qname, e
+                )
+                last_exception = e
+                continue # Try next upstream
+
+            # Success (NOERROR, NXDOMAIN, etc. are all valid final answers)
+            return response_wire, upstream, "ok"
+
+        except Exception as e:
+            logger.debug(
+                "Upstream %s:%d failed for %s: %s", host, port, qname, str(e)
+            )
+            last_exception = e
+            continue  # Try next upstream
+
+    logger.warning(
+        "All upstreams failed for %s %s. Last error: %s", qname, qtype, last_exception
+    )
+    return None, None, "all_failed"
+
+
 class DNSUDPHandler(socketserver.BaseRequestHandler):
     """
     Handles UDP DNS requests.
@@ -100,14 +168,28 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 logger.debug("Cache miss: %s %s", qname, qtype)
 
             # Determine upstream candidates to try
-            upstreams_to_try = self.upstream_addrs
-            logger.debug("Using global upstreams for %s %s", qname, qtype)
-            
+            upstreams_to_try = ctx.upstream_candidates or self.upstream_addrs
+            if upstreams_to_try:
+                logger.debug(
+                    "Using %d upstreams for %s %s", len(upstreams_to_try), qname, qtype
+                )
+            else:
+                logger.warning("No upstreams configured for %s %s", qname, qtype)
+                r = req.reply()
+                r.header.rcode = RCODE.SERVFAIL
+                wire = _set_response_id(r.pack(), req.header.id)
+                sock.sendto(wire, self.client_address)
+                return
+
             # Try upstreams with failover
-            try:
-                reply = req.send(upstreams_to_try[0]['host'], upstreams_to_try[0]['port'], timeout=self.timeout)
-            except Exception as e:
-                logger.debug("Upstream %s:%d error for %s %s: %s", upstreams_to_try[0]['host'], upstreams_to_try[0]['port'], qname, qtype, str(e))
+            reply, used_upstream, reason = send_query_with_failover(
+                req, upstreams_to_try, self.timeout_ms, qname, qtype
+            )
+
+            if reply is None:
+                logger.warning(
+                    "All upstreams failed for %s %s, returning SERVFAIL", qname, qtype
+                )
                 r = req.reply()
                 r.header.rcode = RCODE.SERVFAIL
                 wire = _set_response_id(r.pack(), req.header.id)

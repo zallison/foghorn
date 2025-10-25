@@ -69,7 +69,7 @@ def test_upstream_router_single_upstream():
     
     # Test matching
     ctx = PluginContext('1.2.3.4')
-    result = plugin.pre_resolve('test.corp', 1, ctx)
+    result = plugin.pre_resolve('test.corp', 1, b'', ctx)
     
     assert result is None  # Plugin doesn't override, just sets context
     assert ctx.upstream_candidates == [{'host': '10.0.0.1', 'port': 53}]
@@ -97,7 +97,7 @@ def test_upstream_router_multiple_upstreams():
     
     # Test matching
     ctx = PluginContext('1.2.3.4')
-    result = plugin.pre_resolve('test.internal', 1, ctx)
+    result = plugin.pre_resolve('test.internal', 1, b'', ctx)
     
     assert result is None
     assert len(ctx.upstream_candidates) == 2
