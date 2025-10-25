@@ -147,13 +147,14 @@ class FilterPlugin(BasePlugin):
             except ValueError as e:
                 logger.error("Invalid IP address/network '%s': %s", ip_spec, e)
 
-    def pre_resolve(self, qname: str, qtype: int, ctx: PluginContext) -> Optional[PluginDecision]:
+    def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
         """
         Filters domains before DNS resolution based on blocked lists and patterns.
 
         Args:
             qname: The queried domain name.
             qtype: The query type.
+            req: The raw DNS request.
             ctx: The plugin context.
 
         Returns:
@@ -164,13 +165,13 @@ class FilterPlugin(BasePlugin):
             >>> from foghorn.plugins.base import PluginContext
             >>> plugin = FilterPlugin(blocked_domains=["bad.com"], blocked_keywords=["porn"])
             >>> ctx = PluginContext("1.2.3.4")
-            >>> decision = plugin.pre_resolve("bad.com", 1, ctx)
+            >>> decision = plugin.pre_resolve("bad.com", 1, b'', ctx)
             >>> decision.action
             'deny'
-            >>> decision = plugin.pre_resolve("porn-site.org", 1, ctx)
+            >>> decision = plugin.pre_resolve("porn-site.org", 1, b'', ctx)
             >>> decision.action
             'deny'
-            >>> plugin.pre_resolve("good.com", 1, ctx) is None
+            >>> plugin.pre_resolve("good.com", 1, b'', ctx) is None
             True
         """
         domain = qname.lower()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional, Tuple, ClassVar, Sequence
+from typing import Optional, Tuple, ClassVar, Sequence, List, Dict, Union
 
 @dataclass
 class PluginDecision:
@@ -18,13 +18,21 @@ class PluginDecision:
 
 class PluginContext:
     """
-    Holds contextual information for a DNS query, passed through the plugin chain.
+    Context passed to plugins during pre- and post-resolve phases.
+
+    Attributes (inputs to plugins):
+      - client_ip: str of the requestor's IP address
+      - upstream_candidates: Optional[list[dict]] overrides global upstreams when set;
+        each item is {'host': str, 'port': int}. When provided, the server must use
+        only these upstreams for this request and return SERVFAIL if all fail.
+      - upstream_override: Optional[tuple] legacy single upstream override (host, port)
 
     Example use:
         >>> from foghorn.plugins.base import PluginContext
         >>> ctx = PluginContext(client_ip="192.0.2.1")
         >>> ctx.client_ip
         '192.0.2.1'
+        >>> ctx.upstream_candidates = [{'host': '10.0.0.1', 'port': 53}]
     """
     def __init__(self, client_ip: str) -> None:
         """
@@ -40,7 +48,9 @@ class PluginContext:
             '192.0.2.1'
         """
         self.client_ip = client_ip
-        # Optional per-request upstream override (host, port)
+        # Optional per-request upstream candidates override
+        self.upstream_candidates: Optional[List[Dict[str, Union[str, int]]]] = None
+        # Optional per-request upstream override (host, port) - legacy
         self.upstream_override: Optional[Tuple[str, int]] = None
 
 class BasePlugin:
@@ -78,20 +88,22 @@ class BasePlugin:
         """
         self.config = config
 
-    def pre_resolve(self, qname: str, qtype: int, ctx: PluginContext) -> Optional[PluginDecision]:
+    def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
         """
         A hook that runs before the DNS query is resolved.
         Args:
             qname: The queried domain name.
             qtype: The query type.
+            req: The raw DNS request.
             ctx: The plugin context.
         Returns:
             A PluginDecision, or None to allow the query to proceed.
 
         Example use:
-            >>> from foghorn.plugins.base import BasePlugin, PluginDecision
+            >>> from foghorn.plugins.base import BasePlugin, PluginDecision, PluginContext
             >>> plugin = BasePlugin()
-            >>> plugin.pre_resolve("example.com", 1, None) is None
+            >>> ctx = PluginContext('127.0.0.1')
+            >>> plugin.pre_resolve("example.com", 1, b'', ctx) is None
             True
         """
         return None
@@ -108,9 +120,10 @@ class BasePlugin:
             A PluginDecision, or None to allow the response to be sent as-is.
 
         Example use:
-            >>> from foghorn.plugins.base import BasePlugin, PluginDecision
+            >>> from foghorn.plugins.base import BasePlugin, PluginDecision, PluginContext
             >>> plugin = BasePlugin()
-            >>> plugin.post_resolve("example.com", 1, b"response", None) is None
+            >>> ctx = PluginContext('127.0.0.1')
+            >>> plugin.post_resolve("example.com", 1, b"response", ctx) is None
             True
         """
         return None

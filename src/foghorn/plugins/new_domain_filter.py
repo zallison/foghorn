@@ -39,12 +39,13 @@ class NewDomainFilterPlugin(BasePlugin):
         super().__init__(**config)
         self.threshold_days: int = int(self.config.get("threshold_days", 7))
 
-    def pre_resolve(self, qname: str, qtype: int, ctx: PluginContext) -> Optional[PluginDecision]:
+    def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
         """
         Checks the age of the domain and denies the request if it's too new.
         Args:
             qname: The queried domain name.
             qtype: The query type.
+            req: The raw DNS request.
             ctx: The plugin context.
         Returns:
             A PluginDecision to deny the request if the domain is too new, otherwise None.
@@ -56,7 +57,7 @@ class NewDomainFilterPlugin(BasePlugin):
             >>> from unittest.mock import patch
             >>> plugin = NewDomainFilterPlugin(threshold_days=30)
             >>> with patch.object(plugin, '_domain_age_days', return_value=10):
-            ...     decision = plugin.pre_resolve("new.com", 1, PluginContext("1.2.3.4"))
+            ...     decision = plugin.pre_resolve("new.com", 1, b'', PluginContext("1.2.3.4"))
             ...     decision.action
             'deny'
         """

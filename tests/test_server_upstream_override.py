@@ -26,18 +26,19 @@ def test_server_uses_upstream_override_from_plugin(monkeypatch):
             {"domain": "corp.example.com", "upstream": {"host": override_addr[0], "port": override_addr[1]}}
         ])
     ]
-    DNSUDPHandler.upstream_addr = ("1.1.1.1", 53)
+    DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
     DNSUDPHandler.timeout = 0.5
+    DNSUDPHandler.timeout_ms = 500
 
     # Prepare a DNS query packet
     query = DNSRecord.question("corp.example.com", "A")
     data = query.pack()
 
-    # Capture the dest used by DNSRecord.send
-    used_dest: List[Tuple[str, int]] = []
+    # Capture the host/port used by DNSRecord.send
+    used_calls: List[Tuple[str, int]] = []
 
-    def fake_send(self: DNSRecord, dest: Tuple[str, int], timeout: float = None, *args: Any, **kwargs: Any) -> bytes:
-        used_dest.append(dest)
+    def fake_send(self: DNSRecord, host: str, port: int, timeout: float = None, *args: Any, **kwargs: Any) -> bytes:
+        used_calls.append((host, port))
         return b"dummy-reply"
 
     monkeypatch.setattr(DNSRecord, "send", fake_send, raising=True)
@@ -50,6 +51,7 @@ def test_server_uses_upstream_override_from_plugin(monkeypatch):
     DNSUDPHandler((data, sock), client_addr, object())
 
     # Assert: upstream override was used and reply sent back to client
-    assert used_dest and used_dest[0] == override_addr
+    assert used_calls and used_calls[0] == override_addr
     assert sock.sent and sock.sent[0][1] == client_addr
-    assert sock.sent[0][0] == b"dummy-reply"
+    # Check that a response was sent (the exact content is modified by _set_response_id)
+    assert len(sock.sent[0][0]) > 0

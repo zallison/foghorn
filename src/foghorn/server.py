@@ -1,7 +1,6 @@
-from __future__ import annotations
 import logging
 import socketserver
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Optional
 from dnslib import DNSRecord, QTYPE, RCODE
 
 from .cache import TTLCache
@@ -37,9 +36,10 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     """
 
     cache = TTLCache()
-    upstream_addr: Tuple[str, int] = ("1.1.1.1", 53)
+    upstream_addrs: List[Dict] = []
     plugins: List[BasePlugin] = []
     timeout = 2.0
+    timeout_ms = 2000
 
     def handle(self):
         """
@@ -67,7 +67,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
             # Pre-resolve plugin checks
             for p in self.plugins:
-                decision = p.pre_resolve(qname, qtype, ctx)
+                decision = p.pre_resolve(qname, qtype, data, ctx)
                 if isinstance(decision, PluginDecision):
                     if decision.action == "deny":
                         logger.warning(
@@ -99,23 +99,20 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             else:
                 logger.debug("Cache miss: %s %s", qname, qtype)
 
-            # Forward to upstream
-            upstream_addr = (
-                getattr(ctx, "upstream_override", None) or self.upstream_addr
-            )
-            logger.debug(
-                "Sending to upstream %s:%d", upstream_addr[0], upstream_addr[1]
-            )
+            # Determine upstream candidates to try
+            upstreams_to_try = self.upstream_addrs
+            logger.debug("Using global upstreams for %s %s", qname, qtype)
+            
+            # Try upstreams with failover
             try:
-                host, port = upstream_addr
-                reply = req.send(host, port, timeout=self.timeout)
-                logger.debug("Upstream response: %d bytes", len(reply))
+                reply = req.send(upstreams_to_try[0]['host'], upstreams_to_try[0]['port'], timeout=self.timeout)
             except Exception as e:
-                logger.warning(
-                    "Upstream timeout/error for %s %s: %s", qname, qtype, str(e)
-                )
-                # Re-raise to let existing error handling deal with it
-                raise
+                logger.debug("Upstream %s:%d error for %s %s: %s", upstreams_to_try[0]['host'], upstreams_to_try[0]['port'], qname, qtype, str(e))
+                r = req.reply()
+                r.header.rcode = RCODE.SERVFAIL
+                wire = _set_response_id(r.pack(), req.header.id)
+                sock.sendto(wire, self.client_address)
+                return
             # Post-resolve plugin hooks (allow overrides like rewriting)
             for p in self.plugins:
                 decision = p.post_resolve(qname, qtype, reply, ctx)
@@ -142,15 +139,21 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         break
 
             # Cache the response based on the minimum TTL in the answer records.
+            # Only cache NOERROR responses with answer RRs; never cache SERVFAIL
             try:
                 r = DNSRecord.parse(reply)
-                ttls = [rr.ttl for rr in r.rr]
-                ttl = min(ttls) if ttls else 300
-                if ttl > 0:
-                    logger.debug("Caching %s %s with TTL %ds", qname, qtype, ttl)
-                    self.cache.set(cache_key, ttl, reply)
+                if r.header.rcode == RCODE.NOERROR and r.rr:
+                    ttls = [rr.ttl for rr in r.rr]
+                    ttl = min(ttls) if ttls else 300
+                    if ttl > 0:
+                        logger.debug("Caching %s %s with TTL %ds", qname, qtype, ttl)
+                        self.cache.set(cache_key, ttl, reply)
+                    else:
+                        logger.debug("Not caching %s %s (TTL=%d)", qname, qtype, ttl)
+                elif r.header.rcode == RCODE.SERVFAIL:
+                    logger.debug("Not caching %s %s (SERVFAIL never cached)", qname, qtype)
                 else:
-                    logger.debug("Not caching %s %s (TTL=%d)", qname, qtype, ttl)
+                    logger.debug("Not caching %s %s (rcode=%s, no answer RRs)", qname, qtype, RCODE.get(r.header.rcode, r.header.rcode))
             except Exception as e:
                 logger.debug("Failed to parse response for caching: %s", str(e))
 
@@ -193,9 +196,10 @@ class DNSServer:
         self,
         host: str,
         port: int,
-        upstream: Tuple[str, int],
+        upstreams: List[Dict],
         plugins: List[BasePlugin],
         timeout: float = 2.0,
+        timeout_ms: int = 2000,
     ) -> None:
         """
         Initializes the DNSServer.
@@ -203,9 +207,10 @@ class DNSServer:
         Args:
             host: The host to listen on.
             port: The port to listen on.
-            upstream: The upstream DNS server address.
+            upstreams: A list of upstream DNS server configurations.
             plugins: A list of initialized plugins.
-            timeout: The timeout for upstream queries.
+            timeout: The timeout for upstream queries (seconds, legacy).
+            timeout_ms: The timeout for upstream queries (milliseconds).
 
         Returns:
             None
@@ -217,13 +222,15 @@ class DNSServer:
 
         Example use:
             >>> from foghorn.server import DNSServer
-            >>> server = DNSServer("127.0.0.1", 5353, ("8.8.8.8", 53), [], 2.0)
+            >>> upstreams = [{'host': '8.8.8.8', 'port': 53}]
+            >>> server = DNSServer("127.0.0.1", 5353, upstreams, [], 2.0, 2000)
             >>> server.server.server_address
             ('127.0.0.1', 5353)
         """
-        DNSUDPHandler.upstream_addr = upstream
+        DNSUDPHandler.upstream_addrs = upstreams
         DNSUDPHandler.plugins = plugins
         DNSUDPHandler.timeout = timeout
+        DNSUDPHandler.timeout_ms = timeout_ms
         self.server = socketserver.ThreadingUDPServer((host, port), DNSUDPHandler)
         # Ensure request handler threads do not block shutdown
         self.server.daemon_threads = True

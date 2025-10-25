@@ -19,10 +19,11 @@ Notes:
 ## Configuration
 Create a YAML file (default path: config.yaml) with these keys:
 - listen: host, port
-- upstream: host, port, timeout_ms (milliseconds)
+- upstream: either single upstream dict OR list of upstream objects (with automatic failover)
+- timeout_ms: global timeout in milliseconds (applies to each upstream attempt)
 - plugins: list of plugin specs with module (full dotted class path) and config
 
-Example:
+### Single Upstream (Legacy Format)
 ```yaml
 listen:
   host: 127.0.0.1
@@ -30,23 +31,113 @@ listen:
 upstream:
   host: 1.1.1.1
   port: 53
-  timeout_ms: 2000
+  timeout_ms: 2000  # legacy location, prefer top-level
+timeout_ms: 2000    # preferred location
+```
+
+### Multiple Upstreams with Failover (New Format)
+```yaml
+listen:
+  host: 127.0.0.1
+  port: 5353
+upstream:
+  - host: 1.1.1.1
+    port: 53
+  - host: 1.0.0.1
+    port: 53
+  - host: 8.8.8.8
+    port: 53
+timeout_ms: 2000    # applies to each upstream attempt
 logging:
   level: info          # debug, info, warn, error, crit (default: info if omitted)
   stderr: true         # log to stderr (default: true)
   file: ./foghorn.log  # optional file output
 plugins:
-  - module: dns_cache_server.plugins.access_control.AccessControlPlugin
+  - module: foghorn.plugins.access_control.AccessControlPlugin
     config:
       default: allow   # or deny
       allow: ["192.168.0.0/16", "10.0.0.0/8"]
       deny: ["203.0.113.0/24"]
-  - module: dns_cache_server.plugins.new_domain_filter.NewDomainFilterPlugin
+  - module: foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
     config:
       threshold_days: 7
       rdap_endpoint: https://rdap.org/domain/
       timeout_ms: 2000
+  - module: foghorn.plugins.upstream_router.UpstreamRouterPlugin
+    config:
+      routes:
+        # Single upstream per route (legacy)
+        - suffix: corp
+          upstream:
+            host: 10.0.0.1
+            port: 53
+        # Multiple upstreams per route with failover (new)
+        - suffix: internal
+          upstreams:
+            - host: 10.0.0.2
+              port: 53
+            - host: 10.0.0.3
+              port: 53
 ```
+
+### Failover Behavior
+
+Failover is triggered by:
+- Network connection failures or timeouts
+- DNS responses with SERVFAIL rcode
+- DNS query exceptions
+
+Failover does NOT occur for:
+- NXDOMAIN responses (valid DNS response)
+- NOERROR responses (including empty answers)
+- Any other valid DNS response codes
+
+### Caching Policy
+
+- SERVFAIL responses are never cached (to allow retry on next request)
+- NOERROR responses with answer RRs are cached using minimum TTL from answers
+- NXDOMAIN responses are not cached (existing behavior preserved)
+- Route-specific upstreams do NOT fall back to global upstreams if all fail
+
+### Migration Guide
+
+To migrate from single upstream to multi-upstream:
+
+1. **Move timeout to top-level** (recommended):
+   ```yaml
+   # Before
+   upstream:
+     host: 1.1.1.1
+     port: 53
+     timeout_ms: 2000
+   
+   # After
+   upstream:
+     host: 1.1.1.1
+     port: 53
+   timeout_ms: 2000
+   ```
+
+2. **Convert to list format** (optional):
+   ```yaml
+   # Single upstream as list
+   upstream:
+     - host: 1.1.1.1
+       port: 53
+   timeout_ms: 2000
+   ```
+
+3. **Add multiple upstreams** for failover:
+   ```yaml
+   upstream:
+     - host: 1.1.1.1
+       port: 53
+     - host: 1.0.0.1
+       port: 53
+     - host: 8.8.8.8
+       port: 53
+   timeout_ms: 2000
+   ```
 
 Note: Logging defaults to stderr at level info if the logging block is omitted.
 
