@@ -88,20 +88,22 @@ class BasePlugin:
         """
         self.config = config
 
-def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
+    def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
         """
         A hook that runs before the DNS query is resolved.
         Args:
             qname: The queried domain name.
             qtype: The query type.
+            req: The raw DNS request.
             ctx: The plugin context.
         Returns:
             A PluginDecision, or None to allow the query to proceed.
 
         Example use:
-            >>> from foghorn.plugins.base import BasePlugin, PluginDecision
+            >>> from foghorn.plugins.base import BasePlugin, PluginDecision, PluginContext
             >>> plugin = BasePlugin()
-            >>> plugin.pre_resolve("example.com", 1, None) is None
+            >>> ctx = PluginContext('127.0.0.1')
+            >>> plugin.pre_resolve("example.com", 1, b'', ctx) is None
             True
         """
         return None
@@ -118,9 +120,10 @@ def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) ->
             A PluginDecision, or None to allow the response to be sent as-is.
 
         Example use:
-            >>> from foghorn.plugins.base import BasePlugin, PluginDecision
+            >>> from foghorn.plugins.base import BasePlugin, PluginDecision, PluginContext
             >>> plugin = BasePlugin()
-            >>> plugin.post_resolve("example.com", 1, b"response", None) is None
+            >>> ctx = PluginContext('127.0.0.1')
+            >>> plugin.post_resolve("example.com", 1, b"response", ctx) is None
             True
         """
         return None
