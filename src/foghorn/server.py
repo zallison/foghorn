@@ -109,6 +109,270 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     timeout = 2.0
     timeout_ms = 2000
 
+    def _parse_query(self, data: bytes):
+        """
+        Parse the incoming DNS query from raw UDP payload bytes.
+
+        Inputs:
+            - data (bytes): Raw UDP payload bytes containing a DNS query.
+
+        Outputs:
+            - request (DNSRecord): Parsed DNS request record.
+            - qname (str): Query name (FQDN) with trailing dot removed.
+            - qtype (int): DNS RR type (e.g., 1 for A, 28 for AAAA).
+            - ctx (PluginContext): Plugin context with client IP.
+
+        Example:
+            request, qname, qtype, ctx = self._parse_query(data)
+        """
+        client_ip = self.client_address[0]
+        req = DNSRecord.parse(data)
+        q = req.questions[0]
+        qname = str(q.qname).rstrip(".")
+        qtype = q.qtype
+
+        logger.debug("Query from %s: %s %s", client_ip, qname, qtype)
+
+        ctx = PluginContext(client_ip=client_ip)
+        return req, qname, qtype, ctx
+
+    def _apply_pre_plugins(self, request: DNSRecord, qname: str, qtype: int, data: bytes, ctx):
+        """
+        Apply pre-resolve plugins and handle deny/override decisions.
+
+        Inputs:
+            - request (DNSRecord): Parsed DNS request record.
+            - qname (str): Query name.
+            - qtype (int): DNS RR type.
+            - data (bytes): Original query wire data.
+            - ctx (PluginContext): Plugin context.
+
+        Outputs:
+            - decision (PluginDecision or None): Plugin decision if deny/override.
+
+        Notes:
+            Returns None to continue processing, or PluginDecision for deny/override.
+
+        Example:
+            decision = self._apply_pre_plugins(request, qname, qtype, data, ctx)
+        """
+        # Pre-resolve plugin checks
+        for p in self.plugins:
+            decision = p.pre_resolve(qname, qtype, data, ctx)
+            if isinstance(decision, PluginDecision):
+                if decision.action == "deny":
+                    logger.warning(
+                        "Denied %s %s by %s", qname, qtype, p.__class__.__name__
+                    )
+                    return decision
+                if decision.action == "override" and decision.response is not None:
+                    logger.info(
+                        "Override %s %s by %s", qname, qtype, p.__class__.__name__
+                    )
+                    return decision
+                # allow -> continue
+                logger.debug("Plugin %s: %s", p.__class__.__name__, decision.action)
+        return None
+
+    def _cache_lookup(self, qname: str, qtype: int):
+        """
+        Look up cached response for the query.
+
+        Inputs:
+            - qname (str): Query name.
+            - qtype (int): DNS RR type.
+
+        Outputs:
+            - cached (bytes or None): Cached wire response or None if not found.
+
+        Example:
+            cached = self._cache_lookup(qname, qtype)
+        """
+        # Check cache for a response.
+        cache_key = (qname.lower(), qtype)
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            logger.debug("Cache hit: %s %s (%d bytes)", qname, qtype, len(cached))
+            return cached
+        else:
+            logger.debug("Cache miss: %s %s", qname, qtype)
+            return None
+
+    def _choose_upstreams(self, qname: str, qtype: int, ctx):
+        """
+        Determine upstream servers to use for the query.
+
+        Inputs:
+            - qname (str): Query name.
+            - qtype (int): DNS RR type.
+            - ctx (PluginContext): Plugin context with possible upstream_candidates.
+
+        Outputs:
+            - upstreams (List[Dict]): List of upstream server configs to try.
+
+        Notes:
+            Respects plugin routing decisions and falls back to global upstreams.
+
+        Example:
+            upstreams = self._choose_upstreams(qname, qtype, ctx)
+        """
+        # Determine upstream candidates to try
+        upstreams_to_try = ctx.upstream_candidates or self.upstream_addrs
+        if upstreams_to_try:
+            logger.debug(
+                "Using %d upstreams for %s %s", len(upstreams_to_try), qname, qtype
+            )
+        else:
+            logger.warning("No upstreams configured for %s %s", qname, qtype)
+        return upstreams_to_try
+
+    def _forward_with_failover_helper(self, request: DNSRecord, upstreams, qname: str, qtype: int):
+        """
+        Forward query to upstream servers with failover support.
+
+        Inputs:
+            - request (DNSRecord): DNS request to forward.
+            - upstreams (List[Dict]): Upstream servers to try.
+            - qname (str): Query name for logging.
+            - qtype (int): DNS RR type for logging.
+
+        Outputs:
+            - reply (bytes or None): Response wire data or None if all failed.
+            - used_upstream (Dict or None): Upstream that succeeded or None.
+            - reason (str): Result reason ('ok', 'all_failed', etc.).
+
+        Notes:
+            Uses existing send_query_with_failover function with timeout handling.
+
+        Example:
+            reply, upstream, reason = self._forward_with_failover_helper(req, upstreams, qname, qtype)
+        """
+        # Try upstreams with failover
+        reply, used_upstream, reason = send_query_with_failover(
+            request, upstreams, self.timeout_ms, qname, qtype
+        )
+        return reply, used_upstream, reason
+
+    def _apply_post_plugins(self, request: DNSRecord, qname: str, qtype: int, response_wire: bytes, ctx):
+        """
+        Apply post-resolve plugins and handle deny/override decisions.
+
+        Inputs:
+            - request (DNSRecord): Original DNS request record.
+            - qname (str): Query name.
+            - qtype (int): DNS RR type.
+            - response_wire (bytes): Response wire data.
+            - ctx (PluginContext): Plugin context.
+
+        Outputs:
+            - final_response (bytes): Modified or original response wire data.
+
+        Notes:
+            May modify the response or return error responses based on plugin decisions.
+
+        Example:
+            response = self._apply_post_plugins(request, qname, qtype, response_wire, ctx)
+        """
+        reply = response_wire
+        # Post-resolve plugin hooks (allow overrides like rewriting)
+        for p in self.plugins:
+            decision = p.post_resolve(qname, qtype, reply, ctx)
+            if isinstance(decision, PluginDecision):
+                if decision.action == "deny":
+                    logger.warning(
+                        "Post-resolve denied %s %s by %s",
+                        qname,
+                        qtype,
+                        p.__class__.__name__,
+                    )
+                    r = request.reply()
+                    r.header.rcode = RCODE.NXDOMAIN
+                    reply = r.pack()
+                    break
+                if decision.action == "override" and decision.response is not None:
+                    logger.info(
+                        "Post-resolve override %s %s by %s",
+                        qname,
+                        qtype,
+                        p.__class__.__name__,
+                    )
+                    reply = decision.response
+                    break
+        return reply
+
+    def _cache_store_if_applicable(self, qname: str, qtype: int, response_wire: bytes):
+        """
+        Cache the response if it meets caching criteria.
+
+        Inputs:
+            - qname (str): Query name.
+            - qtype (int): DNS RR type.
+            - response_wire (bytes): Response wire data to potentially cache.
+
+        Outputs:
+            - None
+
+        Notes:
+            Only caches NOERROR responses with answer RRs using minimum TTL.
+            Never caches SERVFAIL responses.
+
+        Example:
+            self._cache_store_if_applicable(qname, qtype, response_wire)
+        """
+        # Cache the response based on the minimum TTL in the answer records.
+        # Only cache NOERROR responses with answer RRs; never cache SERVFAIL
+        try:
+            r = DNSRecord.parse(response_wire)
+            cache_key = (qname.lower(), qtype)
+            if r.header.rcode == RCODE.NOERROR and r.rr:
+                ttls = [rr.ttl for rr in r.rr]
+                ttl = min(ttls) if ttls else 300
+                if ttl > 0:
+                    logger.debug("Caching %s %s with TTL %ds", qname, qtype, ttl)
+                    self.cache.set(cache_key, ttl, response_wire)
+                else:
+                    logger.debug("Not caching %s %s (TTL=%d)", qname, qtype, ttl)
+            elif r.header.rcode == RCODE.SERVFAIL:
+                logger.debug("Not caching %s %s (SERVFAIL never cached)", qname, qtype)
+            else:
+                logger.debug("Not caching %s %s (rcode=%s, no answer RRs)", qname, qtype, RCODE.get(r.header.rcode, r.header.rcode))
+        except Exception as e:
+            logger.debug("Failed to parse response for caching: %s", str(e))
+
+    def _make_nxdomain_response(self, request: DNSRecord):
+        """
+        Create NXDOMAIN response for the given request.
+
+        Inputs:
+            - request (DNSRecord): Original DNS request.
+
+        Outputs:
+            - response_wire (bytes): NXDOMAIN response wire data.
+
+        Example:
+            nxdomain_wire = self._make_nxdomain_response(request)
+        """
+        reply = request.reply()
+        reply.header.rcode = RCODE.NXDOMAIN
+        return _set_response_id(reply.pack(), request.header.id)
+
+    def _make_servfail_response(self, request: DNSRecord):
+        """
+        Create SERVFAIL response for the given request.
+
+        Inputs:
+            - request (DNSRecord): Original DNS request.
+
+        Outputs:
+            - response_wire (bytes): SERVFAIL response wire data.
+
+        Example:
+            servfail_wire = self._make_servfail_response(request)
+        """
+        r = request.reply()
+        r.header.rcode = RCODE.SERVFAIL
+        return _set_response_id(r.pack(), request.header.id)
+
     def handle(self):
         """
         Processes an incoming DNS query.
@@ -124,122 +388,51 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         data, sock = self.request
         client_ip = self.client_address[0]
         try:
-            req = DNSRecord.parse(data)
-            q = req.questions[0]
-            qname = str(q.qname).rstrip(".")
-            qtype = q.qtype
+            # 1. Parse the query
+            req, qname, qtype, ctx = self._parse_query(data)
 
-            logger.debug("Query from %s: %s %s", client_ip, qname, qtype)
+            # 2. Apply pre-resolve plugins
+            pre_decision = self._apply_pre_plugins(req, qname, qtype, data, ctx)
+            if pre_decision is not None:
+                if pre_decision.action == "deny":
+                    wire = self._make_nxdomain_response(req)
+                    sock.sendto(wire, self.client_address)
+                    return
+                if pre_decision.action == "override" and pre_decision.response is not None:
+                    resp = _set_response_id(pre_decision.response, req.header.id)
+                    sock.sendto(resp, self.client_address)
+                    return
 
-            ctx = PluginContext(client_ip=client_ip)
-
-            # Pre-resolve plugin checks
-            for p in self.plugins:
-                decision = p.pre_resolve(qname, qtype, data, ctx)
-                if isinstance(decision, PluginDecision):
-                    if decision.action == "deny":
-                        logger.warning(
-                            "Denied %s %s by %s", qname, qtype, p.__class__.__name__
-                        )
-                        reply = req.reply()
-                        reply.header.rcode = RCODE.NXDOMAIN
-                        wire = _set_response_id(reply.pack(), req.header.id)
-                        sock.sendto(wire, self.client_address)
-                        return
-                    if decision.action == "override" and decision.response is not None:
-                        logger.info(
-                            "Override %s %s by %s", qname, qtype, p.__class__.__name__
-                        )
-                        resp = _set_response_id(decision.response, req.header.id)
-                        sock.sendto(resp, self.client_address)
-                        return
-                    # allow -> continue
-                    logger.debug("Plugin %s: %s", p.__class__.__name__, decision.action)
-
-            # Check cache for a response.
-            cache_key = (qname.lower(), qtype)
-            cached = self.cache.get(cache_key)
+            # 3. Check cache
+            cached = self._cache_lookup(qname, qtype)
             if cached is not None:
-                logger.debug("Cache hit: %s %s (%d bytes)", qname, qtype, len(cached))
                 resp = _set_response_id(cached, req.header.id)
                 sock.sendto(resp, self.client_address)
                 return
-            else:
-                logger.debug("Cache miss: %s %s", qname, qtype)
 
-            # Determine upstream candidates to try
-            upstreams_to_try = ctx.upstream_candidates or self.upstream_addrs
-            if upstreams_to_try:
-                logger.debug(
-                    "Using %d upstreams for %s %s", len(upstreams_to_try), qname, qtype
-                )
-            else:
-                logger.warning("No upstreams configured for %s %s", qname, qtype)
-                r = req.reply()
-                r.header.rcode = RCODE.SERVFAIL
-                wire = _set_response_id(r.pack(), req.header.id)
+            # 4. Choose upstreams and forward with failover
+            upstreams = self._choose_upstreams(qname, qtype, ctx)
+            if not upstreams:
+                wire = self._make_servfail_response(req)
                 sock.sendto(wire, self.client_address)
                 return
 
-            # Try upstreams with failover
-            reply, used_upstream, reason = send_query_with_failover(
-                req, upstreams_to_try, self.timeout_ms, qname, qtype
+            reply, used_upstream, reason = self._forward_with_failover_helper(
+                req, upstreams, qname, qtype
             )
 
             if reply is None:
-                logger.warning(
-                    "All upstreams failed for %s %s, returning SERVFAIL", qname, qtype
-                )
-                r = req.reply()
-                r.header.rcode = RCODE.SERVFAIL
-                wire = _set_response_id(r.pack(), req.header.id)
+                wire = self._make_servfail_response(req)
                 sock.sendto(wire, self.client_address)
                 return
-            # Post-resolve plugin hooks (allow overrides like rewriting)
-            for p in self.plugins:
-                decision = p.post_resolve(qname, qtype, reply, ctx)
-                if isinstance(decision, PluginDecision):
-                    if decision.action == "deny":
-                        logger.warning(
-                            "Post-resolve denied %s %s by %s",
-                            qname,
-                            qtype,
-                            p.__class__.__name__,
-                        )
-                        r = req.reply()
-                        r.header.rcode = RCODE.NXDOMAIN
-                        reply = r.pack()
-                        break
-                    if decision.action == "override" and decision.response is not None:
-                        logger.info(
-                            "Post-resolve override %s %s by %s",
-                            qname,
-                            qtype,
-                            p.__class__.__name__,
-                        )
-                        reply = decision.response
-                        break
 
-            # Cache the response based on the minimum TTL in the answer records.
-            # Only cache NOERROR responses with answer RRs; never cache SERVFAIL
-            try:
-                r = DNSRecord.parse(reply)
-                if r.header.rcode == RCODE.NOERROR and r.rr:
-                    ttls = [rr.ttl for rr in r.rr]
-                    ttl = min(ttls) if ttls else 300
-                    if ttl > 0:
-                        logger.debug("Caching %s %s with TTL %ds", qname, qtype, ttl)
-                        self.cache.set(cache_key, ttl, reply)
-                    else:
-                        logger.debug("Not caching %s %s (TTL=%d)", qname, qtype, ttl)
-                elif r.header.rcode == RCODE.SERVFAIL:
-                    logger.debug("Not caching %s %s (SERVFAIL never cached)", qname, qtype)
-                else:
-                    logger.debug("Not caching %s %s (rcode=%s, no answer RRs)", qname, qtype, RCODE.get(r.header.rcode, r.header.rcode))
-            except Exception as e:
-                logger.debug("Failed to parse response for caching: %s", str(e))
+            # 5. Apply post-resolve plugins
+            reply = self._apply_post_plugins(req, qname, qtype, reply, ctx)
 
-            # Ensure the response ID matches the request ID before sending
+            # 6. Cache the response
+            self._cache_store_if_applicable(qname, qtype, reply)
+
+            # 7. Send final response
             reply = _set_response_id(reply, req.header.id)
             sock.sendto(reply, self.client_address)
         except Exception as e:
