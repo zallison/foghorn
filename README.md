@@ -296,6 +296,17 @@ logging:
   level: info          # Available levels: debug, info, warn, error, crit
   stderr: true         # Log to stderr (default: true)
   file: ./foghorn.log  # Optional: also log to this file
+  syslog: true         # Optional: also log to syslog (default: false)
+```
+
+To configure syslog with custom options:
+
+```yaml
+logging:
+  level: info
+  syslog:
+    address: /dev/log  # Unix socket (default: /dev/log) or ("hostname", port) for network syslog
+    facility: USER     # Syslog facility (default: USER; others: LOCAL0-LOCAL7, DAEMON, etc.)
 ```
 
 ### Available Levels
