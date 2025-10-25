@@ -159,7 +159,7 @@ class ExamplesPlugin(BasePlugin):
         rule_qtypes = rule.get("apply_to_qtypes", ["*"])
         return "*" in rule_qtypes or name in rule_qtypes
 
-    def pre_resolve(self, qname: str, qtype: int, ctx: PluginContext) -> Optional[PluginDecision]:
+    def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
         """
         Deny requests with too many subdomains or excessive length (excluding dots).
 
