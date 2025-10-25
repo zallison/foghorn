@@ -134,7 +134,7 @@ def init_logging(cfg: Optional[Dict[str, Any]]) -> None:
                 facility=facility
             )
             syslog_handler.setFormatter(syslog_formatter)
-            root.addHandler(syslog_handler)g
+            root.addHandler(syslog_handler)
         except (OSError, ValueError) as e:
             # Fall back gracefully if syslog is not available
             root.warning(f"Failed to configure syslog: {e}")

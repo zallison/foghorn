@@ -12,6 +12,12 @@ upstream:
 # Global timeout applies to each upstream attempt
 timeout_ms: 2000
 
+# Minimum cache TTL (in seconds) applied to all cached responses.
+# - For NOERROR with answers: cache TTL = max(min(answer TTLs), min_cache_ttl)
+# - For NOERROR with no answers, NXDOMAIN, and SERVFAIL: cache TTL = min_cache_ttl
+# Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
+min_cache_ttl: 60
+
 # Logging configuration
 logging:
   level: debug         # Available levels: debug, info, warn, error, crit

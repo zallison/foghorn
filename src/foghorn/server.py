@@ -9,6 +9,38 @@ from .plugins.base import BasePlugin, PluginDecision, PluginContext
 logger = logging.getLogger("foghorn.server")
 
 
+def compute_effective_ttl(resp: DNSRecord, min_cache_ttl: int) -> int:
+    """
+    Computes cache TTL with min floor applied for any DNS response.
+
+    Inputs:
+      - resp: dnslib.DNSRecord, the parsed DNS response to cache
+      - min_cache_ttl: int (seconds), minimum TTL floor
+
+    Outputs:
+      - int: effective TTL in seconds to use for cache expiry
+
+    For NOERROR + answers: max(min(answer.ttl), min_cache_ttl)
+    For all other cases: min_cache_ttl
+
+    Example:
+      >>> # Mock resp with NOERROR and answer RRs with TTL 30, min_cache_ttl=60
+      >>> ttl = compute_effective_ttl(resp_with_low_ttl, 60)
+      >>> ttl
+      60
+    """
+    try:
+        rcode = resp.header.rcode
+        has_answers = bool(resp.rr)
+        if rcode == RCODE.NOERROR and has_answers:
+            answer_min_ttl = min(rr.ttl for rr in resp.rr)
+            return max(int(answer_min_ttl), int(min_cache_ttl))
+        return max(0, int(min_cache_ttl))
+    except Exception:
+        # Defensive: on parsing error, fall back to min_cache_ttl
+        return max(0, int(min_cache_ttl))
+
+
 def _set_response_id(wire: bytes, req_id: int) -> bytes:
     """Ensure the response DNS ID matches the request ID.
 
@@ -108,6 +140,41 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     plugins: List[BasePlugin] = []
     timeout = 2.0
     timeout_ms = 2000
+    min_cache_ttl = 60
+
+    def _cache_and_send_response(self, response_wire: bytes, req: DNSRecord, qname: str, qtype: int, sock, client_address, cache_key):
+        """
+        Caches response using TTL floor and sends to client.
+
+        Inputs:
+          - response_wire: bytes, the DNS response to cache and send
+          - req: DNSRecord, original request for ID matching
+          - qname: str, query name for logging
+          - qtype: int, query type for logging
+          - sock: socket to send response through
+          - client_address: client address to send response to
+          - cache_key: tuple, cache key for storing response
+
+        Outputs:
+          - None
+
+        Caches all response types using min_cache_ttl floor and sends response.
+        """
+        try:
+            r = DNSRecord.parse(response_wire)
+            effective_ttl = compute_effective_ttl(r, self.min_cache_ttl)
+            if effective_ttl > 0:
+                rcode_name = RCODE.get(r.header.rcode, f"rcode{r.header.rcode}")
+                logger.debug("Caching %s %s (%s) with TTL %ds", qname, qtype, rcode_name, effective_ttl)
+                self.cache.set(cache_key, effective_ttl, response_wire)
+            else:
+                logger.debug("Not caching %s %s (effective TTL=%d)", qname, qtype, effective_ttl)
+        except Exception as e:
+            logger.debug("Failed to parse response for caching: %s", str(e))
+
+        # Ensure the response ID matches the request ID before sending
+        response_wire = _set_response_id(response_wire, req.header.id)
+        sock.sendto(response_wire, client_address)
 
     def _parse_query(self, data: bytes):
         """
@@ -405,6 +472,36 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
             # 3. Check cache
             cached = self._cache_lookup(qname, qtype)
+
+            ctx = PluginContext(client_ip=client_ip)
+
+            # Pre-resolve plugin checks
+            for p in self.plugins:
+                decision = p.pre_resolve(qname, qtype, data, ctx)
+                if isinstance(decision, PluginDecision):
+                    if decision.action == "deny":
+                        logger.warning(
+                            "Denied %s %s by %s", qname, qtype, p.__class__.__name__
+                        )
+                        reply = req.reply()
+                        reply.header.rcode = RCODE.NXDOMAIN
+                        self._cache_and_send_response(reply.pack(), req, qname, qtype, sock, self.client_address, cache_key)
+                        return
+                    if decision.action == "override" and decision.response is not None:
+                        logger.info(
+                            "Override %s %s by %s", qname, qtype, p.__class__.__name__
+                        )
+                        # Don't cache plugin overrides - they may be dynamic
+                        resp = _set_response_id(decision.response, req.header.id)
+                        sock.sendto(resp, self.client_address)
+                        return
+                    # allow -> continue
+                    logger.debug("Plugin %s: %s", p.__class__.__name__, decision.action)
+
+            # Check cache for a response.
+            cache_key = (qname.lower(), qtype)
+            cached = self.cache.get(cache_key)
+
             if cached is not None:
                 resp = _set_response_id(cached, req.header.id)
                 sock.sendto(resp, self.client_address)
@@ -415,6 +512,18 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             if not upstreams:
                 wire = self._make_servfail_response(req)
                 sock.sendto(wire, self.client_address)
+
+            # Determine upstream candidates to try
+            upstreams_to_try = ctx.upstream_candidates or self.upstream_addrs
+            if upstreams_to_try:
+                logger.debug(
+                    "Using %d upstreams for %s %s", len(upstreams_to_try), qname, qtype
+                )
+            else:
+                logger.warning("No upstreams configured for %s %s", qname, qtype)
+                r = req.reply()
+                r.header.rcode = RCODE.SERVFAIL
+                self._cache_and_send_response(r.pack(), req, qname, qtype, sock, self.client_address, cache_key)
                 return
 
             reply, used_upstream, reason = self._forward_with_failover_helper(
@@ -424,6 +533,13 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             if reply is None:
                 wire = self._make_servfail_response(req)
                 sock.sendto(wire, self.client_address)
+
+                logger.warning(
+                    "All upstreams failed for %s %s, returning SERVFAIL", qname, qtype
+                )
+                r = req.reply()
+                r.header.rcode = RCODE.SERVFAIL
+                self._cache_and_send_response(r.pack(), req, qname, qtype, sock, self.client_address, cache_key)
                 return
 
             # 5. Apply post-resolve plugins
@@ -435,6 +551,10 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             # 7. Send final response
             reply = _set_response_id(reply, req.header.id)
             sock.sendto(reply, self.client_address)
+
+            # Cache and send the final response
+            self._cache_and_send_response(reply, req, qname, qtype, sock, self.client_address, cache_key)
+
         except Exception as e:
             logger.exception(
                 "Unhandled error during request handling from %s", client_ip
@@ -442,10 +562,13 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             try:
                 # On parse or other errors, return SERVFAIL
                 req = DNSRecord.parse(data)
+                q = req.questions[0]
+                qname = str(q.qname).rstrip(".")
+                qtype = q.qtype
+                cache_key = (qname.lower(), qtype)
                 r = req.reply()
                 r.header.rcode = RCODE.SERVFAIL
-                wire = _set_response_id(r.pack(), req.header.id)
-                sock.sendto(wire, self.client_address)
+                self._cache_and_send_response(r.pack(), req, qname, qtype, sock, self.client_address, cache_key)
             except Exception as inner_e:
                 logger.error("Failed to send SERVFAIL response: %s", str(inner_e))
 
@@ -475,30 +598,29 @@ class DNSServer:
         plugins: List[BasePlugin],
         timeout: float = 2.0,
         timeout_ms: int = 2000,
+        min_cache_ttl: int = 60,
     ) -> None:
         """
         Initializes the DNSServer.
 
-        Args:
+        Inputs:
             host: The host to listen on.
             port: The port to listen on.
             upstreams: A list of upstream DNS server configurations.
             plugins: A list of initialized plugins.
             timeout: The timeout for upstream queries (seconds, legacy).
             timeout_ms: The timeout for upstream queries (milliseconds).
+            min_cache_ttl: Minimum cache TTL in seconds applied to all cached responses.
 
-        Returns:
+        Outputs:
             None
 
-        Notes:
-            Uses socketserver.ThreadingUDPServer to handle each UDP request in
-            its own thread for concurrency. Worker threads are daemonized for
-            fast shutdown.
+        Uses socketserver.ThreadingUDPServer for concurrent request handling.
 
-        Example use:
+        Example:
             >>> from foghorn.server import DNSServer
             >>> upstreams = [{'host': '8.8.8.8', 'port': 53}]
-            >>> server = DNSServer("127.0.0.1", 5353, upstreams, [], 2.0, 2000)
+            >>> server = DNSServer("127.0.0.1", 5353, upstreams, [], 2.0, 2000, 60)
             >>> server.server.server_address
             ('127.0.0.1', 5353)
         """
@@ -506,6 +628,7 @@ class DNSServer:
         DNSUDPHandler.plugins = plugins
         DNSUDPHandler.timeout = timeout
         DNSUDPHandler.timeout_ms = timeout_ms
+        DNSUDPHandler.min_cache_ttl = max(0, int(min_cache_ttl))
         self.server = socketserver.ThreadingUDPServer((host, port), DNSUDPHandler)
         # Ensure request handler threads do not block shutdown
         self.server.daemon_threads = True

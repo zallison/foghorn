@@ -29,3 +29,4 @@ Thumbs.db
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+WARP.md
