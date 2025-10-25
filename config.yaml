@@ -3,10 +3,14 @@ listen:
   host: 127.0.0.1
   port: 5354
 
+# Multiple upstream DNS servers with automatic failover
 upstream:
-  host: 8.8.8.8
-  port: 53
-  timeout_ms: 2000
+  - host: 8.8.8.8
+    port: 53
+  - host: 1.1.1.1
+    port: 53
+# Global timeout applies to each upstream attempt
+timeout_ms: 2000
 
 # Logging configuration
 logging:
@@ -22,10 +26,19 @@ plugins:
   - module: router
     config:
       routes:
+        # Single upstream (legacy format)
         - suffix: ".zaa"
           upstream:
             host: 192.168.88.35
             port: 53
+        
+        # Multiple upstreams with failover (new format)
+        - suffix: "corp.internal"
+          upstreams:
+            - host: 10.0.0.1
+              port: 53
+            - host: 10.0.0.2
+              port: 53
 
   - module: filter
     config:

@@ -53,13 +53,15 @@ listen:
 
 ### `upstream`
 
-This section specifies the upstream DNS server to which queries will be forwarded.
+This section specifies the upstream DNS servers to which queries will be forwarded. You can provide a list of servers, and they will be tried in order.
 
 ```yaml
 upstream:
-  host: 1.1.1.1
-  port: 53
-  timeout_ms: 2000
+  - host: 1.1.1.1
+    port: 53
+    timeout_ms: 2000
+  - host: 8.8.8.8
+    port: 53
 ```
 
 ### `plugins`
@@ -112,13 +114,12 @@ plugins:
 
 #### NewDomainFilterPlugin
 
-This plugin blocks domains that were registered recently.
+This plugin blocks domains that were registered recently by checking the domain's creation date using `whois`.
 
 **Configuration:**
 
 *   `threshold_days`: The minimum age of a domain in days. Domains younger than this will be blocked.
-*   `rdap_endpoint`: The RDAP endpoint to use for domain age lookups.
-*   `timeout_ms`: The timeout in milliseconds for RDAP queries.
+*   `timeout_ms`: The timeout in milliseconds for `whois` queries.
 
 **Example (full path):**
 
@@ -127,7 +128,6 @@ plugins:
   - module: foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
     config:
       threshold_days: 7
-      rdap_endpoint: https://rdap.org/domain/
       timeout_ms: 2000
 ```
 
@@ -146,7 +146,7 @@ This plugin routes queries to different upstream DNS servers based on the querie
 
 **Configuration:**
 
-*   `routes`: A list of routing rules. Each rule can have a `domain` (for exact matches) or a `suffix` (for suffix matches) and an `upstream` server to route to.
+*   `routes`: A list of routing rules. Each rule can have a `domain` (for exact matches) or a `suffix` (for suffix matches) and a list of `upstreams` servers to route to.
 
 **Example (full path):**
 
@@ -187,9 +187,11 @@ listen:
   host: 127.0.0.1
   port: 5353
 upstream:
-  host: 1.1.1.1
-  port: 53
-  timeout_ms: 2000
+  - host: 1.1.1.1
+    port: 53
+    timeout_ms: 2000
+  - host: 8.8.8.8
+    port: 53
 logging:
   level: info
   stderr: true
@@ -199,7 +201,6 @@ plugins:
   - module: new_domain
     config:
       threshold_days: 7
-      rdap_endpoint: https://rdap.org/domain/
       timeout_ms: 2000
   - module: router
     config:

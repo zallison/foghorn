@@ -3,7 +3,7 @@ import importlib
 import sys
 import argparse
 import logging
-from typing import List
+from typing import List, Tuple, Dict, Union, Any
 import yaml
 from unittest.mock import patch, mock_open
 
@@ -13,6 +13,77 @@ from .logging_config import init_logging
 from .plugins.registry import discover_plugins, get_plugin_class
 
 
+def normalize_upstream_config(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Union[str, int]]], int]:
+    """
+    Normalize upstream configuration to a list-of-endpoints plus a timeout.
+
+    Inputs:
+      - cfg: dict containing parsed YAML. Supports:
+          - cfg['upstream'] as either:
+              * dict with keys host, port, optional timeout_ms (legacy), or
+              * list of {host, port} entries (new format)
+          - cfg['timeout_ms'] at top level (new preferred location)
+    
+    Outputs:
+      - (upstreams, timeout_ms): tuple where
+          - upstreams: list[dict] with keys {'host': str, 'port': int}
+          - timeout_ms: int timeout in milliseconds applied per upstream attempt
+
+    Notes:
+      - If both top-level timeout_ms and legacy upstream.timeout_ms are present, top-level wins.
+      - If none provided, default to 2000 ms.
+
+    Example:
+      upstreams, timeout = normalize_upstream_config({
+          'upstream': [{'host': '1.1.1.1', 'port': 53}, {'host': '1.0.0.1', 'port': 53}],
+          'timeout_ms': 1500
+      })
+      # upstreams -> [{'host': '1.1.1.1', 'port': 53}, {'host': '1.0.0.1', 'port': 53}]
+      # timeout -> 1500
+    """
+    upstream_raw = cfg.get("upstream", {})
+    top_level_timeout = cfg.get("timeout_ms")
+    legacy_warned = False
+    
+    # Handle upstream format (dict vs list)
+    if isinstance(upstream_raw, list):
+        # New format: list of upstream objects
+        upstreams = []
+        for u in upstream_raw:
+            if isinstance(u, dict) and "host" in u and "port" in u:
+                upstreams.append({
+                    "host": str(u["host"]),
+                    "port": int(u["port"])
+                })
+    elif isinstance(upstream_raw, dict):
+        # Legacy format: single upstream object
+        if "host" in upstream_raw and "port" in upstream_raw:
+            upstreams = [{
+                "host": str(upstream_raw["host"]),
+                "port": int(upstream_raw["port"])
+            }]
+        else:
+            # Default fallback
+            upstreams = [{"host": "1.1.1.1", "port": 53}]
+    else:
+        # Default fallback
+        upstreams = [{"host": "1.1.1.1", "port": 53}]
+    
+    # Handle timeout precedence
+    if top_level_timeout is not None:
+        timeout_ms = int(top_level_timeout)
+        # Check for legacy timeout and warn if both present
+        if isinstance(upstream_raw, dict) and "timeout_ms" in upstream_raw and not legacy_warned:
+            logging.getLogger("foghorn.main").warning(
+                "Both top-level timeout_ms and legacy upstream.timeout_ms provided; using top-level timeout_ms"
+            )
+            legacy_warned = True
+    elif isinstance(upstream_raw, dict) and "timeout_ms" in upstream_raw:
+        timeout_ms = int(upstream_raw["timeout_ms"])
+    else:
+        timeout_ms = 2000  # Default
+    
+    return upstreams, timeout_ms
 
 
 def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
@@ -108,16 +179,17 @@ def main(argv: List[str] | None = None) -> int:
     host = listen.get("host", "127.0.0.1")
     port = int(listen.get("port", 5353))
 
-    upstream = cfg.get("upstream", {})
-    up_host = upstream.get("host", "1.1.1.1")
-    up_port = int(upstream.get("port", 53))
-    timeout_ms = int(upstream.get("timeout_ms", 2000))
+    # Normalize upstream configuration
+    upstreams, timeout_ms = normalize_upstream_config(cfg)
 
     plugins = load_plugins(cfg.get("plugins", []))
     logger.debug("Loaded %d plugins: %s", len(plugins), [p.__class__.__name__ for p in plugins])
 
-    server = DNSServer(host, port, (up_host, up_port), plugins, timeout=timeout_ms/1000.0)
-    logger.info("Starting Foghorn on %s:%d, upstream %s:%d", host, port, up_host, up_port)
+    server = DNSServer(host, port, upstreams, plugins, timeout=timeout_ms/1000.0, timeout_ms=timeout_ms)
+    
+    # Log startup info
+    upstream_info = ", ".join([f"{u['host']}:{u['port']}" for u in upstreams])
+    logger.info("Starting Foghorn on %s:%d, upstreams: [%s], timeout: %dms", host, port, upstream_info, timeout_ms)
 
     try:
         server.serve_forever()
