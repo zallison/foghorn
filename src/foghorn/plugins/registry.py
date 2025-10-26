@@ -12,10 +12,12 @@ logger = logging.getLogger(__name__)
 _CAMEL_1 = re.compile(r"(.)([A-Z][a-z]+)")
 _CAMEL_2 = re.compile(r"([a-z0-9])([A-Z])")
 
+
 def _camel_to_snake(name: str) -> str:
     s1 = _CAMEL_1.sub(r"\1_\2", name)
     s2 = _CAMEL_2.sub(r"\1_\2", s1)
     return s2.lower()
+
 
 def _default_alias_for(cls: Type[BasePlugin]) -> str:
     name = cls.__name__
@@ -23,8 +25,10 @@ def _default_alias_for(cls: Type[BasePlugin]) -> str:
         name = name[:-6]
     return _camel_to_snake(name)
 
+
 def _normalize(alias: str) -> str:
     return alias.strip().lower().replace("-", "_")
+
 
 def _iter_plugin_modules(package_name: str = "foghorn.plugins") -> Iterable[str]:
     pkg = importlib.import_module(package_name)
@@ -35,7 +39,10 @@ def _iter_plugin_modules(package_name: str = "foghorn.plugins") -> Iterable[str]
             pass
         yield modinfo.name
 
-def discover_plugins(package_name: str = "foghorn.plugins") -> Dict[str, Type[BasePlugin]]:
+
+def discover_plugins(
+    package_name: str = "foghorn.plugins",
+) -> Dict[str, Type[BasePlugin]]:
     """
     Imports modules under foghorn.plugins and builds a mapping from alias to plugin class.
     Adds a default alias derived from class name. Honors plugin-declared aliases.
@@ -68,7 +75,10 @@ def discover_plugins(package_name: str = "foghorn.plugins") -> Dict[str, Type[Ba
 
     return registry
 
-def get_plugin_class(identifier: str, registry: Dict[str, Type[BasePlugin]] | None = None) -> Type[BasePlugin]:
+
+def get_plugin_class(
+    identifier: str, registry: Dict[str, Type[BasePlugin]] | None = None
+) -> Type[BasePlugin]:
     """
     Resolve identifier to a plugin class.
     - If identifier contains a dot, treat as dotted import path "pkg.mod.Class".

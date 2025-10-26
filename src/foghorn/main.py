@@ -32,7 +32,9 @@ def _get_min_cache_ttl(cfg: dict) -> int:
     return max(0, ival)
 
 
-def normalize_upstream_config(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Union[str, int]]], int]:
+def normalize_upstream_config(
+    cfg: Dict[str, Any],
+) -> Tuple[List[Dict[str, Union[str, int]]], int]:
     """
     Normalize upstream configuration to a list-of-endpoints plus a timeout.
 
@@ -42,7 +44,7 @@ def normalize_upstream_config(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Union
               * dict with keys host, port, optional timeout_ms (legacy), or
               * list of {host, port} entries (new format)
           - cfg['timeout_ms'] at top level (new preferred location)
-    
+
     Outputs:
       - (upstreams, timeout_ms): tuple where
           - upstreams: list[dict] with keys {'host': str, 'port': int}
@@ -63,36 +65,36 @@ def normalize_upstream_config(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Union
     upstream_raw = cfg.get("upstream", {})
     top_level_timeout = cfg.get("timeout_ms")
     legacy_warned = False
-    
+
     # Handle upstream format (dict vs list)
     if isinstance(upstream_raw, list):
         # New format: list of upstream objects
         upstreams = []
         for u in upstream_raw:
             if isinstance(u, dict) and "host" in u and "port" in u:
-                upstreams.append({
-                    "host": str(u["host"]),
-                    "port": int(u["port"])
-                })
+                upstreams.append({"host": str(u["host"]), "port": int(u["port"])})
     elif isinstance(upstream_raw, dict):
         # Legacy format: single upstream object
         if "host" in upstream_raw and "port" in upstream_raw:
-            upstreams = [{
-                "host": str(upstream_raw["host"]),
-                "port": int(upstream_raw["port"])
-            }]
+            upstreams = [
+                {"host": str(upstream_raw["host"]), "port": int(upstream_raw["port"])}
+            ]
         else:
             # Default fallback
             upstreams = [{"host": "1.1.1.1", "port": 53}]
     else:
         # Default fallback
         upstreams = [{"host": "1.1.1.1", "port": 53}]
-    
+
     # Handle timeout precedence
     if top_level_timeout is not None:
         timeout_ms = int(top_level_timeout)
         # Check for legacy timeout and warn if both present
-        if isinstance(upstream_raw, dict) and "timeout_ms" in upstream_raw and not legacy_warned:
+        if (
+            isinstance(upstream_raw, dict)
+            and "timeout_ms" in upstream_raw
+            and not legacy_warned
+        ):
             logging.getLogger("foghorn.main").warning(
                 "Both top-level timeout_ms and legacy upstream.timeout_ms provided; using top-level timeout_ms"
             )
@@ -101,7 +103,7 @@ def normalize_upstream_config(cfg: Dict[str, Any]) -> Tuple[List[Dict[str, Union
         timeout_ms = int(upstream_raw["timeout_ms"])
     else:
         timeout_ms = 2000  # Default
-    
+
     return upstreams, timeout_ms
 
 
@@ -203,13 +205,29 @@ def main(argv: List[str] | None = None) -> int:
     min_cache_ttl = _get_min_cache_ttl(cfg)
 
     plugins = load_plugins(cfg.get("plugins", []))
-    logger.debug("Loaded %d plugins: %s", len(plugins), [p.__class__.__name__ for p in plugins])
+    logger.debug(
+        "Loaded %d plugins: %s", len(plugins), [p.__class__.__name__ for p in plugins]
+    )
 
-    server = DNSServer(host, port, upstreams, plugins, timeout=timeout_ms/1000.0, timeout_ms=timeout_ms, min_cache_ttl=min_cache_ttl)
-    
+    server = DNSServer(
+        host,
+        port,
+        upstreams,
+        plugins,
+        timeout=timeout_ms / 1000.0,
+        timeout_ms=timeout_ms,
+        min_cache_ttl=min_cache_ttl,
+    )
+
     # Log startup info
     upstream_info = ", ".join([f"{u['host']}:{u['port']}" for u in upstreams])
-    logger.info("Starting Foghorn on %s:%d, upstreams: [%s], timeout: %dms", host, port, upstream_info, timeout_ms)
+    logger.info(
+        "Starting Foghorn on %s:%d, upstreams: [%s], timeout: %dms",
+        host,
+        port,
+        upstream_info,
+        timeout_ms,
+    )
 
     try:
         server.serve_forever()

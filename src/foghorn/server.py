@@ -96,7 +96,9 @@ def send_query_with_failover(
                 if parsed_response.header.rcode == RCODE.SERVFAIL:
                     logger.warning(
                         "Upstream %s:%d returned SERVFAIL for %s, trying next",
-                        host, port, qname
+                        host,
+                        port,
+                        qname,
                     )
                     last_exception = Exception(f"SERVFAIL from {host}:{port}")
                     continue  # Try next upstream
@@ -104,18 +106,19 @@ def send_query_with_failover(
                 # If parsing fails, treat as a server failure
                 logger.warning(
                     "Failed to parse response from %s:%d for %s: %s",
-                    host, port, qname, e
+                    host,
+                    port,
+                    qname,
+                    e,
                 )
                 last_exception = e
-                continue # Try next upstream
+                continue  # Try next upstream
 
             # Success (NOERROR, NXDOMAIN, etc. are all valid final answers)
             return response_wire, upstream, "ok"
 
         except Exception as e:
-            logger.debug(
-                "Upstream %s:%d failed for %s: %s", host, port, qname, str(e)
-            )
+            logger.debug("Upstream %s:%d failed for %s: %s", host, port, qname, str(e))
             last_exception = e
             continue  # Try next upstream
 
@@ -142,7 +145,16 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     timeout_ms = 2000
     min_cache_ttl = 60
 
-    def _cache_and_send_response(self, response_wire: bytes, req: DNSRecord, qname: str, qtype: int, sock, client_address, cache_key):
+    def _cache_and_send_response(
+        self,
+        response_wire: bytes,
+        req: DNSRecord,
+        qname: str,
+        qtype: int,
+        sock,
+        client_address,
+        cache_key,
+    ):
         """
         Caches response using TTL floor and sends to client.
 
@@ -165,10 +177,18 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             effective_ttl = compute_effective_ttl(r, self.min_cache_ttl)
             if effective_ttl > 0:
                 rcode_name = RCODE.get(r.header.rcode, f"rcode{r.header.rcode}")
-                logger.debug("Caching %s %s (%s) with TTL %ds", qname, qtype, rcode_name, effective_ttl)
+                logger.debug(
+                    "Caching %s %s (%s) with TTL %ds",
+                    qname,
+                    qtype,
+                    rcode_name,
+                    effective_ttl,
+                )
                 self.cache.set(cache_key, effective_ttl, response_wire)
             else:
-                logger.debug("Not caching %s %s (effective TTL=%d)", qname, qtype, effective_ttl)
+                logger.debug(
+                    "Not caching %s %s (effective TTL=%d)", qname, qtype, effective_ttl
+                )
         except Exception as e:
             logger.debug("Failed to parse response for caching: %s", str(e))
 
@@ -203,7 +223,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         ctx = PluginContext(client_ip=client_ip)
         return req, qname, qtype, ctx
 
-    def _apply_pre_plugins(self, request: DNSRecord, qname: str, qtype: int, data: bytes, ctx):
+    def _apply_pre_plugins(
+        self, request: DNSRecord, qname: str, qtype: int, data: bytes, ctx
+    ):
         """
         Apply pre-resolve plugins and handle deny/override decisions.
 
@@ -293,7 +315,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             logger.warning("No upstreams configured for %s %s", qname, qtype)
         return upstreams_to_try
 
-    def _forward_with_failover_helper(self, request: DNSRecord, upstreams, qname: str, qtype: int):
+    def _forward_with_failover_helper(
+        self, request: DNSRecord, upstreams, qname: str, qtype: int
+    ):
         """
         Forward query to upstream servers with failover support.
 
@@ -320,7 +344,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         )
         return reply, used_upstream, reason
 
-    def _apply_post_plugins(self, request: DNSRecord, qname: str, qtype: int, response_wire: bytes, ctx):
+    def _apply_post_plugins(
+        self, request: DNSRecord, qname: str, qtype: int, response_wire: bytes, ctx
+    ):
         """
         Apply post-resolve plugins and handle deny/override decisions.
 
@@ -402,7 +428,12 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             elif r.header.rcode == RCODE.SERVFAIL:
                 logger.debug("Not caching %s %s (SERVFAIL never cached)", qname, qtype)
             else:
-                logger.debug("Not caching %s %s (rcode=%s, no answer RRs)", qname, qtype, RCODE.get(r.header.rcode, r.header.rcode))
+                logger.debug(
+                    "Not caching %s %s (rcode=%s, no answer RRs)",
+                    qname,
+                    qtype,
+                    RCODE.get(r.header.rcode, r.header.rcode),
+                )
         except Exception as e:
             logger.debug("Failed to parse response for caching: %s", str(e))
 
@@ -466,7 +497,10 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     wire = self._make_nxdomain_response(req)
                     sock.sendto(wire, self.client_address)
                     return
-                if pre_decision.action == "override" and pre_decision.response is not None:
+                if (
+                    pre_decision.action == "override"
+                    and pre_decision.response is not None
+                ):
                     resp = _set_response_id(pre_decision.response, req.header.id)
                     sock.sendto(resp, self.client_address)
                     return
@@ -486,7 +520,15 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         )
                         reply = req.reply()
                         reply.header.rcode = RCODE.NXDOMAIN
-                        self._cache_and_send_response(reply.pack(), req, qname, qtype, sock, self.client_address, cache_key)
+                        self._cache_and_send_response(
+                            reply.pack(),
+                            req,
+                            qname,
+                            qtype,
+                            sock,
+                            self.client_address,
+                            cache_key,
+                        )
                         return
                     if decision.action == "override" and decision.response is not None:
                         logger.info(
@@ -523,7 +565,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 logger.warning("No upstreams configured for %s %s", qname, qtype)
                 r = req.reply()
                 r.header.rcode = RCODE.SERVFAIL
-                self._cache_and_send_response(r.pack(), req, qname, qtype, sock, self.client_address, cache_key)
+                self._cache_and_send_response(
+                    r.pack(), req, qname, qtype, sock, self.client_address, cache_key
+                )
                 return
 
             reply, used_upstream, reason = self._forward_with_failover_helper(
@@ -539,7 +583,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 )
                 r = req.reply()
                 r.header.rcode = RCODE.SERVFAIL
-                self._cache_and_send_response(r.pack(), req, qname, qtype, sock, self.client_address, cache_key)
+                self._cache_and_send_response(
+                    r.pack(), req, qname, qtype, sock, self.client_address, cache_key
+                )
                 return
 
             # 5. Apply post-resolve plugins
@@ -553,7 +599,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             sock.sendto(reply, self.client_address)
 
             # Cache and send the final response
-            self._cache_and_send_response(reply, req, qname, qtype, sock, self.client_address, cache_key)
+            self._cache_and_send_response(
+                reply, req, qname, qtype, sock, self.client_address, cache_key
+            )
 
         except Exception as e:
             logger.exception(
@@ -568,7 +616,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 cache_key = (qname.lower(), qtype)
                 r = req.reply()
                 r.header.rcode = RCODE.SERVFAIL
-                self._cache_and_send_response(r.pack(), req, qname, qtype, sock, self.client_address, cache_key)
+                self._cache_and_send_response(
+                    r.pack(), req, qname, qtype, sock, self.client_address, cache_key
+                )
             except Exception as inner_e:
                 logger.error("Failed to send SERVFAIL response: %s", str(inner_e))
 

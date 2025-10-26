@@ -22,9 +22,14 @@ def test_server_uses_upstream_override_from_plugin(monkeypatch):
     DNSUDPHandler.cache = TTLCache()  # clear cache
     override_addr = ("127.0.0.2", 10053)
     DNSUDPHandler.plugins = [
-        UpstreamRouterPlugin(routes=[
-            {"domain": "corp.example.com", "upstream": {"host": override_addr[0], "port": override_addr[1]}}
-        ])
+        UpstreamRouterPlugin(
+            routes=[
+                {
+                    "domain": "corp.example.com",
+                    "upstream": {"host": override_addr[0], "port": override_addr[1]},
+                }
+            ]
+        )
     ]
     DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
     DNSUDPHandler.timeout = 0.5
@@ -37,7 +42,14 @@ def test_server_uses_upstream_override_from_plugin(monkeypatch):
     # Capture the host/port used by DNSRecord.send
     used_calls: List[Tuple[str, int]] = []
 
-    def fake_send(self: DNSRecord, host: str, port: int, timeout: float = None, *args: Any, **kwargs: Any) -> bytes:
+    def fake_send(
+        self: DNSRecord,
+        host: str,
+        port: int,
+        timeout: float = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> bytes:
         used_calls.append((host, port))
         return b"dummy-reply"
 

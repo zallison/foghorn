@@ -21,6 +21,7 @@ class AccessControlPlugin(BasePlugin):
               allow:
                 - 192.168.1.0/24
     """
+
     def __init__(self, **config):
         """
         Initializes the AccessControlPlugin.
@@ -37,10 +38,16 @@ class AccessControlPlugin(BasePlugin):
         """
         super().__init__(**config)
         self.default = (self.config.get("default", "allow")).lower()
-        self.allow_nets = [ipaddress.ip_network(n, strict=False) for n in self.config.get("allow", [])]
-        self.deny_nets = [ipaddress.ip_network(n, strict=False) for n in self.config.get("deny", [])]
+        self.allow_nets = [
+            ipaddress.ip_network(n, strict=False) for n in self.config.get("allow", [])
+        ]
+        self.deny_nets = [
+            ipaddress.ip_network(n, strict=False) for n in self.config.get("deny", [])
+        ]
 
-    def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
+    def pre_resolve(
+        self, qname: str, qtype: int, req: bytes, ctx: PluginContext
+    ) -> Optional[PluginDecision]:
         """
         Checks if the client's IP is in the allow or deny lists.
         Args:
@@ -65,11 +72,15 @@ class AccessControlPlugin(BasePlugin):
         # Deny takes precedence
         for n in self.deny_nets:
             if ip in n:
-                logger.warning("Access denied for %s (deny rule: %s)", ctx.client_ip, str(n))
+                logger.warning(
+                    "Access denied for %s (deny rule: %s)", ctx.client_ip, str(n)
+                )
                 return PluginDecision(action="deny")
         for n in self.allow_nets:
             if ip in n:
-                logger.debug("Access allowed for %s (allow rule: %s)", ctx.client_ip, str(n))
+                logger.debug(
+                    "Access allowed for %s (allow rule: %s)", ctx.client_ip, str(n)
+                )
                 return PluginDecision(action="allow")
 
         logger.debug("Access %s for %s (default policy)", self.default, ctx.client_ip)

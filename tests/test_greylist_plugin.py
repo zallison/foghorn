@@ -107,3 +107,44 @@ def test_greylist_deny_within_duration(greylist_db_path):
     assert sock.sent
     response = DNSRecord.parse(sock.sent[0][0])
     assert response.header.rcode == 3  # NXDOMAIN
+
+
+def test_greylist_permanently_allows_after_first_allow(greylist_db_path, monkeypatch):
+    """
+    Brief: Verify that once allowed after the greylist window, subsequent immediate queries remain allowed.
+
+    Inputs:
+        greylist_db_path: Temporary database path for testing
+        monkeypatch: pytest fixture for patching time.time
+
+    Outputs:
+        Asserts on deny/allow decisions; first_seen remains unchanged after initial allow
+
+    Example:
+        After first deny, wait duration, second query allows, third immediate query also allows
+    """
+    from foghorn.plugins.base import PluginContext
+
+    # Mock time to control timing deterministically
+    now = [1_000_000]  # Use list for mutable reference
+    monkeypatch.setattr("foghorn.plugins.greylist.time.time", lambda: now[0])
+
+    # Create plugin instance directly
+    plugin = GreylistPlugin(db_path=greylist_db_path, duration_seconds=2)
+    ctx = PluginContext(client_ip="192.0.2.1")
+
+    # First query at t=1_000_000 - should be denied (first seen)
+    decision1 = plugin.pre_resolve("sub1.example.com", 1, b"", ctx)
+    assert decision1 is not None
+    assert decision1.action == "deny"
+
+    # Advance time past the greylist window
+    now[0] = 1_000_000 + 3  # 3 seconds later, past 2 second window
+
+    # Second query - should be allowed after window
+    decision2 = plugin.pre_resolve("sub2.example.com", 1, b"", ctx)
+    assert decision2 is None  # None means allow
+
+    # Third immediate query (same time) - should STILL be allowed (no greylist restart)
+    decision3 = plugin.pre_resolve("www.example.com", 1, b"", ctx)
+    assert decision3 is None  # None means permanent allow

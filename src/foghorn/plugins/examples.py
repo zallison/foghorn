@@ -102,20 +102,23 @@ class ExamplesPlugin(BasePlugin):
         self.max_subdomains = int(self.config.get("max_subdomains", 5))
         self.max_length_no_dots = int(self.config.get("max_length_no_dots", 50))
         self.base_labels = int(self.config.get("base_labels", 2))
-        self.apply_to_qtypes: List[str] = [str(s).upper() for s in self.config.get("apply_to_qtypes", ["*"])]
-        
+        self.apply_to_qtypes: List[str] = [
+            str(s).upper() for s in self.config.get("apply_to_qtypes", ["*"])
+        ]
+
         # Parse rewrite rules - each rule has its own qtypes and override IP
         self.rewrite_rules: List[dict] = []
         rewrite_config = self.config.get("rewrite_first_ipv4", [])
         if isinstance(rewrite_config, list):
             for rule in rewrite_config:
                 if isinstance(rule, dict):
-                    qtypes = [str(s).upper() for s in rule.get("apply_to_qtypes", ["*"])]
+                    qtypes = [
+                        str(s).upper() for s in rule.get("apply_to_qtypes", ["*"])
+                    ]
                     ip = str(rule.get("ip_override", "127.0.0.1"))
-                    self.rewrite_rules.append({
-                        "apply_to_qtypes": qtypes,
-                        "ip_override": ip
-                    })
+                    self.rewrite_rules.append(
+                        {"apply_to_qtypes": qtypes, "ip_override": ip}
+                    )
 
     def _qtype_name(self, qtype: Union[int, str]) -> str:
         """
@@ -159,7 +162,9 @@ class ExamplesPlugin(BasePlugin):
         rule_qtypes = rule.get("apply_to_qtypes", ["*"])
         return "*" in rule_qtypes or name in rule_qtypes
 
-    def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
+    def pre_resolve(
+        self, qname: str, qtype: int, req: bytes, ctx: PluginContext
+    ) -> Optional[PluginDecision]:
         """
         Deny requests with too many subdomains or excessive length (excluding dots).
 
@@ -194,20 +199,26 @@ class ExamplesPlugin(BasePlugin):
         if subdomains > self.max_subdomains:
             logger.info(
                 "ExamplesPlugin deny: %s has %d subdomains > %d",
-                name, subdomains, self.max_subdomains
+                name,
+                subdomains,
+                self.max_subdomains,
             )
             return PluginDecision(action="deny")
 
         if length_no_dots > self.max_length_no_dots:
             logger.info(
                 "ExamplesPlugin deny: %s length_no_dots=%d > %d",
-                name, length_no_dots, self.max_length_no_dots
+                name,
+                length_no_dots,
+                self.max_length_no_dots,
             )
             return PluginDecision(action="deny")
 
         return None
 
-    def post_resolve(self, qname: str, qtype: int, response_wire: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
+    def post_resolve(
+        self, qname: str, qtype: int, response_wire: bytes, ctx: PluginContext
+    ) -> Optional[PluginDecision]:
         """
         Rewrite the first A or AAAA RR in the answer using matching rewrite rules.
 
@@ -221,7 +232,7 @@ class ExamplesPlugin(BasePlugin):
             PluginDecision("override", response=bytes) if modified; otherwise None.
 
         Example:
-            If upstream returns A answers [93.184.216.34, 93.184.216.35] and there's a 
+            If upstream returns A answers [93.184.216.34, 93.184.216.35] and there's a
             matching rewrite rule, this writes the rule's ip_override into the first A RR only.
         """
         if not self.rewrite_rules:
@@ -249,13 +260,17 @@ class ExamplesPlugin(BasePlugin):
                 ip_override = matching_rule["ip_override"]
                 rr.rdata = A(ip_override)
                 changed = True
-                logger.debug("ExamplesPlugin rewrite: first A record -> %s", ip_override)
+                logger.debug(
+                    "ExamplesPlugin rewrite: first A record -> %s", ip_override
+                )
                 break
             elif rr.rtype == QTYPE.AAAA:
                 ip_override = matching_rule["ip_override"]
                 rr.rdata = AAAA(ip_override)
                 changed = True
-                logger.debug("ExamplesPlugin rewrite: first AAAA record -> %s", ip_override)
+                logger.debug(
+                    "ExamplesPlugin rewrite: first AAAA record -> %s", ip_override
+                )
                 break
 
         if changed:

@@ -36,6 +36,7 @@ class NewDomainFilterPlugin(BasePlugin):
             config:
               threshold_days: 30
     """
+
     def __init__(self, **config):
         """
         Initializes the NewDomainFilterPlugin.
@@ -62,15 +63,21 @@ class NewDomainFilterPlugin(BasePlugin):
 
         # Caching configuration
         self.whois_db_path: str = self.config.get("whois_db_path", "./whois_cache.db")
-        self.whois_cache_ttl_seconds: int = int(self.config.get("whois_cache_ttl_seconds", 3600))
-        self.whois_refresh_seconds: int = int(self.config.get("whois_refresh_seconds", 86400))
+        self.whois_cache_ttl_seconds: int = int(
+            self.config.get("whois_cache_ttl_seconds", 3600)
+        )
+        self.whois_refresh_seconds: int = int(
+            self.config.get("whois_refresh_seconds", 86400)
+        )
 
         # In-memory cache and persistent DB for WHOIS results
         self._whois_cache = TTLCache()
         self._db_lock = threading.Lock()
         self._db_init()
 
-    def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
+    def pre_resolve(
+        self, qname: str, qtype: int, req: bytes, ctx: PluginContext
+    ) -> Optional[PluginDecision]:
         """
         Checks the age of the domain and denies the request if it's too new.
         Args:
@@ -97,7 +104,12 @@ class NewDomainFilterPlugin(BasePlugin):
             logger.debug("Domain age unknown for %s, allowing", qname)
             return None  # unknown; allow
         if age_days < self.threshold_days:
-            logger.warning("Domain %s blocked (age: %d days, threshold: %d)", qname, age_days, self.threshold_days)
+            logger.warning(
+                "Domain %s blocked (age: %d days, threshold: %d)",
+                qname,
+                age_days,
+                self.threshold_days,
+            )
             return PluginDecision(action="deny")
 
         logger.debug("Domain %s allowed (age: %d days)", qname, age_days)
@@ -106,10 +118,10 @@ class NewDomainFilterPlugin(BasePlugin):
     def _domain_age_days(self, domain: str) -> Optional[int]:
         """
         Determines the age of a domain in days by querying WHOIS data.
-        
+
         Inputs:
             domain: str - The domain name to check.
-        
+
         Outputs:
             Optional[int] - The age of the domain in days, or None if it cannot be determined.
 
@@ -142,10 +154,10 @@ class NewDomainFilterPlugin(BasePlugin):
         Fetches the domain creation date with caching.
         Uses an in-memory TTL cache (foghorn.cache.TTLCache) and a persistent
         sqlite3 database for long-term cache.
-        
+
         Inputs:
             domain: str - The domain name.
-        
+
         Outputs:
             Optional[datetime] - A timezone-aware creation datetime if available; otherwise None.
         """
@@ -165,7 +177,9 @@ class NewDomainFilterPlugin(BasePlugin):
             creation_ts, fetched_at = rec
             if now_ts - fetched_at < self.whois_refresh_seconds:
                 # Fresh enough; populate memory cache and return
-                self._whois_cache.set((domain, 1), self.whois_cache_ttl_seconds, str(creation_ts).encode())
+                self._whois_cache.set(
+                    (domain, 1), self.whois_cache_ttl_seconds, str(creation_ts).encode()
+                )
                 return dt.datetime.fromtimestamp(int(creation_ts), tz=dt.timezone.utc)
 
         # 3) Network lookup as last resort
@@ -179,17 +193,19 @@ class NewDomainFilterPlugin(BasePlugin):
 
         # Persist and cache
         self._db_upsert_creation_record(domain, creation_ts, now_ts)
-        self._whois_cache.set((domain, 1), self.whois_cache_ttl_seconds, str(creation_ts).encode())
+        self._whois_cache.set(
+            (domain, 1), self.whois_cache_ttl_seconds, str(creation_ts).encode()
+        )
         return creation_date
 
     def _whois_lookup_creation_date(self, domain: str) -> Optional[dt.datetime]:
         """
         Performs the actual WHOIS lookups using available libraries.
         Tries multiple libraries to be robust against environment differences.
-        
+
         Inputs:
             domain: str - The domain name.
-        
+
         Outputs:
             Optional[datetime] - A creation datetime if available; otherwise None.
         """
@@ -213,76 +229,82 @@ class NewDomainFilterPlugin(BasePlugin):
                         return creation_date
             except Exception as e:  # pragma: no cover - best effort
                 logger.debug("python-whois lookup failed for %s: %s", domain, e)
-        
+
         # Attempt pythonwhois API: pythonwhois.get_whois(domain)
         if _pythonwhois_mod is not None:
             try:
                 data = _pythonwhois_mod.get_whois(domain)
-                creation_date = data.get("creation_date") if isinstance(data, dict) else None
+                creation_date = (
+                    data.get("creation_date") if isinstance(data, dict) else None
+                )
                 if creation_date:
                     if isinstance(creation_date, list):
                         creation_date = min(creation_date)
                     return creation_date
             except Exception as e:  # pragma: no cover - best effort
                 logger.debug("pythonwhois lookup failed for %s: %s", domain, e)
-        
+
         return None
 
     def _db_init(self) -> None:
         """
         Initializes the sqlite3 database for WHOIS caching.
-        
+
         Inputs:
             None
-        
+
         Outputs:
             None
         """
         with self._db_lock:
             self._conn = sqlite3.connect(self.whois_db_path, check_same_thread=False)
-            self._conn.execute('PRAGMA journal_mode=WAL')
+            self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute(
-                'CREATE TABLE IF NOT EXISTS domain_whois ('
-                'domain TEXT PRIMARY KEY, '
-                'creation_ts INTEGER NOT NULL, '
-                'fetched_at INTEGER NOT NULL'
-                ')'
+                "CREATE TABLE IF NOT EXISTS domain_whois ("
+                "domain TEXT PRIMARY KEY, "
+                "creation_ts INTEGER NOT NULL, "
+                "fetched_at INTEGER NOT NULL"
+                ")"
             )
             self._conn.commit()
 
     def _db_get_creation_record(self, domain: str) -> Optional[tuple[int, int]]:
         """
         Loads (creation_ts, fetched_at) from the DB for a domain.
-        
+
         Inputs:
             domain: str
-        
+
         Outputs:
             Optional[tuple[int,int]] - (creation_ts, fetched_at) or None.
         """
         cur = self._conn.cursor()
-        cur.execute('SELECT creation_ts, fetched_at FROM domain_whois WHERE domain=?', (domain,))
+        cur.execute(
+            "SELECT creation_ts, fetched_at FROM domain_whois WHERE domain=?", (domain,)
+        )
         row = cur.fetchone()
         if not row:
             return None
         return int(row[0]), int(row[1])
 
-    def _db_upsert_creation_record(self, domain: str, creation_ts: int, now_ts: int) -> None:
+    def _db_upsert_creation_record(
+        self, domain: str, creation_ts: int, now_ts: int
+    ) -> None:
         """
         Inserts or updates WHOIS record for domain.
-        
+
         Inputs:
             domain: str
             creation_ts: int - epoch seconds UTC
             now_ts: int - fetch time epoch seconds
-        
+
         Outputs:
             None
         """
         with self._db_lock:
             self._conn.execute(
-                'INSERT INTO domain_whois (domain, creation_ts, fetched_at) VALUES (?, ?, ?) '
-                'ON CONFLICT(domain) DO UPDATE SET creation_ts=excluded.creation_ts, fetched_at=excluded.fetched_at',
+                "INSERT INTO domain_whois (domain, creation_ts, fetched_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(domain) DO UPDATE SET creation_ts=excluded.creation_ts, fetched_at=excluded.fetched_at",
                 (domain, int(creation_ts), int(now_ts)),
             )
             self._conn.commit()

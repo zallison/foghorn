@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple, ClassVar, Sequence, List, Dict, Union
 
+
 @dataclass
 class PluginDecision:
     """
@@ -13,8 +14,10 @@ class PluginDecision:
         >>> decision.action
         'deny'
     """
+
     action: str  # "allow", "deny", or "override"
     response: Optional[bytes] = None
+
 
 class PluginContext:
     """
@@ -34,6 +37,7 @@ class PluginContext:
         '192.0.2.1'
         >>> ctx.upstream_candidates = [{'host': '10.0.0.1', 'port': 53}]
     """
+
     def __init__(self, client_ip: str) -> None:
         """
         Initializes the PluginContext.
@@ -53,6 +57,7 @@ class PluginContext:
         # Optional per-request upstream override (host, port) - legacy
         self.upstream_override: Optional[Tuple[str, int]] = None
 
+
 class BasePlugin:
     """
     Base class for all plugins.
@@ -66,6 +71,7 @@ class BasePlugin:
         >>> plugin.pre_resolve("example.com", 1, None) is None
         True
     """
+
     aliases: ClassVar[Sequence[str]] = ()
 
     @classmethod
@@ -88,7 +94,9 @@ class BasePlugin:
         """
         self.config = config
 
-    def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
+    def pre_resolve(
+        self, qname: str, qtype: int, req: bytes, ctx: PluginContext
+    ) -> Optional[PluginDecision]:
         """
         A hook that runs before the DNS query is resolved.
         Args:
@@ -108,7 +116,9 @@ class BasePlugin:
         """
         return None
 
-    def post_resolve(self, qname: str, qtype: int, response_wire: bytes, ctx: PluginContext) -> Optional[PluginDecision]:
+    def post_resolve(
+        self, qname: str, qtype: int, response_wire: bytes, ctx: PluginContext
+    ) -> Optional[PluginDecision]:
         """
         A hook that runs after the DNS query has been resolved.
         Args:
@@ -137,7 +147,9 @@ def plugin_aliases(*aliases: str):
         class AccessControlPlugin(BasePlugin):
             ...
     """
+
     def _wrap(cls):
         cls.aliases = tuple(aliases)
         return cls
+
     return _wrap

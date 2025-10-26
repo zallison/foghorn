@@ -12,25 +12,26 @@ from unittest.mock import Mock
 # Import the function to test
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../src'))
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../src"))
 from foghorn.server import compute_effective_ttl
 
 
 def build_dns_record(rcode=RCODE.NOERROR, answer_ttls=None):
     """
     Builds a mock DNSRecord for testing.
-    
+
     Inputs:
-      - rcode: int, response code (default NOERROR)  
+      - rcode: int, response code (default NOERROR)
       - answer_ttls: list of int, TTL values for answer RRs (default None = no answers)
-    
+
     Outputs:
       - DNSRecord: mock record with specified rcode and answer TTLs
     """
     record = Mock(spec=DNSRecord)
     record.header = Mock()
     record.header.rcode = rcode
-    
+
     if answer_ttls:
         # Create mock RRs with specified TTLs
         record.rr = []
@@ -40,7 +41,7 @@ def build_dns_record(rcode=RCODE.NOERROR, answer_ttls=None):
             record.rr.append(rr)
     else:
         record.rr = []
-    
+
     return record
 
 
@@ -100,6 +101,6 @@ def test_exception_handling():
     resp.header = Mock()
     resp.header.rcode = RCODE.NOERROR
     resp.rr = Mock(side_effect=Exception("Test exception"))
-    
+
     result = compute_effective_ttl(resp, 60)
     assert result == 60  # Should fall back to min_cache_ttl

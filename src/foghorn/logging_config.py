@@ -16,6 +16,7 @@ _LEVELS = {
     "critical": logging.CRITICAL,
 }
 
+
 class SyslogFormatter(logging.Formatter):
     """Formatter for syslog output without timestamps (syslog adds its own)."""
 
@@ -31,6 +32,7 @@ class SyslogFormatter(logging.Formatter):
         """Add level_tag attribute and format without timestamp."""
         record.level_tag = self._TAGS.get(record.levelno, f"[lvl{record.levelno}]")
         return f"{record.level_tag} {record.name}: {record.getMessage()}"
+
 
 class BracketLevelFormatter(logging.Formatter):
     """Custom formatter that adds bracketed lowercase level tags and UTC timestamps."""
@@ -51,6 +53,7 @@ class BracketLevelFormatter(logging.Formatter):
         """Add level_tag attribute and format the record."""
         record.level_tag = self._TAGS.get(record.levelno, f"[lvl{record.levelno}]")
         return super().format(record)
+
 
 def init_logging(cfg: Optional[Dict[str, Any]]) -> None:
     """
@@ -121,7 +124,7 @@ def init_logging(cfg: Optional[Dict[str, Any]]) -> None:
                 facility = getattr(
                     logging.handlers.SysLogHandler,
                     f"LOG_{syslog_cfg.get('facility', 'USER').upper()}",
-                    logging.handlers.SysLogHandler.LOG_USER
+                    logging.handlers.SysLogHandler.LOG_USER,
                 )
             else:
                 # syslog_cfg is True, use defaults
@@ -130,8 +133,7 @@ def init_logging(cfg: Optional[Dict[str, Any]]) -> None:
 
             # Create syslog handler
             syslog_handler = logging.handlers.SysLogHandler(
-                address=address,
-                facility=facility
+                address=address, facility=facility
             )
             syslog_handler.setFormatter(syslog_formatter)
             root.addHandler(syslog_handler)
