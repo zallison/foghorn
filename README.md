@@ -15,6 +15,8 @@ With special thanks to Fiona Weatherwax for their contributions.
     *   **New Domain Filter:** Block domains that were registered recently.
     *   **Upstream Router:** Route queries to different upstream servers based on the domain name.
     *   **Filter:** Block queries based on domain names, keywords, and IP addresses in responses.
+    *   **Examples:** Misc examples, replace the first entry of every record to localhost, limit the length of the domain name, or the depth of domain names.
+
 
 
 ## Installation
