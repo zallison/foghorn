@@ -21,9 +21,10 @@ min_cache_ttl: 60
 
 # Logging configuration
 logging:
-  level: debug         # Available levels: debug, info, warn, error, crit
-  stderr: true         # Log to stderr (default: true)
-  file: ./foghorn.log  # Optional: also log to this file
+  level: debug            # Available levels: debug, info, warn, error, crit
+  stderr: true            # Log to stderr (default: true)
+  file: /tmp/foghorn.log  # Optional: also log to this file
+  syslog: false           # Optional: also log to syslog
 
 plugins:
   - module: new_domain
@@ -33,6 +34,8 @@ plugins:
   - module: greylist
     config:
       duration_seconds: 60
+  #     # duration_hours: 1 # Only if duration_seconds isn't provided
+  #     # db_path: ./greylist.db
 
   # - module: router
   #   config:
@@ -42,7 +45,6 @@ plugins:
   #         upstream:
   #           host: 192.168.1.1
   #           port: 53
-  #
   #       # Multiple upstreams with failover (new format)
   #       - suffix: "corp.internal"
   #         upstreams:
