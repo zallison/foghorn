@@ -288,64 +288,64 @@ plugins:
   #     # duration_hours: 1 # Only if duration_seconds isn't provided
   #     # db_path: ./greylist.db
 
-  # - module: router
-  #   config:
-  #     routes:
-  #       # Single upstream (legacy format)
-  #       - suffix: ".mylan"
-  #         upstream:
-  #           host: 192.168.1.1
-  #           port: 53
-  #       # Multiple upstreams with failover (new format)
-  #       - suffix: "corp.internal"
-  #         upstreams:
-  #           - host: 10.0.0.1
-  #             port: 53
-  #           - host: 10.0.0.2
-  #             port: 53
+  - module: router
+    config:
+      routes:
+        # Single upstream (legacy format)
+        - suffix: ".mylan"
+          upstream:
+            host: 192.168.1.1
+            port: 53
+        # Multiple upstreams with failover (new format)
+        - suffix: "corp.internal"
+          upstreams:
+            - host: 10.0.0.1
+              port: 53
+            - host: 10.0.0.2
+              port: 53
 
-  # - module: filter
-  #   config:
-  #     # Pre-resolve (domain) filtering
-  #     blocked_domains:
-  #       - "malware.com"
-  #       - "phishing-site.org"
-  #       - "spam.example"
+  - module: filter
+    config:
+      # Pre-resolve (domain) filtering
+      blocked_domains:
+        - "malware.com"
+        - "phishing-site.org"
+        - "spam.example"
 
-  #     blocked_patterns:
-  #       - ".*\\.porn\\..*"      # Block any domain with "porn" in subdomain
-  #       - "casino[0-9]+\\..*"   # Block casino1.com, casino2.net, etc.
-  #       - ".*adult.*"           # Block domains containing "adult"
+      blocked_patterns:
+        - ".*\\.porn\\..*"      # Block any domain with "porn" in subdomain
+        - "casino[0-9]+\\..*"   # Block casino1.com, casino2.net, etc.
+        - ".*adult.*"           # Block domains containing "adult"
 
-  #     blocked_keywords:
-  #       - "porn"
-  #       - "gambling"
-  #       - "casino"
-  #       - "malware"
-  #       - "phishing"
+      blocked_keywords:
+        - "porn"
+        - "gambling"
+        - "casino"
+        - "malware"
+        - "phishing"
 
-  #     # Post-resolve (IP) filtering with per-IP actions
-  #     blocked_ips:
-  #       # Remove just the matching IP(s)
-  #       - ip: "23.220.75.245/16"
-  #         action: "remove"
-  #       # Deny entire response if any returned IPs are found
-  #       - ip: "1.2.3.4"
-  #         action: "deny"
+      # Post-resolve (IP) filtering with per-IP actions
+      blocked_ips:
+        # Remove just the matching IP(s)
+        - ip: "23.220.75.245/16"
+          action: "remove"
+        # Deny entire response if any returned IPs are found
+        - ip: "1.2.3.4"
+          action: "deny"
 
-  # - module: foghorn.plugins.examples.ExamplesPlugin
-  #   config:
-  #     # Pre-resolve policy
-  #     max_subdomains: 5
-  #     max_length_no_dots: 50
-  #     base_labels: 2
+  - module: foghorn.plugins.examples.ExamplesPlugin
+    config:
+      # Pre-resolve policy
+      max_subdomains: 5
+      max_length_no_dots: 50
+      base_labels: 2
 
-  #     # Post-resolve IP rewrite rules
-  #     rewrite_first_ipv4:
-  #       - apply_to_qtypes: ["A"]
-  #         ip_override: 127.0.0.1
-  #       - apply_to_qtypes: ["AAAA"]
-  #         ip_override: ::1
+      # Post-resolve IP rewrite rules
+      rewrite_first_ipv4:
+        - apply_to_qtypes: ["A"]
+          ip_override: 127.0.0.1
+        - apply_to_qtypes: ["AAAA"]
+          ip_override: ::1
 
 ```
 
