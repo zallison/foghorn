@@ -11,9 +11,11 @@ With special thanks to Fiona Weatherwax for their contributions.
 *   **Flexible Configuration:** Configure the server, upstream resolvers, and plugins using a simple YAML file.
 *   **Built-in Plugins:** Comes with a set of useful plugins to get you started:
     *   **Access Control:** Filter DNS queries based on the client's IP address (CIDR-based allow/deny).
+    *   **Greylist:** Block domains for a set amount of time after they are first requested.
     *   **New Domain Filter:** Block domains that were registered recently.
     *   **Upstream Router:** Route queries to different upstream servers based on the domain name.
     *   **Filter:** Block queries based on domain names, keywords, and IP addresses in responses.
+
 
 ## Installation
 
