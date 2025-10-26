@@ -130,6 +130,7 @@ DNSUDPHandler.handle() per query:
 - `pyyaml`: YAML configuration parsing
 - `requests`: HTTP library (indirectly via plugins)
 - `whois`: Domain registration lookup (for NewDomainFilterPlugin)
+  Optional: use system `whois` commmand.
 
 ### Configuration (YAML format)
 - **listen**: Host/port to bind
@@ -140,7 +141,7 @@ DNSUDPHandler.handle() per query:
 
 ### Installation
 - Python 3.7+ required
-- Virtual environment recommended (user prefers `venv` over `.venv`)
+- Virtual environment recommended: `python3 -m venv venv && source venv/bin/activate`
 - Install: `pip install -e ".[dev]"` (includes development dependencies)
 
 ### Runtime

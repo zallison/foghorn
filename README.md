@@ -27,10 +27,14 @@ With special thanks to Fiona Weatherwax for their contributions.
 2.  **Install the package with development dependencies:**
 
     ```bash
-    pip install -e ".[dev]"
+    pip install .
     ```
 
-    This will install the project in editable mode, along with all runtime and development dependencies.
+    To install the project in editable mode, along with all runtime and development dependencies.
+
+    ```bash
+    pip install -e ".[dev]"
+    ```
 
 ## Usage
 
@@ -312,7 +316,7 @@ logging:
 ### Available Levels
 
 *   **debug**: Detailed diagnostic information including each query, cache hits/misses, plugin decisions
-*   **info**: General information about server startup, configuration, and important events  
+*   **info**: General information about server startup, configuration, and important events
 *   **warn**: Warning conditions like denied queries, upstream timeouts, plugin errors
 *   **error**: Error conditions that don't stop the server
 *   **crit**: Critical errors that may cause the server to stop
