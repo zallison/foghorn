@@ -26,7 +26,8 @@ ENV/
 # OS files
 .DS_Store
 Thumbs.db
-*.sqlite
-*.sqlite-wal
-*.sqlite-shm
-WARP.md
+
+# Datbases
+*.db
+*.db-wal
+*.db-shm
