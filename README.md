@@ -249,36 +249,104 @@ plugins:
 Here is a complete `config.yaml` file that uses all the available features:
 
 ```yaml
+# Example configuration for the DNS caching server
 listen:
   host: 127.0.0.1
-  port: 5353
+  port: 5300
+
+# Multiple upstream DNS servers with automatic failover
 upstream:
-  - host: 1.1.1.1
-    port: 53
-    timeout_ms: 2000
   - host: 8.8.8.8
     port: 53
+  - host: 1.1.1.1
+    port: 53
+
+# Global timeout applies to each upstream attempt
+timeout_ms: 2000
+
+# Minimum cache TTL (in seconds) applied to ***all*** cached responses.
+# - For NOERROR with answers: cache TTL = max(min(answer TTLs), min_cache_ttl)
+# - For NOERROR with no answers, NXDOMAIN, and SERVFAIL: cache TTL = min_cache_ttl
+# Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
+min_cache_ttl: 60
+
+# Logging configuration
 logging:
-  level: info
-  stderr: true
-  file: ./foghorn.log
+  level: debug            # Available levels: debug, info, warn, error, crit
+  stderr: true            # Log to stderr (default: true)
+  file: /tmp/foghorn.log  # Optional: also log to this file
+  syslog: false           # Optional: also log to syslog
+
 plugins:
-  - acl
   - module: new_domain
     config:
-      threshold_days: 7
-      timeout_ms: 2000
-  - module: router
+      threshold_days: 14
+
+  - module: greylist
     config:
-      routes:
-        - domain: "internal.corp.com"
-          upstream:
-            host: 10.0.0.1
-            port: 53
-        - suffix: ".dev.example.com"
-          upstream:
-            host: 192.168.1.1
-            port: 53
+      duration_seconds: 60
+  #     # duration_hours: 1 # Only if duration_seconds isn't provided
+  #     # db_path: ./greylist.db
+
+  # - module: router
+  #   config:
+  #     routes:
+  #       # Single upstream (legacy format)
+  #       - suffix: ".mylan"
+  #         upstream:
+  #           host: 192.168.1.1
+  #           port: 53
+  #       # Multiple upstreams with failover (new format)
+  #       - suffix: "corp.internal"
+  #         upstreams:
+  #           - host: 10.0.0.1
+  #             port: 53
+  #           - host: 10.0.0.2
+  #             port: 53
+
+  # - module: filter
+  #   config:
+  #     # Pre-resolve (domain) filtering
+  #     blocked_domains:
+  #       - "malware.com"
+  #       - "phishing-site.org"
+  #       - "spam.example"
+
+  #     blocked_patterns:
+  #       - ".*\\.porn\\..*"      # Block any domain with "porn" in subdomain
+  #       - "casino[0-9]+\\..*"   # Block casino1.com, casino2.net, etc.
+  #       - ".*adult.*"           # Block domains containing "adult"
+
+  #     blocked_keywords:
+  #       - "porn"
+  #       - "gambling"
+  #       - "casino"
+  #       - "malware"
+  #       - "phishing"
+
+  #     # Post-resolve (IP) filtering with per-IP actions
+  #     blocked_ips:
+  #       # Remove just the matching IP(s)
+  #       - ip: "23.220.75.245/16"
+  #         action: "remove"
+  #       # Deny entire response if any returned IPs are found
+  #       - ip: "1.2.3.4"
+  #         action: "deny"
+
+  # - module: foghorn.plugins.examples.ExamplesPlugin
+  #   config:
+  #     # Pre-resolve policy
+  #     max_subdomains: 5
+  #     max_length_no_dots: 50
+  #     base_labels: 2
+
+  #     # Post-resolve IP rewrite rules
+  #     rewrite_first_ipv4:
+  #       - apply_to_qtypes: ["A"]
+  #         ip_override: 127.0.0.1
+  #       - apply_to_qtypes: ["AAAA"]
+  #         ip_override: ::1
+
 ```
 
 ## Logging
