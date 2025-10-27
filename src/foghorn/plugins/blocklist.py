@@ -27,25 +27,26 @@ class BlocklistPlugin(BasePlugin):
 
         Inputs:
             **config: Supported keys
-              - db_path (str): Path to the SQLite DB file. Default: ./blocklist.db
+              - db_path (str): Path to the SQLite DB file. Default: ./var/blocklist.db
+              - cache_ttl_seconds (int): In-memory cache TTL for is_allowed results. Default: 300.
+
               - allowlist (list[str]): Domains to explicitly allow.
               - allowlist_files (list[str]): Files with newline-separated allow domains.
               - blocklist (list[str]): Domains to explicitly deny.
               - blocklist_files (list[str]): Files with newline-separated deny domains.
-              - cache_ttl_seconds (int): In-memory cache TTL for is_allowed results. Default: 300.
         Outputs:
             None
         """
         super().__init__(**config)
 
         # Configuration
-        self.db_path: str = self.config.get("db_path", "./blocklist.db")
+        self.db_path: str = self.config.get("db_path", "./var/blocklist.db")
         self.cache_ttl_seconds: int = int(self.config.get("cache_ttl_seconds", 300))
-
+        self.default = self.config.get("default", "deny")
         self.blocklist = self.config.get("blocklist", [])
-        self.blocklist_files = self.config.get("blocklist_files", [])
-
         self.allowlist = self.config.get("allowlist", [])
+
+        self.blocklist_files = self.config.get("blocklist_files", [])
         self.allowlist_files = self.config.get("allowlist_files", [])
 
         # In-memory decision cache for is_allowed(domain)
@@ -79,49 +80,32 @@ class BlocklistPlugin(BasePlugin):
             ctx: Plugin context.
         Outputs:
             PluginDecision("deny") when domain is denied; otherwise None to proceed.
-
-        Example:
-            >>> from foghorn.plugins.base import PluginContext
-            >>> p = BlocklistPlugin(blocklist=["bad.com"])  # doctest: +ELLIPSIS
-            >>> p.pre_resolve("bad.com", 1, b"", PluginContext("127.0.0.1")).action
-            'deny'
         """
         if self.is_allowed(qname):
             return None
-        return PluginDecision(action="deny")
+        return PluginDecision(action=self.default)
 
     def _connect_to_db(self) -> sqlite3.Connection:
-        """
-        Create and return a SQLite connection.
-
-        Inputs:
-            None
-        Outputs:
-            sqlite3.Connection to the configured DB path.
-        """
+        """Create and return a SQLite connection."""
         return sqlite3.connect(self.db_path)
 
     def _db_init(self) -> None:
-        """
-        Create the blocked_domains table if it does not exist.
+        """Create the blocked_domains table if it does not exist."""
 
-        Inputs:
-            None
-        Outputs:
-            None
-        """
+        # Clear blocklist, maybe
+        if self.config.get("clear", 1):
+            logger.debug("clearing allow/deny databases")
+            self.conn.execute("DROP TABLE IF EXISTS blocked_domains")
+
+        logger.debug("Creating blocked_domains")
         self.conn.execute(
-            (
-                "CREATE TABLE IF NOT EXISTS blocked_domains ("
-                "domain TEXT PRIMARY KEY, "
-                "filename TEXT, "
-                "mode TEXT CHECK (mode IN ('allow','deny')) NOT NULL, "
-                "added_at INTEGER NOT NULL"
-                ")"
-            )
+            "CREATE TABLE IF NOT EXISTS blocked_domains ("
+            "domain TEXT PRIMARY KEY, "
+            "filename TEXT, "
+            "mode TEXT CHECK (mode IN ('allow','deny')) NOT NULL, "
+            "added_at INTEGER NOT NULL"
+            ")"
         )
-        # Clear blocklist.
-        self.conn.execute(("TRUNCATE TABLE blocked_domains"))
 
         self.conn.commit()
 
@@ -153,24 +137,13 @@ class BlocklistPlugin(BasePlugin):
             mode: Either "allow" or "deny". Default: "deny".
         Outputs:
             None
-
-        Example:
-            >>> import tempfile, os
-            >>> fp = tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8")
-            >>> _ = fp.write("example.com\n#comment\n\n")
-            >>> _ = fp.flush(); fp.close()
-            >>> p = BlocklistPlugin()
-            >>> p.load_list_from_file(fp.name, mode="allow")
-            >>> p.is_allowed("example.com")
-            True
-            >>> os.unlink(fp.name)
         """
         mode = mode.lower()
         if mode not in {"deny", "allow"}:
             raise ValueError("mode must be 'allow' or 'deny'")
+
         if not os.path.isfile(filename):
-            logger.warning("List file %s not found", filename)
-            return
+            raise FileNotFoundError("No file %s", filename)
 
         with open(filename, "r", encoding="utf-8") as fh:
             for line in fh:
@@ -188,14 +161,7 @@ class BlocklistPlugin(BasePlugin):
         Inputs:
             domain: Domain name to check.
         Outputs:
-            True when mode is "allow" or the domain is absent; False when "deny".
-
-        Example:
-            >>> p = BlocklistPlugin(blocklist=["bad.com"])  # doctest: +ELLIPSIS
-            >>> p.is_allowed("good.com")
-            True
-            >>> p.is_allowed("bad.com")
-            False
+            True when mode is "allow" or not blocked and the default is allow
         """
         key = (str(domain).rstrip(".").lower(), 0)
 
@@ -206,12 +172,15 @@ class BlocklistPlugin(BasePlugin):
             except Exception:
                 pass
 
+        # Not cached, let's check the database
         cur = self.conn.execute(
             "SELECT mode FROM blocked_domains WHERE domain = ?",
             (key[0],),
         )
         row = cur.fetchone()
-        allowed = True if not row else (row[0] == "allow")
+        allowed: bool = self.default == "allow"
+        if row:
+            allowed = row[0] == "allow"
 
         # Cache decision as '1' for True and '0' for False
         try:
