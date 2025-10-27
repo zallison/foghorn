@@ -54,7 +54,7 @@ def discover_plugins(
         try:
             module = importlib.import_module(modname)
         except Exception as e:
-            logger.warning("Failed importing plugin module %s: %s", modname, e)
+            logger.error("Failed importing plugin module %s: %s", modname, e)
             continue
 
         for _, obj in inspect.getmembers(module, inspect.isclass):

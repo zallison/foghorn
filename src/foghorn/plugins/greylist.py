@@ -42,7 +42,7 @@ class GreylistPlugin(BasePlugin):
         self.duration_seconds = self.config.get(
             "duration_seconds", self.config.get("duration_hours", 24) * 3600
         )
-        self.db_path = self.config.get("db_path", "./greylist.db")
+        self.db_path = self.config.get("db_path", "./var/greylist.db")
         self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 300)
         self.cache_max_entries = self.config.get("cache_max_entries", 100000)
 

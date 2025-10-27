@@ -87,7 +87,7 @@ def send_query_with_failover(
     for upstream in upstreams:
         host, port = upstream["host"], upstream["port"]
         try:
-            logger.debug("Forwarding %s %s to %s:%d", qname, qtype, host, port)
+            logger.debug("Forwarding %s type %s to %s:%d", qname, qtype, host, port)
             response_wire = query.send(host, port, timeout=timeout_sec)
 
             # Check for SERVFAIL to trigger failover
@@ -254,12 +254,14 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         "Denied %s %s by %s", qname, qtype, p.__class__.__name__
                     )
                     return decision
-                if decision.action == "override" and decision.response is not None:
+                elif decision.action == "override" and decision.response is not None:
                     logger.info(
-                        "Override %s %s by %s", qname, qtype, p.__class__.__name__
+                        "Override %s type %s by %s", qname, qtype, p.__class__.__name__
                     )
                     return decision
-                # allow -> continue
+                else:
+                    pass
+
                 logger.debug("Plugin %s: %s", p.__class__.__name__, decision.action)
         return None
 
@@ -281,10 +283,10 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         cache_key = (qname.lower(), qtype)
         cached = self.cache.get(cache_key)
         if cached is not None:
-            logger.debug("Cache hit: %s %s (%d bytes)", qname, qtype, len(cached))
+            logger.debug("Cache hit: %s type %s (%d bytes)", qname, qtype, len(cached))
             return cached
         else:
-            logger.debug("Cache miss: %s %s", qname, qtype)
+            logger.debug("Cache miss: %s type %s", qname, qtype)
             return None
 
     def _choose_upstreams(self, qname: str, qtype: int, ctx):
@@ -312,7 +314,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 "Using %d upstreams for %s %s", len(upstreams_to_try), qname, qtype
             )
         else:
-            logger.warning("No upstreams configured for %s %s", qname, qtype)
+            logger.warning("No upstreams configured for %s type %s", qname, qtype)
         return upstreams_to_try
 
     def _forward_with_failover_helper(
@@ -373,7 +375,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
                     logger.warning(
-                        "Post-resolve denied %s %s by %s",
+                        "Post-resolve denied %s type %s by %s",
                         qname,
                         qtype,
                         p.__class__.__name__,
@@ -384,7 +386,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     break
                 if decision.action == "override" and decision.response is not None:
                     logger.info(
-                        "Post-resolve override %s %s by %s",
+                        "Post-resolve override %s type %s by %s",
                         qname,
                         qtype,
                         p.__class__.__name__,
@@ -424,9 +426,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     logger.debug("Caching %s %s with TTL %ds", qname, qtype, ttl)
                     self.cache.set(cache_key, ttl, response_wire)
                 else:
-                    logger.debug("Not caching %s %s (TTL=%d)", qname, qtype, ttl)
+                    logger.debug("Not caching %s type %s (TTL=%d)", qname, qtype, ttl)
             elif r.header.rcode == RCODE.SERVFAIL:
-                logger.debug("Not caching %s %s (SERVFAIL never cached)", qname, qtype)
+                logger.debug("Not caching %s type: %s (SERVFAIL never cached)", qname, qtype)
             else:
                 logger.debug(
                     "Not caching %s %s (rcode=%s, no answer RRs)",
@@ -682,7 +684,7 @@ class DNSServer:
         self.server = socketserver.ThreadingUDPServer((host, port), DNSUDPHandler)
         # Ensure request handler threads do not block shutdown
         self.server.daemon_threads = True
-        logger.info("DNS UDP server bound to %s:%d", host, port)
+        logger.debug("DNS UDP server bound to %s:%d", host, port)
 
     def serve_forever(self):
         """

@@ -81,7 +81,7 @@ class AccessControlPlugin(BasePlugin):
                 logger.debug(
                     "Access allowed for %s (allow rule: %s)", ctx.client_ip, str(n)
                 )
-                return PluginDecision(action="allow")
+                return None
 
         logger.debug("Access %s for %s (default policy)", self.default, ctx.client_ip)
         return PluginDecision(action=self.default)

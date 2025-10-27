@@ -44,7 +44,7 @@ class NewDomainFilterPlugin(BasePlugin):
         Inputs:
             **config: dict – Configuration for the plugin.
                 - threshold_days (int): Block domains younger than this, default 7.
-                - whois_db_path (str): Path to sqlite3 cache DB, default './whois_cache.db'.
+                - whois_db_path (str): Path to sqlite3 cache DB, default './var/whois_cache.db'.
                 - whois_cache_ttl_seconds (int): In-memory cache TTL, default 3600.
                 - whois_refresh_seconds (int): How long DB entries are considered fresh, default 86400.
 
@@ -62,7 +62,7 @@ class NewDomainFilterPlugin(BasePlugin):
         self.threshold_days: int = int(self.config.get("threshold_days", 7))
 
         # Caching configuration
-        self.whois_db_path: str = self.config.get("whois_db_path", "./whois_cache.db")
+        self.whois_db_path: str = self.config.get("whois_db_path", "./var/whois_cache.db")
         self.whois_cache_ttl_seconds: int = int(
             self.config.get("whois_cache_ttl_seconds", 3600)
         )
