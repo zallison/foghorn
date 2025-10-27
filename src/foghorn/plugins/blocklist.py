@@ -83,7 +83,7 @@ class BlocklistPlugin(BasePlugin):
         """
         if self.is_allowed(qname):
             return None
-        return PluginDecision(action=self.default)
+        return PluginDecision(action="deny")
 
     def _connect_to_db(self) -> sqlite3.Connection:
         """Create and return a SQLite connection."""
