@@ -14,7 +14,7 @@ from .base import BasePlugin, PluginDecision, PluginContext, plugin_aliases
 logger = logging.getLogger(__name__)
 
 
-@plugin_aliases("filter")
+@plugin_aliases("filter","block","allow")
 class FilterPlugin(BasePlugin):
     """
     A comprehensive filtering plugin that filters both domains and IP addresses.
@@ -81,6 +81,9 @@ class FilterPlugin(BasePlugin):
         self.allowlist_files = self.config.get("allowlist_files", [])
         self.blocklist = self.config.get("blocked_domains", [])
         self.allowlist = self.config.get("allow_domainss", [])
+
+        self.blocked_ips = self.config.get("blocked_ips",[])
+        self.blocked_networks = self.config.get("blocked_networks",[])
 
         self._connect_to_db()
         self._db_init()
@@ -152,13 +155,12 @@ class FilterPlugin(BasePlugin):
                         # Validate the replacement IP
                         ipaddress.ip_address(replace_with)
                     except ValueError as e:
-                        logger.error(
+                        raise ValueError(
                             "Invalid 'replace_with' IP address '%s' for rule '%s': %s",
                             replace_with,
                             ip_spec,
                             e,
                         )
-                        continue
 
                 if "/" in ip_spec:
                     # It's a network/subnet
@@ -263,7 +265,7 @@ class FilterPlugin(BasePlugin):
         """
         # Only process A and AAAA records
         if qtype not in (QTYPE.A, QTYPE.AAAA):
-            return None
+            raise TypeError("bad qtype")
 
         if not self.blocked_ips and not self.blocked_networks:
             return None
@@ -271,8 +273,8 @@ class FilterPlugin(BasePlugin):
         try:
             response = DNSRecord.parse(response_wire)
         except Exception as e:
-            logger.debug("Failed to parse DNS response: %s", e)
-            return None
+            logger.error("Failed to parse DNS response: %s", e)
+            return PluginDecision(action=self.default)
 
         blocked_ips_deny = []  # IPs that should cause NXDOMAIN
         blocked_ips_remove = []  # IPs that should be removed
@@ -343,7 +345,7 @@ class FilterPlugin(BasePlugin):
 
         # If any IP has "deny" action, return NXDOMAIN for entire response
         if blocked_ips_deny:
-            logger.debugg(
+            logger.debug(
                 "Denying %s due to blocked IPs with deny action: %s",
                 qname,
                 ", ".join(blocked_ips_deny),
