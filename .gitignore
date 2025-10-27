@@ -33,3 +33,4 @@ Thumbs.db
 *.db-shm
 my-config-test.yaml
 my-config.yaml
+var/

@@ -4,53 +4,12 @@ import logging
 
 from dnslib import DNSRecord, QTYPE, A, AAAA
 from .base import BasePlugin, PluginDecision, PluginContext
+from foghorn.plugins.base import BasePlugin, plugin_aliases
 
 logger = logging.getLogger(__name__)
 
 
-def _count_subdomains(qname: str, base_labels: int = 2) -> int:
-    """
-    Count subdomains as label_count - base_labels (never below 0).
-
-    Args:
-        qname: Fully-qualified domain name (string); trailing dot allowed.
-        base_labels: Number of rightmost labels considered the base domain (default 2, e.g., example.com).
-
-    Returns:
-        Count of subdomain labels (>= 0).
-
-    Example:
-        >>> _count_subdomains('a.b.c.example.com')
-        3
-        >>> _count_subdomains('a.b.c.d.e.f.example.com')
-        6
-    """
-    name = qname.rstrip(".")
-    if not name:
-        return 0
-    labels = [p for p in name.split(".") if p]
-    return max(0, len(labels) - int(base_labels))
-
-
-def _length_without_dots(qname: str) -> int:
-    """
-    Compute domain length excluding dots.
-
-    Args:
-        qname: Domain name string (may include a trailing dot).
-
-    Returns:
-        Count of all characters excluding '.'.
-
-    Example:
-        >>> _length_without_dots('ab.cd.com')
-        7
-    """
-    # Remove final trailing dot first (if any), then count non-dot characters
-    s = qname.rstrip(".")
-    return len(s.replace(".", ""))
-
-
+@plugin_aliases("examples")
 class ExamplesPlugin(BasePlugin):
     """
     Deny over-deep or too-long domains pre-resolve; rewrite the first IPv4 A answer post-resolve.
@@ -70,14 +29,14 @@ class ExamplesPlugin(BasePlugin):
 
     Example usage (YAML):
         plugins:
-          - module: foghorn.plugins.examples.ExamplesPlugin
+          - module: examples | foghorn.plugins.examples.ExamplesPlugin
             config:
               max_subdomains: 5
               max_length_no_dots: 50
               base_labels: 2
-              apply_to_qtypes: ["*"]
+              apply_to_qtypes: ["A","AAAA"]
               rewrite_first_ipv4:
-                - apply_to_qtypes: ["*"]
+                - apply_to_qtypes: ["A"]
                   ip_override: 127.0.0.1
                 - apply_to_qtypes: ["AAAA"]
                   ip_override: ::1
@@ -281,3 +240,46 @@ class ExamplesPlugin(BasePlugin):
                 return None
 
         return None
+
+
+def _count_subdomains(qname: str, base_labels: int = 2) -> int:
+    """
+    Count subdomains as label_count - base_labels (never below 0).
+
+    Args:
+        qname: Fully-qualified domain name (string); trailing dot allowed.
+        base_labels: Number of rightmost labels considered the base domain (default 2, e.g., example.com).
+
+    Returns:
+        Count of subdomain labels (>= 0).
+
+    Example:
+        >>> _count_subdomains('a.b.c.example.com')
+        3
+        >>> _count_subdomains('a.b.c.d.e.f.example.com')
+        6
+    """
+    name = qname.rstrip(".")
+    if not name:
+        return 0
+    labels = [p for p in name.split(".") if p]
+    return max(0, len(labels) - int(base_labels))
+
+
+def _length_without_dots(qname: str) -> int:
+    """
+    Compute domain length excluding dots.
+
+    Args:
+        qname: Domain name string (may include a trailing dot).
+
+    Returns:
+        Count of all characters excluding '.'.
+
+    Example:
+        >>> _length_without_dots('ab.cd.com')
+        7
+    """
+    # Remove final trailing dot first (if any), then count non-dot characters
+    s = qname.rstrip(".")
+    return len(s.replace(".", ""))

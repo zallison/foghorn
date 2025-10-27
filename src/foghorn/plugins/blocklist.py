@@ -145,12 +145,14 @@ class BlocklistPlugin(BasePlugin):
         if not os.path.isfile(filename):
             raise FileNotFoundError("No file %s", filename)
 
+        logger.debug("Opening %s for %s", filename, mode)
         with open(filename, "r", encoding="utf-8") as fh:
             for line in fh:
                 domain = line.strip()
                 if not domain or domain.startswith("#"):
                     continue
                 self._db_insert_domain(domain, filename, mode)
+
         # Invalidate decision cache after bulk updates
         self._allow_cache.purge_expired()  # opportunistic cleanup
 

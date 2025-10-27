@@ -205,7 +205,7 @@ def main(argv: List[str] | None = None) -> int:
     min_cache_ttl = _get_min_cache_ttl(cfg)
 
     plugins = load_plugins(cfg.get("plugins", []))
-    logger.debug(
+    logger.info(
         "Loaded %d plugins: %s", len(plugins), [p.__class__.__name__ for p in plugins]
     )
 
@@ -222,7 +222,7 @@ def main(argv: List[str] | None = None) -> int:
     # Log startup info
     upstream_info = ", ".join([f"{u['host']}:{u['port']}" for u in upstreams])
     logger.info(
-        "Starting Foghorn on %s:%d, upstreams: [%s], timeout: %dms",
+        "Starting Foghorn on %s:%d, upstreams: [%s], timeout: %dms\n",
         host,
         port,
         upstream_info,
