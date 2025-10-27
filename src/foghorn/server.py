@@ -53,7 +53,8 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
             lo = req_id & 0xFF
             return bytes([hi, lo]) + wire[2:]
         return wire
-    except Exception:
+    except Exception as e:
+        logger.error("Failed to set response id: %s", e)
         return wire
 
 

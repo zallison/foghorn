@@ -233,8 +233,8 @@ def main(argv: List[str] | None = None) -> int:
         server.serve_forever()
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down")
-    except Exception:
-        logger.exception("Unhandled exception during server operation")
+    except Exception as e:
+        logger.exception(f"Unhandled exception during server operation {e}")
         return 1
 
     return 0
