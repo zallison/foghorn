@@ -1,21 +1,19 @@
 from __future__ import annotations
 import time
+from dnslib import DNSRecord, QTYPE, A, AAAA, QR, RR, DNSHeader
 import os
 import logging
 import pathlib
-from typing import Dict
-
-from typing import Optional
+from typing import Dict, Optional
 
 from foghorn.plugins.base import PluginDecision, PluginContext
 from foghorn.plugins.base import BasePlugin, plugin_aliases
-from foghorn.cache import TTLCache
 
 logger = logging.getLogger(__name__)
 
 
-@plugin_aliases("hosts", "etc-hosts")
-class BlocklistPlugin(BasePlugin):
+@plugin_aliases("hosts", "etc-hosts", "/etc/hosts")
+class EtcHosts(BasePlugin):
     """
     Load /etc/hosts
 
@@ -24,7 +22,7 @@ class BlocklistPlugin(BasePlugin):
 
     def __init__(self, **config) -> None:
         """
-        Initialize plugin configuration and database.
+        Read file in /etc/hosts format
 
         Inputs:
             **config: Supported keys
@@ -39,7 +37,7 @@ class BlocklistPlugin(BasePlugin):
         self.file_path: str = self.config.get("file_path", "/etc/hosts")
         self._load_hosts()
 
-    def _load_hosts() -> Dict[str, str]:
+    def _load_hosts(self) -> None:
         """
         Read the system hosts file (/etc/hosts) and return a dictionary
         mapping each domain name to its corresponding IP address.
@@ -52,8 +50,6 @@ class BlocklistPlugin(BasePlugin):
         """
         hosts_path = pathlib.Path(self.file_path)
         mapping: Dict[str, str] = {}
-        if not hosts_path.is_file():
-            return mapping
 
         with hosts_path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -80,14 +76,78 @@ class BlocklistPlugin(BasePlugin):
             req: Raw DNS request bytes (unused).
             ctx: Plugin context.
         Outputs:
-            PluginDecision("deny") when domain is denied; otherwise None to proceed.
+            PluginDecision("override") when domain is mapped, None to continue
 
-        Example:
-            >>> from foghorn.plugins.base import PluginContext
-            >>> p = BlocklistPlugin(blocklist=["bad.com"])  # doctest: +ELLIPSIS
-            >>> p.pre_resolve("bad.com", 1, b"", PluginContext("127.0.0.1")).action
-            'deny'
         """
-        if self.is_allowed(qname):
+        if qtype not in (QTYPE.A, QTYPE.AAAA):
             return None
-        return PluginDecision(action="deny")
+
+        qname = qname.rstrip(".")
+        ip = self.hosts.get(qname)
+
+        if not ip:
+            return None
+
+        # Build a proper DNS response with the same TXID
+        wire = self._make_a_response(qname, qtype, req, ctx, ip)
+        return PluginDecision(action="override", response=wire)
+
+
+    def _make_a_response(
+        self, qname: str, query_type: int, raw_req: bytes, ctx: PluginContext, ipaddr: str
+        ) -> Optional[bytes]:
+        try:
+            request = DNSRecord.parse(raw_req)
+        except Exception as e:
+            logger.warning("parse failure: %s", e)
+            return None
+
+        # Normalize domain
+        qname = str(request.q.qname).rstrip(".")
+
+        ip = ipaddr
+        reply = DNSRecord(
+            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1),
+            q=request.q
+            )
+
+        if query_type == QTYPE.A:
+            reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.A, rclass=1, ttl=60, rdata=A(ip)))
+        elif query_type == QTYPE.AAAA:
+            reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.AAAA, rclass=1, ttl=60, rdata=AAAA(ip)))
+
+        return reply.pack()
+
+
+    ## def _make_a_response(
+    ##     self, qname: str, query_type: int, raw_req: bytes, ctx: PluginContext, ipaddr: str
+    ## ) -> bytes:
+    ##     """
+    ##     Return a DNS response that carries the original transaction ID,
+    ##     but with the payload replaced.
+    ##     """
+    ##     print("make repo")
+    ##     try:
+    ##         request = DNSRecord.parse(raw_req)
+    ##     except Exception as e:
+    ##         logger.warning("parse failure: %s", e)
+    ##         return None
+
+    ##     qname = str(request.q.qname)
+    ##     if qname not in self.hosts:
+    ##         logger.debug("unknown query: %s", qname)
+    ##         return None
+
+    ##     ip = self.hosts[qname]
+    ##     logger.debug("resolve %s -> %s", qname, ip)
+
+    ##     reply = DNSRecord(
+    ##         DNSHeader(id=request.header.id, qr=1, aa=1, ra=1),
+    ##         q=request.
+    ##     )
+
+    ##     reply.add_answer(
+    ##         RR(rname=req.q.qname, rtype=QTYPE.A, rclass=1, ttl=65, rdata=A(ip))
+    ##     )
+
+    ##     return reply.pack()
