@@ -31,3 +31,5 @@ Thumbs.db
 *.db
 *.db-wal
 *.db-shm
+my-config-test.yaml
+my-config.yaml
