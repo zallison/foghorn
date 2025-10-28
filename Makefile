@@ -50,7 +50,7 @@ clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +;
 	# Delete .pyc, .tmp, backup (~) and vim swap files
 	find . -type f \
-		\( -name '*.pyc' -o -name '*.tmp' -o -name '*~' -o -name '*.swp' \) -delete
+		\( -name '*.pyc' -o -name '*.tmp' -o -name '*~' -o -name '#*' -o -name '*.swp' \) -delete
         # Keep YAML files – nothing more needed
 
 # ------------------------------------------------------------
