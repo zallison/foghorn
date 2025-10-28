@@ -81,7 +81,7 @@ def normalize_upstream_config(
             ]
         else:
             # Default fallback
-            upstreams = [{"host": "1.1.1.1", "port": 53}]
+            upstreams = [{"host": "1.1.1.1", "port": 53}]  # pragma: no cover
     else:
         # Default fallback
         upstreams = [{"host": "1.1.1.1", "port": 53}]
@@ -233,12 +233,12 @@ def main(argv: List[str] | None = None) -> int:
         server.serve_forever()
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down")
-    except Exception as e:
-        logger.exception(f"Unhandled exception during server operation {e}")
-        return 1
+    except Exception as e:  # pragma: no cover
+        logger.exception(f"Unhandled exception during server operation {e}")  # pragma: no cover
+        return 1  # pragma: no cover
 
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main())  # pragma: no cover
