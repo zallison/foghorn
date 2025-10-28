@@ -36,8 +36,6 @@ tests: test
 test: build
 	@echo "=== Running tests (short) ==="
 	python -m venv $(VENV) && . ${VENV}/bin/activate || true   # ignore error if it already exists
-
-	. ${VENV}/bin/activate
 	${VENV}/bin/pytest
 
 # ------------------------------------------------------------
@@ -60,7 +58,7 @@ clean:
 # ------------------------------------------------------------
 .PHONY: help
 help:
-        @echo "Makefile targets:"
+	@echo "Makefile targets:"
 	@echo "  all           – Execute foghorn --config config.yaml"
 	@echo "  build         – Create venv and install package (-e .)"
 	@echo "  test          – Run pytest"

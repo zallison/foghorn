@@ -426,6 +426,8 @@ A make file has been provided For your convenience.
 
 Make `run` will run `tests`.  `Tests` will run `build`.
 
+Ensure your `config.yaml` has been set appropriately. See `config-example.yaml` for details.
+
 
 | Target | What it does | Typical use |
 |--------|--------------|-------------|
