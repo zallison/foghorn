@@ -62,7 +62,9 @@ class NewDomainFilterPlugin(BasePlugin):
         self.threshold_days: int = int(self.config.get("threshold_days", 7))
 
         # Caching configuration
-        self.whois_db_path: str = self.config.get("whois_db_path", "./var/whois_cache.db")
+        self.whois_db_path: str = self.config.get(
+            "whois_db_path", "./var/whois_cache.db"
+        )
         self.whois_cache_ttl_seconds: int = int(
             self.config.get("whois_cache_ttl_seconds", 3600)
         )

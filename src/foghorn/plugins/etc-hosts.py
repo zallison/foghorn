@@ -92,10 +92,14 @@ class EtcHosts(BasePlugin):
         wire = self._make_a_response(qname, qtype, req, ctx, ip)
         return PluginDecision(action="override", response=wire)
 
-
     def _make_a_response(
-        self, qname: str, query_type: int, raw_req: bytes, ctx: PluginContext, ipaddr: str
-        ) -> Optional[bytes]:
+        self,
+        qname: str,
+        query_type: int,
+        raw_req: bytes,
+        ctx: PluginContext,
+        ipaddr: str,
+    ) -> Optional[bytes]:
         try:
             request = DNSRecord.parse(raw_req)
         except Exception as e:
@@ -107,17 +111,25 @@ class EtcHosts(BasePlugin):
 
         ip = ipaddr
         reply = DNSRecord(
-            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1),
-            q=request.q
-            )
+            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+        )
 
         if query_type == QTYPE.A:
-            reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.A, rclass=1, ttl=60, rdata=A(ip)))
+            reply.add_answer(
+                RR(rname=request.q.qname, rtype=QTYPE.A, rclass=1, ttl=60, rdata=A(ip))
+            )
         elif query_type == QTYPE.AAAA:
-            reply.add_answer(RR(rname=request.q.qname, rtype=QTYPE.AAAA, rclass=1, ttl=60, rdata=AAAA(ip)))
+            reply.add_answer(
+                RR(
+                    rname=request.q.qname,
+                    rtype=QTYPE.AAAA,
+                    rclass=1,
+                    ttl=60,
+                    rdata=AAAA(ip),
+                )
+            )
 
         return reply.pack()
-
 
     ## def _make_a_response(
     ##     self, qname: str, query_type: int, raw_req: bytes, ctx: PluginContext, ipaddr: str

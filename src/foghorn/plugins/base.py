@@ -71,10 +71,10 @@ class BasePlugin:
         >>> plugin.pre_resolve("example.com", 1, None) is None
         True
     """
+
     priority = 5
 
     aliases: ClassVar[Sequence[str]] = ()
-
 
     @classmethod
     def get_aliases(cls) -> Sequence[str]:

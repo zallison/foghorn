@@ -4,6 +4,7 @@ Comprehensive test suite for FilterPlugin.
 Tests cover initialization, domain filtering, IP filtering, database operations,
 caching, error handling, and edge cases.
 """
+
 import unittest
 from unittest.mock import patch, MagicMock
 from dnslib import DNSHeader, DNSQuestion, DNSRecord, QTYPE, A, AAAA, CNAME, RR
@@ -47,11 +48,13 @@ class TestFilterPluginInitialization(unittest.TestCase):
             "cache_ttl_seconds": 300,
         }
         plugin = FilterPlugin(**config)
-        
+
         self.assertEqual(len(plugin.blocked_domains), 2)
         self.assertEqual(len(plugin.blocked_patterns), 2)
         self.assertEqual(len(plugin.blocked_keywords), 3)
-        self.assertEqual(len(plugin.blocked_ips), 3)  # 192.0.2.1, 203.0.113.5, and 10.0.0.1
+        self.assertEqual(
+            len(plugin.blocked_ips), 3
+        )  # 192.0.2.1, 203.0.113.5, and 10.0.0.1
         self.assertEqual(len(plugin.blocked_networks), 1)  # 198.51.100.0/24
         self.assertEqual(plugin.cache_ttl_seconds, 300)
 
@@ -61,7 +64,7 @@ class TestFilterPluginInitialization(unittest.TestCase):
             "blocked_patterns": [r"[invalid(regex", r"valid.*pattern"],
             "db_path": ":memory:",
         }
-        
+
         with self.assertLogs(level="ERROR") as cm:
             plugin = FilterPlugin(**config)
             # Only valid pattern should be compiled
@@ -77,7 +80,7 @@ class TestFilterPluginInitialization(unittest.TestCase):
             ],
             "db_path": ":memory:",
         }
-        
+
         with self.assertLogs(level="ERROR") as cm:
             plugin = FilterPlugin(**config)
             # Only valid IP should be added
@@ -90,7 +93,7 @@ class TestFilterPluginInitialization(unittest.TestCase):
             "blocked_ips": [{"ip": "192.0.2.1", "action": "invalid_action"}],
             "db_path": ":memory:",
         }
-        
+
         with self.assertLogs(level="WARNING") as cm:
             plugin = FilterPlugin(**config)
             ip = ipaddress.ip_address("192.0.2.1")
@@ -102,7 +105,7 @@ class TestFilterPluginInitialization(unittest.TestCase):
             "blocked_ips": [{"ip": "192.0.2.1", "action": "replace"}],
             "db_path": ":memory:",
         }
-        
+
         with self.assertLogs(level="ERROR") as cm:
             plugin = FilterPlugin(**config)
             # IP should not be added
@@ -118,7 +121,7 @@ class TestFilterPluginInitialization(unittest.TestCase):
             ],
             "db_path": ":memory:",
         }
-        
+
         plugin = FilterPlugin(**config)
         self.assertEqual(len(plugin.blocked_ips), 1)
         self.assertEqual(len(plugin.blocked_networks), 1)
@@ -158,10 +161,12 @@ class TestFilterPluginDomainFiltering(unittest.TestCase):
 
     def test_pre_resolve_blocked_pattern(self):
         """Test domain blocking by regex pattern."""
-        decision = self.plugin.pre_resolve("example.porn.site.com", QTYPE.A, b"", self.ctx)
+        decision = self.plugin.pre_resolve(
+            "example.porn.site.com", QTYPE.A, b"", self.ctx
+        )
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, "deny")
-        
+
         decision = self.plugin.pre_resolve("casino.example.com", QTYPE.A, b"", self.ctx)
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, "deny")
@@ -171,7 +176,7 @@ class TestFilterPluginDomainFiltering(unittest.TestCase):
         decision = self.plugin.pre_resolve("spam.com", QTYPE.A, b"", self.ctx)
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, "deny")
-        
+
         decision = self.plugin.pre_resolve("example-ads.net", QTYPE.A, b"", self.ctx)
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, "deny")
@@ -186,13 +191,13 @@ class TestFilterPluginDomainFiltering(unittest.TestCase):
         """Test that domain decisions are cached."""
         # First call - cache miss
         decision1 = self.plugin.pre_resolve("example.com", QTYPE.A, b"", self.ctx)
-        
+
         # Second call - should use cache
         with patch.object(self.plugin, "is_allowed") as mock_is_allowed:
             decision2 = self.plugin.pre_resolve("example.com", QTYPE.A, b"", self.ctx)
             # is_allowed should not be called if cache hit
             mock_is_allowed.assert_not_called()
-        
+
         self.assertEqual(decision1, decision2)
 
 
@@ -216,43 +221,51 @@ class TestFilterPluginIPFiltering(unittest.TestCase):
     def _create_dns_response(self, domain, ips, qtype=QTYPE.A):
         """
         Create a DNS response with A or AAAA records.
-        
+
         Inputs:
             domain: Domain name
             ips: List of IP addresses
             qtype: Query type (QTYPE.A or QTYPE.AAAA)
-        
+
         Outputs:
             Packed DNS response bytes
         """
         response = DNSRecord(DNSHeader(qr=1, aa=1, ra=1), q=DNSQuestion(domain, qtype))
-        
+
         for ip in ips:
             if qtype == QTYPE.A:
                 response.add_answer(RR(domain, QTYPE.A, rdata=A(ip), ttl=300))
             elif qtype == QTYPE.AAAA:
                 response.add_answer(RR(domain, QTYPE.AAAA, rdata=AAAA(ip), ttl=300))
-        
+
         return response.pack()
 
     def test_post_resolve_no_blocked_ips(self):
         """Test that clean responses pass through."""
         response_wire = self._create_dns_response("example.com", ["8.8.8.8"])
-        decision = self.plugin.post_resolve("example.com", QTYPE.A, response_wire, self.ctx)
+        decision = self.plugin.post_resolve(
+            "example.com", QTYPE.A, response_wire, self.ctx
+        )
         self.assertIsNone(decision)
 
     def test_post_resolve_blocked_ip_deny(self):
         """Test that 'deny' action returns NXDOMAIN."""
         response_wire = self._create_dns_response("test.com", ["192.0.2.1"])
-        decision = self.plugin.post_resolve("test.com", QTYPE.A, response_wire, self.ctx)
+        decision = self.plugin.post_resolve(
+            "test.com", QTYPE.A, response_wire, self.ctx
+        )
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, "deny")
 
     def test_post_resolve_blocked_ip_remove(self):
         """Test that 'remove' action removes IPs from response."""
-        response_wire = self._create_dns_response("test.com", ["198.51.100.10", "8.8.8.8"])
-        decision = self.plugin.post_resolve("test.com", QTYPE.A, response_wire, self.ctx)
-        
+        response_wire = self._create_dns_response(
+            "test.com", ["198.51.100.10", "8.8.8.8"]
+        )
+        decision = self.plugin.post_resolve(
+            "test.com", QTYPE.A, response_wire, self.ctx
+        )
+
         # Should get override with modified response
         self.assertIsNotNone(decision)
         if decision.action == "override":
@@ -264,8 +277,10 @@ class TestFilterPluginIPFiltering(unittest.TestCase):
     def test_post_resolve_blocked_ip_replace(self):
         """Test that 'replace' action substitutes IP addresses."""
         response_wire = self._create_dns_response("test.com", ["203.0.113.5"])
-        decision = self.plugin.post_resolve("test.com", QTYPE.A, response_wire, self.ctx)
-        
+        decision = self.plugin.post_resolve(
+            "test.com", QTYPE.A, response_wire, self.ctx
+        )
+
         self.assertIsNotNone(decision)
         if decision.action == "override":
             modified_response = DNSRecord.parse(decision.response)
@@ -276,7 +291,9 @@ class TestFilterPluginIPFiltering(unittest.TestCase):
     def test_post_resolve_network_match(self):
         """Test that network ranges are matched correctly."""
         response_wire = self._create_dns_response("test.com", ["198.51.100.50"])
-        decision = self.plugin.post_resolve("test.com", QTYPE.A, response_wire, self.ctx)
+        decision = self.plugin.post_resolve(
+            "test.com", QTYPE.A, response_wire, self.ctx
+        )
         self.assertIsNotNone(decision)
 
     def test_post_resolve_mixed_ips(self):
@@ -284,8 +301,10 @@ class TestFilterPluginIPFiltering(unittest.TestCase):
         response_wire = self._create_dns_response(
             "test.com", ["192.0.2.1", "8.8.8.8", "198.51.100.10"]
         )
-        decision = self.plugin.post_resolve("test.com", QTYPE.A, response_wire, self.ctx)
-        
+        decision = self.plugin.post_resolve(
+            "test.com", QTYPE.A, response_wire, self.ctx
+        )
+
         # Should deny because 192.0.2.1 has 'deny' action
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, "deny")
@@ -293,8 +312,10 @@ class TestFilterPluginIPFiltering(unittest.TestCase):
     def test_post_resolve_all_ips_removed(self):
         """Test that removing all IPs returns NXDOMAIN."""
         response_wire = self._create_dns_response("test.com", ["198.51.100.10"])
-        decision = self.plugin.post_resolve("test.com", QTYPE.A, response_wire, self.ctx)
-        
+        decision = self.plugin.post_resolve(
+            "test.com", QTYPE.A, response_wire, self.ctx
+        )
+
         # All IPs removed should return deny
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, "deny")
@@ -308,7 +329,9 @@ class TestFilterPluginIPFiltering(unittest.TestCase):
     def test_post_resolve_empty_response(self):
         """Test handling of empty DNS response."""
         response = DNSRecord()
-        decision = self.plugin.post_resolve("test.com", QTYPE.A, response.pack(), self.ctx)
+        decision = self.plugin.post_resolve(
+            "test.com", QTYPE.A, response.pack(), self.ctx
+        )
         self.assertIsNone(decision)
 
     def test_post_resolve_no_filters_configured(self):
@@ -341,13 +364,13 @@ class TestFilterPluginDatabase(unittest.TestCase):
     def test_db_insert_domain(self):
         """Test inserting a domain into database."""
         self.plugin._db_insert_domain("test.com", "config", "deny")
-        
+
         cur = self.plugin.conn.execute(
             "SELECT domain, filename, mode FROM blocked_domains WHERE domain = ?",
-            ("test.com",)
+            ("test.com",),
         )
         row = cur.fetchone()
-        
+
         self.assertIsNotNone(row)
         self.assertEqual(row[0], "test.com")
         self.assertEqual(row[1], "config")
@@ -357,13 +380,12 @@ class TestFilterPluginDatabase(unittest.TestCase):
         """Test that inserting duplicate domain replaces existing entry."""
         self.plugin._db_insert_domain("test.com", "file1.txt", "deny")
         self.plugin._db_insert_domain("test.com", "file2.txt", "allow")
-        
+
         cur = self.plugin.conn.execute(
-            "SELECT filename, mode FROM blocked_domains WHERE domain = ?",
-            ("test.com",)
+            "SELECT filename, mode FROM blocked_domains WHERE domain = ?", ("test.com",)
         )
         row = cur.fetchone()
-        
+
         self.assertEqual(row[0], "file2.txt")
         self.assertEqual(row[1], "allow")
 
@@ -381,7 +403,7 @@ class TestFilterPluginDatabase(unittest.TestCase):
         """Test is_allowed uses default for unknown domains."""
         # Default is 'allow'
         self.assertTrue(self.plugin.is_allowed("unknown.com"))
-        
+
         # Change default to 'deny'
         plugin_deny = FilterPlugin(db_path=":memory:", default="deny")
         self.assertFalse(plugin_deny.is_allowed("unknown.com"))
@@ -398,11 +420,10 @@ class TestFilterPluginDatabase(unittest.TestCase):
 
         try:
             self.plugin.load_list_from_file(temp_filename, "deny")
-            
+
             for domain in ["domain1.com", "domain2.com", "domain3.com"]:
                 cur = self.plugin.conn.execute(
-                    "SELECT mode FROM blocked_domains WHERE domain = ?",
-                    (domain,)
+                    "SELECT mode FROM blocked_domains WHERE domain = ?", (domain,)
                 )
                 row = cur.fetchone()
                 self.assertIsNotNone(row)
@@ -444,7 +465,7 @@ class TestFilterPluginCaching(unittest.TestCase):
         """Test adding allowed domain to cache."""
         key = "example.com"
         self.plugin.add_to_cache(key, True)
-        
+
         cached_value = self.plugin._domain_cache.get(("example.com", 0))
         self.assertEqual(cached_value, b"1")
 
@@ -452,17 +473,17 @@ class TestFilterPluginCaching(unittest.TestCase):
         """Test adding blocked domain to cache."""
         key = "blocked.com"
         self.plugin.add_to_cache(key, False)
-        
+
         cached_value = self.plugin._domain_cache.get(("blocked.com", 0))
         self.assertEqual(cached_value, b"0")
 
     def test_cache_hit_avoids_database_lookup(self):
         """Test that cache hit avoids database query."""
         self.plugin._db_insert_domain("test.com", "config", "deny")
-        
+
         # First call populates cache
         self.plugin.pre_resolve("test.com", QTYPE.A, b"", None)
-        
+
         # Second call should use cache
         with patch.object(self.plugin, "is_allowed") as mock_is_allowed:
             self.plugin.pre_resolve("test.com", QTYPE.A, b"", None)
@@ -518,10 +539,10 @@ class TestFilterPluginIPAction(unittest.TestCase):
             "db_path": ":memory:",
         }
         plugin = FilterPlugin(**config)
-        
+
         action = plugin._get_ip_action(ipaddress.ip_address("2001:db8::1"))
         self.assertEqual(action["action"], "deny")
-        
+
         action = plugin._get_ip_action(ipaddress.ip_address("2001:db8::5"))
         self.assertEqual(action["action"], "remove")
 
@@ -537,10 +558,10 @@ class TestFilterPluginEdgeCases(unittest.TestCase):
             "default": "allow",
         }
         plugin = FilterPlugin(**config)
-        
+
         # Invalid DNS wire format
         invalid_wire = b"not a valid dns response"
-        
+
         with self.assertLogs(level="ERROR") as cm:
             decision = plugin.post_resolve("test.com", QTYPE.A, invalid_wire, None)
             self.assertEqual(decision.action, "allow")  # Falls back to default
@@ -549,16 +570,20 @@ class TestFilterPluginEdgeCases(unittest.TestCase):
     def test_cache_exception_handling(self):
         """Test that cache exceptions are caught and logged."""
         plugin = FilterPlugin(db_path=":memory:")
-        
-        with patch.object(plugin._domain_cache, "set", side_effect=Exception("Cache error")):
+
+        with patch.object(
+            plugin._domain_cache, "set", side_effect=Exception("Cache error")
+        ):
             with self.assertLogs(level="WARNING") as cm:
                 plugin.add_to_cache("test.com", True)
-                self.assertTrue(any("exception adding to cache" in msg for msg in cm.output))
+                self.assertTrue(
+                    any("exception adding to cache" in msg for msg in cm.output)
+                )
 
     def test_empty_blocked_lists(self):
         """Test plugin with no filters configured."""
         plugin = FilterPlugin(db_path=":memory:", default="allow")
-        
+
         decision = plugin.pre_resolve("example.com", QTYPE.A, b"", None)
         self.assertIsNone(decision)
 
@@ -569,7 +594,7 @@ class TestFilterPluginEdgeCases(unittest.TestCase):
             "db_path": ":memory:",
         }
         plugin = FilterPlugin(**config)
-        
+
         decision = plugin.pre_resolve("spam.com", QTYPE.A, b"", None)
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, "deny")
@@ -581,7 +606,7 @@ class TestFilterPluginEdgeCases(unittest.TestCase):
             "db_path": ":memory:",
         }
         plugin = FilterPlugin(**config)
-        
+
         decision = plugin.pre_resolve("example.casino.com", QTYPE.A, b"", None)
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, "deny")

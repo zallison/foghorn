@@ -14,7 +14,7 @@ from .base import BasePlugin, PluginDecision, PluginContext, plugin_aliases
 logger = logging.getLogger(__name__)
 
 
-@plugin_aliases("filter","block","allow")
+@plugin_aliases("filter", "block", "allow")
 class FilterPlugin(BasePlugin):
     """
     A comprehensive filtering plugin that filters both domains and IP addresses.
@@ -74,14 +74,13 @@ class FilterPlugin(BasePlugin):
         super().__init__(**config)
         self._domain_cache = TTLCache()
 
-        self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 600) # 10 minutes
+        self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 600)  # 10 minutes
         self.db_path: str = self.config.get("db_path", "./var/blocklist.db")
         self.default = self.config.get("default", "deny")
         self.blocklist_files = self.config.get("blocklist_files", [])
         self.allowlist_files = self.config.get("allowlist_files", [])
         self.blocklist = self.config.get("blocked_domains", [])
         self.allowlist = self.config.get("allowed_domains", [])
-
 
         self._connect_to_db()
         self._db_init()
@@ -96,7 +95,6 @@ class FilterPlugin(BasePlugin):
             self._db_insert_domain(domain, "config", "deny")
         for domain in self.allowlist:
             self._db_insert_domain(domain, "config", "allow")
-
 
         # Pre-resolve (domain) filtering configuration
         self.blocked_domains: Set[str] = set(self.config.get("blocked_domains", []))

@@ -429,7 +429,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 else:
                     logger.debug("Not caching %s type %s (TTL=%d)", qname, qtype, ttl)
             elif r.header.rcode == RCODE.SERVFAIL:
-                logger.debug("Not caching %s type: %s (SERVFAIL never cached)", qname, qtype)
+                logger.debug(
+                    "Not caching %s type: %s (SERVFAIL never cached)", qname, qtype
+                )
             else:
                 logger.debug(
                     "Not caching %s %s (rcode=%s, no answer RRs)",
