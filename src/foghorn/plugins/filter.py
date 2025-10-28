@@ -6,7 +6,7 @@ import sqlite3
 import os
 import time
 from typing import Optional, List, Set, Union, Dict
-from dnslib import DNSRecord, QTYPE, RCODE
+from dnslib import DNSRecord, QTYPE, RCODE, A as RDATA_A, AAAA as RDATA_AAAA
 from foghorn.cache import TTLCache
 
 from .base import BasePlugin, PluginDecision, PluginContext, plugin_aliases
@@ -80,10 +80,8 @@ class FilterPlugin(BasePlugin):
         self.blocklist_files = self.config.get("blocklist_files", [])
         self.allowlist_files = self.config.get("allowlist_files", [])
         self.blocklist = self.config.get("blocked_domains", [])
-        self.allowlist = self.config.get("allow_domainss", [])
+        self.allowlist = self.config.get("allowed_domains", [])
 
-        self.blocked_ips = self.config.get("blocked_ips",[])
-        self.blocked_networks = self.config.get("blocked_networks",[])
 
         self._connect_to_db()
         self._db_init()
@@ -155,12 +153,13 @@ class FilterPlugin(BasePlugin):
                         # Validate the replacement IP
                         ipaddress.ip_address(replace_with)
                     except ValueError as e:
-                        raise ValueError(
+                        logger.error(
                             "Invalid 'replace_with' IP address '%s' for rule '%s': %s",
                             replace_with,
                             ip_spec,
                             e,
                         )
+                        continue
 
                 if "/" in ip_spec:
                     # It's a network/subnet
@@ -187,13 +186,26 @@ class FilterPlugin(BasePlugin):
                 logger.error("Invalid IP address/network '%s': %s", ip_spec, e)
 
     def add_to_cache(self, key: any, allowed: bool):
+        """
+        Add a domain decision to the TTL cache.
+
+        Inputs:
+            key: Domain cache key. Accepts a domain string or (domain, 0) tuple.
+            allowed: True if allowed, False if denied.
+        Outputs:
+            None
+        """
         try:
+            # Normalize to (domain, 0) cache key
+            if not isinstance(key, tuple):
+                norm_key = (str(key).rstrip(".").lower(), 0)
+            else:
+                norm_key = key
             self._domain_cache.set(
-                key, int(self.cache_ttl_seconds), b"1" if allowed else b"0"
+                norm_key, int(self.cache_ttl_seconds), b"1" if allowed else b"0"
             )
         except Exception as e:
-            logging.warn(f"exception adding to cache {e}")
-            pass
+            logger.warning(f"exception adding to cache {e}")
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
@@ -216,13 +228,16 @@ class FilterPlugin(BasePlugin):
         cached = self._domain_cache.get(key)
         if cached is not None:
             try:
-                return cached == b"1"
+                if cached == b"1":
+                    return None
+                else:
+                    return PluginDecision(action="deny")
             except Exception:
                 pass
 
-        if not self.is_allowed(domain):
+        if not self.is_allowed(str(domain).rstrip(".")):
             logger.debug("Domain '%s' blocked (exact match)", qname)
-            self.add_to_cache(domain, b"0")
+            self.add_to_cache(key, False)
             return PluginDecision(action="deny")
 
         # Check keyword filtering
@@ -231,7 +246,7 @@ class FilterPlugin(BasePlugin):
                 logger.debug(
                     "Domain '%s' blocked (contains keyword '%s')", qname, keyword
                 )
-                self.add_to_cache(domain, b"0")
+                self.add_to_cache(key, False)
                 return PluginDecision(action="deny")
 
         # Check regex patterns
@@ -240,11 +255,11 @@ class FilterPlugin(BasePlugin):
                 logger.debug(
                     "Domain '%s' blocked (matches pattern '%s')", qname, pattern.pattern
                 )
-                self.add_to_cache(domain, b"0")
+                self.add_to_cache(key, False)
                 return PluginDecision(action="deny")
 
         logger.debug("Domain '%s' allowed", qname)
-        self.add_to_cache(domain, b"1")
+        self.add_to_cache(key, True)
 
         return None
 
@@ -313,7 +328,11 @@ class FilterPlugin(BasePlugin):
                                 replacement_ip = ipaddress.ip_address(replace_ip_str)
                                 # Ensure IP versions are compatible
                                 if ip_addr.version == replacement_ip.version:
-                                    rr.rdata = replacement_ip
+                                    # Replace rdata with correct RDATA type
+                                    if rr.rtype == QTYPE.A:
+                                        rr.rdata = RDATA_A(str(replacement_ip))
+                                    elif rr.rtype == QTYPE.AAAA:
+                                        rr.rdata = RDATA_AAAA(str(replacement_ip))
                                     modified_records.append(rr)
                                     logger.info(
                                         "Replaced IP %s with %s for domain %s",
@@ -401,8 +420,16 @@ class FilterPlugin(BasePlugin):
         return None
 
     def _connect_to_db(self) -> sqlite3.Connection:
-        """Create and return a SQLite connection."""
+        """
+        Create and return a SQLite connection.
+
+        Inputs:
+            None
+        Outputs:
+            sqlite3.Connection instance connected to the blocklist database.
+        """
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        return self.conn
 
     def _db_init(self) -> None:
         """Create the blocked_domains table if it does not exist."""
@@ -458,7 +485,7 @@ class FilterPlugin(BasePlugin):
             raise ValueError("mode must be 'allow' or 'deny'")
 
         if not os.path.isfile(filename):
-            raise FileNotFoundError("No file %s", filename)
+            raise FileNotFoundError(f"No file {filename}")
 
         logger.debug("Opening %s for %s", filename, mode)
         with open(filename, "r", encoding="utf-8") as fh:
