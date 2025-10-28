@@ -418,3 +418,19 @@ You can extend Foghorn by creating your own plugins. A plugin is a Python class 
 
 *   `pre_resolve(self, qname, qtype, ctx)`: This method is called before a query is resolved. It can return a `PluginDecision` to `allow`, `deny`, or `override` the query.
 *   `post_resolve(self, qname, qtype, response_wire, ctx)`: This method is called after a query has been resolved. It can also return a `PluginDecision` to modify the response.
+
+
+## Makefile Targets
+
+A make file has been provided For your convenience.  Start with `make build` to install the dependencies, `make test` is next, passing means you're good to go. `make run` will run `foghorn --config config.yaml`.
+
+
+| Target | What it does | Typical use |
+|--------|--------------|-------------|
+| **`run`** | <ul><li>Ensures a virtual‑environment (`venv/`) exists and activates it.</li><li>Creates a `var/` directory (if it doesn’t already exist).</li><li>Runs the application via `./venv/bin/foghorn --config config.yaml`.</li></ul> | `make run` – Launch the project with its default configuration. |
+| **`build`** | <ul><li>Creates a clean virtual‑environment (`venv/`).</li><li>Installs the current package in *editable* mode (`pip install -e .`).</li></ul> | `make build` – Prepare the environment for development or testing. |
+| **`test`** (or **`tests`**) | <ul><li>Depends on `build` – guarantees the package is installed.</li><li>Runs `pytest` inside the virtual‑environment.</li></ul> | `make test` – Execute the test suite. |
+| **`clean`** | <ul><li>Removes the `venv/` and `var/` directories.</li><li>Deletes all `__pycache__` directories.</li><li>Deletes temporary and compiled files (`*.pyc`, `*.tmp`, `*~`, `*.swp`).</li><li>YAML files are preserved by design.</li></ul> | `make clean` – Clean the workspace of all generated artefacts. |
+| **`help`** | Prints a short description of the available targets. | `make` or `make help` – Shows this help message. |
+
+> **Default goal** – If you just type `make` with no target, the Makefile runs the `help` target automatically, thanks to ` .DEFAULT_GOAL := help`.
