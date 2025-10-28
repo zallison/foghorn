@@ -422,7 +422,9 @@ You can extend Foghorn by creating your own plugins. A plugin is a Python class 
 
 ## Makefile Targets
 
-A make file has been provided For your convenience.  Start with `make build` to install the dependencies, `make test` is next, passing means you're good to go. `make run` will run `foghorn --config config.yaml`.
+A make file has been provided For your convenience.
+
+Make `run` will run `tests`.  `Tests` will run `build`.
 
 
 | Target | What it does | Typical use |
