@@ -1,0 +1,9 @@
+services:
+  foghorn:
+    image: zallison/foghorn:latest
+    container_name: foghorn
+    volumes:
+      - /VMData/foghorn:/config
+    ports:
+      - 53:5353/udp
+    restart: unless-stopped
