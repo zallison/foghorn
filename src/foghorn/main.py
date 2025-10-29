@@ -234,7 +234,9 @@ def main(argv: List[str] | None = None) -> int:
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down")
     except Exception as e:  # pragma: no cover
-        logger.exception(f"Unhandled exception during server operation {e}")  # pragma: no cover
+        logger.exception(
+            f"Unhandled exception during server operation {e}"
+        )  # pragma: no cover
         return 1  # pragma: no cover
 
     return 0
