@@ -385,7 +385,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     r.header.rcode = RCODE.NXDOMAIN
                     reply = r.pack()
                     break
-                if decision.action == "override" and decision.response is not None:  # pragma: no cover
+                if (
+                    decision.action == "override" and decision.response is not None
+                ):  # pragma: no cover
                     logger.info(
                         "Post-resolve override %s type %s by %s",
                         qname,
@@ -540,7 +542,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                             "Override %s %s by %s", qname, qtype, p.__class__.__name__
                         )  # pragma: no cover
                         # Don't cache plugin overrides - they may be dynamic
-                        resp = _set_response_id(decision.response, req.header.id)  # pragma: no cover
+                        resp = _set_response_id(
+                            decision.response, req.header.id
+                        )  # pragma: no cover
                         sock.sendto(resp, self.client_address)  # pragma: no cover
                         return  # pragma: no cover
                     # allow -> continue
@@ -684,7 +688,9 @@ class DNSServer:
         DNSUDPHandler.timeout = timeout  # pragma: no cover
         DNSUDPHandler.timeout_ms = timeout_ms  # pragma: no cover
         DNSUDPHandler.min_cache_ttl = max(0, int(min_cache_ttl))  # pragma: no cover
-        self.server = socketserver.ThreadingUDPServer((host, port), DNSUDPHandler)  # pragma: no cover
+        self.server = socketserver.ThreadingUDPServer(
+            (host, port), DNSUDPHandler
+        )  # pragma: no cover
         # Ensure request handler threads do not block shutdown
         self.server.daemon_threads = True  # pragma: no cover
         logger.debug("DNS UDP server bound to %s:%d", host, port)  # pragma: no cover
