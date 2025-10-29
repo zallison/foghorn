@@ -1,6 +1,6 @@
 from __future__ import annotations
 import time
-from dnslib import DNSRecord, QTYPE, A, AAAA, QR, RR, DNSHeader
+from dnslib import DNSRecord, QTYPE, A, QR, RR, DNSHeader
 import os
 import logging
 import pathlib
@@ -79,7 +79,7 @@ class EtcHosts(BasePlugin):
             PluginDecision("override") when domain is mapped, None to continue
 
         """
-        if qtype not in (QTYPE.A, QTYPE.AAAA):
+        if qtype != QTYPE.A:
             return None
 
         qname = qname.rstrip(".")
@@ -117,16 +117,6 @@ class EtcHosts(BasePlugin):
         if query_type == QTYPE.A:
             reply.add_answer(
                 RR(rname=request.q.qname, rtype=QTYPE.A, rclass=1, ttl=60, rdata=A(ip))
-            )
-        elif query_type == QTYPE.AAAA:
-            reply.add_answer(
-                RR(
-                    rname=request.q.qname,
-                    rtype=QTYPE.AAAA,
-                    rclass=1,
-                    ttl=60,
-                    rdata=AAAA(ip),
-                )
             )
 
         return reply.pack()
