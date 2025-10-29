@@ -11,6 +11,9 @@ COPY . /foghorn
 RUN pip install -e . && \
     pytest
 
+RUN mkdir /config
+COPY ./config/config.yaml /config/
+
 # Ensure the virtual environment is used by default
 ENV PATH="/foghorn/venv/bin:$PATH"
 
