@@ -8,11 +8,13 @@ WORKDIR /foghorn
 COPY . /foghorn
 
 # Create a virtual environment and install
-RUN pip install -e .
-RUN cp my-config.yaml /config.yaml
+RUN pip install -e . && \
+    pytest
 
 # Ensure the virtual environment is used by default
 ENV PATH="/foghorn/venv/bin:$PATH"
 
+EXPOSE 5353/udp
+
 # Define the default command to run when the container starts
-CMD ["foghorn", "--config", "/config.yaml"]
+CMD ["foghorn", "--config", "/config/config.yaml"]
