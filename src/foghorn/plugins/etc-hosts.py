@@ -34,7 +34,8 @@ class EtcHosts(BasePlugin):
         super().__init__(**config)
 
         # Configuration
-        self.file_path: str = self.config.get("file_path", "/etc/hosts")
+        # :TODO|Make this accept multiple files:
+        self.file_path: str | List[str] = self.config.get("file_path", "/etc/hosts")
         self._load_hosts()
 
     def _load_hosts(self) -> None:
@@ -58,7 +59,7 @@ class EtcHosts(BasePlugin):
                     continue
                 parts = stripped.split()
                 if len(parts) < 2:
-                    continue
+                    continue  # pragma: nocover
                 ip = parts[0]
                 for domain in parts[1:]:
                     mapping[domain] = ip

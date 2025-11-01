@@ -36,7 +36,7 @@ tests: test
 test: build
 	@echo "=== Running tests (short) ==="
 	python -m venv $(VENV) && . ${VENV}/bin/activate || true   # ignore error if it already exists
-	${VENV}/bin/pytest
+	${VENV}/bin/pytest --cov=foghorn tests
 
 # ------------------------------------------------------------
 # Clean temporary artefacts

@@ -7,6 +7,7 @@ Inputs:
 Outputs:
   - None
 """
+
 import pytest
 from dnslib import DNSRecord, QTYPE
 from foghorn.plugins.base import PluginContext

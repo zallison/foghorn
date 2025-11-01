@@ -7,8 +7,13 @@ Inputs:
 Outputs:
   - None
 """
+
 import pytest
-from foghorn.server import _set_response_id, compute_effective_ttl, send_query_with_failover
+from foghorn.server import (
+    _set_response_id,
+    compute_effective_ttl,
+    send_query_with_failover,
+)
 from dnslib import DNSRecord, DNSHeader, QTYPE, RR, A, RCODE
 
 
@@ -89,6 +94,7 @@ def test_send_query_with_failover_parsing_and_servfail_failover(monkeypatch):
     Outputs:
       - None: Asserts second upstream chosen and 'ok' reason
     """
+
     class DummyQuery:
         def send(self, host, port, timeout=None):
             if host == "bad":
@@ -136,6 +142,7 @@ def test_send_query_with_failover_all_failed(monkeypatch):
     Outputs:
       - None: Asserts all_failed with None response
     """
+
     class DummyQuery:
         def send(self, host, port, timeout=None):
             raise RuntimeError("boom")
@@ -168,5 +175,7 @@ def test_send_query_with_failover_no_upstreams():
       - None: Asserts (None, None, 'no_upstreams')
     """
     q = DNSRecord.question("example.com", "A")
-    resp, used, reason = send_query_with_failover(q, upstreams=[], timeout_ms=100, qname="x", qtype=1)
+    resp, used, reason = send_query_with_failover(
+        q, upstreams=[], timeout_ms=100, qname="x", qtype=1
+    )
     assert resp is None and used is None and reason == "no_upstreams"

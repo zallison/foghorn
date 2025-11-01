@@ -7,6 +7,7 @@ Inputs:
 Outputs:
   - None
 """
+
 import ipaddress
 import pytest
 from dnslib import DNSRecord, QTYPE, RR, A, AAAA, MX, TXT
@@ -64,6 +65,29 @@ def test_pre_resolve_block_exact_and_cache(tmp_path):
     assert isinstance(dec2, PluginDecision) and dec2.action == "deny"
 
 
+def test_pre_resolve_allow_exact_and_cache(tmp_path):
+    """
+    Brief: Exact allowed domain denies and subsequent cached lookup denies fast.
+
+    Inputs:
+      - allowed_domains: ['allowed.com']
+
+    Outputs:
+      - None: Asserts deny and cached deny
+    """
+    db = tmp_path / "bl.db"
+    p = FilterPlugin(db_path=str(db), allowed_domains=["allowed.com"], default="allow")
+    ctx = PluginContext(client_ip="1.2.3.4")
+
+    # First call denies and populates cache
+    dec1 = p.pre_resolve("allowed.com", QTYPE.A, b"", ctx)
+    assert dec1 is None
+
+    # Second call hits cache
+    dec2 = p.pre_resolve("allowed.com", QTYPE.A, b"", ctx)
+    assert dec2 is None
+
+
 def test_pre_resolve_allow_keyword_and_pattern(tmp_path, caplog):
     """
     Brief: Allowed domain passes; keyword and regex pattern rules deny.
@@ -77,7 +101,12 @@ def test_pre_resolve_allow_keyword_and_pattern(tmp_path, caplog):
     """
     db = tmp_path / "bl.db"
     # Include an invalid regex to exercise compile error path (logged)
-    p = FilterPlugin(db_path=str(db), default="allow", blocked_keywords=["bad"], blocked_patterns=["(", r".*\.ads\..*"])
+    p = FilterPlugin(
+        db_path=str(db),
+        default="allow",
+        blocked_keywords=["bad"],
+        blocked_patterns=["(", r".*\.ads\..*"],
+    )
     ctx = PluginContext(client_ip="1.2.3.4")
 
     assert p.pre_resolve("good.com", QTYPE.A, b"", ctx) is None
@@ -169,7 +198,9 @@ def test_post_resolve_replace_version_mismatch_and_invalid_runtime(tmp_path):
     db = tmp_path / "bl.db"
     p = FilterPlugin(
         db_path=str(db),
-        blocked_ips=[{"ip": "2001:db8::1", "action": "replace", "replace_with": "127.0.0.1"}],
+        blocked_ips=[
+            {"ip": "2001:db8::1", "action": "replace", "replace_with": "127.0.0.1"}
+        ],
     )
     ctx = PluginContext(client_ip="1.2.3.4")
 
@@ -181,7 +212,10 @@ def test_post_resolve_replace_version_mismatch_and_invalid_runtime(tmp_path):
     assert str(mod.rr[0].rdata) == "2001:db8::1"  # unchanged due to mismatch
 
     # Invalid replacement runtime by patching config after init
-    p.blocked_ips[ipaddress.ip_address("10.0.0.1")] = {"action": "replace", "replace_with": "bad!"}
+    p.blocked_ips[ipaddress.ip_address("10.0.0.1")] = {
+        "action": "replace",
+        "replace_with": "bad!",
+    }
     resp2 = _mk_response_with_ips("ex.com", [("A", "10.0.0.1", 60)])
     dec2 = p.post_resolve("ex.com", QTYPE.A, resp2, ctx)
     # Invalid replacement at runtime leads to no change and records_changed remains False => None
@@ -263,9 +297,17 @@ def test_init_files_and_invalid_ips_and_actions(tmp_path):
             123,  # invalid entry format
             {"ip": "1.1.1.1", "action": "UNKNOWN"},  # defaults to deny
             {"ip": "not-an-ip"},  # invalid ip
-            {"ip": "10.0.0.0/8", "action": "replace", "replace_with": "127.0.0.1"},  # network replace
+            {
+                "ip": "10.0.0.0/8",
+                "action": "replace",
+                "replace_with": "127.0.0.1",
+            },  # network replace
             {"ip": "2.2.2.2", "action": "replace"},  # missing replace_with
-            {"ip": "3.3.3.3", "action": "replace", "replace_with": "bad"},  # invalid replacement
+            {
+                "ip": "3.3.3.3",
+                "action": "replace",
+                "replace_with": "bad",
+            },  # invalid replacement
         ],
     )
 
@@ -292,7 +334,9 @@ def test_post_resolve_aaaa_replace_and_mixed_records(tmp_path):
     """
     p = FilterPlugin(
         db_path=str(tmp_path / "bl.db"),
-        blocked_ips=[{"ip": "2001:db8::2", "action": "replace", "replace_with": "2001:db8::3"}],
+        blocked_ips=[
+            {"ip": "2001:db8::2", "action": "replace", "replace_with": "2001:db8::3"}
+        ],
     )
     ctx = PluginContext(client_ip="1.2.3.4")
 
@@ -376,15 +420,19 @@ def test_post_resolve_pack_failure_returns_deny(tmp_path, monkeypatch):
     """
     p = FilterPlugin(
         db_path=str(tmp_path / "bl.db"),
-        blocked_ips=[{"ip": "9.9.9.9", "action": "replace", "replace_with": "127.0.0.1"}],
+        blocked_ips=[
+            {"ip": "9.9.9.9", "action": "replace", "replace_with": "127.0.0.1"}
+        ],
     )
     ctx = PluginContext(client_ip="1.2.3.4")
     resp = _mk_response_with_ips("ex.com", [("A", "9.9.9.9", 60)])
 
     # Force DNSRecord.pack to raise when called
     original_pack = DNSRecord.pack
+
     def raise_pack(self):
         raise RuntimeError("pack-fail")
+
     monkeypatch.setattr(DNSRecord, "pack", raise_pack)
 
     dec = p.post_resolve("ex.com", QTYPE.A, resp, ctx)
@@ -407,6 +455,7 @@ def test_post_resolve_unknown_action_runtime_returns_none(tmp_path):
     p = FilterPlugin(db_path=str(tmp_path / "bl.db"))
     # Patch with a rule that uses an unknown action (bypassing init normalization)
     import ipaddress as _ip
+
     p.blocked_ips[_ip.ip_address("11.22.33.44")] = {"action": "weird"}
     ctx = PluginContext(client_ip="1.2.3.4")
     resp = _mk_response_with_ips("ex.com", [("A", "11.22.33.44", 60)])

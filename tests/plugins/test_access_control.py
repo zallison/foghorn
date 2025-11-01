@@ -7,6 +7,7 @@ Inputs:
 Outputs:
   - None
 """
+
 import pytest
 from foghorn.plugins.access_control import AccessControlPlugin
 from foghorn.plugins.base import PluginContext, PluginDecision

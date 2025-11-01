@@ -7,12 +7,18 @@ Inputs:
 Outputs:
   - None
 """
+
 import logging
 from unittest.mock import patch, mock_open
 import pytest
 
 import foghorn.main as main_mod
-from foghorn.main import _get_min_cache_ttl, normalize_upstream_config, load_plugins, main
+from foghorn.main import (
+    _get_min_cache_ttl,
+    normalize_upstream_config,
+    load_plugins,
+    main,
+)
 
 
 def test_get_min_cache_ttl_various_inputs():
@@ -42,26 +48,33 @@ def test_normalize_upstream_config_list_and_dict(caplog):
       - None: Asserts upstreams parsed and warning emitted
     """
     # List form
-    ups, to = normalize_upstream_config({
-        "upstream": [{"host": "1.1.1.1", "port": 53}, {"host": "1.0.0.1", "port": 53}],
-        "timeout_ms": 1500,
-    })
+    ups, to = normalize_upstream_config(
+        {
+            "upstream": [
+                {"host": "1.1.1.1", "port": 53},
+                {"host": "1.0.0.1", "port": 53},
+            ],
+            "timeout_ms": 1500,
+        }
+    )
     assert ups == [{"host": "1.1.1.1", "port": 53}, {"host": "1.0.0.1", "port": 53}]
     assert to == 1500
 
     # Dict legacy form with legacy timeout
-    ups2, to2 = normalize_upstream_config({
-        "upstream": {"host": "8.8.8.8", "port": 53, "timeout_ms": 999}
-    })
+    ups2, to2 = normalize_upstream_config(
+        {"upstream": {"host": "8.8.8.8", "port": 53, "timeout_ms": 999}}
+    )
     assert ups2 == [{"host": "8.8.8.8", "port": 53}]
     assert to2 == 999
 
     # Precedence warning when both provided
     caplog.set_level(logging.WARNING)
-    ups3, to3 = normalize_upstream_config({
-        "timeout_ms": 111,
-        "upstream": {"host": "8.8.4.4", "port": 53, "timeout_ms": 999}
-    })
+    ups3, to3 = normalize_upstream_config(
+        {
+            "timeout_ms": 111,
+            "upstream": {"host": "8.8.4.4", "port": 53, "timeout_ms": 999},
+        }
+    )
     assert to3 == 111
     assert any("top-level timeout_ms" in r.message for r in caplog.records)
 
@@ -76,6 +89,7 @@ def test_load_plugins_uses_registry(monkeypatch):
     Outputs:
       - None: Asserts instances created with config
     """
+
     class P1:
         def __init__(self, **kw):
             self.kw = kw
@@ -90,7 +104,9 @@ def test_load_plugins_uses_registry(monkeypatch):
         return alias_map
 
     def fake_get(identifier, reg=None):
-        return alias_map.get(identifier, alias_map["a"]) if identifier in alias_map else P2
+        return (
+            alias_map.get(identifier, alias_map["a"]) if identifier in alias_map else P2
+        )
 
     monkeypatch.setattr(main_mod, "discover_plugins", fake_discover)
     monkeypatch.setattr(main_mod, "get_plugin_class", fake_get)
@@ -150,8 +166,19 @@ def test_main_starts_server_and_handles_keyboardinterrupt(monkeypatch):
     )
 
     class DummyServer:
-        def __init__(self, host, port, upstreams, plugins, timeout, timeout_ms, min_cache_ttl):
-            self.args = (host, port, upstreams, plugins, timeout, timeout_ms, min_cache_ttl)
+        def __init__(
+            self, host, port, upstreams, plugins, timeout, timeout_ms, min_cache_ttl
+        ):
+            self.args = (
+                host,
+                port,
+                upstreams,
+                plugins,
+                timeout,
+                timeout_ms,
+                min_cache_ttl,
+            )
+
         def serve_forever(self):
             raise KeyboardInterrupt
 
@@ -201,6 +228,7 @@ def test_main_returns_one_on_exception_alt(monkeypatch):
     class DummyServer:
         def __init__(self, *a, **kw):
             pass
+
         def serve_forever(self):
             raise ValueError("boom2")
 

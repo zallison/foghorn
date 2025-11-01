@@ -7,6 +7,7 @@ Inputs:
 Outputs:
   - None
 """
+
 import signal
 import pytest
 

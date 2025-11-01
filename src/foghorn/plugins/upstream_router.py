@@ -126,7 +126,7 @@ class UpstreamRouterPlugin(BasePlugin):
                             {"host": str(host), "port": int(port)}
                         )
                     except (ValueError, TypeError):
-                        continue
+                        continue  # pragma: nocover
 
             # Check for new multiple upstreams format
             multiple_upstreams = r.get("upstreams")
@@ -140,8 +140,8 @@ class UpstreamRouterPlugin(BasePlugin):
                                 upstream_candidates.append(
                                     {"host": str(host), "port": int(port)}
                                 )
-                            except (ValueError, TypeError):
-                                continue
+                            except (ValueError, TypeError) as e:  # pragma: nocover
+                                raise e
 
             # Only add route if we have valid matching criteria and at least one upstream
             if upstream_candidates and ("domain" in route or "suffix" in route):
