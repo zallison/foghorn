@@ -7,17 +7,11 @@ WORKDIR /foghorn
 # Copy the current directory contents into the container
 COPY . /foghorn
 
-# Create a virtual environment and install
-RUN pip install -e . && \
-    pytest
-
-RUN mkdir /config
-COPY ./config/config.yaml /config/
-
-# Ensure the virtual environment is used by default
-ENV PATH="/foghorn/venv/bin:$PATH"
+RUN DEBIAN_FRONTEND=noninteractive apt update && \
+    DEBIAN_FRONTEND=noninteractive apt install -y python3-pip && \
+    pip install .
 
 EXPOSE 5353/udp
 
 # Define the default command to run when the container starts
-CMD ["foghorn", "--config", "/config/config.yaml"]
+CMD [ "/foghorn/entrypoint.sh" ]

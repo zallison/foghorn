@@ -1,3 +1,3 @@
 #!/usr/bin/env sh
 
-. venv/bin/active || ( python -m venv venv && . venv/bin/activate )
+foghorn --config /foghorn/config/config.yaml
