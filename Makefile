@@ -4,7 +4,6 @@ PREFIX ?=  ${USER}
 CONFIG_DIR ?= ./config
 CONTAINER_NAME ?= foghorn
 TAG ?= latest
->>>>>>> 330e20a (Docker updates)
 
 # Files/folders that should NOT be deleted by `clean`
 # (Keep YAML files, so we exclude *.yaml and *.yml from the delete patterns)
