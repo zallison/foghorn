@@ -1,8 +1,10 @@
 # Name of the virtual‑env directory
-VENV := venv
-IMAGE_PREFIX ?=  my
-CONFIG_DIR ?= config
+VENV ?= ./venv
+PREFIX ?=  ${USER}
+CONFIG_DIR ?= ./config
 CONTAINER_NAME ?= foghorn
+TAG ?= latest
+>>>>>>> 330e20a (Docker updates)
 
 # Files/folders that should NOT be deleted by `clean`
 # (Keep YAML files, so we exclude *.yaml and *.yml from the delete patterns)
@@ -15,7 +17,7 @@ IGNORE_EXTS :=  .yaml .yml
 #
 # ------------------------------------------------------------
 .PHONY: run
-run: env
+run: env build
 	mkdir var 2>/dev/null || true
 	foghorn --config config/config.yaml
 
@@ -29,7 +31,7 @@ env:
 	python -m venv $(VENV) && . ${VENV}/bin/activate || . ${VENV}/bin/activate   # ignore error if it already exists
 
 .PHONY: build
-build:
+build: env
 	@echo "=== Installing project in editable mode ==="
 	$(VENV)/bin/pip install -e ".[dev]"
 
@@ -63,16 +65,20 @@ clean:
 # ---------------
 .PHONY: docker-build
 docker-build:
-	docker build . -t ${IMAGE_PREFIX}/${CONTAINER_NAME}:latest
+	docker build . -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-run
 docker-run:
 	docker rm -f foghorn 2> /dev/null
-	docker run --name foghorn -d -p 53:5353/udp -v ${CONFIG_DIR}:/foghorn/config -v /etc/hosts:/etc/hosts:ro --restart unless-stopped ${IMAGE_PREFIX}/${CONTAINER_NAME}:latest
+	docker run --name foghorn -d -p 53:5353/udp -v ${CONFIG_DIR}:/foghorn/config -v /etc/hosts:/etc/hosts:ro --restart unless-stopped ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHHONY: docker-logs
 docker-logs:
 	docker logs -f foghorn
+
+.PHONY: dev-ship
+dev-ship: clean docker-build
+	docker push ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 # ------------------------------------------------------------
 # Help
@@ -84,4 +90,3 @@ help:
 	@echo "  docker-build   – Create docker image)"
 	@echo "  test           – Run pytest"
 	@echo "  clean          – Remove venv/, var/, amd temp files"
-
