@@ -210,6 +210,33 @@ def test_normalize_upstream_config_bad_type_default_fallback():
     assert ups == [{"host": "1.1.1.1", "port": 53}]
 
 
+def test_normalize_upstream_config_defaults_port_to_53():
+    """
+    Brief: Port defaults to 53 when not provided.
+
+    Inputs:
+      - cfg: upstream dict and list without port specified
+
+    Outputs:
+      - None: Asserts port defaults to 53
+    """
+    # List format without port
+    ups, _ = normalize_upstream_config(
+        {"upstream": [{"host": "8.8.8.8"}, {"host": "1.1.1.1"}]}
+    )
+    assert ups == [{"host": "8.8.8.8", "port": 53}, {"host": "1.1.1.1", "port": 53}]
+
+    # Dict format without port
+    ups2, _ = normalize_upstream_config({"upstream": {"host": "9.9.9.9"}})
+    assert ups2 == [{"host": "9.9.9.9", "port": 53}]
+
+    # Mixed - some with port, some without
+    ups3, _ = normalize_upstream_config(
+        {"upstream": [{"host": "1.1.1.1", "port": 5353}, {"host": "8.8.8.8"}]}
+    )
+    assert ups3 == [{"host": "1.1.1.1", "port": 5353}, {"host": "8.8.8.8", "port": 53}]
+
+
 def test_main_returns_one_on_exception_alt(monkeypatch):
     """
     Brief: main() returns 1 on unexpected exception from server.

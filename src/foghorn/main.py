@@ -71,13 +71,13 @@ def normalize_upstream_config(
         # New format: list of upstream objects
         upstreams = []
         for u in upstream_raw:
-            if isinstance(u, dict) and "host" in u and "port" in u:
-                upstreams.append({"host": str(u["host"]), "port": int(u["port"])})
+            if isinstance(u, dict) and "host" in u:
+                upstreams.append({"host": str(u["host"]), "port": int(u.get("port", 53))})
     elif isinstance(upstream_raw, dict):
         # Legacy format: single upstream object
-        if "host" in upstream_raw and "port" in upstream_raw:
+        if "host" in upstream_raw:
             upstreams = [
-                {"host": str(upstream_raw["host"]), "port": int(upstream_raw["port"])}
+                {"host": str(upstream_raw["host"]), "port": int(upstream_raw.get("port", 53))}
             ]
         else:
             # Default fallback
