@@ -15,11 +15,23 @@ import importlib.util
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SRC_DIR = os.path.join(ROOT, "src")
-PLUGIN_PATH = os.path.join(SRC_DIR, "foghorn", "plugins", "flakey_server.py")
+PKG_DIR = os.path.join(SRC_DIR, "foghorn")
+PLUG_DIR = os.path.join(PKG_DIR, "plugins")
+PLUGIN_PATH = os.path.join(PLUG_DIR, "flakey_server.py")
 
-spec = importlib.util.spec_from_file_location("_flakey_server_local", PLUGIN_PATH)
+# Synthesize a local package hierarchy so relative imports resolve inside flakey_server
+import types
+foghorn_pkg = types.ModuleType("foghorn")
+foghorn_pkg.__path__ = [PKG_DIR]
+sys.modules["foghorn"] = foghorn_pkg
+
+plugins_pkg = types.ModuleType("foghorn.plugins")
+plugins_pkg.__path__ = [PLUG_DIR]
+sys.modules["foghorn.plugins"] = plugins_pkg
+
+spec = importlib.util.spec_from_file_location("foghorn.plugins.flakey_server", PLUGIN_PATH)
 mod = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = mod  # register under a private name
+sys.modules[spec.name] = mod
 assert spec.loader is not None
 spec.loader.exec_module(mod)
 FlakeyServer = mod.FlakeyServer
