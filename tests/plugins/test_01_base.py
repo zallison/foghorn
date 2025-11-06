@@ -202,15 +202,16 @@ def test_plugin_aliases_decorator_none():
 
 def test_base_plugin_priority_default():
     """
-    Brief: Verify BasePlugin has default priority.
+    Brief: Verify BasePlugin has default pre and post priorities.
 
     Inputs:
       - None
 
     Outputs:
-      - None: Asserts priority value
+      - None: Asserts priority values
     """
-    assert BasePlugin.priority == 5
+    assert BasePlugin.pre_priority == 50
+    assert BasePlugin.post_priority == 50
 
 
 def test_base_plugin_subclass_inheritance():

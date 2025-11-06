@@ -242,12 +242,13 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
         Notes:
             Returns None to continue processing, or PluginDecision for deny/override.
+            Plugins are executed in ascending pre_priority order (1=earliest, stable ties).
 
         Example:
             decision = self._apply_pre_plugins(request, qname, qtype, data, ctx)
         """
-        # Pre-resolve plugin checks
-        for p in self.plugins:
+        # Pre-resolve plugin checks sorted by pre_priority (ascending, stable)
+        for p in sorted(self.plugins, key=lambda p: getattr(p, 'pre_priority', 50)):
             decision = p.pre_resolve(qname, qtype, data, ctx)
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
@@ -365,13 +366,14 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
         Notes:
             May modify the response or return error responses based on plugin decisions.
+            Plugins are executed in ascending post_priority order (1=earliest, stable ties).
 
         Example:
             response = self._apply_post_plugins(request, qname, qtype, response_wire, ctx)
         """
         reply = response_wire
-        # Post-resolve plugin hooks (allow overrides like rewriting)
-        for p in self.plugins:
+        # Post-resolve plugin hooks sorted by post_priority (ascending, stable)
+        for p in sorted(self.plugins, key=lambda p: getattr(p, 'post_priority', 50)):
             decision = p.post_resolve(qname, qtype, reply, ctx)
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
@@ -517,8 +519,8 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
             ctx = PluginContext(client_ip=client_ip)
 
-            # Pre-resolve plugin checks
-            for p in self.plugins:
+            # Pre-resolve plugin checks sorted by pre_priority (ascending, stable)
+            for p in sorted(self.plugins, key=lambda p: getattr(p, 'pre_priority', 50)):
                 decision = p.pre_resolve(qname, qtype, data, ctx)
                 if isinstance(decision, PluginDecision):
                     if decision.action == "deny":

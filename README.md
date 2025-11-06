@@ -419,6 +419,100 @@ You can extend Foghorn by creating your own plugins. A plugin is a Python class 
 *   `pre_resolve(self, qname, qtype, ctx)`: This method is called before a query is resolved. It can return a `PluginDecision` to `allow`, `deny`, or `override` the query.
 *   `post_resolve(self, qname, qtype, response_wire, ctx)`: This method is called after a query has been resolved. It can also return a `PluginDecision` to modify the response.
 
+### Hook Priorities
+
+Plugins can specify the execution order of their hooks using priority values. Lower numbers run earlier.
+
+**Key Properties:**
+*   **Range**: 1 (earliest) to 255 (latest)
+*   **Default**: 50 for both `pre_priority` and `post_priority`
+*   **Ties**: Plugins with equal priorities execute in registration order (stable sort)
+*   **Configuration**: Set via class attributes or per-instance YAML config
+
+**Class-Level Defaults:**
+
+```python
+from foghorn.plugins.base import BasePlugin
+
+class AllowlistPlugin(BasePlugin):
+    pre_priority = 10  # Run early in pre-resolve
+    
+    def pre_resolve(self, qname, qtype, req, ctx):
+        # Check allowlist before other plugins
+        ...
+
+class BlocklistPlugin(BasePlugin):
+    pre_priority = 20  # Run after allowlist
+    
+    def pre_resolve(self, qname, qtype, req, ctx):
+        # Check blocklist
+        ...
+
+class RedirectPlugin(BasePlugin):
+    pre_priority = 100  # Run later
+    post_priority = 120
+    
+    def pre_resolve(self, qname, qtype, req, ctx):
+        # Route to different upstreams
+        ...
+```
+
+**YAML Configuration Overrides:**
+
+You can override priorities per plugin instance in your config file:
+
+```yaml
+plugins:
+  # Access control runs first
+  - module: acl
+    pre_priority: 10
+    config:
+      default: allow
+      deny:
+        - "192.0.2.0/24"
+  
+  # Blocklist runs second
+  - module: filter
+    pre_priority: 20
+    config:
+      blocked_domains:
+        - "malware.com"
+  
+  # Upstream routing runs later
+  - module: router
+    pre_priority: 100
+    config:
+      routes:
+        - suffix: ".corp"
+          upstream:
+            host: 10.0.0.1
+            port: 53
+```
+
+**Why Priorities Matter:**
+
+Priorities let you ensure critical checks happen first. For example:
+*   **Access control** (priority 10) blocks unauthorized clients before other processing
+*   **Allowlist/Blocklist** (priority 20) filters domains before routing decisions
+*   **Upstream routing** (priority 100) runs after filtering is complete
+
+**Legacy `priority` Key (Deprecated):**
+
+Older configs may use `priority` instead of `pre_priority`/`post_priority`. This sets both hooks to the same value and will log a warning. Migrate to the specific keys:
+
+```yaml
+# Old (deprecated):
+plugins:
+  - module: acl
+    priority: 10
+
+# New (preferred):
+plugins:
+  - module: acl
+    pre_priority: 10
+    post_priority: 50  # Use default or set explicitly
+```
+
 
 ## Makefile Targets
 

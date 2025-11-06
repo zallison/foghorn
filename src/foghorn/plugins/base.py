@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple, ClassVar, Sequence, List, Dict, Union
+import logging
 
 
 @dataclass
@@ -62,17 +63,26 @@ class BasePlugin:
     """
     Base class for all plugins.
 
+    Hook priorities control execution order:
+      - pre_priority: Order for pre_resolve hooks (1=earliest, 255=latest, default 50)
+      - post_priority: Order for post_resolve hooks (1=earliest, 255=latest, default 50)
+      - Ties preserve registration order (stable sort)
+
     Example use:
         >>> from foghorn.plugins.base import BasePlugin
         >>> class MyPlugin(BasePlugin):
+        ...     pre_priority = 10  # Run early
         ...     def pre_resolve(self, qname, qtype, ctx):
         ...         return None
         >>> plugin = MyPlugin(config={})
         >>> plugin.pre_resolve("example.com", 1, None) is None
         True
+        >>> plugin.pre_priority
+        10
     """
 
-    priority = 5
+    pre_priority: int = 50
+    post_priority: int = 50
 
     aliases: ClassVar[Sequence[str]] = ()
 
@@ -83,18 +93,88 @@ class BasePlugin:
 
     def __init__(self, **config):
         """
-        Initializes the BasePlugin.
+        Initializes the BasePlugin and parses per-hook priorities.
 
         Args:
-            **config: Plugin-specific configuration.
+            **config: Plugin-specific configuration, may include:
+                - pre_priority: int (1-255) for pre_resolve order
+                - post_priority: int (1-255) for post_resolve order
+                - priority: int (deprecated legacy; applies to both if specific not provided)
+
+        Outputs:
+            None (side effects: sets self.pre_priority, self.post_priority; logs warnings on invalid/clamped values)
 
         Example use:
             >>> from foghorn.plugins.base import BasePlugin
-            >>> plugin = BasePlugin(my_config="value")
+            >>> plugin = BasePlugin(my_config="value", pre_priority=10)
             >>> plugin.config["my_config"]
             'value'
+            >>> plugin.pre_priority
+            10
         """
         self.config = config
+        
+        # Parse priorities with clamping [1, 255]
+        cls_pre = type(self).pre_priority
+        cls_post = type(self).post_priority
+        
+        # Legacy 'priority' falls back for both if specific keys absent
+        legacy = config.get('priority')
+        pre_val = config.get('pre_priority', legacy if legacy is not None else cls_pre)
+        post_val = config.get('post_priority', legacy if legacy is not None else cls_post)
+        
+        self.pre_priority = self._parse_priority(pre_val, cls_pre, 'pre')
+        self.post_priority = self._parse_priority(post_val, cls_post, 'post')
+        
+        # Warn if legacy used alongside specific keys
+        if legacy is not None and ('pre_priority' in config or 'post_priority' in config):
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "Plugin %s: legacy 'priority' ignored where per-hook priorities provided; "
+                "use 'pre_priority'/'post_priority' only.",
+                type(self).__name__
+            )
+
+    @staticmethod
+    def _parse_priority(value, default: int, which: str) -> int:
+        """
+        Coerce and clamp a priority value into [1, 255].
+
+        Inputs:
+          - value: The configured value (any type)
+          - default: The default to use when value is None or invalid
+          - which: 'pre' or 'post' for log context
+
+        Outputs:
+          - int: The clamped priority in [1, 255]
+
+        Details:
+          - Non-integer values are coerced via int(); on failure, default is used and a warning is logged.
+          - Values below 1 are clamped to 1; above 255 are clamped to 255; warnings are logged.
+
+        Example:
+          >>> BasePlugin._parse_priority(0, 50, "pre")
+          1
+          >>> BasePlugin._parse_priority(300, 50, "post")
+          255
+          >>> BasePlugin._parse_priority(100, 50, "pre")
+          100
+        """
+        logger = logging.getLogger(__name__)
+        if value is None:
+            return default
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            logger.warning("Invalid %s_priority %r; using default %d", which, value, default)
+            return default
+        if n < 1:
+            logger.warning("%s_priority %d below 1; clamping to 1", which, n)
+            return 1
+        if n > 255:
+            logger.warning("%s_priority %d above 255; clamping to 255", which, n)
+            return 255
+        return n
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
