@@ -17,8 +17,8 @@ IGNORE_EXTS :=  .yaml .yml
 # ------------------------------------------------------------
 .PHONY: run
 run: env build
-	mkdir var 2>/dev/null || true
-	foghorn --config config/config.yaml
+        mkdir var 2>/dev/null || true
+        foghorn --config config/config.yaml
 
 
 # ------------------------------------------------------------
@@ -26,13 +26,13 @@ run: env build
 # ------------------------------------------------------------
 .PHONY: env
 env:
-	@echo "=== Creating virtual environment ==="
-	python -m venv $(VENV) && . ${VENV}/bin/activate || . ${VENV}/bin/activate   # ignore error if it already exists
+        @echo "=== Creating virtual environment ==="
+        python -m venv $(VENV) && . ${VENV}/bin/activate || . ${VENV}/bin/activate   # ignore error if it already exists
 
 .PHONY: build
 build: env
-	@echo "=== Installing project in editable mode ==="
-	$(VENV)/bin/pip install -e ".[dev]"
+        @echo "=== Installing project in editable mode ==="
+        $(VENV)/bin/pip install -e ".[dev]"
 
 # ------------------------------------------------------------
 # Run tests
@@ -40,23 +40,23 @@ build: env
 .PHONY: test tests
 tests: test
 test:
-	@echo "=== Running tests (short) ==="
-	python -m venv $(VENV) && . ${VENV}/bin/activate || true   # ignore error if it already exists
-	pytest --cov=foghorn tests
+        @echo "=== Running tests (short) ==="
+        python -m venv $(VENV) && . ${VENV}/bin/activate || true   # ignore error if it already exists
+        pytest --cov=foghorn tests
 
 # ------------------------------------------------------------
 # Clean temporary artefacts
 # ------------------------------------------------------------
 .PHONY: clean
 clean:
-	@echo "=== Removing virtual environment and var directory ==="
-	rm -rf $(VENV) var
-	@echo "=== Removing temporary files and byte‑code ==="
-	# Delete __pycache__ directories
-	find . -type d -name "__pycache__" -exec rm -rf {} +;
-	# Delete .pyc, .tmp, backup (~) and vim swap files
-	find . -type f \
-		\( -name '*.pyc' -o -name '*.tmp' -o -name '*~' -o -name '#*' -o -name '*.swp' \) -delete
+        @echo "=== Removing virtual environment and var directory ==="
+        rm -rf $(VENV) var
+        @echo "=== Removing temporary files and byte‑code ==="
+        # Delete __pycache__ directories
+        find . -type d -name "__pycache__" -exec rm -rf {} +;
+        # Delete .pyc, .tmp, backup (~) and vim swap files
+        find . -type f \
+                \( -name '*.pyc' -o -name '*.tmp' -o -name '*~' -o -name '#*' -o -name '*.swp' \) -delete
         # Keep YAML files – nothing more needed
 
 # ---------------
@@ -64,28 +64,28 @@ clean:
 # ---------------
 .PHONY: docker-build
 docker-build:
-	docker build . -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
+        docker build . -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-run
 docker-run:
-	docker rm -f foghorn 2> /dev/null
-	docker run --name foghorn -d -p 53:5353/udp -v ${CONFIG_DIR}:/foghorn/config -v /etc/hosts:/etc/hosts:ro --restart unless-stopped ${PREFIX}/${CONTAINER_NAME}:${TAG}
+        docker rm -f foghorn 2> /dev/null
+        docker run --name foghorn -d -p 53:5353/udp -v ${CONFIG_DIR}:/foghorn/config -v /etc/hosts:/etc/hosts:ro --restart unless-stopped ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHHONY: docker-logs
 docker-logs:
-	docker logs -f foghorn
+        docker logs -f foghorn
 
 .PHONY: dev-ship
 dev-ship: clean docker-build
-	docker push ${PREFIX}/${CONTAINER_NAME}:${TAG}
+        docker push ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 # ------------------------------------------------------------
 # Help
 # ------------------------------------------------------------
 .PHONY: help
 help:
-	@echo "Makefile targets:"
-	@echo "  run            – Execute foghorn --config config.yaml"
-	@echo "  docker-build   – Create docker image)"
-	@echo "  test           – Run pytest"
-	@echo "  clean          – Remove venv/, var/, amd temp files"
+        @echo "Makefile targets:"
+        @echo "  run            – Execute foghorn --config config.yaml"
+        @echo "  docker-build   – Create docker image)"
+        @echo "  test           – Run pytest"
+        @echo "  clean          – Remove venv/, var/, amd temp files"
