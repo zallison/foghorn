@@ -25,7 +25,7 @@ def test_default_priorities_are_50():
     """
     assert BasePlugin.pre_priority == 50
     assert BasePlugin.post_priority == 50
-    
+
     plugin = BasePlugin()
     assert plugin.pre_priority == 50
     assert plugin.post_priority == 50
@@ -41,6 +41,7 @@ def test_class_attribute_defaults_respected():
     Outputs:
       - None: Asserts instances inherit class priorities
     """
+
     class PluginA(BasePlugin):
         pre_priority = 10
 
@@ -49,7 +50,7 @@ def test_class_attribute_defaults_respected():
 
     a = PluginA()
     b = PluginB()
-    
+
     assert a.pre_priority == 10
     assert a.post_priority == 50  # default
     assert b.pre_priority == 100
@@ -66,6 +67,7 @@ def test_yaml_config_overrides_class_defaults():
     Outputs:
       - None: Asserts instance uses config values over class defaults
     """
+
     class MyPlugin(BasePlugin):
         pre_priority = 30
         post_priority = 40
@@ -87,7 +89,7 @@ def test_legacy_priority_applies_to_both_hooks(caplog):
     """
     with caplog.at_level(logging.WARNING):
         plugin = BasePlugin(priority=15)
-    
+
     assert plugin.pre_priority == 15
     assert plugin.post_priority == 15
 
@@ -104,7 +106,7 @@ def test_legacy_priority_ignored_with_specific_keys(caplog):
     """
     with caplog.at_level(logging.WARNING):
         plugin = BasePlugin(priority=99, pre_priority=7, post_priority=88)
-    
+
     assert plugin.pre_priority == 7
     assert plugin.post_priority == 88
     assert any("legacy 'priority' ignored" in rec.message for rec in caplog.records)
@@ -122,7 +124,7 @@ def test_clamping_below_range(caplog):
     """
     with caplog.at_level(logging.WARNING):
         plugin = BasePlugin(pre_priority=0, post_priority=-5)
-    
+
     assert plugin.pre_priority == 1
     assert plugin.post_priority == 1
     assert any("below 1; clamping to 1" in rec.message for rec in caplog.records)
@@ -140,7 +142,7 @@ def test_clamping_above_range(caplog):
     """
     with caplog.at_level(logging.WARNING):
         plugin = BasePlugin(pre_priority=256, post_priority=1000)
-    
+
     assert plugin.pre_priority == 255
     assert plugin.post_priority == 255
     assert any("above 255; clamping to 255" in rec.message for rec in caplog.records)
@@ -158,7 +160,7 @@ def test_invalid_type_uses_default(caplog):
     """
     with caplog.at_level(logging.WARNING):
         plugin = BasePlugin(pre_priority="abc")
-    
+
     assert plugin.pre_priority == 50  # fallback to class default
     assert any("Invalid pre_priority" in rec.message for rec in caplog.records)
 
@@ -173,6 +175,7 @@ def test_stable_ties_preserve_registration_order():
     Outputs:
       - None: Asserts sorted order equals original order
     """
+
     class PluginA(BasePlugin):
         pass
 
@@ -183,14 +186,14 @@ def test_stable_ties_preserve_registration_order():
         pass
 
     plugins = [PluginA(), PluginB(), PluginC()]
-    
+
     # Sort by pre_priority (all 50)
-    sorted_pre = sorted(plugins, key=lambda p: getattr(p, 'pre_priority', 50))
-    assert [type(p).__name__ for p in sorted_pre] == ['PluginA', 'PluginB', 'PluginC']
-    
+    sorted_pre = sorted(plugins, key=lambda p: getattr(p, "pre_priority", 50))
+    assert [type(p).__name__ for p in sorted_pre] == ["PluginA", "PluginB", "PluginC"]
+
     # Sort by post_priority (all 50)
-    sorted_post = sorted(plugins, key=lambda p: getattr(p, 'post_priority', 50))
-    assert [type(p).__name__ for p in sorted_post] == ['PluginA', 'PluginB', 'PluginC']
+    sorted_post = sorted(plugins, key=lambda p: getattr(p, "post_priority", 50))
+    assert [type(p).__name__ for p in sorted_post] == ["PluginA", "PluginB", "PluginC"]
 
 
 def test_integration_ordering_pre_hooks():
@@ -204,37 +207,37 @@ def test_integration_ordering_pre_hooks():
       - None: Asserts pre execution order: Allowlist -> Blocklist -> Redirect
     """
     execution_order = []
-    
+
     class AllowlistPlugin(BasePlugin):
         pre_priority = 10
-        
+
         def pre_resolve(self, qname, qtype, req, ctx):
-            execution_order.append('Allowlist')
+            execution_order.append("Allowlist")
             return None
-    
+
     class BlocklistPlugin(BasePlugin):
         pre_priority = 20
-        
+
         def pre_resolve(self, qname, qtype, req, ctx):
-            execution_order.append('Blocklist')
+            execution_order.append("Blocklist")
             return None
-    
+
     class RedirectPlugin(BasePlugin):
         pre_priority = 100
-        
+
         def pre_resolve(self, qname, qtype, req, ctx):
-            execution_order.append('Redirect')
+            execution_order.append("Redirect")
             return None
-    
+
     # Register in arbitrary order
     plugins = [RedirectPlugin(), AllowlistPlugin(), BlocklistPlugin()]
-    
+
     # Sort and execute
-    ctx = PluginContext(client_ip='127.0.0.1')
-    for p in sorted(plugins, key=lambda p: getattr(p, 'pre_priority', 50)):
-        p.pre_resolve('example.com', 1, b'', ctx)
-    
-    assert execution_order == ['Allowlist', 'Blocklist', 'Redirect']
+    ctx = PluginContext(client_ip="127.0.0.1")
+    for p in sorted(plugins, key=lambda p: getattr(p, "pre_priority", 50)):
+        p.pre_resolve("example.com", 1, b"", ctx)
+
+    assert execution_order == ["Allowlist", "Blocklist", "Redirect"]
 
 
 def test_integration_ordering_post_hooks():
@@ -248,37 +251,37 @@ def test_integration_ordering_post_hooks():
       - None: Asserts post execution order: Logger -> Filter -> Rewrite
     """
     execution_order = []
-    
+
     class LoggerPlugin(BasePlugin):
         post_priority = 10
-        
+
         def post_resolve(self, qname, qtype, response_wire, ctx):
-            execution_order.append('Logger')
+            execution_order.append("Logger")
             return None
-    
+
     class FilterPlugin(BasePlugin):
         post_priority = 100
-        
+
         def post_resolve(self, qname, qtype, response_wire, ctx):
-            execution_order.append('Filter')
+            execution_order.append("Filter")
             return None
-    
+
     class RewritePlugin(BasePlugin):
         post_priority = 200
-        
+
         def post_resolve(self, qname, qtype, response_wire, ctx):
-            execution_order.append('Rewrite')
+            execution_order.append("Rewrite")
             return None
-    
+
     # Register in arbitrary order
     plugins = [FilterPlugin(), RewritePlugin(), LoggerPlugin()]
-    
+
     # Sort and execute
-    ctx = PluginContext(client_ip='127.0.0.1')
-    for p in sorted(plugins, key=lambda p: getattr(p, 'post_priority', 50)):
-        p.post_resolve('example.com', 1, b'response', ctx)
-    
-    assert execution_order == ['Logger', 'Filter', 'Rewrite']
+    ctx = PluginContext(client_ip="127.0.0.1")
+    for p in sorted(plugins, key=lambda p: getattr(p, "post_priority", 50)):
+        p.post_resolve("example.com", 1, b"response", ctx)
+
+    assert execution_order == ["Logger", "Filter", "Rewrite"]
 
 
 def test_mixed_priorities_and_defaults():
@@ -291,6 +294,7 @@ def test_mixed_priorities_and_defaults():
     Outputs:
       - None: Asserts execution order A -> B -> C
     """
+
     class PluginA(BasePlugin):
         pre_priority = 1
 
@@ -301,9 +305,13 @@ def test_mixed_priorities_and_defaults():
         pre_priority = 100
 
     plugins = [PluginC(), PluginB(), PluginA()]
-    sorted_plugins = sorted(plugins, key=lambda p: getattr(p, 'pre_priority', 50))
-    
-    assert [type(p).__name__ for p in sorted_plugins] == ['PluginA', 'PluginB', 'PluginC']
+    sorted_plugins = sorted(plugins, key=lambda p: getattr(p, "pre_priority", 50))
+
+    assert [type(p).__name__ for p in sorted_plugins] == [
+        "PluginA",
+        "PluginB",
+        "PluginC",
+    ]
 
 
 def test_config_override_with_string_coercion():

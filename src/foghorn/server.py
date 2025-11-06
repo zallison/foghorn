@@ -248,7 +248,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             decision = self._apply_pre_plugins(request, qname, qtype, data, ctx)
         """
         # Pre-resolve plugin checks sorted by pre_priority (ascending, stable)
-        for p in sorted(self.plugins, key=lambda p: getattr(p, 'pre_priority', 50)):
+        for p in sorted(self.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
             decision = p.pre_resolve(qname, qtype, data, ctx)
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
@@ -373,7 +373,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         """
         reply = response_wire
         # Post-resolve plugin hooks sorted by post_priority (ascending, stable)
-        for p in sorted(self.plugins, key=lambda p: getattr(p, 'post_priority', 50)):
+        for p in sorted(self.plugins, key=lambda p: getattr(p, "post_priority", 50)):
             decision = p.post_resolve(qname, qtype, reply, ctx)
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
@@ -520,7 +520,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             ctx = PluginContext(client_ip=client_ip)
 
             # Pre-resolve plugin checks sorted by pre_priority (ascending, stable)
-            for p in sorted(self.plugins, key=lambda p: getattr(p, 'pre_priority', 50)):
+            for p in sorted(self.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
                 decision = p.pre_resolve(qname, qtype, data, ctx)
                 if isinstance(decision, PluginDecision):
                     if decision.action == "deny":

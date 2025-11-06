@@ -113,26 +113,30 @@ class BasePlugin:
             10
         """
         self.config = config
-        
+
         # Parse priorities with clamping [1, 255]
         cls_pre = type(self).pre_priority
         cls_post = type(self).post_priority
-        
+
         # Legacy 'priority' falls back for both if specific keys absent
-        legacy = config.get('priority')
-        pre_val = config.get('pre_priority', legacy if legacy is not None else cls_pre)
-        post_val = config.get('post_priority', legacy if legacy is not None else cls_post)
-        
-        self.pre_priority = self._parse_priority(pre_val, cls_pre, 'pre')
-        self.post_priority = self._parse_priority(post_val, cls_post, 'post')
-        
+        legacy = config.get("priority")
+        pre_val = config.get("pre_priority", legacy if legacy is not None else cls_pre)
+        post_val = config.get(
+            "post_priority", legacy if legacy is not None else cls_post
+        )
+
+        self.pre_priority = self._parse_priority(pre_val, cls_pre, "pre")
+        self.post_priority = self._parse_priority(post_val, cls_post, "post")
+
         # Warn if legacy used alongside specific keys
-        if legacy is not None and ('pre_priority' in config or 'post_priority' in config):
+        if legacy is not None and (
+            "pre_priority" in config or "post_priority" in config
+        ):
             logger = logging.getLogger(__name__)
             logger.warning(
                 "Plugin %s: legacy 'priority' ignored where per-hook priorities provided; "
                 "use 'pre_priority'/'post_priority' only.",
-                type(self).__name__
+                type(self).__name__,
             )
 
     @staticmethod
@@ -166,7 +170,9 @@ class BasePlugin:
         try:
             n = int(value)
         except (TypeError, ValueError):
-            logger.warning("Invalid %s_priority %r; using default %d", which, value, default)
+            logger.warning(
+                "Invalid %s_priority %r; using default %d", which, value, default
+            )
             return default
         if n < 1:
             logger.warning("%s_priority %d below 1; clamping to 1", which, n)
