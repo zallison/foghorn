@@ -21,6 +21,7 @@ PLUGIN_PATH = os.path.join(PLUG_DIR, "flakey_server.py")
 
 # Synthesize a local package hierarchy so relative imports resolve inside flakey_server
 import types
+
 foghorn_pkg = types.ModuleType("foghorn")
 foghorn_pkg.__path__ = [PKG_DIR]
 sys.modules["foghorn"] = foghorn_pkg
@@ -29,7 +30,9 @@ plugins_pkg = types.ModuleType("foghorn.plugins")
 plugins_pkg.__path__ = [PLUG_DIR]
 sys.modules["foghorn.plugins"] = plugins_pkg
 
-spec = importlib.util.spec_from_file_location("foghorn.plugins.flakey_server", PLUGIN_PATH)
+spec = importlib.util.spec_from_file_location(
+    "foghorn.plugins.flakey_server", PLUGIN_PATH
+)
 mod = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = mod
 assert spec.loader is not None
@@ -65,7 +68,9 @@ def test_no_targets_is_noop():
 
 
 def test_client_ip_targets_only_that_ip():
-    p = FlakeyServer(client_ip="192.0.2.55", servfail_one_in=1, nxdomain_one_in=999, seed=1)
+    p = FlakeyServer(
+        client_ip="192.0.2.55", servfail_one_in=1, nxdomain_one_in=999, seed=1
+    )
     q, wire = _mk_query()
     # Target IP should be affected (SERVFAIL forced by 1-in-1)
     dec = p.pre_resolve("example.com", QTYPE.A, wire, PluginContext("192.0.2.55"))
@@ -81,13 +86,17 @@ def test_allow_list_targets_cidr_and_single():
     p = FlakeyServer(allow=["192.0.2.0/24", "198.51.100.10"], servfail_one_in=1, seed=2)
     q, wire = _mk_query()
     assert p.pre_resolve("ex", QTYPE.A, wire, PluginContext("192.0.2.99")) is not None
-    assert p.pre_resolve("ex", QTYPE.A, wire, PluginContext("198.51.100.10")) is not None
+    assert (
+        p.pre_resolve("ex", QTYPE.A, wire, PluginContext("198.51.100.10")) is not None
+    )
     # Non-matching address
     assert p.pre_resolve("ex", QTYPE.A, wire, PluginContext("203.0.113.1")) is None
 
 
 def test_servfail_precedence_over_nxdomain():
-    p = FlakeyServer(client_ip="192.0.2.55", servfail_one_in=1, nxdomain_one_in=1, seed=3)
+    p = FlakeyServer(
+        client_ip="192.0.2.55", servfail_one_in=1, nxdomain_one_in=1, seed=3
+    )
     q, wire = _mk_query()
     dec = p.pre_resolve("ex", QTYPE.A, wire, PluginContext("192.0.2.55"))
     assert dec is not None
@@ -96,7 +105,13 @@ def test_servfail_precedence_over_nxdomain():
 
 
 def test_qtype_filtering_only_A():
-    p = FlakeyServer(client_ip="192.0.2.55", allow=None, servfail_one_in=1, apply_to_qtypes=["A"], seed=4)
+    p = FlakeyServer(
+        client_ip="192.0.2.55",
+        allow=None,
+        servfail_one_in=1,
+        apply_to_qtypes=["A"],
+        seed=4,
+    )
     q, wire_a = _mk_query("ex", "A")
     q6, wire_aaaa = _mk_query("ex", "AAAA")
     # A should be affected
@@ -109,7 +124,9 @@ def test_qtype_filtering_only_A():
 
 def test_invalid_allow_entries_do_not_crash(caplog):
     caplog.set_level("WARNING")
-    p = FlakeyServer(allow=["not-an-ip", "300.300.300.300/33"], servfail_one_in=1, seed=5)
+    p = FlakeyServer(
+        allow=["not-an-ip", "300.300.300.300/33"], servfail_one_in=1, seed=5
+    )
     q, wire = _mk_query()
     # With no valid targets, it's a no-op
     assert p.pre_resolve("ex", QTYPE.A, wire, PluginContext("192.0.2.55")) is None

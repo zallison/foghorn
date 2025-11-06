@@ -482,14 +482,14 @@ from foghorn.plugins.base import BasePlugin
 
 class AllowlistPlugin(BasePlugin):
     pre_priority = 10  # Run early in pre-resolve
-    
+
     def pre_resolve(self, qname, qtype, req, ctx):
         # Check allowlist before other plugins
         ...
 
 class BlocklistPlugin(BasePlugin):
     pre_priority = 20  # Run after allowlist
-    
+
     def pre_resolve(self, qname, qtype, req, ctx):
         # Check blocklist
         ...
@@ -497,7 +497,7 @@ class BlocklistPlugin(BasePlugin):
 class RedirectPlugin(BasePlugin):
     pre_priority = 100  # Run later
     post_priority = 120
-    
+
     def pre_resolve(self, qname, qtype, req, ctx):
         # Route to different upstreams
         ...
@@ -516,14 +516,14 @@ plugins:
       default: allow
       deny:
         - "192.0.2.0/24"
-  
+
   # Blocklist runs second
   - module: filter
     pre_priority: 20
     config:
       blocked_domains:
         - "malware.com"
-  
+
   # Upstream routing runs later
   - module: router
     pre_priority: 100

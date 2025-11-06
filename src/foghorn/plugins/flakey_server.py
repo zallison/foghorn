@@ -65,7 +65,9 @@ class FlakeyServer(BasePlugin):
         """
         super().__init__(**config)
 
-        self._allow_networks: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]] = []
+        self._allow_networks: List[
+            Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
+        ] = []
 
         # Collect targets from allow and/or client_ip
         allow_cfg = config.get("allow")
@@ -79,7 +81,9 @@ class FlakeyServer(BasePlugin):
         elif allow_cfg is None:
             allow_list = []
         else:
-            logger.warning("FlakeyServer: ignoring invalid 'allow' value: %r", allow_cfg)
+            logger.warning(
+                "FlakeyServer: ignoring invalid 'allow' value: %r", allow_cfg
+            )
             allow_list = []
 
         if client_ip:
@@ -91,15 +95,21 @@ class FlakeyServer(BasePlugin):
                 net = ipaddress.ip_network(entry, strict=False)
                 self._allow_networks.append(net)
             except Exception as e:
-                logger.warning("FlakeyServer: skipping invalid allow entry %r: %s", entry, e)
+                logger.warning(
+                    "FlakeyServer: skipping invalid allow entry %r: %s", entry, e
+                )
 
         # If no allow targets are configured, plugin becomes a no-op
         if not self._allow_networks:
             logger.info("FlakeyServer: no targets configured; plugin will be a no-op")
 
         # Probabilities with clamping
-        self.servfail_one_in = self._clamp_one_in(config.get("servfail_one_in", 4), key="servfail_one_in")
-        self.nxdomain_one_in = self._clamp_one_in(config.get("nxdomain_one_in", 10), key="nxdomain_one_in")
+        self.servfail_one_in = self._clamp_one_in(
+            config.get("servfail_one_in", 4), key="servfail_one_in"
+        )
+        self.nxdomain_one_in = self._clamp_one_in(
+            config.get("nxdomain_one_in", 10), key="nxdomain_one_in"
+        )
 
         # Qtype filter
         raw_qtypes = config.get("apply_to_qtypes", ["*"])
@@ -112,7 +122,9 @@ class FlakeyServer(BasePlugin):
         seed = config.get("seed")
         if seed is not None:
             try:
-                self._rng: Union[random.Random, secrets.SystemRandom] = random.Random(int(seed))
+                self._rng: Union[random.Random, secrets.SystemRandom] = random.Random(
+                    int(seed)
+                )
             except Exception:
                 logger.warning("FlakeyServer: bad seed %r; using SystemRandom()", seed)
                 self._rng = secrets.SystemRandom()
@@ -134,7 +146,9 @@ class FlakeyServer(BasePlugin):
         try:
             n = int(value)
         except Exception:
-            logger.warning("FlakeyServer: %s non-integer %r -> default to 1", key, value)
+            logger.warning(
+                "FlakeyServer: %s non-integer %r -> default to 1", key, value
+            )
             return 1
         if n < 1:
             logger.warning("FlakeyServer: %s < 1 (%d); clamping to 1", key, n)
@@ -178,7 +192,11 @@ class FlakeyServer(BasePlugin):
             return True
         if "*" in self.apply_to_qtypes:
             return True
-        name = QTYPE.get(qtype, str(qtype)) if isinstance(qtype, int) else str(qtype).upper()
+        name = (
+            QTYPE.get(qtype, str(qtype))
+            if isinstance(qtype, int)
+            else str(qtype).upper()
+        )
         return name in self.apply_to_qtypes
 
     def _make_response(self, req_wire: bytes, rcode: int) -> Optional[bytes]:
