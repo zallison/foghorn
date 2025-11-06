@@ -15,6 +15,7 @@ With special thanks to Fiona Weatherwax for their contributions.
     *   **New Domain Filter:** Block domains that were registered recently.
     *   **Upstream Router:** Route queries to different upstream servers based on the domain name.
     *   **Filter:** Block queries based on domain names, keywords, and IP addresses in responses.
+    *   **Flakey Server:** Simulate an unreliable server: randomly return SERVFAIL or NXDOMAIN for targeted clients (testing aid).
     *   **Examples:** Misc examples, replace the first entry of every record to localhost, limit the length of the domain name, or the depth of domain names.
 
 
@@ -106,6 +107,7 @@ You can use short aliases instead of full dotted paths:
 - new_domain_filter or new_domain -> foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
 - upstream_router or router -> foghorn.plugins.upstream_router.UpstreamRouterPlugin
 - filter -> foghorn.plugins.filter.FilterPlugin
+- flakey_server or flakey or flaky -> foghorn.plugins.flakey_server.FlakeyServer
 
 Examples of plugin entries:
 - As a dict with module/config: `{ module: acl, config: {...} }`
@@ -247,6 +249,50 @@ plugins:
         - ip: "8.8.8.8/24"
           action: "remove" # Remove just this A/AAAA record
 ```
+
+#### FlakeyServer
+
+Simulate an unreliable server by randomly returning errors for targeted clients. Useful for testing client failover and error handling.
+
+Aliases: `flakey_server`, `flakey`, `flaky`
+
+Default priority: `pre_priority` 15 (runs relatively early in pre-resolve).
+
+Configuration:
+
+- `allow`: List of CIDR(s) or IP(s) to target (e.g., `["192.0.2.0/24", "2001:db8::/32"]`). If omitted/empty, the plugin is a no‑op.
+- `client_ip`: Single IP to target (shorthand; combined with `allow` if both are provided).
+- `servfail_one_in`: Integer N (>=1). Return SERVFAIL with probability 1-in-N. Default 4.
+- `nxdomain_one_in`: Integer N (>=1). Return NXDOMAIN with probability 1-in-N if SERVFAIL did not trigger. Default 10.
+- `apply_to_qtypes`: List of qtypes this applies to (e.g., `["A", "AAAA"]`). `"*"` means all. Default `["*"]`.
+- `seed`: Optional integer for deterministic behavior in tests. If omitted, uses non-deterministic randomness.
+
+Behavior notes:
+- Targeting: Only clients matching `allow`/`client_ip` are affected.
+- Precedence: SERVFAIL draw is evaluated first; NXDOMAIN is considered only if SERVFAIL does not trigger.
+
+Example (short alias):
+
+```yaml
+plugins:
+  - module: flakey_server
+    pre_priority: 15
+    config:
+      # Choose one or both targeting methods:
+      allow: ["192.0.2.0/24", "2001:db8::/32"]
+      # or
+      # client_ip: 192.0.2.55
+
+      servfail_one_in: 4
+      nxdomain_one_in: 10
+      apply_to_qtypes: ["*"]
+      seed: 12345  # Optional: set for deterministic tests
+```
+
+Testing:
+- For deterministic tests, set `seed` to any integer so the random decisions are reproducible across runs.
+- Without `seed`, the plugin uses non-deterministic randomness (good for ad‑hoc/manual testing).
+- To force outcomes during tests, use small denominators (e.g., `servfail_one_in: 1` or `nxdomain_one_in: 1`).
 
 ## Complete `config.yaml` Example
 
