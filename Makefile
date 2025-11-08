@@ -18,7 +18,7 @@ IGNORE_EXTS :=  .yaml .yml
 .PHONY: run
 run: env build
 	mkdir var 2>/dev/null || true
-	foghorn --config config/config.yaml
+	foghorn --config config.yaml
 
 
 # ------------------------------------------------------------
