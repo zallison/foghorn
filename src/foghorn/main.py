@@ -233,7 +233,10 @@ def main(argv: List[str] | None = None) -> int:
             log_level=stats_cfg.get("log_level", "info"),
         )
         stats_reporter.start()
-        logger.info("Statistics collection enabled (interval: %ds)", stats_reporter.interval_seconds)
+        logger.info(
+            "Statistics collection enabled (interval: %ds)",
+            stats_reporter.interval_seconds,
+        )
 
     server = DNSServer(
         host,
@@ -261,7 +264,9 @@ def main(argv: List[str] | None = None) -> int:
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down")
     except Exception as e:  # pragma: no cover
-        logger.exception(f"Unhandled exception during server operation {e}")  # pragma: no cover
+        logger.exception(
+            f"Unhandled exception during server operation {e}"
+        )  # pragma: no cover
         return 1  # pragma: no cover
     finally:
         # Stop statistics reporter on shutdown

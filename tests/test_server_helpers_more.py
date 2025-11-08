@@ -7,6 +7,7 @@ Inputs:
 Outputs:
   - None
 """
+
 import pytest
 from dnslib import DNSRecord, QTYPE, RCODE
 
@@ -25,8 +26,10 @@ def test_compute_effective_ttl_exception_returns_floor():
     Outputs:
       - None: Asserts floor returned
     """
+
     class Bad:
         pass
+
     assert compute_effective_ttl(Bad(), 42) == 42
 
 
@@ -53,6 +56,7 @@ def test_send_query_with_failover_parse_exception_then_ok(monkeypatch):
     Outputs:
       - None: Asserts success on second upstream
     """
+
     class DummyQuery:
         def send(self, host, port, timeout=None):
             return b"resp-%s" % host.encode()
@@ -60,9 +64,11 @@ def test_send_query_with_failover_parse_exception_then_ok(monkeypatch):
     def fake_parse(wire):
         if wire == b"resp-bad":
             raise ValueError("bad parse")
+
         class Dummy:
             class header:
                 rcode = RCODE.NOERROR
+
         return Dummy
 
     monkeypatch.setattr(server_mod.DNSRecord, "parse", staticmethod(fake_parse))
@@ -92,15 +98,22 @@ def test_cache_and_send_response_parse_exception(monkeypatch):
     class Sock:
         def __init__(self):
             self.calls = []
+
         def sendto(self, d, addr):
             self.calls.append((d, addr))
 
     h = object.__new__(DNSUDPHandler)
     h.client_address = ("1.2.3.4", 9)
 
-    monkeypatch.setattr(server_mod.DNSRecord, "parse", staticmethod(lambda b: (_ for _ in ()).throw(ValueError("boom"))))
+    monkeypatch.setattr(
+        server_mod.DNSRecord,
+        "parse",
+        staticmethod(lambda b: (_ for _ in ()).throw(ValueError("boom"))),
+    )
     # Call with arbitrary response bytes; ensure it still sends
-    h._cache_and_send_response(b"abc", q, "example.com", 1, Sock(), ("1.2.3.4", 9), ("example.com", 1))
+    h._cache_and_send_response(
+        b"abc", q, "example.com", 1, Sock(), ("1.2.3.4", 9), ("example.com", 1)
+    )
 
 
 def test_apply_pre_plugins_allow_logs_and_continues(caplog):
@@ -113,6 +126,7 @@ def test_apply_pre_plugins_allow_logs_and_continues(caplog):
     Outputs:
       - None: Asserts None returned
     """
+
     class AllowPlugin(BasePlugin):
         def pre_resolve(self, *a, **kw):
             return PluginDecision(action="allow")
@@ -133,6 +147,7 @@ def test_apply_post_plugins_deny_turns_to_nxdomain():
     Outputs:
       - None: Asserts NXDOMAIN rcode
     """
+
     class DenyPost(BasePlugin):
         def post_resolve(self, *a, **kw):
             return PluginDecision(action="deny")
@@ -140,7 +155,9 @@ def test_apply_post_plugins_deny_turns_to_nxdomain():
     q = DNSRecord.question("example.com", "A")
     h = object.__new__(DNSUDPHandler)
     h.plugins = [DenyPost()]
-    out = DNSUDPHandler._apply_post_plugins(h, q, "example.com", 1, q.reply().pack(), None)
+    out = DNSUDPHandler._apply_post_plugins(
+        h, q, "example.com", 1, q.reply().pack(), None
+    )
     assert DNSRecord.parse(out).header.rcode == RCODE.NXDOMAIN
 
 
@@ -179,13 +196,13 @@ def test_cache_store_if_applicable_ttl_zero_and_parse_error():
     q = DNSRecord.question("example.com", "A")
     r = q.reply()
     from dnslib import RR, A
+
     r.add_answer(RR("example.com", QTYPE.A, rdata=A("1.2.3.4"), ttl=0))
     h = object.__new__(DNSUDPHandler)
     DNSUDPHandler._cache_store_if_applicable(h, "example.com", 1, r.pack())
 
     # Parse error path
     DNSUDPHandler._cache_store_if_applicable(h, "example.com", 1, b"not-a-dns-packet")
-
 
 
 def test_handle_inner_exception_logs_and_does_not_send(monkeypatch):
@@ -204,6 +221,7 @@ def test_handle_inner_exception_logs_and_does_not_send(monkeypatch):
     class Sock:
         def __init__(self):
             self.calls = []
+
         def sendto(self, d, addr):
             self.calls.append((d, addr))
 
@@ -211,8 +229,16 @@ def test_handle_inner_exception_logs_and_does_not_send(monkeypatch):
     h.request = (data, Sock())
     h.client_address = ("1.2.3.4", 9)
 
-    monkeypatch.setattr(DNSUDPHandler, "_parse_query", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
-    monkeypatch.setattr(server_mod.DNSRecord, "parse", staticmethod(lambda b: (_ for _ in ()).throw(ValueError("bad"))))
+    monkeypatch.setattr(
+        DNSUDPHandler,
+        "_parse_query",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr(
+        server_mod.DNSRecord,
+        "parse",
+        staticmethod(lambda b: (_ for _ in ()).throw(ValueError("bad"))),
+    )
 
     DNSUDPHandler.handle(h)
 
@@ -230,6 +256,7 @@ def test_forward_with_failover_helper_delegates(monkeypatch):
       - None: Asserts passthrough
     """
     called = {}
+
     def fake_send(q, ups, timeout_ms, qname, qtype):
         called["args"] = (ups, timeout_ms, qname, qtype)
         return b"x", {"host": "h", "port": 9}, "ok"

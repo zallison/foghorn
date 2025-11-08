@@ -5,6 +5,7 @@ This module provides a statistics subsystem that tracks queries, cache performan
 plugin decisions, upstream results, and response codes with minimal overhead and
 guaranteed thread-safety for concurrent request handling.
 """
+
 from __future__ import annotations
 import json
 import logging

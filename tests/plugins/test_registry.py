@@ -7,6 +7,7 @@ Inputs:
 Outputs:
   - None
 """
+
 import pytest
 from foghorn.plugins.registry import (
     _camel_to_snake,
@@ -69,6 +70,7 @@ def test_default_alias_for_with_plugin_suffix():
     Outputs:
       - None: Asserts suffix removed and snake_cased
     """
+
     class ExamplePlugin(BasePlugin):
         pass
 
@@ -85,6 +87,7 @@ def test_default_alias_for_without_plugin_suffix():
     Outputs:
       - None: Asserts snake_cased name
     """
+
     class MyFilter(BasePlugin):
         pass
 

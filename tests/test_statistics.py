@@ -1,4 +1,5 @@
 """Unit tests for statistics collection system."""
+
 import json
 import logging
 import threading
@@ -255,7 +256,9 @@ class TestStatsCollector:
 
     def test_domain_normalization_in_queries(self):
         """Domains are normalized when recording queries."""
-        collector = StatsCollector(track_uniques=True, include_top_domains=True, top_n=5)
+        collector = StatsCollector(
+            track_uniques=True, include_top_domains=True, top_n=5
+        )
         collector.record_query("192.0.2.1", "Example.COM.", "A")
         collector.record_query("192.0.2.1", "example.com", "A")
         snapshot = collector.snapshot()
@@ -359,7 +362,7 @@ class TestStatsReporter:
 
         # Use simpler test: verify snapshot is called with reset flag
         snapshot_count_before = collector._totals.get("total_queries", 0)
-        
+
         reporter = StatsReporter(collector, interval_seconds=0.1, reset_on_log=False)
         reporter.start()
         time.sleep(0.25)  # Wait for at least 2 intervals
@@ -372,12 +375,12 @@ class TestStatsReporter:
     def test_reporter_reset_on_log(self):
         """Reporter resets counters when configured."""
         collector = StatsCollector()
-        
+
         # Test reset directly via snapshot to avoid thread timing issues
         collector.record_query("192.0.2.1", "example.com", "A")
         snapshot1 = collector.snapshot(reset=True)
         assert snapshot1.totals["total_queries"] == 1
-        
+
         snapshot2 = collector.snapshot(reset=False)
         assert snapshot2.totals.get("total_queries", 0) == 0
 

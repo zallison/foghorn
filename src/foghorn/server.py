@@ -386,7 +386,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     r.header.rcode = RCODE.NXDOMAIN
                     reply = r.pack()
                     break
-                if decision.action == "override" and decision.response is not None:  # pragma: no cover
+                if (
+                    decision.action == "override" and decision.response is not None
+                ):  # pragma: no cover
                     logger.info(
                         "Post-resolve override %s type %s by %s",
                         qname,
@@ -557,7 +559,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                             "Override %s %s by %s", qname, qtype, p.__class__.__name__
                         )  # pragma: no cover
                         # Don't cache plugin overrides - they may be dynamic
-                        resp = _set_response_id(decision.response, req.header.id)  # pragma: no cover
+                        resp = _set_response_id(
+                            decision.response, req.header.id
+                        )  # pragma: no cover
                         sock.sendto(resp, self.client_address)  # pragma: no cover
                         return  # pragma: no cover
                     # allow -> continue
@@ -572,7 +576,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     # Parse to get rcode for stats
                     try:
                         parsed_cached = DNSRecord.parse(cached)
-                        rcode_name = RCODE.get(parsed_cached.header.rcode, str(parsed_cached.header.rcode))
+                        rcode_name = RCODE.get(
+                            parsed_cached.header.rcode, str(parsed_cached.header.rcode)
+                        )
                         self.stats_collector.record_response_rcode(rcode_name)
                     except Exception:
                         pass
@@ -645,7 +651,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             if self.stats_collector:
                 try:
                     parsed_reply = DNSRecord.parse(reply)
-                    rcode_name = RCODE.get(parsed_reply.header.rcode, str(parsed_reply.header.rcode))
+                    rcode_name = RCODE.get(
+                        parsed_reply.header.rcode, str(parsed_reply.header.rcode)
+                    )
                     self.stats_collector.record_response_rcode(rcode_name)
                 except Exception:
                     pass

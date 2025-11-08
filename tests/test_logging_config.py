@@ -7,6 +7,7 @@ Inputs:
 Outputs:
   - None
 """
+
 import logging
 from pathlib import Path
 import types
@@ -66,9 +67,11 @@ def test_init_logging_syslog_success(monkeypatch):
 
     class DummySysLogHandler:
         LOG_USER = object()
+
         def __init__(self, address=None, facility=None):
             created["address"] = address
             created["facility"] = facility
+
         def setFormatter(self, fmt):
             created["formatter"] = fmt
 
@@ -77,7 +80,7 @@ def test_init_logging_syslog_success(monkeypatch):
     init_logging({"syslog": True})
     assert created["address"] == "/dev/log"
     assert "formatter" in created
-    
+
     # Dict syslog config (exercise address/facility mapping branch)
     created.clear()
     init_logging({"syslog": {"address": ("localhost", 514), "facility": "LOCAL0"}})
@@ -99,6 +102,7 @@ def test_init_logging_syslog_failure_warns(monkeypatch, caplog):
 
     class FailingSysLogHandler:
         LOG_USER = object()
+
         def __init__(self, *a, **kw):
             raise OSError("no syslog")
 
@@ -107,11 +111,13 @@ def test_init_logging_syslog_failure_warns(monkeypatch, caplog):
     # Capture warning call on root logger directly to avoid handler interference
     caught = {"msg": None}
     root = logging.getLogger()
+
     def fake_warning(msg, *args, **kwargs):
         try:
             caught["msg"] = msg % args if args else str(msg)
         except Exception:
             caught["msg"] = str(msg)
+
     monkeypatch.setattr(root, "warning", fake_warning)
 
     init_logging({"syslog": True})

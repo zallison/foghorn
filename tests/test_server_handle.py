@@ -7,6 +7,7 @@ Inputs:
 Outputs:
   - None
 """
+
 import types
 import pytest
 from dnslib import DNSRecord, QTYPE, RCODE, A, RR
@@ -25,8 +26,10 @@ class FakeSock:
     Outputs:
       - None: use calls attribute to inspect
     """
+
     def __init__(self):
         self.calls = []
+
     def sendto(self, data, addr):
         self.calls.append((data, addr))
 
@@ -197,8 +200,16 @@ def test_handle_upstream_all_failed_sends_servfail_twice(monkeypatch):
     monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **kw: None)
     DNSUDPHandler.plugins = []
     DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
-    monkeypatch.setattr(DNSUDPHandler, "_choose_upstreams", lambda *a, **kw: [{"host": "1.1.1.1", "port": 53}])
-    monkeypatch.setattr(DNSUDPHandler, "_forward_with_failover_helper", lambda *a, **kw: (None, None, "all_failed"))
+    monkeypatch.setattr(
+        DNSUDPHandler,
+        "_choose_upstreams",
+        lambda *a, **kw: [{"host": "1.1.1.1", "port": 53}],
+    )
+    monkeypatch.setattr(
+        DNSUDPHandler,
+        "_forward_with_failover_helper",
+        lambda *a, **kw: (None, None, "all_failed"),
+    )
 
     h = _mk_handler(data, sock)
     h.handle()
@@ -235,8 +246,16 @@ def test_handle_success_with_post_override(monkeypatch):
     monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **kw: None)
     DNSUDPHandler.plugins = [OverridePostPlugin()]
     DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
-    monkeypatch.setattr(DNSUDPHandler, "_choose_upstreams", lambda *a, **kw: [{"host": "1.1.1.1", "port": 53}])
-    monkeypatch.setattr(DNSUDPHandler, "_forward_with_failover_helper", lambda *a, **kw: (upstream_reply.pack(), {"host": "1.1.1.1", "port": 53}, "ok"))
+    monkeypatch.setattr(
+        DNSUDPHandler,
+        "_choose_upstreams",
+        lambda *a, **kw: [{"host": "1.1.1.1", "port": 53}],
+    )
+    monkeypatch.setattr(
+        DNSUDPHandler,
+        "_forward_with_failover_helper",
+        lambda *a, **kw: (upstream_reply.pack(), {"host": "1.1.1.1", "port": 53}, "ok"),
+    )
 
     h = _mk_handler(data, sock)
     h.handle()
@@ -261,7 +280,11 @@ def test_handle_exception_path_sends_servfail(monkeypatch):
     q, data = _mk_query("boom.com")
     sock = FakeSock()
 
-    monkeypatch.setattr(DNSUDPHandler, "_parse_query", lambda *a, **kw: (_ for _ in ()).throw(ValueError("boom")))
+    monkeypatch.setattr(
+        DNSUDPHandler,
+        "_parse_query",
+        lambda *a, **kw: (_ for _ in ()).throw(ValueError("boom")),
+    )
 
     h = _mk_handler(data, sock)
     h.handle()
@@ -295,4 +318,7 @@ def test_handle_allow_plugin_path(monkeypatch):
     h.handle()
 
     assert len(sock.calls) >= 1
-    assert DNSRecord.parse(sock.calls[-1][0]).header.rcode in (RCODE.SERVFAIL, RCODE.NXDOMAIN)
+    assert DNSRecord.parse(sock.calls[-1][0]).header.rcode in (
+        RCODE.SERVFAIL,
+        RCODE.NXDOMAIN,
+    )
