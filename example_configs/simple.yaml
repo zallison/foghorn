@@ -21,6 +21,7 @@ upstream:
 
 dnssec:
   mode: passthrough
+  validation: upstream_ad
   udp_payload_size: 1232
 
 timeout_ms: 2000

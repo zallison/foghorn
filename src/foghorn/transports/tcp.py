@@ -85,6 +85,30 @@ class TCPConnectionPool:
         self._lock = threading.Lock()
         self._stack = []  # type: list[_TCPConn]
 
+    def set_limits(self, *, max_connections: int | None = None, idle_timeout_s: int | None = None) -> None:
+        """
+        Adjust pool sizing at runtime.
+
+        Inputs:
+          - max_connections: Optional new maximum size
+          - idle_timeout_s: Optional new idle timeout seconds
+        Outputs:
+          - None
+
+        Example:
+          >>> pool.set_limits(max_connections=64, idle_timeout_s=60)
+        """
+        if max_connections is not None:
+            try:
+                self._max = max(1, int(max_connections))
+            except Exception:
+                pass
+        if idle_timeout_s is not None:
+            try:
+                self._idle = max(1, int(idle_timeout_s))
+            except Exception:
+                pass
+
     def send(self, query: bytes, connect_timeout_ms: int, read_timeout_ms: int) -> bytes:
         conn = None
         with self._lock:

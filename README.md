@@ -61,12 +61,15 @@ The server will start listening for DNS queries on the configured host and port.
 
 ```yaml
 dnssec:
-  mode: passthrough   # ignore | passthrough | validate
+  mode: passthrough            # ignore | passthrough | validate
+  validation: upstream_ad      # upstream_ad | local   (local = experimental)
   udp_payload_size: 1232
 ```
 - ignore: do not advertise DO; DNSSEC data not requested.
 - passthrough: advertise DO and return DNSSEC records; forward AD bit if upstream set it.
-- validate: require upstream AD bit; otherwise respond SERVFAIL.
+- validate:
+  - upstream_ad: require upstream AD bit (simple, recommended for now)
+  - local (experimental): perform local DNSSEC validation via dnspython; unsigned zones will SERVFAIL.
 
 ## Testing
 
@@ -122,8 +125,15 @@ upstream:
     tls:
       server_name: cloudflare-dns.com
       verify: true
+    pool:
+      max_connections: 64
+      idle_timeout_ms: 30000
   - host: 8.8.8.8
     port: 53
+    # transport: udp (default)
+    pool:
+      max_connections: 32
+      idle_timeout_ms: 15000
 ```
 
 ### `plugins`

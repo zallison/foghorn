@@ -29,7 +29,8 @@ upstream:
 
 # DNSSEC settings (ignore | passthrough | validate)
 dnssec:
-  mode: passthrough    # use 'validate' to require upstream AD bit; 'ignore' disables DO
+  mode: passthrough    # ignore | passthrough | validate
+  validation: upstream_ad  # upstream_ad | local (experimental)
   udp_payload_size: 1232
 
 # Global timeout applies to each upstream attempt

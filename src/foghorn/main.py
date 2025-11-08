@@ -276,6 +276,7 @@ def main(argv: List[str] | None = None) -> int:
             from . import server as _server_mod
             _server_mod.DNSUDPHandler.dnssec_mode = dnssec_mode
             _server_mod.DNSUDPHandler.edns_udp_payload = max(512, int(edns_payload))
+            _server_mod.DNSUDPHandler.dnssec_validation = str(dnssec_cfg.get("validation", "upstream_ad")).lower()
         except Exception:
             pass
 

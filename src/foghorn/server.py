@@ -98,10 +98,26 @@ def send_query_with_failover(
                 server_name = tls.get("server_name")
                 verify = bool(tls.get("verify", True))
                 ca_file = tls.get("ca_file")
+                pool_cfg = upstream.get("pool", {}) if isinstance(upstream.get("pool"), dict) else {}
                 pool = get_dot_pool(host, int(port), server_name, verify, ca_file)
+                try:
+                    pool.set_limits(
+                        max_connections=pool_cfg.get("max_connections"),
+                        idle_timeout_s=(int(pool_cfg.get("idle_timeout_ms")) // 1000) if pool_cfg.get("idle_timeout_ms") else None,
+                    )
+                except Exception:
+                    pass
                 response_wire = pool.send(query.pack(), timeout_ms, timeout_ms)
             elif transport == "tcp":
+                pool_cfg = upstream.get("pool", {}) if isinstance(upstream.get("pool"), dict) else {}
                 pool = get_tcp_pool(host, int(port))
+                try:
+                    pool.set_limits(
+                        max_connections=pool_cfg.get("max_connections"),
+                        idle_timeout_s=(int(pool_cfg.get("idle_timeout_ms")) // 1000) if pool_cfg.get("idle_timeout_ms") else None,
+                    )
+                except Exception:
+                    pass
                 response_wire = pool.send(query.pack(), timeout_ms, timeout_ms)
             else:  # udp (default)
                 response_wire = query.send(host, int(port), timeout=timeout_sec)
@@ -177,7 +193,8 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     timeout_ms = 2000
     min_cache_ttl = 60
     stats_collector = None  # Optional StatsCollector instance
-    dnssec_mode = "ignore"  # ignore | passthrough | validate (validate not yet implemented)
+    dnssec_mode = "ignore"  # ignore | passthrough | validate
+    dnssec_validation = "upstream_ad"  # upstream_ad | local
     edns_udp_payload = 1232
 
     def _cache_and_send_response(
@@ -718,9 +735,19 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             try:
                 if str(self.dnssec_mode).lower() == "validate":
                     parsed = DNSRecord.parse(reply)
-                    # Require AD bit from upstream to consider validated
-                    if getattr(parsed.header, "ad", 0) != 1:
-                        logger.warning("DNSSEC validate mode: upstream did not set AD for %s; returning SERVFAIL", qname)
+                    valid = False
+                    if str(getattr(self, 'dnssec_validation', 'upstream_ad')).lower() == 'local':
+                        try:
+                            from .dnssec_validate import validate_response_local
+                            valid = bool(validate_response_local(qname, qtype, reply, udp_payload_size=self.edns_udp_payload))
+                        except Exception as e:
+                            logger.debug("Local DNSSEC validation error: %s", e)
+                            valid = False
+                    else:
+                        # Require AD bit from upstream to consider validated
+                        valid = getattr(parsed.header, "ad", 0) == 1
+                    if not valid:
+                        logger.warning("DNSSEC validate mode: validation failed for %s; returning SERVFAIL", qname)
                         r = req.reply(); r.header.rcode = RCODE.SERVFAIL
                         reply = r.pack()
             except Exception:
