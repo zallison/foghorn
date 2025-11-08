@@ -211,9 +211,20 @@ def main(argv: List[str] | None = None) -> int:
     logger = logging.getLogger("foghorn.main")
     logger.info("Loaded config from %s", args.config)
 
-    listen = cfg.get("listen", {})
-    host = listen.get("host", "127.0.0.1")
-    port = int(listen.get("port", 5353))
+    # Normalize listen configuration with backward compatibility.
+    # If listen.udp is present, prefer it; otherwise fall back to legacy listen.host/port.
+    listen_cfg = cfg.get("listen", {}) or {}
+    legacy_host = str(listen_cfg.get("host", "127.0.0.1"))
+    legacy_port = int(listen_cfg.get("port", 5353))
+
+    def _sub(key, defaults):
+        d = listen_cfg.get(key, {}) or {}
+        out = {**defaults, **d} if isinstance(d, dict) else defaults
+        return out
+
+    udp_cfg = _sub("udp", {"enabled": True, "host": legacy_host, "port": legacy_port})
+    tcp_cfg = _sub("tcp", {"enabled": False, "host": legacy_host, "port": 53})
+    dot_cfg = _sub("dot", {"enabled": False, "host": legacy_host, "port": 853})
 
     # Normalize upstream configuration
     upstreams, timeout_ms = normalize_upstream_config(cfg)
@@ -252,21 +263,18 @@ def main(argv: List[str] | None = None) -> int:
             stats_reporter.interval_seconds,
         )
 
-    # DNSSEC config (ignore|passthrough|validate). Validation not yet implemented.
+    # DNSSEC config (ignore|passthrough|validate)
     dnssec_cfg = cfg.get("dnssec", {}) or {}
     dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()
     edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
 
     server = None
-    # Respect udp.listen.enabled (default true)
-    listen_cfg = cfg.get("listen", {}) or {}
-    udp_enabled = True
-    if isinstance(listen_cfg.get("udp"), dict):
-        udp_enabled = bool(listen_cfg.get("udp", {}).get("enabled", True))
-    if udp_enabled:
+    if bool(udp_cfg.get("enabled", True)):
+        uhost = str(udp_cfg.get("host", legacy_host))
+        uport = int(udp_cfg.get("port", legacy_port))
         server = DNSServer(
-            host,
-            port,
+            uhost,
+            uport,
             upstreams,
             plugins,
             timeout=timeout_ms / 1000.0,
@@ -277,33 +285,33 @@ def main(argv: List[str] | None = None) -> int:
         # Set DNSSEC/EDNS knobs on handler class (keeps DNSServer signature stable)
         try:
             from . import server as _server_mod
+
             _server_mod.DNSUDPHandler.dnssec_mode = dnssec_mode
             _server_mod.DNSUDPHandler.edns_udp_payload = max(512, int(edns_payload))
-            _server_mod.DNSUDPHandler.dnssec_validation = str(dnssec_cfg.get("validation", "upstream_ad")).lower()
+            _server_mod.DNSUDPHandler.dnssec_validation = str(
+                dnssec_cfg.get("validation", "upstream_ad")
+            ).lower()
         except Exception:
             pass
 
     # Log startup info
     upstream_info = ", ".join([f"{u['host']}:{u['port']}" for u in upstreams])
-    logger.info(
-        "Starting Foghorn on %s:%d, upstreams: [%s], timeout: %dms\n",
-        host,
-        port,
-        upstream_info,
-        timeout_ms,
-    )
+    if server is not None:
+        logger.info(
+            "Starting Foghorn on %s:%d, upstreams: [%s], timeout: %dms\n",
+            uhost,
+            uport,
+            upstream_info,
+            timeout_ms,
+        )
+    else:
+        logger.info(
+            "Starting Foghorn without UDP listener; upstreams: [%s], timeout: %dms\n",
+            upstream_info,
+            timeout_ms,
+        )
 
     # Optionally start TCP/DoT listeners based on listen config
-    listen_cfg = cfg.get("listen", {}) or {}
-    # Normalize listen subsections
-    def _sub(key, defaults):
-        d = listen_cfg.get(key, {}) or {}
-        out = {**defaults, **d} if isinstance(d, dict) else defaults
-        return out
-
-    tcp_cfg = _sub("tcp", {"enabled": False, "host": host, "port": 53})
-    dot_cfg = _sub("dot", {"enabled": False, "host": host, "port": 853})
-    udp_cfg = _sub("udp", {"enabled": True, "host": host, "port": port})
 
     # Resolver adapter for TCP/DoT servers
     from .server import resolve_query_bytes
@@ -320,26 +328,42 @@ def main(argv: List[str] | None = None) -> int:
                 loop.run_until_complete(coro_factory())
             finally:
                 loop.close()
+
         t = threading.Thread(target=runner, name=name, daemon=True)
         t.start()
         loop_threads.append(t)
 
     if bool(tcp_cfg.get("enabled", False)):
         from .tcp_server import serve_tcp
-        thost = str(tcp_cfg.get("host", host)); tport = int(tcp_cfg.get("port", 53))
+
+        thost = str(tcp_cfg.get("host", host))
+        tport = int(tcp_cfg.get("port", 53))
         logger.info("Starting TCP listener on %s:%d", thost, tport)
-        _start_asyncio_server(lambda: serve_tcp(thost, tport, resolve_query_bytes), name="foghorn-tcp")
+        _start_asyncio_server(
+            lambda: serve_tcp(thost, tport, resolve_query_bytes), name="foghorn-tcp"
+        )
 
     if bool(dot_cfg.get("enabled", False)):
         from .dot_server import serve_dot
-        dhost = str(dot_cfg.get("host", host)); dport = int(dot_cfg.get("port", 853))
-        cert_file = dot_cfg.get("cert_file"); key_file = dot_cfg.get("key_file")
+
+        dhost = str(dot_cfg.get("host", host))
+        dport = int(dot_cfg.get("port", 853))
+        cert_file = dot_cfg.get("cert_file")
+        key_file = dot_cfg.get("key_file")
         if not cert_file or not key_file:
-            logger.error("listen.dot.enabled=true but cert_file/key_file not provided; skipping DoT listener")
+            logger.error(
+                "listen.dot.enabled=true but cert_file/key_file not provided; skipping DoT listener"
+            )
         else:
             logger.info("Starting DoT listener on %s:%d", dhost, dport)
             _start_asyncio_server(
-                lambda: serve_dot(dhost, dport, resolve_query_bytes, cert_file=cert_file, key_file=key_file),
+                lambda: serve_dot(
+                    dhost,
+                    dport,
+                    resolve_query_bytes,
+                    cert_file=cert_file,
+                    key_file=key_file,
+                ),
                 name="foghorn-dot",
             )
 
@@ -349,6 +373,7 @@ def main(argv: List[str] | None = None) -> int:
         else:
             # No UDP server; keep main thread alive while async listeners run
             import time as _time
+
             while True:
                 _time.sleep(3600)
     except KeyboardInterrupt:
