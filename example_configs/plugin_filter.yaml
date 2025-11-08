@@ -1,0 +1,75 @@
+# Foghorn example: Filter plugin
+# Block/allow domains, patterns, keywords, and manipulate returned IPs.
+
+listen:
+  udp:
+    enabled: true
+    host: 127.0.0.1
+    port: 5353
+  tcp:
+    enabled: false
+  dot:
+    enabled: false
+
+upstream:
+  - { host: 1.1.1.1, port: 53 }
+  - { host: 8.8.8.8, port: 53 }
+
+dnssec:
+  mode: passthrough
+  validation: upstream_ad
+  udp_payload_size: 1232
+
+timeout_ms: 2000
+logging:
+  level: info
+
+plugins:
+  - module: filter  # FilterPlugin alias
+    # pre_priority: 20  # optional: run after ACL
+    config:
+      # Default policy when no rule matches.
+      default: deny
+
+      # Persistent on-disk DB (SQLite) for stats/cache if enabled by plugin.
+      db_path: ./var/blocklist.db
+
+      # Cache TTL for in-memory decisions to reduce DB/CPU load.
+      cache_ttl_seconds: 600
+      # cache_max_entries: 100000
+
+      # Exact-domain rules
+      blocked_domains:
+        - tracker.example
+      allowed_domains:
+        - intranet.example
+
+      # Regex-style patterns (Python-style). Escapes shown for dot.
+      blocked_patterns:
+        - ".*\\.ads\\..*"   # any label containing `.ads.`
+
+      # Simple keyword match on the FQDN
+      blocked_keywords:
+        - gambling
+
+      # IP-level actions applied to A/AAAA answers.
+      # - action: remove -> strip matching IPs from the answer set
+      # - action: deny   -> convert to NXDOMAIN or policy denial
+      # - action: replace -> substitute with `replace_with`
+      blocked_ips:
+        - ip: "198.51.100.0/24"
+          action: remove
+        - ip: "203.0.113.5"
+          action: replace
+          replace_with: "127.0.0.1"
+
+      # File-based lists (one domain per line; lines beginning with # are comments).
+      # Uncomment to enable:
+      # blocklist_files:
+      #   - example_configs/lists/blocklist.txt
+      # allowlist_files:
+      #   - example_configs/lists/allowlist.txt
+
+      # Notes:
+      # - IP matching supports IPv4 and IPv6 (CIDR).
+      # - File-based lists are merged with in-config lists; allowlist wins when both match.
