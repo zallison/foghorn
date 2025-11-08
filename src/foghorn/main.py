@@ -320,33 +320,47 @@ def main(argv: List[str] | None = None) -> int:
 
     loop_threads = []
 
-    def _start_asyncio_server(coro_factory, name: str):
+    def _start_asyncio_server(coro_factory, name: str, *, on_permission_error=None):
         def runner():
-            asyncio.set_event_loop(asyncio.new_event_loop())
-            loop = asyncio.get_event_loop()
             try:
-                loop.run_until_complete(coro_factory())
-            finally:
-                loop.close()
+                asyncio.set_event_loop(asyncio.new_event_loop())
+                loop = asyncio.get_event_loop()
+                try:
+                    loop.run_until_complete(coro_factory())
+                finally:
+                    loop.close()
+            except PermissionError:
+                # Environment forbids creating asyncio self-pipe/socketpair (e.g., restricted seccomp).
+                if callable(on_permission_error):
+                    on_permission_error()
+                else:
+                    logging.getLogger("foghorn.main").error(
+                        "Asyncio loop creation failed with PermissionError for %s; no fallback provided",
+                        name,
+                    )
 
         t = threading.Thread(target=runner, name=name, daemon=True)
         t.start()
         loop_threads.append(t)
 
     if bool(tcp_cfg.get("enabled", False)):
-        from .tcp_server import serve_tcp
+        from .tcp_server import serve_tcp, serve_tcp_threaded
 
-        thost = str(tcp_cfg.get("host", host))
+        thost = str(tcp_cfg.get("host", legacy_host))
         tport = int(tcp_cfg.get("port", 53))
         logger.info("Starting TCP listener on %s:%d", thost, tport)
         _start_asyncio_server(
-            lambda: serve_tcp(thost, tport, resolve_query_bytes), name="foghorn-tcp"
+            lambda: serve_tcp(thost, tport, resolve_query_bytes),
+            name="foghorn-tcp",
+            on_permission_error=lambda: serve_tcp_threaded(
+                thost, tport, resolve_query_bytes
+            ),
         )
 
     if bool(dot_cfg.get("enabled", False)):
         from .dot_server import serve_dot
 
-        dhost = str(dot_cfg.get("host", host))
+        dhost = str(dot_cfg.get("host", legacy_host))
         dport = int(dot_cfg.get("port", 853))
         cert_file = dot_cfg.get("cert_file")
         key_file = dot_cfg.get("key_file")

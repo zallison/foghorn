@@ -50,7 +50,7 @@ test:
 .PHONY: clean
 clean:
 	@echo "=== Removing virtual environment and var directory ==="
-	rm -rf $(VENV) var
+	rm -rf $(VENV) var build
 	@echo "=== Removing temporary files and byte‑code ==="
 	# Delete __pycache__ directories
 	find . -type d -name "__pycache__" -exec rm -rf {} +;
