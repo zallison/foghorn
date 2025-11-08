@@ -110,6 +110,13 @@ listen:
     port: 8853
     cert_file: /path/to/cert.pem
     key_file: /path/to/key.pem
+  doh:
+    enabled: false
+    host: 127.0.0.1
+    port: 8053
+    # Optional TLS
+    # cert_file: /path/to/cert.pem
+    # key_file: /path/to/key.pem
 ```
 
 ### `upstream`
@@ -133,6 +140,14 @@ upstream:
     pool:
       max_connections: 32
       idle_timeout_ms: 15000
+  - transport: doh
+    url: https://dns.google/dns-query
+    method: POST   # or GET
+    headers:
+      user-agent: foghorn
+    tls:
+      verify: true
+      # ca_file: /etc/ssl/certs/ca-certificates.crt
 ```
 
 ### `plugins`

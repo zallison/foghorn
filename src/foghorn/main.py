@@ -72,16 +72,35 @@ def normalize_upstream_config(
         # New format: list of upstream objects
         upstreams = []
         for u in upstream_raw:
-            if isinstance(u, dict) and "host" in u:
+            if not isinstance(u, dict):
+                continue
+            # Support DoH entries that specify a URL instead of host/port
+            if str(u.get("transport", "")).lower() == "doh" and "url" in u:
                 rec: Dict[str, Union[str, int, dict]] = {
+                    "transport": "doh",
+                    "url": str(u["url"]),
+                }
+                if "method" in u:
+                    rec["method"] = str(u.get("method"))
+                if "headers" in u and isinstance(u["headers"], dict):
+                    rec["headers"] = u["headers"]
+                if "tls" in u and isinstance(u["tls"], dict):
+                    rec["tls"] = u["tls"]
+                upstreams.append(rec)
+                continue
+            # Default host/port-based upstream (udp/tcp/dot)
+            if "host" in u:
+                rec2: Dict[str, Union[str, int, dict]] = {
                     "host": str(u["host"]),
                     "port": int(u.get("port", 53)),
                 }
                 if "transport" in u:
-                    rec["transport"] = str(u.get("transport"))
+                    rec2["transport"] = str(u.get("transport"))
                 if "tls" in u and isinstance(u["tls"], dict):
-                    rec["tls"] = u["tls"]
-                upstreams.append(rec)
+                    rec2["tls"] = u["tls"]
+                if "pool" in u and isinstance(u["pool"], dict):
+                    rec2["pool"] = u["pool"]
+                upstreams.append(rec2)
     elif isinstance(upstream_raw, dict):
         # Legacy format: single upstream object
         if "host" in upstream_raw:
@@ -225,6 +244,7 @@ def main(argv: List[str] | None = None) -> int:
     udp_cfg = _sub("udp", {"enabled": True, "host": legacy_host, "port": legacy_port})
     tcp_cfg = _sub("tcp", {"enabled": False, "host": legacy_host, "port": 53})
     dot_cfg = _sub("dot", {"enabled": False, "host": legacy_host, "port": 853})
+    doh_cfg = _sub("doh", {"enabled": False, "host": legacy_host, "port": 8053})
 
     # Normalize upstream configuration
     upstreams, timeout_ms = normalize_upstream_config(cfg)
@@ -380,6 +400,25 @@ def main(argv: List[str] | None = None) -> int:
                 ),
                 name="foghorn-dot",
             )
+
+    if bool(doh_cfg.get("enabled", False)):
+        from .doh_server import serve_doh
+
+        h = str(doh_cfg.get("host", legacy_host))
+        p = int(doh_cfg.get("port", 8053))
+        cert_file = doh_cfg.get("cert_file")
+        key_file = doh_cfg.get("key_file")
+        logger.info("Starting DoH listener on %s:%d", h, p)
+        _start_asyncio_server(
+            lambda: serve_doh(
+                h,
+                p,
+                resolve_query_bytes,
+                cert_file=cert_file,
+                key_file=key_file,
+            ),
+            name="foghorn-doh",
+        )
 
     try:
         if server is not None:

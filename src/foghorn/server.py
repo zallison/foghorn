@@ -146,8 +146,55 @@ def send_query_with_failover(
                 except Exception:
                     pass
                 response_wire = pool.send(query.pack(), timeout_ms, timeout_ms)
+            elif transport == "doh":
+                doh_url = str(
+                    upstream.get("url") or upstream.get("endpoint") or ""
+                ).strip()
+                if not doh_url:
+                    raise Exception("missing DoH url in upstream config")
+                doh_method = str(upstream.get("method", "POST"))
+                doh_headers = (
+                    upstream.get("headers")
+                    if isinstance(upstream.get("headers"), dict)
+                    else {}
+                )
+                tls_cfg = (
+                    upstream.get("tls", {})
+                    if isinstance(upstream.get("tls"), dict)
+                    else {}
+                )
+                verify = bool(tls_cfg.get("verify", True))
+                ca_file = tls_cfg.get("ca_file")
+                from .transports.doh import (
+                    doh_query,
+                    DoHError,
+                )  # local import to avoid overhead
+
+                body, resp_headers = doh_query(
+                    doh_url,
+                    query.pack(),
+                    method=doh_method,
+                    headers=doh_headers,
+                    timeout_ms=timeout_ms,
+                    verify=verify,
+                    ca_file=ca_file,
+                )
+                response_wire = body
             else:  # udp (default)
-                response_wire = query.send(host, int(port), timeout=timeout_sec)
+                # Use transport impl for consistency, but preserve legacy path for tests/mocks
+                try:
+                    pack = getattr(query, "pack")
+                except Exception:
+                    pack = None
+                if callable(pack):
+                    from .transports.udp import udp_query
+
+                    response_wire = udp_query(
+                        host, int(port), query.pack(), timeout_ms=timeout_ms
+                    )
+                else:
+                    # Fallback to dnslib's convenience API (used in unit tests)
+                    response_wire = query.send(host, int(port), timeout=timeout_sec)
 
             # Check for SERVFAIL or truncation to trigger fallback
             try:
