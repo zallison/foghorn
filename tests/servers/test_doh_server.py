@@ -66,6 +66,8 @@ def running_doh_server():
     t.start()
     if not ready.wait(1.0):
         pytest.skip("failed to start loop")
+    # Allow bind-to-ready handoff
+    time.sleep(0.15)
     try:
         yield host, actual["port"]
     finally:

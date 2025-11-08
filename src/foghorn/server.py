@@ -88,7 +88,12 @@ def send_query_with_failover(
     last_exception = None
 
     for upstream in upstreams:
-        host, port = upstream["host"], upstream["port"]
+        # For DoH we may not have host/port; use safe defaults for logging
+        host = str(upstream.get("host", ""))
+        try:
+            port = int(upstream.get("port", 0))
+        except Exception:
+            port = 0
         transport = str(upstream.get("transport", "udp")).lower()
         try:
             logger.debug(

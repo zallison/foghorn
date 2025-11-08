@@ -42,6 +42,7 @@ def running_udp_server():
     t.start()
     if not ready.wait(1.0):
         pytest.skip("failed to start udp server")
+    time.sleep(0.05)
     yield host, actual["port"]
     # daemon thread exits on process end
 

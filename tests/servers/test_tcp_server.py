@@ -59,6 +59,8 @@ def running_tcp_server():
     t.start()
     if not ready.wait(1.0):
         pytest.skip("failed to start tcp server")
+    # Give the real server a moment to bind after the temp socket closes
+    time.sleep(0.15)
     yield host, port_holder["port"]
 
 

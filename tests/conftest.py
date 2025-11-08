@@ -9,7 +9,15 @@ Outputs:
 """
 
 import signal
+import os
+import sys
 import pytest
+
+# Ensure 'src' is on sys.path so 'foghorn' package is importable in tests
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+SRC_DIR = os.path.join(ROOT, "src")
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
 
 
 def _alarm_handler(signum, frame):
@@ -29,6 +37,27 @@ def _alarm_handler(signum, frame):
 # Install handler if supported on this platform
 if hasattr(signal, "SIGALRM"):
     signal.signal(signal.SIGALRM, _alarm_handler)
+
+
+@pytest.fixture(autouse=True)
+def clear_dns_cache_between_tests():
+    """
+    Brief: Clear DNSUDPHandler cache between tests to avoid cross-test interference.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None
+    """
+    try:
+        from foghorn.server import DNSUDPHandler
+
+        if hasattr(DNSUDPHandler, "cache") and hasattr(DNSUDPHandler.cache, "_store"):
+            DNSUDPHandler.cache._store = {}
+    except Exception:
+        pass
+    yield
 
 
 @pytest.fixture(autouse=True)
