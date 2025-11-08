@@ -12,7 +12,7 @@ from .base import BasePlugin, PluginDecision, PluginContext, plugin_aliases
 logger = logging.getLogger(__name__)
 
 
-@plugin_aliases("flaky_server", "flaky", "flaky")
+@plugin_aliases("flaky_server", "flaky", "buggy")
 class FlakyServer(BasePlugin):
     """
     Brief: Simulate an unreliable server by randomly returning SERVFAIL or NXDOMAIN for specific clients.
@@ -81,9 +81,7 @@ class FlakyServer(BasePlugin):
         elif allow_cfg is None:
             allow_list = []
         else:
-            logger.warning(
-                "FlakyServer: ignoring invalid 'allow' value: %r", allow_cfg
-            )
+            logger.warning("FlakyServer: ignoring invalid 'allow' value: %r", allow_cfg)
             allow_list = []
 
         if client_ip:
@@ -146,9 +144,7 @@ class FlakyServer(BasePlugin):
         try:
             n = int(value)
         except Exception:
-            logger.warning(
-                "FlakyServer: %s non-integer %r -> default to 1", key, value
-            )
+            logger.warning("FlakyServer: %s non-integer %r -> default to 1", key, value)
             return 1
         if n < 1:
             logger.warning("FlakyServer: %s < 1 (%d); clamping to 1", key, n)
