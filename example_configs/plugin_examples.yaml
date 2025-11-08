@@ -1,0 +1,49 @@
+# Foghorn example: Examples plugin
+# Demonstrates request filtering and simple response rewrite.
+
+listen:
+  udp:
+    enabled: true
+    host: 127.0.0.1
+    port: 5353
+  tcp:
+    enabled: false
+  dot:
+    enabled: false
+
+upstream:
+  - host: 1.1.1.1
+    port: 53
+  - host: 8.8.8.8
+    port: 53
+
+dnssec:
+  mode: passthrough
+  validation: upstream_ad
+  udp_payload_size: 1232
+
+timeout_ms: 2000
+logging:
+  level: info
+
+plugins:
+  - module: examples  # ExamplesPlugin alias
+    # pre_priority: 60
+    # post_priority: 90  # optional: perform rewrites late
+    config:
+      # Pre-filtering knobs
+      max_subdomains: 5
+      max_length_no_dots: 50
+      base_labels: 2
+      apply_to_qtypes: ["*"]
+
+      # Post-response rewrite example: override first IPv4 answer
+      rewrite_first_ipv4:
+        - apply_to_qtypes: ["A"]
+          ip_override: "127.0.0.1"
+        # - apply_to_qtypes: ["AAAA"]
+        #   ip_override: "::1"
+
+      # Notes:
+      # - Pre-filter checks run before upstream resolution.
+      # - Rewrites occur after an answer is received (post-processing).

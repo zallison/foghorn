@@ -1,0 +1,35 @@
+# Foghorn example: /etc/hosts override plugin
+# This plugin answers from the hosts file for A records (IPv4).
+
+listen:
+  udp:
+    enabled: true
+    host: 127.0.0.1
+    port: 5353
+  tcp:
+    enabled: false
+  dot:
+    enabled: false
+
+upstream:
+  - host: 1.1.1.1
+    port: 53
+  - host: 8.8.8.8
+    port: 53
+
+dnssec:
+  mode: passthrough
+  validation: upstream_ad
+  udp_payload_size: 1232
+
+timeout_ms: 2000
+logging:
+  level: info
+
+plugins:
+  - module: etc-hosts  # EtcHosts plugin alias
+    # pre_priority: 25  # optional: run after ACL but before other filters
+    config:
+      # The plugin reads from the system hosts file by default.
+      # file_path: /etc/hosts
+      # Note: This affects only A queries (IPv4); AAAA queries are not overridden.

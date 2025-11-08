@@ -294,6 +294,20 @@ Testing:
 - Without `seed`, the plugin uses non-deterministic randomness (good for ad‑hoc/manual testing).
 - To force outcomes during tests, use small denominators (e.g., `servfail_one_in: 1` or `nxdomain_one_in: 1`).
 
+## Example configurations (YAML)
+
+YAML is the supported configuration format. See example files under `example_configs/` for ready-to-run, plugin-focused configs with inline comments:
+
+- `example_configs/plugin_access_control.yaml` — Access control (allow/deny CIDRs)
+- `example_configs/plugin_etc_hosts.yaml` — Local overrides from hosts file (A-only)
+- `example_configs/plugin_filter.yaml` — Domain/regex/keyword filtering and IP actions (remove/deny/replace)
+- `example_configs/plugin_flakey_server.yaml` — Simulate SERVFAIL/NXDOMAIN for targeted clients
+- `example_configs/plugin_greylist.yaml` — Temporary denies for first-seen base domains
+- `example_configs/plugin_new_domain_filter.yaml` — Block newly-registered domains by age
+- `example_configs/plugin_upstream_router.yaml` — Route queries by domain/suffix to specific upstreams
+- `example_configs/plugin_examples.yaml` — Demonstration plugin with pre-filters and post rewrites
+- `example_configs/kitchen_sink.yaml` — Combined example showing hook priorities and interactions
+
 ## Complete `config.yaml` Example
 
 Here is a complete `config.yaml` file that uses all the available features:
@@ -302,7 +316,7 @@ Here is a complete `config.yaml` file that uses all the available features:
 # Example configuration for the DNS caching server
 listen:
   host: 127.0.0.1
-  port: 5300
+  port: 5353
 
 # Multiple upstream DNS servers with automatic failover
 upstream:
