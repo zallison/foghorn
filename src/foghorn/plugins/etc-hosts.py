@@ -88,6 +88,15 @@ class EtcHosts(BasePlugin):
         if not ip:
             return None
 
+        # If the requested type doesn't match the IP version we have, let normal
+        # resolution continue (avoid constructing invalid AAAA from IPv4, etc.).
+        is_v6 = ":" in ip
+        is_v4 = "." in ip
+        if qtype == QTYPE.AAAA and is_v4 and not is_v6:
+            return None
+        if qtype == QTYPE.A and is_v6 and not is_v4:
+            return None
+
         # Build a proper DNS response with the same TXID
         wire = self._make_a_response(qname, qtype, req, ctx, ip)
         return PluginDecision(action="override", response=wire)

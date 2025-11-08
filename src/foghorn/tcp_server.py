@@ -1,3 +1,8 @@
+import asyncio
+import socketserver
+from typing import Callable
+
+
 class _TCPHandler(socketserver.BaseRequestHandler):
     """
     Blocking handler for DNS-over-TCP using length-prefixed frames.
@@ -69,11 +74,6 @@ def serve_tcp_threaded(
             server.server_close()
         except Exception:
             pass
-
-
-import asyncio
-import socketserver
-from typing import Callable
 
 
 async def _read_exact(reader: asyncio.StreamReader, n: int) -> bytes:
