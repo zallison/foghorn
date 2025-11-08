@@ -1,10 +1,12 @@
 import logging
 import socketserver
 from typing import List, Tuple, Dict, Optional
-from dnslib import DNSRecord, QTYPE, RCODE
+from dnslib import DNSRecord, QTYPE, RCODE, RR, EDNS0
 
 from .cache import TTLCache
 from .plugins.base import BasePlugin, PluginDecision, PluginContext
+from .transports.dot import dot_query, DoTError, get_dot_pool
+from .transports.tcp import tcp_query, TCPError, get_tcp_pool
 
 logger = logging.getLogger("foghorn.server")
 
@@ -87,11 +89,40 @@ def send_query_with_failover(
 
     for upstream in upstreams:
         host, port = upstream["host"], upstream["port"]
+        transport = str(upstream.get("transport", "udp")).lower()
         try:
-            logger.debug("Forwarding %s type %s to %s:%d", qname, qtype, host, port)
-            response_wire = query.send(host, port, timeout=timeout_sec)
+            logger.debug("Forwarding %s type %s via %s to %s:%d", qname, qtype, transport, host, port)
+            # Send based on transport
+            if transport == "dot":
+                tls = upstream.get("tls", {}) if isinstance(upstream.get("tls"), dict) else {}
+                server_name = tls.get("server_name")
+                verify = bool(tls.get("verify", True))
+                ca_file = tls.get("ca_file")
+                pool_cfg = upstream.get("pool", {}) if isinstance(upstream.get("pool"), dict) else {}
+                pool = get_dot_pool(host, int(port), server_name, verify, ca_file)
+                try:
+                    pool.set_limits(
+                        max_connections=pool_cfg.get("max_connections"),
+                        idle_timeout_s=(int(pool_cfg.get("idle_timeout_ms")) // 1000) if pool_cfg.get("idle_timeout_ms") else None,
+                    )
+                except Exception:
+                    pass
+                response_wire = pool.send(query.pack(), timeout_ms, timeout_ms)
+            elif transport == "tcp":
+                pool_cfg = upstream.get("pool", {}) if isinstance(upstream.get("pool"), dict) else {}
+                pool = get_tcp_pool(host, int(port))
+                try:
+                    pool.set_limits(
+                        max_connections=pool_cfg.get("max_connections"),
+                        idle_timeout_s=(int(pool_cfg.get("idle_timeout_ms")) // 1000) if pool_cfg.get("idle_timeout_ms") else None,
+                    )
+                except Exception:
+                    pass
+                response_wire = pool.send(query.pack(), timeout_ms, timeout_ms)
+            else:  # udp (default)
+                response_wire = query.send(host, int(port), timeout=timeout_sec)
 
-            # Check for SERVFAIL to trigger failover
+            # Check for SERVFAIL or truncation to trigger fallback
             try:
                 parsed_response = DNSRecord.parse(response_wire)
                 if parsed_response.header.rcode == RCODE.SERVFAIL:
@@ -103,6 +134,22 @@ def send_query_with_failover(
                     )
                     last_exception = Exception(f"SERVFAIL from {host}:{port}")
                     continue  # Try next upstream
+                # If UDP and TC=1, fallback to TCP for full response
+                tc_flag = getattr(parsed_response.header, "tc", 0)
+                if transport == "udp" and tc_flag == 1:
+                    logger.debug("Truncated UDP response for %s; retrying over TCP", qname)
+                    try:
+                        response_wire = tcp_query(
+                            host,
+                            int(port),
+                            query.pack(),
+                            connect_timeout_ms=timeout_ms,
+                            read_timeout_ms=timeout_ms,
+                        )
+                        return response_wire, {**upstream, "transport": "tcp"}, "ok"
+                    except Exception as e2:
+                        last_exception = e2
+                        continue
             except Exception as e:
                 # If parsing fails, treat as a server failure
                 logger.warning(
@@ -115,11 +162,11 @@ def send_query_with_failover(
                 last_exception = e
                 continue  # Try next upstream
 
-            # Success (NOERROR, NXDOMAIN, etc. are all valid final answers)
+            # Success (NOERROR, NXDOMAIN, etc.)
             return response_wire, upstream, "ok"
 
-        except Exception as e:
-            logger.debug("Upstream %s:%d failed for %s: %s", host, port, qname, str(e))
+        except (DoTError, TCPError, Exception) as e:
+            logger.debug("Upstream %s:%d via %s failed for %s: %s", host, port, transport, qname, str(e))
             last_exception = e
             continue  # Try next upstream
 
@@ -146,6 +193,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     timeout_ms = 2000
     min_cache_ttl = 60
     stats_collector = None  # Optional StatsCollector instance
+    dnssec_mode = "ignore"  # ignore | passthrough | validate
+    dnssec_validation = "upstream_ad"  # upstream_ad | local
+    edns_udp_payload = 1232
 
     def _cache_and_send_response(
         self,
@@ -479,6 +529,35 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         r.header.rcode = RCODE.SERVFAIL
         return _set_response_id(r.pack(), request.header.id)
 
+    def _ensure_edns(self, req: DNSRecord) -> None:
+        """
+        Ensure the request carries an EDNS(0) OPT record with configured payload size and DO bit per dnssec_mode.
+
+        Inputs:
+          - req: DNSRecord to mutate.
+        Outputs:
+          - None
+
+        Example:
+          >>> self._ensure_edns(req)
+        """
+        # Find existing OPT
+        opt_idx = None
+        for idx, rr in enumerate(getattr(req, "ar", []) or []):
+            if rr.rtype == QTYPE.OPT:
+                opt_idx = idx
+                break
+        flags = 0
+        if str(self.dnssec_mode).lower() == "passthrough":
+            # Preserve DO if present, otherwise set it to advertise support
+            flags |= 0x8000  # DO bit
+        # rclass of OPT holds payload size
+        opt_rr = RR(rname=".", rtype=QTYPE.OPT, rclass=int(self.edns_udp_payload), ttl=0, rdata=EDNS0(flags=flags))
+        if opt_idx is None:
+            req.add_ar(opt_rr)
+        else:
+            req.ar[opt_idx] = opt_rr
+
     def handle(self):
         """
         Processes an incoming DNS query.
@@ -615,6 +694,14 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 )
                 return
 
+            # Adjust EDNS/DO based on dnssec.mode before forwarding
+            try:
+                mode = str(self.dnssec_mode).lower()
+                if mode in ("ignore", "passthrough", "validate"):
+                    self._ensure_edns(req)
+            except Exception:
+                pass
+
             reply, used_upstream, reason = self._forward_with_failover_helper(
                 req, upstreams, qname, qtype
             )
@@ -643,6 +730,30 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
             # 5. Apply post-resolve plugins
             reply = self._apply_post_plugins(req, qname, qtype, reply, ctx)
+
+            # Validate DNSSEC if requested
+            try:
+                if str(self.dnssec_mode).lower() == "validate":
+                    parsed = DNSRecord.parse(reply)
+                    valid = False
+                    if str(getattr(self, 'dnssec_validation', 'upstream_ad')).lower() == 'local':
+                        try:
+                            from .dnssec_validate import validate_response_local
+                            valid = bool(validate_response_local(qname, qtype, reply, udp_payload_size=self.edns_udp_payload))
+                        except Exception as e:
+                            logger.debug("Local DNSSEC validation error: %s", e)
+                            valid = False
+                    else:
+                        # Require AD bit from upstream to consider validated
+                        valid = getattr(parsed.header, "ad", 0) == 1
+                    if not valid:
+                        logger.warning("DNSSEC validate mode: validation failed for %s; returning SERVFAIL", qname)
+                        r = req.reply(); r.header.rcode = RCODE.SERVFAIL
+                        reply = r.pack()
+            except Exception:
+                logger.debug("DNSSEC validate check failed; returning SERVFAIL")
+                r = req.reply(); r.header.rcode = RCODE.SERVFAIL
+                reply = r.pack()
 
             # 6. Cache the response
             self._cache_store_if_applicable(qname, qtype, reply)
@@ -694,6 +805,114 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 self.stats_collector.record_latency(t1 - t0)
 
 
+def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
+    """
+    Resolve a single DNS wire query and return wire response using the same pipeline as UDP handler.
+
+    Inputs:
+      - data: Wire-format DNS query bytes.
+      - client_ip: String client IP for plugin context and logging.
+    Outputs:
+      - bytes: Wire-format DNS response.
+
+    Example:
+      >>> resp = resolve_query_bytes(query_bytes, '127.0.0.1')
+    """
+    # Use DNSUDPHandler class-level config and cache
+    try:
+        req = DNSRecord.parse(data)
+        q = req.questions[0]
+        qname = str(q.qname).rstrip(".")
+        qtype = q.qtype
+        cache_key = (qname.lower(), qtype)
+
+        # Pre plugins
+        ctx = PluginContext(client_ip=client_ip)
+        for p in sorted(DNSUDPHandler.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
+            decision = p.pre_resolve(qname, qtype, data, ctx)
+            if isinstance(decision, PluginDecision):
+                if decision.action == "deny":
+                    r = req.reply(); r.header.rcode = RCODE.NXDOMAIN
+                    return _set_response_id(r.pack(), req.header.id)
+                if decision.action == "override" and decision.response is not None:
+                    return _set_response_id(decision.response, req.header.id)
+
+        # Cache
+        cached = DNSUDPHandler.cache.get(cache_key)
+        if cached is not None:
+            return _set_response_id(cached, req.header.id)
+
+        # Upstreams
+        upstreams = ctx.upstream_candidates or DNSUDPHandler.upstream_addrs
+        if not upstreams:
+            r = req.reply(); r.header.rcode = RCODE.SERVFAIL
+            return _set_response_id(r.pack(), req.header.id)
+
+        # EDNS/DNSSEC adjustments
+        try:
+            mode = str(DNSUDPHandler.dnssec_mode).lower()
+            if mode in ("ignore", "passthrough"):
+                # Use instance-like helper by constructing a temp handler
+                dummy = type("_H", (), {})()
+                dummy.dnssec_mode = DNSUDPHandler.dnssec_mode
+                dummy.edns_udp_payload = DNSUDPHandler.edns_udp_payload
+                def _ensure(req):
+                    # Inline simplified ensure to avoid method binding
+                    opt_idx = None
+                    for idx, rr in enumerate(getattr(req, "ar", []) or []):
+                        if rr.rtype == QTYPE.OPT:
+                            opt_idx = idx; break
+                    flags = 0x8000 if str(dummy.dnssec_mode).lower() == "passthrough" else 0
+                    opt_rr = RR(rname=".", rtype=QTYPE.OPT, rclass=int(dummy.edns_udp_payload), ttl=0, rdata=EDNS0(flags=flags))
+                    if opt_idx is None:
+                        req.add_ar(opt_rr)
+                    else:
+                        req.ar[opt_idx] = opt_rr
+                _ensure(req)
+        except Exception:
+            pass
+
+        # Forward
+        reply, used_upstream, reason = send_query_with_failover(
+            req, upstreams, DNSUDPHandler.timeout_ms, qname, qtype
+        )
+        if reply is None:
+            r = req.reply(); r.header.rcode = RCODE.SERVFAIL
+            return _set_response_id(r.pack(), req.header.id)
+
+        # Post plugins
+        ctx2 = PluginContext(client_ip=client_ip)
+        out = reply
+        for p in sorted(DNSUDPHandler.plugins, key=lambda p: getattr(p, "post_priority", 50)):
+            decision = p.post_resolve(qname, qtype, out, ctx2)
+            if isinstance(decision, PluginDecision):
+                if decision.action == "deny":
+                    r = req.reply(); r.header.rcode = RCODE.NXDOMAIN
+                    out = r.pack(); break
+                if decision.action == "override" and decision.response is not None:
+                    out = decision.response; break
+
+        # Cache store minimal (NOERROR+answers) like original _cache_store_if_applicable
+        try:
+            r = DNSRecord.parse(out)
+            if r.header.rcode == RCODE.NOERROR and r.rr:
+                ttls = [rr.ttl for rr in r.rr]
+                ttl = min(ttls) if ttls else 300
+                if ttl > 0:
+                    DNSUDPHandler.cache.set(cache_key, ttl, out)
+        except Exception:
+            pass
+
+        return _set_response_id(out, req.header.id)
+    except Exception:
+        try:
+            req = DNSRecord.parse(data)
+            r = req.reply(); r.header.rcode = RCODE.SERVFAIL
+            return _set_response_id(r.pack(), req.header.id)
+        except Exception:
+            return data  # fallback worst-case
+
+
 class DNSServer:
     """
     A basic DNS server.
@@ -721,6 +940,9 @@ class DNSServer:
         timeout_ms: int = 2000,
         min_cache_ttl: int = 60,
         stats_collector=None,
+        *,
+        dnssec_mode: str = "ignore",
+        edns_udp_payload: int = 1232,
     ) -> None:
         """
         Initializes the DNSServer.
@@ -753,6 +975,11 @@ class DNSServer:
         DNSUDPHandler.timeout_ms = timeout_ms  # pragma: no cover
         DNSUDPHandler.min_cache_ttl = max(0, int(min_cache_ttl))  # pragma: no cover
         DNSUDPHandler.stats_collector = stats_collector  # pragma: no cover
+        DNSUDPHandler.dnssec_mode = str(dnssec_mode)
+        try:
+            DNSUDPHandler.edns_udp_payload = max(512, int(edns_udp_payload))
+        except Exception:
+            DNSUDPHandler.edns_udp_payload = 1232
         self.server = socketserver.ThreadingUDPServer(
             (host, port), DNSUDPHandler
         )  # pragma: no cover

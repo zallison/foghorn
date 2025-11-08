@@ -4,6 +4,8 @@ Foghorn is a lightweight, caching DNS server built with Python. It's designed to
 
 With special thanks to Fiona Weatherwax for their contributions.
 
+For developer-focused documentation (architecture, transports, plugins), see README-DEV.md.
+
 ## Features
 
 *   **DNS Caching:** Speeds up DNS resolution by caching responses from upstream servers.
@@ -54,6 +56,20 @@ python -m foghorn.main --config config.yaml
 
 The server will start listening for DNS queries on the configured host and port.
 
+### DNSSEC modes
+
+```yaml
+dnssec:
+  mode: passthrough            # ignore | passthrough | validate
+  validation: upstream_ad      # upstream_ad | local   (local = experimental)
+  udp_payload_size: 1232
+```
+- ignore: do not advertise DO; DNSSEC data not requested.
+- passthrough: advertise DO and return DNSSEC records; forward AD bit if upstream set it.
+- validate:
+  - upstream_ad: require upstream AD bit (simple, recommended for now)
+  - local (experimental): perform local DNSSEC validation via dnspython; unsigned zones will SERVFAIL.
+
 ## Testing
 
 To run the test suite, use `pytest`:
@@ -76,25 +92,47 @@ Configuration is handled through a `config.yaml` file. The file has three main s
 
 ### `listen`
 
-This section defines the host and port the server will listen on.
+You can enable one or more listeners. UDP remains the default; TCP and DoT are optional.
 
 ```yaml
 listen:
-  host: 127.0.0.1
-  port: 5353
+  udp:
+    enabled: true
+    host: 127.0.0.1
+    port: 5353
+  tcp:
+    enabled: false
+    host: 127.0.0.1
+    port: 5353
+  dot:
+    enabled: false
+    host: 127.0.0.1
+    port: 8853
+    cert_file: /path/to/cert.pem
+    key_file: /path/to/key.pem
 ```
 
 ### `upstream`
 
-This section specifies the upstream DNS servers to which queries will be forwarded. You can provide a list of servers, and they will be tried in order.
+You can mix transports per upstream. If `transport` is omitted it defaults to UDP.
 
 ```yaml
 upstream:
   - host: 1.1.1.1
-    port: 53
-    timeout_ms: 2000
+    port: 853
+    transport: dot
+    tls:
+      server_name: cloudflare-dns.com
+      verify: true
+    pool:
+      max_connections: 64
+      idle_timeout_ms: 30000
   - host: 8.8.8.8
     port: 53
+    # transport: udp (default)
+    pool:
+      max_connections: 32
+      idle_timeout_ms: 15000
 ```
 
 ### `plugins`
