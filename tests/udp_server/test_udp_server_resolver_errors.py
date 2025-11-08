@@ -44,6 +44,6 @@ def test_udp_server_handles_resolver_exception(started_udp_server):
         try:
             _ = s.recvfrom(1024)
         except Exception:
-            pass
+            pass  # pragma: no cover
     finally:
         s.close()

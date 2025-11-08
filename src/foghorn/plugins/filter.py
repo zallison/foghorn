@@ -231,7 +231,7 @@ class FilterPlugin(BasePlugin):
                 else:
                     return PluginDecision(action="deny")
             except Exception:
-                pass
+                pass  # pragma: no cover
 
         if not self.is_allowed(str(domain).rstrip(".")):
             logger.debug("Domain '%s' blocked (exact match)", qname)

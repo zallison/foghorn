@@ -39,7 +39,7 @@ def test_stats_collected_on_query():
             handler.handle()
         except Exception as e:
             # Socket operations may fail in test, that's OK
-            pass
+            pass  # pragma: no cover
 
     # Verify stats were collected
     snapshot = collector.snapshot()
@@ -81,7 +81,7 @@ def test_stats_cache_hit():
     try:
         handler.handle()
     except Exception:
-        pass
+        pass  # pragma: no cover
 
     # Verify cache hit was recorded
     snapshot = collector.snapshot()

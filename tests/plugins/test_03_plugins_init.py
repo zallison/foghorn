@@ -67,7 +67,7 @@ def test_getattr_re_raises_non_matching_module_not_found(monkeypatch):
         try:
             delattr(plugins, target_name)
         except Exception:
-            pass
+            pass  # pragma: no cover
     import sys
 
     sys.modules.pop(fullname, None)

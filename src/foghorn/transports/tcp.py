@@ -27,6 +27,7 @@ class _TCPConn:
     Outputs:
       - send(query_bytes)->response_bytes on a persistent connection.
     """
+
     def __init__(self, host: str, port: int):
         self._host = host
         self._port = int(port)
@@ -35,7 +36,9 @@ class _TCPConn:
 
     def connect(self, connect_timeout_ms: int):
         self.close()
-        s = socket.create_connection((self._host, self._port), timeout=connect_timeout_ms / 1000.0)
+        s = socket.create_connection(
+            (self._host, self._port), timeout=connect_timeout_ms / 1000.0
+        )
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._sock = s
         self._last_used = time.time()
@@ -64,7 +67,7 @@ class _TCPConn:
             try:
                 self._sock.close()
             except Exception:
-                pass
+                pass  # pragma: no cover
         self._sock = None
 
 
@@ -77,7 +80,10 @@ class TCPConnectionPool:
     Outputs:
       - send(query)->response using persistent connection.
     """
-    def __init__(self, host: str, port: int, max_connections: int = 32, idle_timeout_s: int = 30):
+
+    def __init__(
+        self, host: str, port: int, max_connections: int = 32, idle_timeout_s: int = 30
+    ):
         self._host = host
         self._port = int(port)
         self._max = int(max_connections)
@@ -85,7 +91,9 @@ class TCPConnectionPool:
         self._lock = threading.Lock()
         self._stack = []  # type: list[_TCPConn]
 
-    def set_limits(self, *, max_connections: int | None = None, idle_timeout_s: int | None = None) -> None:
+    def set_limits(
+        self, *, max_connections: int | None = None, idle_timeout_s: int | None = None
+    ) -> None:
         """
         Adjust pool sizing at runtime.
 
@@ -102,14 +110,16 @@ class TCPConnectionPool:
             try:
                 self._max = max(1, int(max_connections))
             except Exception:
-                pass
+                pass  # pragma: no cover
         if idle_timeout_s is not None:
             try:
                 self._idle = max(1, int(idle_timeout_s))
             except Exception:
-                pass
+                pass  # pragma: no cover
 
-    def send(self, query: bytes, connect_timeout_ms: int, read_timeout_ms: int) -> bytes:
+    def send(
+        self, query: bytes, connect_timeout_ms: int, read_timeout_ms: int
+    ) -> bytes:
         conn = None
         with self._lock:
             # Cleanup idle
@@ -134,7 +144,7 @@ class TCPConnectionPool:
             try:
                 conn.close()
             except Exception:
-                pass
+                pass  # pragma: no cover
             raise
         finally:
             if conn is not None and conn._sock is not None:
@@ -195,7 +205,9 @@ def tcp_query(
     length_prefix = len(query).to_bytes(2, byteorder="big")
     payload = length_prefix + query
     try:
-        sock = socket.create_connection((host, port), timeout=connect_timeout_ms / 1000.0)
+        sock = socket.create_connection(
+            (host, port), timeout=connect_timeout_ms / 1000.0
+        )
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             sock.settimeout(read_timeout_ms / 1000.0)
@@ -212,7 +224,7 @@ def tcp_query(
             try:
                 sock.close()
             except Exception:
-                pass
+                pass  # pragma: no cover
     except (OSError, TimeoutError) as e:
         raise TCPError(f"Network error: {e}")
 

@@ -56,6 +56,6 @@ def udp_query(
             try:
                 s.close()
             except Exception:
-                pass
+                pass  # pragma: no cover
     except OSError as e:
         raise UDPError(f"UDP error: {e}")

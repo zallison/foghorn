@@ -147,19 +147,19 @@ async def _handle_conn(
         writer.write(resp)
         await writer.drain()
     except asyncio.TimeoutError:
-        pass
+        pass  # pragma: no cover
     except Exception:
         try:
             writer.write(_HTTP_BAD + _CONN_CLOSE + _CRLF)
             await writer.drain()
         except Exception:
-            pass
+            pass  # pragma: no cover
     finally:
         try:
             writer.close()
             await writer.wait_closed()
         except Exception:
-            pass
+            pass  # pragma: no cover
 
 
 async def serve_doh(

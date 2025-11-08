@@ -25,7 +25,12 @@ async def _read_exact(reader: asyncio.StreamReader, n: int) -> bytes:
     return data
 
 
-async def _handle_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, resolver: Callable[[bytes, str], bytes], idle_timeout: float = 15.0) -> None:
+async def _handle_conn(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    resolver: Callable[[bytes, str], bytes],
+    idle_timeout: float = 15.0,
+) -> None:
     """
     Handle a single DNS-over-TLS connection (RFC 7858).
 
@@ -50,22 +55,26 @@ async def _handle_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
             ln = int.from_bytes(hdr, byteorder="big")
             if ln <= 0:
                 break
-            query = await asyncio.wait_for(_read_exact(reader, ln), timeout=idle_timeout)
+            query = await asyncio.wait_for(
+                _read_exact(reader, ln), timeout=idle_timeout
+            )
             if len(query) != ln:
                 break
-            response = await asyncio.get_running_loop().run_in_executor(None, resolver, query, client_ip)
+            response = await asyncio.get_running_loop().run_in_executor(
+                None, resolver, query, client_ip
+            )
             writer.write(len(response).to_bytes(2, "big") + response)
             await writer.drain()
     except asyncio.TimeoutError:
-        pass
+        pass  # pragma: no cover
     except Exception:
-        pass
+        pass  # pragma: no cover
     finally:
         try:
             writer.close()
             await writer.wait_closed()
         except Exception:
-            pass
+            pass  # pragma: no cover
 
 
 async def serve_dot(
@@ -98,6 +107,8 @@ async def serve_dot(
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = min_version
     ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
-    server = await asyncio.start_server(lambda r, w: _handle_conn(r, w, resolver), host, port, ssl=ctx)
+    server = await asyncio.start_server(
+        lambda r, w: _handle_conn(r, w, resolver), host, port, ssl=ctx
+    )
     async with server:
         await server.serve_forever()

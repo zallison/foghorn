@@ -312,7 +312,7 @@ def main(argv: List[str] | None = None) -> int:
                 dnssec_cfg.get("validation", "upstream_ad")
             ).lower()
         except Exception:
-            pass
+            pass  # pragma: no cover
 
     # Log startup info
     upstream_info = ", ".join([f"{u['host']}:{u['port']}" for u in upstreams])

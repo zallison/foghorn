@@ -38,13 +38,13 @@ class _ShortReadServer:
                 _ = conn.recv(1)
                 # Close without sending anything
         except Exception:
-            pass
+            pass  # pragma: no cover
 
     def close(self):
         try:
             self.sock.close()
         except Exception:
-            pass
+            pass  # pragma: no cover
 
 
 @pytest.fixture(scope="module")

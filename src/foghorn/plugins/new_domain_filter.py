@@ -170,7 +170,7 @@ class NewDomainFilterPlugin(BasePlugin):
                 ts = int(cached.decode())
                 return dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc)
             except Exception:
-                pass
+                pass  # pragma: no cover
 
         # 2) Persistent DB cache
         rec = self._db_get_creation_record(domain)

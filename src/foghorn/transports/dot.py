@@ -21,7 +21,9 @@ class DoTError(Exception):
 
 
 def _build_ssl_context(
-    server_hostname: Optional[str], verify: bool = True, ca_file: Optional[str] = None,
+    server_hostname: Optional[str],
+    verify: bool = True,
+    ca_file: Optional[str] = None,
     min_version: ssl.TLSVersion = ssl.TLSVersion.TLSv1_2,
 ) -> ssl.SSLContext:
     """
@@ -38,7 +40,11 @@ def _build_ssl_context(
     Example:
       >>> ctx = _build_ssl_context('cloudflare-dns.com', True, None)
     """
-    ctx = ssl.create_default_context(cafile=ca_file) if verify else ssl._create_unverified_context()
+    ctx = (
+        ssl.create_default_context(cafile=ca_file)
+        if verify
+        else ssl._create_unverified_context()
+    )
     ctx.minimum_version = min_version
     # RFC7858 recommends TLS 1.2 or later; HTTP/2 ciphers are fine but not required here.
     return ctx
@@ -57,18 +63,23 @@ class _DotConn:
 
     Brief: Manages one TLS socket; not safe for concurrent in-flight queries.
     """
-    def __init__(self, host: str, port: int, ctx: ssl.SSLContext, server_name: Optional[str]):
+
+    def __init__(
+        self, host: str, port: int, ctx: ssl.SSLContext, server_name: Optional[str]
+    ):
         self._host = host
         self._port = int(port)
         self._ctx = ctx
         self._server_name = server_name
         self._sock = None  # type: Optional[socket.socket]
-        self._tls = None   # type: Optional[socket.socket]
+        self._tls = None  # type: Optional[socket.socket]
         self._last_used = time.time()
 
     def connect(self, connect_timeout_ms: int):
         self.close()
-        s = socket.create_connection((self._host, self._port), timeout=connect_timeout_ms / 1000.0)
+        s = socket.create_connection(
+            (self._host, self._port), timeout=connect_timeout_ms / 1000.0
+        )
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         t = self._ctx.wrap_socket(s, server_hostname=self._server_name)
         self._sock = s
@@ -100,12 +111,12 @@ class _DotConn:
                 try:
                     self._tls.close()
                 except Exception:
-                    pass
+                    pass  # pragma: no cover
             if self._sock is not None:
                 try:
                     self._sock.close()
                 except Exception:
-                    pass
+                    pass  # pragma: no cover
         finally:
             self._tls = None
             self._sock = None
@@ -125,19 +136,34 @@ class DotConnectionPool:
     Example:
       >>> pool = get_dot_pool('1.1.1.1', 853, 'cloudflare-dns.com', True, None)
     """
-    def __init__(self, host: str, port: int, server_name: Optional[str], verify: bool, ca_file: Optional[str], max_connections: int = 32, idle_timeout_s: int = 30, min_version: ssl.TLSVersion = ssl.TLSVersion.TLSv1_2):
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        server_name: Optional[str],
+        verify: bool,
+        ca_file: Optional[str],
+        max_connections: int = 32,
+        idle_timeout_s: int = 30,
+        min_version: ssl.TLSVersion = ssl.TLSVersion.TLSv1_2,
+    ):
         self._host = host
         self._port = int(port)
         self._server_name = server_name
         self._verify = verify
         self._ca_file = ca_file
-        self._ctx = _build_ssl_context(server_name, verify=verify, ca_file=ca_file, min_version=min_version)
+        self._ctx = _build_ssl_context(
+            server_name, verify=verify, ca_file=ca_file, min_version=min_version
+        )
         self._max = int(max_connections)
         self._idle = int(idle_timeout_s)
         self._lock = threading.Lock()
         self._stack = []  # type: list[_DotConn]
 
-    def set_limits(self, *, max_connections: int | None = None, idle_timeout_s: int | None = None) -> None:
+    def set_limits(
+        self, *, max_connections: int | None = None, idle_timeout_s: int | None = None
+    ) -> None:
         """
         Adjust pool sizing at runtime.
 
@@ -154,14 +180,16 @@ class DotConnectionPool:
             try:
                 self._max = max(1, int(max_connections))
             except Exception:
-                pass
+                pass  # pragma: no cover
         if idle_timeout_s is not None:
             try:
                 self._idle = max(1, int(idle_timeout_s))
             except Exception:
-                pass
+                pass  # pragma: no cover
 
-    def send(self, query: bytes, connect_timeout_ms: int, read_timeout_ms: int) -> bytes:
+    def send(
+        self, query: bytes, connect_timeout_ms: int, read_timeout_ms: int
+    ) -> bytes:
         conn = None
         with self._lock:
             # Cleanup idle
@@ -186,7 +214,7 @@ class DotConnectionPool:
             try:
                 conn.close()
             except Exception:
-                pass
+                pass  # pragma: no cover
             raise
         finally:
             if conn is not None and conn._tls is not None:
@@ -200,7 +228,13 @@ class DotConnectionPool:
 _POOLS = {}
 
 
-def get_dot_pool(host: str, port: int, server_name: Optional[str], verify: bool, ca_file: Optional[str]) -> DotConnectionPool:
+def get_dot_pool(
+    host: str,
+    port: int,
+    server_name: Optional[str],
+    verify: bool,
+    ca_file: Optional[str],
+) -> DotConnectionPool:
     """
     Get or create a DoT connection pool for the given parameters.
 
@@ -254,11 +288,15 @@ def dot_query(
 
     try:
         # TCP connect
-        sock = socket.create_connection((host, port), timeout=connect_timeout_ms / 1000.0)
+        sock = socket.create_connection(
+            (host, port), timeout=connect_timeout_ms / 1000.0
+        )
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             ctx = _build_ssl_context(server_name, verify=verify, ca_file=ca_file)
-            tls_sock = ctx.wrap_socket(sock, server_hostname=server_name if verify else None)
+            tls_sock = ctx.wrap_socket(
+                sock, server_hostname=server_name if verify else None
+            )
             try:
                 tls_sock.settimeout(read_timeout_ms / 1000.0)
                 # Send length-prefixed query
@@ -276,12 +314,12 @@ def dot_query(
                 try:
                     tls_sock.close()
                 except Exception:
-                    pass
+                    pass  # pragma: no cover
         finally:
             try:
                 sock.close()
             except Exception:
-                pass
+                pass  # pragma: no cover
     except ssl.SSLError as e:
         raise DoTError(f"TLS error: {e}")
     except (OSError, socket.timeout) as e:

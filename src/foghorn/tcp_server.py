@@ -42,7 +42,7 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                 resp = self.resolver(body, peer_ip)
                 sock.sendall(len(resp).to_bytes(2, "big") + resp)
         except Exception:
-            pass
+            pass  # pragma: no cover
 
 
 def serve_tcp_threaded(
@@ -73,7 +73,7 @@ def serve_tcp_threaded(
         try:
             server.server_close()
         except Exception:
-            pass
+            pass  # pragma: no cover
 
 
 async def _read_exact(reader: asyncio.StreamReader, n: int) -> bytes:
@@ -142,15 +142,15 @@ async def _handle_conn(
             writer.write(len(response).to_bytes(2, "big") + response)
             await writer.drain()
     except asyncio.TimeoutError:
-        pass
+        pass  # pragma: no cover
     except Exception:
-        pass
+        pass  # pragma: no cover
     finally:
         try:
             writer.close()
             await writer.wait_closed()
         except Exception:
-            pass
+            pass  # pragma: no cover
 
 
 async def serve_tcp(

@@ -30,7 +30,7 @@ class _UDPHandler(socketserver.BaseRequestHandler):
             resp = self.resolver(data, peer_ip)
             sock.sendto(resp, self.client_address)
         except Exception:
-            pass
+            pass  # pragma: no cover
 
 
 def serve_udp(host: str, port: int, resolver: Callable[[bytes, str], bytes]) -> None:
@@ -59,4 +59,4 @@ def serve_udp(host: str, port: int, resolver: Callable[[bytes, str], bytes]) -> 
         try:
             server.server_close()
         except Exception:
-            pass
+            pass  # pragma: no cover

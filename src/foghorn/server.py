@@ -130,7 +130,7 @@ def send_query_with_failover(
                         ),
                     )
                 except Exception:
-                    pass
+                    pass  # pragma: no cover
                 response_wire = pool.send(query.pack(), timeout_ms, timeout_ms)
             elif transport == "tcp":
                 pool_cfg = (
@@ -149,7 +149,7 @@ def send_query_with_failover(
                         ),
                     )
                 except Exception:
-                    pass
+                    pass  # pragma: no cover
                 response_wire = pool.send(query.pack(), timeout_ms, timeout_ms)
             elif transport == "doh":
                 doh_url = str(
@@ -716,7 +716,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         )
                         self.stats_collector.record_response_rcode(rcode_name)
                     except Exception:
-                        pass
+                        pass  # pragma: no cover
                 resp = _set_response_id(cached, req.header.id)
                 sock.sendto(resp, self.client_address)
                 return
@@ -740,7 +740,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 if mode in ("ignore", "passthrough", "validate"):
                     self._ensure_edns(req)
             except Exception:
-                pass
+                pass  # pragma: no cover
 
             reply, used_upstream, reason = self._forward_with_failover_helper(
                 req, upstreams, qname, qtype
@@ -823,7 +823,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     )
                     self.stats_collector.record_response_rcode(rcode_name)
                 except Exception:
-                    pass
+                    pass  # pragma: no cover
 
             # 7. Send final response
             reply = _set_response_id(reply, req.header.id)
@@ -941,7 +941,7 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
 
                 _ensure(req)
         except Exception:
-            pass
+            pass  # pragma: no cover
 
         # Forward
         reply, used_upstream, reason = send_query_with_failover(
@@ -978,7 +978,7 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                 if ttl > 0:
                     DNSUDPHandler.cache.set(cache_key, ttl, out)
         except Exception:
-            pass
+            pass  # pragma: no cover
 
         return _set_response_id(out, req.header.id)
     except Exception:

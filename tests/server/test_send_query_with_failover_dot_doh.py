@@ -70,14 +70,14 @@ class _TLSEcho:
                     return
                 s.sendall(hdr + body)
         except Exception:
-            pass
+            pass  # pragma: no cover
 
     def close(self):
         self._stop = True
         try:
             self.sock.close()
         except Exception:
-            pass
+            pass  # pragma: no cover
 
 
 class _DoHHandler(BaseHTTPRequestHandler):

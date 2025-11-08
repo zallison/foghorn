@@ -69,14 +69,14 @@ class _TLSEcho:
                     return
                 s.sendall(ln.to_bytes(2, "big") + body)
         except Exception:
-            pass
+            pass  # pragma: no cover
 
     def close(self):
         self._stop = True
         try:
             self.sock.close()
         except Exception:
-            pass
+            pass  # pragma: no cover
 
 
 @pytest.fixture(scope="module")

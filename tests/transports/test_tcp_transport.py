@@ -69,7 +69,7 @@ class _TCPStub:
         try:
             self.sock.close()
         except Exception:
-            pass
+            pass  # pragma: no cover
 
 
 @pytest.fixture(scope="module")

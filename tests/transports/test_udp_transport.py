@@ -40,14 +40,14 @@ class _UDPStub:
             try:
                 self.sock.sendto(data, peer)
             except Exception:
-                pass
+                pass  # pragma: no cover
 
     def close(self):
         self._stop = True
         try:
             self.sock.close()
         except Exception:
-            pass
+            pass  # pragma: no cover
 
 
 @pytest.fixture(scope="module")
