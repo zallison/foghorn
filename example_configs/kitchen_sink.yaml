@@ -39,7 +39,7 @@ plugins:
         - 203.0.113.0/24
 
   # 2) Introduce flakiness early (test client resilience)
-  - module: flakey
+  - module: flaky
     pre_priority: 15
     config:
       allow: ["192.0.2.0/24", "2001:db8::/32"]
@@ -116,5 +116,5 @@ plugins:
 
 # Ordering notes:
 # - Lower pre_priority runs earlier; higher post_priority runs later.
-# - Typical chain (pre): ACL -> Flakey -> Filter -> Router -> Greylist -> NewDomain -> EtcHosts
+# - Typical chain (pre): ACL -> Flaky -> Filter -> Router -> Greylist -> NewDomain -> EtcHosts
 # - Post-processing (e.g., Examples rewrite) should be last to avoid interfering with policy checks.

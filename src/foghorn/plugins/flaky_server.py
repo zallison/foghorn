@@ -12,8 +12,8 @@ from .base import BasePlugin, PluginDecision, PluginContext, plugin_aliases
 logger = logging.getLogger(__name__)
 
 
-@plugin_aliases("flakey_server", "flakey", "flaky")
-class FlakeyServer(BasePlugin):
+@plugin_aliases("flaky_server", "flaky", "flaky")
+class FlakyServer(BasePlugin):
     """
     Brief: Simulate an unreliable server by randomly returning SERVFAIL or NXDOMAIN for specific clients.
 
@@ -37,7 +37,7 @@ class FlakeyServer(BasePlugin):
 
     Example usage (YAML):
       plugins:
-        - name: flakey_server
+        - name: flaky_server
           pre_priority: 15
           config:
             allow: ["192.0.2.0/24", "2001:db8::/32"]
@@ -61,7 +61,7 @@ class FlakeyServer(BasePlugin):
           - None (sets instance attributes)
 
         Example:
-          >>> FlakeyServer(allow=["10.0.0.0/8"], servfail_one_in=2, nxdomain_one_in=3)
+          >>> FlakyServer(allow=["10.0.0.0/8"], servfail_one_in=2, nxdomain_one_in=3)
         """
         super().__init__(**config)
 
@@ -82,7 +82,7 @@ class FlakeyServer(BasePlugin):
             allow_list = []
         else:
             logger.warning(
-                "FlakeyServer: ignoring invalid 'allow' value: %r", allow_cfg
+                "FlakyServer: ignoring invalid 'allow' value: %r", allow_cfg
             )
             allow_list = []
 
@@ -96,12 +96,12 @@ class FlakeyServer(BasePlugin):
                 self._allow_networks.append(net)
             except Exception as e:
                 logger.warning(
-                    "FlakeyServer: skipping invalid allow entry %r: %s", entry, e
+                    "FlakyServer: skipping invalid allow entry %r: %s", entry, e
                 )
 
         # If no allow targets are configured, plugin becomes a no-op
         if not self._allow_networks:
-            logger.info("FlakeyServer: no targets configured; plugin will be a no-op")
+            logger.info("FlakyServer: no targets configured; plugin will be a no-op")
 
         # Probabilities with clamping
         self.servfail_one_in = self._clamp_one_in(
@@ -126,7 +126,7 @@ class FlakeyServer(BasePlugin):
                     int(seed)
                 )
             except Exception:
-                logger.warning("FlakeyServer: bad seed %r; using SystemRandom()", seed)
+                logger.warning("FlakyServer: bad seed %r; using SystemRandom()", seed)
                 self._rng = secrets.SystemRandom()
         else:
             self._rng = secrets.SystemRandom()
@@ -147,11 +147,11 @@ class FlakeyServer(BasePlugin):
             n = int(value)
         except Exception:
             logger.warning(
-                "FlakeyServer: %s non-integer %r -> default to 1", key, value
+                "FlakyServer: %s non-integer %r -> default to 1", key, value
             )
             return 1
         if n < 1:
-            logger.warning("FlakeyServer: %s < 1 (%d); clamping to 1", key, n)
+            logger.warning("FlakyServer: %s < 1 (%d); clamping to 1", key, n)
             return 1
         return n
 
@@ -166,7 +166,7 @@ class FlakeyServer(BasePlugin):
           - bool: True if targeted, else False
 
         Example:
-          >>> p = FlakeyServer(allow=["192.0.2.0/24"])  # doctest: +SKIP
+          >>> p = FlakyServer(allow=["192.0.2.0/24"])  # doctest: +SKIP
           >>> p._is_target_client("192.0.2.55")  # doctest: +SKIP
           True
         """
@@ -216,7 +216,7 @@ class FlakeyServer(BasePlugin):
             rep.header.rcode = rcode
             return rep.pack()
         except Exception as e:
-            logger.debug("FlakeyServer: failed to synthesize response: %s", e)
+            logger.debug("FlakyServer: failed to synthesize response: %s", e)
             return None
 
     def pre_resolve(
@@ -236,7 +236,7 @@ class FlakeyServer(BasePlugin):
 
         Example:
           >>> # For a targeted client, force 1-in-1 SERVFAIL
-          >>> p = FlakeyServer(client_ip="192.0.2.55", servfail_one_in=1, nxdomain_one_in=10, seed=1)  # doctest: +SKIP
+          >>> p = FlakyServer(client_ip="192.0.2.55", servfail_one_in=1, nxdomain_one_in=10, seed=1)  # doctest: +SKIP
           >>> # decision = p.pre_resolve("example.com", QTYPE.A, wire, PluginContext("192.0.2.55"))
         """
         # Quick exits
@@ -252,7 +252,7 @@ class FlakeyServer(BasePlugin):
                 if wire is not None:
                     return PluginDecision(action="override", response=wire)
         except Exception as e:
-            logger.debug("FlakeyServer: SERVFAIL draw error: %s", e)
+            logger.debug("FlakyServer: SERVFAIL draw error: %s", e)
 
         # Then NXDOMAIN
         try:
@@ -261,6 +261,6 @@ class FlakeyServer(BasePlugin):
                 if wire is not None:
                     return PluginDecision(action="override", response=wire)
         except Exception as e:
-            logger.debug("FlakeyServer: NXDOMAIN draw error: %s", e)
+            logger.debug("FlakyServer: NXDOMAIN draw error: %s", e)
 
         return None

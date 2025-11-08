@@ -1,5 +1,5 @@
 """
-Brief: Tests for FlakeyServer plugin behavior and configuration parsing.
+Brief: Tests for FlakyServer plugin behavior and configuration parsing.
 
 Inputs:
   - None
@@ -17,9 +17,9 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SRC_DIR = os.path.join(ROOT, "src")
 PKG_DIR = os.path.join(SRC_DIR, "foghorn")
 PLUG_DIR = os.path.join(PKG_DIR, "plugins")
-PLUGIN_PATH = os.path.join(PLUG_DIR, "flakey_server.py")
+PLUGIN_PATH = os.path.join(PLUG_DIR, "flaky_server.py")
 
-# Synthesize a local package hierarchy so relative imports resolve inside flakey_server
+# Synthesize a local package hierarchy so relative imports resolve inside flaky_server
 import types
 
 foghorn_pkg = types.ModuleType("foghorn")
@@ -31,13 +31,13 @@ plugins_pkg.__path__ = [PLUG_DIR]
 sys.modules["foghorn.plugins"] = plugins_pkg
 
 spec = importlib.util.spec_from_file_location(
-    "foghorn.plugins.flakey_server", PLUGIN_PATH
+    "foghorn.plugins.flaky_server", PLUGIN_PATH
 )
 mod = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = mod
 assert spec.loader is not None
 spec.loader.exec_module(mod)
-FlakeyServer = mod.FlakeyServer
+FlakyServer = mod.FlakyServer
 
 import pytest
 from dnslib import DNSRecord, QTYPE, RCODE
@@ -51,24 +51,24 @@ def _mk_query(name="example.com", qtype="A"):
 
 
 def test_alias_discovery():
-    # We loaded FlakeyServer directly from source; ensure it is callable/class
-    assert callable(FlakeyServer)
+    # We loaded FlakyServer directly from source; ensure it is callable/class
+    assert callable(FlakyServer)
 
 
 def test_default_priority():
-    p = FlakeyServer()
+    p = FlakyServer()
     assert p.pre_priority == 15
 
 
 def test_no_targets_is_noop():
-    p = FlakeyServer()  # no allow / client_ip
+    p = FlakyServer()  # no allow / client_ip
     q, wire = _mk_query()
     ctx = PluginContext("192.0.2.55")
     assert p.pre_resolve("example.com", QTYPE.A, wire, ctx) is None
 
 
 def test_client_ip_targets_only_that_ip():
-    p = FlakeyServer(
+    p = FlakyServer(
         client_ip="192.0.2.55", servfail_one_in=1, nxdomain_one_in=999, seed=1
     )
     q, wire = _mk_query()
@@ -83,7 +83,7 @@ def test_client_ip_targets_only_that_ip():
 
 
 def test_allow_list_targets_cidr_and_single():
-    p = FlakeyServer(allow=["192.0.2.0/24", "198.51.100.10"], servfail_one_in=1, seed=2)
+    p = FlakyServer(allow=["192.0.2.0/24", "198.51.100.10"], servfail_one_in=1, seed=2)
     q, wire = _mk_query()
     assert p.pre_resolve("ex", QTYPE.A, wire, PluginContext("192.0.2.99")) is not None
     assert (
@@ -94,7 +94,7 @@ def test_allow_list_targets_cidr_and_single():
 
 
 def test_servfail_precedence_over_nxdomain():
-    p = FlakeyServer(
+    p = FlakyServer(
         client_ip="192.0.2.55", servfail_one_in=1, nxdomain_one_in=1, seed=3
     )
     q, wire = _mk_query()
@@ -105,7 +105,7 @@ def test_servfail_precedence_over_nxdomain():
 
 
 def test_qtype_filtering_only_A():
-    p = FlakeyServer(
+    p = FlakyServer(
         client_ip="192.0.2.55",
         allow=None,
         servfail_one_in=1,
@@ -124,7 +124,7 @@ def test_qtype_filtering_only_A():
 
 def test_invalid_allow_entries_do_not_crash(caplog):
     caplog.set_level("WARNING")
-    p = FlakeyServer(
+    p = FlakyServer(
         allow=["not-an-ip", "300.300.300.300/33"], servfail_one_in=1, seed=5
     )
     q, wire = _mk_query()

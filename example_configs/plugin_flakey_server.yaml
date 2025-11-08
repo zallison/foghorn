@@ -1,4 +1,4 @@
-# Foghorn example: Flakey server plugin
+# Foghorn example: Flaky server plugin
 # Introduce controlled failures for testing resilience and clients' retry behavior.
 
 listen:
@@ -27,10 +27,10 @@ logging:
   level: info
 
 plugins:
-  - module: flakey  # FlakeyServer alias
+  - module: flaky  # FlakyServer alias
     # pre_priority: 15  # optional: run early so failures happen before other plugins
     config:
-      # Only apply flakey behavior to these client subnets:
+      # Only apply flaky behavior to these client subnets:
       allow:
         - 192.0.2.0/24
         - 2001:db8::/32
