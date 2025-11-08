@@ -1,4 +1,0 @@
-# Sample allowlist
-intranet.example
-safe.example
-corp.internal

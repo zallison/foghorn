@@ -71,18 +71,13 @@ def normalize_upstream_config(
         # New format: list of upstream objects
         upstreams = []
         for u in upstream_raw:
-            if isinstance(u, dict) and "host" in u:
-                upstreams.append(
-                    {"host": str(u["host"]), "port": int(u.get("port", 53))}
-                )
+            if isinstance(u, dict) and "host" in u and "port" in u:
+                upstreams.append({"host": str(u["host"]), "port": int(u["port"])})
     elif isinstance(upstream_raw, dict):
         # Legacy format: single upstream object
-        if "host" in upstream_raw:
+        if "host" in upstream_raw and "port" in upstream_raw:
             upstreams = [
-                {
-                    "host": str(upstream_raw["host"]),
-                    "port": int(upstream_raw.get("port", 53)),
-                }
+                {"host": str(upstream_raw["host"]), "port": int(upstream_raw["port"])}
             ]
         else:
             # Default fallback
@@ -239,9 +234,7 @@ def main(argv: List[str] | None = None) -> int:
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down")
     except Exception as e:  # pragma: no cover
-        logger.exception(
-            f"Unhandled exception during server operation {e}"
-        )  # pragma: no cover
+        logger.exception(f"Unhandled exception during server operation {e}")  # pragma: no cover
         return 1  # pragma: no cover
 
     return 0

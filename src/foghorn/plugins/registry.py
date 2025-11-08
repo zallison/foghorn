@@ -36,7 +36,7 @@ def _iter_plugin_modules(package_name: str = "foghorn.plugins") -> Iterable[str]
         # Only import modules (skip packages unless they contain modules)
         if modinfo.ispkg:
             # Still yield submodules during walk; leave as-is
-            pass  # pragma: nocover
+            pass
         yield modinfo.name
 
 
@@ -55,7 +55,7 @@ def discover_plugins(
             module = importlib.import_module(modname)
         except Exception as e:
             logger.error("Failed importing plugin module %s: %s", modname, e)
-            raise e
+            continue
 
         for _, obj in inspect.getmembers(module, inspect.isclass):
             if not issubclass(obj, BasePlugin) or obj is BasePlugin:

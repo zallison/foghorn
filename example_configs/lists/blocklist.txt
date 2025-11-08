@@ -1,4 +1,0 @@
-# Sample blocklist
-ads.example
-bad.example
-tracking.internal

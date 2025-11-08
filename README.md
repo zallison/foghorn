@@ -15,7 +15,6 @@ With special thanks to Fiona Weatherwax for their contributions.
     *   **New Domain Filter:** Block domains that were registered recently.
     *   **Upstream Router:** Route queries to different upstream servers based on the domain name.
     *   **Filter:** Block queries based on domain names, keywords, and IP addresses in responses.
-    *   **Flakey Server:** Simulate an unreliable server: randomly return SERVFAIL or NXDOMAIN for targeted clients (testing aid).
     *   **Examples:** Misc examples, replace the first entry of every record to localhost, limit the length of the domain name, or the depth of domain names.
 
 
@@ -107,7 +106,6 @@ You can use short aliases instead of full dotted paths:
 - new_domain_filter or new_domain -> foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
 - upstream_router or router -> foghorn.plugins.upstream_router.UpstreamRouterPlugin
 - filter -> foghorn.plugins.filter.FilterPlugin
-- flakey_server or flakey or flaky -> foghorn.plugins.flakey_server.FlakeyServer
 
 Examples of plugin entries:
 - As a dict with module/config: `{ module: acl, config: {...} }`
@@ -250,72 +248,6 @@ plugins:
           action: "remove" # Remove just this A/AAAA record
 ```
 
-#### FlakeyServer
-
-Simulate an unreliable server by randomly returning errors for targeted clients. Useful for testing client failover and error handling.
-
-Aliases: `flakey_server`, `flakey`, `flaky`
-
-Default priority: `pre_priority` 15 (runs relatively early in pre-resolve).
-
-Configuration:
-
-- `allow`: List of CIDR(s) or IP(s) to target (e.g., `["192.0.2.0/24", "2001:db8::/32"]`). If omitted/empty, the plugin is a no‑op.
-- `client_ip`: Single IP to target (shorthand; combined with `allow` if both are provided).
-- `servfail_one_in`: Integer N (>=1). Return SERVFAIL with probability 1-in-N. Default 4.
-- `nxdomain_one_in`: Integer N (>=1). Return NXDOMAIN with probability 1-in-N if SERVFAIL did not trigger. Default 10.
-- `apply_to_qtypes`: List of qtypes this applies to (e.g., `["A", "AAAA"]`). `"*"` means all. Default `["*"]`.
-- `seed`: Optional integer for deterministic behavior in tests. If omitted, uses non-deterministic randomness.
-
-Behavior notes:
-- Targeting: Only clients matching `allow`/`client_ip` are affected.
-- Precedence: SERVFAIL draw is evaluated first; NXDOMAIN is considered only if SERVFAIL does not trigger.
-
-Example (short alias):
-
-```yaml
-plugins:
-  - module: flakey_server
-    pre_priority: 15
-    config:
-      # Choose one or both targeting methods:
-      allow: ["192.0.2.0/24", "2001:db8::/32"]
-      # or
-      # client_ip: 192.0.2.55
-
-      servfail_one_in: 4
-      nxdomain_one_in: 10
-      apply_to_qtypes: ["*"]
-      seed: 12345  # Optional: set for deterministic tests
-```
-
-Testing:
-- For deterministic tests, set `seed` to any integer so the random decisions are reproducible across runs.
-- Without `seed`, the plugin uses non-deterministic randomness (good for ad‑hoc/manual testing).
-- To force outcomes during tests, use small denominators (e.g., `servfail_one_in: 1` or `nxdomain_one_in: 1`).
-
-## Example configurations (YAML)
-
-YAML is the supported configuration format. See example files under `example_configs/` for ready-to-run, plugin-focused configs with inline comments:
-
-- `example_configs/plugin_access_control.yaml` — Access control (allow/deny CIDRs)
-- `example_configs/plugin_etc_hosts.yaml` — Local overrides from hosts file (A-only)
-- `example_configs/plugin_filter.yaml` — Domain/regex/keyword filtering and IP actions (remove/deny/replace)
-- `example_configs/plugin_flakey_server.yaml` — Simulate SERVFAIL/NXDOMAIN for targeted clients
-- `example_configs/plugin_greylist.yaml` — Temporary denies for first-seen base domains
-- `example_configs/plugin_new_domain_filter.yaml` — Block newly-registered domains by age
-- `example_configs/plugin_upstream_router.yaml` — Route queries by domain/suffix to specific upstreams
-- `example_configs/plugin_examples.yaml` — Demonstration plugin with pre-filters and post rewrites
-- `example_configs/kitchen_sink.yaml` — Combined example showing hook priorities and interactions
-
-Network and DNSSEC examples:
-- `example_configs/net_listen_udp_tcp.yaml` — Enable UDP and TCP listeners
-- `example_configs/net_listen_dot.yaml` — Enable a DoT listener with certificate/key (plus mixed upstreams)
-- `example_configs/net_upstream_udp.yaml` — Multiple UDP upstreams with timeout
-- `example_configs/net_upstream_dot.yaml` — Multiple DoT upstreams with SNI and verification
-- `example_configs/net_upstream_mixed.yaml` — Prefer DoT with UDP fallback
-- `example_configs/net_dnssec_modes.yaml` — DNSSEC modes: ignore, passthrough, validate (local)
-
 ## Complete `config.yaml` Example
 
 Here is a complete `config.yaml` file that uses all the available features:
@@ -324,7 +256,7 @@ Here is a complete `config.yaml` file that uses all the available features:
 # Example configuration for the DNS caching server
 listen:
   host: 127.0.0.1
-  port: 5353
+  port: 5300
 
 # Multiple upstream DNS servers with automatic failover
 upstream:
@@ -486,117 +418,3 @@ You can extend Foghorn by creating your own plugins. A plugin is a Python class 
 
 *   `pre_resolve(self, qname, qtype, ctx)`: This method is called before a query is resolved. It can return a `PluginDecision` to `allow`, `deny`, or `override` the query.
 *   `post_resolve(self, qname, qtype, response_wire, ctx)`: This method is called after a query has been resolved. It can also return a `PluginDecision` to modify the response.
-
-### Hook Priorities
-
-Plugins can specify the execution order of their hooks using priority values. Lower numbers run earlier.
-
-**Key Properties:**
-*   **Range**: 1 (earliest) to 255 (latest)
-*   **Default**: 50 for both `pre_priority` and `post_priority`
-*   **Ties**: Plugins with equal priorities execute in registration order (stable sort)
-*   **Configuration**: Set via class attributes or per-instance YAML config
-
-**Class-Level Defaults:**
-
-```python
-from foghorn.plugins.base import BasePlugin
-
-class AllowlistPlugin(BasePlugin):
-    pre_priority = 10  # Run early in pre-resolve
-
-    def pre_resolve(self, qname, qtype, req, ctx):
-        # Check allowlist before other plugins
-        ...
-
-class BlocklistPlugin(BasePlugin):
-    pre_priority = 20  # Run after allowlist
-
-    def pre_resolve(self, qname, qtype, req, ctx):
-        # Check blocklist
-        ...
-
-class RedirectPlugin(BasePlugin):
-    pre_priority = 100  # Run later
-    post_priority = 120
-
-    def pre_resolve(self, qname, qtype, req, ctx):
-        # Route to different upstreams
-        ...
-```
-
-**YAML Configuration Overrides:**
-
-You can override priorities per plugin instance in your config file:
-
-```yaml
-plugins:
-  # Access control runs first
-  - module: acl
-    pre_priority: 10
-    config:
-      default: allow
-      deny:
-        - "192.0.2.0/24"
-
-  # Blocklist runs second
-  - module: filter
-    pre_priority: 20
-    config:
-      blocked_domains:
-        - "malware.com"
-
-  # Upstream routing runs later
-  - module: router
-    pre_priority: 100
-    config:
-      routes:
-        - suffix: ".corp"
-          upstream:
-            host: 10.0.0.1
-            port: 53
-```
-
-**Why Priorities Matter:**
-
-Priorities let you ensure critical checks happen first. For example:
-*   **Access control** (priority 10) blocks unauthorized clients before other processing
-*   **Allowlist/Blocklist** (priority 20) filters domains before routing decisions
-*   **Upstream routing** (priority 100) runs after filtering is complete
-
-**Legacy `priority` Key (Deprecated):**
-
-Older configs may use `priority` instead of `pre_priority`/`post_priority`. This sets both hooks to the same value and will log a warning. Migrate to the specific keys:
-
-```yaml
-# Old (deprecated):
-plugins:
-  - module: acl
-    priority: 10
-
-# New (preferred):
-plugins:
-  - module: acl
-    pre_priority: 10
-    post_priority: 50  # Use default or set explicitly
-```
-
-
-## Makefile Targets
-
-A make file has been provided For your convenience.
-
-Make `run` will run `tests`.  `Tests` will run `build`.
-
-Ensure your `config.yaml` has been set appropriately. See `config-example.yaml` for details.
-
-
-| Target | What it does | Typical use |
-|--------|--------------|-------------|
-| **`run`** | <ul><li>Ensures a virtual‑environment (`venv/`) exists and activates it.</li><li>Creates a `var/` directory (if it doesn’t already exist).</li><li>Runs the application via `./venv/bin/foghorn --config config.yaml`.</li></ul> | `make run` – Launch the project with its default configuration. |
-| **`build`** | <ul><li>Creates a clean virtual‑environment (`venv/`).</li><li>Installs the current package in *editable* mode (`pip install -e .`).</li></ul> | `make build` – Prepare the environment for development or testing. |
-| **`test`** (or **`tests`**) | <ul><li>Depends on `build` – guarantees the package is installed.</li><li>Runs `pytest` inside the virtual‑environment.</li></ul> | `make test` – Execute the test suite. |
-| **`clean`** | <ul><li>Removes the `venv/` and `var/` directories.</li><li>Deletes all `__pycache__` directories.</li><li>Deletes temporary and compiled files (`*.pyc`, `*.tmp`, `*~`, `*.swp`).</li><li>YAML files are preserved by design.</li></ul> | `make clean` – Clean the workspace of all generated artefacts. |
-| **`help`** | Prints a short description of the available targets. | `make` or `make help` – Shows this help message. |
-
-> **Default goal** – If you just type `make` with no target, the Makefile runs the `help` target automatically, thanks to ` .DEFAULT_GOAL := help`.
