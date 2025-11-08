@@ -91,30 +91,57 @@ def send_query_with_failover(
         host, port = upstream["host"], upstream["port"]
         transport = str(upstream.get("transport", "udp")).lower()
         try:
-            logger.debug("Forwarding %s type %s via %s to %s:%d", qname, qtype, transport, host, port)
+            logger.debug(
+                "Forwarding %s type %s via %s to %s:%d",
+                qname,
+                qtype,
+                transport,
+                host,
+                port,
+            )
             # Send based on transport
             if transport == "dot":
-                tls = upstream.get("tls", {}) if isinstance(upstream.get("tls"), dict) else {}
+                tls = (
+                    upstream.get("tls", {})
+                    if isinstance(upstream.get("tls"), dict)
+                    else {}
+                )
                 server_name = tls.get("server_name")
                 verify = bool(tls.get("verify", True))
                 ca_file = tls.get("ca_file")
-                pool_cfg = upstream.get("pool", {}) if isinstance(upstream.get("pool"), dict) else {}
+                pool_cfg = (
+                    upstream.get("pool", {})
+                    if isinstance(upstream.get("pool"), dict)
+                    else {}
+                )
                 pool = get_dot_pool(host, int(port), server_name, verify, ca_file)
                 try:
                     pool.set_limits(
                         max_connections=pool_cfg.get("max_connections"),
-                        idle_timeout_s=(int(pool_cfg.get("idle_timeout_ms")) // 1000) if pool_cfg.get("idle_timeout_ms") else None,
+                        idle_timeout_s=(
+                            (int(pool_cfg.get("idle_timeout_ms")) // 1000)
+                            if pool_cfg.get("idle_timeout_ms")
+                            else None
+                        ),
                     )
                 except Exception:
                     pass
                 response_wire = pool.send(query.pack(), timeout_ms, timeout_ms)
             elif transport == "tcp":
-                pool_cfg = upstream.get("pool", {}) if isinstance(upstream.get("pool"), dict) else {}
+                pool_cfg = (
+                    upstream.get("pool", {})
+                    if isinstance(upstream.get("pool"), dict)
+                    else {}
+                )
                 pool = get_tcp_pool(host, int(port))
                 try:
                     pool.set_limits(
                         max_connections=pool_cfg.get("max_connections"),
-                        idle_timeout_s=(int(pool_cfg.get("idle_timeout_ms")) // 1000) if pool_cfg.get("idle_timeout_ms") else None,
+                        idle_timeout_s=(
+                            (int(pool_cfg.get("idle_timeout_ms")) // 1000)
+                            if pool_cfg.get("idle_timeout_ms")
+                            else None
+                        ),
                     )
                 except Exception:
                     pass
@@ -137,7 +164,9 @@ def send_query_with_failover(
                 # If UDP and TC=1, fallback to TCP for full response
                 tc_flag = getattr(parsed_response.header, "tc", 0)
                 if transport == "udp" and tc_flag == 1:
-                    logger.debug("Truncated UDP response for %s; retrying over TCP", qname)
+                    logger.debug(
+                        "Truncated UDP response for %s; retrying over TCP", qname
+                    )
                     try:
                         response_wire = tcp_query(
                             host,
@@ -166,7 +195,14 @@ def send_query_with_failover(
             return response_wire, upstream, "ok"
 
         except (DoTError, TCPError, Exception) as e:
-            logger.debug("Upstream %s:%d via %s failed for %s: %s", host, port, transport, qname, str(e))
+            logger.debug(
+                "Upstream %s:%d via %s failed for %s: %s",
+                host,
+                port,
+                transport,
+                qname,
+                str(e),
+            )
             last_exception = e
             continue  # Try next upstream
 
@@ -279,7 +315,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         self, request: DNSRecord, qname: str, qtype: int, data: bytes, ctx
     ):
         """
-        Apply pre-resolve plugins and handle deny/override decisions.
+        Apply pre-resolve plugins in ascending pre_priority order.
 
         Inputs:
             - request (DNSRecord): Parsed DNS request record.
@@ -291,14 +327,14 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         Outputs:
             - decision (PluginDecision or None): Plugin decision if deny/override.
 
-        Notes:
-            Returns None to continue processing, or PluginDecision for deny/override.
+        Plugins execute in ascending pre_priority order (lower values first, default 50).
+        Stable sort preserves registration order for equal priorities.
 
         Example:
             decision = self._apply_pre_plugins(request, qname, qtype, data, ctx)
         """
-        # Pre-resolve plugin checks
-        for p in self.plugins:
+        # Pre-resolve plugin checks in priority order
+        for p in sorted(self.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
             decision = p.pre_resolve(qname, qtype, data, ctx)
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
@@ -402,7 +438,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         self, request: DNSRecord, qname: str, qtype: int, response_wire: bytes, ctx
     ):
         """
-        Apply post-resolve plugins and handle deny/override decisions.
+        Apply post-resolve plugins in ascending post_priority order.
 
         Inputs:
             - request (DNSRecord): Original DNS request record.
@@ -414,15 +450,15 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         Outputs:
             - final_response (bytes): Modified or original response wire data.
 
-        Notes:
-            May modify the response or return error responses based on plugin decisions.
+        Plugins execute in ascending post_priority order (lower values first, default 50).
+        Stable sort preserves registration order for equal priorities.
 
         Example:
             response = self._apply_post_plugins(request, qname, qtype, response_wire, ctx)
         """
         reply = response_wire
-        # Post-resolve plugin hooks (allow overrides like rewriting)
-        for p in self.plugins:
+        # Post-resolve plugin hooks in priority order
+        for p in sorted(self.plugins, key=lambda p: getattr(p, "post_priority", 50)):
             decision = p.post_resolve(qname, qtype, reply, ctx)
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
@@ -552,7 +588,13 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             # Preserve DO if present, otherwise set it to advertise support
             flags |= 0x8000  # DO bit
         # rclass of OPT holds payload size
-        opt_rr = RR(rname=".", rtype=QTYPE.OPT, rclass=int(self.edns_udp_payload), ttl=0, rdata=EDNS0(flags=flags))
+        opt_rr = RR(
+            rname=".",
+            rtype=QTYPE.OPT,
+            rclass=int(self.edns_udp_payload),
+            ttl=0,
+            rdata=EDNS0(flags=flags),
+        )
         if opt_idx is None:
             req.add_ar(opt_rr)
         else:
@@ -611,44 +653,6 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             # 3. Check cache
             cached = self._cache_lookup(qname, qtype)
 
-            ctx = PluginContext(client_ip=client_ip)
-
-            # Pre-resolve plugin checks
-            for p in self.plugins:
-                decision = p.pre_resolve(qname, qtype, data, ctx)
-                if isinstance(decision, PluginDecision):
-                    if decision.action == "deny":
-                        logger.warning(
-                            "Denied %s %s by %s", qname, qtype, p.__class__.__name__
-                        )
-                        reply = req.reply()
-                        reply.header.rcode = RCODE.NXDOMAIN
-                        self._cache_and_send_response(
-                            reply.pack(),
-                            req,
-                            qname,
-                            qtype,
-                            sock,
-                            self.client_address,
-                            cache_key,
-                        )
-                        return
-                    if decision.action == "override" and decision.response is not None:
-                        logger.info(
-                            "Override %s %s by %s", qname, qtype, p.__class__.__name__
-                        )  # pragma: no cover
-                        # Don't cache plugin overrides - they may be dynamic
-                        resp = _set_response_id(
-                            decision.response, req.header.id
-                        )  # pragma: no cover
-                        sock.sendto(resp, self.client_address)  # pragma: no cover
-                        return  # pragma: no cover
-                    # allow -> continue
-                    logger.debug("Plugin %s: %s", p.__class__.__name__, decision.action)
-
-            # Check cache for a response.
-            cached = self.cache.get(cache_key)
-
             if cached is not None:
                 if self.stats_collector:
                     self.stats_collector.record_cache_hit(qname)
@@ -676,22 +680,6 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     self.stats_collector.record_response_rcode("SERVFAIL")
                 wire = self._make_servfail_response(req)
                 sock.sendto(wire, self.client_address)
-
-            # Determine upstream candidates to try
-            upstreams_to_try = ctx.upstream_candidates or self.upstream_addrs
-            if upstreams_to_try:
-                logger.debug(
-                    "Using %d upstreams for %s %s", len(upstreams_to_try), qname, qtype
-                )
-            else:
-                logger.warning("No upstreams configured for %s %s", qname, qtype)
-                if self.stats_collector:
-                    self.stats_collector.record_response_rcode("SERVFAIL")
-                r = req.reply()
-                r.header.rcode = RCODE.SERVFAIL
-                self._cache_and_send_response(
-                    r.pack(), req, qname, qtype, sock, self.client_address, cache_key
-                )
                 return
 
             # Adjust EDNS/DO based on dnssec.mode before forwarding
@@ -736,10 +724,21 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 if str(self.dnssec_mode).lower() == "validate":
                     parsed = DNSRecord.parse(reply)
                     valid = False
-                    if str(getattr(self, 'dnssec_validation', 'upstream_ad')).lower() == 'local':
+                    if (
+                        str(getattr(self, "dnssec_validation", "upstream_ad")).lower()
+                        == "local"
+                    ):
                         try:
                             from .dnssec_validate import validate_response_local
-                            valid = bool(validate_response_local(qname, qtype, reply, udp_payload_size=self.edns_udp_payload))
+
+                            valid = bool(
+                                validate_response_local(
+                                    qname,
+                                    qtype,
+                                    reply,
+                                    udp_payload_size=self.edns_udp_payload,
+                                )
+                            )
                         except Exception as e:
                             logger.debug("Local DNSSEC validation error: %s", e)
                             valid = False
@@ -747,12 +746,17 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         # Require AD bit from upstream to consider validated
                         valid = getattr(parsed.header, "ad", 0) == 1
                     if not valid:
-                        logger.warning("DNSSEC validate mode: validation failed for %s; returning SERVFAIL", qname)
-                        r = req.reply(); r.header.rcode = RCODE.SERVFAIL
+                        logger.warning(
+                            "DNSSEC validate mode: validation failed for %s; returning SERVFAIL",
+                            qname,
+                        )
+                        r = req.reply()
+                        r.header.rcode = RCODE.SERVFAIL
                         reply = r.pack()
             except Exception:
                 logger.debug("DNSSEC validate check failed; returning SERVFAIL")
-                r = req.reply(); r.header.rcode = RCODE.SERVFAIL
+                r = req.reply()
+                r.header.rcode = RCODE.SERVFAIL
                 reply = r.pack()
 
             # 6. Cache the response
@@ -828,11 +832,14 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
 
         # Pre plugins
         ctx = PluginContext(client_ip=client_ip)
-        for p in sorted(DNSUDPHandler.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
+        for p in sorted(
+            DNSUDPHandler.plugins, key=lambda p: getattr(p, "pre_priority", 50)
+        ):
             decision = p.pre_resolve(qname, qtype, data, ctx)
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
-                    r = req.reply(); r.header.rcode = RCODE.NXDOMAIN
+                    r = req.reply()
+                    r.header.rcode = RCODE.NXDOMAIN
                     return _set_response_id(r.pack(), req.header.id)
                 if decision.action == "override" and decision.response is not None:
                     return _set_response_id(decision.response, req.header.id)
@@ -845,7 +852,8 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
         # Upstreams
         upstreams = ctx.upstream_candidates or DNSUDPHandler.upstream_addrs
         if not upstreams:
-            r = req.reply(); r.header.rcode = RCODE.SERVFAIL
+            r = req.reply()
+            r.header.rcode = RCODE.SERVFAIL
             return _set_response_id(r.pack(), req.header.id)
 
         # EDNS/DNSSEC adjustments
@@ -856,18 +864,29 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                 dummy = type("_H", (), {})()
                 dummy.dnssec_mode = DNSUDPHandler.dnssec_mode
                 dummy.edns_udp_payload = DNSUDPHandler.edns_udp_payload
+
                 def _ensure(req):
                     # Inline simplified ensure to avoid method binding
                     opt_idx = None
                     for idx, rr in enumerate(getattr(req, "ar", []) or []):
                         if rr.rtype == QTYPE.OPT:
-                            opt_idx = idx; break
-                    flags = 0x8000 if str(dummy.dnssec_mode).lower() == "passthrough" else 0
-                    opt_rr = RR(rname=".", rtype=QTYPE.OPT, rclass=int(dummy.edns_udp_payload), ttl=0, rdata=EDNS0(flags=flags))
+                            opt_idx = idx
+                            break
+                    flags = (
+                        0x8000 if str(dummy.dnssec_mode).lower() == "passthrough" else 0
+                    )
+                    opt_rr = RR(
+                        rname=".",
+                        rtype=QTYPE.OPT,
+                        rclass=int(dummy.edns_udp_payload),
+                        ttl=0,
+                        rdata=EDNS0(flags=flags),
+                    )
                     if opt_idx is None:
                         req.add_ar(opt_rr)
                     else:
                         req.ar[opt_idx] = opt_rr
+
                 _ensure(req)
         except Exception:
             pass
@@ -877,20 +896,26 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
             req, upstreams, DNSUDPHandler.timeout_ms, qname, qtype
         )
         if reply is None:
-            r = req.reply(); r.header.rcode = RCODE.SERVFAIL
+            r = req.reply()
+            r.header.rcode = RCODE.SERVFAIL
             return _set_response_id(r.pack(), req.header.id)
 
         # Post plugins
         ctx2 = PluginContext(client_ip=client_ip)
         out = reply
-        for p in sorted(DNSUDPHandler.plugins, key=lambda p: getattr(p, "post_priority", 50)):
+        for p in sorted(
+            DNSUDPHandler.plugins, key=lambda p: getattr(p, "post_priority", 50)
+        ):
             decision = p.post_resolve(qname, qtype, out, ctx2)
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
-                    r = req.reply(); r.header.rcode = RCODE.NXDOMAIN
-                    out = r.pack(); break
+                    r = req.reply()
+                    r.header.rcode = RCODE.NXDOMAIN
+                    out = r.pack()
+                    break
                 if decision.action == "override" and decision.response is not None:
-                    out = decision.response; break
+                    out = decision.response
+                    break
 
         # Cache store minimal (NOERROR+answers) like original _cache_store_if_applicable
         try:
@@ -907,7 +932,8 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
     except Exception:
         try:
             req = DNSRecord.parse(data)
-            r = req.reply(); r.header.rcode = RCODE.SERVFAIL
+            r = req.reply()
+            r.header.rcode = RCODE.SERVFAIL
             return _set_response_id(r.pack(), req.header.id)
         except Exception:
             return data  # fallback worst-case

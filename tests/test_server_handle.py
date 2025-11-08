@@ -102,34 +102,6 @@ def test_handle_pre_plugins_override_sends_response(monkeypatch):
     assert sent[:2] == data[:2]
 
 
-def test_handle_second_pre_resolve_path_deny(monkeypatch):
-    """
-    Brief: Deny via second pre_resolve loop triggers NXDOMAIN via cache+send helper.
-
-    Inputs:
-      - monkeypatch: disable initial _apply_pre_plugins
-
-    Outputs:
-      - None: Asserts NXDOMAIN sent once
-    """
-    q, data = _mk_query("deny2.com")
-    sock = FakeSock()
-
-    class DenyPlugin(BasePlugin):
-        def pre_resolve(self, *a, **kw):
-            return PluginDecision(action="deny")
-
-    DNSUDPHandler.plugins = [DenyPlugin()]
-    monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **kw: None)
-
-    h = _mk_handler(data, sock)
-    h.handle()
-
-    assert len(sock.calls) == 1
-    resp = DNSRecord.parse(sock.calls[0][0])
-    assert resp.header.rcode == RCODE.NXDOMAIN
-
-
 def test_handle_cache_hit_short_circuits_response(monkeypatch):
     """
     Brief: Cached response is returned without contacting upstreams.
@@ -158,15 +130,15 @@ def test_handle_cache_hit_short_circuits_response(monkeypatch):
     assert sent[:2] == data[:2]
 
 
-def test_handle_no_upstreams_sends_servfail_twice(monkeypatch):
+def test_handle_no_upstreams_sends_servfail(monkeypatch):
     """
-    Brief: No upstreams configured triggers immediate and cached SERVFAIL sends.
+    Brief: No upstreams configured triggers SERVFAIL.
 
     Inputs:
       - _choose_upstreams returns []
 
     Outputs:
-      - None: Asserts two sendto calls
+      - None: Asserts one SERVFAIL sent
     """
     q, data = _mk_query("noup.com")
     sock = FakeSock()
@@ -179,9 +151,9 @@ def test_handle_no_upstreams_sends_servfail_twice(monkeypatch):
     h = _mk_handler(data, sock)
     h.handle()
 
-    assert len(sock.calls) == 2
-    # Both should be SERVFAIL
-    assert all(DNSRecord.parse(c[0]).header.rcode == RCODE.SERVFAIL for c in sock.calls)
+    assert len(sock.calls) == 1
+    resp = DNSRecord.parse(sock.calls[0][0])
+    assert resp.header.rcode == RCODE.SERVFAIL
 
 
 def test_handle_upstream_all_failed_sends_servfail_twice(monkeypatch):

@@ -44,15 +44,30 @@ def discover_plugins(
     package_name: str = "foghorn.plugins",
 ) -> Dict[str, Type[BasePlugin]]:
     """
-    Imports modules under foghorn.plugins and builds a mapping from alias to plugin class.
-    Adds a default alias derived from class name. Honors plugin-declared aliases.
-    Raises on duplicate alias.
+    Discover and register plugins by importing modules.
+
+    Inputs:
+      - package_name (str): Package path to scan for plugins
+
+    Outputs:
+      - Dict[str, Type[BasePlugin]]: Mapping from normalized aliases to plugin classes
+
+    Raises ImportError if module import fails. Raises ValueError on duplicate aliases.
+
+    Example:
+        >>> registry = discover_plugins("foghorn.plugins")
+        >>> "filter" in registry
+        True
     """
     registry: Dict[str, Type[BasePlugin]] = {}
 
     for modname in _iter_plugin_modules(package_name):
         try:
             module = importlib.import_module(modname)
+        except ImportError:
+            # Re-raise ImportError to signal hard failures in discovery
+            logger.error("Failed importing plugin module %s: fail", modname)
+            raise
         except Exception as e:
             logger.error("Failed importing plugin module %s: %s", modname, e)
             continue
