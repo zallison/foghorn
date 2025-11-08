@@ -493,17 +493,33 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         6. Caches the response.
         7. Sends the final response to the client.
         """
+        import time as time_module
+        from dnslib import QTYPE
+        
+        t0 = time_module.perf_counter() if self.stats_collector else None
         data, sock = self.request
         client_ip = self.client_address[0]
+        qname_for_stats = None
+        qtype_for_stats = None
+        
         try:
             # 1. Parse the query
             req, qname, qtype, ctx = self._parse_query(data)
             cache_key = (qname.lower(), qtype)
+            
+            # Record query stats
+            qname_for_stats = qname
+            qtype_for_stats = qtype
+            if self.stats_collector:
+                qtype_name = QTYPE.get(qtype, str(qtype))
+                self.stats_collector.record_query(client_ip, qname, qtype_name)
 
             # 2. Apply pre-resolve plugins
             pre_decision = self._apply_pre_plugins(req, qname, qtype, data, ctx)
             if pre_decision is not None:
                 if pre_decision.action == "deny":
+                    if self.stats_collector:
+                        self.stats_collector.record_response_rcode("NXDOMAIN")
                     wire = self._make_nxdomain_response(req)
                     sock.sendto(wire, self.client_address)
                     return
@@ -557,13 +573,28 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             cached = self.cache.get(cache_key)
 
             if cached is not None:
+                if self.stats_collector:
+                    self.stats_collector.record_cache_hit(qname)
+                    # Parse to get rcode for stats
+                    try:
+                        parsed_cached = DNSRecord.parse(cached)
+                        rcode_name = RCODE.get(parsed_cached.header.rcode, str(parsed_cached.header.rcode))
+                        self.stats_collector.record_response_rcode(rcode_name)
+                    except Exception:
+                        pass
                 resp = _set_response_id(cached, req.header.id)
                 sock.sendto(resp, self.client_address)
                 return
 
+            # Record cache miss
+            if self.stats_collector:
+                self.stats_collector.record_cache_miss(qname)
+            
             # 4. Choose upstreams and forward with failover
             upstreams = self._choose_upstreams(qname, qtype, ctx)
             if not upstreams:
+                if self.stats_collector:
+                    self.stats_collector.record_response_rcode("SERVFAIL")
                 wire = self._make_servfail_response(req)
                 sock.sendto(wire, self.client_address)
 
@@ -575,6 +606,8 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 )
             else:
                 logger.warning("No upstreams configured for %s %s", qname, qtype)
+                if self.stats_collector:
+                    self.stats_collector.record_response_rcode("SERVFAIL")
                 r = req.reply()
                 r.header.rcode = RCODE.SERVFAIL
                 self._cache_and_send_response(
@@ -585,8 +618,16 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             reply, used_upstream, reason = self._forward_with_failover_helper(
                 req, upstreams, qname, qtype
             )
+            
+            # Record upstream result
+            if self.stats_collector and used_upstream:
+                upstream_id = f"{used_upstream['host']}:{used_upstream['port']}"
+                outcome = "success" if reason == "ok" else reason
+                self.stats_collector.record_upstream_result(upstream_id, outcome)
 
             if reply is None:
+                if self.stats_collector:
+                    self.stats_collector.record_response_rcode("SERVFAIL")
                 wire = self._make_servfail_response(req)
                 sock.sendto(wire, self.client_address)
 
@@ -606,6 +647,15 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             # 6. Cache the response
             self._cache_store_if_applicable(qname, qtype, reply)
 
+            # Record response rcode
+            if self.stats_collector:
+                try:
+                    parsed_reply = DNSRecord.parse(reply)
+                    rcode_name = RCODE.get(parsed_reply.header.rcode, str(parsed_reply.header.rcode))
+                    self.stats_collector.record_response_rcode(rcode_name)
+                except Exception:
+                    pass
+
             # 7. Send final response
             reply = _set_response_id(reply, req.header.id)
             sock.sendto(reply, self.client_address)
@@ -619,6 +669,8 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             logger.exception(
                 "Unhandled error during request handling from %s", client_ip
             )
+            if self.stats_collector:
+                self.stats_collector.record_response_rcode("SERVFAIL")
             try:
                 # On parse or other errors, return SERVFAIL
                 req = DNSRecord.parse(data)
@@ -633,6 +685,11 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 )
             except Exception as inner_e:
                 logger.error("Failed to send SERVFAIL response: %s", str(inner_e))
+        finally:
+            # Record latency if stats enabled
+            if self.stats_collector and t0 is not None:
+                t1 = time_module.perf_counter()
+                self.stats_collector.record_latency(t1 - t0)
 
 
 class DNSServer:
