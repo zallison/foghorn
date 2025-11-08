@@ -1,0 +1,37 @@
+# Foghorn example: Upstream over DNS-over-TLS (DoT)
+# Demonstrates multiple DoT upstreams with SNI and certificate verification.
+
+listen:
+  udp:
+    enabled: true
+    host: 127.0.0.1
+    port: 5353
+  tcp:
+    enabled: false
+  dot:
+    enabled: false
+
+upstream:
+  - host: 1.1.1.1
+    port: 853
+    transport: dot
+    tls:
+      server_name: cloudflare-dns.com
+      verify: true
+  - host: 9.9.9.9
+    port: 853
+    transport: dot
+    tls:
+      server_name: dns.quad9.net
+      verify: true
+
+# Per-upstream-attempt timeout (ms)
+timeout_ms: 2000
+
+dnssec:
+  mode: passthrough
+  validation: upstream_ad
+  udp_payload_size: 1232
+
+logging:
+  level: info

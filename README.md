@@ -308,6 +308,14 @@ YAML is the supported configuration format. See example files under `example_con
 - `example_configs/plugin_examples.yaml` — Demonstration plugin with pre-filters and post rewrites
 - `example_configs/kitchen_sink.yaml` — Combined example showing hook priorities and interactions
 
+Network and DNSSEC examples:
+- `example_configs/net_listen_udp_tcp.yaml` — Enable UDP and TCP listeners
+- `example_configs/net_listen_dot.yaml` — Enable a DoT listener with certificate/key (plus mixed upstreams)
+- `example_configs/net_upstream_udp.yaml` — Multiple UDP upstreams with timeout
+- `example_configs/net_upstream_dot.yaml` — Multiple DoT upstreams with SNI and verification
+- `example_configs/net_upstream_mixed.yaml` — Prefer DoT with UDP fallback
+- `example_configs/net_dnssec_modes.yaml` — DNSSEC modes: ignore, passthrough, validate (local)
+
 ## Complete `config.yaml` Example
 
 Here is a complete `config.yaml` file that uses all the available features:

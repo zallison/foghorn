@@ -1,0 +1,40 @@
+# Foghorn example: DNSSEC modes and validation options
+# Shows the three modes: ignore, passthrough, and validate (local).
+
+listen:
+  udp:
+    enabled: true
+    host: 127.0.0.1
+    port: 5353
+  tcp:
+    enabled: false
+  dot:
+    enabled: false
+
+upstream:
+  - host: 1.1.1.1
+    port: 53
+
+# Choose ONE of the following blocks and comment the others:
+# 1) Ignore DNSSEC entirely (do not set DO bit, do not honor AD)
+# dnssec:
+#   mode: ignore
+#   udp_payload_size: 1232
+
+# 2) Passthrough (set DO, trust upstream AD bit)
+dnssec:
+  mode: passthrough
+  validation: upstream_ad   # ask upstream to validate and set AD
+  udp_payload_size: 1232
+
+# 3) Local validation (experimental if supported)
+# dnssec:
+#   mode: validate
+#   validation: local
+#   udp_payload_size: 1232
+
+# Per-upstream-attempt timeout (ms)
+timeout_ms: 2000
+
+logging:
+  level: info

@@ -1,0 +1,34 @@
+# Foghorn example: Mixed UDP + DoT upstreams with failover
+# Demonstrates trying DoT first then falling back to UDP.
+
+listen:
+  udp:
+    enabled: true
+    host: 127.0.0.1
+    port: 5353
+  tcp:
+    enabled: false
+  dot:
+    enabled: false
+
+# Ordered list: DoT first, then UDP fallback
+upstream:
+  - host: 1.1.1.1
+    port: 853
+    transport: dot
+    tls:
+      server_name: cloudflare-dns.com
+      verify: true
+  - host: 8.8.8.8
+    port: 53
+
+# Shorter timeout to demonstrate failover speed
+timeout_ms: 1200
+
+dnssec:
+  mode: passthrough
+  validation: upstream_ad
+  udp_payload_size: 1232
+
+logging:
+  level: info
