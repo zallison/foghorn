@@ -145,6 +145,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     timeout = 2.0
     timeout_ms = 2000
     min_cache_ttl = 60
+    stats_collector = None  # Optional StatsCollector instance
 
     def _cache_and_send_response(
         self,
@@ -660,6 +661,7 @@ class DNSServer:
         timeout: float = 2.0,
         timeout_ms: int = 2000,
         min_cache_ttl: int = 60,
+        stats_collector=None,
     ) -> None:
         """
         Initializes the DNSServer.
@@ -672,6 +674,7 @@ class DNSServer:
             timeout: The timeout for upstream queries (seconds, legacy).
             timeout_ms: The timeout for upstream queries (milliseconds).
             min_cache_ttl: Minimum cache TTL in seconds applied to all cached responses.
+            stats_collector: Optional StatsCollector for recording metrics.
 
         Outputs:
             None
@@ -690,6 +693,7 @@ class DNSServer:
         DNSUDPHandler.timeout = timeout  # pragma: no cover
         DNSUDPHandler.timeout_ms = timeout_ms  # pragma: no cover
         DNSUDPHandler.min_cache_ttl = max(0, int(min_cache_ttl))  # pragma: no cover
+        DNSUDPHandler.stats_collector = stats_collector  # pragma: no cover
         self.server = socketserver.ThreadingUDPServer(
             (host, port), DNSUDPHandler
         )  # pragma: no cover
