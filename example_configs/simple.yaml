@@ -1,14 +1,33 @@
-# Foghorn - DNS
+# Foghorn - DNS (simple DoT + UDP example)
 listen:
-  host: 0.0.0.0
-  port: 5353
+  udp:
+    enabled: true
+    host: 0.0.0.0
+    port: 5353
+  tcp:
+    enabled: false
+  dot:
+    enabled: false
+
 upstream:
+  - host: 1.1.1.1
+    port: 853
+    transport: dot
+    tls:
+      server_name: cloudflare-dns.com
+      verify: true
   - host: 8.8.8.8
     port: 53
-  - host: 1.1.1.1
-    port: 53
+
+dnssec:
+  mode: passthrough
+  udp_payload_size: 1232
+
+timeout_ms: 2000
+
 plugins:
   - module: etc-hosts
+
 logging:
   level: debug
 # Optional: enable statistics

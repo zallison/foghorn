@@ -35,7 +35,7 @@ def _get_min_cache_ttl(cfg: dict) -> int:
 
 def normalize_upstream_config(
     cfg: Dict[str, Any],
-) -> Tuple[List[Dict[str, Union[str, int]]], int]:
+) -> Tuple[List[Dict[str, Union[str, int, dict]]], int]:
     """
     Normalize upstream configuration to a list-of-endpoints plus a timeout.
 
@@ -73,18 +73,27 @@ def normalize_upstream_config(
         upstreams = []
         for u in upstream_raw:
             if isinstance(u, dict) and "host" in u:
-                upstreams.append(
-                    {"host": str(u["host"]), "port": int(u.get("port", 53))}
-                )
+                rec: Dict[str, Union[str, int, dict]] = {
+                    "host": str(u["host"]),
+                    "port": int(u.get("port", 53)),
+                }
+                if "transport" in u:
+                    rec["transport"] = str(u.get("transport"))
+                if "tls" in u and isinstance(u["tls"], dict):
+                    rec["tls"] = u["tls"]
+                upstreams.append(rec)
     elif isinstance(upstream_raw, dict):
         # Legacy format: single upstream object
         if "host" in upstream_raw:
-            upstreams = [
-                {
-                    "host": str(upstream_raw["host"]),
-                    "port": int(upstream_raw.get("port", 53)),
-                }
-            ]
+            rec: Dict[str, Union[str, int, dict]] = {
+                "host": str(upstream_raw["host"]),
+                "port": int(upstream_raw.get("port", 53)),
+            }
+            if "transport" in upstream_raw:
+                rec["transport"] = str(upstream_raw.get("transport"))
+            if "tls" in upstream_raw and isinstance(upstream_raw["tls"], dict):
+                rec["tls"] = upstream_raw["tls"]
+            upstreams = [rec]
         else:
             # Default fallback
             upstreams = [{"host": "1.1.1.1", "port": 53}]  # pragma: no cover
@@ -240,16 +249,35 @@ def main(argv: List[str] | None = None) -> int:
         stats_reporter.start()
         logger.info("Statistics collection enabled (interval: %ds)", stats_reporter.interval_seconds)
 
-    server = DNSServer(
-        host,
-        port,
-        upstreams,
-        plugins,
-        timeout=timeout_ms / 1000.0,
-        timeout_ms=timeout_ms,
-        min_cache_ttl=min_cache_ttl,
-        stats_collector=stats_collector,
-    )
+    # DNSSEC config (ignore|passthrough|validate). Validation not yet implemented.
+    dnssec_cfg = cfg.get("dnssec", {}) or {}
+    dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()
+    edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
+
+    server = None
+    # Respect udp.listen.enabled (default true)
+    listen_cfg = cfg.get("listen", {}) or {}
+    udp_enabled = True
+    if isinstance(listen_cfg.get("udp"), dict):
+        udp_enabled = bool(listen_cfg.get("udp", {}).get("enabled", True))
+    if udp_enabled:
+        server = DNSServer(
+            host,
+            port,
+            upstreams,
+            plugins,
+            timeout=timeout_ms / 1000.0,
+            timeout_ms=timeout_ms,
+            min_cache_ttl=min_cache_ttl,
+            stats_collector=stats_collector,
+        )
+        # Set DNSSEC/EDNS knobs on handler class (keeps DNSServer signature stable)
+        try:
+            from . import server as _server_mod
+            _server_mod.DNSUDPHandler.dnssec_mode = dnssec_mode
+            _server_mod.DNSUDPHandler.edns_udp_payload = max(512, int(edns_payload))
+        except Exception:
+            pass
 
     # Log startup info
     upstream_info = ", ".join([f"{u['host']}:{u['port']}" for u in upstreams])
@@ -261,8 +289,64 @@ def main(argv: List[str] | None = None) -> int:
         timeout_ms,
     )
 
+    # Optionally start TCP/DoT listeners based on listen config
+    listen_cfg = cfg.get("listen", {}) or {}
+    # Normalize listen subsections
+    def _sub(key, defaults):
+        d = listen_cfg.get(key, {}) or {}
+        out = {**defaults, **d} if isinstance(d, dict) else defaults
+        return out
+
+    tcp_cfg = _sub("tcp", {"enabled": False, "host": host, "port": 53})
+    dot_cfg = _sub("dot", {"enabled": False, "host": host, "port": 853})
+    udp_cfg = _sub("udp", {"enabled": True, "host": host, "port": port})
+
+    # Resolver adapter for TCP/DoT servers
+    from .server import resolve_query_bytes
+    import threading
+    import asyncio
+
+    loop_threads = []
+
+    def _start_asyncio_server(coro_factory, name: str):
+        def runner():
+            asyncio.set_event_loop(asyncio.new_event_loop())
+            loop = asyncio.get_event_loop()
+            try:
+                loop.run_until_complete(coro_factory())
+            finally:
+                loop.close()
+        t = threading.Thread(target=runner, name=name, daemon=True)
+        t.start()
+        loop_threads.append(t)
+
+    if bool(tcp_cfg.get("enabled", False)):
+        from .tcp_server import serve_tcp
+        thost = str(tcp_cfg.get("host", host)); tport = int(tcp_cfg.get("port", 53))
+        logger.info("Starting TCP listener on %s:%d", thost, tport)
+        _start_asyncio_server(lambda: serve_tcp(thost, tport, resolve_query_bytes), name="foghorn-tcp")
+
+    if bool(dot_cfg.get("enabled", False)):
+        from .dot_server import serve_dot
+        dhost = str(dot_cfg.get("host", host)); dport = int(dot_cfg.get("port", 853))
+        cert_file = dot_cfg.get("cert_file"); key_file = dot_cfg.get("key_file")
+        if not cert_file or not key_file:
+            logger.error("listen.dot.enabled=true but cert_file/key_file not provided; skipping DoT listener")
+        else:
+            logger.info("Starting DoT listener on %s:%d", dhost, dport)
+            _start_asyncio_server(
+                lambda: serve_dot(dhost, dport, resolve_query_bytes, cert_file=cert_file, key_file=key_file),
+                name="foghorn-dot",
+            )
+
     try:
-        server.serve_forever()
+        if server is not None:
+            server.serve_forever()
+        else:
+            # No UDP server; keep main thread alive while async listeners run
+            import time as _time
+            while True:
+                _time.sleep(3600)
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down")
     except Exception as e:  # pragma: no cover
