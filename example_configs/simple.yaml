@@ -11,3 +11,7 @@ plugins:
   - module: etc-hosts
 logging:
   level: debug
+# Optional: enable statistics
+# statistics:
+#   enabled: true
+#   interval_seconds: 10

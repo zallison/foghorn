@@ -167,7 +167,7 @@ def test_main_starts_server_and_handles_keyboardinterrupt(monkeypatch):
 
     class DummyServer:
         def __init__(
-            self, host, port, upstreams, plugins, timeout, timeout_ms, min_cache_ttl
+            self, host, port, upstreams, plugins, timeout, timeout_ms, min_cache_ttl, stats_collector=None
         ):
             self.args = (
                 host,
@@ -177,6 +177,7 @@ def test_main_starts_server_and_handles_keyboardinterrupt(monkeypatch):
                 timeout,
                 timeout_ms,
                 min_cache_ttl,
+                stats_collector,
             )
 
         def serve_forever(self):

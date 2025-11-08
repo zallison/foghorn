@@ -26,6 +26,25 @@ logging:
   file: /tmp/foghorn.log  # Optional: also log to this file
   syslog: false           # Optional: also log to syslog
 
+# Statistics collection and reporting
+statistics:
+  enabled: true                 # Enable periodic statistics logging (default: false)
+  interval_seconds: 10          # Log stats every N seconds (default: 10)
+  reset_on_log: false           # Reset counters after each log (default: false)
+  log_level: info               # Log level for stats: debug, info, warning, error (default: info)
+  include_qtype_breakdown: true # Track query type distribution (A, AAAA, etc.) (default: true)
+  include_top_clients: true     # Track top N clients by request count (default: false)
+  include_top_domains: true     # Track top N domains by request count (default: false)
+  top_n: 10                     # Size of top-N lists when enabled (default: 10)
+  track_latency: true           # Enable request latency histogram (default: false)
+  track_uniques: true           # Track unique client IPs and domains (default: true)
+  # Statistics output format: single-line JSON to foghorn.stats logger
+  # Example log line:
+  # {"ts":"2025-11-08T06:00:00Z","totals":{"total_queries":1240,"cache_hits":900,"cache_misses":340},
+  #  "uniques":{"clients":54,"domains":312},"rcodes":{"NOERROR":980,"NXDOMAIN":190,"SERVFAIL":70},
+  #  "qtypes":{"A":850,"AAAA":270},"upstreams":{"8.8.8.8:53":{"success":1120,"timeout":20}},
+  #  "latency":{"count":1240,"min_ms":1.2,"max_ms":45.3,"avg_ms":3.1,"p50_ms":2.8,"p90_ms":8.4,"p99_ms":22.1}}
+
 plugins:
   - module: new_domain
     config:

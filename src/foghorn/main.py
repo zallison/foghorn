@@ -11,6 +11,7 @@ from .server import DNSServer
 from .plugins.base import BasePlugin
 from .logging_config import init_logging
 from .plugins.registry import discover_plugins, get_plugin_class
+from .stats import StatsCollector, StatsReporter
 
 
 def _get_min_cache_ttl(cfg: dict) -> int:
@@ -214,6 +215,31 @@ def main(argv: List[str] | None = None) -> int:
         "Loaded %d plugins: %s", len(plugins), [p.__class__.__name__ for p in plugins]
     )
 
+    # Initialize statistics collection if enabled
+    stats_cfg = cfg.get("statistics", {})
+    stats_enabled = stats_cfg.get("enabled", False)
+    stats_collector = None
+    stats_reporter = None
+
+    if stats_enabled:
+        stats_collector = StatsCollector(
+            track_uniques=stats_cfg.get("track_uniques", True),
+            include_qtype_breakdown=stats_cfg.get("include_qtype_breakdown", True),
+            include_top_clients=stats_cfg.get("include_top_clients", False),
+            include_top_domains=stats_cfg.get("include_top_domains", False),
+            top_n=int(stats_cfg.get("top_n", 10)),
+            track_latency=stats_cfg.get("track_latency", False),
+        )
+
+        stats_reporter = StatsReporter(
+            collector=stats_collector,
+            interval_seconds=int(stats_cfg.get("interval_seconds", 10)),
+            reset_on_log=stats_cfg.get("reset_on_log", False),
+            log_level=stats_cfg.get("log_level", "info"),
+        )
+        stats_reporter.start()
+        logger.info("Statistics collection enabled (interval: %ds)", stats_reporter.interval_seconds)
+
     server = DNSServer(
         host,
         port,
@@ -222,6 +248,7 @@ def main(argv: List[str] | None = None) -> int:
         timeout=timeout_ms / 1000.0,
         timeout_ms=timeout_ms,
         min_cache_ttl=min_cache_ttl,
+        stats_collector=stats_collector,
     )
 
     # Log startup info
@@ -243,6 +270,11 @@ def main(argv: List[str] | None = None) -> int:
             f"Unhandled exception during server operation {e}"
         )  # pragma: no cover
         return 1  # pragma: no cover
+    finally:
+        # Stop statistics reporter on shutdown
+        if stats_reporter is not None:
+            logger.info("Stopping statistics reporter")
+            stats_reporter.stop()
 
     return 0
 
