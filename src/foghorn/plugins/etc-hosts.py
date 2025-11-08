@@ -1,6 +1,6 @@
 from __future__ import annotations
 import time
-from dnslib import DNSRecord, QTYPE, A, QR, RR, DNSHeader
+from dnslib import DNSRecord, QTYPE, A, AAAA, QR, RR, DNSHeader
 import os
 import logging
 import pathlib
@@ -34,8 +34,7 @@ class EtcHosts(BasePlugin):
         super().__init__(**config)
 
         # Configuration
-        # :TODO|Make this accept multiple files:
-        self.file_path: str | List[str] = self.config.get("file_path", "/etc/hosts")
+        self.file_path: str = self.config.get("file_path", "/etc/hosts")
         self._load_hosts()
 
     def _load_hosts(self) -> None:
@@ -59,7 +58,7 @@ class EtcHosts(BasePlugin):
                     continue
                 parts = stripped.split()
                 if len(parts) < 2:
-                    continue  # pragma: nocover
+                    continue
                 ip = parts[0]
                 for domain in parts[1:]:
                     mapping[domain] = ip
@@ -80,7 +79,7 @@ class EtcHosts(BasePlugin):
             PluginDecision("override") when domain is mapped, None to continue
 
         """
-        if qtype != QTYPE.A:
+        if qtype not in (QTYPE.A, QTYPE.AAAA):
             return None
 
         qname = qname.rstrip(".")
@@ -118,6 +117,16 @@ class EtcHosts(BasePlugin):
         if query_type == QTYPE.A:
             reply.add_answer(
                 RR(rname=request.q.qname, rtype=QTYPE.A, rclass=1, ttl=60, rdata=A(ip))
+            )
+        elif query_type == QTYPE.AAAA:
+            reply.add_answer(
+                RR(
+                    rname=request.q.qname,
+                    rtype=QTYPE.AAAA,
+                    rclass=1,
+                    ttl=60,
+                    rdata=AAAA(ip),
+                )
             )
 
         return reply.pack()

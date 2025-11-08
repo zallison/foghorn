@@ -243,13 +243,12 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
         Notes:
             Returns None to continue processing, or PluginDecision for deny/override.
-            Plugins are executed in ascending pre_priority order (1=earliest, stable ties).
 
         Example:
             decision = self._apply_pre_plugins(request, qname, qtype, data, ctx)
         """
-        # Pre-resolve plugin checks sorted by pre_priority (ascending, stable)
-        for p in sorted(self.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
+        # Pre-resolve plugin checks
+        for p in self.plugins:
             decision = p.pre_resolve(qname, qtype, data, ctx)
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
@@ -367,14 +366,13 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
         Notes:
             May modify the response or return error responses based on plugin decisions.
-            Plugins are executed in ascending post_priority order (1=earliest, stable ties).
 
         Example:
             response = self._apply_post_plugins(request, qname, qtype, response_wire, ctx)
         """
         reply = response_wire
-        # Post-resolve plugin hooks sorted by post_priority (ascending, stable)
-        for p in sorted(self.plugins, key=lambda p: getattr(p, "post_priority", 50)):
+        # Post-resolve plugin hooks (allow overrides like rewriting)
+        for p in self.plugins:
             decision = p.post_resolve(qname, qtype, reply, ctx)
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
@@ -388,9 +386,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     r.header.rcode = RCODE.NXDOMAIN
                     reply = r.pack()
                     break
-                if (
-                    decision.action == "override" and decision.response is not None
-                ):  # pragma: no cover
+                if decision.action == "override" and decision.response is not None:  # pragma: no cover
                     logger.info(
                         "Post-resolve override %s type %s by %s",
                         qname,
@@ -495,18 +491,18 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         """
         import time as time_module
         from dnslib import QTYPE
-        
+
         t0 = time_module.perf_counter() if self.stats_collector else None
         data, sock = self.request
         client_ip = self.client_address[0]
         qname_for_stats = None
         qtype_for_stats = None
-        
+
         try:
             # 1. Parse the query
             req, qname, qtype, ctx = self._parse_query(data)
             cache_key = (qname.lower(), qtype)
-            
+
             # Record query stats
             qname_for_stats = qname
             qtype_for_stats = qtype
@@ -536,8 +532,8 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
             ctx = PluginContext(client_ip=client_ip)
 
-            # Pre-resolve plugin checks sorted by pre_priority (ascending, stable)
-            for p in sorted(self.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
+            # Pre-resolve plugin checks
+            for p in self.plugins:
                 decision = p.pre_resolve(qname, qtype, data, ctx)
                 if isinstance(decision, PluginDecision):
                     if decision.action == "deny":
@@ -561,9 +557,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                             "Override %s %s by %s", qname, qtype, p.__class__.__name__
                         )  # pragma: no cover
                         # Don't cache plugin overrides - they may be dynamic
-                        resp = _set_response_id(
-                            decision.response, req.header.id
-                        )  # pragma: no cover
+                        resp = _set_response_id(decision.response, req.header.id)  # pragma: no cover
                         sock.sendto(resp, self.client_address)  # pragma: no cover
                         return  # pragma: no cover
                     # allow -> continue
@@ -589,7 +583,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             # Record cache miss
             if self.stats_collector:
                 self.stats_collector.record_cache_miss(qname)
-            
+
             # 4. Choose upstreams and forward with failover
             upstreams = self._choose_upstreams(qname, qtype, ctx)
             if not upstreams:
@@ -618,7 +612,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             reply, used_upstream, reason = self._forward_with_failover_helper(
                 req, upstreams, qname, qtype
             )
-            
+
             # Record upstream result
             if self.stats_collector and used_upstream:
                 upstream_id = f"{used_upstream['host']}:{used_upstream['port']}"
@@ -754,6 +748,7 @@ class DNSServer:
         self.server = socketserver.ThreadingUDPServer(
             (host, port), DNSUDPHandler
         )  # pragma: no cover
+
         # Ensure request handler threads do not block shutdown
         self.server.daemon_threads = True  # pragma: no cover
         logger.debug("DNS UDP server bound to %s:%d", host, port)  # pragma: no cover

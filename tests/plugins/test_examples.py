@@ -7,14 +7,9 @@ Inputs:
 Outputs:
   - None
 """
-
 import pytest
 from dnslib import DNSRecord, QTYPE, A, AAAA
-from foghorn.plugins.examples import (
-    ExamplesPlugin,
-    _count_subdomains,
-    _length_without_dots,
-)
+from foghorn.plugins.examples import ExamplesPlugin, _count_subdomains, _length_without_dots
 from foghorn.plugins.base import PluginContext
 
 
@@ -118,7 +113,7 @@ def test_examples_plugin_init_custom_config():
         max_subdomains=3,
         max_length_no_dots=30,
         base_labels=3,
-        apply_to_qtypes=["A", "AAAA"],
+        apply_to_qtypes=["A", "AAAA"]
     )
     assert plugin.max_subdomains == 3
     assert plugin.max_length_no_dots == 30
@@ -191,12 +186,12 @@ def test_examples_plugin_applies_qtype_filter():
     """
     plugin = ExamplesPlugin(max_subdomains=0, apply_to_qtypes=["A"])
     ctx = PluginContext(client_ip="127.0.0.1")
-
+    
     # Should deny A queries
     decision_a = plugin.pre_resolve("www.example.com", QTYPE.A, b"", ctx)
     assert decision_a is not None
     assert decision_a.action == "deny"
-
+    
     # Should allow AAAA queries (not in apply_to_qtypes)
     decision_aaaa = plugin.pre_resolve("www.example.com", QTYPE.AAAA, b"", ctx)
     assert decision_aaaa is None
@@ -237,26 +232,20 @@ def test_examples_plugin_post_resolve_with_rewrite():
         rewrite_first_ipv4=[{"apply_to_qtypes": ["A"], "ip_override": "127.0.0.1"}]
     )
     ctx = PluginContext(client_ip="127.0.0.1")
-
+    
     # Create a proper response with A record using RR
     from dnslib import RR, DNSHeader
-
     query = DNSRecord.question("example.com", "A")
-    response = DNSRecord(DNSHeader(id=query.header.id, qr=1, aa=1, ra=1), q=query.q)
-    response.add_answer(
-        RR(
-            rname="example.com",
-            rtype=QTYPE.A,
-            rclass=1,
-            ttl=60,
-            rdata=A("93.184.216.34"),
-        )
+    response = DNSRecord(
+        DNSHeader(id=query.header.id, qr=1, aa=1, ra=1),
+        q=query.q
     )
-
+    response.add_answer(RR(rname="example.com", rtype=QTYPE.A, rclass=1, ttl=60, rdata=A("93.184.216.34")))
+    
     decision = plugin.post_resolve("example.com", QTYPE.A, response.pack(), ctx)
     assert decision is not None
     assert decision.action == "override"
-
+    
     # Parse modified response and verify IP changed
     modified = DNSRecord.parse(decision.response)
     assert str(modified.rr[0].rdata) == "127.0.0.1"

@@ -7,7 +7,6 @@ Inputs:
 Outputs:
   - None
 """
-
 import time
 import threading
 import pytest

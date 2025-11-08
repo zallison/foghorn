@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Foghorn"
-version = "0.1.2"
+version = "0.1.0"
 description = "Caching DNS server with plugin-based access control and new-domain filter"
 authors = [ { name = "Zack Allison" } ]
 license = { text = "MIT" }
@@ -20,7 +20,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest",
-  "pytest-cov",
   "black",
   "ipython"
 ]

@@ -139,7 +139,7 @@ class NewDomainFilterPlugin(BasePlugin):
         try:
             creation_date = self._fetch_creation_date(domain)
             if not creation_date:
-                return None  # pragma: nocover
+                return None
 
             now = dt.datetime.now(dt.timezone.utc)
             if creation_date.tzinfo is None:
@@ -187,7 +187,7 @@ class NewDomainFilterPlugin(BasePlugin):
         # 3) Network lookup as last resort
         creation_date = self._whois_lookup_creation_date(domain)
         if creation_date is None:
-            return None  # pragma: nocover
+            return None
 
         if creation_date.tzinfo is None:
             creation_date = creation_date.replace(tzinfo=dt.timezone.utc)
