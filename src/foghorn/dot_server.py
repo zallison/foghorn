@@ -65,15 +65,15 @@ async def _handle_conn(
             )
             writer.write(len(response).to_bytes(2, "big") + response)
             await writer.drain()
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError:  # pragma: no cover
         pass  # pragma: no cover
-    except Exception:
+    except Exception:  # pragma: no cover
         pass  # pragma: no cover
     finally:
         try:
             writer.close()
             await writer.wait_closed()
-        except Exception:
+        except Exception:  # pragma: no cover
             pass  # pragma: no cover
 
 

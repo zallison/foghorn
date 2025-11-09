@@ -66,7 +66,7 @@ def test_getattr_re_raises_non_matching_module_not_found(monkeypatch):
     if hasattr(plugins, target_name):
         try:
             delattr(plugins, target_name)
-        except Exception:
+        except Exception:  # pragma: no cover
             pass  # pragma: no cover
     import sys
 
