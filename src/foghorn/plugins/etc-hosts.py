@@ -139,36 +139,3 @@ class EtcHosts(BasePlugin):
             )
 
         return reply.pack()
-
-    ## def _make_a_response(
-    ##     self, qname: str, query_type: int, raw_req: bytes, ctx: PluginContext, ipaddr: str
-    ## ) -> bytes:
-    ##     """
-    ##     Return a DNS response that carries the original transaction ID,
-    ##     but with the payload replaced.
-    ##     """
-    ##     print("make repo")
-    ##     try:
-    ##         request = DNSRecord.parse(raw_req)
-    ##     except Exception as e:
-    ##         logger.warning("parse failure: %s", e)
-    ##         return None
-
-    ##     qname = str(request.q.qname)
-    ##     if qname not in self.hosts:
-    ##         logger.debug("unknown query: %s", qname)
-    ##         return None
-
-    ##     ip = self.hosts[qname]
-    ##     logger.debug("resolve %s -> %s", qname, ip)
-
-    ##     reply = DNSRecord(
-    ##         DNSHeader(id=request.header.id, qr=1, aa=1, ra=1),
-    ##         q=request.
-    ##     )
-
-    ##     reply.add_answer(
-    ##         RR(rname=req.q.qname, rtype=QTYPE.A, rclass=1, ttl=65, rdata=A(ip))
-    ##     )
-
-    ##     return reply.pack()
