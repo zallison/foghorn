@@ -146,7 +146,7 @@ class ExamplesPlugin(BasePlugin):
         """
         try:
             name = str(qname).rstrip(".")
-        except Exception:
+        except Exception:  # pragma: no cover
             name = str(qname)
 
         if not self._applies(qtype):

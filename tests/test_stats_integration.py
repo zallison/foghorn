@@ -37,7 +37,7 @@ def test_stats_collected_on_query():
     with patch.object(DNSRecord, "send", return_value=response_wire):
         try:
             handler.handle()
-        except Exception as e:
+        except Exception as e:  # pragma: no cover
             # Socket operations may fail in test, that's OK
             pass  # pragma: no cover
 
@@ -80,7 +80,7 @@ def test_stats_cache_hit():
 
     try:
         handler.handle()
-    except Exception:
+    except Exception:  # pragma: no cover
         pass  # pragma: no cover
 
     # Verify cache hit was recorded
