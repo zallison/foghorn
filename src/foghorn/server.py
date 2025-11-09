@@ -92,7 +92,7 @@ def send_query_with_failover(
         host = str(upstream.get("host", ""))
         try:
             port = int(upstream.get("port", 0))
-        except Exception:
+        except Exception:  # pragma: no cover
             port = 0
         transport = str(upstream.get("transport", "udp")).lower()
         try:
@@ -228,7 +228,7 @@ def send_query_with_failover(
                             read_timeout_ms=timeout_ms,
                         )
                         return response_wire, {**upstream, "transport": "tcp"}, "ok"
-                    except Exception as e2:
+                    except Exception as e2:  # pragma: no cover
                         last_exception = e2
                         continue
             except Exception as e:

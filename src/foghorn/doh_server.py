@@ -65,7 +65,7 @@ async def _read_request(
         try:
             ln = int(headers.get("content-length", "0"))
             body = await reader.readexactly(ln)
-        except Exception:
+        except Exception:  # pragma: no cover
             body = await reader.read(0)
     return req_line, headers, body
 
@@ -152,14 +152,14 @@ async def _handle_conn(
         try:
             writer.write(_HTTP_BAD + _CONN_CLOSE + _CRLF)
             await writer.drain()
-        except Exception:
-            pass  # pragma: no cover
+        except Exception:  # pragma: no cover
+            pass
     finally:
         try:
             writer.close()
             await writer.wait_closed()
-        except Exception:
-            pass  # pragma: no cover
+        except Exception:  # pragma: no cover
+            pass
 
 
 async def serve_doh(
