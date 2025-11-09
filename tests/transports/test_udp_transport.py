@@ -39,14 +39,14 @@ class _UDPStub:
             # Echo back
             try:
                 self.sock.sendto(data, peer)
-            except Exception:
+            except Exception:  # pragma: no cover
                 pass  # pragma: no cover
 
     def close(self):
         self._stop = True
         try:
             self.sock.close()
-        except Exception:
+        except Exception:  # pragma: no cover
             pass  # pragma: no cover
 
 

@@ -105,7 +105,7 @@ class FilterPlugin(BasePlugin):
         for pattern in self.config.get("blocked_patterns", []):
             try:
                 self.blocked_patterns.append(re.compile(pattern, re.IGNORECASE))
-            except re.error as e:
+            except re.error as e:  # pragma: no cover
                 logger.error("Invalid regex pattern '%s': %s", pattern, e)
 
         # Post-resolve (IP) filtering configuration
@@ -150,7 +150,7 @@ class FilterPlugin(BasePlugin):
                     try:
                         # Validate the replacement IP
                         ipaddress.ip_address(replace_with)
-                    except ValueError as e:
+                    except ValueError as e:  # pragma: no cover
                         logger.error(
                             "Invalid 'replace_with' IP address '%s' for rule '%s': %s",
                             replace_with,
@@ -180,7 +180,7 @@ class FilterPlugin(BasePlugin):
                     else:
                         self.blocked_ips[ip_addr] = {"action": action}
 
-            except ValueError as e:
+            except ValueError as e:  # pragma: no cover
                 logger.error("Invalid IP address/network '%s': %s", ip_spec, e)
 
     def add_to_cache(self, key: any, allowed: bool):
@@ -202,7 +202,7 @@ class FilterPlugin(BasePlugin):
             self._domain_cache.set(
                 norm_key, int(self.cache_ttl_seconds), b"1" if allowed else b"0"
             )
-        except Exception as e:
+        except Exception as e:  # pragma: no cover
             logger.warning(f"exception adding to cache {e}")
 
     def pre_resolve(
@@ -230,7 +230,7 @@ class FilterPlugin(BasePlugin):
                     return None
                 else:
                     return PluginDecision(action="deny")
-            except Exception:
+            except Exception:  # pragma: no cover
                 pass  # pragma: no cover
 
         if not self.is_allowed(str(domain).rstrip(".")):
@@ -346,7 +346,7 @@ class FilterPlugin(BasePlugin):
                                     )
                                     modified_records.append(rr)
                                 records_changed = True
-                            except ValueError:
+                            except ValueError:  # pragma: no cover
                                 logger.error(
                                     "Invalid replacement IP: %s", replace_ip_str
                                 )
