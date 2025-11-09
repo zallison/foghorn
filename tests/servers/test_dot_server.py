@@ -90,6 +90,7 @@ def running_dot_server(selfsigned_cert):
 def test_dot_server_roundtrip(running_dot_server):
     host, port = running_dot_server
     ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     s = ctx.wrap_socket(socket.socket(), server_hostname="localhost")
