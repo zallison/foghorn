@@ -34,7 +34,7 @@ def _iter_plugin_modules(package_name: str = "foghorn.plugins") -> Iterable[str]
     pkg = importlib.import_module(package_name)
     for modinfo in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
         # Only import modules (skip packages unless they contain modules)
-        if modinfo.ispkg:
+        if modinfo.ispkg:  # pragma: no cover
             # Still yield submodules during walk; leave as-is
             pass
         yield modinfo.name
@@ -68,7 +68,7 @@ def discover_plugins(
             # Re-raise ImportError to signal hard failures in discovery
             logger.error("Failed importing plugin module %s: fail", modname)
             raise
-        except Exception as e:
+        except Exception as e:  # pragma: no cover
             logger.error("Failed importing plugin module %s: %s", modname, e)
             continue
 

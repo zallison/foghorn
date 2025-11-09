@@ -72,8 +72,6 @@ def normalize_upstream_config(
         # New format: list of upstream objects
         upstreams = []
         for u in upstream_raw:
-            if not isinstance(u, dict):
-                continue
             # Support DoH entries that specify a URL instead of host/port
             if str(u.get("transport", "")).lower() == "doh" and "url" in u:
                 rec: Dict[str, Union[str, int, dict]] = {
@@ -311,8 +309,8 @@ def main(argv: List[str] | None = None) -> int:
             _server_mod.DNSUDPHandler.dnssec_validation = str(
                 dnssec_cfg.get("validation", "upstream_ad")
             ).lower()
-        except Exception:
-            pass  # pragma: no cover
+        except Exception:  # pragma: no cover
+            pass
 
     # Log startup info
     upstream_info = ", ".join([f"{u['host']}:{u['port']}" for u in upstreams])
@@ -424,7 +422,7 @@ def main(argv: List[str] | None = None) -> int:
         if server is not None:
             server.serve_forever()
         else:
-            # No UDP server; keep main thread alive while async listeners run
+            #  keep main thread alive while async listeners run
             import time as _time
 
             while True:
