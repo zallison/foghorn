@@ -37,13 +37,13 @@ class _ShortReadServer:
                 # Read only 1 byte of the len header and close to force short read
                 _ = conn.recv(1)
                 # Close without sending anything
-        except Exception:
+        except Exception:  # pragma: no cover
             pass  # pragma: no cover
 
     def close(self):
         try:
             self.sock.close()
-        except Exception:
+        except Exception:  # pragma: no cover
             pass  # pragma: no cover
 
 

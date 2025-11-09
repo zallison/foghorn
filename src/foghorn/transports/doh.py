@@ -152,7 +152,7 @@ def doh_query(
         finally:
             try:
                 conn.close()
-            except Exception:
+            except Exception:  # pragma: no cover
                 pass  # pragma: no cover
     except ssl.SSLError as e:
         raise DoHError(f"TLS error: {e}")

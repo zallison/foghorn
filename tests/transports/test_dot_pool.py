@@ -66,14 +66,14 @@ class _TLSEcho:
                 if len(body) != ln:
                     return
                 s.sendall(hdr + body)
-        except Exception:
+        except Exception:  # pragma: no cover
             pass  # pragma: no cover
 
     def close(self):
         self._stop = True
         try:
             self.sock.close()
-        except Exception:
+        except Exception:  # pragma: no cover
             pass  # pragma: no cover
 
 

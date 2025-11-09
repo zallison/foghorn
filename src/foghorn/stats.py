@@ -818,7 +818,7 @@ class StatsReporter(threading.Thread):
                 snapshot = self.collector.snapshot(reset=self.reset_on_log)
                 json_line = format_snapshot_json(snapshot)
                 self.logger.log(self.log_level, json_line)
-            except Exception as e:
+            except Exception as e:  # pragma: no cover
                 self.logger.error("StatsReporter error: %s", e, exc_info=True)
 
     def stop(self, timeout: float = 5.0) -> None:

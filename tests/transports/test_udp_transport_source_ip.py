@@ -35,7 +35,7 @@ def test_udp_query_source_ip_bind():
             try:
                 data, peer = srv.recvfrom(2048)
                 srv.sendto(data, peer)
-            except Exception:
+            except Exception:  # pragma: no cover
                 pass  # pragma: no cover
 
     t = threading.Thread(target=loop, daemon=True)
@@ -49,5 +49,5 @@ def test_udp_query_source_ip_bind():
         stopped["v"] = True
         try:
             srv.close()
-        except Exception:
+        except Exception:  # pragma: no cover
             pass  # pragma: no cover

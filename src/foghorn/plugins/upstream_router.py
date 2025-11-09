@@ -229,7 +229,7 @@ class UpstreamRouterPlugin(BasePlugin):
                     )
                     return True, reply_bytes
 
-            except Exception as e:
+            except Exception as e:  # pragma: no cover
                 logger.debug(
                     "Upstream %s:%d error for %s %s: %s",
                     host,

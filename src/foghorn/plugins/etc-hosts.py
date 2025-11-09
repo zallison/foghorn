@@ -39,26 +39,26 @@ class EtcHosts(BasePlugin):
 
     def _load_hosts(self) -> None:
         """
-        Read the system hosts file (/etc/hosts) and return a dictionary
-        mapping each domain name to its corresponding IP address.
+        Read the system hosts file (/etc/hosts) and build a mapping of domain -> IP.
 
-        The hosts file may contain comments and multiple domain names per IP.
-        Only the first IP per line is used for the mapping.
-
-        Returns:
-        A dictionary where keys are domain names and values are IP addresses.
+        - Supports comments beginning with '#', including inline comments.
+        - Requires at least one hostname after the IP on each non-comment line.
+        - Multiple hostnames per line are supported and mapped to the same IP.
         """
         hosts_path = pathlib.Path(self.file_path)
         mapping: Dict[str, str] = {}
 
         with hosts_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
+            for raw_line in f:
+                # Remove inline comments and surrounding whitespace
+                line = raw_line.split("#", 1)[0].strip()
+                if not line:
                     continue
-                parts = stripped.split()
+
+                parts = line.split()
                 if len(parts) < 2:
-                    continue
+                    raise ValueError(f"File {hosts_path} malformed line: {raw_line}")
+
                 ip = parts[0]
                 for domain in parts[1:]:
                     mapping[domain] = ip

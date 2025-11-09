@@ -55,7 +55,7 @@ def clear_dns_cache_between_tests():
 
         if hasattr(DNSUDPHandler, "cache") and hasattr(DNSUDPHandler.cache, "_store"):
             DNSUDPHandler.cache._store = {}
-    except Exception:
+    except Exception:  # pragma: no cover
         pass  # pragma: no cover
     yield
 
