@@ -14,9 +14,9 @@ logger = logging.getLogger("foghorn.dnssec")
 # Root trust anchor (KSK-2017) as DNSKEY public key (RFC 7958) in presentation form
 # Source: https://data.iana.org/root-anchors/root-anchors.xml
 # key id 20326, algorithm 8 (RSASHA256)
-ROOT_DNSKEY_STR = ". 0 IN DNSKEY 257 3 8 AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiWv7fE0kGJ0G4KPPeG3K
+ROOT_DNSKEY_STR = """. 0 IN DNSKEY 257 3 8 AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiWv7fE0kGJ0G4KPPeG3K
 j8GvXfY8+9GZV3fQ0R2U2GZQBaL8Xo4Z5V3Ckq5oO2GhgGZLQG5w5fVsrEo3xPx+
-CfJ4H3CvGf2bQ3aU/J5g7y3i7vU898vW3HjR8wQ6Y2GQ7QvG4hVYbVUrkE0="
+CfJ4H3CvGf2bQ3aU/J5g7y3i7vU898vW3HjR8wQ6Y2GQ7QvG4hVYbVUrkE0="""
 
 
 def _resolver(payload_size: int = 1232) -> dns.resolver.Resolver:
@@ -35,7 +35,9 @@ def _root_dnskey_rrset() -> Optional[dns.rrset.RRset]:
         # Parse constant DNSKEY line into an rrset
         name = dns.name.from_text(".")
         txt = ROOT_DNSKEY_STR.replace("\n", " ")
-        rrset = dns.rrset.from_text_list(name, 0, dns.rdataclass.IN, dns.rdatatype.DNSKEY, [txt.split(" DNSKEY ")[1]])
+        rrset = dns.rrset.from_text_list(
+            name, 0, dns.rdataclass.IN, dns.rdatatype.DNSKEY, [txt.split(" DNSKEY ")[1]]
+        )
         rrset.name = name
         return rrset
     except Exception as e:
@@ -43,12 +45,14 @@ def _root_dnskey_rrset() -> Optional[dns.rrset.RRset]:
         return None
 
 
-def _find_zone_apex(r: dns.resolver.Resolver, qname: dns.name.Name) -> Optional[dns.name.Name]:
+def _find_zone_apex(
+    r: dns.resolver.Resolver, qname: dns.name.Name
+) -> Optional[dns.name.Name]:
     # Walk labels upwards until DNSKEY exists
     n = qname
     while True:
         try:
-            _ = _fetch(r, n, 'DNSKEY')
+            _ = _fetch(r, n, "DNSKEY")
             return n
         except Exception:
             if n == dns.name.root:
@@ -56,7 +60,9 @@ def _find_zone_apex(r: dns.resolver.Resolver, qname: dns.name.Name) -> Optional[
             n = n.parent()
 
 
-def _validate_chain(r: dns.resolver.Resolver, apex: dns.name.Name) -> Optional[dns.rrset.RRset]:
+def _validate_chain(
+    r: dns.resolver.Resolver, apex: dns.name.Name
+) -> Optional[dns.rrset.RRset]:
     """
     Validates the DNSKEY rrset at apex back to the root trust anchor.
 
@@ -76,7 +82,7 @@ def _validate_chain(r: dns.resolver.Resolver, apex: dns.name.Name) -> Optional[d
             return None
         # Initialize parent
         parent = dns.name.root
-        parent_dnskey = _fetch(r, parent, 'DNSKEY').rrset
+        parent_dnskey = _fetch(r, parent, "DNSKEY").rrset
         # Ensure trust anchor exists in fetched root keys
         # (If mismatch, still proceed; many validators trust by key match.)
         # Walk down from parent to apex
@@ -88,13 +94,15 @@ def _validate_chain(r: dns.resolver.Resolver, apex: dns.name.Name) -> Optional[d
         for child in reversed(labels):
             # DS at parent for child
             try:
-                ds = _fetch(r, child, 'DS').rrset
+                ds = _fetch(r, child, "DS").rrset
             except Exception:
                 # No DS → insecure child; fail strict validation
                 return None
             # Validate DS RRset with parent's DNSKEY (if RRSIG present)
             try:
-                dssig = _fetch(r, child, 'RRSIG').rrset  # RRSIG(DS) may be in the DS response; if not, resolver packs differently
+                dssig = _fetch(
+                    r, child, "RRSIG"
+                ).rrset  # RRSIG(DS) may be in the DS response; if not, resolver packs differently
             except Exception:
                 dssig = None
             if dssig is not None:
@@ -103,14 +111,21 @@ def _validate_chain(r: dns.resolver.Resolver, apex: dns.name.Name) -> Optional[d
                 except Exception:
                     return None
             # Fetch child DNSKEY
-            child_dnskey = _fetch(r, child, 'DNSKEY').rrset
+            child_dnskey = _fetch(r, child, "DNSKEY").rrset
             # Compare DS against child DNSKEY (at least one matches)
             match = False
             for dnskey in child_dnskey:
                 try:
-                    for algorithm in (dns.dnssec.DSDigest.SHA256, dns.dnssec.DSDigest.SHA1):
+                    for algorithm in (
+                        dns.dnssec.DSDigest.SHA256,
+                        dns.dnssec.DSDigest.SHA1,
+                    ):
                         computed = dns.dnssec.make_ds(child, dnskey, algorithm)
-                        if any(x.digest == computed.digest and x.key_tag == computed.key_tag for x in ds):
+                        if any(
+                            x.digest == computed.digest
+                            and x.key_tag == computed.key_tag
+                            for x in ds
+                        ):
                             match = True
                             break
                     if match:
@@ -121,7 +136,7 @@ def _validate_chain(r: dns.resolver.Resolver, apex: dns.name.Name) -> Optional[d
                 return None
             # Validate child DNSKEY RRset self-signature (requires RRSIG)
             try:
-                dnskey_sig = _fetch(r, child, 'RRSIG').rrset
+                dnskey_sig = _fetch(r, child, "RRSIG").rrset
                 dns.dnssec.validate(child_dnskey, dnskey_sig, {child: child_dnskey})
             except Exception:
                 # If missing/invalid, fail
@@ -134,7 +149,13 @@ def _validate_chain(r: dns.resolver.Resolver, apex: dns.name.Name) -> Optional[d
         return None
 
 
-def validate_response_local(qname_text: str, qtype_num: int, response_wire: bytes, *, udp_payload_size: int = 1232) -> bool:
+def validate_response_local(
+    qname_text: str,
+    qtype_num: int,
+    response_wire: bytes,
+    *,
+    udp_payload_size: int = 1232,
+) -> bool:
     """
     Perform local DNSSEC validation of an upstream response.
 
@@ -152,7 +173,11 @@ def validate_response_local(qname_text: str, qtype_num: int, response_wire: byte
     try:
         msg = dns.message.from_wire(response_wire)
         qname = dns.name.from_text(qname_text)
-        rdtype = dns.rdatatype.from_text(str(qtype_num)) if isinstance(qtype_num, str) else qtype_num
+        rdtype = (
+            dns.rdatatype.from_text(str(qtype_num))
+            if isinstance(qtype_num, str)
+            else qtype_num
+        )
         # Gather answer RRset and its RRSIG
         answer_rrset = None
         rrsig_rrset = None

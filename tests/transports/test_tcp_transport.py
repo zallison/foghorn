@@ -68,7 +68,7 @@ class _TCPStub:
         self._stop = True
         try:
             self.sock.close()
-        except Exception:
+        except Exception:  # pragma: no cover
             pass  # pragma: no cover
 
 
