@@ -3,7 +3,9 @@ import importlib
 import sys
 import argparse
 import logging
-from typing import List, Tuple, Dict, Union, Any
+import signal
+import threading
+from typing import List, Tuple, Dict, Union, Any, Optional
 import yaml
 from unittest.mock import patch, mock_open
 
@@ -11,7 +13,7 @@ from .server import DNSServer
 from .plugins.base import BasePlugin
 from .logging_config import init_logging
 from .plugins.registry import discover_plugins, get_plugin_class
-from .stats import StatsCollector, StatsReporter
+from .stats import StatsCollector, StatsReporter, format_snapshot_json
 
 
 def _get_min_cache_ttl(cfg: dict) -> int:
@@ -228,6 +230,11 @@ def main(argv: List[str] | None = None) -> int:
     logger = logging.getLogger("foghorn.main")
     logger.info("Loaded config from %s", args.config)
 
+    # Keep references for signal-driven reload/reset
+    cfg_path: str = args.config
+    stats_collector: Optional[StatsCollector]
+    stats_reporter: Optional[StatsReporter]
+
     # Normalize listen configuration with backward compatibility.
     # If listen.udp is present, prefer it; otherwise fall back to legacy listen.host/port.
     listen_cfg = cfg.get("listen", {}) or {}
@@ -281,6 +288,218 @@ def main(argv: List[str] | None = None) -> int:
             stats_reporter.interval_seconds,
         )
 
+    # --- Signal handling (SIGUSR1) for config reload and optional stats reset ---
+    _sigusr1_pending = threading.Event()
+    _sigusr2_pending = threading.Event()
+
+    def _apply_runtime_config(new_cfg: dict) -> None:
+        """
+        Brief: Apply runtime-safe settings from new_cfg.
+
+        Inputs:
+          - new_cfg: dict configuration just loaded
+        Outputs:
+          - None
+
+        Notes:
+          - Reinitializes logging and DNSSEC knobs
+          - Manages StatsReporter per configuration changes without touching listeners
+        """
+        nonlocal stats_collector, stats_reporter
+        # Re-init logging
+        init_logging(new_cfg.get("logging"))
+        # Apply DNSSEC/EDNS knobs to UDP handler
+        dnssec_cfg = new_cfg.get("dnssec", {}) or {}
+        try:
+            from . import server as _server_mod
+
+            _server_mod.DNSUDPHandler.dnssec_mode = str(
+                dnssec_cfg.get("mode", "ignore")
+            ).lower()
+            _server_mod.DNSUDPHandler.edns_udp_payload = max(
+                512, int(dnssec_cfg.get("udp_payload_size", 1232))
+            )
+            _server_mod.DNSUDPHandler.dnssec_validation = str(
+                dnssec_cfg.get("validation", "upstream_ad")
+            ).lower()
+        except Exception:
+            pass
+
+        # Stats management
+        s_cfg = new_cfg.get("statistics", {}) or {}
+        s_enabled = bool(s_cfg.get("enabled", False))
+        # Start/stop reporter based on enabled flag
+        if not s_enabled:
+            if stats_reporter is not None:
+                logging.getLogger("foghorn.main").info(
+                    "Disabling statistics reporter per reload"
+                )
+                try:
+                    stats_reporter.stop()
+                finally:
+                    stats_reporter = None
+            # keep collector instance to allow later re-enable, but it will be unused
+        else:
+            # Ensure we have a collector
+            if stats_collector is None:
+                stats_collector = StatsCollector(
+                    track_uniques=s_cfg.get("track_uniques", True),
+                    include_qtype_breakdown=s_cfg.get("include_qtype_breakdown", True),
+                    include_top_clients=s_cfg.get("include_top_clients", False),
+                    include_top_domains=s_cfg.get("include_top_domains", False),
+                    top_n=int(s_cfg.get("top_n", 10)),
+                    track_latency=s_cfg.get("track_latency", False),
+                )
+            # Recreate reporter if settings changed or reporter missing
+            need_restart = False
+            if stats_reporter is None:
+                need_restart = True
+            else:
+                # If interval/reset_on_log/log_level differ, restart
+                try:
+                    interval_seconds = int(s_cfg.get("interval_seconds", 10))
+                    reset_on_log = bool(s_cfg.get("reset_on_log", False))
+                    log_level = str(s_cfg.get("log_level", "info"))
+                    if (
+                        stats_reporter.interval_seconds != max(1, interval_seconds)
+                        or stats_reporter.log_level
+                        != logging.getLogger().getEffectiveLevel()  # rough check
+                        or reset_on_log != stats_reporter.reset_on_log
+                    ):
+                        need_restart = True
+                except Exception:
+                    need_restart = True
+            if need_restart:
+                if stats_reporter is not None:
+                    try:
+                        stats_reporter.stop()
+                    except Exception:
+                        pass
+                stats_reporter = StatsReporter(
+                    collector=stats_collector,
+                    interval_seconds=int(s_cfg.get("interval_seconds", 10)),
+                    reset_on_log=bool(s_cfg.get("reset_on_log", False)),
+                    log_level=str(s_cfg.get("log_level", "info")),
+                )
+                stats_reporter.start()
+
+    def _process_sigusr1() -> None:
+        """
+        Brief: Handle SIGUSR1 by reloading config, re-applying runtime settings, and optionally logging and resetting statistics.
+
+        Inputs: none
+        Outputs: none
+
+        Example:
+            >>> # Internal use; invoked by signal handler thread
+        """
+        nonlocal cfg, stats_collector, stats_reporter
+        logger = logging.getLogger("foghorn.main")
+        try:
+            with open(cfg_path, "r") as f:
+                new_cfg = yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.error("SIGUSR1: failed to read config %s: %s", cfg_path, e)
+            return
+        # Apply runtime config (logging, DNSSEC, reporter)
+        _apply_runtime_config(new_cfg)
+        # Handle statistics reset if enabled and configured
+        s_cfg = new_cfg.get("statistics", {}) or {}
+        if bool(s_cfg.get("enabled", False)) and bool(
+            s_cfg.get("reset_on_sigusr1", False)
+        ):
+            if stats_collector is not None:
+                try:
+                    # Log snapshot then reset
+                    snap = stats_collector.snapshot(reset=False)
+                    json_line = format_snapshot_json(snap)
+                    logging.getLogger("foghorn.stats").info(json_line)
+                    # Now reset
+                    stats_collector.snapshot(reset=True)
+                    logger.info("SIGUSR1: statistics reset completed")
+                except Exception as e:
+                    logger.error(
+                        "SIGUSR1: error during statistics snapshot/reset: %s", e
+                    )
+        else:
+            logger.info(
+                "SIGUSR1: statistics reset skipped (disabled or reset_on_sigusr1 not set)"
+            )
+        # Replace current cfg
+        cfg = new_cfg
+
+    def _sigusr1_handler(_signum, _frame):
+        # coalesce multiple signals
+        if _sigusr1_pending.is_set():
+            return
+        _sigusr1_pending.set()
+
+        def runner():
+            try:
+                _process_sigusr1()
+            finally:
+                _sigusr1_pending.clear()
+
+        t = threading.Thread(target=runner, name="foghorn-sigusr1", daemon=True)
+        t.start()
+
+    # Register handlers (Unix only)
+    try:
+        signal.signal(signal.SIGUSR1, _sigusr1_handler)
+        logger.info(
+            "Installed SIGUSR1 handler for config reload and optional stats reset"
+        )
+    except Exception:
+        logger.warning("Could not install SIGUSR1 handler on this platform")
+
+    def _process_sigusr2() -> None:
+        """
+        Brief: Handle SIGUSR2 by invoking handle_sigusr2() on all active plugins.
+
+        Inputs: none
+        Outputs: none
+
+        Example:
+            >>> # Internal use; invoked by signal handler thread
+        """
+        log = logging.getLogger("foghorn.main")
+        count = 0
+        for p in plugins or []:
+            try:
+                handler = getattr(p, "handle_sigusr2", None)
+                if callable(handler):
+                    handler()
+                    count += 1
+            except Exception as e:
+                log.error(
+                    "SIGUSR2: plugin %s handler error: %s", p.__class__.__name__, e
+                )
+        log.info("SIGUSR2: invoked handle_sigusr2 on %d plugins", count)
+
+    def _sigusr2_handler(_signum, _frame):
+        if _sigusr2_pending.is_set():
+            return
+        _sigusr2_pending.set()
+
+        def runner():
+            try:
+                _process_sigusr2()
+            finally:
+                _sigusr2_pending.clear()
+
+        # Import threading dynamically to respect test monkeypatching
+        import importlib as _importlib
+
+        _threading = _importlib.import_module("threading")
+        t = _threading.Thread(target=runner, name="foghorn-sigusr2", daemon=True)
+        t.start()
+
+    try:
+        signal.signal(signal.SIGUSR2, _sigusr2_handler)
+        logger.info("Installed SIGUSR2 handler to notify plugins")
+    except Exception:
+        logger.warning("Could not install SIGUSR2 handler on this platform")
+
     # DNSSEC config (ignore|passthrough|validate)
     dnssec_cfg = cfg.get("dnssec", {}) or {}
     dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()
@@ -333,7 +552,6 @@ def main(argv: List[str] | None = None) -> int:
 
     # Resolver adapter for TCP/DoT servers
     from .server import resolve_query_bytes
-    import threading
     import asyncio
 
     loop_threads = []
@@ -357,7 +575,11 @@ def main(argv: List[str] | None = None) -> int:
                         name,
                     )
 
-        t = threading.Thread(target=runner, name=name, daemon=True)
+        # Import threading dynamically so tests can monkeypatch via sys.modules
+        import importlib as _importlib
+
+        _threading = _importlib.import_module("threading")
+        t = _threading.Thread(target=runner, name=name, daemon=True)
         t.start()
         loop_threads.append(t)
 
