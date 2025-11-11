@@ -433,15 +433,10 @@ def main(argv: List[str] | None = None) -> int:
         if _sigusr1_pending.is_set():
             return
         _sigusr1_pending.set()
-
-        def runner():
-            try:
-                _process_sigusr1()
-            finally:
-                _sigusr1_pending.clear()
-
-        t = threading.Thread(target=runner, name="foghorn-sigusr1", daemon=True)
-        t.start()
+        try:
+            _process_sigusr1()
+        finally:
+            _sigusr1_pending.clear()
 
     # Register handlers (Unix only)
     try:
@@ -480,19 +475,10 @@ def main(argv: List[str] | None = None) -> int:
         if _sigusr2_pending.is_set():
             return
         _sigusr2_pending.set()
-
-        def runner():
-            try:
-                _process_sigusr2()
-            finally:
-                _sigusr2_pending.clear()
-
-        # Import threading dynamically to respect test monkeypatching
-        import importlib as _importlib
-
-        _threading = _importlib.import_module("threading")
-        t = _threading.Thread(target=runner, name="foghorn-sigusr2", daemon=True)
-        t.start()
+        try:
+            _process_sigusr2()
+        finally:
+            _sigusr2_pending.clear()
 
     try:
         signal.signal(signal.SIGUSR2, _sigusr2_handler)
