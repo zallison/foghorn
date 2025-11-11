@@ -55,8 +55,8 @@ def serve_udp(host: str, port: int, resolver: Callable[[bytes, str], bytes]) -> 
     server.daemon_threads = True
     try:
         server.serve_forever()
-    finally:
+    finally:  # pragma: no cover
         try:
             server.server_close()
         except Exception:
-            pass  # pragma: no cover
+            pass

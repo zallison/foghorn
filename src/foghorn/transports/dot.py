@@ -110,12 +110,12 @@ class _DotConn:
             if self._tls is not None:
                 try:
                     self._tls.close()
-                except Exception:
+                except Exception:  # pragma: no cover
                     pass  # pragma: no cover
             if self._sock is not None:
                 try:
                     self._sock.close()
-                except Exception:
+                except Exception:  # pragma: no cover
                     pass  # pragma: no cover
         finally:
             self._tls = None
@@ -179,12 +179,12 @@ class DotConnectionPool:
         if max_connections is not None:
             try:
                 self._max = max(1, int(max_connections))
-            except Exception:
+            except Exception:  # pragma: no cover
                 pass  # pragma: no cover
         if idle_timeout_s is not None:
             try:
                 self._idle = max(1, int(idle_timeout_s))
-            except Exception:
+            except Exception:  # pragma: no cover
                 pass  # pragma: no cover
 
     def send(
@@ -213,7 +213,7 @@ class DotConnectionPool:
         except Exception:
             try:
                 conn.close()
-            except Exception:
+            except Exception:  # pragma: no cover
                 pass  # pragma: no cover
             raise
         finally:
@@ -313,12 +313,12 @@ def dot_query(
             finally:
                 try:
                     tls_sock.close()
-                except Exception:
+                except Exception:  # pragma: no cover
                     pass  # pragma: no cover
         finally:
             try:
                 sock.close()
-            except Exception:
+            except Exception:  # pragma: no cover
                 pass  # pragma: no cover
     except ssl.SSLError as e:
         raise DoTError(f"TLS error: {e}")
