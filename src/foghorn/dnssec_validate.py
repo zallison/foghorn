@@ -1,4 +1,5 @@
 import logging
+import functools
 from typing import Optional
 
 # dnspython imports
@@ -30,6 +31,7 @@ def _fetch(r: dns.resolver.Resolver, name: dns.name.Name, rdtype: str):
     return r.resolve(name, rdtype, raise_on_no_answer=True)
 
 
+@functools.lru_cache(maxsize=1024)
 def _root_dnskey_rrset() -> Optional[dns.rrset.RRset]:
     try:
         # Parse constant DNSKEY line into an rrset
