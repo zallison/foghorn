@@ -1,60 +1,85 @@
 # Foghorn
 
-Foghorn is a lightweight, caching DNS server built with Python. It's designed to be fast and extensible, featuring a pluggable policy system that allows you to customize its behavior to fit your needs.
+Foghorn is a lightweight, caching DNS server built with Python (3.10+). It's designed to be fast and extensible, featuring a pluggable policy system that allows you to customize its behavior to fit your needs.
 
 With special thanks to Fiona Weatherwax for their contributions.
 
-For developer-focused documentation (architecture, transports, plugins), see README-DEV.md.
+For developer documentation (architecture, transports, plugin internals, testing), see README-DEV.md.
 
 ## Features
 
 *   **DNS Caching:** Speeds up DNS resolution by caching responses from upstream servers.
 *   **Extensible Plugin System:** Easily add custom logic to control DNS resolution.
-*   **Flexible Configuration:** Configure the server, upstream resolvers, and plugins using a simple YAML file.
-*   **Built-in Plugins:** Comes with a set of useful plugins to get you started:
-    *   **Access Control:** Filter DNS queries based on the client's IP address (CIDR-based allow/deny).
-    *   **Greylist:** Block domains for a set amount of time after they are first requested.
-    *   **New Domain Filter:** Block domains that were registered recently.
-    *   **Upstream Router:** Route queries to different upstream servers based on the domain name.
-    *   **Filter:** Block queries based on domain names, keywords, and IP addresses in responses.
-    *   **Examples:** Misc examples, replace the first entry of every record to localhost, limit the length of the domain name, or the depth of domain names.
-
-
+*   **Flexible Configuration:** Configure listeners, upstream resolvers (UDP/TCP/DoT/DoH), and plugins using YAML.
+*   **Built-in Plugins:**
+    *   **Access Control:** CIDR-based allow/deny (allowlist/blocklist terminology in docs).
+    *   **Greylist:** Temporarily block newly seen domains.
+    *   **New Domain Filter:** Block recently registered domains.
+    *   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
+    *   **Filter:** Filter by domain patterns/keywords and by response IPs.
+    *   **Examples:** Showcase of simple policies and rewrites.
 
 ## Installation
 
-1.  **Create a virtual environment:**
+Use a virtual environment named `venv`:
 
-    ```bash
-    python3 -m venv venv
-    source venv/bin/activate
-    ```
-
-2.  **Install the package with development dependencies:**
-
-    ```bash
-    pip install .
-    ```
-
-    To install the project in editable mode, along with all runtime and development dependencies.
-
-    ```bash
-    pip install -e ".[dev]"
-    ```
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install .
+# Optional for development:
+pip install -e '.[dev]'
+```
 
 ## Usage
 
-To run the server, you first need a `config.yaml` file. Then, you can start the server with the `foghorn` command:
+Create a `config.yaml`, then run:
 
 ```bash
 foghorn --config config.yaml
 ```
-Alternatively, you can run it as a module:
+
+Alternatively, run as a module:
+
 ```bash
 python -m foghorn.main --config config.yaml
 ```
 
 The server will start listening for DNS queries on the configured host and port.
+
+### Docker
+
+Foghorn is available on Docker Hub at `zallison/foghorn:latest`.
+
+**Using the pre-built image:**
+
+```bash
+docker run -d -p 5353:5353/udp \
+  -v /path/to/your/config.yaml:/foghorn/config.yaml \
+  zallison/foghorn:latest
+```
+
+**Building locally:**
+
+```bash
+[cp /path/to/your/config.yaml .] # Optional
+docker build -t my/foghorn .
+docker run -d -p 5353:5353/udp my/foghorn
+```
+
+**Important:** Mount your `config.yaml` to `/foghorn/config.yaml` inside the container unless you've built your own image that contains your config.
+
+If you need to expose additional listeners (TCP/DoT/DoH), add the corresponding port mappings:
+
+```bash
+docker run -d \
+  -p 5353:5353/udp \
+  -p 5353:5353/tcp \
+  -p 8853:8853/tcp \
+  -p 8053:8053/tcp \
+  -v /path/to/your/config.yaml:/foghorn/config.yaml \
+  zallison/foghorn:latest
+```
 
 ### DNSSEC modes
 
@@ -67,24 +92,8 @@ dnssec:
 - ignore: do not advertise DO; DNSSEC data not requested.
 - passthrough: advertise DO and return DNSSEC records; forward AD bit if upstream set it.
 - validate:
-  - upstream_ad: require upstream AD bit (simple, recommended for now)
-  - local (experimental): perform local DNSSEC validation via dnspython; unsigned zones will SERVFAIL.
-
-## Testing
-
-To run the test suite, use `pytest`:
-
-```bash
-pytest
-```
-
-## Code Formatting
-
-This project uses `black` for code formatting. To format the code, run:
-
-```bash
-black src tests
-```
+  - upstream_ad: require upstream AD bit (recommended for now)
+  - local (experimental): perform local DNSSEC validation.
 
 ## Configuration
 
@@ -92,7 +101,7 @@ Configuration is handled through a `config.yaml` file. The file has three main s
 
 ### `listen`
 
-You can enable one or more listeners. UDP remains the default; TCP and DoT are optional.
+You can enable one or more listeners. UDP is enabled by default; TCP, DoT, and DoH are optional and supported.
 
 ```yaml
 listen:
@@ -408,7 +417,7 @@ plugins:
 
 ## Logging
 
-Foghorn includes configurable logging with bracketed level tags and UTC timestamps. Log output includes the timestamp, level tag, logger name, and message:
+Foghorn includes configurable logging with bracketed level tags and UTC timestamps. Example output:
 
 ```
 2025-10-24T05:56:01Z [info] foghorn.main: Starting Foghorn on 127.0.0.1:5354
@@ -416,58 +425,8 @@ Foghorn includes configurable logging with bracketed level tags and UTC timestam
 2025-10-24T05:56:02Z [warn] foghorn.plugins.new_domain_filter: Domain example-new.com blocked (age: 3 days, threshold: 7)
 ```
 
-### Configuration
+See README-DEV.md for advanced logging and statistics options.
 
-Add a `logging` section to your `config.yaml`:
+## License
 
-```yaml
-logging:
-  level: info          # Available levels: debug, info, warn, error, crit
-  stderr: true         # Log to stderr (default: true)
-  file: ./foghorn.log  # Optional: also log to this file
-  syslog: true         # Optional: also log to syslog (default: false)
-```
-
-To configure syslog with custom options:
-
-```yaml
-logging:
-  level: info
-  syslog:
-    address: /dev/log  # Unix socket (default: /dev/log) or ("hostname", port) for network syslog
-    facility: USER     # Syslog facility (default: USER; others: LOCAL0-LOCAL7, DAEMON, etc.)
-```
-
-### Available Levels
-
-*   **debug**: Detailed diagnostic information including each query, cache hits/misses, plugin decisions
-*   **info**: General information about server startup, configuration, and important events
-*   **warn**: Warning conditions like denied queries, upstream timeouts, plugin errors
-*   **error**: Error conditions that don't stop the server
-*   **crit**: Critical errors that may cause the server to stop
-
-### File Logging
-
-When `file` is specified, Foghorn will:
-*   Create parent directories automatically if they don't exist
-*   Log to both stderr and the file (if `stderr: true`)
-*   Append to the file (it won't overwrite existing content)
-*   Use UTF-8 encoding
-
-### Plugin Logging
-
-Plugin authors can use Python's standard `logging` module and will inherit the same bracketed format:
-
-```python
-import logging
-
-logger = logging.getLogger(__name__)
-logger.warning("Custom plugin warning: %s", some_value)
-```
-
-## Plugin Development
-
-You can extend Foghorn by creating your own plugins. A plugin is a Python class that inherits from `BasePlugin` and implements one or both of the following methods:
-
-*   `pre_resolve(self, qname, qtype, ctx)`: This method is called before a query is resolved. It can return a `PluginDecision` to `allow`, `deny`, or `override` the query.
-*   `post_resolve(self, qname, qtype, response_wire, ctx)`: This method is called after a query has been resolved. It can also return a `PluginDecision` to modify the response.
+MIT

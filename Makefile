@@ -4,6 +4,7 @@ PREFIX ?=  ${USER}
 CONFIG_DIR ?= ./config
 CONTAINER_NAME ?= foghorn
 TAG ?= latest
+MERMAID ?= mmdc
 
 # Files/folders that should NOT be deleted by `clean`
 # (Keep YAML files, so we exclude *.yaml and *.yml from the delete patterns)
@@ -103,3 +104,43 @@ help:
 	@echo "  docker-run     – Run docker container"
 	@echo "  docker-logs    – Follow docker container logs"
 	@echo "  dev-ship       – Clean, build, and push docker image"
+	@echo "  workflow-diagram – Generate developer diagram (.mmd/.svg/.png)"
+	@echo "  workflow-diagrams – Generate developer, user, and full diagrams (.mmd/.svg/.png)"
+
+.PHONY: workflow-diagram docs-assets
+
+images/foghorn-workflow.mmd: scripts/generate_workflow_diagram.py | images
+	$(VENV)/bin/python scripts/generate_workflow_diagram.py --variant dev --out images/foghorn-workflow.mmd
+
+images/foghorn-workflow-user.mmd: scripts/generate_workflow_diagram.py | images
+	$(VENV)/bin/python scripts/generate_workflow_diagram.py --variant user --out images/foghorn-workflow-user.mmd
+
+images/foghorn-workflow-full.mmd: scripts/generate_workflow_diagram.py | images
+	$(VENV)/bin/python scripts/generate_workflow_diagram.py --variant full --out images/foghorn-workflow-full.mmd
+
+images/foghorn-workflow.svg: images/foghorn-workflow.mmd | images
+	$(MERMAID) -i images/foghorn-workflow.mmd -o images/foghorn-workflow.svg --backgroundColor '#ffffff'
+
+images/foghorn-workflow.png: images/foghorn-workflow.mmd | images
+	$(MERMAID) -i images/foghorn-workflow.mmd -o images/foghorn-workflow.png --backgroundColor '#ffffff' --scale 2
+
+images/foghorn-workflow-user.svg: images/foghorn-workflow-user.mmd | images
+	$(MERMAID) -i images/foghorn-workflow-user.mmd -o images/foghorn-workflow-user.svg --backgroundColor '#ffffff'
+
+images/foghorn-workflow-user.png: images/foghorn-workflow-user.mmd | images
+	$(MERMAID) -i images/foghorn-workflow-user.mmd -o images/foghorn-workflow-user.png --backgroundColor '#ffffff' --scale 2
+
+images/foghorn-workflow-full.svg: images/foghorn-workflow-full.mmd | images
+	$(MERMAID) -i images/foghorn-workflow-full.mmd -o images/foghorn-workflow-full.svg --backgroundColor '#ffffff'
+
+images/foghorn-workflow-full.png: images/foghorn-workflow-full.mmd | images
+	$(MERMAID) -i images/foghorn-workflow-full.mmd -o images/foghorn-workflow-full.png --backgroundColor '#ffffff' --scale 2
+
+images:
+	mkdir -p images
+
+workflow-diagram: images/foghorn-workflow.mmd images/foghorn-workflow.svg images/foghorn-workflow.png
+
+workflow-diagrams: workflow-diagram images/foghorn-workflow-user.mmd images/foghorn-workflow-user.svg images/foghorn-workflow-user.png images/foghorn-workflow-full.mmd images/foghorn-workflow-full.svg images/foghorn-workflow-full.png
+
+docs-assets: workflow-diagrams

@@ -1,0 +1,41 @@
+%%{init: {'theme':'base', 'themeVariables': { 'primaryTextColor': '#000000', 'textColor': '#000000', 'lineColor': '#333333', 'background': '#ffffff' }}}%%
+flowchart TB
+  classDef default fill:#ffffff,color:#000000,stroke:#333333,stroke-width:1px
+  cli_config["CLI/Config → main.py"]
+  normalize["normalize_upstream_config()<br/>load_plugins()<br/>init_logging()"]
+  dns_server_init["DNSServer.__init__()<br/>ThreadingUDPServer created"]
+  serve_forever["DNSServer.serve_forever()<br/>Listens for UDP queries"]
+  handler["DNSUDPHandler.handle()<br/>per query"]
+  parse["Parse query<br/>(DNSRecord)"]
+  plugin_ctx["Instantiate<br/>PluginContext(client_ip)"]
+  pre_resolve["For each plugin:<br/>pre_resolve() → PluginDecision"]
+  cache_lookup["Cache lookup<br/>by (qname, qtype)"]
+  upstream_failover["send_query_with_failover()<br/>upstream_candidates or global"]
+  post_resolve["For each plugin:<br/>post_resolve() → PluginDecision"]
+  cache_store["Cache response<br/>(if NOERROR + has answers)"]
+  send_response["Send response<br/>to client"]
+  cli_config --> normalize
+  normalize --> dns_server_init
+  dns_server_init --> serve_forever
+  serve_forever -->|per UDP packet| handler
+  handler --> parse
+  parse --> plugin_ctx
+  plugin_ctx --> pre_resolve
+  pre_resolve --> cache_lookup
+  cache_lookup -->|cache miss| upstream_failover
+  upstream_failover --> post_resolve
+  post_resolve --> cache_store
+  cache_store --> send_response
+  style cli_config fill:#add8e6,stroke:#333,stroke-width:1px
+  style normalize fill:#ffffe0,stroke:#333,stroke-width:1px
+  style dns_server_init fill:#90ee90,stroke:#333,stroke-width:1px
+  style serve_forever fill:#e0ffff,stroke:#333,stroke-width:1px
+  style handler fill:#f5deb3,stroke:#333,stroke-width:1px
+  style parse fill:#ffffff,stroke:#333,stroke-width:1px
+  style plugin_ctx fill:#ffffff,stroke:#333,stroke-width:1px
+  style pre_resolve fill:#ffa07a,stroke:#333,stroke-width:1px
+  style cache_lookup fill:#ffffff,stroke:#333,stroke-width:1px
+  style upstream_failover fill:#b0c4de,stroke:#333,stroke-width:1px
+  style post_resolve fill:#ffa07a,stroke:#333,stroke-width:1px
+  style cache_store fill:#ffffff,stroke:#333,stroke-width:1px
+  style send_response fill:#add8e6,stroke:#333,stroke-width:1px
