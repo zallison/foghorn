@@ -1,0 +1,19 @@
+%%{init: {'theme':'base', 'themeVariables': { 'primaryTextColor': '#000000', 'textColor': '#000000', 'lineColor': '#333333', 'background': '#ffffff' }}}%%
+flowchart TB
+  classDef default fill:#ffffff,color:#000000,stroke:#333333,stroke-width:1px
+  start["Client DNS Query"]
+  plugins["Policy & Plugins<br/>(allow/deny/modify)"]
+  cache["Cache<br/>(hit or miss)"]
+  upstream["Forward to Upstream DNS<br/>(with failover)"]
+  response["Response to Client"]
+  start --> plugins
+  plugins --> cache
+  cache -->|hit| response
+  cache -->|miss| upstream
+  upstream -->|post-process| plugins
+  plugins --> response
+  style start fill:#add8e6,stroke:#333,stroke-width:1px
+  style plugins fill:#ffa07a,stroke:#333,stroke-width:1px
+  style cache fill:#ffffff,stroke:#333,stroke-width:1px
+  style upstream fill:#b0c4de,stroke:#333,stroke-width:1px
+  style response fill:#add8e6,stroke:#333,stroke-width:1px

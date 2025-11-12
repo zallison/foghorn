@@ -1,65 +1,76 @@
 # Foghorn Developer Guide
 
-This document contains developer-facing details: architecture, transports, plugins, logging, and testing. For end‑users and configuration examples, see README.md.
+This document contains developer-facing details: architecture, transports, plugins, logging, statistics, signals, and testing. For end‑users and configuration examples, see README.md.
 
 ## Architecture Overview
 
-- Entry: `foghorn/main.py` parses YAML, initializes logging/plugins, starts listeners.
-- UDP server: `foghorn/server.py` (ThreadingUDPServer). Now delegates transport selection per upstream.
-- Downstream servers (asyncio):
-  - TCP 53: `foghorn/tcp_server.py` (length‑prefixed, persistent connections, RFC 7766)
-  - DoT 853: `foghorn/dot_server.py` (TLS, RFC 7858)
+- Entry: `src/foghorn/main.py` parses YAML, initializes logging/plugins, starts listeners, installs signal handlers.
+- Downstream servers:
+  - UDP 53: `src/foghorn/udp_server.py` (ThreadingUDPServer wrapper) — handler logic lives in `src/foghorn/server.py`.
+  - TCP 53: `src/foghorn/tcp_server.py` (length‑prefixed, persistent connections, RFC 7766; asyncio with threaded fallback).
+  - DoT 853: `src/foghorn/dot_server.py` (TLS, RFC 7858; asyncio).
+  - DoH 8053: `src/foghorn/doh_server.py` (HTTP/1.1 minimal parser, RFC 8484; optional TLS).
 - Upstream transports:
-  - UDP (dnslib `DNSRecord.send`)
-  - TCP: `foghorn/transports/tcp.py` with pooling
-  - DoT: `foghorn/transports/dot.py` with pooling
-- Plugins: `foghorn/plugins/*`, discovered via `plugins/registry.py`. Hooks: `pre_resolve`, `post_resolve`.
-- Cache: `foghorn/cache.py` TTLCache with opportunistic cleanup.
+  - UDP: `src/foghorn/transports/udp.py` (dnslib send)
+  - TCP: `src/foghorn/transports/tcp.py` with connection pooling
+  - DoT: `src/foghorn/transports/dot.py` with connection pooling
+  - DoH: `src/foghorn/transports/doh.py` (stdlib http.client; GET/POST; TLS verification controls)
+- Plugins: `src/foghorn/plugins/*`, discovered via `plugins/registry.py`. Hooks: `pre_resolve`, `post_resolve`. Aliases supported (e.g., `acl`, `router`, `new_domain`, `filter`).
+- Cache: `src/foghorn/cache.py` TTLCache with opportunistic cleanup.
 
 ## Request Pipeline
 
 1) Parse query (dnslib)
-2) Pre‑plugins (deny/override/allow)
+2) Pre‑plugins (allow/deny/override)
 3) Cache lookup
-4) Upstream forward with failover (UDP/TCP/DoT)
+4) Upstream forward with failover (UDP/TCP/DoT/DoH)
 5) Post‑plugins (modify/deny)
 6) Cache store (NOERROR+answers)
-7) Send response (ID fixed)
+7) Send response (request ID preserved)
 
-When `dnssec.mode` is `validate`, EDNS DO is set and upstream responses are required to carry AD; otherwise SERVFAIL is returned.
+When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnssec.validation`:
+- `upstream_ad`: require upstream AD bit; otherwise respond SERVFAIL
+- `local` (experimental): local validation; behavior may change
 
 ## Transports and Pooling
 
-- TCP/DoT clients maintain a simple LIFO pool (max_connections default 32, idle timeout 30s). One in‑flight query per connection; concurrency is achieved by acquiring multiple connections.
+- TCP/DoT clients maintain a simple LIFO pool (default `max_connections: 32`, `idle_timeout_ms: 30000`). One in‑flight query per connection; concurrency by acquiring multiple connections.
 - Pools live in module globals keyed by upstream parameters.
-- DoT uses `ssl.SSLContext` with TLS ≥1.2, SNI/verification configurable per upstream.
-
-## DNSSEC Modes
-
-- `ignore`: do not advertise DO; no DNSSEC data requested.
-- `passthrough`: advertise DO; return DNSSEC RRs unmodified; forward AD if present.
-- `validate`: advertise DO; require upstream AD bit. If AD is missing, respond SERVFAIL. (Local chain validation is future work.)
+- DoT uses `ssl.SSLContext` with TLS ≥1.2; SNI/verification configurable per upstream (`tls.server_name`, `tls.verify`).
+- DoH client supports POST (binary body) and GET (`?dns=` base64url without padding). TLS verification is configurable via `verify` and optional `ca_file`.
 
 ## Configuration (highlights)
 
-- Listeners under `listen.{udp,tcp,dot}` with `enabled`, `host`, `port`.
-- Upstreams accept optional `transport: udp|tcp|dot`. For `dot`, set `tls.server_name`, `tls.verify`.
-- `dnssec.mode: ignore|passthrough|validate`, `dnssec.udp_payload_size` (default 1232).
+- Listeners under `listen.{udp,tcp,dot,doh}` with `enabled`, `host`, `port`. DoT/DoH accept `cert_file` and `key_file` (optional for DoH if plain HTTP is desired).
+- Upstreams accept optional `transport: udp|tcp|dot|doh`. For DoT set `tls.server_name`, `tls.verify`. For DoH set `url`, optional `method`, `headers`, and `tls.verify`/`tls.ca_file`.
+- `dnssec.mode: ignore|passthrough|validate`, `dnssec.validation: upstream_ad|local` (local is experimental), `dnssec.udp_payload_size` (default 1232).
+- `min_cache_ttl` (seconds) clamps cache expiry floor; negative values are clamped to 0.
 
-## Logging and Stats
+## Logging and Statistics
 
-- Logging configured via YAML; see README.md. Stats collector logs JSON lines with counters/histograms if enabled.
+- Logging is configured via the YAML `logging` section (see README.md for a quickstart). Format uses bracketed levels and UTC timestamps.
+- Statistics: enable with `statistics.enabled`. A `StatsReporter` periodically logs JSON snapshots with counters/histograms. Tunables include `interval_seconds`, `reset_on_log`, `track_uniques`, `include_qtype_breakdown`, `include_top_clients`, `include_top_domains`, `top_n`, and `track_latency`.
+
+## Signals
+
+- SIGUSR1: reloads configuration from `--config`, re‑applies logging and DNSSEC knobs, and if statistics are enabled with `reset_on_sigusr1: true`, logs a JSON snapshot and resets the counters.
+- SIGUSR2: invokes `handle_sigusr2()` on all active plugins if implemented (useful for ad‑hoc plugin actions).
 
 ## Testing
 
-- Unit tests: `pytest`.
+- Unit tests: run `pytest`.
 - Integration (manual):
   - TCP: `dig +tcp @127.0.0.1 -p 5353 example.com A`
   - DoT: `kdig +tls @127.0.0.1 -p 8853 example.com A`
+  - DoH: `curl -s -H 'accept: application/dns-message' --data-binary @query.bin http://127.0.0.1:8053/dns-query`
   - DNSSEC passthrough: `kdig +dnssec @127.0.0.1 -p 5353 example.com A`
+
+## Development
+
+- Code formatting: run `black src tests`.
+- Plugin development: inherit from `BasePlugin`, implement `pre_resolve` and/or `post_resolve`. Use the alias registry (see `plugins/registry.py`) or full dotted class paths. Prefer the terms “allowlist” and “blocklist” in documentation.
 
 ## Future Work
 
-- Full local DNSSEC validation (dnspython) with trust anchor management.
-- Upstream HTTP/2 DoH, downstream /dns-query HTTPS.
-- Metrics endpoint and connection reuse optimizations (session resumption).
+- Full local DNSSEC validation with trust anchor management.
+- Additional metrics endpoint and connection reuse optimizations (e.g., TLS session resumption).

@@ -1,0 +1,65 @@
+   %%{init: {'theme':'base', 'themeVariables': { 'primaryTextColor': '#000000', 'textColor': '#000000', 'lineColor': '#333333', 'background': '#ffffff' }}}%%
+   flowchart TB
+   classDef default fill:#ffffff,color:#000000,stroke:#333333,stroke-width:1px
+   accTitle: Init
+   Initialize["Initialize / Reload"]
+   main["main.py<br/>parse_args()"]
+   init_logging["init_logging()"]
+   load_cfg["load config<br/>normalize_upstream_config()"]
+   load_plugins["load_plugins()<br/>registry & aliases"]
+   server_init["DNSServer.__init__()"]
+   serve["DNSServer.serve_forever()"]
+   handle["ProtocolHandler.handle()"]
+   parse_q["parse_dns_query()"]
+   ctx["PluginContext(client_ip, upstream_candidates, upstream_override)"]
+   pre_plugins["pre_resolve() plugins:<br/>AccessControl, FlakyServer,<br/>Greylist, NewDomainFilter,<br/>Filter, EtcHosts,<br/>Examples, UpstreamRouter"]
+   decide["PluginDecision<br/>(allow/deny/override)"]
+   cache_get["TTLCache.get((qname,qtype))"]
+   fail_check["cache miss?"]
+   send_up["send_query_with_failover()"]
+   post_plugins["post_resolve() plugins:<br/>Filter (IP filtering),<br/>Examples (A/AAAA rewrite)"]
+   cache_set["TTLCache.set(key, ttl, bytes)"]
+   send_resp["send_response()"]
+   Initialize --> main
+   main --> init_logging
+   init_logging --> load_cfg
+   load_cfg --> load_plugins
+   load_plugins --> server_init
+   server_init --> serve
+
+   %%  serve -->|per packet or request| handle
+   %% Section 2
+   handle --> parse_q
+   parse_q --> ctx
+   ctx --> pre_plugins
+   pre_plugins --> decide
+   decide -->|allow| cache_get
+   decide -->|deny/override| send_resp
+   cache_get --> fail_check
+   fail_check -->|miss| send_up
+   fail_check -->|hit| post_plugins
+   send_up --> post_plugins
+   post_plugins -->|NOERROR + answers| cache_set
+   post_plugins -->|no caching| send_resp
+   cache_set --> send_resp
+   style main fill:#add8e6,stroke:#333,stroke-width:1px
+   style Initialize fill:#ffffff,stroke:#333,stroke-width:1px
+
+   style init_logging fill:#ffffff,stroke:#333,stroke-width:1px
+   style init_logging fill:#ffffff,stroke:#333,stroke-width:1px
+   style load_cfg fill:#ffffff,stroke:#333,stroke-width:1px
+   %%  style normalize_cfg fill:#ffffe0,stroke:#333,stroke-width:1px
+   style load_plugins fill:#ffffe0,stroke:#333,stroke-width:1px
+   style server_init fill:#90ee90,stroke:#333,stroke-width:1px
+   style serve fill:#e0ffff,stroke:#333,stroke-width:1px
+   style handle fill:#f5deb3,stroke:#333,stroke-width:1px
+   style parse_q fill:#ffffff,stroke:#333,stroke-width:1px
+   style ctx fill:#ffffff,stroke:#333,stroke-width:1px
+   style pre_plugins fill:#ffa07a,stroke:#333,stroke-width:1px
+   style decide fill:#ffa07a,stroke:#333,stroke-width:1px
+   style cache_get fill:#ffffff,stroke:#333,stroke-width:1px
+   style fail_check fill:#ffffff,stroke:#333,stroke-width:1px
+   style send_up fill:#b0c4de,stroke:#333,stroke-width:1px
+   style post_plugins fill:#ffa07a,stroke:#333,stroke-width:1px
+   style cache_set fill:#ffffff,stroke:#333,stroke-width:1px
+   style send_resp fill:#add8e6,stroke:#333,stroke-width:1px
