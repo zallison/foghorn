@@ -238,6 +238,27 @@ class BasePlugin:
         """
         return None
 
+    def handle_sigusr2(self) -> None:
+        """
+        Handle SIGUSR2 signal.
+
+        Inputs:
+          - None
+        Outputs:
+          - None
+
+        Brief: Default implementation does nothing; plugins may override to
+        perform maintenance or resets when SIGUSR2 is received.
+
+        Example:
+            >>> class P(BasePlugin):
+            ...     def handle_sigusr2(self):
+            ...         self.touched = True
+            >>> p = P()
+            >>> p.handle_sigusr2()
+        """
+        return None
+
 
 def plugin_aliases(*aliases: str):
     """
