@@ -136,12 +136,9 @@ class UpstreamRouterPlugin(BasePlugin):
                         host = up.get("host")
                         port = up.get("port")
                         if host and port is not None:
-                            try:
-                                upstream_candidates.append(
-                                    {"host": str(host), "port": int(port)}
-                                )
-                            except (ValueError, TypeError):
-                                continue
+                            upstream_candidates.append(
+                                {"host": str(host), "port": int(port)}
+                            )
 
             # Only add route if we have valid matching criteria and at least one upstream
             if upstream_candidates and ("domain" in route or "suffix" in route):
