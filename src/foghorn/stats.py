@@ -9,6 +9,7 @@ guaranteed thread-safety for concurrent request handling.
 from __future__ import annotations
 import json
 import logging
+import functools
 import threading
 import time
 from collections import defaultdict
@@ -19,6 +20,7 @@ from typing import Dict, List, Optional, Set, Tuple
 logger = logging.getLogger(__name__)
 
 
+@functools.lru_cache(maxsize=1024)
 def _normalize_domain(domain: str) -> str:
     """
     Normalize domain name for statistics tracking.

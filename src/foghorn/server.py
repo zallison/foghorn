@@ -1,4 +1,5 @@
 import logging
+import functools
 import socketserver
 from typing import List, Tuple, Dict, Optional
 from dnslib import DNSRecord, QTYPE, RCODE, RR, EDNS0
@@ -46,9 +47,37 @@ def compute_effective_ttl(resp: DNSRecord, min_cache_ttl: int) -> int:
 def _set_response_id(wire: bytes, req_id: int) -> bytes:
     """Ensure the response DNS ID matches the request ID.
 
+    Inputs:
+      - wire: bytes-like DNS response (bytes, bytearray, or memoryview)
+      - req_id: int request ID to set in the first two bytes
+    Outputs:
+      - bytes: response with corrected ID
+
     Fast path: DNS ID is the first 2 bytes (big-endian). We rewrite them
     without parsing to avoid any packing differences.
+
+    Note: We normalize to bytes before delegating to a cached helper so that
+    unhashable types (e.g., bytearray) do not break caching.
     """
+    try:
+        # Normalize to bytes to ensure hashability and immutability
+        try:
+            bwire = bytes(wire)
+        except Exception:
+            bwire = wire  # fallback; will likely still be bytes
+        return _set_response_id_cached(bwire, int(req_id))
+    except Exception as e:
+        logger.error("Failed to set response id: %s", e)
+        return (
+            bytes(wire)
+            if not isinstance(wire, (bytes, bytearray))
+            else (bytes(wire) if isinstance(wire, bytearray) else wire)
+        )
+
+
+@functools.lru_cache(maxsize=1024)
+def _set_response_id_cached(wire: bytes, req_id: int) -> bytes:
+    """Cached helper for setting DNS ID on an immutable bytes payload."""
     try:
         if len(wire) >= 2:
             hi = (req_id >> 8) & 0xFF
@@ -56,7 +85,7 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
             return bytes([hi, lo]) + wire[2:]
         return wire
     except Exception as e:
-        logger.error("Failed to set response id: %s", e)
+        logger.error("Failed to set response id (cached): %s", e)
         return wire
 
 

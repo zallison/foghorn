@@ -1,8 +1,10 @@
 from __future__ import annotations
-import time
+import functools
+import logging
 import sqlite3
 import threading
-import logging
+import time
+
 from typing import Optional
 
 from foghorn.plugins.base import BasePlugin, PluginDecision, PluginContext
@@ -64,6 +66,7 @@ class GreylistPlugin(BasePlugin):
                 ")"
             )
 
+    @functools.lru_cache(maxsize=1024)
     def _to_base_domain(self, qname: str) -> str:
         """
         Extracts the last two labels of a domain name.

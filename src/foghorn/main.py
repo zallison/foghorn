@@ -1,19 +1,36 @@
 from __future__ import annotations
-import importlib
-import sys
 import argparse
+import gc
+import importlib
 import logging
 import signal
+import sys
 import threading
-from typing import List, Tuple, Dict, Union, Any, Optional
 import yaml
+
+from typing import List, Tuple, Dict, Union, Any, Optional
 from unittest.mock import patch, mock_open
 
-from .server import DNSServer
-from .plugins.base import BasePlugin
 from .logging_config import init_logging
+from .plugins.base import BasePlugin
 from .plugins.registry import discover_plugins, get_plugin_class
+from .server import DNSServer
 from .stats import StatsCollector, StatsReporter, format_snapshot_json
+
+
+def _clear_lru_caches(wrappers: Optional[List[Object]]):
+    # Collect all cached function wrappers
+    gc.collect()
+    if not wrappers:
+        wrappers = [
+            obj
+            for obj in gc.get_objects()
+            if isinstance(obj, functools._lru_cache_wrapper)
+        ]
+
+    # Clear all caches
+    for wrapper in wrappers:
+        wrapper.cache_clear()
 
 
 def _get_min_cache_ttl(cfg: dict) -> int:
