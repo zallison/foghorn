@@ -31,7 +31,11 @@ plugins:
 
 logging:
   level: debug
+  enabled: true
+  port: 8080
+
 # Optional: enable statistics
 # statistics:
 #   enabled: true
 #   interval_seconds: 10
+
