@@ -1,15 +1,80 @@
 from __future__ import annotations
-import time
-from dnslib import DNSRecord, QTYPE, A, AAAA, QR, RR, DNSHeader
-import os
 import logging
+import os
 import pathlib
-from typing import Dict, Optional, Iterable, List
+import sys
+import threading
+import time
+
+from dnslib import DNSRecord, QTYPE, A, AAAA, QR, RR, DNSHeader
+from typing import Dict, Optional, Iterable, List, Set
 
 from foghorn.plugins.base import PluginDecision, PluginContext
 from foghorn.plugins.base import BasePlugin, plugin_aliases
 
+try:
+    import pyinotify
+
+    _HAVE_PYINOTIFY = True
+except Exception:  # pragma: no cover
+    _HAVE_PYINOTIFY = False
+
 logger = logging.getLogger(__name__)
+
+
+class _HostsEventHandler(object if not _HAVE_PYINOTIFY else pyinotify.ProcessEvent):
+    """
+    Brief: Inotify event handler that triggers host file reloads.
+
+    Inputs:
+      - reload_callback: callable with no args, performs an immediate reload.
+      - target_paths: set of absolute paths to files we care about.
+      - lock: threading.RLock used to serialize reload.
+
+    Outputs:
+      - None (side-effects: calls reload_callback on file events).
+    """
+
+    def __init__(self, reload_callback, target_paths: Set[str], lock: threading.RLock):
+        if _HAVE_PYINOTIFY:
+            super().__init__()
+        self._reload_callback = reload_callback
+        self._target_paths = {pathlib.Path(p).resolve() for p in target_paths}
+        self._lock = lock
+
+    def _maybe_reload(self, event):
+        """
+        Brief: Check if event pathname is a target file and trigger reload if so.
+
+        Inputs:
+          - event: pyinotify event object
+
+        Outputs:
+          - None (may call _reload_callback)
+        """
+        try:
+            changed = pathlib.Path(getattr(event, "pathname", "")).resolve()
+        except Exception:
+            return
+        if changed in self._target_paths:
+            with self._lock:
+                self._reload_callback()
+
+    def process_IN_CLOSE_WRITE(self, event):  # noqa: N802
+        """Handle close after write event."""
+        self._maybe_reload(event)
+
+    def process_IN_MODIFY(self, event):  # noqa: N802
+        """Handle modify event."""
+        self._maybe_reload(event)
+
+    def process_IN_MOVED_TO(self, event):  # noqa: N802
+        """Handle move-to event (atomic replace pattern)."""
+        self._maybe_reload(event)
+
+    def process_IN_ATTRIB(self, event):  # noqa: N802
+        """Handle attribute change event."""
+        self._maybe_reload(event)
 
 
 @plugin_aliases("hosts", "etc-hosts", "/etc/hosts")
@@ -22,14 +87,23 @@ class EtcHosts(BasePlugin):
     from later files override earlier ones.
     """
 
-    def __init__(self, **config) -> None:
+    def __init__(
+        self,
+        file_paths: Optional[List[str]] = None,
+        file_path: Optional[str] = None,
+        inotify_enabled: Optional[bool] = None,
+        **config,
+    ) -> None:
         """
-        Brief: Initialize the plugin and load host mappings.
+        Brief: Initialize the plugin and load host mappings with optional inotify reloading.
 
         Inputs:
-          - file_path (str, optional): Single hosts file path (legacy, preserved)
           - file_paths (list[str], optional): List of hosts file paths
             to load and merge in order (later overrides earlier)
+          - file_path (str, optional): Single hosts file path (legacy, preserved)
+          - inotify_enabled (bool, optional): Enable background reloading via inotify.
+            Defaults to True on Linux when pyinotify is available.
+          - **config: Additional plugin configuration
 
         Outputs:
           - None
@@ -40,15 +114,136 @@ class EtcHosts(BasePlugin):
 
           Multiple files (preferred):
             EtcHosts(file_paths=["/etc/hosts", "/etc/hosts.d/extra"])
+
+          With inotify explicitly disabled:
+            EtcHosts(file_paths=["/etc/hosts"], inotify_enabled=False)
         """
         super().__init__(**config)
 
+        # Thread safety lock
+        self._lock = threading.RLock()
+
         # Normalize configuration into a list of paths. Default to /etc/hosts
-        legacy = self.config.get("file_path")
-        provided = self.config.get("file_paths")
+        provided = file_paths or self.config.get("file_paths")
+        legacy = file_path or self.config.get("file_path")
         self.file_paths: List[str] = self._normalize_paths(provided, legacy)
 
+        # Host mappings
+        self.hosts: Dict[str, str] = {}
+
+        # Inotify state
+        self._watch_manager: Optional[object] = None
+        self._notifier: Optional[object] = None
+
+        # Determine if inotify should be enabled
+        if inotify_enabled is None:
+            inotify_enabled = _HAVE_PYINOTIFY and (
+                os.name == "posix" and sys.platform.startswith("linux")
+            )
+        self._inotify_enabled = bool(inotify_enabled)
+
+        # Initial load
         self._load_hosts()
+
+        # Start background watcher if enabled
+        if self._inotify_enabled:
+            self._start_inotify()
+
+    def _start_inotify(self) -> None:
+        """
+        Brief: Start a background ThreadedNotifier to watch host files for changes.
+
+        Inputs:
+          - None (uses self.file_paths)
+
+        Outputs:
+          - None
+
+        Example:
+          self._start_inotify()
+        """
+        if not _HAVE_PYINOTIFY:
+            return
+
+        try:
+            wm = pyinotify.WatchManager()
+            mask = (
+                pyinotify.IN_CLOSE_WRITE
+                | pyinotify.IN_MODIFY
+                | pyinotify.IN_MOVED_TO
+                | pyinotify.IN_ATTRIB
+                | pyinotify.IN_CREATE
+            )
+            abs_paths = [str(pathlib.Path(p).resolve()) for p in self.file_paths]
+            handler = _HostsEventHandler(self._load_hosts, set(abs_paths), self._lock)
+            notifier = pyinotify.ThreadedNotifier(wm, default_proc_fun=handler)
+            notifier.daemon = True
+
+            # Watch both each file and its parent directory (to catch atomic replace)
+            for path in abs_paths:
+                parent = pathlib.Path(path).parent
+                try:
+                    wm.add_watch(str(parent), mask, rec=False, auto_add=False)
+                    logger.debug(f"Added inotify watch for directory {parent}")
+                except Exception as e:
+                    logger.debug(f"Failed to watch directory {parent}: {e}")
+
+                try:
+                    if pathlib.Path(path).exists():
+                        wm.add_watch(path, mask, rec=False, auto_add=False)
+                        logger.debug(f"Added inotify watch for file {path}")
+                except Exception as e:
+                    logger.debug(f"Failed to watch file {path}: {e}")
+
+            notifier.start()
+            self._watch_manager = wm
+            self._notifier = notifier
+            logger.debug("Started inotify ThreadedNotifier for hosts files")
+        except Exception as e:
+            logger.warning(f"Failed to start inotify watcher: {e}")
+            self._inotify_enabled = False
+
+    def _stop_inotify(self) -> None:
+        """
+        Brief: Stop the inotify notifier and release resources.
+
+        Inputs:
+          - None
+
+        Outputs:
+          - None
+        """
+        n = self._notifier
+        self._notifier = None
+        try:
+            if n is not None:
+                n.stop()
+                logger.debug("Stopped inotify ThreadedNotifier")
+        except Exception as e:
+            logger.debug(f"Error stopping notifier: {e}")
+        finally:
+            wm = self._watch_manager
+            self._watch_manager = None
+            if wm is not None:
+                try:
+                    wm.close()
+                except Exception as e:
+                    logger.debug(f"Error closing watch manager: {e}")
+
+    def close(self) -> None:
+        """
+        Brief: Close the plugin and stop background watchers.
+
+        Inputs:
+          - None
+
+        Outputs:
+          - None
+
+        Example:
+          plugin.close()
+        """
+        self._stop_inotify()
 
     def _normalize_paths(
         self, file_paths: Optional[Iterable[str]], legacy: Optional[str]
@@ -93,34 +288,41 @@ class EtcHosts(BasePlugin):
         - Multiple hostnames per line are supported and mapped to the same IP.
         - When multiple files are provided, later files override earlier ones on
           conflicts for the same hostname.
+        - Thread-safe: acquires self._lock to ensure no leftover data from previous calls.
 
         Inputs:
           - None (uses self.file_paths)
         Outputs:
           - None (populates self.hosts: Dict[str, str])
         """
-        mapping: Dict[str, str] = {}
+        with self._lock:
+            # Ensure no data is left over from previous calls.
+            mapping: Dict[str, str] = {}
 
-        for fp in self.file_paths:
-            hosts_path = pathlib.Path(fp)
-            with hosts_path.open("r", encoding="utf-8") as f:
-                for raw_line in f:
-                    # Remove inline comments and surrounding whitespace
-                    line = raw_line.split("#", 1)[0].strip()
-                    if not line:
-                        continue
+            for fp in self.file_paths:
+                hosts_path = pathlib.Path(fp)
+                try:
+                    with hosts_path.open("r", encoding="utf-8") as f:
+                        for raw_line in f:
+                            # Remove inline comments and surrounding whitespace
+                            line = raw_line.split("#", 1)[0].strip()
+                            if not line:
+                                continue
 
-                    parts = line.split()
-                    if len(parts) < 2:
-                        raise ValueError(
-                            f"File {hosts_path} malformed line: {raw_line}"
-                        )
+                            parts = line.split()
+                            if len(parts) < 2:
+                                raise ValueError(
+                                    f"File {hosts_path} malformed line: {raw_line}"
+                                )
 
-                    ip = parts[0]
-                    for domain in parts[1:]:
-                        # Later files override earlier ones by assignment
-                        mapping[domain] = ip
-        self.hosts = mapping
+                            ip = parts[0]
+                            for domain in parts[1:]:
+                                # Later files override earlier ones by assignment
+                                mapping[domain] = ip
+                except FileNotFoundError:
+                    # File may not exist yet or may be deleted; skip it
+                    pass
+            self.hosts = mapping
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
@@ -142,7 +344,9 @@ class EtcHosts(BasePlugin):
             return None
 
         qname = qname.rstrip(".")
-        ip = self.hosts.get(qname)
+
+        with self._lock:
+            ip = self.hosts.get(qname)
 
         if not ip:
             return None
