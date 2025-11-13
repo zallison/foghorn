@@ -48,11 +48,11 @@ class ListDownloader(BasePlugin):
 
     def __init__(self, **config):
         super().__init__(**config)
-        self.download_path: str = str(self.config.get('download_path', './var/lists'))
-        self.cache_days: int = int(self.config.get('cache_days', 7))
-        self.urls: List[str] = list(self.config.get('urls', []) or [])
-        self.url_files: List[str] = list(self.config.get('url_files', []) or [])
-        self.interval_seconds: int | None = self.config.get('interval_seconds')
+        self.download_path: str = str(self.config.get("download_path", "./var/lists"))
+        self.cache_days: int = int(self.config.get("cache_days", 7))
+        self.urls: List[str] = list(self.config.get("urls", []) or [])
+        self.url_files: List[str] = list(self.config.get("url_files", []) or [])
+        self.interval_seconds: int | None = self.config.get("interval_seconds")
         self._last_run: float = 0.0
 
         # Merge URLs from url_files
@@ -62,9 +62,11 @@ class ListDownloader(BasePlugin):
                 merged: Set[str] = set(self.urls)
                 merged.update(urls_from_files)
                 self.urls = sorted(merged)
-                logger.debug('ListDownloader added %d URLs from url_files', len(urls_from_files))
+                logger.debug(
+                    "ListDownloader added %d URLs from url_files", len(urls_from_files)
+                )
             except Exception as e:  # pragma: no cover
-                logger.warning('Failed reading url_files: %s', e)
+                logger.warning("Failed reading url_files: %s", e)
 
         os.makedirs(self.download_path, exist_ok=True)
         # Perform an initial fetch at startup
@@ -103,7 +105,7 @@ class ListDownloader(BasePlugin):
                 self._fetch(url, fpath)
 
             if not self._validate_domain_list(fpath):
-                raise ValueError(f'Invalid content in {fname}: expected domain-per-line list')
+                raise ValueError(
                     f"Invalid content in {fname}: expected domain-per-line list"
                 )
 
@@ -146,7 +148,7 @@ class ListDownloader(BasePlugin):
             >>> ListDownloader()._url_hash12('https://example.com/a.txt')
             '0a1b2c3d4e5f'
         """
-        h = hashlib.sha1(url.encode('utf-8')).hexdigest()
+        h = hashlib.sha1(url.encode("utf-8")).hexdigest()
         return h[:12]
 
     def _derive_base_and_ext(self, url: str) -> tuple[str, str]:
@@ -169,10 +171,10 @@ class ListDownloader(BasePlugin):
         p = urlparse(url)
         basename = os.path.basename(p.path)
         if not basename:
-            base = p.netloc or 'list'
-            return base, ''
+            base = p.netloc or "list"
+            return base, ""
         base, ext = os.path.splitext(basename)
-        base = base or (p.netloc or 'list')
+        base = base or (p.netloc or "list")
         return base, ext
 
     def _make_hashed_filename(self, url: str, base_name: str | None = None) -> str:
@@ -198,12 +200,12 @@ class ListDownloader(BasePlugin):
         # sanitize base (keep common safe characters)
         safe = []
         for ch in base:
-            if ch.isalnum() or ch in ('-', '_', '.'):
+            if ch.isalnum() or ch in ("-", "_", "."):
                 safe.append(ch)
             else:
-                safe.append('_')
-        base_safe = ''.join(safe) or 'list'
-        return f'{base_safe}-{url_hash}{ext}'
+                safe.append("_")
+        base_safe = "".join(safe) or "list"
+        return f"{base_safe}-{url_hash}{ext}"
 
     def _read_url_files(self, paths: List[str]) -> Set[str]:
         """
@@ -221,14 +223,14 @@ class ListDownloader(BasePlugin):
         urls: Set[str] = set()
         for path in paths:
             try:
-                with open(path, 'r', encoding='utf-8', errors='ignore') as fh:
+                with open(path, "r", encoding="utf-8", errors="ignore") as fh:
                     for raw in fh:
                         s = raw.strip()
-                        if not s or s.startswith('#'):
+                        if not s or s.startswith("#"):
                             continue
                         urls.add(s)
             except FileNotFoundError:
-                logger.warning('url_files entry not found: %s', path)
+                logger.warning("url_files entry not found: %s", path)
         return urls
 
     def _make_header_line(self, url: str, now: datetime | None = None) -> str:
@@ -249,23 +251,23 @@ class ListDownloader(BasePlugin):
         r.raise_for_status()
         header = self._make_header_line(url)
         body = r.text
-        with open(filepath, 'w', encoding='utf-8', errors='ignore') as f:
+        with open(filepath, "w", encoding="utf-8", errors="ignore") as f:
             f.write(header)
-            f.write('\n')
+            f.write("\n")
             f.write(body)
 
     def _validate_domain_list(self, filepath: str) -> bool:
         try:
             seen = 0
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                 for raw in f:
                     line = raw.strip()
-                    if not line or line.startswith('#'):
+                    if not line or line.startswith("#"):
                         continue
                     # Reject typical hosts-format entries (start with an IP)
                     if line[0].isdigit():
                         return False
-                    if ' ' in line or '\t' in line or '.' not in line:
+                    if " " in line or "\t" in line or "." not in line:
                         return False
                     seen += 1
                     if seen >= 5:
