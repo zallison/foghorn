@@ -1,4 +1,5 @@
 from __future__ import annotations
+import glob
 import ipaddress
 import logging
 import re
@@ -77,8 +78,13 @@ class FilterPlugin(BasePlugin):
         self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 600)  # 10 minutes
         self.db_path: str = self.config.get("db_path", "./var/blocklist.db")
         self.default = self.config.get("default", "deny")
-        self.blocklist_files = self.config.get("blocklist_files", [])
-        self.allowlist_files = self.config.get("allowlist_files", [])
+        # Expand glob patterns for list files
+        self.blocklist_files: List[str] = []
+        for pattern in self.config.get("blocklist_files", []):
+            self.blocklist_files.extend(glob.glob(pattern))
+        self.allowlist_files: List[str] = []
+        for pattern in self.config.get("allowlist_files", []):
+            self.allowlist_files.extend(glob.glob(pattern))
         self.blocklist = self.config.get("blocked_domains", [])
         self.allowlist = self.config.get("allowed_domains", [])
 
