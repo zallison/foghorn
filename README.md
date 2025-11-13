@@ -280,10 +280,30 @@ This plugin provides flexible filtering of DNS queries based on domain names, pa
 
 **Configuration:**
 
-*   `blocked_domains`: A list of exact domain names to block.
-*   `blocked_patterns`: A list of regular expressions to match against the domain name.
-*   `blocked_keywords`: A list of keywords to block if they appear anywhere in the domain name.
-*   `blocked_ips`: A list of IP addresses or CIDR ranges to block in the response. You can specify an `action` for each (`deny` or `remove`).
+- blocked_domains: list of exact domain names to block.
+- blocked_patterns: list of regular expressions to match against the domain name.
+- blocked_keywords: list of keywords to block if they appear anywhere in the domain name.
+- blocked_ips: list of IP addresses or CIDR ranges to control post‑resolution behavior; each entry supports action deny, remove, or replace (with replace_with).
+
+File-backed inputs (support globs):
+- allowed_domains_files, blocked_domains_files (aliases also supported: allowlist_files, blocklist_files)
+- blocked_patterns_files
+- blocked_keywords_files
+- blocked_ips_files
+
+Formats supported per file (auto-detected line-by-line):
+- Plain text (default): a single value per line; blank lines and lines starting with '#' are ignored
+- JSON Lines: one JSON object per line with the following schemas
+  - Domains: {"domain": "example.com", "mode": "allow|deny"} (mode optional; defaults to the file-level mode implied by which key you used)
+  - Patterns: {"pattern": "^ads\\.", "flags": ["IGNORECASE"]} (flags optional; defaults to IGNORECASE)
+  - Keywords: {"keyword": "tracker"}
+  - IPs: {"ip": "203.0.113.0/24", "action": "deny|remove|replace", "replace_with": "IP"}
+
+Load order and precedence for domains (last write wins):
+1) allowed_domains_files/allowlist_files
+2) blocked_domains_files/blocklist_files
+3) inline allowed_domains
+4) inline blocked_domains
 
 **Example (short alias):**
 
@@ -306,9 +326,60 @@ plugins:
       blocked_ips:
         - ip: "1.2.3.4"
           action: "deny" # Deny the whole response
-        - ip: "8.8.8.8/24"
+        - ip: "8.8.8.0/24"
           action: "remove" # Remove just this A/AAAA record
+
+      # File-backed examples (globs allowed)
+      allowed_domains_files:
+        - config/allow.txt
+        - config/allow.d/*.list
+      blocked_domains_files:
+        - config/block.txt
+        - config/block.d/*.txt
+      blocked_patterns_files:
+        - config/patterns/*.re
+      blocked_keywords_files:
+        - config/keywords.txt
+      blocked_ips_files:
+        - config/ips.txt
+        - config/ips.d/*.csv
 ```
+
+##### JSON Lines examples for files
+
+- Domains (allowed_domains_files or blocked_domains_files):
+
+```json
+{"domain": "good.com", "mode": "allow"}
+{"domain": "bad.com", "mode": "deny"}
+{"domain": "neutral.com"}
+```
+
+- Patterns (blocked_patterns_files):
+
+```json
+{"pattern": "^ads\\.", "flags": ["IGNORECASE"]}
+{"pattern": "^track\\.", "flags": []}
+```
+
+- Keywords (blocked_keywords_files):
+
+```json
+{"keyword": "tracker"}
+{"keyword": "analytics"}
+```
+
+- IPs (blocked_ips_files):
+
+```json
+{"ip": "192.0.2.1", "action": "deny"}
+{"ip": "198.51.100.0/24", "action": "remove"}
+{"ip": "203.0.113.5", "action": "replace", "replace_with": "127.0.0.1"}
+```
+
+Notes:
+- Plain-text lines continue to work alongside JSON Lines within the same file.
+- Unknown actions default to deny (logged). Invalid JSON/regex/IP lines are logged and skipped.
 
 #### ListDownloader plugin
 
