@@ -466,7 +466,7 @@ def main(argv: List[str] | None = None) -> int:
 
     def _process_sigusr2() -> None:
         """
-        Brief: Handle SIGUSR2 by invoking handle_sigusr2() on all active plugins.
+        Brief: Handle SIGUSR2 by optionally resetting statistics and invoking handle_sigusr2() on all active plugins.
 
         Inputs: none
         Outputs: none
@@ -474,7 +474,33 @@ def main(argv: List[str] | None = None) -> int:
         Example:
             >>> # Internal use; invoked by signal handler thread
         """
+        nonlocal cfg, stats_collector
         log = logging.getLogger("foghorn.main")
+
+        # Conditionally reset statistics based on config
+        try:
+            s_cfg = (cfg.get("statistics") or {}) if isinstance(cfg, dict) else {}
+            if bool(s_cfg.get("enabled", False)) and bool(
+                s_cfg.get("sigusr2_resets_stats", False)
+            ):
+                if stats_collector is not None:
+                    try:
+                        stats_collector.snapshot(reset=True)
+                        log.info("SIGUSR2: statistics reset completed")
+                    except Exception as e:
+                        log.error("SIGUSR2: error during statistics reset: %s", e)
+                else:
+                    log.info("SIGUSR2: no statistics collector active, skipping reset")
+            else:
+                log.info(
+                    "SIGUSR2: statistics reset skipped (disabled or sigusr2_resets_stats not set)"
+                )
+        except Exception as e:  # defensive: do not block plugin notifications
+            log.error(
+                "SIGUSR2: unexpected error checking statistics reset config: %s", e
+            )
+
+        # Invoke plugin handlers
         count = 0
         for p in plugins or []:
             try:

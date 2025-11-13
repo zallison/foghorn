@@ -297,8 +297,10 @@ class StatsSnapshot:
     upstreams: Dict[str, Dict[str, int]]
     uniques: Optional[Dict[str, int]]
     top_clients: Optional[List[Tuple[str, int]]]
+    top_subdomains: Optional[List[Tuple[str, int]]]
     top_domains: Optional[List[Tuple[str, int]]]
     latency_stats: Optional[Dict[str, float]]
+    latency_recent_stats: Optional[Dict[str, float]] = None
 
 
 class StatsCollector:
@@ -394,12 +396,19 @@ class StatsCollector:
         self._top_clients: Optional[TopK] = (
             TopK(capacity=top_n) if include_top_clients else None
         )
+        # Track both subdomains (full qname) and base domains (last two labels)
+        self._top_subdomains: Optional[TopK] = (
+            TopK(capacity=top_n) if include_top_domains else None
+        )
         self._top_domains: Optional[TopK] = (
             TopK(capacity=top_n) if include_top_domains else None
         )
 
         # Optional: latency histogram
         self._latency: Optional[LatencyHistogram] = (
+            LatencyHistogram() if track_latency else None
+        )
+        self._latency_recent: Optional[LatencyHistogram] = (
             LatencyHistogram() if track_latency else None
         )
 
@@ -436,8 +445,14 @@ class StatsCollector:
             if self._top_clients is not None:
                 self._top_clients.add(client_ip)
 
+            if self._top_subdomains is not None:
+                self._top_subdomains.add(domain)
+
             if self._top_domains is not None:
-                self._top_domains.add(domain)
+                # Aggregate by base domain (last two labels)
+                parts = domain.split(".")
+                base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
+                self._top_domains.add(base)
 
     def record_cache_hit(self, qname: str) -> None:
         """
@@ -576,6 +591,8 @@ class StatsCollector:
         if self._latency is not None:
             with self._lock:
                 self._latency.add(seconds)
+                if self._latency_recent is not None:
+                    self._latency_recent.add(seconds)
 
     def snapshot(self, reset: bool = False) -> StatsSnapshot:
         """
@@ -630,6 +647,10 @@ class StatsCollector:
             if self._top_clients is not None:
                 top_clients = self._top_clients.export(self.top_n)
 
+            top_subdomains = None
+            if self._top_subdomains is not None:
+                top_subdomains = self._top_subdomains.export(self.top_n)
+
             top_domains = None
             if self._top_domains is not None:
                 top_domains = self._top_domains.export(self.top_n)
@@ -638,6 +659,10 @@ class StatsCollector:
             latency_stats = None
             if self._latency is not None:
                 latency_stats = self._latency.summarize()
+
+            latency_recent_stats = None
+            if self._latency_recent is not None:
+                latency_recent_stats = self._latency_recent.summarize()
 
             snapshot = StatsSnapshot(
                 created_at=time.time(),
@@ -648,8 +673,10 @@ class StatsCollector:
                 upstreams=upstreams,
                 uniques=uniques,
                 top_clients=top_clients,
+                top_subdomains=top_subdomains,
                 top_domains=top_domains,
                 latency_stats=latency_stats,
+                latency_recent_stats=latency_recent_stats,
             )
 
             # Reset if requested
@@ -669,13 +696,40 @@ class StatsCollector:
 
                 if self._top_clients is not None:
                     self._top_clients.counts.clear()
+                if self._top_subdomains is not None:
+                    self._top_subdomains.counts.clear()
                 if self._top_domains is not None:
                     self._top_domains.counts.clear()
 
                 if self._latency is not None:
                     self._latency = LatencyHistogram()
+                if self._latency_recent is not None:
+                    self._latency_recent = LatencyHistogram()
 
             return snapshot
+
+    def reset_latency_recent(self) -> None:
+        """
+        Reset only the recent latency window.
+
+        Inputs:
+            None
+
+        Outputs:
+            None
+
+        Example:
+            >>> collector = StatsCollector(track_latency=True)
+            >>> collector.record_latency(0.005)
+            >>> snapshot1 = collector.snapshot()
+            >>> collector.reset_latency_recent()
+            >>> snapshot2 = collector.snapshot()
+            >>> snapshot2.latency_recent_stats['count']
+            0
+        """
+        with self._lock:
+            if self._latency_recent is not None:
+                self._latency_recent = LatencyHistogram()
 
 
 def format_snapshot_json(snapshot: StatsSnapshot) -> str:
@@ -726,6 +780,11 @@ def format_snapshot_json(snapshot: StatsSnapshot) -> str:
             {"client": c, "count": n} for c, n in snapshot.top_clients
         ]
 
+    if snapshot.top_subdomains:
+        output["top_subdomains"] = [
+            {"domain": d, "count": n} for d, n in snapshot.top_subdomains
+        ]
+
     if snapshot.top_domains:
         output["top_domains"] = [
             {"domain": d, "count": n} for d, n in snapshot.top_domains
@@ -733,6 +792,9 @@ def format_snapshot_json(snapshot: StatsSnapshot) -> str:
 
     if snapshot.latency_stats:
         output["latency"] = snapshot.latency_stats
+
+    if snapshot.latency_recent_stats:
+        output["latency_recent"] = snapshot.latency_recent_stats
 
     return json.dumps(output, separators=(",", ":"))
 
@@ -820,6 +882,8 @@ class StatsReporter(threading.Thread):
                 snapshot = self.collector.snapshot(reset=self.reset_on_log)
                 json_line = format_snapshot_json(snapshot)
                 self.logger.log(self.log_level, json_line)
+                # Always reset recent latency window after emission
+                self.collector.reset_latency_recent()
             except Exception as e:  # pragma: no cover
                 self.logger.error("StatsReporter error: %s", e, exc_info=True)
 
