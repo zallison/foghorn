@@ -48,7 +48,20 @@ plugins:
       apply_to_qtypes: ["A", "AAAA"]
       # seed: 42
 
-  # 3) Filter domains/IPs before routing (policy enforcement)
+  # 3) Download curated domain lists before filtering (ensures files exist)
+  - module: list_downloader
+    pre_priority: 15
+    config:
+      download_path: ./var/lists
+      cache_days: 7
+      interval_seconds: 3600
+      urls:
+        - https://v.firebog.net/hosts/AdguardDNS.txt
+        - https://v.firebog.net/hosts/Easylist.txt
+        - https://v.firebog.net/hosts/Prigent-Ads.txt
+        - https://v.firebog.net/hosts/Prigent-Malware.txt
+
+  # 4) Filter domains/IPs before routing (policy enforcement)
   - module: filter
     pre_priority: 20
     config:
@@ -62,9 +75,12 @@ plugins:
       blocked_ips:
         - { ip: "198.51.100.0/24", action: remove }
         - { ip: "203.0.113.5", action: replace, replace_with: "127.0.0.1" }
-      # Enable external lists (provide files under example_configs/lists/)
+      # Enable external lists (downloaded above to ./var/lists/)
       blocklist_files:
-        - example_configs/lists/blocklist.txt
+        - ./var/lists/AdguardDNS-*.txt
+        - ./var/lists/Easylist-*.txt
+        - ./var/lists/Prigent-Ads-*.txt
+        - ./var/lists/Prigent-Malware-*.txt
       allowlist_files:
         - example_configs/lists/allowlist.txt
 
