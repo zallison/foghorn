@@ -50,6 +50,10 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
 
 - Logging is configured via the YAML `logging` section (see README.md for a quickstart). Format uses bracketed levels and UTC timestamps.
 - Statistics: enable with `statistics.enabled`. A `StatsReporter` periodically logs JSON snapshots with counters/histograms. Tunables include `interval_seconds`, `reset_on_log`, `track_uniques`, `include_qtype_breakdown`, `include_top_clients`, `include_top_domains`, `top_n`, and `track_latency`.
+- When `track_latency: true`, two latency histogram fields are emitted:
+  - `latency`: cumulative statistics since start (or last reset if `reset_on_log: true`)
+  - `latency_recent`: statistics only for queries since the last stats emission; always resets after each log interval
+  Both fields have the same schema: `count`, `min_ms`, `max_ms`, `avg_ms`, `p50_ms`, `p90_ms`, `p99_ms`.
 
 ## Signals
 
