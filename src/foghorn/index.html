@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Foghorn Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+    <style>
+        pre.code-block {
+            background: #f4f4f4;
+            padding: 10px;
+            border-radius: 5px;
+        }
+    </style>
+    <script>
+        function updateData() {
+            fetch('/stats').then(response => response.json()).then(data => {
+                const pretty = JSON.stringify(data, null, 2);
+                document.getElementById('stats').innerHTML = `<pre class="code-block"><code class="language-json">${pretty}</code></pre>`;
+                Prism.highlightElement(document.querySelector('code.language-json'));
+            });
+            fetch('/logs').then(response => response.json()).then(data => {
+                const pretty = JSON.stringify(data, null, 2);
+                document.getElementById('logs').innerHTML = `<pre class="code-block"><code class="language-json">${pretty}</code></pre>`;
+                Prism.highlightElement(document.querySelector('code.language-json'));
+            });
+            fetch('/traffic').then(response => response.json()).then(data => {
+                const pretty = JSON.stringify(data, null, 2);
+                document.getElementById('traffic').innerHTML = `<pre class="code-block"><code class="language-json">${pretty}</code></pre>`;
+                Prism.highlightElement(document.querySelector('code.language-json'));
+            });
+            setTimeout(updateData, 5000);
+        }
+        window.onload = updateData;
+    </script>
+</head>
+<body>
+    <h1>Foghorn Dashboard</h1>
+    <h2>Statistics</h2>
+    <div id="stats"></div>
+    <h2>Logs</h2>
+    <div id="logs"></div>
+    <h2>Traffic</h2>
+    <div id="traffic"></div>
+</body>
+</html>
