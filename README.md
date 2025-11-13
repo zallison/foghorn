@@ -293,11 +293,13 @@ File-backed inputs (support globs):
 
 Formats supported per file (auto-detected line-by-line):
 - Plain text (default): a single value per line; blank lines and lines starting with '#' are ignored
-- JSON Lines: one JSON object per line with the following schemas
+- JSON Lines (JSONL): one JSON object per line with the following schemas
   - Domains: {"domain": "example.com", "mode": "allow|deny"} (mode optional; defaults to the file-level mode implied by which key you used)
   - Patterns: {"pattern": "^ads\\.", "flags": ["IGNORECASE"]} (flags optional; defaults to IGNORECASE)
   - Keywords: {"keyword": "tracker"}
   - IPs: {"ip": "203.0.113.0/24", "action": "deny|remove|replace", "replace_with": "IP"}
+
+Note: JSONL is only supported in FilterPlugin file-backed inputs (the *_files keys above). The core YAML config does not accept JSONL.
 
 Load order and precedence for domains (last write wins):
 1) allowed_domains_files/allowlist_files

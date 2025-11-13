@@ -70,6 +70,49 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
 - Code formatting: run `black src tests`.
 - Plugin development: inherit from `BasePlugin`, implement `pre_resolve` and/or `post_resolve`. Use the alias registry (see `plugins/registry.py`) or full dotted class paths. Prefer the terms “allowlist” and “blocklist” in documentation.
 
+## JSON Lines (JSONL) format
+
+JSON Lines is a convenient format for streaming structured data where each line is an independent JSON object.
+
+- Encoding: UTF-8
+- Structure: one JSON object per line; no outer array or multi-line objects
+- Whitespace: newlines delimit records; trailing spaces are allowed but discouraged
+- Comments: not allowed inside JSON; files may still contain shell-style comments (`# ...`) only when a loader explicitly states it supports them
+- Commas: no trailing commas; each line must be valid JSON by itself
+- Mixing formats: where documented, loaders may accept plain-text lines and JSONL in the same file, detected line-by-line
+
+Why we use it
+- Stream-friendly: process large files incrementally with O(1) memory
+- Append-friendly: safe to append new objects without reformatting
+- Human-diffable: line-oriented diffs stay readable
+
+General guidelines for contributors
+- Keep each line a single JSON object with a minimal schema; avoid nesting unless necessary
+- Validate inputs; on parse errors, prefer logging-and-skip over hard failure for data files
+- Do not retain parser state between calls; each file/line should be handled independently
+- Use allowlist/blocklist terminology in user-facing fields and docs
+
+Examples
+
+Plain JSONL file:
+```json path=null start=null
+{"domain": "good.com", "mode": "allow"}
+{"domain": "bad.com", "mode": "deny"}
+{"domain": "neutral.com"}
+```
+
+Mixed with plain text (only when the loader documents support):
+```text path=null start=null
+# allowlist
+good.com
+{"domain": "bad.com", "mode": "deny"}
+```
+
+Project-specific notes
+- FilterPlugin is the only component that reads JSONL from external files; specifically the file-backed input fields: allowed_domains_files, allowlist_files, blocked_domains_files, blocklist_files, blocked_patterns_files, blocked_keywords_files, blocked_ips_files
+- The core YAML config does not accept JSONL; it only references which files to load
+- Statistics snapshots are logged as single-line JSON objects (conceptually JSONL when collected)
+
 ## FilterPlugin file parsing internals
 
 FilterPlugin supports file-backed inputs for domains, patterns, keywords, and IP rules. Parsing is layered to keep responsibilities clear and avoid state leakage.
