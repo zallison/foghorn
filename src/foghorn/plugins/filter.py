@@ -540,7 +540,28 @@ class FilterPlugin(BasePlugin):
         patterns: List[re.Pattern] = []
         for ln, text in self._iter_noncomment_lines(path):
             try:
-                patterns.append(re.compile(text, re.IGNORECASE))
+                if text.lstrip().startswith("{"):
+                    try:
+                        obj = json.loads(text)
+                    except json.JSONDecodeError as e:
+                        logger.error("Invalid JSON in %s:%d: %s", path, ln, e)
+                        continue
+                    if not isinstance(obj, dict) or "pattern" not in obj:
+                        logger.error(
+                            "JSON pattern missing 'pattern' in %s:%d", path, ln
+                        )
+                        continue
+                    patt = str(obj["pattern"])
+                    flags = 0
+                    for f in obj.get("flags") or []:
+                        fs = str(f).upper()
+                        if fs == "IGNORECASE":
+                            flags |= re.IGNORECASE
+                    if flags == 0:
+                        flags = re.IGNORECASE
+                    patterns.append(re.compile(patt, flags))
+                else:
+                    patterns.append(re.compile(text, re.IGNORECASE))
             except re.error as e:
                 logger.error(
                     "Invalid regex pattern in %s:%d: %s (%s)", path, ln, text, e
@@ -563,8 +584,19 @@ class FilterPlugin(BasePlugin):
             {'ads', 'tracker'}
         """
         kws: Set[str] = set()
-        for _ln, text in self._iter_noncomment_lines(path):
-            kws.add(text.lower())
+        for ln, text in self._iter_noncomment_lines(path):
+            if text.lstrip().startswith("{"):
+                try:
+                    obj = json.loads(text)
+                except json.JSONDecodeError as e:
+                    logger.error("Invalid JSON in %s:%d: %s", path, ln, e)
+                    continue
+                if not isinstance(obj, dict) or "keyword" not in obj:
+                    logger.error("JSON keyword missing 'keyword' in %s:%d", path, ln)
+                    continue
+                kws.add(str(obj["keyword"]).lower())
+            else:
+                kws.add(text.lower())
         return kws
 
     def _load_blocked_ips_from_file(self, path: str) -> None:
@@ -735,13 +767,17 @@ class FilterPlugin(BasePlugin):
 
     def load_list_from_file(self, filename: str, mode: str = "deny") -> None:
         """
-        Load domains from a newline-separated file into the database.
+        Load domains from a file into the database.
 
         Inputs:
             filename: Path to file containing domains.
             mode: Either "allow" or "deny". Default: "deny".
         Outputs:
             None
+
+        Supported line formats:
+          - Plain text: domain per line; blank lines and lines starting with '#' are ignored
+          - JSON Lines: {"domain": "example.com"} (optional "mode" in {"allow","deny"} overrides the function arg)
         """
         mode = mode.lower()
         if mode not in {"deny", "allow"}:
@@ -750,13 +786,52 @@ class FilterPlugin(BasePlugin):
         if not os.path.isfile(filename):
             raise FileNotFoundError(f"No file {filename}")
 
+        def _normalize_token(token: str) -> str:
+            """
+            Brief: Normalize a domain token from list files.
+
+            Inputs:
+              - token: raw domain token
+            Outputs:
+              - normalized token with Adblock-style wrappers removed
+
+            If the token starts with '||' and ends with '^', those wrappers are stripped.
+            """
+            t = token.strip()
+            if t.startswith("||") and t.endswith("^"):
+                t = t[2:-1]
+            return t
+
         logger.debug("Opening %s for %s", filename, mode)
         with open(filename, "r", encoding="utf-8") as fh:
-            for line in fh:
-                domain = line.strip()
-                if not domain or domain.startswith("#"):
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
                     continue
-                self._db_insert_domain(domain, filename, mode)
+                eff_mode = mode
+                domain_val = None
+                if line.lstrip().startswith("{"):
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError as e:
+                        logger.error("Invalid JSON domain line in %s: %s", filename, e)
+                        continue
+                    if not isinstance(obj, dict):
+                        logger.error("JSON domain line not an object in %s", filename)
+                        continue
+                    domain_val = _normalize_token(str(obj.get("domain", "")).strip())
+                    line_mode = obj.get("mode")
+                    if isinstance(line_mode, str) and line_mode.lower() in {
+                        "allow",
+                        "deny",
+                    }:
+                        eff_mode = line_mode.lower()
+                else:
+                    domain_val = _normalize_token(line)
+                if not domain_val:
+                    logger.error("Missing domain entry in %s", filename)
+                    continue
+                self._db_insert_domain(domain_val, filename, eff_mode)
 
     def is_allowed(self, domain: str) -> bool:
         """

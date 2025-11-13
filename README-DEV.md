@@ -70,6 +70,46 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
 - Code formatting: run `black src tests`.
 - Plugin development: inherit from `BasePlugin`, implement `pre_resolve` and/or `post_resolve`. Use the alias registry (see `plugins/registry.py`) or full dotted class paths. Prefer the terms “allowlist” and “blocklist” in documentation.
 
+## FilterPlugin file parsing internals
+
+FilterPlugin supports file-backed inputs for domains, patterns, keywords, and IP rules. Parsing is layered to keep responsibilities clear and avoid state leakage.
+
+Helpers (in src/foghorn/plugins/filter.py):
+- _expand_globs(paths: list[str]) -> list[str]
+  - Expands globs and validates that each path either exists or matches at least one file; raises FileNotFoundError on misses.
+- _iter_noncomment_lines(path: str) -> Iterator[tuple[int, str]]
+  - Yields (lineno, stripped_line) for non-empty, non-#-comment lines.
+- _load_patterns_from_file(path: str) -> list[Pattern]
+  - Accepts plain lines (regex) and JSON Lines: {"pattern": "...", "flags": ["IGNORECASE"]}; compiles with re.IGNORECASE by default; logs compile errors and skips invalid entries.
+- _load_keywords_from_file(path: str) -> set[str]
+  - Accepts plain lines (keyword) and JSON Lines: {"keyword": "..."}; lowercases and accumulates.
+- _load_blocked_ips_from_file(path: str) -> None
+  - Accepts simple lines (IP or CIDR -> deny), CSV lines (ip,action[,replace_with]), and JSON Lines: {"ip": "...", "action": "deny|remove|replace", "replace_with": "IP"}.
+  - Validates IP/CIDR and replacement IPs; unknown actions default to deny; logs and skips invalid entries.
+- load_list_from_file(filename: str, mode: str = 'deny')
+  - Domains loader; accepts plain lines (domain) and JSON Lines {"domain": "...", "mode": "allow|deny"}; per-line mode overrides provided mode. Persists into SQLite table blocked_domains with last-write-wins semantics.
+
+Domain precedence (implemented in __init__ load order):
+1) allowed_domains_files / allowlist_files
+2) blocked_domains_files / blocklist_files
+3) inline allowed_domains
+4) inline blocked_domains
+
+IPs evaluation:
+- Exact IP rules override network rules when both match.
+- If any rule with action=deny matches an answer IP, the entire response is denied.
+- action=remove: answer RRs matching the rule are removed; if all A/AAAA are removed, NXDOMAIN is returned.
+- action=replace: A/AAAA RRs are rewritten to the replacement IP (version must match), producing an override response.
+
+Logging and errors:
+- All loaders log file:line for invalid entries and continue.
+- Glob expansion raises FileNotFoundError when nothing matches and the path doesn’t exist.
+
+Testing notes:
+- tests/plugins/test_filter_plugin.py covers core behavior and error paths.
+- tests/plugins/test_filter_plugin_files_extra.py covers globs and file-backed inputs (plain/CSV).
+- tests/plugins/test_filter_plugin_jsonl.py covers JSON Lines for domains, patterns, keywords.
+
 ## Future Work
 
 - Full local DNSSEC validation with trust anchor management.
