@@ -16,7 +16,8 @@ dependencies = [
   "PyYAML>=6.0.1",
   "whois",
   "lxml",
-  "dnspython>=2.6.1"
+  "dnspython>=2.6.1",
+  "pyinotify",
 ]
 
 [project.optional-dependencies]
