@@ -437,3 +437,47 @@ def test_post_resolve_unknown_action_runtime_returns_none(tmp_path):
     ctx = PluginContext(client_ip="1.2.3.4")
     resp = _mk_response_with_ips("ex.com", [("A", "11.22.33.44", 60)])
     assert p.post_resolve("ex.com", QTYPE.A, resp, ctx) is None
+
+
+def test_glob_expansion_for_blocklist_and_allowlist_files(tmp_path):
+    """
+    Brief: Glob patterns in blocklist_files and allowlist_files are expanded to load multiple files.
+
+    Inputs:
+      - allowlist_files: glob pattern matching multiple files
+      - blocklist_files: glob pattern matching multiple files
+
+    Outputs:
+      - None: Asserts domains from expanded files are correctly allowed/denied
+    """
+    # Create directories and files
+    allow_dir = tmp_path / "allows"
+    allow_dir.mkdir()
+    block_dir = tmp_path / "blocks"
+    block_dir.mkdir()
+
+    # Create allow files
+    (allow_dir / "allow1.txt").write_text("allow1.com\n")
+    (allow_dir / "allow2.txt").write_text("allow2.com\n")
+
+    # Create block files
+    (block_dir / "block1.txt").write_text("block1.com\n")
+    (block_dir / "block2.txt").write_text("block2.com\n")
+
+    p = FilterPlugin(
+        db_path=str(tmp_path / "bl.db"),
+        default="deny",
+        allowlist_files=[str(allow_dir / "*.txt")],
+        blocklist_files=[str(block_dir / "*.txt")],
+    )
+
+    # Check that domains from allow files are allowed
+    assert p.is_allowed("allow1.com") is True
+    assert p.is_allowed("allow2.com") is True
+
+    # Check that domains from block files are denied
+    assert p.is_allowed("block1.com") is False
+    assert p.is_allowed("block2.com") is False
+
+    # Check default deny for unknown domains
+    assert p.is_allowed("unknown.com") is False
