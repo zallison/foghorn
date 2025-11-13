@@ -4,6 +4,7 @@ from dnslib import DNSRecord, QTYPE, A, AAAA, QR, RR, DNSHeader
 import os
 import logging
 import pathlib
+import threading
 from typing import Dict, Optional, Iterable, List
 
 from foghorn.plugins.base import PluginDecision, PluginContext
@@ -198,3 +199,19 @@ class EtcHosts(BasePlugin):
             )
 
         return reply.pack()
+
+    def close(self) -> None:
+        """
+        Brief: Stop any background watchers and release resources.
+
+        Inputs:
+          - None
+        Outputs:
+          - None
+        """
+        try:
+            if self._notifier is not None:
+                self._notifier.stop()
+        except Exception:  # pragma: no cover
+            pass
+        self._notifier = None
