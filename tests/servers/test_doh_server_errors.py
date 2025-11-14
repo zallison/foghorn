@@ -15,7 +15,10 @@ import threading
 
 import pytest
 
-from foghorn.doh_server import serve_doh
+pytestmark = pytest.mark.slow
+
+from foghorn.doh_api import start_doh_server
+from foghorn.server import resolve_query_bytes
 
 
 def _echo(q: bytes, ip: str) -> bytes:
@@ -39,7 +42,8 @@ def running_doh(tmp_path):
             ready.set()
             srv.close()
             await srv.wait_closed()
-            await serve_doh(host, port, _echo)
+            # Start DoH FastAPI server in background thread using resolve_query_bytes
+            start_doh_server(host, port, resolve_query_bytes)
 
         loop.create_task(bind_and_run())
         loop.run_forever()

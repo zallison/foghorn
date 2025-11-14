@@ -6,6 +6,7 @@ import logging
 import signal
 import sys
 import threading
+import functools
 import yaml
 
 from typing import List, Tuple, Dict, Union, Any, Optional
@@ -17,6 +18,7 @@ from .plugins.registry import discover_plugins, get_plugin_class
 from .server import DNSServer
 from .stats import StatsCollector, StatsReporter, format_snapshot_json
 from .webserver import RingBuffer, start_webserver
+from .doh_api import start_doh_server
 
 
 def _clear_lru_caches(wrappers: Optional[List[Object]]):
@@ -57,105 +59,62 @@ def normalize_upstream_config(
     cfg: Dict[str, Any],
 ) -> Tuple[List[Dict[str, Union[str, int, dict]]], int]:
     """
-    Normalize upstream configuration to a list-of-endpoints plus a timeout.
+    Brief: Normalize modern upstream configuration to a list-of-endpoints plus a timeout.
 
     Inputs:
-      - cfg: dict containing parsed YAML. Supports:
-          - cfg['upstream'] as either:
-              * dict with keys host, port, optional timeout_ms (legacy), or
-              * list of {host, port} entries (new format)
-          - cfg['timeout_ms'] at top level (new preferred location)
+      - cfg: dict containing parsed YAML. Supports only the modern form:
+          - cfg['upstream'] as a list of upstream entries, each either:
+              * DoH entry: {'transport': 'doh', 'url': str, ...}
+              * host/port entry: {'host': str, 'port': int, ...}
+          - cfg['timeout_ms'] at top level.
 
     Outputs:
-      - (upstreams, timeout_ms): tuple where
-          - upstreams: list[dict] with keys {'host': str, 'port': int}
-          - timeout_ms: int timeout in milliseconds applied per upstream attempt
+      - (upstreams, timeout_ms):
+          - upstreams: list[dict] with keys like {'host': str, 'port': int} or DoH metadata.
+          - timeout_ms: int timeout in milliseconds applied per upstream attempt (default 2000).
 
-    Notes:
-      - If both top-level timeout_ms and legacy upstream.timeout_ms are present, top-level wins.
-      - If none provided, default to 2000 ms.
-
-    Example:
-      upstreams, timeout = normalize_upstream_config({
-          'upstream': [{'host': '1.1.1.1', 'port': 53}, {'host': '1.0.0.1', 'port': 53}],
-          'timeout_ms': 1500
-      })
-      # upstreams -> [{'host': '1.1.1.1', 'port': 53}, {'host': '1.0.0.1', 'port': 53}]
-      # timeout -> 1500
+    Legacy single-dict forms for cfg['upstream'] and upstream.timeout_ms are no longer supported.
     """
-    upstream_raw = cfg.get("upstream", {})
-    top_level_timeout = cfg.get("timeout_ms")
-    legacy_warned = False
+    upstream_raw = cfg.get("upstream")
+    if not isinstance(upstream_raw, list):
+        raise ValueError("config.upstream must be a list of upstream definitions")
 
-    # Handle upstream format (dict vs list)
-    if isinstance(upstream_raw, list):
-        # New format: list of upstream objects
-        upstreams = []
-        for u in upstream_raw:
-            # Support DoH entries that specify a URL instead of host/port
-            if str(u.get("transport", "")).lower() == "doh" and "url" in u:
-                rec: Dict[str, Union[str, int, dict]] = {
-                    "transport": "doh",
-                    "url": str(u["url"]),
-                }
-                if "method" in u:
-                    rec["method"] = str(u.get("method"))
-                if "headers" in u and isinstance(u["headers"], dict):
-                    rec["headers"] = u["headers"]
-                if "tls" in u and isinstance(u["tls"], dict):
-                    rec["tls"] = u["tls"]
-                upstreams.append(rec)
-                continue
-            # Default host/port-based upstream (udp/tcp/dot)
-            if "host" in u:
-                rec2: Dict[str, Union[str, int, dict]] = {
-                    "host": str(u["host"]),
-                    "port": int(u.get("port", 53)),
-                }
-                if "transport" in u:
-                    rec2["transport"] = str(u.get("transport"))
-                if "tls" in u and isinstance(u["tls"], dict):
-                    rec2["tls"] = u["tls"]
-                if "pool" in u and isinstance(u["pool"], dict):
-                    rec2["pool"] = u["pool"]
-                upstreams.append(rec2)
-    elif isinstance(upstream_raw, dict):
-        # Legacy format: single upstream object
-        if "host" in upstream_raw:
+    upstreams: List[Dict[str, Union[str, int, dict]]] = []
+    for u in upstream_raw:
+        if not isinstance(u, dict):
+            raise ValueError("each upstream entry must be a mapping")
+
+        # DoH entries using URL
+        if str(u.get("transport", "")).lower() == "doh" and "url" in u:
             rec: Dict[str, Union[str, int, dict]] = {
-                "host": str(upstream_raw["host"]),
-                "port": int(upstream_raw.get("port", 53)),
+                "transport": "doh",
+                "url": str(u["url"]),
             }
-            if "transport" in upstream_raw:
-                rec["transport"] = str(upstream_raw.get("transport"))
-            if "tls" in upstream_raw and isinstance(upstream_raw["tls"], dict):
-                rec["tls"] = upstream_raw["tls"]
-            upstreams = [rec]
-        else:
-            # Default fallback
-            upstreams = [{"host": "1.1.1.1", "port": 53}]  # pragma: no cover
-    else:
-        # Default fallback
-        upstreams = [{"host": "1.1.1.1", "port": 53}]
+            if "method" in u:
+                rec["method"] = str(u.get("method"))
+            if "headers" in u and isinstance(u["headers"], dict):
+                rec["headers"] = u["headers"]
+            if "tls" in u and isinstance(u["tls"], dict):
+                rec["tls"] = u["tls"]
+            upstreams.append(rec)
+            continue
 
-    # Handle timeout precedence
-    if top_level_timeout is not None:
-        timeout_ms = int(top_level_timeout)
-        # Check for legacy timeout and warn if both present
-        if (
-            isinstance(upstream_raw, dict)
-            and "timeout_ms" in upstream_raw
-            and not legacy_warned
-        ):
-            logging.getLogger("foghorn.main").warning(
-                "Both top-level timeout_ms and legacy upstream.timeout_ms provided; using top-level timeout_ms"
-            )
-            legacy_warned = True
-    elif isinstance(upstream_raw, dict) and "timeout_ms" in upstream_raw:
-        timeout_ms = int(upstream_raw["timeout_ms"])
-    else:
-        timeout_ms = 2000  # Default
+        # Host/port-based upstream (udp/tcp/dot)
+        if "host" not in u:
+            raise ValueError("each upstream entry must include 'host'")
+        rec2: Dict[str, Union[str, int, dict]] = {
+            "host": str(u["host"]),
+            "port": int(u.get("port", 53)),
+        }
+        if "transport" in u:
+            rec2["transport"] = str(u.get("transport"))
+        if "tls" in u and isinstance(u["tls"], dict):
+            rec2["tls"] = u["tls"]
+        if "pool" in u and isinstance(u["pool"], dict):
+            rec2["pool"] = u["pool"]
+        upstreams.append(rec2)
 
+    timeout_ms = int(cfg.get("timeout_ms", 2000))
     return upstreams, timeout_ms
 
 
@@ -660,8 +619,6 @@ def main(argv: List[str] | None = None) -> int:
             )
 
     if bool(doh_cfg.get("enabled", False)):
-        from .doh_api import start_doh_server
-
         h = str(doh_cfg.get("host", legacy_host))
         p = int(doh_cfg.get("port", 8053))
         cert_file = doh_cfg.get("cert_file")
@@ -669,18 +626,28 @@ def main(argv: List[str] | None = None) -> int:
         logger.info("Starting DoH listener on %s:%d", h, p)
         try:
             # start uvicorn-based DoH FastAPI server in background thread
-            start_doh_server(
+            doh_handle = start_doh_server(
                 h, p, resolve_query_bytes, cert_file=cert_file, key_file=key_file
             )
         except Exception as e:
             logger.error("Failed to start DoH server: %s", e)
+            return 1
+        if doh_handle is None:
+            logger.error(
+                "Fatal: listen.doh.enabled=true but start_doh_server returned None"
+            )
+            return 1
 
-    # Start admin HTTP webserver (FastAPI) if enabled
+    # Start admin HTTP webserver (FastAPI) and treat None handle as fatal when enabled
     try:
         web_handle = start_webserver(stats_collector, cfg, web_log_buffer)
     except Exception as e:  # pragma: no cover
         logger.error("Failed to start webserver: %s", e)
-        web_handle = None
+        return 1
+
+    if bool(web_cfg.get("enabled", False)) and web_handle is None:
+        logger.error("Fatal: webserver.enabled=true but start_webserver returned None")
+        return 1
 
     try:
         if server is not None:

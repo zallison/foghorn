@@ -32,7 +32,9 @@ def test_main_tcp_listener_uses_legacy_host_and_starts(monkeypatch):
         "    enabled: true\n"
         "    host: 127.0.0.1\n"
         "    port: 5354\n"
-        "upstream:\n  host: 1.1.1.1\n  port: 53\n"
+        "upstream:\n"
+        "  - host: 1.1.1.1\n"
+        "    port: 53\n"
     )
 
     class DummyServer:
