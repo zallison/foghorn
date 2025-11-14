@@ -6,5 +6,5 @@ services:
       - /VMData/foghorn:/config
     ports:
       - 53:5353/udp
-      - 8080:8080
+      - 8053:8053
     restart: unless-stopped

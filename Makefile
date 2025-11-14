@@ -17,7 +17,8 @@ IGNORE_EXTS :=  .yaml .yml
 #
 # ------------------------------------------------------------
 .PHONY: run
-run: env build
+run: build
+	python -m venv $(VENV) && . ${VENV}/bin/activate || true   # ignore error if it already exists
 	mkdir var 2>/dev/null || true
 	foghorn --config config.yaml
 
@@ -77,7 +78,7 @@ docker-clean:
 .PHONY: docker-run
 docker-run:
 	docker rm -f foghorn 2> /dev/null
-	docker run --name foghorn -d -p 5300:5353/udp -p 5300:5353/tcp -p 8080:8080 -v /etc/hosts:/etc/hosts:ro --restart unless-stopped ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker run --name foghorn -d -p 5333:5353/udp -p 5333:5353/tcp -p 8053:8053 -v /etc/hosts:/etc/hosts:ro --restart unless-stopped ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-logs
 docker-logs:
