@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "Foghorn"
 version = "0.2.0"
-description = "Caching DNS server with plugin-based access control and new-domain filter"
+description = "Caching DNS server with plugin-based controls. DoT, DoH, ACL, query filters, etc."
 authors = [ { name = "Zack Allison", email = "zack@zackallison.com" } ]
 license = { text = "MIT" }
 readme = "README.md"
@@ -18,7 +18,7 @@ dependencies = [
   "lxml",
   "httpx",
   "dnspython>=2.6.1",
-    "watchdog",
+  "watchdog",
   "fastapi>=0.111.0",
   "uvicorn>=0.30.0",
   "pytest",
