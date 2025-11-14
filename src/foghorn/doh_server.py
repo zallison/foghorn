@@ -164,6 +164,10 @@ async def _handle_conn(
             pass
 
 
+# NOTE: This module is retained for backwards-compatibility but the DoH server
+# is now implemented using FastAPI/uvicorn in foghorn.doh_api. The legacy
+# serve_doh entrypoint now forwards to the new implementation by starting the
+# uvicorn-based server and keeping the coroutine alive.
 async def serve_doh(
     host: str,
     port: int,
@@ -172,6 +176,36 @@ async def serve_doh(
     cert_file: Optional[str] = None,
     key_file: Optional[str] = None,
 ) -> None:
+    """
+    Brief: Backwards-compatibility shim that starts the FastAPI DoH server.
+
+    Inputs:
+    - host: listen address
+    - port: listen port
+    - resolver: callable mapping (query_bytes, client_ip) -> response_bytes
+    - cert_file: optional TLS certificate path
+    - key_file: optional TLS key path
+
+    Outputs:
+    - None (runs forever)
+
+    Example:
+        >>> # asyncio.run(serve_doh('127.0.0.1', 8053, resolver))
+    """
+    # Start the uvicorn server in a thread and then await forever to keep
+    # backwards compatibility with tests that expect an awaitable.
+    try:
+        from .doh_api import start_doh_server
+    except Exception:
+        # Fall back to original minimal server if import fails
+        pass
+    else:
+        start_doh_server(host, port, resolver, cert_file=cert_file, key_file=key_file)
+        # Sleep forever; this task represents the server lifetime
+        import asyncio as _asyncio
+
+        while True:
+            await _asyncio.sleep(3600)
     """
     Brief: Serve DNS-over-HTTPS (RFC 8484) on host:port with optional TLS.
 
