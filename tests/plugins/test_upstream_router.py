@@ -91,18 +91,23 @@ def _send_factory(outcomes):
 # ------------------------
 
 
-def test_pre_resolve_single_upstream_sets_candidates_and_override():
+def test_pre_resolve_single_upstream_sets_candidates():
     """
-    Brief: Exact domain match sets upstream_candidates and legacy upstream_override.
+    Brief: Exact domain match sets upstream_candidates using modern 'upstreams' list.
 
     Inputs:
-      - routes: domain 'test.example' -> 1.1.1.1:53
+      - routes: domain 'test.example' -> upstreams: [1.1.1.1:53]
 
     Outputs:
-      - None: asserts candidates list and override tuple; returns None
+      - None: asserts candidates list; returns None
     """
     plugin = UpstreamRouterPlugin(
-        routes=[{"domain": "test.example", "upstream": {"host": "1.1.1.1", "port": 53}}]
+        routes=[
+            {
+                "domain": "test.example",
+                "upstreams": [{"host": "1.1.1.1", "port": 53}],
+            }
+        ]
     )
     ctx = PluginContext(client_ip="127.0.0.1")
     q, wire = _mk_query("test.example", "A")
@@ -110,7 +115,7 @@ def test_pre_resolve_single_upstream_sets_candidates_and_override():
     decision = plugin.pre_resolve("test.example", QTYPE.A, wire, ctx)
     assert decision is None
     assert ctx.upstream_candidates == [{"host": "1.1.1.1", "port": 53}]
-    assert ctx.upstream_override == ("1.1.1.1", 53)
+    assert ctx.upstream_override is None
 
 
 def test_pre_resolve_multi_upstreams_sets_candidates_no_override():
@@ -179,7 +184,12 @@ def test_pre_resolve_case_insensitive_and_trailing_dot():
       - None: asserts candidates set correctly
     """
     plugin = UpstreamRouterPlugin(
-        routes=[{"domain": "Example.COM.", "upstream": {"host": "2.2.2.2", "port": 53}}]
+        routes=[
+            {
+                "domain": "Example.COM.",
+                "upstreams": [{"host": "2.2.2.2", "port": 53}],
+            }
+        ]
     )
     ctx = PluginContext(client_ip="127.0.0.1")
     q, wire = _mk_query("example.com.", "A")
@@ -206,7 +216,10 @@ def test_normalize_mixed_routes_and_types():
     """
     plugin = UpstreamRouterPlugin()
     routes = [
-        {"domain": "MiXeD.Example.", "upstream": {"host": "1.1.1.1", "port": "53"}},
+        {
+            "domain": "MiXeD.Example.",
+            "upstreams": [{"host": "1.1.1.1", "port": "53"}],
+        },
         {
             "suffix": ".Sub.Example",
             "upstreams": [
@@ -237,11 +250,23 @@ def test_normalize_ignores_invalid_entries():
     """
     plugin = UpstreamRouterPlugin()
     routes = [
-        {"domain": "ok.example", "upstream": {"host": "1.1.1.1", "port": 53}},
-        {"domain": "bad1.example", "upstream": {"host": "1.1.1.1"}},  # missing port
-        {"domain": "bad2.example", "upstream": {"host": "1.1.1.1", "port": "abc"}},
-        {"domain": "bad3.example", "upstream": {"port": 53}},  # missing host
-        {"upstream": {"host": "1.1.1.1", "port": 53}},  # no domain/suffix
+        {
+            "domain": "ok.example",
+            "upstreams": [{"host": "1.1.1.1", "port": 53}],
+        },
+        {
+            "domain": "bad1.example",
+            "upstreams": [{"host": "1.1.1.1"}],  # missing port
+        },
+        {
+            "domain": "bad2.example",
+            "upstreams": [{"host": "1.1.1.1", "port": "abc"}],
+        },
+        {
+            "domain": "bad3.example",
+            "upstreams": [{"port": 53}],  # missing host
+        },
+        {"upstreams": [{"host": "1.1.1.1", "port": 53}]},  # no domain/suffix
     ]
     norm = plugin._normalize_routes(routes)
 
@@ -263,7 +288,10 @@ def test_match_exact_domain_vs_suffix_priority():
     """
     plugin = UpstreamRouterPlugin(
         routes=[
-            {"domain": "A.Example", "upstream": {"host": "4.4.4.4", "port": 53}},
+            {
+                "domain": "A.Example",
+                "upstreams": [{"host": "4.4.4.4", "port": 53}],
+            },
             {"suffix": "example", "upstreams": [{"host": "5.5.5.5", "port": 53}]},
         ]
     )

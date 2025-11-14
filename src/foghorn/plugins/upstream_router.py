@@ -61,13 +61,6 @@ class UpstreamRouterPlugin(BasePlugin):
             # Set candidates on the context for the main server handler to use.
             ctx.upstream_candidates = upstream_candidates
 
-            # For backward compatibility with tests, set legacy override if single
-            if len(upstream_candidates) == 1:
-                ctx.upstream_override = (
-                    upstream_candidates[0]["host"],
-                    upstream_candidates[0]["port"],
-                )
-
             upstream_info = ", ".join(
                 [f"{u['host']}:{u['port']}" for u in upstream_candidates]
             )
@@ -78,7 +71,7 @@ class UpstreamRouterPlugin(BasePlugin):
 
     def _normalize_routes(self, routes: List[Dict]) -> List[Dict]:
         """
-        Normalizes and validates the routing rules.
+        Normalizes and validates routing rules using only the modern 'upstreams' list format.
 
         Args:
             routes: A list of routing rules.
@@ -89,18 +82,18 @@ class UpstreamRouterPlugin(BasePlugin):
             >>> from foghorn.plugins.upstream_router import UpstreamRouterPlugin
             >>> plugin = UpstreamRouterPlugin()
             >>> routes = [
-            ...     {"domain": "EXAMPLE.COM", "upstream": {"host": "1.1.1.1", "port": "53"}},
-            ...     {"suffix": "corp", "upstreams": [{"host": "10.0.0.1", "port": 53}]}
+            ...     {"domain": "MiXeD.Example.", "upstreams": [{"host": "1.1.1.1", "port": "53"}]},
+            ...     {"suffix": ".Sub.Example", "upstreams": [{"host": "10.0.0.1", "port": 53}]}
             ... ]
             >>> norm_routes = plugin._normalize_routes(routes)
             >>> norm_routes[0]["domain"]
-            'example.com'
+            'mixed.example'
             >>> norm_routes[0]["upstream_candidates"]
             [{'host': '1.1.1.1', 'port': 53}]
         """
         norm: List[Dict] = []
         for r in routes or []:
-            route = {}
+            route: Dict[str, object] = {}
             domain = r.get("domain")
             suffix = r.get("suffix")
             if domain:
@@ -112,23 +105,8 @@ class UpstreamRouterPlugin(BasePlugin):
                     s = s[1:]
                 route["suffix"] = s
 
-            # Handle both single upstream and multiple upstreams
-            upstream_candidates = []
-
-            # Check for legacy single upstream format
-            single_upstream = r.get("upstream")
-            if single_upstream and isinstance(single_upstream, dict):
-                host = single_upstream.get("host")
-                port = single_upstream.get("port")
-                if host and port is not None:
-                    try:
-                        upstream_candidates.append(
-                            {"host": str(host), "port": int(port)}
-                        )
-                    except (ValueError, TypeError):
-                        continue
-
-            # Check for new multiple upstreams format
+            # Modern multiple-upstreams format only
+            upstream_candidates: List[Dict[str, int | str]] = []
             multiple_upstreams = r.get("upstreams")
             if multiple_upstreams and isinstance(multiple_upstreams, list):
                 for up in multiple_upstreams:
@@ -136,9 +114,12 @@ class UpstreamRouterPlugin(BasePlugin):
                         host = up.get("host")
                         port = up.get("port")
                         if host and port is not None:
-                            upstream_candidates.append(
-                                {"host": str(host), "port": int(port)}
-                            )
+                            try:
+                                upstream_candidates.append(
+                                    {"host": str(host), "port": int(port)}
+                                )
+                            except (ValueError, TypeError):
+                                continue
 
             # Only add route if we have valid matching criteria and at least one upstream
             if upstream_candidates and ("domain" in route or "suffix" in route):
