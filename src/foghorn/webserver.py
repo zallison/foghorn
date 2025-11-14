@@ -10,8 +10,11 @@ backed by the in-process StatsCollector and current configuration dict.
 from __future__ import annotations
 
 import copy
+import http.server
+import json
 import logging
 import threading
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -482,11 +485,519 @@ def create_app(
     return app
 
 
-class WebServerHandle:
-    """Handle for a background uvicorn server thread.
+class _AdminHTTPServer(http.server.ThreadingHTTPServer):
+    """ThreadingHTTPServer carrying shared admin state (stats, config, logs).
 
     Inputs (constructor):
-      - thread: Thread object
+      - server_address: (host, port) tuple
+      - RequestHandlerClass: handler class (typically _ThreadedAdminRequestHandler)
+      - stats: Optional StatsCollector
+      - config: Configuration dict loaded from YAML
+      - log_buffer: Optional RingBuffer instance
+
+    Outputs:
+      - Initialized HTTP server suitable for use with serve_forever().
+
+    Example:
+      >>> # internal use by _start_admin_server_threaded()
+    """
+
+    allow_reuse_address = True
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        RequestHandlerClass: type[http.server.BaseHTTPRequestHandler],
+        stats: Optional[StatsCollector],
+        config: Dict[str, Any],
+        log_buffer: Optional[RingBuffer],
+    ) -> None:
+        super().__init__(server_address, RequestHandlerClass)
+        self.stats = stats
+        self.config = config
+        self.log_buffer = log_buffer
+
+
+class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
+    """Brief: Minimal admin HTTP handler using the standard library.
+
+    Inputs:
+      - Inherits request/connection attributes from BaseHTTPRequestHandler.
+
+    Outputs:
+      - Serves /health, /stats, /stats/reset, /traffic, /config, /logs, and
+        optionally / when index.html is present.
+    """
+
+    def _server(self) -> _AdminHTTPServer:
+        """Brief: Return typed reference to the underlying HTTP server.
+
+        Inputs: none
+        Outputs: _AdminHTTPServer instance.
+        """
+
+        return self.server  # type: ignore[return-value]
+
+    # ---------- Helpers ----------
+
+    def _client_ip(self) -> str:
+        """Brief: Return best-effort client IP address.
+
+        Inputs: none
+        Outputs: str IP address.
+        """
+
+        addr = getattr(self, "client_address", None)
+        if isinstance(addr, tuple) and addr:
+            return str(addr[0])
+        return "0.0.0.0"
+
+    def _web_cfg(self) -> Dict[str, Any]:
+        """Brief: Return webserver config subsection from global config.
+
+        Inputs: none
+        Outputs: dict representing config['webserver'] or {}.
+        """
+
+        cfg = getattr(self._server(), "config", {}) or {}
+        if isinstance(cfg, dict):
+            return cfg.get("webserver", {}) or {}
+        return {}
+
+    def _apply_cors_headers(self) -> None:
+        """Brief: Apply CORS headers when webserver.cors.enabled is true.
+
+        Inputs: none
+        Outputs: None (mutates response headers).
+        """
+
+        web_cfg = self._web_cfg()
+        cors_cfg = web_cfg.get("cors") or {}
+        if not cors_cfg.get("enabled"):
+            return
+
+        origins = cors_cfg.get("allowlist") or ["*"]
+        origin_hdr = self.headers.get("Origin") or ""
+        if "*" in origins:
+            allow_origin = "*"
+        elif origin_hdr and origin_hdr in origins:
+            allow_origin = origin_hdr
+        else:
+            allow_origin = origins[0]
+
+        self.send_header("Access-Control-Allow-Origin", allow_origin)
+        self.send_header("Access-Control-Allow-Credentials", "false")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+
+    def _send_json(self, status_code: int, payload: Dict[str, Any]) -> None:
+        """Brief: Send JSON response with appropriate headers.
+
+        Inputs:
+          - status_code: HTTP status code
+          - payload: JSON-serializable dict
+        Outputs:
+          - None
+        """
+
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(len(body)))
+        self._apply_cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_text(self, status_code: int, text: str) -> None:
+        """Brief: Send plain-text response.
+
+        Inputs:
+          - status_code: HTTP status code
+          - text: Response body
+        Outputs:
+          - None
+        """
+
+        body = text.encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(len(body)))
+        self._apply_cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _require_auth(self) -> bool:
+        """Brief: Enforce auth.mode=token semantics for protected endpoints.
+
+        Inputs: none
+        Outputs: bool indicating whether the request is authorized.
+        """
+
+        web_cfg = self._web_cfg()
+        auth_cfg = web_cfg.get("auth") or {}
+        mode = str(auth_cfg.get("mode", "none")).lower()
+        if mode != "token":
+            return True
+
+        token = auth_cfg.get("token")
+        if not token:
+            self._send_json(
+                500,
+                {
+                    "detail": "webserver.auth.token not configured",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return False
+
+        hdr = self.headers.get("Authorization") or ""
+        api_key = self.headers.get("X-API-Key")
+        if hdr.lower().startswith("bearer "):
+            provided = hdr[7:].strip()
+        else:
+            provided = api_key.strip() if api_key else ""
+        if not provided or provided != str(token):
+            self._send_json(
+                403,
+                {"detail": "forbidden", "server_time": _utc_now_iso()},
+            )
+            return False
+        return True
+
+    # ---------- Endpoint handlers ----------
+
+    def _handle_health(self) -> None:
+        """Brief: Handle GET /health.
+
+        Inputs: none
+        Outputs: None (sends JSON response).
+        """
+
+        self._send_json(200, {"status": "ok", "server_time": _utc_now_iso()})
+
+    def _handle_stats(self, params: Dict[str, list[str]]) -> None:
+        """Brief: Handle GET /stats.
+
+        Inputs:
+          - params: Query string parameters mapping
+        Outputs:
+          - None
+        """
+
+        if not self._require_auth():
+            return
+
+        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        if collector is None:
+            self._send_json(
+                200,
+                {"status": "disabled", "server_time": _utc_now_iso()},
+            )
+            return
+
+        reset_raw = params.get("reset", ["false"])[0]
+        reset = str(reset_raw).lower() in {"1", "true", "yes"}
+        snap: StatsSnapshot = collector.snapshot(reset=reset)
+        payload: Dict[str, Any] = {
+            "created_at": snap.created_at,
+            "server_time": _utc_now_iso(),
+            "totals": snap.totals,
+            "rcodes": snap.rcodes,
+            "qtypes": snap.qtypes,
+            "uniques": snap.uniques,
+            "upstreams": snap.upstreams,
+            "top_clients": snap.top_clients,
+            "top_subdomains": snap.top_subdomains,
+            "top_domains": snap.top_domains,
+            "latency": snap.latency_stats,
+            "latency_recent": snap.latency_recent_stats,
+        }
+        self._send_json(200, payload)
+
+    def _handle_stats_reset(self) -> None:
+        """Brief: Handle POST /stats/reset.
+
+        Inputs: none
+        Outputs: None
+        """
+
+        if not self._require_auth():
+            return
+
+        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        if collector is None:
+            self._send_json(
+                200,
+                {"status": "disabled", "server_time": _utc_now_iso()},
+            )
+            return
+        collector.snapshot(reset=True)
+        self._send_json(200, {"status": "ok", "server_time": _utc_now_iso()})
+
+    def _handle_traffic(self) -> None:
+        """Brief: Handle GET /traffic.
+
+        Inputs: none
+        Outputs: None
+        """
+
+        if not self._require_auth():
+            return
+
+        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        if collector is None:
+            self._send_json(
+                200,
+                {"status": "disabled", "server_time": _utc_now_iso()},
+            )
+            return
+        snap: StatsSnapshot = collector.snapshot(reset=False)
+        payload = {
+            "server_time": _utc_now_iso(),
+            "created_at": snap.created_at,
+            "totals": snap.totals,
+            "rcodes": snap.rcodes,
+            "qtypes": snap.qtypes,
+            "top_clients": snap.top_clients,
+            "top_domains": snap.top_domains,
+            "latency": snap.latency_stats,
+        }
+        self._send_json(200, payload)
+
+    def _handle_config(self) -> None:
+        """Brief: Handle GET /config.
+
+        Inputs: none
+        Outputs: None
+        """
+
+        if not self._require_auth():
+            return
+
+        cfg = getattr(self._server(), "config", {}) or {}
+        web_cfg_inner = (cfg.get("webserver") or {}) if isinstance(cfg, dict) else {}
+        redact_keys = web_cfg_inner.get("redact_keys") or [
+            "token",
+            "password",
+            "secret",
+        ]
+        clean = sanitize_config(cfg, redact_keys=redact_keys)
+        self._send_json(
+            200,
+            {"server_time": _utc_now_iso(), "config": clean},
+        )
+
+    def _handle_logs(self, params: Dict[str, list[str]]) -> None:
+        """Brief: Handle GET /logs.
+
+        Inputs:
+          - params: Query parameters mapping
+        Outputs:
+          - None
+        """
+
+        if not self._require_auth():
+            return
+
+        buf: Optional[RingBuffer] = getattr(self._server(), "log_buffer", None)
+        if buf is None:
+            entries: list[Any] = []
+        else:
+            raw = params.get("limit", ["100"])[0]
+            try:
+                limit = max(0, int(raw))
+            except ValueError:
+                limit = 100
+            entries = buf.snapshot(limit=limit)
+        self._send_json(
+            200,
+            {"server_time": _utc_now_iso(), "entries": entries},
+        )
+
+    def _handle_index(self) -> None:
+        """Brief: Handle GET / when index.html is enabled.
+
+        Inputs: none
+        Outputs: None
+        """
+
+        web_cfg = self._web_cfg()
+        index_enabled = bool(web_cfg.get("index", True))
+        if not index_enabled:
+            self._send_text(404, "index disabled")
+            return
+
+        import os
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        index_path = os.path.join(here, "index.html")
+        if not os.path.exists(index_path):
+            self._send_json(
+                404,
+                {
+                    "error": "index.html not found",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        try:
+            with open(index_path, "rb") as f:
+                data = f.read()
+        except Exception as exc:  # pragma: no cover
+            logger.error("Failed to read index.html: %s", exc)
+            self._send_text(500, "failed to read index.html")
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(len(data)))
+        self._apply_cors_headers()
+        self.end_headers()
+        self.wfile.write(data)
+
+    # ---------- HTTP verb handlers ----------
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        """Brief: Handle CORS preflight requests.
+
+        Inputs: none
+        Outputs: None
+        """
+
+        self.send_response(204)
+        self._apply_cors_headers()
+        self.end_headers()
+
+    def do_GET(self) -> None:  # noqa: N802
+        """Brief: Dispatch GET requests to admin endpoints.
+
+        Inputs: none
+        Outputs: None
+        """
+
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        params = urllib.parse.parse_qs(parsed.query)
+
+        if path == "/health":
+            self._handle_health()
+        elif path == "/stats":
+            self._handle_stats(params)
+        elif path == "/traffic":
+            self._handle_traffic()
+        elif path == "/config":
+            self._handle_config()
+        elif path == "/logs":
+            self._handle_logs(params)
+        elif path == "/":
+            self._handle_index()
+        else:
+            self._send_text(404, "not found")
+
+    def do_POST(self) -> None:  # noqa: N802
+        """Brief: Dispatch POST requests to admin endpoints.
+
+        Inputs: none
+        Outputs: None
+        """
+
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        if path == "/stats/reset":
+            self._handle_stats_reset()
+        else:
+            self._send_text(404, "not found")
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+        """Brief: Route handler logs through the module logger instead of stderr.
+
+        Inputs:
+          - format: format string
+          - args: format arguments
+        Outputs:
+          - None
+        """
+
+        try:
+            msg = format % args
+        except Exception:
+            msg = format
+        logger.info("webserver HTTP: %s", msg)
+
+
+def _start_admin_server_threaded(
+    stats: Optional[StatsCollector],
+    config: Dict[str, Any],
+    log_buffer: Optional[RingBuffer],
+) -> Optional["WebServerHandle"]:
+    """Brief: Start threaded admin HTTP server without using asyncio.
+
+    Inputs:
+      - stats: Optional StatsCollector
+      - config: Full configuration dict
+      - log_buffer: Optional RingBuffer for log entries
+
+    Outputs:
+      - WebServerHandle if server started successfully, else None.
+
+    Example:
+      >>> handle = _start_admin_server_threaded(None, {"webserver": {"enabled": True}}, None)
+    """
+
+    web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
+    if not web_cfg.get("enabled"):
+        return None
+
+    host = str(web_cfg.get("host", "127.0.0.1"))
+    port = int(web_cfg.get("port", 8053))
+
+    try:
+        httpd = _AdminHTTPServer(
+            (host, port),
+            _ThreadedAdminRequestHandler,
+            stats=stats,
+            config=config,
+            log_buffer=log_buffer,
+        )
+    except (
+        OSError
+    ) as exc:  # pragma: no cover - binding failures are environment-specific
+        logger.error(
+            "Failed to bind threaded admin webserver on %s:%d: %s", host, port, exc
+        )
+        return None
+
+    def _serve() -> None:
+        try:
+            httpd.serve_forever()
+        except Exception:  # pragma: no cover
+            logger.exception("Unhandled exception in threaded admin webserver")
+        finally:
+            try:
+                httpd.server_close()
+            except Exception:  # pragma: no cover
+                pass
+
+    thread = threading.Thread(
+        target=_serve,
+        name="foghorn-webserver-threaded",
+        daemon=True,
+    )
+    thread.start()
+    logger.info("Started threaded admin webserver on %s:%d", host, port)
+    return WebServerHandle(thread, server=httpd)
+
+
+class WebServerHandle:
+    """Handle for a background admin webserver thread.
+
+    Inputs (constructor):
+      - thread: Thread object running the HTTP/uvicorn server loop.
+      - server: Optional server instance with shutdown/server_close methods.
 
     Outputs:
       - WebServerHandle instance with stop() and is_running().
@@ -495,8 +1006,9 @@ class WebServerHandle:
       >>> # created via start_webserver() in main
     """
 
-    def __init__(self, thread: threading.Thread) -> None:
+    def __init__(self, thread: threading.Thread, server: Any | None = None) -> None:
         self._thread = thread
+        self._server = server
 
     def is_running(self) -> bool:
         """Return True if the underlying thread is alive.
@@ -508,7 +1020,7 @@ class WebServerHandle:
         return self._thread.is_alive()
 
     def stop(self, timeout: float = 5.0) -> None:
-        """Best-effort stop; currently waits for thread join.
+        """Best-effort stop; shuts down server if possible and waits for thread.
 
         Inputs:
           - timeout: Seconds to wait for thread to exit.
@@ -517,11 +1029,23 @@ class WebServerHandle:
           - None
 
         Notes:
-          - This implementation relies on uvicorn server lifetime matching
-            process lifetime. For now, we only join the thread on shutdown.
+          - For uvicorn-based servers, this relies on process lifetime matching
+            server lifetime and only joins the thread.
+          - For threaded HTTP fallbacks, this also calls shutdown/server_close
+            on the underlying server instance when present.
         """
 
         try:
+            if self._server is not None:
+                try:
+                    shutdown = getattr(self._server, "shutdown", None)
+                    if callable(shutdown):
+                        shutdown()
+                    close = getattr(self._server, "server_close", None)
+                    if callable(close):
+                        close()
+                except Exception:
+                    logger.exception("Error while shutting down webserver instance")
             self._thread.join(timeout=timeout)
         except Exception:
             logger.exception("Error while stopping webserver thread")
@@ -532,7 +1056,7 @@ def start_webserver(
     config: Dict[str, Any],
     log_buffer: Optional[RingBuffer] = None,
 ) -> Optional[WebServerHandle]:
-    """Start FastAPI-based admin HTTP server in background thread.
+    """Start admin HTTP server, preferring uvicorn but falling back to threaded HTTP.
 
     Inputs:
       - stats: Optional StatsCollector instance used by DNS server.
@@ -552,11 +1076,34 @@ def start_webserver(
     if not web_cfg.get("enabled"):
         return None
 
+    # Detect restricted environments where asyncio cannot create its self-pipe
+    # and skip uvicorn entirely in that case.
+    can_use_asyncio = True
+    try:  # pragma: no cover - difficult to exercise PermissionError in CI
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        loop.close()
+    except PermissionError as exc:  # pragma: no cover
+        logger.warning(
+            "Asyncio loop creation failed for admin webserver; falling back to threaded HTTP server: %s",
+            exc,
+        )
+        can_use_asyncio = False
+    except Exception:
+        can_use_asyncio = True
+
+    if not can_use_asyncio:
+        return _start_admin_server_threaded(stats, config, log_buffer)
+
     try:
         import uvicorn
     except Exception as exc:  # pragma: no cover - missing optional dependency
-        logger.error("webserver.enabled=true but uvicorn is not available: %s", exc)
-        return None
+        logger.error(
+            "webserver.enabled=true but uvicorn is not available: %s; using threaded fallback",
+            exc,
+        )
+        return _start_admin_server_threaded(stats, config, log_buffer)
 
     host = str(web_cfg.get("host", "127.0.0.1"))
     port = int(web_cfg.get("port", 8053))
@@ -578,6 +1125,12 @@ def start_webserver(
     def _runner() -> None:
         try:
             server.run()
+        except PermissionError as exc:  # pragma: no cover
+            logger.error(
+                "Webserver disabled: PermissionError while creating asyncio self-pipe/socketpair: %s; "
+                "this usually indicates a restricted container or seccomp profile.",
+                exc,
+            )
         except Exception:  # pragma: no cover
             logger.exception("Unhandled exception in webserver thread")
 
