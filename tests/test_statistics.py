@@ -349,8 +349,10 @@ class TestStatsReporter:
         """Reporter thread starts and stops cleanly."""
         collector = StatsCollector()
         reporter = StatsReporter(collector, interval_seconds=10)
+        # Use a much smaller interval in tests to avoid long sleeps.
+        reporter.interval_seconds = 0.01
         reporter.start()
-        time.sleep(0.1)
+        time.sleep(0.05)
         assert reporter.is_alive()
         reporter.stop(timeout=2.0)
         assert not reporter.is_alive()
@@ -364,8 +366,10 @@ class TestStatsReporter:
         snapshot_count_before = collector._totals.get("total_queries", 0)
 
         reporter = StatsReporter(collector, interval_seconds=0.1, reset_on_log=False)
+        # Speed up for tests: shorter interval
+        reporter.interval_seconds = 0.01
         reporter.start()
-        time.sleep(0.25)  # Wait for at least 2 intervals
+        time.sleep(0.05)  # Wait for at least a couple of intervals
         reporter.stop(timeout=2.0)
 
         # Verify counter is still there (no reset)
