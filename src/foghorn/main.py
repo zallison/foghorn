@@ -660,23 +660,20 @@ def main(argv: List[str] | None = None) -> int:
             )
 
     if bool(doh_cfg.get("enabled", False)):
-        from .doh_server import serve_doh
+        from .doh_api import start_doh_server
 
         h = str(doh_cfg.get("host", legacy_host))
         p = int(doh_cfg.get("port", 8053))
         cert_file = doh_cfg.get("cert_file")
         key_file = doh_cfg.get("key_file")
         logger.info("Starting DoH listener on %s:%d", h, p)
-        _start_asyncio_server(
-            lambda: serve_doh(
-                h,
-                p,
-                resolve_query_bytes,
-                cert_file=cert_file,
-                key_file=key_file,
-            ),
-            name="foghorn-doh",
-        )
+        try:
+            # start uvicorn-based DoH FastAPI server in background thread
+            start_doh_server(
+                h, p, resolve_query_bytes, cert_file=cert_file, key_file=key_file
+            )
+        except Exception as e:
+            logger.error("Failed to start DoH server: %s", e)
 
     # Start admin HTTP webserver (FastAPI) if enabled
     try:

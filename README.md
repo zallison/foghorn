@@ -126,6 +126,11 @@ listen:
     # Optional TLS
     # cert_file: /path/to/cert.pem
     # key_file: /path/to/key.pem
+
+Note: The DoH listener is served by a dedicated FastAPI app using uvicorn in a
+single background thread. TLS is applied via `cert_file`/`key_file`. Behavior is
+RFC 8484‑compatible and unchanged from previous releases; only the runtime
+implementation has changed.
 ```
 
 ### `upstream`
