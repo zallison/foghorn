@@ -25,6 +25,68 @@ from .stats import StatsCollector, StatsSnapshot
 logger = logging.getLogger("foghorn.webserver")
 
 
+class _Suppress2xxAccessFilter(logging.Filter):
+    """Logging filter that drops uvicorn access records for HTTP 2xx responses.
+
+    Inputs:
+      - record: logging.LogRecord instance from uvicorn.access or other loggers.
+
+    Outputs:
+      - bool: False for records that clearly correspond to HTTP 2xx status codes,
+        True otherwise (including when no status code can be determined).
+
+    Example:
+      >>> import logging
+      >>> access_logger = logging.getLogger("uvicorn.access")
+      >>> access_logger.addFilter(_Suppress2xxAccessFilter())
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Fast-path: use explicit status_code attribute if present
+        status = getattr(record, "status_code", None)
+
+        # Fallbacks: inspect record.args as used by uvicorn access logger
+        if status is None:
+            args = getattr(record, "args", None)
+            if isinstance(args, dict):
+                # Common uvicorn mapping keys: status_code or status
+                status = args.get("status_code") or args.get("status")
+            elif isinstance(args, (tuple, list)) and args:
+                # Heuristic: last positional arg is often the status code
+                status = args[-1]
+
+        try:
+            code = int(status)
+        except Exception:
+            # If we cannot confidently determine a numeric status code, keep record
+            return True
+
+        # Suppress all 2xx access logs
+        return not (200 <= code <= 299)
+
+
+def install_uvicorn_2xx_suppression() -> None:
+    """Attach _Suppress2xxAccessFilter to uvicorn.access logger if not present.
+
+    Inputs:
+      - None (operates on the global logging configuration).
+
+    Outputs:
+      - None. The uvicorn.access logger will drop 2xx HTTP access records by default.
+
+    Example:
+      >>> install_uvicorn_2xx_suppression()
+      >>> # Subsequent FastAPI/uvicorn 2xx responses will not emit access logs.
+    """
+
+    access_logger = logging.getLogger("uvicorn.access")
+    # Avoid adding duplicate filters if called multiple times (e.g., reloads)
+    for f in getattr(access_logger, "filters", []):
+        if isinstance(f, _Suppress2xxAccessFilter):
+            return
+    access_logger.addFilter(_Suppress2xxAccessFilter())
+
+
 class LogEntry(BaseModel):
     """Structured log entry stored in the in-memory buffer.
 
@@ -241,6 +303,20 @@ def create_app(
 
     web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
     app = FastAPI(title="Foghorn Admin HTTP API")
+
+    # Install default suppression of 2xx uvicorn access logs on startup so it
+    # applies both to embedded and external uvicorn usage.
+    @app.on_event("startup")
+    async def _install_logging_filter() -> None:
+        """FastAPI startup hook that installs the 2xx access-log suppression filter.
+
+        Inputs:
+          - None
+        Outputs:
+          - None (mutates global logging configuration).
+        """
+
+        install_uvicorn_2xx_suppression()
 
     # Attach shared state
     app.state.stats_collector = stats
@@ -483,7 +559,7 @@ def start_webserver(
         return None
 
     host = str(web_cfg.get("host", "127.0.0.1"))
-    port = int(web_cfg.get("port", 8080))
+    port = int(web_cfg.get("port", 8053))
 
     # Warn if unauthenticated and binding to all interfaces
     auth_cfg = web_cfg.get("auth") or {}

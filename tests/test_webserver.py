@@ -14,10 +14,18 @@ server, keeping them fast and deterministic.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi.testclient import TestClient
 
 from foghorn.stats import StatsCollector
-from foghorn.webserver import RingBuffer, create_app, sanitize_config
+from foghorn.webserver import (
+    RingBuffer,
+    create_app,
+    sanitize_config,
+    _Suppress2xxAccessFilter,
+    install_uvicorn_2xx_suppression,
+)
 
 
 def test_sanitize_config_redacts_simple_keys() -> None:
@@ -228,6 +236,174 @@ def test_logs_endpoint_returns_entries_from_ringbuffer() -> None:
     assert len(entries) == 3
     assert entries[0]["n"] == 2
     assert entries[-1]["n"] == 4
+
+
+def test_suppress2xx_filter_handles_status_attribute() -> None:
+    """Brief: _Suppress2xxAccessFilter must drop 2xx when status_code attr is set.
+
+    Inputs:
+      - Synthetic LogRecord instances with status_code attribute.
+
+    Outputs:
+      - Filter returns False for 2xx and True for non-2xx status codes.
+    """
+
+    flt = _Suppress2xxAccessFilter()
+
+    rec_200 = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg="200 OK",
+        args=(),
+        exc_info=None,
+    )
+    rec_200.status_code = 200
+
+    rec_201 = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg="201 Created",
+        args=(),
+        exc_info=None,
+    )
+    rec_201.status_code = 201
+
+    rec_404 = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg="404 Not Found",
+        args=(),
+        exc_info=None,
+    )
+    rec_404.status_code = 404
+
+    assert flt.filter(rec_200) is False
+    assert flt.filter(rec_201) is False
+    assert flt.filter(rec_404) is True
+
+
+def test_suppress2xx_filter_handles_args_dict_and_tuple() -> None:
+    """Brief: _Suppress2xxAccessFilter must interpret status from args.
+
+    Inputs:
+      - LogRecords with dict args and tuple args containing status codes.
+
+    Outputs:
+      - 2xx are suppressed; non-2xx are allowed; non-numeric args are ignored.
+    """
+
+    flt = _Suppress2xxAccessFilter()
+
+    # Dict args with status_code (set args after construction to avoid LogRecord
+    # treating the mapping as a positional sequence internally).
+    rec_204 = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg="%(status_code)d",
+        args=(),
+        exc_info=None,
+    )
+    rec_204.args = {"status_code": 204}
+
+    # Dict args with status
+    rec_500 = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg="%(status)d",
+        args=(),
+        exc_info=None,
+    )
+    rec_500.args = {"status": 500}
+
+    # Tuple args; last element is status code
+    rec_tuple_200 = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg="%s %s",
+        args=("GET /", 200),
+        exc_info=None,
+    )
+
+    # Tuple args with non-numeric last argument -> keep record
+    rec_tuple_bad = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg="%s",
+        args=("no-status",),
+        exc_info=None,
+    )
+
+    assert flt.filter(rec_204) is False
+    assert flt.filter(rec_tuple_200) is False
+    assert flt.filter(rec_500) is True
+    assert flt.filter(rec_tuple_bad) is True
+
+
+def test_install_uvicorn_2xx_suppression_is_idempotent() -> None:
+    """Brief: install_uvicorn_2xx_suppression must not add duplicate filters.
+
+    Inputs:
+      - Global uvicorn.access logger.
+
+    Outputs:
+      - Exactly one _Suppress2xxAccessFilter instance after repeated calls.
+    """
+
+    logger_obj = logging.getLogger("uvicorn.access")
+    original_filters = list(logger_obj.filters)
+    try:
+        logger_obj.filters = list(original_filters)
+        install_uvicorn_2xx_suppression()
+        count1 = sum(
+            isinstance(f, _Suppress2xxAccessFilter) for f in logger_obj.filters
+        )
+        install_uvicorn_2xx_suppression()
+        count2 = sum(
+            isinstance(f, _Suppress2xxAccessFilter) for f in logger_obj.filters
+        )
+        assert count1 == 1
+        assert count2 == 1
+    finally:
+        logger_obj.filters = original_filters
+
+
+def test_create_app_installs_filter_on_startup() -> None:
+    """Brief: create_app startup hook must attach 2xx suppression filter.
+
+    Inputs:
+      - Admin FastAPI app created with create_app.
+
+    Outputs:
+      - uvicorn.access logger has _Suppress2xxAccessFilter after client startup.
+    """
+
+    logger_obj = logging.getLogger("uvicorn.access")
+    original_filters = list(logger_obj.filters)
+    try:
+        logger_obj.filters = []
+        app = create_app(
+            stats=None, config={"webserver": {"enabled": True}}, log_buffer=RingBuffer()
+        )
+        # TestClient triggers FastAPI startup events on first use
+        with TestClient(app):
+            pass
+        assert any(isinstance(f, _Suppress2xxAccessFilter) for f in logger_obj.filters)
+    finally:
+        logger_obj.filters = original_filters
 
 
 def test_root_index_returns_html_when_enabled(tmp_path) -> None:
