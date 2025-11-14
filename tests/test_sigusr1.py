@@ -30,12 +30,16 @@ def test_sigusr1_reload_and_reset(monkeypatch, caplog):
     # Prepare two configs: initial and after-reload
     initial_yaml = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  host: 1.1.1.1\n  port: 53\n"
+        "upstream:\n"
+        "  - host: 1.1.1.1\n"
+        "    port: 53\n"
         "statistics:\n  enabled: true\n  interval_seconds: 1\n"
     )
     reload_yaml = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  host: 1.1.1.1\n  port: 53\n"
+        "upstream:\n"
+        "  - host: 1.1.1.1\n"
+        "    port: 53\n"
         "statistics:\n  enabled: true\n  interval_seconds: 1\n  reset_on_sigusr1: true\n"
     )
 

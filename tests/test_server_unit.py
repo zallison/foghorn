@@ -13,7 +13,9 @@ from foghorn.server import (
     _set_response_id,
     compute_effective_ttl,
     send_query_with_failover,
+    DNSUDPHandler,
 )
+from foghorn.cache import TTLCache
 from dnslib import DNSRecord, DNSHeader, QTYPE, RR, A, RCODE
 
 
@@ -179,3 +181,125 @@ def test_send_query_with_failover_no_upstreams():
         q, upstreams=[], timeout_ms=100, qname="x", qtype=1
     )
     assert resp is None and used is None and reason == "no_upstreams"
+
+
+def _make_handler_for_cache_tests(min_cache_ttl: int):
+    """Brief: Construct a bare DNSUDPHandler instance suitable for calling _cache_and_send_response.
+
+    Inputs:
+      - min_cache_ttl: int minimum cache TTL to configure on the handler
+
+    Outputs:
+      - DNSUDPHandler instance with fake cache and client metadata
+    """
+    handler = DNSUDPHandler.__new__(DNSUDPHandler)
+    handler.cache = TTLCache()
+    handler.min_cache_ttl = min_cache_ttl
+    handler.client_address = ("127.0.0.1", 12345)
+    return handler
+
+
+def test_cache_and_send_response_uses_effective_ttl(monkeypatch):
+    """
+    Brief: _cache_and_send_response applies compute_effective_ttl and caches with the floor.
+
+    Inputs:
+      - response with low TTL and min_cache_ttl higher than RR TTL
+
+    Outputs:
+      - None: Asserts cache.set is called with TTL equal to compute_effective_ttl
+    """
+    from foghorn.cache import TTLCache
+
+    handler = _make_handler_for_cache_tests(min_cache_ttl=60)
+
+    # Build a NOERROR response with two answers (30 and 120 second TTL)
+    q = DNSRecord.question("example.com", "A")
+    resp = q.reply()
+    resp.add_answer(RR("example.com", QTYPE.A, rdata=A("1.2.3.4"), ttl=30))
+    resp.add_answer(RR("example.com", QTYPE.A, rdata=A("2.3.4.5"), ttl=120))
+    wire = resp.pack()
+
+    cache_calls = {"ttl": None, "key": None}
+
+    def fake_set(key, ttl, data):
+        cache_calls["ttl"] = ttl
+        cache_calls["key"] = key
+
+    handler.cache = TTLCache()
+    monkeypatch.setattr(handler.cache, "set", fake_set)
+
+    class DummySock:
+        def __init__(self):
+            self.sent = []
+
+        def sendto(self, data, addr):
+            self.sent.append((data, addr))
+
+    sock = DummySock()
+    cache_key = ("example.com", QTYPE.A)
+
+    handler._cache_and_send_response(
+        wire,
+        q,
+        "example.com",
+        QTYPE.A,
+        sock,
+        handler.client_address,
+        cache_key,
+    )
+
+    assert cache_calls["ttl"] == 60
+    assert cache_calls["key"] == cache_key
+    assert len(sock.sent) == 1
+
+
+def test_cache_and_send_response_never_caches_servfail(monkeypatch):
+    """
+    Brief: _cache_and_send_response does not cache SERVFAIL responses.
+
+    Inputs:
+      - SERVFAIL DNSRecord
+
+    Outputs:
+      - None: Asserts cache.set is never called
+    """
+    from foghorn.cache import TTLCache
+
+    handler = _make_handler_for_cache_tests(min_cache_ttl=60)
+
+    q = DNSRecord.question("example.com", "A")
+    resp = q.reply()
+    resp.header.rcode = RCODE.SERVFAIL
+    wire = resp.pack()
+
+    cache_calls = {"called": False}
+
+    def fake_set(key, ttl, data):
+        cache_calls["called"] = True
+
+    handler.cache = TTLCache()
+    monkeypatch.setattr(handler.cache, "set", fake_set)
+
+    class DummySock:
+        def __init__(self):
+            self.sent = []
+
+        def sendto(self, data, addr):
+            self.sent.append((data, addr))
+
+    sock = DummySock()
+    cache_key = ("example.com", QTYPE.A)
+
+    handler._cache_and_send_response(
+        wire,
+        q,
+        "example.com",
+        QTYPE.A,
+        sock,
+        handler.client_address,
+        cache_key,
+    )
+
+    assert cache_calls["called"] is False
+    assert len(sock.sent) == 1
