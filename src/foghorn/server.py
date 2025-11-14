@@ -954,25 +954,41 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
 
 def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
-    """
-    Resolve a single DNS wire query and return wire response using the same pipeline as UDP handler.
+    """Resolve a single DNS wire query and return wire response.
 
     Inputs:
       - data: Wire-format DNS query bytes.
-      - client_ip: String client IP for plugin context and logging.
+      - client_ip: String client IP for plugin context, logging, and statistics.
     Outputs:
       - bytes: Wire-format DNS response.
+
+    This helper reuses DNSUDPHandler's class-level configuration (cache,
+    plugins, upstreams, DNSSEC knobs, and optional StatsCollector) so that
+    TCP/DoT/DoH and other non-UDP callers share the same behavior and
+    statistics pipeline.
 
     Example:
       >>> resp = resolve_query_bytes(query_bytes, '127.0.0.1')
     """
-    # Use DNSUDPHandler class-level config and cache
+    import time as _time  # Local import to avoid impacting module import time
+
+    stats = getattr(DNSUDPHandler, "stats_collector", None)
+    t0 = _time.perf_counter() if stats is not None else None
+
     try:
         req = DNSRecord.parse(data)
         q = req.questions[0]
         qname = str(q.qname).rstrip(".")
         qtype = q.qtype
         cache_key = (qname.lower(), qtype)
+
+        # Record query stats (mirrors DNSUDPHandler.handle)
+        if stats is not None:
+            try:
+                qtype_name = QTYPE.get(qtype, str(qtype))
+                stats.record_query(client_ip, qname, qtype_name)
+            except Exception:  # pragma: no cover
+                pass
 
         # Pre plugins
         ctx = PluginContext(client_ip=client_ip)
@@ -982,25 +998,66 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
             decision = p.pre_resolve(qname, qtype, data, ctx)
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
+                    # NXDOMAIN deny path
                     r = req.reply()
                     r.header.rcode = RCODE.NXDOMAIN
-                    return _set_response_id(r.pack(), req.header.id)
+                    wire = _set_response_id(r.pack(), req.header.id)
+                    if stats is not None:
+                        try:
+                            stats.record_response_rcode("NXDOMAIN")
+                        except Exception:  # pragma: no cover
+                            pass
+                    return wire
                 if decision.action == "override" and decision.response is not None:
-                    return _set_response_id(decision.response, req.header.id)
+                    wire = _set_response_id(decision.response, req.header.id)
+                    if stats is not None:
+                        try:
+                            parsed = DNSRecord.parse(wire)
+                            rcode_name = RCODE.get(
+                                parsed.header.rcode, str(parsed.header.rcode)
+                            )
+                            stats.record_response_rcode(rcode_name)
+                        except Exception:  # pragma: no cover
+                            pass
+                    return wire
 
-        # Cache
+        # Cache lookup
         cached = DNSUDPHandler.cache.get(cache_key)
         if cached is not None:
+            if stats is not None:
+                try:
+                    stats.record_cache_hit(qname)
+                    parsed_cached = DNSRecord.parse(cached)
+                    rcode_name = RCODE.get(
+                        parsed_cached.header.rcode,
+                        str(parsed_cached.header.rcode),
+                    )
+                    stats.record_response_rcode(rcode_name)
+                except Exception:  # pragma: no cover
+                    pass
             return _set_response_id(cached, req.header.id)
+
+        # Cache miss
+        if stats is not None:
+            try:
+                stats.record_cache_miss(qname)
+            except Exception:  # pragma: no cover
+                pass
 
         # Upstreams
         upstreams = ctx.upstream_candidates or DNSUDPHandler.upstream_addrs
         if not upstreams:
             r = req.reply()
             r.header.rcode = RCODE.SERVFAIL
-            return _set_response_id(r.pack(), req.header.id)
+            wire = _set_response_id(r.pack(), req.header.id)
+            if stats is not None:
+                try:
+                    stats.record_response_rcode("SERVFAIL")
+                except Exception:  # pragma: no cover
+                    pass
+            return wire
 
-        # EDNS/DNSSEC adjustments
+        # EDNS/DNSSEC adjustments (mirror DNSUDPHandler behavior)
         try:
             mode = str(DNSUDPHandler.dnssec_mode).lower()
             if mode in ("ignore", "passthrough"):
@@ -1035,14 +1092,32 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
         except Exception:  # pragma: no cover
             pass  # pragma: no cover
 
-        # Forward
+        # Forward with failover
         reply, used_upstream, reason = send_query_with_failover(
             req, upstreams, DNSUDPHandler.timeout_ms, qname, qtype
         )
+
+        # Record upstream result
+        if stats is not None and used_upstream:
+            try:
+                host = str(used_upstream.get("host", ""))
+                port = int(used_upstream.get("port", 0))
+                upstream_id = f"{host}:{port}" if host or port else host or "unknown"
+                outcome = "success" if reason == "ok" else str(reason)
+                stats.record_upstream_result(upstream_id, outcome)
+            except Exception:  # pragma: no cover
+                pass
+
         if reply is None:
             r = req.reply()
             r.header.rcode = RCODE.SERVFAIL
-            return _set_response_id(r.pack(), req.header.id)
+            wire = _set_response_id(r.pack(), req.header.id)
+            if stats is not None:
+                try:
+                    stats.record_response_rcode("SERVFAIL")
+                except Exception:  # pragma: no cover
+                    pass
+            return wire
 
         # Post plugins
         ctx2 = PluginContext(client_ip=client_ip)
@@ -1072,15 +1147,40 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
         except Exception:  # pragma: no cover
             pass  # pragma: no cover
 
-        return _set_response_id(out, req.header.id)
+        wire = _set_response_id(out, req.header.id)
+
+        # Record response rcode
+        if stats is not None:
+            try:
+                parsed = DNSRecord.parse(wire)
+                rcode_name = RCODE.get(parsed.header.rcode, str(parsed.header.rcode))
+                stats.record_response_rcode(rcode_name)
+            except Exception:  # pragma: no cover
+                pass
+
+        return wire
     except Exception:
         try:
             req = DNSRecord.parse(data)
             r = req.reply()
             r.header.rcode = RCODE.SERVFAIL
-            return _set_response_id(r.pack(), req.header.id)
+            wire = _set_response_id(r.pack(), req.header.id)
+            if stats is not None:
+                try:
+                    stats.record_response_rcode("SERVFAIL")
+                except Exception:  # pragma: no cover
+                    pass
+            return wire
         except Exception:
             return data  # fallback worst-case
+    finally:
+        # Latency tracking shared across all transports
+        if stats is not None and t0 is not None:
+            try:
+                t1 = _time.perf_counter()
+                stats.record_latency(t1 - t0)
+            except Exception:  # pragma: no cover
+                pass
 
 
 class DNSServer:
