@@ -30,7 +30,7 @@ def _empty_config() -> Dict[str, Any]:
         "webserver": {
             "enabled": True,
             "host": "127.0.0.1",
-            "port": 8080,
+            "port": 8053,
             "index": True,
         }
     }
