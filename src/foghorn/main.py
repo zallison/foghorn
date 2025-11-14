@@ -249,10 +249,13 @@ def main(argv: List[str] | None = None) -> int:
         stats_collector = StatsCollector(
             track_uniques=stats_cfg.get("track_uniques", True),
             include_qtype_breakdown=stats_cfg.get("include_qtype_breakdown", True),
-            include_top_clients=stats_cfg.get("include_top_clients", False),
-            include_top_domains=stats_cfg.get("include_top_domains", False),
+            # Enable top clients/domains and latency by default when statistics
+            # are enabled, while still allowing explicit False in config to
+            # disable them.
+            include_top_clients=bool(stats_cfg.get("include_top_clients", True)),
+            include_top_domains=bool(stats_cfg.get("include_top_domains", True)),
             top_n=int(stats_cfg.get("top_n", 10)),
-            track_latency=stats_cfg.get("track_latency", False),
+            track_latency=bool(stats_cfg.get("track_latency", True)),
         )
 
         stats_reporter = StatsReporter(
@@ -330,10 +333,10 @@ def main(argv: List[str] | None = None) -> int:
                 stats_collector = StatsCollector(
                     track_uniques=s_cfg.get("track_uniques", True),
                     include_qtype_breakdown=s_cfg.get("include_qtype_breakdown", True),
-                    include_top_clients=s_cfg.get("include_top_clients", False),
-                    include_top_domains=s_cfg.get("include_top_domains", False),
+                    include_top_clients=bool(s_cfg.get("include_top_clients", True)),
+                    include_top_domains=bool(s_cfg.get("include_top_domains", True)),
                     top_n=int(s_cfg.get("top_n", 10)),
-                    track_latency=s_cfg.get("track_latency", False),
+                    track_latency=bool(s_cfg.get("track_latency", True)),
                 )
             # Recreate reporter if settings changed or reporter missing
             need_restart = False
