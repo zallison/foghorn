@@ -16,17 +16,22 @@ dependencies = [
   "PyYAML>=6.0.1",
   "whois",
   "lxml",
+  "httpx",
   "dnspython>=2.6.1",
   "pyinotify",
+  "fastapi>=0.111.0",
+  "uvicorn>=0.30.0",
 ]
 
-[project.optional-dependencies]
+[optional-dependencies]
 dev = [
   "pytest",
   "pytest-cov",
   "coverage",
   "black",
-  "ipython"
+  "ipython",
+  "fastapi>=0.111.0",
+  "uvicorn>=0.30.0",
 ]
 
 [project.scripts]

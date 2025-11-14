@@ -16,6 +16,7 @@ from .plugins.base import BasePlugin
 from .plugins.registry import discover_plugins, get_plugin_class
 from .server import DNSServer
 from .stats import StatsCollector, StatsReporter, format_snapshot_json
+from .webserver import RingBuffer, start_webserver
 
 
 def _clear_lru_caches(wrappers: Optional[List[Object]]):
@@ -251,6 +252,8 @@ def main(argv: List[str] | None = None) -> int:
     cfg_path: str = args.config
     stats_collector: Optional[StatsCollector]
     stats_reporter: Optional[StatsReporter]
+    web_handle = None
+    web_log_buffer: Optional[RingBuffer] = None
 
     # Normalize listen configuration with backward compatibility.
     # If listen.udp is present, prefer it; otherwise fall back to legacy listen.host/port.
@@ -304,6 +307,12 @@ def main(argv: List[str] | None = None) -> int:
             "Statistics collection enabled (interval: %ds)",
             stats_reporter.interval_seconds,
         )
+
+    # Initialize webserver log buffer (shared with admin HTTP API)
+    web_cfg = cfg.get("webserver", {}) or {}
+    if web_cfg.get("enabled", False):
+        buffer_size = int((web_cfg.get("logs") or {}).get("buffer_size", 500))
+        web_log_buffer = RingBuffer(capacity=buffer_size)
 
     # --- Signal handling (SIGUSR1) for config reload and optional stats reset ---
     _sigusr1_pending = threading.Event()
@@ -669,6 +678,13 @@ def main(argv: List[str] | None = None) -> int:
             name="foghorn-doh",
         )
 
+    # Start admin HTTP webserver (FastAPI) if enabled
+    try:
+        web_handle = start_webserver(stats_collector, cfg, web_log_buffer)
+    except Exception as e:  # pragma: no cover
+        logger.error("Failed to start webserver: %s", e)
+        web_handle = None
+
     try:
         if server is not None:
             server.serve_forever()
@@ -690,6 +706,10 @@ def main(argv: List[str] | None = None) -> int:
         if stats_reporter is not None:
             logger.info("Stopping statistics reporter")
             stats_reporter.stop()
+        # Stop webserver thread on shutdown
+        if web_handle is not None:
+            logger.info("Stopping webserver")
+            web_handle.stop()
 
     return 0
 
