@@ -128,11 +128,14 @@ def test_stats_reporter_logs_and_stops(caplog):
         logger_name="foghorn.stats.test",
     )
     rep.daemon = True
+    # Use a much smaller interval to avoid long sleeps in tests; the reporter
+    # reads interval_seconds on each loop iteration.
+    rep.interval_seconds = 0.01
 
     with caplog.at_level("INFO", logger="foghorn.stats.test"):
         rep.start()
-        # Allow at least one cycle
-        time.sleep(1.2)
+        # Allow at least one cycle with the shorter interval
+        time.sleep(0.05)
         rep.stop(timeout=2.0)
 
     # At least one log record produced

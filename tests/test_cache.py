@@ -46,7 +46,7 @@ def test_cache_get_missing_returns_none():
     assert c.get(("missing", 1)) is None
 
 
-def test_cache_expiry_and_purge():
+def test_cache_expiry_and_purge(monkeypatch):
     """
     Brief: Expired entries are not returned and are purged by purge_expired.
 
@@ -59,7 +59,19 @@ def test_cache_expiry_and_purge():
     c = TTLCache()
     k = ("soon-expire.com", 1)
     c.set(k, 1, b"x")
-    time.sleep(1.1)
+
+    # Advance cache's notion of time without real sleeping by monkeypatching
+    # the time module used inside foghorn.cache.
+    import foghorn.cache as cache_mod
+
+    base = cache_mod.time.time()
+
+    def fake_time() -> float:
+        # Move time forward sufficiently past the 1s TTL
+        return base + 2.0
+
+    monkeypatch.setattr(cache_mod.time, "time", fake_time)
+
     assert c.get(k) is None  # opportunistic cleanup on get
     # Explicit purge returns count of removed entries (0 or more depending on timing)
     removed = c.purge_expired()
