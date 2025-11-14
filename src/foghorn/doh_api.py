@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import base64
+import http.server
 import logging
+import ssl
+import threading
+import urllib.parse
 from typing import Any, Callable, Optional
 
 from fastapi import FastAPI, HTTPException, Request, Response, status
@@ -112,23 +116,228 @@ def create_doh_app(
     return app
 
 
-class DoHServerHandle:
+class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
+    """Brief: Minimal HTTP/1.1 DoH handler using the standard library.
+
+    Inputs:
+    - Inherits request/connection attributes from BaseHTTPRequestHandler.
+
+    Outputs:
+    - Handles GET/POST /dns-query with RFC 8484-compatible semantics.
+
+    Notes:
+    - Resolver callable is attached via the class attribute ``resolver``.
     """
-    Brief: Handle for a background uvicorn server thread running DoH app.
+
+    # Resolver will be injected by the server factory.
+    resolver: Callable[[bytes, str], bytes] | None = None
+
+    def _client_ip(self) -> str:
+        """Brief: Return best-effort client IP.
+
+        Inputs: None
+        Outputs: str IP address string.
+        """
+        addr = getattr(self, "client_address", None)
+        if isinstance(addr, tuple) and addr:
+            return str(addr[0])
+        return "0.0.0.0"
+
+    def _send_bytes(self, status_code: int, body: bytes, content_type: str) -> None:
+        """Brief: Send raw bytes with given status and content type.
+
+        Inputs:
+        - status_code: HTTP status code
+        - body: response payload as bytes
+        - content_type: MIME type string
+
+        Outputs:
+        - None
+        """
+        self.send_response(status_code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def _send_empty(self, status_code: int) -> None:
+        """Brief: Send an empty response body with the given HTTP status code.
+
+        Inputs:
+        - status_code: HTTP status code
+        Outputs:
+        - None
+        """
+        self._send_bytes(status_code, b"", "text/plain; charset=utf-8")
+
+    def do_GET(self) -> None:  # noqa: N802 (HTTP verb name)
+        """Brief: Handle GET /dns-query?dns=<base64url> requests.
+
+        Inputs: None
+        Outputs: None (writes HTTP response to client socket).
+        """
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/dns-query":
+            self._send_empty(404)
+            return
+
+        params = urllib.parse.parse_qs(parsed.query)
+        dns_param = params.get("dns", [None])[0]
+        if not dns_param:
+            self._send_empty(400)
+            return
+
+        try:
+            qbytes = _b64url_decode_nopad(str(dns_param))
+        except Exception:
+            self._send_empty(400)
+            return
+
+        resolver = self.resolver or (lambda q, ip: q)
+        client_ip = self._client_ip()
+        try:
+            resp = resolver(qbytes, client_ip)
+        except Exception:
+            logger.exception("resolver raised in threaded DoH GET")
+            self._send_empty(400)
+            return
+
+        self._send_bytes(200, resp, _DNS_CT)
+
+    def do_POST(self) -> None:  # noqa: N802 (HTTP verb name)
+        """Brief: Handle POST /dns-query with DNS message body.
+
+        Inputs: None
+        Outputs: None (writes HTTP response to client socket).
+        """
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/dns-query":
+            self._send_empty(404)
+            return
+
+        ctype = self.headers.get("Content-Type", "")
+        if _DNS_CT not in ctype:
+            self._send_empty(415)
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        body = self.rfile.read(length) if length > 0 else b""
+
+        resolver = self.resolver or (lambda q, ip: q)
+        client_ip = self._client_ip()
+        try:
+            resp = resolver(body, client_ip)
+        except Exception:
+            logger.exception("resolver raised in threaded DoH POST")
+            self._send_empty(400)
+            return
+
+        self._send_bytes(200, resp, _DNS_CT)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+        """Brief: Route handler logs through the module logger instead of stderr.
+
+        Inputs:
+        - format: format string
+        - args: format arguments
+
+        Outputs:
+        - None
+        """
+        try:
+            msg = format % args
+        except Exception:
+            msg = format
+        logger.info("DoH HTTP: %s", msg)
+
+
+def _start_doh_server_threaded(
+    host: str,
+    port: int,
+    resolver: Callable[[bytes, str], bytes],
+    *,
+    cert_file: Optional[str] = None,
+    key_file: Optional[str] = None,
+) -> Optional["DoHServerHandle"]:
+    """Brief: Start a threaded HTTP DoH server without using asyncio.
+
+    Inputs:
+    - host: listen address
+    - port: listen port
+    - resolver: callable (query_bytes, client_ip) -> response_bytes
+    - cert_file: optional TLS certificate path
+    - key_file: optional TLS key path
+
+    Outputs:
+    - DoHServerHandle if server started successfully, else None.
+
+    Example:
+      >>> handle = _start_doh_server_threaded('127.0.0.1', 8053, lambda q, ip: q)
+    """
+    handler_cls = _ThreadedDoHRequestHandler
+    handler_cls.resolver = staticmethod(resolver)  # type: ignore[assignment]
+
+    try:
+        httpd = http.server.ThreadingHTTPServer((host, port), handler_cls)
+    except OSError as exc:  # pragma: no cover - hard to force in unit tests
+        logger.error("Failed to bind threaded DoH server on %s:%d: %s", host, port, exc)
+        return None
+
+    if cert_file and key_file:
+        try:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+            httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+        except Exception as exc:  # pragma: no cover - TLS misconfig
+            logger.error("Failed to configure TLS for threaded DoH server: %s", exc)
+            try:
+                httpd.server_close()
+            except Exception:
+                pass
+            return None
+
+    def _serve() -> None:
+        try:
+            httpd.serve_forever()
+        except Exception:  # pragma: no cover - unexpected runtime error
+            logger.exception("Unhandled exception in threaded DoH server")
+        finally:
+            try:
+                httpd.server_close()
+            except Exception:  # pragma: no cover
+                pass
+
+    thread = threading.Thread(target=_serve, name="foghorn-doh-threaded", daemon=True)
+    thread.start()
+    logger.info("Started threaded DoH server on %s:%d", host, port)
+    return DoHServerHandle(thread, server=httpd)
+
+
+class DoHServerHandle:
+    """Brief: Handle for a background DoH server thread.
 
     Inputs (constructor):
-    - thread: Thread object
+    - thread: Thread object running the HTTP/uvicorn server loop.
+    - server: Optional server instance with shutdown/server_close methods.
 
     Outputs:
     - DoHServerHandle with is_running() and stop().
+
+    Example:
+      >>> # typically created by start_doh_server()
     """
 
-    def __init__(self, thread) -> None:
+    def __init__(self, thread, server: Any | None = None) -> None:
         self._thread = thread
+        self._server = server
 
     def is_running(self) -> bool:
-        """
-        Brief: Return True if thread is alive.
+        """Brief: Return True if thread is alive.
 
         Inputs: None
         Outputs: bool
@@ -136,14 +345,24 @@ class DoHServerHandle:
         return self._thread.is_alive()
 
     def stop(self, timeout: float = 5.0) -> None:
-        """
-        Brief: Best-effort stop; waits for thread join.
+        """Brief: Best-effort stop; shuts down server if possible and waits for thread.
 
         Inputs:
         - timeout: seconds to wait
         Outputs: None
         """
         try:
+            if self._server is not None:
+                try:
+                    # Graceful shutdown for threaded HTTP servers.
+                    shutdown = getattr(self._server, "shutdown", None)
+                    if callable(shutdown):
+                        shutdown()
+                    close = getattr(self._server, "server_close", None)
+                    if callable(close):
+                        close()
+                except Exception:
+                    logger.exception("Error while shutting down DoH server instance")
             self._thread.join(timeout=timeout)
         except Exception:
             logger.exception("Error while stopping DoH thread")
@@ -157,8 +376,7 @@ def start_doh_server(
     cert_file: Optional[str] = None,
     key_file: Optional[str] = None,
 ) -> Optional[DoHServerHandle]:
-    """
-    Brief: Start FastAPI-based DoH server on host:port using uvicorn in a background thread.
+    """Brief: Start DoH server, preferring uvicorn but falling back to threaded HTTP.
 
     Inputs:
     - host: listen address
@@ -168,16 +386,51 @@ def start_doh_server(
     - key_file: optional TLS key path
 
     Outputs:
-    - DoHServerHandle if server started, else None
+    - DoHServerHandle if server started, else None.
 
     Example:
       >>> handle = start_doh_server('127.0.0.1', 8053, lambda q, ip: q)
     """
+    # First, detect environments where asyncio cannot create its self-pipe
+    # (e.g., restricted containers or seccomp profiles). In that case, skip
+    # uvicorn entirely and use the threaded HTTP implementation.
+    can_use_asyncio = True
+    try:  # pragma: no cover - difficult to exercise PermissionError in CI
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        loop.close()
+    except PermissionError as exc:  # pragma: no cover
+        logger.warning(
+            "Asyncio loop creation failed for DoH; falling back to threaded HTTP server: %s",
+            exc,
+        )
+        can_use_asyncio = False
+    except Exception:
+        # For other issues we still attempt uvicorn and rely on its own error
+        # handling; the threaded fallback remains available on ImportError.
+        can_use_asyncio = True
+
+    if not can_use_asyncio:
+        return _start_doh_server_threaded(
+            host,
+            port,
+            resolver,
+            cert_file=cert_file,
+            key_file=key_file,
+        )
+
     try:
         import uvicorn
     except Exception as exc:  # pragma: no cover
-        logger.error("uvicorn not available for DoH: %s", exc)
-        return None
+        logger.error("uvicorn not available for DoH: %s; using threaded fallback", exc)
+        return _start_doh_server_threaded(
+            host,
+            port,
+            resolver,
+            cert_file=cert_file,
+            key_file=key_file,
+        )
 
     app = create_doh_app(resolver)
 
