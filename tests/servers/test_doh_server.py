@@ -16,12 +16,18 @@ import http.client
 
 import pytest
 
-from foghorn.doh_server import serve_doh
+from foghorn.doh_api import start_doh_server
+from foghorn.server import resolve_query_bytes
 
 
 def _echo_resolver(q: bytes, client_ip: str) -> bytes:
     # Echo back with same ID
     return q
+
+
+import pytest
+
+pytestmark = pytest.mark.slow
 
 
 @pytest.fixture
@@ -54,10 +60,11 @@ def running_doh_server():
             addr = srv.sockets[0].getsockname()
             actual["port"] = addr[1]
             ready.set()
-            # Close temp and start real DoH on same port
+            # Close temp and start real DoH on same port using FastAPI/uvicorn
             srv.close()
             await srv.wait_closed()
-            await serve_doh(host, actual["port"], _echo_resolver)
+            # Start DoH server in background thread using resolve_query_bytes
+            start_doh_server(host, actual["port"], resolve_query_bytes)
 
         loop.create_task(bind_and_run())
         loop.run_forever()
