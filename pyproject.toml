@@ -18,15 +18,16 @@ dependencies = [
   "lxml",
   "httpx",
   "dnspython>=2.6.1",
-  "pyinotify",
+    "watchdog",
   "fastapi>=0.111.0",
   "uvicorn>=0.30.0",
+  "pytest",
+  "pytest-cov",
+
 ]
 
 [optional-dependencies]
 dev = [
-  "pytest",
-  "pytest-cov",
   "coverage",
   "black",
   "ipython",
@@ -45,3 +46,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 addopts = "--maxfail=1 --disable-warnings"
+markers = [
+  "slow: marks tests that start real network servers or otherwise run slowly",
+]
