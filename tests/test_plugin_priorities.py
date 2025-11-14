@@ -77,41 +77,6 @@ def test_yaml_config_overrides_class_defaults():
     assert plugin.post_priority == 200
 
 
-def test_legacy_priority_applies_to_both_hooks(caplog):
-    """
-    Brief: Legacy 'priority' key sets both pre and post when specific keys absent.
-
-    Inputs:
-      - Config with priority=15 (no pre_priority or post_priority)
-
-    Outputs:
-      - None: Asserts pre_priority=15 and post_priority=15
-    """
-    with caplog.at_level(logging.WARNING):
-        plugin = BasePlugin(priority=15)
-
-    assert plugin.pre_priority == 15
-    assert plugin.post_priority == 15
-
-
-def test_legacy_priority_ignored_with_specific_keys(caplog):
-    """
-    Brief: Specific pre/post_priority take precedence; legacy 'priority' triggers warning.
-
-    Inputs:
-      - Config: priority=99, pre_priority=7, post_priority=88
-
-    Outputs:
-      - None: Asserts pre=7, post=88; warning logged about legacy ignored
-    """
-    with caplog.at_level(logging.WARNING):
-        plugin = BasePlugin(priority=99, pre_priority=7, post_priority=88)
-
-    assert plugin.pre_priority == 7
-    assert plugin.post_priority == 88
-    assert any("legacy 'priority' ignored" in rec.message for rec in caplog.records)
-
-
 def test_clamping_below_range(caplog):
     """
     Brief: Priority values below 1 are clamped to 1 with warning.
