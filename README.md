@@ -6,6 +6,30 @@ With special thanks to Fiona Weatherwax for their contributions.
 
 For developer documentation (architecture, transports, plugin internals, testing), see README-DEV.md.
 
+## Breaking changes
+
+The following breaking changes apply from this release onward:
+
+- `upstream` configuration must be a list of upstream definitions. Legacy single-mapping forms like:
+
+  ```yaml
+  upstream:
+    host: 1.1.1.1
+    port: 53
+  ```
+
+  are no longer accepted. Use the list form instead:
+
+  ```yaml
+  upstream:
+    - host: 1.1.1.1
+      port: 53
+  ```
+
+- The `upstream_router` plugin now only accepts `routes[*].upstreams` (a list of `{host, port}` mappings). Legacy `routes[*].upstream` single-entry fields are no longer supported.
+- Plugin configuration no longer supports the legacy `priority` key; use `pre_priority` and `post_priority` instead when you need to tune hook ordering.
+- The DNS-over-HTTPS implementation is now served via `foghorn.doh_api.start_doh_server` (FastAPI/uvicorn). The old `foghorn.doh_server.serve_doh` coroutine has been removed; existing YAML `listen.doh` config remains valid.
+
 ## Features
 
 *   **DNS Caching:** Speeds up DNS resolution by caching responses from upstream servers.

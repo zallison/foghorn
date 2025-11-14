@@ -2,6 +2,15 @@
 
 This document contains developer-facing details: architecture, transports, plugins, logging, statistics, signals, and testing. For end‑users and configuration examples, see README.md.
 
+## Breaking changes
+
+This release introduces a few developer-visible breaking changes:
+
+- **Upstream config normalization**: `src/foghorn/main.py.normalize_upstream_config` no longer accepts `cfg['upstream']` as a single mapping with optional `timeout_ms`. Only list-based upstreams are supported; callers must ensure YAML uses the list form.
+- **UpstreamRouterPlugin routes**: `src/foghorn/plugins/upstream_router.py` now normalizes routes exclusively from `routes[*].upstreams`. The legacy `routes[*].upstream` single mapping is removed.
+- **BasePlugin priority**: `src/foghorn/plugins/base.py` no longer honors the legacy `priority` key. Only `pre_priority` and `post_priority` are used, with the same clamping semantics as before.
+- **DoH server shim**: the legacy asyncio-based `foghorn.doh_server.serve_doh` entrypoint has been removed. All DoH usage should go through `foghorn.doh_api.start_doh_server`; YAML `listen.doh` behavior is unchanged.
+
 ## Architecture Overview
 
 - Entry: `src/foghorn/main.py` parses YAML, initializes logging/plugins, starts listeners, installs signal handlers.
