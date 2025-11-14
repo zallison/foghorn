@@ -12,22 +12,43 @@
         }
     </style>
     <script>
-        function updateData() {
-            fetch('/stats').then(response => response.json()).then(data => {
-                const pretty = JSON.stringify(data, null, 2);
-                document.getElementById('stats').innerHTML = `<pre class="code-block"><code class="language-json">${pretty}</code></pre>`;
-                Prism.highlightElement(document.querySelector('code.language-json'));
-            });
-            fetch('/logs').then(response => response.json()).then(data => {
-                const pretty = JSON.stringify(data, null, 2);
-                document.getElementById('logs').innerHTML = `<pre class="code-block"><code class="language-json">${pretty}</code></pre>`;
-                Prism.highlightElement(document.querySelector('code.language-json'));
-            });
-            fetch('/traffic').then(response => response.json()).then(data => {
-                const pretty = JSON.stringify(data, null, 2);
-                document.getElementById('traffic').innerHTML = `<pre class="code-block"><code class="language-json">${pretty}</code></pre>`;
-                Prism.highlightElement(document.querySelector('code.language-json'));
-            });
+        function renderJson(targetId, data) {
+            const pretty = JSON.stringify(data, null, 2);
+            document.getElementById(targetId).innerHTML = `<pre class="code-block"><code class="language-json">${pretty}</code></pre>`;
+            Prism.highlightElement(document.querySelector(`#${targetId} code.language-json`));
+        }
+
+        async function updateData() {
+            try {
+                const statsResp = await fetch('/stats');
+                if (statsResp.ok) {
+                    const statsData = await statsResp.json();
+                    renderJson('stats', statsData);
+                }
+            } catch (e) {
+                console.error('Failed to fetch /stats', e);
+            }
+
+            try {
+                const logsResp = await fetch('/logs');
+                if (logsResp.ok) {
+                    const logsData = await logsResp.json();
+                    renderJson('logs', logsData);
+                }
+            } catch (e) {
+                console.error('Failed to fetch /logs', e);
+            }
+
+            try {
+                const trafficResp = await fetch('/traffic');
+                if (trafficResp.ok) {
+                    const trafficData = await trafficResp.json();
+                    renderJson('traffic', trafficData);
+                }
+            } catch (e) {
+                console.error('Failed to fetch /traffic', e);
+            }
+
             setTimeout(updateData, 5000);
         }
         window.onload = updateData;
