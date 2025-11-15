@@ -291,6 +291,7 @@ def _start_doh_server_threaded(
     if cert_file and key_file:
         try:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
             context.load_cert_chain(certfile=cert_file, keyfile=key_file)
             httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
         except Exception as exc:  # pragma: no cover - TLS misconfig
