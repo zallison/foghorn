@@ -361,7 +361,7 @@ class StatsSQLiteStore:
         if dir_path:
             os.makedirs(dir_path, exist_ok=True)
 
-        conn = sqlite3.connect(self._db_path)
+        conn = sqlite3.connect(self._db_path, check_same_thread=False)
         try:
             # Best-effort journaling tweaks; errors are non-fatal.
             conn.execute("PRAGMA journal_mode=WAL")
