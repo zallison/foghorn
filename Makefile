@@ -71,7 +71,7 @@ docker-build: docker-clean
 
 .PHONY: docker-clean
 docker-clean:
-	docker rmi ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker rmi ${PREFIX}/${CONTAINER_NAME}:${TAG} || true
 
 .PHONY: docker-run
 docker-run:
