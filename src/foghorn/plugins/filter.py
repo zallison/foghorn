@@ -305,9 +305,11 @@ class FilterPlugin(BasePlugin):
         Returns:
             A PluginDecision to modify or deny responses containing blocked IPs, otherwise None.
         """
-        # Only process A and AAAA records
-        if qtype not in (QTYPE.A, QTYPE.AAAA):
-            raise TypeError("bad qtype")
+
+        ## :warn:Not Implemented Yet:
+        ## # Only process A and AAAA records
+        ## if qtype not in (QTYPE.A, QTYPE.AAAA):
+        ##     return
 
         if not self.blocked_ips and not self.blocked_networks:
             return None
