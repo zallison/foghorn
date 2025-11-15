@@ -13,14 +13,19 @@ import copy
 import http.server
 import json
 import logging
+import mimetypes
+import os
+import signal
 import threading
 import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+import yaml
+
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from .stats import StatsCollector, StatsSnapshot
@@ -238,6 +243,190 @@ def sanitize_config(
     return redacted
 
 
+def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
+    """Brief: Parse a /proc/meminfo-style file into byte counts.
+
+    Inputs:
+      - path: Filesystem path to a meminfo-style file (default "/proc/meminfo").
+
+    Outputs:
+      - Dict mapping field name (e.g. "MemTotal") to integer byte values.
+
+    Example:
+      >>> info = _read_proc_meminfo()  # doctest: +SKIP (depends on host)
+      >>> isinstance(info.get("MemTotal"), int)
+      True
+    """
+
+    result: Dict[str, int] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                key, rest = line.split(":", 1)
+                key = key.strip()
+                parts = rest.strip().split()
+                if not parts:
+                    continue
+                try:
+                    # meminfo reports kB (KiB) values by default
+                    kib_val = float(parts[0])
+                except Exception:
+                    continue
+                result[key] = int(kib_val * 1024)
+    except Exception:  # pragma: no cover - depends on host environment
+        return {}
+    return result
+
+
+def get_system_info() -> Dict[str, Any]:
+    """Brief: Collect simple system load and memory usage snapshot.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Dict containing keys such as "load_1m", "load_5m", "load_15m",
+        "memory_total_bytes", "memory_used_bytes", "memory_free_bytes", and
+        "memory_available_bytes". Values are floats or integers when
+        available, or None when the metric cannot be determined.
+
+    Example:
+      >>> info = get_system_info()  # doctest: +SKIP (depends on host)
+      >>> "load_1m" in info
+      True
+    """
+
+    payload: Dict[str, Any] = {
+        "load_1m": None,
+        "load_5m": None,
+        "load_15m": None,
+        "memory_total_bytes": None,
+        "memory_used_bytes": None,
+        "memory_free_bytes": None,
+        "memory_available_bytes": None,
+    }
+
+    # Load averages
+    try:
+        if hasattr(os, "getloadavg"):
+            load1, load5, load15 = os.getloadavg()  # type: ignore[assignment]
+            payload["load_1m"] = float(load1)
+            payload["load_5m"] = float(load5)
+            payload["load_15m"] = float(load15)
+    except Exception:  # pragma: no cover - environment specific
+        pass
+
+    # Memory statistics from /proc/meminfo when available
+    meminfo = _read_proc_meminfo()
+    if meminfo:
+        total = meminfo.get("MemTotal")
+        free = meminfo.get("MemFree")
+        available = meminfo.get("MemAvailable")
+
+        if isinstance(total, int):
+            payload["memory_total_bytes"] = total
+        if isinstance(free, int):
+            payload["memory_free_bytes"] = free
+        if isinstance(available, int):
+            payload["memory_available_bytes"] = available
+        if isinstance(total, int) and isinstance(available, int):
+            used = total - available
+            if used >= 0:
+                payload["memory_used_bytes"] = used
+
+    return payload
+
+
+def _build_stats_payload_for_index(
+    collector: Optional[StatsCollector],
+) -> Dict[str, Any]:
+    """Return statistics payload suitable for embedding in the index page.
+
+    Inputs:
+      - collector: Optional StatsCollector instance.
+
+    Outputs:
+      - Dict with either disabled status or a snapshot of current statistics.
+    """
+
+    if collector is None:
+        return {"status": "disabled", "server_time": _utc_now_iso()}
+
+    snap: StatsSnapshot = collector.snapshot(reset=False)
+    payload: Dict[str, Any] = {
+        "created_at": snap.created_at,
+        "server_time": _utc_now_iso(),
+        "totals": snap.totals,
+        "rcodes": snap.rcodes,
+        "qtypes": snap.qtypes,
+        "uniques": snap.uniques,
+        "upstreams": snap.upstreams,
+        "top_clients": snap.top_clients,
+        "top_subdomains": snap.top_subdomains,
+        "top_domains": snap.top_domains,
+        "latency": snap.latency_stats,
+        "latency_recent": snap.latency_recent_stats,
+        "system": get_system_info(),
+    }
+    return payload
+
+
+def _render_index_html(
+    logo_url: str,
+    stats_payload: Dict[str, Any],
+    config_payload: Dict[str, Any],
+) -> str:
+    """Return HTML string for the virtual /index.html dashboard.
+
+    Inputs:
+      - logo_url: URL path to the logo image (e.g., "/logo.png").
+      - stats_payload: Dict of statistics to render.
+      - config_payload: Dict of sanitized configuration to render.
+
+    Outputs:
+      - HTML document as a string that references an external stylesheet
+        (served from /styles.css under the html/ static root).
+    """
+
+    stats_pretty = html.escape(json.dumps(stats_payload, indent=2, sort_keys=True))
+    config_pretty = html.escape(json.dumps(config_payload, indent=2, sort_keys=True))
+
+    generated_at = html.escape(_utc_now_iso())
+
+    return f"""<!DOCTYPE html>
+<html lang=\"en\">
+  <head>
+    <meta charset=\"utf-8\" />
+    <title>Foghorn statistics</title>
+    <link rel=\"stylesheet\" href=\"/styles.css\" />
+  </head>
+  <body>
+    <div class=\"page\">
+      <header class=\"hero\">
+        <img class=\"logo\" src=\"{logo_url}\" alt=\"Foghorn logo\" />
+        <h1>Foghorn statistics</h1>
+        <p class=\"meta\">Generated at {generated_at}</p>
+      </header>
+
+      <main class=\"panels\">
+        <section class=\"panel panel-stats\">
+          <h2>Statistics</h2>
+          <pre>{stats_pretty}</pre>
+        </section>
+
+        <section class=\"panel panel-config\">
+          <h2>Configuration (sanitized)</h2>
+          <pre>{config_pretty}</pre>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
+"""
+
+
 def _build_auth_dependency(web_cfg: Dict[str, Any]):
     """Build a FastAPI dependency enforcing optional admin auth.
 
@@ -287,6 +476,7 @@ def create_app(
     stats: Optional[StatsCollector],
     config: Dict[str, Any],
     log_buffer: Optional[RingBuffer] = None,
+    config_path: str | None = None,
 ) -> FastAPI:
     """Create and configure FastAPI app exposing Foghorn admin endpoints.
 
@@ -294,14 +484,16 @@ def create_app(
       - stats: Optional StatsCollector instance used by the DNS server.
       - config: Current configuration dictionary loaded from YAML.
       - log_buffer: Optional RingBuffer for recent log-like entries.
+      - config_path: Optional filesystem path to the active YAML config file.
 
     Outputs:
-      - Configured FastAPI application instance.
+      - Configured FastAPI application instance exposing health, stats,
+        traffic, config, logs, and configuration management endpoints.
 
     Example:
       >>> from foghorn.stats import StatsCollector
       >>> collector = StatsCollector()
-      >>> app = create_app(collector, {"webserver": {"enabled": True}})
+      >>> app = create_app(collector, {"webserver": {"enabled": True}}, config_path="config.yaml")
     """
 
     web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
@@ -324,6 +516,7 @@ def create_app(
     # Attach shared state
     app.state.stats_collector = stats
     app.state.config = config
+    app.state.config_path = config_path
     app.state.log_buffer = log_buffer or RingBuffer(
         capacity=int(web_cfg.get("logs", {}).get("buffer_size", 500))
     )
@@ -383,6 +576,7 @@ def create_app(
             "top_domains": snap.top_domains,
             "latency": snap.latency_stats,
             "latency_recent": snap.latency_recent_stats,
+            "system": get_system_info(),
         }
         return payload
 
@@ -441,6 +635,128 @@ def create_app(
         clean = sanitize_config(cfg, redact_keys=redact_keys)
         return {"server_time": _utc_now_iso(), "config": clean}
 
+    @app.get("/config/raw", dependencies=[Depends(auth_dep)])
+    async def get_config_raw() -> Dict[str, Any]:
+        """Return raw on-disk configuration without sanitization.
+
+        Inputs:
+          - None (uses app.state.config_path to locate YAML file).
+
+        Outputs:
+          - Dict containing server_time, raw_yaml (string with the exact file
+            contents), and config keys, where config is the configuration
+            mapping loaded from the YAML file on disk.
+
+        Example:
+          >>> # With app created via create_app(..., config_path="config.yaml")
+          >>> # a GET /config/raw will return {"server_time": "...", "config": {...}, "raw_yaml": "..."}
+        """
+
+        cfg_path = getattr(app.state, "config_path", None)
+        if not cfg_path:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="config_path not configured",
+            )
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                raw_text = f.read()
+            raw_cfg = yaml.safe_load(raw_text) or {}
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - I/O errors are environment-specific
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"failed to read config from {cfg_path}: {exc}",
+            ) from exc
+        return {"server_time": _utc_now_iso(), "config": raw_cfg, "raw_yaml": raw_text}
+
+    @app.post("/config/save", dependencies=[Depends(auth_dep)])
+    async def save_config(body: Dict[str, Any]) -> Dict[str, Any]:
+        """Persist new configuration to disk and signal SIGUSR1 for reload.
+
+        Inputs:
+          - body: JSON object representing the full configuration mapping to
+            serialize back to YAML.
+
+        Outputs:
+          - Dict with status, server_time, path to the written config, and
+            backed_up_to indicating the backup file path.
+
+        Notes:
+          - The YAML file is written atomically via a temporary file and
+            rename to avoid partial writes.
+          - A timestamped backup copy of the previous config is created in the
+            same directory before the overwrite.
+
+        Example:
+          >>> payload = {"listen": {"host": "127.0.0.1", "port": 5353}}
+          >>> # POST /config/save with JSON body payload
+        """
+
+        if not isinstance(body, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="request body must be a JSON object",
+            )
+
+        cfg_path = getattr(app.state, "config_path", None)
+        if not cfg_path:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="config_path not configured",
+            )
+
+        # Prepare backup and atomic write paths
+        cfg_path_abs = os.path.abspath(cfg_path)
+        cfg_dir = os.path.dirname(cfg_path_abs)
+        ts = datetime.now(timezone.utc).isoformat().replace(":", "-")
+        backup_path = f"{cfg_path_abs}.bak.{ts}"
+        tmp_path = os.path.join(cfg_dir, f".tmp-{os.path.basename(cfg_path_abs)}-{ts}")
+
+        try:
+            # Best-effort backup of existing file
+            if os.path.exists(cfg_path_abs):
+                with open(cfg_path_abs, "rb") as src, open(backup_path, "wb") as dst:
+                    dst.write(src.read())
+
+            # Serialize new configuration to YAML
+            yaml_text = yaml.safe_dump(
+                body,
+                default_flow_style=False,
+                sort_keys=False,
+                indent=2,
+                allow_unicode=True,
+            )
+
+            with open(tmp_path, "w", encoding="utf-8") as tmp:
+                tmp.write(yaml_text)
+            os.replace(tmp_path, cfg_path_abs)
+        except Exception as exc:  # pragma: no cover - file system specific
+            # Clean up tmp file if something went wrong
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"failed to write config to {cfg_path_abs}: {exc}",
+            ) from exc
+
+        # Signal main process to reload configuration
+        try:
+            os.kill(os.getpid(), signal.SIGUSR1)
+        except Exception as exc:  # pragma: no cover - platform specific
+            logger.error("Failed to send SIGUSR1 after config save: %s", exc)
+
+        return {
+            "status": "ok",
+            "server_time": _utc_now_iso(),
+            "path": cfg_path_abs,
+            "backed_up_to": backup_path,
+        }
+
     @app.get("/logs", dependencies=[Depends(auth_dep)])
     async def get_logs(limit: int = 100) -> Dict[str, Any]:
         """Return recent log-like entries from in-memory ring buffer.
@@ -461,26 +777,81 @@ def create_app(
     if index_enabled:
         import os
 
-        here = os.path.dirname(os.path.abspath(__file__))
-        index_path = os.path.join(here, "index.html")
+    @app.get("/index.html", response_class=HTMLResponse)
+    @app.get("/", response_class=HTMLResponse)
+    async def index() -> HTMLResponse:
+        """Serve HTML index page.
 
-        @app.get("/")
-        async def index() -> Any:
-            """Serve the static dashboard index.html if present.
+        Inputs:
+          - None.
 
-            Inputs: none
-            Outputs: FileResponse for index HTML or JSON error if missing.
-            """
+        Outputs:
+          - HTMLResponse. If html/index.html exists under the project html
+            directory it is served directly; otherwise a virtual dashboard
+            with stats and sanitized config is rendered.
+        """
 
-            if not os.path.exists(index_path):
-                return JSONResponse(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    content={
-                        "error": "index.html not found",
-                        "server_time": _utc_now_iso(),
-                    },
-                )
-            return FileResponse(index_path, media_type="text/html")
+        # Prefer a real html/index.html from the project when present
+        # Prefer an index.html next to this module (used by tests/legacy setups)
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        legacy_index = os.path.abspath(os.path.join(module_dir, "index.html"))
+        if os.path.isfile(legacy_index):
+            return FileResponse(legacy_index)
+
+        # Otherwise, look under the configured html/ root
+        www_root_local = getattr(app.state, "www_root", www_root)
+        index_path = os.path.abspath(os.path.join(www_root_local, "index.html"))
+        if os.path.isfile(index_path):
+            return FileResponse(index_path)
+
+        # Fallback to virtual dashboard when no static index is present
+        collector: Optional[StatsCollector] = app.state.stats_collector
+        stats_payload = _build_stats_payload_for_index(collector)
+
+        cfg = app.state.config or {}
+        web_cfg_inner = (cfg.get("webserver") or {}) if isinstance(cfg, dict) else {}
+        redact_keys = web_cfg_inner.get("redact_keys") or [
+            "token",
+            "password",
+            "secret",
+        ]
+        clean_cfg = sanitize_config(cfg, redact_keys=redact_keys)
+
+        logo_url = "/logo.png"
+        html_body = _render_index_html(logo_url, stats_payload, clean_cfg)
+        return HTMLResponse(content=html_body)
+
+    @app.get("/{path:path}")
+    async def static_www(path: str) -> Any:
+        """Serve files from the project-level html/ directory when they exist.
+
+        Inputs:
+          - path: Requested path segment (e.g., "logo.png" or "css/app.css").
+
+        Outputs:
+          - FileResponse when the file exists under html/, otherwise 404.
+        """
+
+        if not path:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="not found"
+            )
+
+        www_root_local = getattr(app.state, "www_root", www_root)
+        root_abs = os.path.abspath(www_root_local)
+        candidate = os.path.abspath(os.path.join(root_abs, path))
+
+        # Simple path traversal protection: require candidate under html root.
+        if not candidate.startswith(root_abs + os.sep):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="not found"
+            )
+        if not os.path.isfile(candidate):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="not found"
+            )
+
+        return FileResponse(candidate)
 
     return app
 
@@ -511,11 +882,13 @@ class _AdminHTTPServer(http.server.ThreadingHTTPServer):
         stats: Optional[StatsCollector],
         config: Dict[str, Any],
         log_buffer: Optional[RingBuffer],
+        config_path: str | None = None,
     ) -> None:
         super().__init__(server_address, RequestHandlerClass)
         self.stats = stats
         self.config = config
         self.log_buffer = log_buffer
+        self.config_path = config_path
 
 
 class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -713,6 +1086,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             "top_domains": snap.top_domains,
             "latency": snap.latency_stats,
             "latency_recent": snap.latency_recent_stats,
+            "system": get_system_info(),
         }
         self._send_json(200, payload)
 
@@ -789,6 +1163,46 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             {"server_time": _utc_now_iso(), "config": clean},
         )
 
+    def _handle_config_raw(self) -> None:
+        """Brief: Handle GET /config_raw to return on-disk configuration.
+
+        Inputs:
+          - None (uses self.server.config_path to locate YAML file).
+
+        Outputs:
+          - JSON with server_time, raw_yaml (exact file contents), and config
+            mapping loaded from disk.
+        """
+
+        if not self._require_auth():
+            return
+
+        cfg_path = getattr(self._server(), "config_path", None)
+        if not cfg_path:
+            self._send_json(
+                500,
+                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
+            )
+            return
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                raw_text = f.read()
+            raw_cfg = yaml.safe_load(raw_text) or {}
+        except Exception as exc:  # pragma: no cover - environment-specific
+            self._send_json(
+                500,
+                {
+                    "detail": f"failed to read config from {cfg_path}: {exc}",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        self._send_json(
+            200,
+            {"server_time": _utc_now_iso(), "config": raw_cfg, "raw_yaml": raw_text},
+        )
+
     def _handle_logs(self, params: Dict[str, list[str]]) -> None:
         """Brief: Handle GET /logs.
 
@@ -816,6 +1230,88 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             {"server_time": _utc_now_iso(), "entries": entries},
         )
 
+    def _handle_config_save(self, body: Dict[str, Any]) -> None:
+        """Brief: Handle POST /config/save to persist config and signal SIGUSR1.
+
+        Inputs:
+          - body: Parsed JSON object representing full configuration mapping.
+
+        Outputs:
+          - JSON describing outcome (status, server_time, path, backed_up_to).
+        """
+
+        if not self._require_auth():
+            return
+
+        if not isinstance(body, dict):
+            self._send_json(
+                400,
+                {
+                    "detail": "request body must be a JSON object",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        cfg_path = getattr(self._server(), "config_path", None)
+        if not cfg_path:
+            self._send_json(
+                500,
+                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
+            )
+            return
+
+        cfg_path_abs = os.path.abspath(cfg_path)
+        cfg_dir = os.path.dirname(cfg_path_abs)
+        ts = datetime.now(timezone.utc).isoformat().replace(":", "-")
+        backup_path = f"{cfg_path_abs}.bak.{ts}"
+        tmp_path = os.path.join(cfg_dir, f".tmp-{os.path.basename(cfg_path_abs)}-{ts}")
+
+        try:
+            if os.path.exists(cfg_path_abs):
+                with open(cfg_path_abs, "rb") as src, open(backup_path, "wb") as dst:
+                    dst.write(src.read())
+
+            yaml_text = yaml.safe_dump(
+                body,
+                default_flow_style=False,
+                sort_keys=False,
+                indent=2,
+                allow_unicode=True,
+            )
+            with open(tmp_path, "w", encoding="utf-8") as tmp:
+                tmp.write(yaml_text)
+            os.replace(tmp_path, cfg_path_abs)
+        except Exception as exc:  # pragma: no cover
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            self._send_json(
+                500,
+                {
+                    "detail": f"failed to write config to {cfg_path_abs}: {exc}",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        try:
+            os.kill(os.getpid(), signal.SIGUSR1)
+        except Exception as exc:  # pragma: no cover
+            logger.error("Failed to send SIGUSR1 after config save (threaded): %s", exc)
+
+        self._send_json(
+            200,
+            {
+                "status": "ok",
+                "server_time": _utc_now_iso(),
+                "path": cfg_path_abs,
+                "backed_up_to": backup_path,
+            },
+        )
+
     def _handle_index(self) -> None:
         """Brief: Handle GET / when index.html is enabled.
 
@@ -829,7 +1325,46 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_text(404, "index disabled")
             return
 
-        import os
+        # Prefer static html/index.html when available
+        index_path = os.path.abspath(os.path.join(self._www_root(), "index.html"))
+        if os.path.isfile(index_path):
+            try:
+                with open(index_path, "rb") as f:
+                    data = f.read()
+            except Exception as exc:  # pragma: no cover
+                logger.error("Failed to read static index.html: %s", exc)
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Connection", "close")
+                self.send_header("Content-Length", str(len(data)))
+                self._apply_cors_headers()
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
+        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        stats_payload = _build_stats_payload_for_index(collector)
+
+        cfg = getattr(self._server(), "config", {}) or {}
+        web_cfg_inner = (cfg.get("webserver") or {}) if isinstance(cfg, dict) else {}
+        redact_keys = web_cfg_inner.get("redact_keys") or [
+            "token",
+            "password",
+            "secret",
+        ]
+        clean = sanitize_config(cfg, redact_keys=redact_keys)
+
+        logo_url = "/logo.png"
+        html_body = _render_index_html(logo_url, stats_payload, clean)
+        self._send_html(200, html_body)
+
+    def _www_root(self) -> str:
+        """Brief: Return absolute path to the project-level html directory.
+
+        Inputs: none
+        Outputs: str absolute path to html/.
+        """
 
         here = os.path.dirname(os.path.abspath(__file__))
         index_path = os.path.join(here, "index.html")
@@ -891,6 +1426,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_traffic()
         elif path == "/config":
             self._handle_config()
+        elif path in {"/config/raw", "/config_raw"}:
+            self._handle_config_raw()
         elif path == "/logs":
             self._handle_logs(params)
         elif path == "/":
@@ -907,8 +1444,33 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+
         if path == "/stats/reset":
             self._handle_stats_reset()
+        elif path == "/config/save":
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            raw_body = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = json.loads(raw_body.decode("utf-8") or "{}")
+            except Exception:
+                self._send_json(
+                    400,
+                    {
+                        "detail": "invalid JSON body",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+            if not isinstance(body, dict):
+                self._send_json(
+                    400,
+                    {
+                        "detail": "request body must be a JSON object",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+            self._handle_config_save(body)
         else:
             self._send_text(404, "not found")
 
@@ -933,6 +1495,7 @@ def _start_admin_server_threaded(
     stats: Optional[StatsCollector],
     config: Dict[str, Any],
     log_buffer: Optional[RingBuffer],
+    config_path: str | None = None,
 ) -> Optional["WebServerHandle"]:
     """Brief: Start threaded admin HTTP server without using asyncio.
 
@@ -962,6 +1525,7 @@ def _start_admin_server_threaded(
             stats=stats,
             config=config,
             log_buffer=log_buffer,
+            config_path=config_path,
         )
     except (
         OSError
@@ -1055,6 +1619,7 @@ def start_webserver(
     stats: Optional[StatsCollector],
     config: Dict[str, Any],
     log_buffer: Optional[RingBuffer] = None,
+    config_path: str | None = None,
 ) -> Optional[WebServerHandle]:
     """Start admin HTTP server, preferring uvicorn but falling back to threaded HTTP.
 
@@ -1094,7 +1659,9 @@ def start_webserver(
         can_use_asyncio = True
 
     if not can_use_asyncio:
-        return _start_admin_server_threaded(stats, config, log_buffer)
+        return _start_admin_server_threaded(
+            stats, config, log_buffer, config_path=config_path
+        )
 
     try:
         import uvicorn
@@ -1117,7 +1684,7 @@ def start_webserver(
             host,
         )
 
-    app = create_app(stats, config, log_buffer)
+    app = create_app(stats, config, log_buffer, config_path=config_path)
 
     config_uvicorn = uvicorn.Config(app, host=host, port=port, log_level="info")
     server = uvicorn.Server(config_uvicorn)
