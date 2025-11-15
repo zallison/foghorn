@@ -33,4 +33,5 @@ def test_etc_hosts_load_hosts_malformed_single_entry_with_comment(tmp_path):
     hosts_file.write_text("127.0.0.1 home\n192.168.88.3       # <-- invalid\n")
 
     with pytest.raises(ValueError):
-        _ = EtcHosts(file_path=str(hosts_file))
+        plugin = EtcHosts(file_path=str(hosts_file))
+        plugin.setup()

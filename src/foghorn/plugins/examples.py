@@ -48,7 +48,7 @@ class ExamplesPlugin(BasePlugin):
         - A responses: first A RR is rewritten per matching rewrite rules.
     """
 
-    def setup(self, **config) -> None:
+    def setup(self) -> None:
         """
         Initialize plugin with provided config or defaults.
 

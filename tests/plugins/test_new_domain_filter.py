@@ -27,6 +27,7 @@ def test_new_domain_filter_init_defaults(tmp_path):
     """
     db_path = tmp_path / "whois.db"
     plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin.setup()
     assert plugin.threshold_days == 7
     assert plugin.whois_cache_ttl_seconds == 3600
     assert plugin.whois_refresh_seconds == 86400
@@ -49,6 +50,7 @@ def test_new_domain_filter_init_custom_config(tmp_path):
         whois_cache_ttl_seconds=7200,
         whois_refresh_seconds=172800,
     )
+    plugin.setup()
     assert plugin.threshold_days == 30
     assert plugin.whois_cache_ttl_seconds == 7200
     assert plugin.whois_refresh_seconds == 172800
@@ -67,6 +69,7 @@ def test_new_domain_filter_pre_resolve_unknown_age_allows(tmp_path, monkeypatch)
     """
     db_path = tmp_path / "whois.db"
     plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin.setup()
 
     # Mock _domain_age_days to return None (unknown)
     monkeypatch.setattr(plugin, "_domain_age_days", lambda d: None)
@@ -89,6 +92,7 @@ def test_new_domain_filter_pre_resolve_old_domain_allows(tmp_path, monkeypatch):
     """
     db_path = tmp_path / "whois.db"
     plugin = NewDomainFilterPlugin(whois_db_path=str(db_path), threshold_days=10)
+    plugin.setup()
 
     # Mock _domain_age_days to return 20 days (older than threshold)
     monkeypatch.setattr(plugin, "_domain_age_days", lambda d: 20)
@@ -111,6 +115,7 @@ def test_new_domain_filter_pre_resolve_new_domain_denies(tmp_path, monkeypatch):
     """
     db_path = tmp_path / "whois.db"
     plugin = NewDomainFilterPlugin(whois_db_path=str(db_path), threshold_days=10)
+    plugin.setup()
 
     # Mock _domain_age_days to return 5 days (newer than threshold)
     monkeypatch.setattr(plugin, "_domain_age_days", lambda d: 5)
@@ -133,6 +138,7 @@ def test_new_domain_filter_domain_age_days(tmp_path, monkeypatch):
     """
     db_path = tmp_path / "whois.db"
     plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin.setup()
 
     # Mock creation date 100 days ago
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
@@ -161,6 +167,7 @@ def test_new_domain_filter_fetch_creation_date_caching(tmp_path):
     """
     db_path = tmp_path / "whois.db"
     plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin.setup()
 
     # Mock the whois lookup to return a fixed date
     mock_date = dt.datetime(2023, 1, 1, tzinfo=dt.timezone.utc)
@@ -187,6 +194,7 @@ def test_new_domain_filter_db_operations(tmp_path):
     """
     db_path = tmp_path / "whois.db"
     plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin.setup()
 
     # Check DB initialized
     assert db_path.exists()
@@ -215,6 +223,7 @@ def test_new_domain_filter_db_get_nonexistent(tmp_path):
     """
     db_path = tmp_path / "whois.db"
     plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin.setup()
 
     record = plugin._db_get_creation_record("nonexistent.com")
     assert record is None
@@ -238,6 +247,7 @@ def test_new_domain_filter_whois_lookup_no_libraries(tmp_path, monkeypatch):
 
     db_path = tmp_path / "whois.db"
     plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin.setup()
 
     result = plugin._whois_lookup_creation_date("example.com")
     assert result is None
@@ -255,6 +265,7 @@ def test_new_domain_filter_domain_age_exception_handling(tmp_path, monkeypatch):
     """
     db_path = tmp_path / "whois.db"
     plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin.setup()
 
     # Mock _fetch_creation_date to raise exception
     monkeypatch.setattr(plugin, "_fetch_creation_date", lambda d: 1 / 0)

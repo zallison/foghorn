@@ -26,39 +26,39 @@ logger = logging.getLogger(__name__)
 
 @plugin_aliases("new_domain", "new_domain_filter", "ndf")
 class NewDomainFilterPlugin(BasePlugin):
-    """
-    A plugin that filters out domains that have been registered recently.
+    """Plugin that filters out domains registered too recently.
 
-    Example use:
-        In config.yaml:
+    Brief:
+      - Uses WHOIS data (with in-memory and sqlite caches) to compute domain age
+        in days and denies queries for domains younger than a configurable
+        threshold.
+
+    Example use in YAML config:
+
         plugins:
           - module: foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
             config:
               threshold_days: 30
     """
 
-    def __init__(self, **config):
-        """
-        Initializes the NewDomainFilterPlugin.
+    def setup(self) -> None:
+        """Initialize NewDomainFilterPlugin from ``self.config``.
 
         Inputs:
-            **config: dict – Configuration for the plugin.
-                - threshold_days (int): Block domains younger than this, default 7.
-                - whois_db_path (str): Path to sqlite3 cache DB, default './var/whois_cache.db'.
-                - whois_cache_ttl_seconds (int): In-memory cache TTL, default 3600.
-                - whois_refresh_seconds (int): How long DB entries are considered fresh, default 86400.
+          - None (configuration is taken from ``self.config`` set by BasePlugin).
 
         Outputs:
-            None
+          - None (sets threshold_days, WHOIS cache/DB configuration and opens DB).
 
-        Example use:
-            >>> from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin
-            >>> config = {"threshold_days": 10}
-            >>> plugin = NewDomainFilterPlugin(**config)
-            >>> plugin.threshold_days
-            10
+        Example:
+          >>> from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin
+          >>> plugin = NewDomainFilterPlugin(threshold_days=10)
+          >>> plugin.setup()
+          >>> plugin.threshold_days
+          10
         """
-        super().__init__(**config)
+        # BasePlugin.__init__ has already stored configuration in self.config;
+        # setup() is responsible only for deriving runtime attributes.
         self.threshold_days: int = int(self.config.get("threshold_days", 7))
 
         # Caching configuration

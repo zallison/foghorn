@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional, Tuple, ClassVar, Sequence, List, Dict, Union
+from typing import Optional, Tuple, ClassVar, Sequence, List, Dict, Union, final
 import logging
 
 
@@ -39,6 +39,7 @@ class PluginContext:
         >>> ctx.upstream_candidates = [{'host': '10.0.0.1', 'port': 53}]
     """
 
+    @final
     def __init__(self, client_ip: str) -> None:
         """
         Initializes the PluginContext.
@@ -99,6 +100,7 @@ class BasePlugin:
         # Always returns a sequence (even if empty) for discovery
         return tuple(getattr(cls, "aliases", ()))
 
+    @final
     def __init__(self, **config):
         """
         Initializes the BasePlugin.

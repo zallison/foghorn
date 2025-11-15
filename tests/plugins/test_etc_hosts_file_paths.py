@@ -37,6 +37,7 @@ def test_init_with_file_paths_only_merges_in_order(tmp_path):
     f2 = _write(tmp_path, "f2", "2.2.2.2 hostA\n10.0.0.2 hostB\n")
 
     plugin = EtcHosts(file_paths=[str(f1), str(f2)])
+    plugin.setup()
     assert plugin.hosts["hostA"] == "2.2.2.2"  # overridden by later file
     assert plugin.hosts["hostB"] == "10.0.0.2"
     assert plugin.hosts["localhost"] == "127.0.0.1"
@@ -62,6 +63,7 @@ def test_both_params_with_redundant_legacy_deduplicates(tmp_path):
     f2 = _write(tmp_path, "f2", "2.2.2.2 hostA\n")
 
     plugin = EtcHosts(file_paths=[str(f1), str(f2)], file_path=str(f1))
+    plugin.setup()
     # Expect f2 to override since effective order remains [f1, f2]
     assert plugin.hosts["hostA"] == "2.2.2.2"
 
@@ -86,6 +88,7 @@ def test_both_params_with_nonredundant_legacy_appends_last(tmp_path):
     f2 = _write(tmp_path, "f2", "3.3.3.3 hostA\n")
 
     plugin = EtcHosts(file_paths=[str(f1)], file_path=str(f2))
+    plugin.setup()
     # Legacy path appended last should override hostA
     assert plugin.hosts["hostA"] == "3.3.3.3"
     # Non-conflicting entry from f1 remains
@@ -115,4 +118,5 @@ def test_no_input_uses_default_via_monkeypatched_normalize(tmp_path, monkeypatch
     monkeypatch.setattr(EtcHosts, "_normalize_paths", _fake_normalize)
 
     plugin = EtcHosts()  # no inputs -> uses monkeypatched default
+    plugin.setup()
     assert plugin.hosts["defaultHost"] == "4.4.4.4"

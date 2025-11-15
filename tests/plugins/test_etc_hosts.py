@@ -46,6 +46,7 @@ def test_etc_hosts_init_with_custom_file(tmp_path):
     hosts_file.write_text("127.0.0.1 localhost\n192.168.1.1 router.local\n")
 
     plugin = EtcHosts(file_path=str(hosts_file))
+    plugin.setup()
     assert "localhost" in plugin.hosts
     assert plugin.hosts["localhost"] == "127.0.0.1"
     assert "router.local" in plugin.hosts
@@ -69,6 +70,7 @@ def test_etc_hosts_parses_multiple_aliases(tmp_path):
     hosts_file.write_text("127.0.0.1 localhost local host1 host2\n")
 
     plugin = EtcHosts(file_path=str(hosts_file))
+    plugin.setup()
     assert plugin.hosts["localhost"] == "127.0.0.1"
     assert plugin.hosts["local"] == "127.0.0.1"
     assert plugin.hosts["host1"] == "127.0.0.1"
@@ -92,6 +94,7 @@ def test_etc_hosts_ignores_comments(tmp_path):
     hosts_file.write_text("# Comment line\n127.0.0.1 localhost\n# Another comment\n")
 
     plugin = EtcHosts(file_path=str(hosts_file))
+    plugin.setup()
     assert len(plugin.hosts) == 1
     assert "localhost" in plugin.hosts
 
@@ -113,6 +116,7 @@ def test_etc_hosts_ignores_empty_lines(tmp_path):
     hosts_file.write_text("\n\n127.0.0.1 localhost\n\n")
 
     plugin = EtcHosts(file_path=str(hosts_file))
+    plugin.setup()
     assert len(plugin.hosts) == 1
 
 
@@ -134,6 +138,7 @@ def test_etc_hosts_pre_resolve_matched_a_record(tmp_path):
     hosts_file.write_text("192.168.1.100 myhost.local\n")
 
     plugin = EtcHosts(file_path=str(hosts_file))
+    plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
     # Create a proper query
@@ -166,6 +171,7 @@ def test_etc_hosts_pre_resolve_no_match(tmp_path):
     hosts_file.write_text("127.0.0.1 localhost\n")
 
     plugin = EtcHosts(file_path=str(hosts_file))
+    plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
     query = DNSRecord.question("unknown.local", "A")
@@ -190,6 +196,7 @@ def test_etc_hosts_pre_resolve_ignores_non_a_aaaa(tmp_path):
     hosts_file.write_text("127.0.0.1 localhost\n")
 
     plugin = EtcHosts(file_path=str(hosts_file))
+    plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
     query = DNSRecord.question("localhost", "MX")
@@ -214,6 +221,7 @@ def test_etc_hosts_pre_resolve_strips_trailing_dot(tmp_path):
     hosts_file.write_text("127.0.0.1 localhost\n")
 
     plugin = EtcHosts(file_path=str(hosts_file))
+    plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
     query = DNSRecord.question("localhost.", "A")
@@ -239,6 +247,7 @@ def test_etc_hosts_ipv6_support(tmp_path):
     hosts_file.write_text("::1 localhost6\n2001:db8::1 ipv6host\n")
 
     plugin = EtcHosts(file_path=str(hosts_file))
+    plugin.setup()
     assert "localhost6" in plugin.hosts
     assert plugin.hosts["localhost6"] == "::1"
     assert plugin.hosts["ipv6host"] == "2001:db8::1"
