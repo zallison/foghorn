@@ -23,6 +23,7 @@ dependencies = [
   "uvicorn>=0.30.0",
   "pytest",
   "pytest-cov",
+  "psutil",
 
 ]
 
