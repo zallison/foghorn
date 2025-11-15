@@ -98,13 +98,14 @@ def test_stats_endpoint_disabled_when_no_collector() -> None:
 
 
 def test_get_system_info_uses_meminfo_and_load(monkeypatch) -> None:
-    """Brief: get_system_info() should combine loadavg and meminfo safely.
+    """Brief: get_system_info() should combine loadavg, meminfo, and process RSS safely.
 
     Inputs:
       - monkeypatch fixture to stub os.getloadavg and _read_proc_meminfo.
 
     Outputs:
-      - Dict with expected numeric values for load and memory fields.
+      - Dict with expected numeric values for load and memory fields and
+        process RSS keys present.
     """
 
     import foghorn.webserver as web_mod
@@ -130,6 +131,9 @@ def test_get_system_info_uses_meminfo_and_load(monkeypatch) -> None:
     assert info["memory_available_bytes"] == 512 * 1024 * 1024
     assert info["memory_free_bytes"] == 256 * 1024 * 1024
     assert info["memory_used_bytes"] == 512 * 1024 * 1024
+    # Process RSS keys should always be present; values may be None when psutil is unavailable.
+    assert "process_rss_bytes" in info
+    assert "process_rss_mb" in info
 
 
 def test_stats_includes_system_section(monkeypatch) -> None:
@@ -480,51 +484,43 @@ def test_create_app_installs_filter_on_startup() -> None:
         logger_obj.filters = original_filters
 
 
-def test_root_index_returns_html_when_enabled(tmp_path) -> None:
-    """Brief: GET / should serve index.html when webserver.index is true.
+def test_root_index_serves_project_html_index(monkeypatch, tmp_path) -> None:
+    """Brief: GET / and /index.html should serve project html/index.html.
 
     Inputs:
-      - Temporary index.html file placed next to foghorn.webserver module.
+      - Temporary html directory with an index.html file.
 
     Outputs:
-      - / returns HTTP 200 and HTML content type when file exists.
+      - / and /index.html return HTTP 200, HTML content type, and the
+        contents of html/index.html.
     """
 
-    # Import here to locate the module directory at runtime
     import os
     import foghorn.webserver as web_mod
 
-    here = os.path.dirname(os.path.abspath(web_mod.__file__))
-    index_path = os.path.join(here, "index.html")
+    # Point www_root to a temporary html directory for this test
+    root_dir = tmp_path
+    html_dir = root_dir / "html"
+    html_dir.mkdir()
+    index_path = html_dir / "index.html"
+    index_body = "<html><body>test dashboard from project html</body></html>"
+    index_path.write_text(index_body, encoding="utf-8")
 
-    # Create a temporary index.html in the module directory
-    # (back up any existing file and restore it after test)
-    backup_path = None
-    if os.path.exists(index_path):
-        backup_path = index_path + ".bak"
-        os.replace(index_path, backup_path)
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True, "index": True}},
+        log_buffer=RingBuffer(),
+    )
 
-    try:
-        with open(index_path, "w", encoding="utf-8") as f:
-            f.write("<html><body>test dashboard</body></html>")
+    # Override app.state.www_root to point at our temporary html directory
+    app.state.www_root = os.fspath(html_dir)
+    client = TestClient(app)
 
-        app = create_app(
-            stats=None,
-            config={"webserver": {"enabled": True, "index": True}},
-            log_buffer=RingBuffer(),
-        )
-        client = TestClient(app)
-
-        resp = client.get("/")
+    for path in ["/", "/index.html"]:
+        resp = client.get(path)
         assert resp.status_code == 200
         assert "text/html" in resp.headers.get("content-type", "")
-        assert "test dashboard" in resp.text
-    finally:
-        # Clean up: remove temp file and restore backup if needed
-        if os.path.exists(index_path):
-            os.remove(index_path)
-        if backup_path is not None and os.path.exists(backup_path):
-            os.replace(backup_path, index_path)
+        assert index_body == resp.text
 
 
 def test_token_auth_blocks_unauthorized_and_allows_with_token() -> None:
