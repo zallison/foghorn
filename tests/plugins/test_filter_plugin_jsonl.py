@@ -32,6 +32,7 @@ def test_domains_jsonl_with_modes(tmp_path):
         allowed_domains_files=[str(f)],  # initial mode allow, per-line override applies
         default="deny",
     )
+    p.setup()
 
     assert p.is_allowed("a-allow.com") is True
     assert p.is_allowed("b-deny.com") is False
@@ -65,6 +66,7 @@ def test_patterns_keywords_jsonl(tmp_path):
         blocked_keywords_files=[str(keys)],
         default="allow",
     )
+    p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     assert p.pre_resolve("ads.example", QTYPE.A, b"", ctx).action == "deny"
