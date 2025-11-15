@@ -509,12 +509,12 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             decision = p.pre_resolve(qname, qtype, data, ctx)
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
-                    logger.warning(
+                    logger.debug(
                         "Denied %s %s by %s", qname, qtype, p.__class__.__name__
                     )
                     return decision
                 elif decision.action == "override" and decision.response is not None:
-                    logger.info(
+                    logger.debug(
                         "Override %s type %s by %s", qname, qtype, p.__class__.__name__
                     )
                     return decision

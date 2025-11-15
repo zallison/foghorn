@@ -25,7 +25,7 @@ class FlakyServer(BasePlugin):
         - nxdomain_one_in (int, default 10): Probability denominator for NXDOMAIN (1 in N). Minimum 1.
         - apply_to_qtypes (list[str], default ["*"]): Qtypes to affect (e.g., ["A","AAAA"]). "*" means all.
         - seed (int | None, default None): If provided, decisions become deterministic for testing.
-        - pre_priority/post_priority/priority (int): Standard BasePlugin priority knobs. Default pre=15.
+        - pre_priority/post_priority (int): Standard BasePlugin priority knobs. Default pre=15.
 
     Outputs:
       - Initialized plugin instance that may short-circuit requests in pre_resolve with SERVFAIL or NXDOMAIN.

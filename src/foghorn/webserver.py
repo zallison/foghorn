@@ -10,12 +10,16 @@ backed by the in-process StatsCollector and current configuration dict.
 from __future__ import annotations
 
 import copy
+import html
 import http.server
 import json
 import logging
 import mimetypes
 import os
+<<<<<<< HEAD
 import signal
+=======
+>>>>>>> dev/0.2.0-stat-server
 import threading
 import urllib.parse
 from datetime import datetime, timezone
@@ -243,6 +247,7 @@ def sanitize_config(
     return redacted
 
 
+<<<<<<< HEAD
 def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
     """Brief: Parse a /proc/meminfo-style file into byte counts.
 
@@ -339,6 +344,8 @@ def get_system_info() -> Dict[str, Any]:
     return payload
 
 
+=======
+>>>>>>> dev/0.2.0-stat-server
 def _build_stats_payload_for_index(
     collector: Optional[StatsCollector],
 ) -> Dict[str, Any]:
@@ -368,7 +375,10 @@ def _build_stats_payload_for_index(
         "top_domains": snap.top_domains,
         "latency": snap.latency_stats,
         "latency_recent": snap.latency_recent_stats,
+<<<<<<< HEAD
         "system": get_system_info(),
+=======
+>>>>>>> dev/0.2.0-stat-server
     }
     return payload
 
@@ -499,6 +509,12 @@ def create_app(
     web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
     app = FastAPI(title="Foghorn Admin HTTP API")
 
+    # Derived paths for optional static assets
+    root_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
+    )
+    www_root = os.path.join(root_dir, "html")
+
     # Install default suppression of 2xx uvicorn access logs on startup so it
     # applies both to embedded and external uvicorn usage.
     @app.on_event("startup")
@@ -520,6 +536,7 @@ def create_app(
     app.state.log_buffer = log_buffer or RingBuffer(
         capacity=int(web_cfg.get("logs", {}).get("buffer_size", 500))
     )
+    app.state.www_root = www_root
 
     # CORS configuration
     cors_cfg = web_cfg.get("cors") or {}
@@ -772,14 +789,13 @@ def create_app(
         entries = buf.snapshot(limit=max(0, int(limit)))
         return {"server_time": _utc_now_iso(), "entries": entries}
 
-    # Optional static dashboard
+    # Optional virtual HTML dashboard and static file serving from www/
     index_enabled = bool(web_cfg.get("index", True))
-    if index_enabled:
-        import os
 
     @app.get("/index.html", response_class=HTMLResponse)
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
+<<<<<<< HEAD
         """Serve HTML index page.
 
         Inputs:
@@ -805,6 +821,20 @@ def create_app(
             return FileResponse(index_path)
 
         # Fallback to virtual dashboard when no static index is present
+=======
+        """Serve a virtual HTML index page with logo, stats, and sanitized config.
+
+        Inputs: none
+        Outputs: HTMLResponse representing the dashboard.
+        """
+
+        if not index_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="index disabled",
+            )
+
+>>>>>>> dev/0.2.0-stat-server
         collector: Optional[StatsCollector] = app.state.stats_collector
         stats_payload = _build_stats_payload_for_index(collector)
 
@@ -898,8 +928,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
       - Inherits request/connection attributes from BaseHTTPRequestHandler.
 
     Outputs:
-      - Serves /health, /stats, /stats/reset, /traffic, /config, /logs, and
-        optionally / when index.html is present.
+      - Serves /health, /stats, /stats/reset, /traffic, /config, /logs,
+        virtual / and /index.html, and static files from html/ when present.
     """
 
     def _server(self) -> _AdminHTTPServer:
@@ -995,6 +1025,25 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         body = text.encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(len(body)))
+        self._apply_cors_headers()
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_html(self, status_code: int, html_body: str) -> None:
+        """Brief: Send HTML response.
+
+        Inputs:
+          - status_code: HTTP status code
+          - html_body: HTML document/string to send.
+        Outputs:
+          - None
+        """
+
+        body = html_body.encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
         self._apply_cors_headers()
@@ -1313,7 +1362,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _handle_index(self) -> None:
-        """Brief: Handle GET / when index.html is enabled.
+        """Brief: Handle GET / and /index.html with a virtual HTML dashboard.
 
         Inputs: none
         Outputs: None
@@ -1325,6 +1374,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_text(404, "index disabled")
             return
 
+<<<<<<< HEAD
         # Prefer static html/index.html when available
         index_path = os.path.abspath(os.path.join(self._www_root(), "index.html"))
         if os.path.isfile(index_path):
@@ -1343,6 +1393,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(data)
                 return
 
+=======
+>>>>>>> dev/0.2.0-stat-server
         collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
         stats_payload = _build_stats_payload_for_index(collector)
 
@@ -1367,32 +1419,48 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """
 
         here = os.path.dirname(os.path.abspath(__file__))
-        index_path = os.path.join(here, "index.html")
-        if not os.path.exists(index_path):
-            self._send_json(
-                404,
-                {
-                    "error": "index.html not found",
-                    "server_time": _utc_now_iso(),
-                },
-            )
-            return
+        return os.path.abspath(os.path.join(here, os.pardir, os.pardir, "html"))
+
+    def _try_serve_www(self, path: str) -> bool:
+        """Brief: Attempt to serve a static file from html/ for the given path.
+
+        Inputs:
+          - path: Request path (e.g., "/logo.png" or "/css/app.css").
+
+        Outputs:
+          - bool: True if a response was sent, False if no matching file exists.
+        """
+
+        # Normalize and guard against path traversal
+        rel = path.lstrip("/")
+        root = self._www_root()
+        root_abs = os.path.abspath(root)
+        candidate = os.path.abspath(os.path.join(root_abs, rel))
+        if not candidate.startswith(root_abs + os.sep):
+            return False
+        if not os.path.isfile(candidate):
+            return False
 
         try:
-            with open(index_path, "rb") as f:
+            with open(candidate, "rb") as f:
                 data = f.read()
         except Exception as exc:  # pragma: no cover
-            logger.error("Failed to read index.html: %s", exc)
-            self._send_text(500, "failed to read index.html")
-            return
+            logger.error("Failed to read static file %s: %s", candidate, exc)
+            self._send_text(500, "failed to read static file")
+            return True
+
+        content_type, _ = mimetypes.guess_type(candidate)
+        if not content_type:
+            content_type = "application/octet-stream"
 
         self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(data)))
         self._apply_cors_headers()
         self.end_headers()
         self.wfile.write(data)
+        return True
 
     # ---------- HTTP verb handlers ----------
 
@@ -1430,9 +1498,12 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_config_raw()
         elif path == "/logs":
             self._handle_logs(params)
-        elif path == "/":
+        elif path in {"/", "/index.html"}:
             self._handle_index()
         else:
+            # As a last resort, try to serve from html/ if the file exists.
+            if self._try_serve_www(path):
+                return
             self._send_text(404, "not found")
 
     def do_POST(self) -> None:  # noqa: N802
