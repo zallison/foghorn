@@ -110,6 +110,7 @@ def test_fetch_creation_date_uses_memory_cache(monkeypatch, tmp_path):
     """
     db = tmp_path / "whois.db"
     p = NDF(whois_db_path=str(db))
+    p.setup()
     domain = "cached.com"
     ts = 1700000000
     p._whois_cache.set((domain, 1), 3600, str(ts).encode())
@@ -142,6 +143,7 @@ def test_domain_age_days_handles_naive_creation_date(monkeypatch, tmp_path):
     """
     db = tmp_path / "whois.db"
     p = NDF(whois_db_path=str(db))
+    p.setup()
 
     created = dt.datetime(2023, 1, 1)  # naive
     now = dt.datetime(2023, 1, 11, tzinfo=dt.timezone.utc)
@@ -172,6 +174,7 @@ def test_domain_age_days_exception_returns_none(monkeypatch, tmp_path):
       - None: asserts None returned
     """
     p = NDF(whois_db_path=str(tmp_path / "whois.db"))
+    p.setup()
     monkeypatch.setattr(
         p, "_fetch_creation_date", lambda d: (_ for _ in ()).throw(RuntimeError("boom"))
     )
@@ -190,6 +193,7 @@ def test_fetch_creation_date_persists_naive_datetime(tmp_path, monkeypatch):
     """
     db = tmp_path / "whois.db"
     p = NDF(whois_db_path=str(db))
+    p.setup()
     domain = "naive.com"
 
     naive = dt.datetime(2020, 6, 1)  # naive

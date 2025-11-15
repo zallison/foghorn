@@ -98,6 +98,7 @@ def test_examples_plugin_init_defaults():
       - None: Asserts default config values
     """
     plugin = ExamplesPlugin()
+    plugin.setup()
     assert plugin.max_subdomains == 5
     assert plugin.max_length_no_dots == 50
     assert plugin.base_labels == 2
@@ -120,6 +121,7 @@ def test_examples_plugin_init_custom_config():
         base_labels=3,
         apply_to_qtypes=["A", "AAAA"],
     )
+    plugin.setup()
     assert plugin.max_subdomains == 3
     assert plugin.max_length_no_dots == 30
     assert plugin.base_labels == 3
@@ -137,6 +139,7 @@ def test_examples_plugin_pre_resolve_allows_normal():
       - None: Asserts None returned (allow)
     """
     plugin = ExamplesPlugin()
+    plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
     decision = plugin.pre_resolve("www.example.com", QTYPE.A, b"", ctx)
     assert decision is None
@@ -153,6 +156,7 @@ def test_examples_plugin_pre_resolve_denies_too_many_subdomains():
       - None: Asserts deny decision
     """
     plugin = ExamplesPlugin(max_subdomains=3)
+    plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
     # a.b.c.d.example.com = 4 subdomains
     decision = plugin.pre_resolve("a.b.c.d.example.com", QTYPE.A, b"", ctx)
@@ -171,6 +175,7 @@ def test_examples_plugin_pre_resolve_denies_too_long():
       - None: Asserts deny decision
     """
     plugin = ExamplesPlugin(max_length_no_dots=10)
+    plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
     # "verylongdomainname.com" = 21 chars without dots
     decision = plugin.pre_resolve("verylongdomainname.com", QTYPE.A, b"", ctx)
@@ -190,6 +195,7 @@ def test_examples_plugin_applies_qtype_filter():
       - None: Asserts filtering applied
     """
     plugin = ExamplesPlugin(max_subdomains=0, apply_to_qtypes=["A"])
+    plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
     # Should deny A queries
@@ -213,6 +219,7 @@ def test_examples_plugin_post_resolve_no_rewrite_rules():
       - None: Asserts None returned
     """
     plugin = ExamplesPlugin()
+    plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
     query = DNSRecord.question("example.com", "A")
     response = query.reply()
@@ -233,9 +240,10 @@ def test_examples_plugin_post_resolve_with_rewrite():
     Outputs:
       - None: Asserts override decision with modified response
     """
-    plugin = ExamplesPlugin(
-        rewrite_first_ipv4=[{"apply_to_qtypes": ["A"], "ip_override": "127.0.0.1"}]
-    )
+    rewrite_first_ipv4 = [{"apply_to_qtypes": ["A"], "ip_override": "127.0.0.1"}]
+    plugin = ExamplesPlugin(rewrite_first_ipv4=rewrite_first_ipv4)
+    plugin.setup()
+
     ctx = PluginContext(client_ip="127.0.0.1")
 
     # Create a proper response with A record using RR
@@ -252,7 +260,6 @@ def test_examples_plugin_post_resolve_with_rewrite():
             rdata=A("93.184.216.34"),
         )
     )
-
     decision = plugin.post_resolve("example.com", QTYPE.A, response.pack(), ctx)
     assert decision is not None
     assert decision.action == "override"

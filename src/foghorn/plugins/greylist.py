@@ -33,14 +33,13 @@ class GreylistPlugin(BasePlugin):
     - No schema changes: uses existing first_seen timestamp without updates
     """
 
-    def __init__(self, **config):
+    def start(self, **config):
         """
         Initializes the GreylistPlugin.
 
         Args:
             **config: Plugin-specific configuration.
         """
-        super().__init__(**config)
         self.duration_seconds = self.config.get(
             "duration_seconds", self.config.get("duration_hours", 24) * 3600
         )

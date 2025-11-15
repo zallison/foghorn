@@ -293,21 +293,30 @@ class FilterPlugin(BasePlugin):
     def post_resolve(
         self, qname: str, qtype: int, response_wire: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
-        """
-        Filters IP addresses in DNS responses after resolution.
+        """Filter IP addresses in DNS responses after resolution.
 
-        Args:
-            qname: The queried domain name.
-            qtype: The query type.
-            response_wire: The response from the upstream server.
-            ctx: The plugin context.
+        Inputs:
+            qname: Queried domain name.
+            qtype: Query type (only A and AAAA are supported).
+            response_wire: DNS response bytes from the upstream server.
+            ctx: PluginContext with request metadata.
 
-        Returns:
-            A PluginDecision to modify or deny responses containing blocked IPs, otherwise None.
+        Outputs:
+            PluginDecision to modify or deny responses containing blocked IPs,
+            or None when no changes are required.
+
+        Example:
+            >>> # Only A/AAAA queries are supported; others raise TypeError
+            >>> # plugin.post_resolve("ex.com", QTYPE.MX, b"", ctx)  # doctest: +SKIP
         """
-        # Only process A and AAAA records
+
+        # Only process A and AAAA records; other qtypes are considered a
+        # programming error for this plugin and raise TypeError so callers can
+        # handle them explicitly.
         if qtype not in (QTYPE.A, QTYPE.AAAA):
-            raise TypeError("bad qtype")
+            raise TypeError(
+                f"FilterPlugin.post_resolve only supports A/AAAA qtypes, got {qtype!r}"
+            )
 
         if not self.blocked_ips and not self.blocked_networks:
             return None
