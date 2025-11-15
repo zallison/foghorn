@@ -16,6 +16,8 @@ import time
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from foghorn.transports.dot import get_dot_pool
 
 

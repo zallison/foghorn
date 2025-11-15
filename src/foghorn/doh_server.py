@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import ssl
+import functools
 from typing import Callable, Optional
 
 _HTTP_OK = b"HTTP/1.1 200 OK\r\n"
@@ -13,6 +14,7 @@ _CONN_CLOSE = b"Connection: close\r\n"
 _CRLF = b"\r\n"
 
 
+@functools.lru_cache(maxsize=1024)
 def _b64url_decode_nopad(s: str) -> bytes:
     """
     Brief: Decode base64url without padding.
@@ -162,38 +164,10 @@ async def _handle_conn(
             pass
 
 
-async def serve_doh(
-    host: str,
-    port: int,
-    resolver: Callable[[bytes, str], bytes],
-    *,
-    cert_file: Optional[str] = None,
-    key_file: Optional[str] = None,
-) -> None:
-    """
-    Brief: Serve DNS-over-HTTPS (RFC 8484) on host:port with optional TLS.
+# NOTE: This module previously exposed a backwards-compatibility asyncio DoH
+# server. That implementation has been superseded by the FastAPI/uvicorn-based
+# server in foghorn.doh_api. New code should use foghorn.doh_api.start_doh_server
+# directly.
 
-    Inputs:
-    - host: listen address
-    - port: listen port
-    - resolver: callable mapping (query_bytes, client_ip) -> response_bytes
-    - cert_file: optional TLS certificate path
-    - key_file: optional TLS key path
-
-    Outputs:
-    - None (runs forever)
-
-    Example:
-        >>> # asyncio.run(serve_doh('127.0.0.1', 8053, resolver))
-    """
-    ssl_ctx = None
-    if cert_file and key_file:
-        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        ssl_ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
-
-    server = await asyncio.start_server(
-        lambda r, w: _handle_conn(r, w, resolver), host, port, ssl=ssl_ctx
-    )
-    async with server:
-        await server.serve_forever()
+# The legacy serve_doh coroutine is removed; importing this module is no longer
+# required for DoH operation.

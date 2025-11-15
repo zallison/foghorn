@@ -28,6 +28,7 @@ def test_first_seen_inserts_and_denies(tmp_path, monkeypatch):
     """
     db = tmp_path / "grey.db"
     p = GreylistPlugin(db_path=str(db), duration_seconds=60, cache_ttl_seconds=300)
+    p.start()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     monkeypatch.setattr("time.time", lambda: 1000)
@@ -52,6 +53,7 @@ def test_within_window_denies_again_without_updating_first_seen(tmp_path, monkey
     """
     db = tmp_path / "grey.db"
     p = GreylistPlugin(db_path=str(db), duration_seconds=60, cache_ttl_seconds=300)
+    p.start()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     monkeypatch.setattr("time.time", lambda: 1000)
@@ -78,6 +80,7 @@ def test_after_window_allows_and_does_not_update_first_seen(tmp_path, monkeypatc
     """
     db = tmp_path / "grey.db"
     p = GreylistPlugin(db_path=str(db), duration_seconds=60, cache_ttl_seconds=300)
+    p.start()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     monkeypatch.setattr("time.time", lambda: 1000)
@@ -121,6 +124,7 @@ def test_cache_hit_bypasses_db(monkeypatch, tmp_path):
     """
     db = tmp_path / "grey.db"
     p = GreylistPlugin(db_path=str(db), duration_seconds=50, cache_ttl_seconds=300)
+    p.start()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     # Seed cache directly
@@ -149,6 +153,7 @@ def test_db_load_populates_cache(tmp_path, monkeypatch):
     """
     db = tmp_path / "grey.db"
     p = GreylistPlugin(db_path=str(db), duration_seconds=60, cache_ttl_seconds=300)
+    p.start()
 
     # Insert directly into DB
     p._db_upsert_first_seen("example.com", 1000)

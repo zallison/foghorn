@@ -37,17 +37,17 @@ def test_get_min_cache_ttl_various_inputs():
     assert _get_min_cache_ttl({}) == 60
 
 
-def test_normalize_upstream_config_list_and_dict(caplog):
+def test_normalize_upstream_config_list_only_and_timeout_default():
     """
-    Brief: normalize_upstream_config supports list and dict, timeout precedence.
+    Brief: normalize_upstream_config accepts list-only upstreams and top-level timeout.
 
     Inputs:
-      - cfg: with list upstreams and top-level timeout, and legacy dict with timeout
+      - cfg: with list upstreams and optional top-level timeout.
 
     Outputs:
-      - None: Asserts upstreams parsed and warning emitted
+      - None: Asserts upstreams parsed and timeout default/override behavior.
     """
-    # List form
+    # List form with explicit timeout
     ups, to = normalize_upstream_config(
         {
             "upstream": [
@@ -60,23 +60,16 @@ def test_normalize_upstream_config_list_and_dict(caplog):
     assert ups == [{"host": "1.1.1.1", "port": 53}, {"host": "1.0.0.1", "port": 53}]
     assert to == 1500
 
-    # Dict legacy form with legacy timeout
+    # Default timeout when not provided
     ups2, to2 = normalize_upstream_config(
-        {"upstream": {"host": "8.8.8.8", "port": 53, "timeout_ms": 999}}
-    )
-    assert ups2 == [{"host": "8.8.8.8", "port": 53}]
-    assert to2 == 999
-
-    # Precedence warning when both provided
-    caplog.set_level(logging.WARNING)
-    ups3, to3 = normalize_upstream_config(
         {
-            "timeout_ms": 111,
-            "upstream": {"host": "8.8.4.4", "port": 53, "timeout_ms": 999},
+            "upstream": [
+                {"host": "8.8.8.8", "port": 53},
+            ]
         }
     )
-    assert to3 == 111
-    assert any("top-level timeout_ms" in r.message for r in caplog.records)
+    assert ups2 == [{"host": "8.8.8.8", "port": 53}]
+    assert to2 == 2000
 
 
 def test_load_plugins_uses_registry(monkeypatch):
@@ -117,19 +110,21 @@ def test_load_plugins_uses_registry(monkeypatch):
     assert plugins[1].kw == {"x": 1}
 
 
-def test_normalize_upstream_config_default_fallbacks():
+def test_normalize_upstream_config_rejects_non_list():
     """
-    Brief: Covers default upstream fallback and default timeout path.
+    Brief: Non-list upstream config raises ValueError now that legacy dict form is removed.
 
     Inputs:
-      - cfg: upstream dict missing host/port; no timeout fields
+      - cfg: upstream as dict or other non-list.
 
     Outputs:
-      - None: Asserts default upstream and 2000ms timeout
+      - None: Asserts ValueError raised.
     """
-    ups, to = normalize_upstream_config({"upstream": {"foo": "bar"}})
-    assert ups == [{"host": "1.1.1.1", "port": 53}]
-    assert to == 2000
+    with pytest.raises(ValueError):
+        normalize_upstream_config({"upstream": {"host": "1.1.1.1", "port": 53}})
+
+    with pytest.raises(ValueError):
+        normalize_upstream_config({"upstream": "invalid"})
 
 
 def test_load_plugins_skips_missing_module():
@@ -159,7 +154,9 @@ def test_main_starts_server_and_handles_keyboardinterrupt(monkeypatch):
     """
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  host: 1.1.1.1\n  port: 53\n"
+        "upstream:\n"
+        "  - host: 1.1.1.1\n"
+        "    port: 53\n"
         "timeout_ms: 777\n"
         "min_cache_ttl: 33\n"
         "plugins: []\n"
@@ -205,18 +202,18 @@ def test_main_starts_server_and_handles_keyboardinterrupt(monkeypatch):
     assert rc == 0
 
 
-def test_normalize_upstream_config_bad_type_default_fallback():
+def test_normalize_upstream_config_rejects_non_mapping_entries():
     """
-    Brief: Non-dict/list upstream triggers default fallback branch.
+    Brief: Each upstream entry must be a mapping; invalid entries raise ValueError.
 
     Inputs:
-      - cfg: upstream as string
+      - cfg: upstream as list with a non-dict element.
 
     Outputs:
-      - None: Asserts default upstream returned
+      - None: Asserts ValueError raised.
     """
-    ups, _ = normalize_upstream_config({"upstream": "invalid"})
-    assert ups == [{"host": "1.1.1.1", "port": 53}]
+    with pytest.raises(ValueError):
+        normalize_upstream_config({"upstream": ["bad"]})
 
 
 def test_main_returns_one_on_exception_alt(monkeypatch):
@@ -231,7 +228,9 @@ def test_main_returns_one_on_exception_alt(monkeypatch):
     """
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  host: 1.1.1.1\n  port: 53\n"
+        "upstream:\n"
+        "  - host: 1.1.1.1\n"
+        "    port: 53\n"
     )
 
     class DummyServer:

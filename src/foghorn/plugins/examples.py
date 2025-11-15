@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Optional, Union, List
 import logging
+import functools
 
 from dnslib import DNSRecord, QTYPE, A, AAAA
 from .base import BasePlugin, PluginDecision, PluginContext
@@ -47,7 +48,7 @@ class ExamplesPlugin(BasePlugin):
         - A responses: first A RR is rewritten per matching rewrite rules.
     """
 
-    def __init__(self, **config) -> None:
+    def setup(self) -> None:
         """
         Initialize plugin with provided config or defaults.
 
@@ -57,7 +58,6 @@ class ExamplesPlugin(BasePlugin):
         Returns:
             None
         """
-        super().__init__(**config)
         self.max_subdomains = int(self.config.get("max_subdomains", 5))
         self.max_length_no_dots = int(self.config.get("max_length_no_dots", 50))
         self.base_labels = int(self.config.get("base_labels", 2))
@@ -242,6 +242,7 @@ class ExamplesPlugin(BasePlugin):
         return None
 
 
+@functools.lru_cache(maxsize=1024)
 def _count_subdomains(qname: str, base_labels: int = 2) -> int:
     """
     Count subdomains as label_count - base_labels (never below 0).
@@ -266,6 +267,7 @@ def _count_subdomains(qname: str, base_labels: int = 2) -> int:
     return max(0, len(labels) - int(base_labels))
 
 
+@functools.lru_cache(maxsize=1024)
 def _length_without_dots(qname: str) -> int:
     """
     Compute domain length excluding dots.

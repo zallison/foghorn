@@ -25,6 +25,7 @@ def test_fetch_creation_date_uses_fresh_db_and_seeds_cache(tmp_path, monkeypatch
     """
     db = tmp_path / "whois.db"
     plugin = NewDomainFilterPlugin(whois_db_path=str(db), whois_refresh_seconds=86400)
+    plugin.setup()
     now_ts = 2000000000
     domain = "fresh.com"
 
@@ -53,6 +54,7 @@ def test_fetch_creation_date_refreshes_stale_db(tmp_path, monkeypatch):
     """
     db = tmp_path / "whois.db"
     plugin = NewDomainFilterPlugin(whois_db_path=str(db), whois_refresh_seconds=100)
+    plugin.setup()
     domain = "stale.com"
 
     old_creation = 1600000000
@@ -93,6 +95,7 @@ def test_fetch_creation_date_bad_cached_value_is_ignored(tmp_path, monkeypatch):
     """
     db = tmp_path / "whois.db"
     plugin = NewDomainFilterPlugin(whois_db_path=str(db), whois_refresh_seconds=999999)
+    plugin.setup()
     domain = "cachecorrupt.com"
 
     # Corrupt cache value

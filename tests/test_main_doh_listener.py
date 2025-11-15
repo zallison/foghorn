@@ -30,7 +30,9 @@ def test_main_doh_listener_starts(monkeypatch):
         "    enabled: true\n"
         "    host: 127.0.0.1\n"
         "    port: 8053\n"
-        "upstream:\n  host: 1.1.1.1\n  port: 53\n"
+        "upstream:\n"
+        "  - host: 1.1.1.1\n"
+        "    port: 53\n"
     )
 
     class DummyServer:

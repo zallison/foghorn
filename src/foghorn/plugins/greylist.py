@@ -1,8 +1,10 @@
 from __future__ import annotations
-import time
+import functools
+import logging
 import sqlite3
 import threading
-import logging
+import time
+
 from typing import Optional
 
 from foghorn.plugins.base import BasePlugin, PluginDecision, PluginContext
@@ -31,14 +33,13 @@ class GreylistPlugin(BasePlugin):
     - No schema changes: uses existing first_seen timestamp without updates
     """
 
-    def __init__(self, **config):
+    def start(self, **config):
         """
         Initializes the GreylistPlugin.
 
         Args:
             **config: Plugin-specific configuration.
         """
-        super().__init__(**config)
         self.duration_seconds = self.config.get(
             "duration_seconds", self.config.get("duration_hours", 24) * 3600
         )
@@ -64,6 +65,7 @@ class GreylistPlugin(BasePlugin):
                 ")"
             )
 
+    @functools.lru_cache(maxsize=1024)
     def _to_base_domain(self, qname: str) -> str:
         """
         Extracts the last two labels of a domain name.

@@ -42,7 +42,7 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                 resp = self.resolver(body, peer_ip)
                 sock.sendall(len(resp).to_bytes(2, "big") + resp)
         except Exception:  # pragma: no cover
-            pass  # pragma: no cover
+            pass
 
 
 def serve_tcp_threaded(

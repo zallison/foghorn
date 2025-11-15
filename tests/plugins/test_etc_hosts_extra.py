@@ -30,6 +30,7 @@ def test_pre_resolve_override_response_id_matches(tmp_path):
     hosts_file.write_text("10.0.0.1 example.local\n")
 
     plugin = EtcHosts(file_path=str(hosts_file))
+    plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
     q = DNSRecord.question("example.local", "A")
@@ -58,6 +59,7 @@ def test_pre_resolve_parse_failure_returns_override_with_none_response(tmp_path)
     hosts_file.write_text("192.0.2.1 broken.local\n")
 
     plugin = EtcHosts(file_path=str(hosts_file))
+    plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
     decision = plugin.pre_resolve("broken.local", QTYPE.A, b"not-a-dns-wire", ctx)

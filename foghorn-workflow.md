@@ -2,27 +2,53 @@
 
 ## Component Interactions & Data Flow
 
+Below is the Mermaid diagram (renders on GitHub and many docs tools):
+
+```mermaid
+flowchart TB
+  cli_config['CLI/Config → main.py']
+  normalize['normalize_upstream_config()<br/>load_plugins()<br/>init_logging()']
+  dns_server_init['DNSServer.__init__()<br/>ThreadingUDPServer created']
+  serve_forever['DNSServer.serve_forever()<br/>Listens for UDP queries']
+  handler['DNSUDPHandler.handle()<br/>per query']
+  parse['Parse query<br/>(DNSRecord)']
+  plugin_ctx['Instantiate<br/>PluginContext(client_ip)']
+  pre_resolve['For each plugin:<br/>pre_resolve() → PluginDecision']
+  cache_lookup['Cache lookup<br/>by (qname, qtype)']
+  upstream_failover['send_query_with_failover()<br/>upstream_candidates or global']
+  post_resolve['For each plugin:<br/>post_resolve() → PluginDecision']
+  cache_store['Cache response<br/>(if NOERROR + has answers)']
+  send_response['Send response<br/>to client']
+
+  cli_config --> normalize
+  normalize --> dns_server_init
+  dns_server_init --> serve_forever
+  serve_forever -- 'per UDP packet' --> handler
+  handler --> parse
+  parse --> plugin_ctx
+  plugin_ctx --> pre_resolve
+  pre_resolve --> cache_lookup
+  cache_lookup -- 'cache miss' --> upstream_failover
+  upstream_failover --> post_resolve
+  post_resolve --> cache_store
+  cache_store --> send_response
+
+  style cli_config fill:#add8e6,stroke:#333,stroke-width:1px
+  style normalize fill:#ffffe0,stroke:#333,stroke-width:1px
+  style dns_server_init fill:#90ee90,stroke:#333,stroke-width:1px
+  style serve_forever fill:#e0ffff,stroke:#333,stroke-width:1px
+  style handler fill:#f5deb3,stroke:#333,stroke-width:1px
+  style parse fill:#ffffff,stroke:#333,stroke-width:1px
+  style plugin_ctx fill:#ffffff,stroke:#333,stroke-width:1px
+  style pre_resolve fill:#ffa07a,stroke:#333,stroke-width:1px
+  style cache_lookup fill:#ffffff,stroke:#333,stroke-width:1px
+  style upstream_failover fill:#b0c4de,stroke:#333,stroke-width:1px
+  style post_resolve fill:#ffa07a,stroke:#333,stroke-width:1px
+  style cache_store fill:#ffffff,stroke:#333,stroke-width:1px
+  style send_response fill:#add8e6,stroke:#333,stroke-width:1px
 ```
-CLI/Config → main.py
-    ↓
-normalize_upstream_config() → (upstreams, timeout_ms)
-load_plugins() → [plugin_instances]
-init_logging() → Logger setup
-    ↓
-DNSServer.__init__() → ThreadingUDPServer created, plugins injected into handler class vars
-    ↓
-DNSServer.serve_forever() → Listens for UDP queries
-    ↓
-DNSUDPHandler.handle() per query:
-    ├─ Parse query (DNSRecord)
-    ├─ Instantiate PluginContext(client_ip)
-    ├─ For each plugin: pre_resolve() → PluginDecision
-    ├─ Cache lookup by (qname, qtype)
-    ├─ send_query_with_failover(upstream_candidates or global upstreams)
-    ├─ For each plugin: post_resolve() → PluginDecision
-    ├─ Cache response (if NOERROR + has answers)
-    └─ Send response to client
-```
+
+To regenerate a standalone .mmd file: `make workflow-diagram` (requires the `venv` to be prepared via `make build`).
 
 
 ## Core Components
@@ -87,10 +113,9 @@ DNSUDPHandler.handle() per query:
 
 #### 1. AccessControlPlugin (`access_control.py`)
 - **Aliases**: `acl`, `access_control`
-- **Function**: CIDR-based IP allow/deny lists with configurable default policy
-- **Hook**: `pre_resolve()` - Denies/allows based on client IP
-- **Config**: `default` (allow/deny), `allow` (list of CIDR ranges), `deny` (list of CIDR ranges)
-
+- **Function**: CIDR-based IP allowlist/blocklist with configurable default policy
+- **Hook**: `pre_resolve()` - Applies allowlist/blocklist policy based on client IP
+- **Config**: `default` (allow/deny), `allow` (allowlist CIDR ranges), `deny` (blocklist CIDR ranges)
 #### 2. UpstreamRouterPlugin (`upstream_router.py`)
 - **Aliases**: `upstream_router`, `router`, `upstream`
 - **Function**: Routes queries to different upstreams based on domain suffix/exact match with failover
@@ -181,6 +206,14 @@ DNSUDPHandler.handle() per query:
 - Eviction: Opportunistic on get/set; expired entries auto-purged
 - No caching of SERVFAIL (allows retry on next request)
 - No caching of NXDOMAIN (existing behavior preserved)
+
+### Regenerating the workflow diagrams
+- Source of truth: `scripts/generate_workflow_diagram.py`
+- Outputs:
+  - Developer: `images/foghorn-workflow.mmd/.svg/.png`
+  - User Overview: `images/foghorn-workflow-user.mmd/.svg/.png`
+  - Full detail: `images/foghorn-workflow-full.mmd/.svg/.png`
+- Regenerate via: `make workflow-diagrams` (after `make build`; Mermaid CLI `mmdc` must be available)
 
 ### 5. Logging Output
 - Format: `<UTC_timestamp> <[level]> <logger_name>: <message>`

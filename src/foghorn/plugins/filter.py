@@ -1,11 +1,14 @@
 from __future__ import annotations
+import csv
+import glob
 import ipaddress
+import json
 import logging
 import re
 import sqlite3
 import os
 import time
-from typing import Optional, List, Set, Union, Dict
+from typing import Optional, List, Set, Union, Dict, Iterator, Tuple
 from dnslib import DNSRecord, QTYPE, RCODE, A as RDATA_A, AAAA as RDATA_AAAA
 from foghorn.cache import TTLCache
 
@@ -64,44 +67,35 @@ class FilterPlugin(BasePlugin):
               #   - "198.51.100.0/24"
     """
 
-    def __init__(self, **config):
+    def setup(self):
         """
-        Initializes the FilterPlugin.
-
-        Args:
-            **config: Configuration for the plugin containing domain and IP filters.
+        Initializes the FilterPlugin.  Config has been read.
         """
-        super().__init__(**config)
+        # super().__init__(**config)
         self._domain_cache = TTLCache()
 
         self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 600)  # 10 minutes
         self.db_path: str = self.config.get("db_path", "./var/blocklist.db")
         self.default = self.config.get("default", "deny")
-        self.blocklist_files = self.config.get("blocklist_files", [])
-        self.allowlist_files = self.config.get("allowlist_files", [])
+
+        # Back-compat keep existing keys, add new *_domains_files keys
+        self.blocklist_files: List[str] = self._expand_globs(
+            list(self.config.get("blocklist_files", []))
+            + list(self.config.get("blocked_domains_files", []))
+        )
+        self.allowlist_files: List[str] = self._expand_globs(
+            list(self.config.get("allowlist_files", []))
+            + list(self.config.get("allowed_domains_files", []))
+        )
+
         self.blocklist = self.config.get("blocked_domains", [])
         self.allowlist = self.config.get("allowed_domains", [])
 
-        self._connect_to_db()
-        self._db_init()
-
-        # Preload configured domains/files
-        for file in self.allowlist_files:
-            self.load_list_from_file(file, "allow")
-        for file in self.blocklist_files:
-            self.load_list_from_file(file, "deny")
-
-        for domain in self.blocklist:
-            self._db_insert_domain(domain, "config", "deny")
-        for domain in self.allowlist:
-            self._db_insert_domain(domain, "config", "allow")
-
-        # Pre-resolve (domain) filtering configuration
-        self.blocked_domains: Set[str] = set(self.config.get("blocked_domains", []))
+        # Pre-resolve (domain) filtering configuration (inline first)
         self.blocked_patterns: List[re.Pattern] = []
         self.blocked_keywords: Set[str] = set(self.config.get("blocked_keywords", []))
 
-        # Compile regex patterns for domain filtering
+        # Compile regex patterns for domain filtering from inline config
         for pattern in self.config.get("blocked_patterns", []):
             try:
                 self.blocked_patterns.append(re.compile(pattern, re.IGNORECASE))
@@ -109,7 +103,7 @@ class FilterPlugin(BasePlugin):
                 logger.error("Invalid regex pattern '%s': %s", pattern, e)
 
         # Post-resolve (IP) filtering configuration
-        # Maps IP networks/addresses to their actions ("remove" or "deny")
+        # Maps IP networks/addresses to their actions
         self.blocked_networks: Dict[
             Union[ipaddress.IPv4Network, ipaddress.IPv6Network], Dict
         ] = {}
@@ -117,16 +111,18 @@ class FilterPlugin(BasePlugin):
             Union[ipaddress.IPv4Address, ipaddress.IPv6Address], Dict
         ] = {}
 
-        # Parse IP addresses and networks with actions
+        # Parse IP addresses and networks with actions from inline config
         for ip_config in self.config.get("blocked_ips", []):
             try:
                 # Handle both simple string format and dict format
                 if isinstance(ip_config, str):
                     ip_spec = ip_config
                     action = "deny"  # default action
+                    replace_with = None
                 elif isinstance(ip_config, dict):
                     ip_spec = ip_config.get("ip", "")
                     action = ip_config.get("action", "deny").lower()
+                    replace_with = ip_config.get("replace_with")
                 else:
                     logger.error("Invalid blocked_ips entry format: %s", ip_config)
                     continue
@@ -140,7 +136,6 @@ class FilterPlugin(BasePlugin):
                     action = "deny"
 
                 if action == "replace":
-                    replace_with = ip_config.get("replace_with")
                     if not replace_with:
                         logger.error(
                             "Action 'replace' for IP '%s' requires 'replace_with' field.",
@@ -182,6 +177,40 @@ class FilterPlugin(BasePlugin):
 
             except ValueError as e:  # pragma: no cover
                 logger.error("Invalid IP address/network '%s': %s", ip_spec, e)
+
+        # Connect DB and initialize table
+        self._connect_to_db()
+        self._db_init()
+
+        # Load domains from files and inline with defined precedence (last write wins):
+        # 1) allowlist files, 2) blocklist files, 3) inline allowed_domains, 4) inline blocked_domains
+        for file in self.allowlist_files:
+            self.load_list_from_file(file, "allow")
+        for file in self.blocklist_files:
+            self.load_list_from_file(file, "deny")
+
+        # Inline allow/deny domains from config: batch into a single transaction
+        if self.allowlist or self.blocklist:
+            with self.conn:
+                for domain in self.allowlist:
+                    self._db_insert_domain(domain, "config", "allow")
+                for domain in self.blocklist:
+                    self._db_insert_domain(domain, "config", "deny")
+
+        # Load patterns/keywords/IPs from files (additive to inline config)
+        for patfile in self._expand_globs(
+            list(self.config.get("blocked_patterns_files", []))
+        ):
+            for pat in self._load_patterns_from_file(patfile):
+                self.blocked_patterns.append(pat)
+        for kwfile in self._expand_globs(
+            list(self.config.get("blocked_keywords_files", []))
+        ):
+            self.blocked_keywords.update(self._load_keywords_from_file(kwfile))
+        for ipfile in self._expand_globs(
+            list(self.config.get("blocked_ips_files", []))
+        ):
+            self._load_blocked_ips_from_file(ipfile)
 
     def add_to_cache(self, key: any, allowed: bool):
         """
@@ -264,21 +293,30 @@ class FilterPlugin(BasePlugin):
     def post_resolve(
         self, qname: str, qtype: int, response_wire: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
-        """
-        Filters IP addresses in DNS responses after resolution.
+        """Filter IP addresses in DNS responses after resolution.
 
-        Args:
-            qname: The queried domain name.
-            qtype: The query type.
-            response_wire: The response from the upstream server.
-            ctx: The plugin context.
+        Inputs:
+            qname: Queried domain name.
+            qtype: Query type (only A and AAAA are supported).
+            response_wire: DNS response bytes from the upstream server.
+            ctx: PluginContext with request metadata.
 
-        Returns:
-            A PluginDecision to modify or deny responses containing blocked IPs, otherwise None.
+        Outputs:
+            PluginDecision to modify or deny responses containing blocked IPs,
+            or None when no changes are required.
+
+        Example:
+            >>> # Only A/AAAA queries are supported; others raise TypeError
+            >>> # plugin.post_resolve("ex.com", QTYPE.MX, b"", ctx)  # doctest: +SKIP
         """
-        # Only process A and AAAA records
+
+        # Only process A and AAAA records; other qtypes are considered a
+        # programming error for this plugin and raise TypeError so callers can
+        # handle them explicitly.
         if qtype not in (QTYPE.A, QTYPE.AAAA):
-            raise TypeError("bad qtype")
+            raise TypeError(
+                f"FilterPlugin.post_resolve only supports A/AAAA qtypes, got {qtype!r}"
+            )
 
         if not self.blocked_ips and not self.blocked_networks:
             return None
@@ -429,15 +467,274 @@ class FilterPlugin(BasePlugin):
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         return self.conn
 
+    @staticmethod
+    def _expand_globs(paths: List[str]) -> List[str]:
+        """
+        Expand a list of file paths and globs into concrete file paths.
+
+        Args:
+            paths: A list of file paths or glob patterns.
+
+        Returns:
+            A list of resolved file paths.
+
+        Raises:
+            FileNotFoundError: If a provided path does not exist and matches no files.
+
+        Example:
+            >>> # doctest: +SKIP
+            >>> FilterPlugin._expand_globs(['config/*.txt', 'config/static.txt'])
+            ['config/a.txt', 'config/b.txt', 'config/static.txt']
+        """
+        resolved: List[str] = []
+        for p in paths:
+            matches = glob.glob(p)
+            if matches:
+                resolved.extend(matches)
+            else:
+                if os.path.exists(p):
+                    resolved.append(p)
+                else:
+                    raise FileNotFoundError(f"No file(s) match pattern or path: {p}")
+        return resolved
+
+    @staticmethod
+    def _iter_noncomment_lines(path: str) -> Iterator[Tuple[int, str]]:
+        """
+        Yield non-empty, non-comment lines from a file with line numbers.
+
+        Args:
+            path: File path to read.
+
+        Returns:
+            Iterator of (line_number, text) for each meaningful line.
+
+        Example:
+            >>> # doctest: +SKIP
+            >>> for ln, text in FilterPlugin._iter_noncomment_lines('file.txt'):
+            ...     print(ln, text)
+        """
+        with open(path, "r", encoding="utf-8") as fh:
+            for idx, raw in enumerate(fh, start=1):
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                yield idx, line
+
+    def _load_patterns_from_file(self, path: str) -> List[re.Pattern]:
+        """
+        Load regex patterns from a file, compiling with IGNORECASE.
+
+        Args:
+            path: Path to a file with one regex per line; '#' starts a comment.
+
+        Returns:
+            A list of compiled regex patterns.
+
+        Example:
+            >>> # doctest: +SKIP
+            >>> self._load_patterns_from_file('patterns.txt')
+            [re.compile('^ads\\.', re.IGNORECASE)]
+        """
+        logger.info(f"Filter: adding {path} to the database")
+        patterns: List[re.Pattern] = []
+        for ln, text in self._iter_noncomment_lines(path):
+            try:
+                if text.lstrip().startswith("{"):
+                    try:
+                        obj = json.loads(text)
+                    except json.JSONDecodeError as e:
+                        logger.error("Invalid JSON in %s:%d: %s", path, ln, e)
+                        continue
+                    if not isinstance(obj, dict) or "pattern" not in obj:
+                        logger.error(
+                            "JSON pattern missing 'pattern' in %s:%d", path, ln
+                        )
+                        continue
+                    patt = str(obj["pattern"])
+                    flags = 0
+                    for f in obj.get("flags") or []:
+                        fs = str(f).upper()
+                        if fs == "IGNORECASE":
+                            flags |= re.IGNORECASE
+                    if flags == 0:
+                        flags = re.IGNORECASE
+                    patterns.append(re.compile(patt, flags))
+                else:
+                    patterns.append(re.compile(text, re.IGNORECASE))
+            except re.error as e:
+                logger.error(
+                    "Invalid regex pattern in %s:%d: %s (%s)", path, ln, text, e
+                )
+        return patterns
+
+    def _load_keywords_from_file(self, path: str) -> Set[str]:
+        """
+        Load case-insensitive keywords from a file.
+
+        Args:
+            path: Path to a file with one keyword per line.
+
+        Returns:
+            A set of lowercased keywords.
+
+        Example:
+            >>> # doctest: +SKIP
+            >>> self._load_keywords_from_file('keywords.txt')
+            {'ads', 'tracker'}
+        """
+        kws: Set[str] = set()
+        for ln, text in self._iter_noncomment_lines(path):
+            if text.lstrip().startswith("{"):
+                try:
+                    obj = json.loads(text)
+                except json.JSONDecodeError as e:
+                    logger.error("Invalid JSON in %s:%d: %s", path, ln, e)
+                    continue
+                if not isinstance(obj, dict) or "keyword" not in obj:
+                    logger.error("JSON keyword missing 'keyword' in %s:%d", path, ln)
+                    continue
+                kws.add(str(obj["keyword"]).lower())
+            else:
+                kws.add(text.lower())
+        return kws
+
+    def _load_blocked_ips_from_file(self, path: str) -> None:
+        """
+        Load blocked IP rules from a file supporting simple, CSV, and JSON Lines formats.
+
+        Line formats:
+          - Simple: "IP_OR_CIDR" => action=deny
+          - CSV:    "IP_OR_CIDR,action[,replace_with]" where action in {deny, remove, replace}
+          - JSONL:  {"ip": "IP_OR_CIDR", "action": "deny|remove|replace", "replace_with": "IP"}
+
+        Args:
+            path: Path to the IP rules file.
+
+        Returns:
+            None
+
+        Example:
+            >>> # doctest: +SKIP
+            >>> self._load_blocked_ips_from_file('ips.txt')
+        """
+        for ln, text in self._iter_noncomment_lines(path):
+            ip_spec: str
+            action: str = "deny"
+            replace_with: Optional[str] = None
+            try:
+                stripped = text.lstrip()
+                if stripped.startswith("{"):
+                    # JSON line
+                    try:
+                        obj = json.loads(text)
+                    except json.JSONDecodeError as e:
+                        logger.error("Invalid JSON in %s:%d: %s", path, ln, e)
+                        continue
+                    if not isinstance(obj, dict):
+                        logger.error("JSON line is not an object in %s:%d", path, ln)
+                        continue
+                    ip_spec = str(obj.get("ip", "")).strip()
+                    action = str(obj.get("action", "deny")).strip().lower() or "deny"
+                    replace_with = obj.get("replace_with")
+                    if replace_with is not None:
+                        replace_with = str(replace_with).strip()
+                elif "," in text:
+                    # Use csv to parse robustly
+                    row = next(csv.reader([text]))
+                    if len(row) < 2 or len(row) > 3:
+                        logger.error(
+                            "Invalid blocked_ips CSV in %s:%d: %r", path, ln, text
+                        )
+                        continue
+                    ip_spec = row[0].strip()
+                    action = (row[1] or "").strip().lower() or "deny"
+                    replace_with = row[2].strip() if len(row) == 3 else None
+                else:
+                    ip_spec = text
+
+                if not ip_spec:
+                    logger.error("Missing ip in %s:%d", path, ln)
+                    continue
+
+                if action not in ("deny", "remove", "replace"):
+                    logger.warning(
+                        "Invalid action '%s' in %s:%d for '%s'; defaulting to 'deny'",
+                        action,
+                        path,
+                        ln,
+                        ip_spec,
+                    )
+                    action = "deny"
+
+                if "/" in ip_spec:
+                    network = ipaddress.ip_network(ip_spec, strict=False)
+                    if action == "replace":
+                        if not replace_with:
+                            logger.error(
+                                "Missing replace_with in %s:%d for network '%s'",
+                                path,
+                                ln,
+                                ip_spec,
+                            )
+                            continue
+                        try:
+                            ipaddress.ip_address(replace_with)
+                        except ValueError:
+                            logger.error(
+                                "Invalid replace_with '%s' in %s:%d",
+                                replace_with,
+                                path,
+                                ln,
+                            )
+                            continue
+                        self.blocked_networks[network] = {
+                            "action": action,
+                            "replace_with": replace_with,
+                        }
+                    else:
+                        self.blocked_networks[network] = {"action": action}
+                else:
+                    ip_addr = ipaddress.ip_address(ip_spec)
+                    if action == "replace":
+                        if not replace_with:
+                            logger.error(
+                                "Missing replace_with in %s:%d for ip '%s'",
+                                path,
+                                ln,
+                                ip_spec,
+                            )
+                            continue
+                        try:
+                            ipaddress.ip_address(replace_with)
+                        except ValueError:
+                            logger.error(
+                                "Invalid replace_with '%s' in %s:%d",
+                                replace_with,
+                                path,
+                                ln,
+                            )
+                            continue
+                        self.blocked_ips[ip_addr] = {
+                            "action": action,
+                            "replace_with": replace_with,
+                        }
+                    else:
+                        self.blocked_ips[ip_addr] = {"action": action}
+            except ValueError as e:
+                logger.error(
+                    "Invalid IP/network spec in %s:%d: %s (%s)", path, ln, text, e
+                )
+
     def _db_init(self) -> None:
         """Create the blocked_domains table if it does not exist."""
+        logger.debug("Creating blocked_domains database")
 
         # Clear blocklist, maybe
         if self.config.get("clear", 1):
             logger.debug("clearing allow/deny databases")
             self.conn.execute("DROP TABLE IF EXISTS blocked_domains")
 
-        logger.debug("Creating blocked_domains database")
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS blocked_domains ("
             "domain TEXT PRIMARY KEY, "
@@ -466,17 +763,20 @@ class FilterPlugin(BasePlugin):
             "VALUES (?, ?, ?, ?)",
             (domain, filename, mode, added_at),
         )
-        self.conn.commit()
 
     def load_list_from_file(self, filename: str, mode: str = "deny") -> None:
         """
-        Load domains from a newline-separated file into the database.
+        Load domains from a file into the database.
 
         Inputs:
             filename: Path to file containing domains.
             mode: Either "allow" or "deny". Default: "deny".
         Outputs:
             None
+
+        Supported line formats:
+          - Plain text: domain per line; blank lines and lines starting with '#' are ignored
+          - JSON Lines: {"domain": "example.com"} (optional "mode" in {"allow","deny"} overrides the function arg)
         """
         mode = mode.lower()
         if mode not in {"deny", "allow"}:
@@ -485,13 +785,60 @@ class FilterPlugin(BasePlugin):
         if not os.path.isfile(filename):
             raise FileNotFoundError(f"No file {filename}")
 
-        logger.debug("Opening %s for %s", filename, mode)
-        with open(filename, "r", encoding="utf-8") as fh:
-            for line in fh:
-                domain = line.strip()
-                if not domain or domain.startswith("#"):
-                    continue
-                self._db_insert_domain(domain, filename, mode)
+        def _normalize_token(token: str) -> str:
+            """
+            Brief: Normalize a domain token from list files.
+
+            Inputs:
+              - token: raw domain token
+            Outputs:
+              - normalized token with Adblock-style wrappers removed
+
+            If the token starts with '||' and ends with '^', those wrappers are stripped.
+            """
+            t = token.strip()
+            if t.startswith("||") and t.endswith("^"):
+                t = t[2:-1]
+            return t
+
+        logger.info("Opening %s for %s", filename, mode)
+        # Use a single transaction per file for performance on very large lists.
+        with self.conn:
+            with open(filename, "r", encoding="utf-8") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    eff_mode = mode
+                    domain_val = None
+                    if line.lstrip().startswith("{"):
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError as e:
+                            logger.error(
+                                "Invalid JSON domain line in %s: %s", filename, e
+                            )
+                            continue
+                        if not isinstance(obj, dict):
+                            logger.error(
+                                "JSON domain line not an object in %s", filename
+                            )
+                            continue
+                        domain_val = _normalize_token(
+                            str(obj.get("domain", "")).strip()
+                        )
+                        line_mode = obj.get("mode")
+                        if isinstance(line_mode, str) and line_mode.lower() in {
+                            "allow",
+                            "deny",
+                        }:
+                            eff_mode = line_mode.lower()
+                    else:
+                        domain_val = _normalize_token(line)
+                    if not domain_val:
+                        logger.error("Missing domain entry in %s", filename)
+                        continue
+                    self._db_insert_domain(domain_val, filename, eff_mode)
 
     def is_allowed(self, domain: str) -> bool:
         """

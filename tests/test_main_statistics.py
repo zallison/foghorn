@@ -35,7 +35,9 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
     """
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  host: 1.1.1.1\n  port: 53\n"
+        "upstream:\n"
+        "  - host: 1.1.1.1\n"
+        "    port: 53\n"
         "statistics:\n"
         "  enabled: true\n"
         "  interval_seconds: 1\n"
@@ -55,12 +57,22 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
             constructed["collector_kwargs"] = kw
 
     class DummyReporter:
-        def __init__(self, collector, interval_seconds, reset_on_log, log_level):
+        def __init__(
+            self,
+            collector,
+            interval_seconds,
+            reset_on_log,
+            log_level,
+            logger_name="foghorn.stats",
+            persistence_store=None,
+        ):
             constructed["reporter_args"] = {
                 "collector": collector,
                 "interval_seconds": interval_seconds,
                 "reset_on_log": reset_on_log,
                 "log_level": log_level,
+                "logger_name": logger_name,
+                "persistence_store": persistence_store,
             }
             self.interval_seconds = interval_seconds
             self.started = False

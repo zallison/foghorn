@@ -1,0 +1,360 @@
+:root {
+  /* Default to dark theme; light overrides are defined below. */
+  --fh-bg-page: #050910;
+  --fh-bg-pane: #0b1120;
+  --fh-bg-header: #050910;
+  --fh-border: #1f2937;
+  --fh-text: #e5e7eb;
+  --fh-muted: #9ca3af;
+  --fh-accent: #17273d; /* logo foreground */
+  --fh-accent-soft: rgba(23, 39, 61, 0.25);
+  --fh-error: #fecaca;
+  --fh-error-bg: rgba(248, 113, 113, 0.16);
+  --fh-success: #bbf7d0;
+  --fh-success-bg: rgba(34, 197, 94, 0.16);
+  --fh-pre-bg: #020617;
+  --fh-pre-fg: #e5e7eb;
+}
+
+:root[data-theme='light'] {
+  --fh-bg-page: #fef9f2;
+  --fh-bg-pane: #f9fafb;
+  --fh-bg-header: #fef9f2;
+  --fh-border: #e5e7eb;
+  --fh-text: #111827;
+  --fh-muted: #6b7280;
+  --fh-accent: #17273d;
+  --fh-accent-soft: #e0edff;
+  --fh-error: #b91c1c;
+  --fh-error-bg: #fee2e2;
+  --fh-success: #166534;
+  --fh-success-bg: #dcfce7;
+  --fh-pre-bg: #0b1120;
+  --fh-pre-fg: #e5e7eb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background-color: var(--fh-bg-page);
+  color: var(--fh-text);
+}
+
+.fh-header {
+  background: var(--fh-bg-header);
+  border-bottom: 1px solid var(--fh-border);
+}
+
+.fh-header-inner {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0.75rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.fh-header-main {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.fh-logo {
+  height: 140px;
+  width: auto;
+}
+
+.fh-title-block {
+  display: flex;
+  flex-direction: column;
+}
+
+.fh-title {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+.fh-subtitle {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--fh-muted);
+}
+
+.fh-theme-toggle {
+  display: inline-flex;
+  border-radius: 999px;
+  padding: 2px;
+  background: var(--fh-accent-soft);
+}
+
+.fh-theme-btn {
+  border: none;
+  background: transparent;
+  padding: 0.25rem 0.9rem;
+  font-size: 0.8rem;
+  border-radius: 999px;
+  color: var(--fh-muted);
+  cursor: pointer;
+}
+
+.fh-theme-btn-active {
+  background: var(--fh-accent);
+  color: #f9fafb;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.7);
+}
+
+.fh-main {
+  max-width: 1200px;
+  margin: 1.5rem auto;
+  padding: 0 1.5rem 1.5rem;
+  display: flex;
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+
+.fh-pane {
+  flex: 1 1 0;
+  min-width: 0;
+  background: var(--fh-bg-pane);
+  border-radius: 0.5rem;
+  border: 1px solid var(--fh-border);
+  padding: 1rem 1.25rem;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.4);
+  display: flex;
+  flex-direction: column;
+}
+
+.fh-pane-left {
+  flex: 0 0 360px;
+  max-width: 420px;
+}
+
+.fh-pane-title {
+  margin: 0 0 0.25rem 0;
+  font-size: 1.1rem;
+}
+
+.fh-pane-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.fh-pane-help {
+  margin: 0 0 0.75rem 0;
+  font-size: 0.85rem;
+  color: var(--fh-muted);
+}
+
+.fh-pre {
+  margin: 0;
+  padding: 0.75rem;
+  border-radius: 0.375rem;
+  background: var(--fh-pre-bg);
+  color: var(--fh-pre-fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  overflow: auto;
+  white-space: pre;
+}
+
+.fh-pre-compact {
+  max-height: 220px;
+}
+
+.fh-warning {
+  margin-bottom: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.375rem;
+  background: rgba(253, 224, 71, 0.12);
+  border: 1px solid rgba(250, 204, 21, 0.7);
+  font-size: 0.85rem;
+}
+
+.fh-warning strong {
+  color: #facc15;
+}
+
+.fh-config-toggle {
+  display: inline-flex;
+  margin-bottom: 0.75rem;
+  border-radius: 999px;
+  padding: 2px;
+  background: var(--fh-accent-soft);
+}
+
+.fh-toggle-btn {
+  border: none;
+  background: transparent;
+  padding: 0.3rem 0.9rem;
+  font-size: 0.85rem;
+  border-radius: 999px;
+  color: var(--fh-muted);
+  cursor: pointer;
+}
+
+.fh-toggle-btn-active {
+  background: var(--fh-accent);
+  color: #f9fafb;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.7);
+}
+
+.fh-config-actions,
+.fh-config-actions-edit {
+  margin-bottom: 0.5rem;
+}
+
+.fh-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.375rem;
+  border: 1px solid var(--fh-border);
+  background: var(--fh-bg-pane);
+  padding: 0.35rem 0.9rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  color: var(--fh-text);
+}
+
+.fh-btn-primary {
+  background: var(--fh-accent);
+  border-color: var(--fh-accent);
+  color: #ffffff;
+}
+
+.fh-btn-secondary {
+  background: #111827;
+}
+
+.fh-btn:hover {
+  filter: brightness(1.08);
+}
+
+.fh-messages {
+  min-height: 1.3rem;
+  font-size: 0.8rem;
+  margin-bottom: 0.5rem;
+}
+
+.fh-messages-error {
+  color: var(--fh-error);
+  background: var(--fh-error-bg);
+  border-radius: 0.375rem;
+  padding: 0.25rem 0.5rem;
+}
+
+.fh-messages-success {
+  color: var(--fh-success);
+  background: var(--fh-success-bg);
+  border-radius: 0.375rem;
+  padding: 0.25rem 0.5rem;
+}
+
+.fh-messages-info {
+  color: var(--fh-muted);
+}
+
+.fh-textarea {
+  width: 100%;
+  min-height: 320px;
+  resize: vertical;
+  border-radius: 0.375rem;
+  border: 1px solid var(--fh-border);
+  padding: 0.5rem 0.6rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 0.9rem;
+  line-height: 1.35;
+  background: var(--fh-bg-page);
+  color: var(--fh-pre-fg);
+}
+
+.fh-stats-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.fh-stats-group {
+  border-radius: 0.375rem;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  padding: 0.5rem 0.75rem;
+}
+
+.fh-stats-group-title {
+  margin: 0 0 0.25rem 0;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fh-muted);
+}
+
+.fh-kv-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+  gap: 0.15rem 0.5rem;
+  font-size: 0.85rem;
+}
+
+.fh-kv-list dt {
+  color: var(--fh-muted);
+}
+
+.fh-kv-list dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.fh-system-bar {
+  position: relative;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.7);
+  overflow: hidden;
+  margin-top: 0.25rem;
+}
+
+.fh-system-bar-inner {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #22c55e, #eab308, #ef4444);
+  transform-origin: left center;
+}
+
+@media (max-width: 900px) {
+  .fh-main {
+    flex-direction: column;
+  }
+
+  .fh-pane-left {
+    max-width: none;
+  }
+}
+
+.fh-footer {
+  max-width: 1200px;
+  margin: 0 auto 1.5rem;
+  padding: 0.75rem 1.5rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--fh-border);
+  background: var(--fh-bg-pane);
+  font-size: 0.8rem;
+  color: var(--fh-muted);
+}
+
+.fh-footer a {
+  color: var(--fh-accent);
+  text-decoration: underline;
+}
