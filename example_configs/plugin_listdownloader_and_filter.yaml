@@ -20,10 +20,11 @@ logging:
   level: info
 
 plugins:
-  # 1) Download well-known domain-only blocklists to ./var/lists
+  # 1) Download well-known domain-only blocklists to ./var/lists.
+  # Runs early in the setup phase so files are present before Filter runs.
   - module: list_downloader
-    pre_priority: 15
     config:
+      setup_priority: 15  # lower runs earlier during setup()
       download_path: ./var/lists
       # Optionally refresh no more than once per hour during runtime
       interval_seconds: 3600
@@ -34,10 +35,10 @@ plugins:
         - https://v.firebog.net/hosts/Prigent-Ads.txt
         - https://v.firebog.net/hosts/Prigent-Malware.txt
 
-  # 2) Filter consumes those files as blocklists
+  # 2) Filter consumes those files as blocklists.
   - module: filter
-    pre_priority: 20
     config:
+      setup_priority: 20  # run setup after list_downloader
       default: deny
       db_path: ./var/blocklist.db
       cache_ttl_seconds: 600

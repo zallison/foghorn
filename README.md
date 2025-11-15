@@ -180,6 +180,22 @@ Examples of plugin entries:
 - As a dict with module/config: `{ module: acl, config: {...} }`
 - As a plain alias string: `acl` (no config)
 
+#### Plugin priorities and `setup_priority`
+
+Plugins support three priority knobs in their config (all optional, integers 1–255):
+
+- `pre_priority`: controls the order of `pre_resolve` hooks; lower values run first.
+- `post_priority`: controls the order of `post_resolve` hooks; lower values run first.
+- `setup_priority`: controls the order of one-time `setup()` calls during startup; lower values run first.
+
+`setup_priority` is only used for plugins that override `BasePlugin.setup`. Its value is resolved as:
+
+- Use the explicit `setup_priority` from config if provided.
+- Otherwise, reuse the config’s `pre_priority` value for setup-aware plugins.
+- Otherwise, fall back to the plugin’s class-level default (50).
+
+This lets you, for example, have a ListDownloader plugin run its setup early (to download lists) and a Filter plugin run slightly later to load those lists from disk.
+
 #### AccessControlPlugin
 
 This plugin provides access control based on the client's IP address.
@@ -259,13 +275,13 @@ plugins:
     config:
       routes:
         - domain: "internal.corp.com"
-          upstream:
-            host: 10.0.0.1
-            port: 53
+          upstreams:
+            - host: 10.0.0.1
+              port: 53
         - suffix: ".dev.example.com"
-          upstream:
-            host: 192.168.1.1
-            port: 53
+          upstreams:
+            - host: 192.168.1.1
+              port: 53
 ```
 
 **Example (short alias):**
@@ -276,9 +292,9 @@ plugins:
     config:
       routes:
         - suffix: "corp"
-          upstream:
-            host: 10.0.0.53
-            port: 53
+          upstreams:
+            - host: 10.0.0.53
+              port: 53
 ```
 
 #### FilterPlugin
@@ -435,20 +451,54 @@ plugins:
 
 ## Complete `config.yaml` Example
 
-Here is a complete `config.yaml` file that uses all the available features:
+Here is a complete `config.yaml` file that uses the modern configuration format and shows how plugin priorities (including `setup_priority`) work:
 
 ```yaml
 # Example configuration for the DNS caching server
 listen:
-  host: 127.0.0.1
-  port: 5333
+  # Modern listener config; UDP is enabled by default.
+  udp:
+    enabled: true
+    host: 127.0.0.1
+    port: 5333
+  tcp:
+    enabled: false
+    host: 127.0.0.1
+    port: 5333
+  dot:
+    enabled: false
+    host: 127.0.0.1
+    port: 8853
+    # cert_file: /path/to/cert.pem
+    # key_file: /path/to/key.pem
+  doh:
+    enabled: false
+    host: 127.0.0.1
+    port: 8053
+    # Optional TLS for DoH
+    # cert_file: /path/to/cert.pem
+    # key_file: /path/to/key.pem
 
-# Multiple upstream DNS servers with automatic failover
+# Multiple upstream DNS servers with automatic failover.
+# All upstreams share a single timeout (timeout_ms) per attempt.
 upstream:
   - host: 8.8.8.8
     port: 53
+    transport: udp
   - host: 1.1.1.1
-    port: 53
+    port: 853
+    transport: dot
+    tls:
+      server_name: cloudflare-dns.com
+      verify: true
+      # ca_file: /etc/ssl/certs/ca-certificates.crt
+  - transport: doh
+    url: https://dns.google/dns-query
+    method: POST
+    headers:
+      user-agent: foghorn
+    tls:
+      verify: true
 
 # Global timeout applies to each upstream attempt
 timeout_ms: 2000
@@ -459,6 +509,12 @@ timeout_ms: 2000
 # Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
 min_cache_ttl: 60
 
+# Optional DNSSEC configuration
+# dnssec:
+#   mode: passthrough            # ignore | passthrough | validate
+#   validation: upstream_ad      # upstream_ad | local (local is experimental)
+#   udp_payload_size: 1232
+
 # Logging configuration
 logging:
   level: debug            # Available levels: debug, info, warn, error, crit
@@ -466,26 +522,41 @@ logging:
   file: /tmp/foghorn.log  # Optional: also log to this file
   syslog: false           # Optional: also log to syslog
 
+# Statistics (optional)
+statistics:
+  enabled: false
+  interval_seconds: 10
+  reset_on_log: false
+  include_qtype_breakdown: true
+  include_top_clients: true
+  include_top_domains: true
+  top_n: 10
+  track_latency: true
+  # reset_on_sigusr1: true
+  # sigusr2_resets_stats: true
+
 plugins:
+  # New-domain filter: simple pre-resolve policy plugin.
   - module: new_domain
     config:
       threshold_days: 14
 
+  # Greylist plugin.
   - module: greylist
     config:
       duration_seconds: 60
-  #     # duration_hours: 1 # Only if duration_seconds isn't provided
-  #     # db_path: ./greylist.db
+      # duration_hours: 1  # Only if duration_seconds isn't provided
+      # db_path: ./greylist.db
 
+  # Upstream router: route queries to specific upstreams by suffix.
+  # Uses the modern "upstreams" list format only.
   - module: router
     config:
       routes:
-        # Single upstream (legacy format)
         - suffix: ".mylan"
-          upstream:
-            host: 192.168.1.1
-            port: 53
-        # Multiple upstreams with failover (new format)
+          upstreams:
+            - host: 192.168.1.1
+              port: 53
         - suffix: "corp.internal"
           upstreams:
             - host: 10.0.0.1
@@ -493,8 +564,26 @@ plugins:
             - host: 10.0.0.2
               port: 53
 
+  # ListDownloader: runs early in the setup phase to download blocklists
+  # that the Filter plugin will read from disk.
+  - module: list_downloader
+    config:
+      # setup_priority controls when setup() runs relative to other plugins.
+      # Lower numbers run earlier. ListDownloader defaults to 15.
+      setup_priority: 15
+      download_path: ./var/lists
+      interval_seconds: 3600
+      urls:
+        - https://v.firebog.net/hosts/AdguardDNS.txt
+        - https://v.firebog.net/hosts/Easylist.txt
+
+  # Filter plugin: loads allowlists/blocklists and applies domain/IP filtering.
   - module: filter
     config:
+      # setup_priority controls when setup() runs. When omitted, it falls back to
+      # pre_priority for setupable plugins, or to the class default (50).
+      setup_priority: 20
+
       # Pre-resolve (domain) filtering
       blocked_domains:
         - "malware.com"
@@ -513,6 +602,20 @@ plugins:
         - "malware"
         - "phishing"
 
+      # Optional: file-backed allowlist/blocklist inputs (globs allowed)
+      # allowlist_files:
+      #   - config/allow.txt
+      #   - config/allow.d/*.list
+      # blocklist_files:
+      #   - config/block.txt
+      #   - config/block.d/*.txt
+      # blocked_patterns_files:
+      #   - config/patterns/*.re
+      # blocked_keywords_files:
+      #   - config/keywords.txt
+      # blocked_ips_files:
+      #   - config/ips.txt
+
       # Post-resolve (IP) filtering with per-IP actions
       blocked_ips:
         # Remove just the matching IP(s)
@@ -522,6 +625,7 @@ plugins:
         - ip: "1.2.3.4"
           action: "deny"
 
+  # Examples plugin: demonstrates additional policies and rewrites.
   - module: foghorn.plugins.examples.ExamplesPlugin
     config:
       # Pre-resolve policy
