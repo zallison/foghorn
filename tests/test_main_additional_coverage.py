@@ -158,12 +158,16 @@ def test_sigusr1_dnssec_failure_and_disable_stats_on_reload(monkeypatch, caplog)
             interval_seconds: int,
             reset_on_log: bool,
             log_level: str,
+            logger_name: str = "foghorn.stats",
+            persistence_store: Any | None = None,
         ) -> None:
             constructed["reporter"] = self
             self.collector = collector
             self.interval_seconds = interval_seconds
             self.reset_on_log = reset_on_log
             self.log_level = log_level
+            self.logger_name = logger_name
+            self.persistence_store = persistence_store
             self.started = False
             self.stopped = False
 
@@ -254,12 +258,16 @@ def test_sigusr1_enable_statistics_on_reload(monkeypatch, caplog):
             interval_seconds: int,
             reset_on_log: bool,
             log_level: str,
+            logger_name: str = "foghorn.stats",
+            persistence_store: Any | None = None,
         ) -> None:
             constructed["reporter"] = self
             self.collector = collector
             self.interval_seconds = interval_seconds
             self.reset_on_log = reset_on_log
             self.log_level = log_level
+            self.logger_name = logger_name
+            self.persistence_store = persistence_store
             self.started = False
 
         def start(self) -> None:
@@ -347,12 +355,16 @@ def test_sigusr1_restart_reporter_on_settings_change_and_error(monkeypatch, capl
             interval_seconds: int,
             reset_on_log: bool,
             log_level: str,
+            logger_name: str = "foghorn.stats",
+            persistence_store: Any | None = None,
         ) -> None:
             self.collector = collector
             self.interval_seconds = max(1, interval_seconds)
             self.reset_on_log = reset_on_log
             # Simulate a concrete log level for comparison
             self.log_level = logging.getLogger().getEffectiveLevel()
+            self.logger_name = logger_name
+            self.persistence_store = persistence_store
             self.started = False
             self.stopped = False
             reporters.append(self)
@@ -370,10 +382,14 @@ def test_sigusr1_restart_reporter_on_settings_change_and_error(monkeypatch, capl
             interval_seconds: int,
             reset_on_log: bool,
             log_level: str,
+            logger_name: str = "foghorn.stats",
+            persistence_store: Any | None = None,
         ) -> None:
             # Deliberately omit interval_seconds/reset_on_log attributes to
             # trigger the except path in settings comparison.
             self.collector = collector
+            self.logger_name = logger_name
+            self.persistence_store = persistence_store
             self.started = False
             self.stopped = False
             reporters.append(self)
