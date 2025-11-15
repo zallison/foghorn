@@ -25,7 +25,6 @@ plugins:
     pre_priority: 15
     config:
       download_path: ./var/lists
-      cache_days: 7
       # Optionally refresh no more than once per hour during runtime
       interval_seconds: 3600
       urls:

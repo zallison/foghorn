@@ -6,6 +6,7 @@ import hashlib
 from datetime import datetime
 from typing import Iterable, List, Set
 from urllib.parse import urlparse
+import threading
 
 import requests
 
@@ -22,7 +23,6 @@ class ListDownloader(BasePlugin):
       - urls (List[str]): HTTP(S) URLs to domain-per-line lists (comments with '#').
       - url_files (List[str], optional): File paths containing one URL per line ('#' comments allowed).
       - download_path (str): Directory to store downloaded files (default: './var/lists').
-      - cache_days (int): Skip re-download if local file is newer than this many days.
       - interval_seconds (int|None): If set, re-check and update no more often than this.
 
     Outputs:
@@ -49,11 +49,12 @@ class ListDownloader(BasePlugin):
     def __init__(self, **config):
         super().__init__(**config)
         self.download_path: str = str(self.config.get("download_path", "./var/lists"))
-        self.cache_days: int = int(self.config.get("cache_days", 7))
         self.urls: List[str] = list(self.config.get("urls", []) or [])
         self.url_files: List[str] = list(self.config.get("url_files", []) or [])
         self.interval_seconds: int | None = self.config.get("interval_seconds")
         self._last_run: float = 0.0
+        self._stop_event: threading.Event | None = None
+        self._background_thread: threading.Thread | None = None
 
         # Merge URLs from url_files
         if self.url_files:
@@ -68,17 +69,79 @@ class ListDownloader(BasePlugin):
             except Exception as e:  # pragma: no cover
                 logger.warning("Failed reading url_files: %s", e)
 
+    # Run early in the setup phase so files exist before Filter runs
+    setup_priority = 15
+
+    def setup(self) -> None:
+        """Perform initial downloads and start optional periodic refresh.
+
+        Inputs:
+          - None (uses plugin configuration stored on self).
+        Outputs:
+          - None
+
+        Brief: Creates the download directory, performs an initial update of
+        all configured lists, and, when interval_seconds is set, starts a
+        background thread that periodically refreshes the lists.
+
+        Example use:
+          >>> from foghorn.plugins.list_downloader import ListDownloader
+          >>> dl = ListDownloader(download_path="./var/lists", urls=[], url_files=[])
+          >>> dl.setup()  # doctest: +SKIP
+        """
         os.makedirs(self.download_path, exist_ok=True)
-        # Perform an initial fetch at startup
+        # Initial fetch at startup; failures propagate to caller so that
+        # abort_on_failure semantics can be enforced by the setup runner.
         self._maybe_run(force=True)
 
-    # Run early so files exist before Filter runs
-    pre_priority = 15
+        # Optional periodic refresh while the process runs
+        if self.interval_seconds is None:
+            return
+        try:
+            interval = int(self.interval_seconds)
+        except (TypeError, ValueError):  # pragma: no cover
+            logger.warning(
+                "ListDownloader interval_seconds %r is invalid; disabling periodic refresh",
+                self.interval_seconds,
+            )
+            return
+        if interval <= 0:
+            return
 
-    def pre_resolve(self, qname, qtype, req, ctx):  # noqa: D401
-        """No decision; opportunistically refresh lists on interval."""
-        self._maybe_run(force=False)
-        return None
+        if self._stop_event is not None:
+            # Already started
+            return
+
+        self._stop_event = threading.Event()
+
+        def _loop() -> None:
+            """Background loop to refresh lists on a fixed interval.
+
+            Inputs:
+              - None (captures self and configuration).
+            Outputs:
+              - None
+
+            The loop calls _maybe_run(force=False) and then waits for the
+            configured interval; any exceptions during refresh are logged but
+            do not stop the loop.
+            """
+            assert self._stop_event is not None
+            while not self._stop_event.is_set():
+                try:
+                    self._maybe_run(force=False)
+                except Exception as exc:  # pragma: no cover
+                    logger.warning("ListDownloader periodic update failed: %s", exc)
+                # Wait for the interval or until stop is requested
+                self._stop_event.wait(interval)
+
+        t = threading.Thread(
+            target=_loop,
+            name="ListDownloader-refresh",
+            daemon=True,
+        )
+        t.start()
+        self._background_thread = t
 
     # Internal helpers
     def _maybe_run(self, force: bool) -> None:
@@ -97,23 +160,15 @@ class ListDownloader(BasePlugin):
             fname = self._make_hashed_filename(url)
             fpath = os.path.join(self.download_path, fname)
 
-            if self._should_skip_cache(fpath):
-                continue
-
             # Try HEAD for last-modified; fall back to GET
             if self._needs_update(url, fpath):
+                logger.info(f"Downloading list {url} to {fpath}")
                 self._fetch(url, fpath)
 
             if not self._validate_domain_list(fpath):
                 raise ValueError(
                     f"Invalid content in {fname}: expected domain-per-line list"
                 )
-
-    def _should_skip_cache(self, filepath: str) -> bool:
-        if not os.path.exists(filepath):
-            return False
-        mtime = os.path.getmtime(filepath)
-        return (time.time() - mtime) < (self.cache_days * 86400)
 
     def _needs_update(self, url: str, filepath: str) -> bool:
         if not os.path.exists(filepath):
@@ -261,12 +316,10 @@ class ListDownloader(BasePlugin):
             seen = 0
             with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                 for raw in f:
-                    line = raw.strip()
+                    line = raw.strip().split("#")[0]
                     if not line or line.startswith("#"):
                         continue
                     # Reject typical hosts-format entries (start with an IP)
-                    if line[0].isdigit():
-                        return False
                     if " " in line or "\t" in line or "." not in line:
                         return False
                     seen += 1
