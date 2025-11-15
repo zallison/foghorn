@@ -67,24 +67,11 @@ class FilterPlugin(BasePlugin):
               #   - "198.51.100.0/24"
     """
 
-    def __init__(self, **config):
+    def setup(self):
         """
-        Initializes the FilterPlugin.
-
-        Args:
-            **config: Configuration for the plugin containing domain and IP filters.
-                Supported keys (in addition to existing ones):
-                  - allowed_domains_files: list[str] of files or globs with one domain per line (comments with '#')
-                  - blocked_domains_files: list[str] of files or globs with one domain per line
-                  - blocked_patterns_files: list[str] of files or globs with one regex per line (IGNORECASE)
-                  - blocked_keywords_files: list[str] of files or globs with one keyword per line
-                  - blocked_ips_files: list[str] of files or globs; each line either
-                        "IP_OR_CIDR" (defaults to deny),
-                        "IP_OR_CIDR,action[,replace_with]" (CSV), or
-                        JSON line: {"ip": "IP_OR_CIDR", "action": "deny|remove|replace", "replace_with": "IP"}
-                Glob patterns are expanded. Missing files raise FileNotFoundError.
+        Initializes the FilterPlugin.  Config has been read.
         """
-        super().__init__(**config)
+        # super().__init__(**config)
         self._domain_cache = TTLCache()
 
         self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 600)  # 10 minutes
@@ -105,7 +92,6 @@ class FilterPlugin(BasePlugin):
         self.allowlist = self.config.get("allowed_domains", [])
 
         # Pre-resolve (domain) filtering configuration (inline first)
-        self.blocked_domains: Set[str] = set(self.config.get("blocked_domains", []))
         self.blocked_patterns: List[re.Pattern] = []
         self.blocked_keywords: Set[str] = set(self.config.get("blocked_keywords", []))
 
@@ -202,10 +188,14 @@ class FilterPlugin(BasePlugin):
             self.load_list_from_file(file, "allow")
         for file in self.blocklist_files:
             self.load_list_from_file(file, "deny")
-        for domain in self.allowlist:
-            self._db_insert_domain(domain, "config", "allow")
-        for domain in self.blocklist:
-            self._db_insert_domain(domain, "config", "deny")
+
+        # Inline allow/deny domains from config: batch into a single transaction
+        if self.allowlist or self.blocklist:
+            with self.conn:
+                for domain in self.allowlist:
+                    self._db_insert_domain(domain, "config", "allow")
+                for domain in self.blocklist:
+                    self._db_insert_domain(domain, "config", "deny")
 
         # Load patterns/keywords/IPs from files (additive to inline config)
         for patfile in self._expand_globs(
@@ -537,6 +527,7 @@ class FilterPlugin(BasePlugin):
             >>> self._load_patterns_from_file('patterns.txt')
             [re.compile('^ads\\.', re.IGNORECASE)]
         """
+        logger.info(f"Filter: adding {path} to the database")
         patterns: List[re.Pattern] = []
         for ln, text in self._iter_noncomment_lines(path):
             try:
@@ -728,13 +719,13 @@ class FilterPlugin(BasePlugin):
 
     def _db_init(self) -> None:
         """Create the blocked_domains table if it does not exist."""
+        logger.debug("Creating blocked_domains database")
 
         # Clear blocklist, maybe
         if self.config.get("clear", 1):
             logger.debug("clearing allow/deny databases")
             self.conn.execute("DROP TABLE IF EXISTS blocked_domains")
 
-        logger.debug("Creating blocked_domains database")
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS blocked_domains ("
             "domain TEXT PRIMARY KEY, "
@@ -763,7 +754,6 @@ class FilterPlugin(BasePlugin):
             "VALUES (?, ?, ?, ?)",
             (domain, filename, mode, added_at),
         )
-        self.conn.commit()
 
     def load_list_from_file(self, filename: str, mode: str = "deny") -> None:
         """
@@ -802,36 +792,44 @@ class FilterPlugin(BasePlugin):
                 t = t[2:-1]
             return t
 
-        logger.debug("Opening %s for %s", filename, mode)
-        with open(filename, "r", encoding="utf-8") as fh:
-            for raw in fh:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                eff_mode = mode
-                domain_val = None
-                if line.lstrip().startswith("{"):
-                    try:
-                        obj = json.loads(line)
-                    except json.JSONDecodeError as e:
-                        logger.error("Invalid JSON domain line in %s: %s", filename, e)
+        logger.info("Opening %s for %s", filename, mode)
+        # Use a single transaction per file for performance on very large lists.
+        with self.conn:
+            with open(filename, "r", encoding="utf-8") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if not line or line.startswith("#"):
                         continue
-                    if not isinstance(obj, dict):
-                        logger.error("JSON domain line not an object in %s", filename)
+                    eff_mode = mode
+                    domain_val = None
+                    if line.lstrip().startswith("{"):
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError as e:
+                            logger.error(
+                                "Invalid JSON domain line in %s: %s", filename, e
+                            )
+                            continue
+                        if not isinstance(obj, dict):
+                            logger.error(
+                                "JSON domain line not an object in %s", filename
+                            )
+                            continue
+                        domain_val = _normalize_token(
+                            str(obj.get("domain", "")).strip()
+                        )
+                        line_mode = obj.get("mode")
+                        if isinstance(line_mode, str) and line_mode.lower() in {
+                            "allow",
+                            "deny",
+                        }:
+                            eff_mode = line_mode.lower()
+                    else:
+                        domain_val = _normalize_token(line)
+                    if not domain_val:
+                        logger.error("Missing domain entry in %s", filename)
                         continue
-                    domain_val = _normalize_token(str(obj.get("domain", "")).strip())
-                    line_mode = obj.get("mode")
-                    if isinstance(line_mode, str) and line_mode.lower() in {
-                        "allow",
-                        "deny",
-                    }:
-                        eff_mode = line_mode.lower()
-                else:
-                    domain_val = _normalize_token(line)
-                if not domain_val:
-                    logger.error("Missing domain entry in %s", filename)
-                    continue
-                self._db_insert_domain(domain_val, filename, eff_mode)
+                    self._db_insert_domain(domain_val, filename, eff_mode)
 
     def is_allowed(self, domain: str) -> bool:
         """
