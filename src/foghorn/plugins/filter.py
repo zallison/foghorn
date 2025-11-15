@@ -310,6 +310,7 @@ class FilterPlugin(BasePlugin):
             >>> # plugin.post_resolve("ex.com", QTYPE.MX, b"", ctx)  # doctest: +SKIP
         """
 
+<<<<<<< HEAD
         # Only process A and AAAA records; other qtypes are considered a
         # programming error for this plugin and raise TypeError so callers can
         # handle them explicitly.
@@ -317,6 +318,12 @@ class FilterPlugin(BasePlugin):
             raise TypeError(
                 f"FilterPlugin.post_resolve only supports A/AAAA qtypes, got {qtype!r}"
             )
+=======
+        ## :warn:Not Implemented Yet:
+        ## # Only process A and AAAA records
+        ## if qtype not in (QTYPE.A, QTYPE.AAAA):
+        ##     return
+>>>>>>> dev/0.2.0-stat-server
 
         if not self.blocked_ips and not self.blocked_networks:
             return None

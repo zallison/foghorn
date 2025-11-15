@@ -41,8 +41,9 @@ class NewDomainFilterPlugin(BasePlugin):
               threshold_days: 30
     """
 
-    def setup(self) -> None:
-        """Initialize NewDomainFilterPlugin from ``self.config``.
+    def setup(self):
+        """
+        Initializes the NewDomainFilterPlugin.
 
         Inputs:
           - None (configuration is taken from ``self.config`` set by BasePlugin).
