@@ -15,10 +15,11 @@ For developer documentation (architecture, transports, plugin internals, testing
 *   **Flexible Configuration:** Configure listeners, upstream resolvers (UDP/TCP/DoT/DoH), and plugins using YAML.
 *   **Built-in Plugins:**
     *   **Access Control:** CIDR-based allow/deny (allowlist/blocklist terminology in docs).
+    *   **EtcHosts:** Answer queries based on host file(s).
     *   **Greylist:** Temporarily block newly seen domains.
     *   **New Domain Filter:** Block recently registered domains.
     *   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
-    *   **Filter:** Filter by domain patterns/keywords and by response IPs.
+    *   **Filter:** Filter by domain patterns/keywords IPs.
     *   **Examples:** Showcase of simple policies and rewrites.
 
 ## Installation
