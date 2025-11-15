@@ -48,7 +48,7 @@ class ExamplesPlugin(BasePlugin):
         - A responses: first A RR is rewritten per matching rewrite rules.
     """
 
-    def __init__(self, **config) -> None:
+    def setup(self, **config) -> None:
         """
         Initialize plugin with provided config or defaults.
 
@@ -58,7 +58,6 @@ class ExamplesPlugin(BasePlugin):
         Returns:
             None
         """
-        super().__init__(**config)
         self.max_subdomains = int(self.config.get("max_subdomains", 5))
         self.max_length_no_dots = int(self.config.get("max_length_no_dots", 50))
         self.base_labels = int(self.config.get("base_labels", 2))

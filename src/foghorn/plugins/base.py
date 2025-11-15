@@ -63,11 +63,16 @@ class BasePlugin:
     """
     Base class for all plugins.
 
-    Plugins can control execution order using pre_priority (for pre_resolve hooks)
-    and post_priority (for post_resolve hooks). Lower values run first.
+    Plugins can control execution order using:
+      - pre_priority (for pre_resolve hooks; lower runs first)
+      - post_priority (for post_resolve hooks; lower runs first)
+      - setup_priority (for setup() hooks; lower runs first)
 
     Inputs:
-      - **config: Plugin configuration including optional pre_priority, post_priority.
+      - **config: Plugin configuration including optional
+        pre_priority, post_priority, and setup_priority. Plugins may also
+        use an `abort_on_failure` boolean in their config to control
+        whether setup() failures abort startup (default True).
 
     Outputs:
       - Initialized plugin instance with priority attributes.
@@ -85,6 +90,7 @@ class BasePlugin:
 
     pre_priority: ClassVar[int] = 50
     post_priority: ClassVar[int] = 50
+    setup_priority: ClassVar[int] = 50
 
     aliases: ClassVar[Sequence[str]] = ()
 
@@ -101,11 +107,16 @@ class BasePlugin:
           - **config: Plugin configuration including:
             - pre_priority (int): Priority for pre_resolve (1-255, default from class).
             - post_priority (int): Priority for post_resolve (1-255, default from class).
+            - setup_priority (int): Priority for setup() (1-255, default from class).
+              If setup_priority is not provided, pre_priority from config is used as a
+              fallback for setup plugins.
 
         Outputs:
-          - None (sets self.config, self.pre_priority, self.post_priority).
+          - None (sets self.config, self.pre_priority, self.post_priority,
+            self.setup_priority).
 
-        Priority values are clamped to [1, 255]. Invalid types use class defaults.
+        Priority values are clamped to [1, 255]. Invalid types use class
+        defaults.
 
         Example use:
             >>> from foghorn.plugins.base import BasePlugin
@@ -115,7 +126,7 @@ class BasePlugin:
         """
         self.config = config
         logger = logging.getLogger(__name__)
-
+        logger.info(f"loading {self}")
         # Standard path: use class defaults or config overrides
         self.pre_priority = self._parse_priority_value(
             config.get("pre_priority", self.__class__.pre_priority),
@@ -125,6 +136,17 @@ class BasePlugin:
         self.post_priority = self._parse_priority_value(
             config.get("post_priority", self.__class__.post_priority),
             "post_priority",
+            logger,
+        )
+        # Setup priority: prefer explicit setup_priority, then pre_priority from
+        # config as a fallback, then class default.
+        raw_setup = config.get(
+            "setup_priority",
+            config.get("pre_priority", getattr(self.__class__, "setup_priority", 50)),
+        )
+        self.setup_priority = self._parse_priority_value(
+            raw_setup,
+            "setup_priority",
             logger,
         )
 
@@ -224,6 +246,34 @@ class BasePlugin:
             ...         self.touched = True
             >>> p = P()
             >>> p.handle_sigusr2()
+        """
+        return None
+
+    def setup(self) -> None:
+        """
+        Run one-time initialization logic for setup-aware plugins.
+
+        Inputs:
+          - None (uses plugin configuration and instance attributes).
+        Outputs:
+          - None
+
+        Brief: Base implementation is a no-op; plugins that participate in the
+        setup phase should override this method. The main process will invoke
+        setup() on such plugins in ascending setup_priority order before
+        starting listeners.
+
+        Example:
+            >>> from foghorn.plugins.base import BasePlugin
+            >>> class P(BasePlugin):
+            ...     def setup(self):
+            ...         self.ready = True
+            >>> p = P()
+            >>> hasattr(p, 'ready')
+            False
+            >>> p.setup()
+            >>> p.ready
+            True
         """
         return None
 

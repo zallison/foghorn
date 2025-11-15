@@ -164,6 +164,88 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
     return plugins
 
 
+def _is_setup_plugin(plugin: BasePlugin) -> bool:
+    """
+    Determine whether a plugin overrides BasePlugin.setup and should
+    participate in the setup phase.
+
+    Inputs:
+      - plugin: BasePlugin instance.
+    Outputs:
+      - bool: True if the plugin defines its own setup() implementation.
+
+    Example use:
+      >>> from foghorn.plugins.base import BasePlugin
+      >>> class P(BasePlugin):
+      ...     def setup(self):
+      ...         pass
+      >>> p = P()
+      >>> _is_setup_plugin(p)
+      True
+    """
+    try:
+        return plugin.__class__.setup is not BasePlugin.setup
+    except Exception:
+        return False
+
+
+def run_setup_plugins(plugins: List[BasePlugin]) -> None:
+    """
+    Run setup() on all setup-aware plugins in ascending setup_priority order.
+
+    Inputs:
+      - plugins: List[BasePlugin] instances, typically from load_plugins().
+    Outputs:
+      - None; raises RuntimeError if a setup plugin with abort_on_failure=True
+        fails.
+
+    Brief: This helper is invoked by main() after plugin instantiation but
+    before listeners start. Plugins that override BasePlugin.setup are
+    considered setup plugins. Their setup_priority attribute (or corresponding
+    config value) controls execution order.
+
+    Example use:
+      >>> plugins = load_plugins([])
+      >>> run_setup_plugins(plugins)  # no-op when there are no setup plugins
+    """
+    logger = logging.getLogger("foghorn.main.setup")
+    # Collect (priority, plugin) pairs for setup-capable plugins
+    setup_entries: List[tuple[int, BasePlugin]] = []
+    for p in plugins or []:
+        if not _is_setup_plugin(p):
+            continue
+        try:
+            prio = int(getattr(p, "setup_priority", 50))
+        except Exception:
+            prio = 50
+        setup_entries.append((prio, p))
+
+    # Stable sort by priority; list order is preserved for equal priorities
+    setup_entries.sort(key=lambda item: item[0])
+
+    for prio, plugin in setup_entries:
+        cfg = getattr(plugin, "config", {}) or {}
+        abort_on_failure = bool(cfg.get("abort_on_failure", True))
+        name = plugin.__class__.__name__
+        logger.info(
+            "Running setup for plugin %s (setup_priority=%d, abort_on_failure=%s)",
+            name,
+            prio,
+            abort_on_failure,
+        )
+        try:
+            plugin.setup()
+        except Exception as e:  # pragma: no cover
+            logger.error("Setup for plugin %s failed: %s", name, e, exc_info=True)
+            if abort_on_failure:
+                raise RuntimeError(f"Setup for plugin {name} failed") from e
+            logger.warning(
+                "Continuing startup despite setup failure in plugin %s "
+                "because abort_on_failure is False",
+                name,
+            )
+
+
 def main(argv: List[str] | None = None) -> int:
     """
     Main entry point for the DNS server.
@@ -238,6 +320,13 @@ def main(argv: List[str] | None = None) -> int:
     logger.info(
         "Loaded %d plugins: %s", len(plugins), [p.__class__.__name__ for p in plugins]
     )
+
+    # Run setup phase for setup-aware plugins before starting listeners
+    try:
+        run_setup_plugins(plugins)
+    except RuntimeError as e:
+        logger.error("Plugin setup failed: %s", e)
+        return 1
 
     # Initialize statistics collection if enabled
     stats_cfg = cfg.get("statistics", {})
