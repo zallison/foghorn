@@ -54,6 +54,7 @@ def test_pre_resolve_block_exact_and_cache(tmp_path):
     """
     db = tmp_path / "bl.db"
     p = FilterPlugin(db_path=str(db), blocked_domains=["blocked.com"], default="allow")
+    p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     # First call denies and populates cache
@@ -84,6 +85,7 @@ def test_pre_resolve_allow_keyword_and_pattern(tmp_path, caplog):
         blocked_keywords=["bad"],
         blocked_patterns=["(", r".*\.ads\..*"],
     )
+    p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     assert p.pre_resolve("good.com", QTYPE.A, b"", ctx) is None
@@ -103,6 +105,7 @@ def test_load_list_from_file_and_is_allowed_and_errors(tmp_path):
     """
     db = tmp_path / "bl.db"
     p = FilterPlugin(db_path=str(db), default="deny")
+    p.setup()
 
     # Write an allowlist file
     f = tmp_path / "allow.txt"
@@ -142,6 +145,7 @@ def test_post_resolve_deny_overrides_remove_and_replace_paths(tmp_path):
             {"ip": "9.9.9.9", "action": "replace", "replace_with": "127.0.0.1"},
         ],
     )
+    p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     # Deny path (presence of a deny IP causes overall deny)
@@ -179,6 +183,7 @@ def test_post_resolve_replace_version_mismatch_and_invalid_runtime(tmp_path):
             {"ip": "2001:db8::1", "action": "replace", "replace_with": "127.0.0.1"}
         ],
     )
+    p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     # Version mismatch path
@@ -211,6 +216,7 @@ def test_post_resolve_non_a_aaaa_and_parse_error(tmp_path):
     """
     db = tmp_path / "bl.db"
     p = FilterPlugin(db_path=str(db), blocked_ips=["1.2.3.4"], default="allow")
+    p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     # Non A/AAAA raises TypeError
@@ -234,6 +240,7 @@ def test_add_to_cache_and_get_ip_action(tmp_path):
     """
     db = tmp_path / "bl.db"
     p = FilterPlugin(db_path=str(db))
+    p.setup()
 
     # Cache allow and deny decisions using different key forms
     p.add_to_cache("Example.COM.", True)
@@ -287,6 +294,7 @@ def test_init_files_and_invalid_ips_and_actions(tmp_path):
             },  # invalid replacement
         ],
     )
+    p.setup()
 
     assert p.is_allowed("fromfile-allow.com") is True
     # Default allow overridden by explicit deny entry from block file
@@ -315,6 +323,7 @@ def test_post_resolve_aaaa_replace_and_mixed_records(tmp_path):
             {"ip": "2001:db8::2", "action": "replace", "replace_with": "2001:db8::3"}
         ],
     )
+    p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     # Build response with AAAA and a TXT record
@@ -343,6 +352,7 @@ def test_post_resolve_none_when_no_rules(tmp_path):
       - None: Asserts None decision
     """
     p = FilterPlugin(db_path=str(tmp_path / "bl.db"))
+    p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
     resp = _mk_response_with_ips("ex.com", [("A", "8.8.8.8", 60)])
     assert p.post_resolve("ex.com", QTYPE.A, resp, ctx) is None
@@ -359,6 +369,7 @@ def test_add_to_cache_error_logs(tmp_path, monkeypatch, caplog):
       - None: Asserts warning logged
     """
     p = FilterPlugin(db_path=str(tmp_path / "bl.db"))
+    p.setup()
     caplog.set_level("WARNING")
 
     def boom(*a, **k):
@@ -380,6 +391,7 @@ def test_pre_resolve_cached_allow_returns_none(tmp_path):
       - None: Asserts pre_resolve returns None
     """
     p = FilterPlugin(db_path=str(tmp_path / "bl.db"), default="deny")
+    p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
     p.add_to_cache(("cached.com", 0), True)
     assert p.pre_resolve("cached.com", QTYPE.A, b"", ctx) is None
@@ -401,6 +413,7 @@ def test_post_resolve_pack_failure_returns_deny(tmp_path, monkeypatch):
             {"ip": "9.9.9.9", "action": "replace", "replace_with": "127.0.0.1"}
         ],
     )
+    p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
     resp = _mk_response_with_ips("ex.com", [("A", "9.9.9.9", 60)])
 
@@ -430,6 +443,7 @@ def test_post_resolve_unknown_action_runtime_returns_none(tmp_path):
       - None: Asserts decision is None
     """
     p = FilterPlugin(db_path=str(tmp_path / "bl.db"))
+    p.setup()
     # Patch with a rule that uses an unknown action (bypassing init normalization)
     import ipaddress as _ip
 
@@ -470,6 +484,7 @@ def test_glob_expansion_for_blocklist_and_allowlist_files(tmp_path):
         allowlist_files=[str(allow_dir / "*.txt")],
         blocklist_files=[str(block_dir / "*.txt")],
     )
+    p.setup()
 
     # Check that domains from allow files are allowed
     assert p.is_allowed("allow1.com") is True
