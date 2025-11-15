@@ -171,7 +171,9 @@ def test_send_query_with_failover_udp_legacy_send_path(monkeypatch):
     legacy = _Legacy(q.reply().pack())
 
     upstreams = [{"host": "9.9.9.9", "port": 53, "transport": "udp"}]
-    resp, used, reason = srv.send_query_with_failover(legacy, upstreams, 200, "legacy.example", QTYPE.A)  # type: ignore[arg-type]
+    resp, used, reason = srv.send_query_with_failover(
+        legacy, upstreams, 200, "legacy.example", QTYPE.A
+    )  # type: ignore[arg-type]
     assert reason == "ok" and used == upstreams[0]
 
 

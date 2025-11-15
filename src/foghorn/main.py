@@ -16,7 +16,7 @@ from .logging_config import init_logging
 from .plugins.base import BasePlugin
 from .plugins.registry import discover_plugins, get_plugin_class
 from .server import DNSServer
-from .stats import StatsCollector, StatsReporter, format_snapshot_json
+from .stats import StatsCollector, StatsReporter, StatsSQLiteStore, format_snapshot_json
 from .webserver import RingBuffer, start_webserver
 from .doh_api import start_doh_server
 
@@ -289,11 +289,20 @@ def main(argv: List[str] | None = None) -> int:
     logger = logging.getLogger("foghorn.main")
     logger.info("Loaded config from %s", args.config)
 
-    # Keep references for signal-driven reload/reset
+    # Keep references for signal-driven reload/reset and coordinated shutdown.
+    # These are captured by inner closures (SIGUSR1/SIGUSR2 handlers and
+    # _apply_runtime_config) so they can adjust behaviour without restarting
+    # the main process or DNS listeners.
     cfg_path: str = args.config
     stats_collector: Optional[StatsCollector]
     stats_reporter: Optional[StatsReporter]
+    stats_persistence_store: Optional[StatsSQLiteStore]
+    # web_handle is the admin HTTP/web UI handle returned by start_webserver().
+    # It is allowed to be None when the webserver is disabled but is treated as
+    # fatal when webserver.enabled is true.
     web_handle = None
+    # Shared in-memory log buffer passed into the FastAPI admin app; this is
+    # also used when starting the threaded admin HTTP fallback.
     web_log_buffer: Optional[RingBuffer] = None
 
     # Normalize listen configuration with backward compatibility.
@@ -333,8 +342,10 @@ def main(argv: List[str] | None = None) -> int:
     stats_enabled = stats_cfg.get("enabled", False)
     stats_collector = None
     stats_reporter = None
+    stats_persistence_store = None
 
     if stats_enabled:
+        # Initialize in-memory collector first
         stats_collector = StatsCollector(
             track_uniques=stats_cfg.get("track_uniques", True),
             include_qtype_breakdown=stats_cfg.get("include_qtype_breakdown", True),
@@ -347,11 +358,34 @@ def main(argv: List[str] | None = None) -> int:
             track_latency=bool(stats_cfg.get("track_latency", True)),
         )
 
+        # Optional SQLite-backed persistence and warm-start
+        persistence_cfg = stats_cfg.get("persistence", {}) or {}
+        persistence_enabled = bool(persistence_cfg.get("enabled", True))
+        if persistence_enabled:
+            db_path = str(persistence_cfg.get("db_path", "./var/stats.db"))
+            try:
+                stats_persistence_store = StatsSQLiteStore(db_path=db_path)
+                latest = stats_persistence_store.load_latest_snapshot()
+                if latest is not None:
+                    logger.info(
+                        "Loaded statistics from latest persisted snapshot (created_at=%s)",
+                        latest.created_at,
+                    )
+                    stats_collector.load_from_snapshot(latest)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error(
+                    "Failed to initialize statistics persistence: %s; continuing without persistence",
+                    exc,
+                    exc_info=True,
+                )
+                stats_persistence_store = None
+
         stats_reporter = StatsReporter(
             collector=stats_collector,
             interval_seconds=int(stats_cfg.get("interval_seconds", 10)),
             reset_on_log=stats_cfg.get("reset_on_log", False),
             log_level=stats_cfg.get("log_level", "info"),
+            persistence_store=stats_persistence_store,
         )
         stats_reporter.start()
         logger.info(
@@ -365,13 +399,15 @@ def main(argv: List[str] | None = None) -> int:
         buffer_size = int((web_cfg.get("logs") or {}).get("buffer_size", 500))
         web_log_buffer = RingBuffer(capacity=buffer_size)
 
-    # --- Signal handling (SIGUSR1) for config reload and optional stats reset ---
+    # --- Signal handling (SIGUSR1/SIGUSR2) ---
+    # Use Events to coalesce multiple signals so that expensive work (config
+    # reload, stats reset, plugin notifications) is never running concurrently
+    # for the same signal type.
     _sigusr1_pending = threading.Event()
     _sigusr2_pending = threading.Event()
 
     def _apply_runtime_config(new_cfg: dict) -> None:
-        """
-        Brief: Apply runtime-safe settings from new_cfg.
+        """Apply runtime-safe settings from a freshly-loaded config mapping.
 
         Inputs:
           - new_cfg: dict configuration just loaded
@@ -382,7 +418,7 @@ def main(argv: List[str] | None = None) -> int:
           - Reinitializes logging and DNSSEC knobs
           - Manages StatsReporter per configuration changes without touching listeners
         """
-        nonlocal stats_collector, stats_reporter
+        nonlocal stats_collector, stats_reporter, stats_persistence_store
         # Re-init logging
         init_logging(new_cfg.get("logging"))
         # Apply DNSSEC/EDNS knobs to UDP handler
@@ -402,7 +438,9 @@ def main(argv: List[str] | None = None) -> int:
         except Exception:
             pass
 
-        # Stats management
+        # Stats management: we intentionally avoid touching the DNS listeners
+        # here. Only logging and StatsCollector/StatsReporter wiring are
+        # updated so that long-lived sockets are unaffected by reloads.
         s_cfg = new_cfg.get("statistics", {}) or {}
         s_enabled = bool(s_cfg.get("enabled", False))
         # Start/stop reporter based on enabled flag
@@ -457,6 +495,7 @@ def main(argv: List[str] | None = None) -> int:
                     interval_seconds=int(s_cfg.get("interval_seconds", 10)),
                     reset_on_log=bool(s_cfg.get("reset_on_log", False)),
                     log_level=str(s_cfg.get("log_level", "info")),
+                    persistence_store=stats_persistence_store,
                 )
                 stats_reporter.start()
 
@@ -480,7 +519,9 @@ def main(argv: List[str] | None = None) -> int:
             return
         # Apply runtime config (logging, DNSSEC, reporter)
         _apply_runtime_config(new_cfg)
-        # Handle statistics reset if enabled and configured
+        # Handle statistics reset if enabled and configured. This is only
+        # invoked on successful reload and only when explicitly requested via
+        # statistics.reset_on_sigusr1.
         s_cfg = new_cfg.get("statistics", {}) or {}
         if bool(s_cfg.get("enabled", False)) and bool(
             s_cfg.get("reset_on_sigusr1", False)
@@ -537,7 +578,8 @@ def main(argv: List[str] | None = None) -> int:
         nonlocal cfg, stats_collector
         log = logging.getLogger("foghorn.main")
 
-        # Conditionally reset statistics based on config
+        # Conditionally reset statistics based on config; failures here must
+        # never prevent plugin notifications from running.
         try:
             s_cfg = (cfg.get("statistics") or {}) if isinstance(cfg, dict) else {}
             if bool(s_cfg.get("enabled", False)) and bool(
@@ -560,7 +602,10 @@ def main(argv: List[str] | None = None) -> int:
                 "SIGUSR2: unexpected error checking statistics reset config: %s", e
             )
 
-        # Invoke plugin handlers
+        # Invoke plugin handlers. Each plugin can optionally expose
+        # handle_sigusr2(); errors are logged but do not abort other handlers.
+        # This keeps plugin notifications best-effort while preserving the
+        # overall signal semantics.
         count = 0
         for p in plugins or []:
             try:
@@ -730,9 +775,17 @@ def main(argv: List[str] | None = None) -> int:
             )
             return 1
 
-    # Start admin HTTP webserver (FastAPI) and treat None handle as fatal when enabled
+    # Start admin HTTP webserver (FastAPI) and treat None handle as fatal when
+    # webserver.enabled is true. Tests and production code both rely on a
+    # single call to start_webserver() so it can be cleanly monkeypatched and
+    # stopped from the finally: block below.
     try:
-        web_handle = start_webserver(stats_collector, cfg, web_log_buffer)
+        web_handle = start_webserver(
+            stats_collector,
+            cfg,
+            log_buffer=web_log_buffer,
+            config_path=cfg_path,
+        )
     except Exception as e:  # pragma: no cover
         logger.error("Failed to start webserver: %s", e)
         return 1
@@ -758,11 +811,17 @@ def main(argv: List[str] | None = None) -> int:
         )  # pragma: no cover
         return 1  # pragma: no cover
     finally:
-        # Stop statistics reporter on shutdown
+        # Stop statistics reporter on shutdown so background reporting threads
+        # never outlive the main process and do not keep it alive.
         if stats_reporter is not None:
             logger.info("Stopping statistics reporter")
             stats_reporter.stop()
-        # Stop webserver thread on shutdown
+        if stats_persistence_store is not None:
+            logger.info("Closing statistics persistence store")
+            stats_persistence_store.close()
+        # Stop webserver thread on shutdown. The handle abstraction lets both
+        # the FastAPI-based web UI and the threaded admin HTTP server share the
+        # same shutdown semantics (is_running/stop).
         if web_handle is not None:
             logger.info("Stopping webserver")
             web_handle.stop()
