@@ -20,9 +20,15 @@ import signal
 import threading
 import urllib.parse
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
+
+try:
+    import psutil  # type: ignore[import]
+except Exception:  # pragma: no cover - optional dependency fallback
+    psutil = None  # type: ignore[assignment]
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -282,16 +288,17 @@ def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
 
 
 def get_system_info() -> Dict[str, Any]:
-    """Brief: Collect simple system load and memory usage snapshot.
+    """Brief: Collect simple system and process memory usage snapshot.
 
     Inputs:
       - None.
 
     Outputs:
       - Dict containing keys such as "load_1m", "load_5m", "load_15m",
-        "memory_total_bytes", "memory_used_bytes", "memory_free_bytes", and
-        "memory_available_bytes". Values are floats or integers when
-        available, or None when the metric cannot be determined.
+        "memory_total_bytes", "memory_used_bytes", "memory_free_bytes",
+        "memory_available_bytes", "process_rss_bytes", and "process_rss_mb".
+        Values are floats or integers when available, or None when the metric
+        cannot be determined.
 
     Example:
       >>> info = get_system_info()  # doctest: +SKIP (depends on host)
@@ -307,7 +314,19 @@ def get_system_info() -> Dict[str, Any]:
         "memory_used_bytes": None,
         "memory_free_bytes": None,
         "memory_available_bytes": None,
+        "process_rss_bytes": None,
+        "process_rss_mb": None,
     }
+
+    # Process memory (RSS) in bytes and MB when psutil is available
+    if psutil is not None:
+        try:
+            proc = psutil.Process(os.getpid())
+            rss_bytes = int(proc.memory_info().rss)
+            payload["process_rss_bytes"] = rss_bytes
+            payload["process_rss_mb"] = round(rss_bytes / (1024 * 1024), 2)
+        except Exception:  # pragma: no cover - environment specific
+            pass
 
     # Load averages
     try:
@@ -340,92 +359,47 @@ def get_system_info() -> Dict[str, Any]:
     return payload
 
 
-def _build_stats_payload_for_index(
-    collector: Optional[StatsCollector],
-) -> Dict[str, Any]:
-    """Return statistics payload suitable for embedding in the index page.
+def resolve_www_root(config: Dict[str, Any] | None = None) -> str:
+    """Brief: Resolve absolute html root directory for static admin assets.
 
     Inputs:
-      - collector: Optional StatsCollector instance.
+      - config: Optional full configuration mapping (e.g. loaded from YAML).
 
     Outputs:
-      - Dict with either disabled status or a snapshot of current statistics.
+      - str absolute path to the directory from which static files are served.
+
+    Example:
+      >>> cfg = {"webserver": {"www_root": "/srv/foghorn/html"}}
+      >>> path = resolve_www_root(cfg)
+      >>> path.endswith("/srv/foghorn/html")
+      True
     """
 
-    if collector is None:
-        return {"status": "disabled", "server_time": _utc_now_iso()}
+    # 1) Config override: webserver.www_root
+    if isinstance(config, dict):
+        web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
+        candidate = web_cfg.get("www_root")
+        if isinstance(candidate, str) and candidate:
+            cfg_path = Path(candidate).expanduser()
+            if cfg_path.is_dir():
+                return str(cfg_path.resolve())
 
-    snap: StatsSnapshot = collector.snapshot(reset=False)
-    payload: Dict[str, Any] = {
-        "created_at": snap.created_at,
-        "server_time": _utc_now_iso(),
-        "totals": snap.totals,
-        "rcodes": snap.rcodes,
-        "qtypes": snap.qtypes,
-        "uniques": snap.uniques,
-        "upstreams": snap.upstreams,
-        "top_clients": snap.top_clients,
-        "top_subdomains": snap.top_subdomains,
-        "top_domains": snap.top_domains,
-        "latency": snap.latency_stats,
-        "latency_recent": snap.latency_recent_stats,
-        "system": get_system_info(),
-    }
-    return payload
+    # 2) Environment variable override
+    env_root = os.environ.get("FOGHORN_WWW_ROOT")
+    if env_root:
+        env_path = Path(env_root).expanduser()
+        if env_path.is_dir():
+            return str(env_path.resolve())
 
+    # 3) Current working directory ./html
+    cwd_html = Path(os.getcwd()) / "html"
+    if cwd_html.is_dir():
+        return str(cwd_html.resolve())
 
-def _render_index_html(
-    logo_url: str,
-    stats_payload: Dict[str, Any],
-    config_payload: Dict[str, Any],
-) -> str:
-    """Return HTML string for the virtual /index.html dashboard.
-
-    Inputs:
-      - logo_url: URL path to the logo image (e.g., "/logo.png").
-      - stats_payload: Dict of statistics to render.
-      - config_payload: Dict of sanitized configuration to render.
-
-    Outputs:
-      - HTML document as a string that references an external stylesheet
-        (served from /styles.css under the html/ static root).
-    """
-
-    stats_pretty = html.escape(json.dumps(stats_payload, indent=2, sort_keys=True))
-    config_pretty = html.escape(json.dumps(config_payload, indent=2, sort_keys=True))
-
-    generated_at = html.escape(_utc_now_iso())
-
-    return f"""<!DOCTYPE html>
-<html lang=\"en\">
-  <head>
-    <meta charset=\"utf-8\" />
-    <title>Foghorn statistics</title>
-    <link rel=\"stylesheet\" href=\"/styles.css\" />
-  </head>
-  <body>
-    <div class=\"page\">
-      <header class=\"hero\">
-        <img class=\"logo\" src=\"{logo_url}\" alt=\"Foghorn logo\" />
-        <h1>Foghorn statistics</h1>
-        <p class=\"meta\">Generated at {generated_at}</p>
-      </header>
-
-      <main class=\"panels\">
-        <section class=\"panel panel-stats\">
-          <h2>Statistics</h2>
-          <pre>{stats_pretty}</pre>
-        </section>
-
-        <section class=\"panel panel-config\">
-          <h2>Configuration (sanitized)</h2>
-          <pre>{config_pretty}</pre>
-        </section>
-      </main>
-    </div>
-  </body>
-</html>
-"""
+    # 4) Fallback to package-relative html directory (existing behavior)
+    here = Path(__file__).resolve()
+    pkg_html = here.parent.parent / "html"
+    return str(pkg_html.resolve())
 
 
 def _build_auth_dependency(web_cfg: Dict[str, Any]):
@@ -501,10 +475,7 @@ def create_app(
     app = FastAPI(title="Foghorn Admin HTTP API")
 
     # Derived paths for optional static assets
-    root_dir = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
-    )
-    www_root = os.path.join(root_dir, "html")
+    www_root = resolve_www_root(config)
 
     # Install default suppression of 2xx uvicorn access logs on startup so it
     # applies both to embedded and external uvicorn usage.
@@ -780,52 +751,40 @@ def create_app(
         entries = buf.snapshot(limit=max(0, int(limit)))
         return {"server_time": _utc_now_iso(), "entries": entries}
 
-    # Optional virtual HTML dashboard and static file serving from www/
+    # Optional static HTML index and static file serving from www/
     index_enabled = bool(web_cfg.get("index", True))
 
     @app.get("/index.html", response_class=HTMLResponse)
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
-        """Serve HTML index page.
+        """Serve html/index.html for root and index when enabled.
 
         Inputs:
           - None.
 
         Outputs:
-          - HTMLResponse. If html/index.html exists under the project html
-            directory it is served directly; otherwise a virtual dashboard
-            with stats and sanitized config is rendered.
+          - HTMLResponse with the contents of html/index.html when it exists
+            and webserver.index is true; otherwise HTTP 404.
+
+        Example:
+          >>> # GET / or /index.html will return the same html/index.html file
         """
 
-        # Prefer a real html/index.html from the project when present
-        # Prefer an index.html next to this module (used by tests/legacy setups)
-        module_dir = os.path.dirname(os.path.abspath(__file__))
-        legacy_index = os.path.abspath(os.path.join(module_dir, "index.html"))
-        if os.path.isfile(legacy_index):
-            return FileResponse(legacy_index)
+        if not index_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="index disabled",
+            )
 
-        # Otherwise, look under the configured html/ root
+        # Always serve the project-level html/index.html when present
         www_root_local = getattr(app.state, "www_root", www_root)
         index_path = os.path.abspath(os.path.join(www_root_local, "index.html"))
-        if os.path.isfile(index_path):
-            return FileResponse(index_path)
-
-        # Fallback to virtual dashboard when no static index is present
-        collector: Optional[StatsCollector] = app.state.stats_collector
-        stats_payload = _build_stats_payload_for_index(collector)
-
-        cfg = app.state.config or {}
-        web_cfg_inner = (cfg.get("webserver") or {}) if isinstance(cfg, dict) else {}
-        redact_keys = web_cfg_inner.get("redact_keys") or [
-            "token",
-            "password",
-            "secret",
-        ]
-        clean_cfg = sanitize_config(cfg, redact_keys=redact_keys)
-
-        logo_url = "/logo.png"
-        html_body = _render_index_html(logo_url, stats_payload, clean_cfg)
-        return HTMLResponse(content=html_body)
+        if not os.path.isfile(index_path):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="index not found",
+            )
+        return FileResponse(index_path)
 
     @app.get("/{path:path}")
     async def static_www(path: str) -> Any:
@@ -1338,7 +1297,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _handle_index(self) -> None:
-        """Brief: Handle GET / and /index.html with a virtual HTML dashboard.
+        """Brief: Handle GET / and /index.html by serving html/index.html.
 
         Inputs: none
         Outputs: None
@@ -1350,49 +1309,36 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_text(404, "index disabled")
             return
 
-        # Prefer static html/index.html when available
         index_path = os.path.abspath(os.path.join(self._www_root(), "index.html"))
-        if os.path.isfile(index_path):
-            try:
-                with open(index_path, "rb") as f:
-                    data = f.read()
-            except Exception as exc:  # pragma: no cover
-                logger.error("Failed to read static index.html: %s", exc)
-            else:
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Connection", "close")
-                self.send_header("Content-Length", str(len(data)))
-                self._apply_cors_headers()
-                self.end_headers()
-                self.wfile.write(data)
-                return
+        if not os.path.isfile(index_path):
+            self._send_text(404, "index not found")
+            return
 
-        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
-        stats_payload = _build_stats_payload_for_index(collector)
+        try:
+            with open(index_path, "rb") as f:
+                data = f.read()
+        except Exception as exc:  # pragma: no cover
+            logger.error("Failed to read static index.html: %s", exc)
+            self._send_text(500, "failed to read static index")
+            return
 
-        cfg = getattr(self._server(), "config", {}) or {}
-        web_cfg_inner = (cfg.get("webserver") or {}) if isinstance(cfg, dict) else {}
-        redact_keys = web_cfg_inner.get("redact_keys") or [
-            "token",
-            "password",
-            "secret",
-        ]
-        clean = sanitize_config(cfg, redact_keys=redact_keys)
-
-        logo_url = "/logo.png"
-        html_body = _render_index_html(logo_url, stats_payload, clean)
-        self._send_html(200, html_body)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(len(data)))
+        self._apply_cors_headers()
+        self.end_headers()
+        self.wfile.write(data)
 
     def _www_root(self) -> str:
-        """Brief: Return absolute path to the project-level html directory.
+        """Brief: Resolve absolute path to the html directory for static assets.
 
         Inputs: none
         Outputs: str absolute path to html/.
         """
 
-        here = os.path.dirname(os.path.abspath(__file__))
-        return os.path.abspath(os.path.join(here, os.pardir, os.pardir, "html"))
+        cfg = getattr(self._server(), "config", None)
+        return resolve_www_root(cfg)
 
     def _try_serve_www(self, path: str) -> bool:
         """Brief: Attempt to serve a static file from html/ for the given path.
