@@ -1,60 +1,87 @@
 # Foghorn
 
-Foghorn is a lightweight, caching DNS server built with Python. It's designed to be fast and extensible, featuring a pluggable policy system that allows you to customize its behavior to fit your needs.
+![Foghorn Logo](html/logo.png)
 
-With special thanks to Fiona Weatherwax for their contributions.
+Foghorn is a lightweight, caching DNS server built with Python (3.10+). It's designed to be fast and extensible, featuring a pluggable policy system that allows you to customize its behavior to fit your needs.
 
-For developer-focused documentation (architecture, transports, plugins), see README-DEV.md.
+With special thanks to Fiona Weatherwax for their contributions and inspiration.
+
+For developer documentation (architecture, transports, plugin internals, testing), see README-DEV.md.
 
 ## Features
 
 *   **DNS Caching:** Speeds up DNS resolution by caching responses from upstream servers.
 *   **Extensible Plugin System:** Easily add custom logic to control DNS resolution.
-*   **Flexible Configuration:** Configure the server, upstream resolvers, and plugins using a simple YAML file.
-*   **Built-in Plugins:** Comes with a set of useful plugins to get you started:
-    *   **Access Control:** Filter DNS queries based on the client's IP address (CIDR-based allow/deny).
-    *   **Greylist:** Block domains for a set amount of time after they are first requested.
-    *   **New Domain Filter:** Block domains that were registered recently.
-    *   **Upstream Router:** Route queries to different upstream servers based on the domain name.
-    *   **Filter:** Block queries based on domain names, keywords, and IP addresses in responses.
-    *   **Examples:** Misc examples, replace the first entry of every record to localhost, limit the length of the domain name, or the depth of domain names.
-
-
+*   **Flexible Configuration:** Configure listeners, upstream resolvers (UDP/TCP/DoT/DoH), and plugins using YAML.
+*   **Built-in Plugins:**
+    *   **Access Control:** CIDR-based allow/deny (allowlist/blocklist terminology in docs).
+    *   **Greylist:** Temporarily block newly seen domains.
+    *   **New Domain Filter:** Block recently registered domains.
+    *   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
+    *   **Filter:** Filter by domain patterns/keywords and by response IPs.
+    *   **Examples:** Showcase of simple policies and rewrites.
 
 ## Installation
 
-1.  **Create a virtual environment:**
+Use a virtual environment named `venv`:
 
-    ```bash
-    python3 -m venv venv
-    source venv/bin/activate
-    ```
-
-2.  **Install the package with development dependencies:**
-
-    ```bash
-    pip install .
-    ```
-
-    To install the project in editable mode, along with all runtime and development dependencies.
-
-    ```bash
-    pip install -e ".[dev]"
-    ```
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install .
+# Optional for development:
+pip install -e '.[dev]'
+```
 
 ## Usage
 
-To run the server, you first need a `config.yaml` file. Then, you can start the server with the `foghorn` command:
+Create a `config.yaml`, then run:
 
 ```bash
 foghorn --config config.yaml
 ```
-Alternatively, you can run it as a module:
+
+Alternatively, run as a module:
+
 ```bash
 python -m foghorn.main --config config.yaml
 ```
 
 The server will start listening for DNS queries on the configured host and port.
+
+### Docker
+
+Foghorn is available on Docker Hub at `zallison/foghorn:latest`.
+
+**Using the pre-built image:**
+
+```bash
+docker run -d -p 5353:5353/udp \
+  -v /path/to/your/config.yaml:/foghorn/config.yaml \
+  zallison/foghorn:latest
+```
+
+**Building locally:**
+
+```bash
+[cp /path/to/your/config.yaml .] # Optional
+docker build -t my/foghorn .
+docker run -d -p 5353:5353/udp my/foghorn
+```
+
+**Important:** Mount your `config.yaml` to `/foghorn/config.yaml` inside the container unless you've built your own image that contains your config.
+
+If you need to expose additional listeners (TCP/DoT/DoH), add the corresponding port mappings:
+
+```bash
+docker run -d \
+  -p 5353:5353/udp \
+  -p 5353:5353/tcp \
+  -p 8853:8853/tcp \
+  -p 8053:8053/tcp \
+  -v /path/to/your/config.yaml:/foghorn/config.yaml \
+  zallison/foghorn:latest
+```
 
 ### DNSSEC modes
 
@@ -67,24 +94,8 @@ dnssec:
 - ignore: do not advertise DO; DNSSEC data not requested.
 - passthrough: advertise DO and return DNSSEC records; forward AD bit if upstream set it.
 - validate:
-  - upstream_ad: require upstream AD bit (simple, recommended for now)
-  - local (experimental): perform local DNSSEC validation via dnspython; unsigned zones will SERVFAIL.
-
-## Testing
-
-To run the test suite, use `pytest`:
-
-```bash
-pytest
-```
-
-## Code Formatting
-
-This project uses `black` for code formatting. To format the code, run:
-
-```bash
-black src tests
-```
+  - upstream_ad: require upstream AD bit (recommended for now)
+  - local (experimental): perform local DNSSEC validation.
 
 ## Configuration
 
@@ -92,7 +103,7 @@ Configuration is handled through a `config.yaml` file. The file has three main s
 
 ### `listen`
 
-You can enable one or more listeners. UDP remains the default; TCP and DoT are optional.
+You can enable one or more listeners. UDP is enabled by default; TCP, DoT, and DoH are optional and supported.
 
 ```yaml
 listen:
@@ -117,6 +128,11 @@ listen:
     # Optional TLS
     # cert_file: /path/to/cert.pem
     # key_file: /path/to/key.pem
+
+Note: The DoH listener is served by a dedicated FastAPI app using uvicorn in a
+single background thread. TLS is applied via `cert_file`/`key_file`. Behavior is
+RFC 8484‑compatible and unchanged from previous releases; only the runtime
+implementation has changed.
 ```
 
 ### `upstream`
@@ -163,6 +179,22 @@ You can use short aliases instead of full dotted paths:
 Examples of plugin entries:
 - As a dict with module/config: `{ module: acl, config: {...} }`
 - As a plain alias string: `acl` (no config)
+
+#### Plugin priorities and `setup_priority`
+
+Plugins support three priority knobs in their config (all optional, integers 1–255):
+
+- `pre_priority`: controls the order of `pre_resolve` hooks; lower values run first.
+- `post_priority`: controls the order of `post_resolve` hooks; lower values run first.
+- `setup_priority`: controls the order of one-time `setup()` calls during startup; lower values run first.
+
+`setup_priority` is only used for plugins that override `BasePlugin.setup`. Its value is resolved as:
+
+- Use the explicit `setup_priority` from config if provided.
+- Otherwise, reuse the config’s `pre_priority` value for setup-aware plugins.
+- Otherwise, fall back to the plugin’s class-level default (50).
+
+This lets you, for example, have a ListDownloader plugin run its setup early (to download lists) and a Filter plugin run slightly later to load those lists from disk.
 
 #### AccessControlPlugin
 
@@ -243,13 +275,13 @@ plugins:
     config:
       routes:
         - domain: "internal.corp.com"
-          upstream:
-            host: 10.0.0.1
-            port: 53
+          upstreams:
+            - host: 10.0.0.1
+              port: 53
         - suffix: ".dev.example.com"
-          upstream:
-            host: 192.168.1.1
-            port: 53
+          upstreams:
+            - host: 192.168.1.1
+              port: 53
 ```
 
 **Example (short alias):**
@@ -260,9 +292,9 @@ plugins:
     config:
       routes:
         - suffix: "corp"
-          upstream:
-            host: 10.0.0.53
-            port: 53
+          upstreams:
+            - host: 10.0.0.53
+              port: 53
 ```
 
 #### FilterPlugin
@@ -271,10 +303,32 @@ This plugin provides flexible filtering of DNS queries based on domain names, pa
 
 **Configuration:**
 
-*   `blocked_domains`: A list of exact domain names to block.
-*   `blocked_patterns`: A list of regular expressions to match against the domain name.
-*   `blocked_keywords`: A list of keywords to block if they appear anywhere in the domain name.
-*   `blocked_ips`: A list of IP addresses or CIDR ranges to block in the response. You can specify an `action` for each (`deny` or `remove`).
+- blocked_domains: list of exact domain names to block.
+- blocked_patterns: list of regular expressions to match against the domain name.
+- blocked_keywords: list of keywords to block if they appear anywhere in the domain name.
+- blocked_ips: list of IP addresses or CIDR ranges to control post‑resolution behavior; each entry supports action deny, remove, or replace (with replace_with).
+
+File-backed inputs (support globs):
+- allowed_domains_files, blocked_domains_files (aliases also supported: allowlist_files, blocklist_files)
+- blocked_patterns_files
+- blocked_keywords_files
+- blocked_ips_files
+
+Formats supported per file (auto-detected line-by-line):
+- Plain text (default): a single value per line; blank lines and lines starting with '#' are ignored
+- JSON Lines (JSONL): one JSON object per line with the following schemas
+  - Domains: {"domain": "example.com", "mode": "allow|deny"} (mode optional; defaults to the file-level mode implied by which key you used)
+  - Patterns: {"pattern": "^ads\\.", "flags": ["IGNORECASE"]} (flags optional; defaults to IGNORECASE)
+  - Keywords: {"keyword": "tracker"}
+  - IPs: {"ip": "203.0.113.0/24", "action": "deny|remove|replace", "replace_with": "IP"}
+
+Note: JSONL is only supported in FilterPlugin file-backed inputs (the *_files keys above). The core YAML config does not accept JSONL.
+
+Load order and precedence for domains (last write wins):
+1) allowed_domains_files/allowlist_files
+2) blocked_domains_files/blocklist_files
+3) inline allowed_domains
+4) inline blocked_domains
 
 **Example (short alias):**
 
@@ -297,26 +351,154 @@ plugins:
       blocked_ips:
         - ip: "1.2.3.4"
           action: "deny" # Deny the whole response
-        - ip: "8.8.8.8/24"
+        - ip: "8.8.8.0/24"
           action: "remove" # Remove just this A/AAAA record
+
+      # File-backed examples (globs allowed)
+      allowed_domains_files:
+        - config/allow.txt
+        - config/allow.d/*.list
+      blocked_domains_files:
+        - config/block.txt
+        - config/block.d/*.txt
+      blocked_patterns_files:
+        - config/patterns/*.re
+      blocked_keywords_files:
+        - config/keywords.txt
+      blocked_ips_files:
+        - config/ips.txt
+        - config/ips.d/*.csv
+```
+
+##### JSON Lines examples for files
+
+- Domains (allowed_domains_files or blocked_domains_files):
+
+```json
+{"domain": "good.com", "mode": "allow"}
+{"domain": "bad.com", "mode": "deny"}
+{"domain": "neutral.com"}
+```
+
+- Patterns (blocked_patterns_files):
+
+```json
+{"pattern": "^ads\\.", "flags": ["IGNORECASE"]}
+{"pattern": "^track\\.", "flags": []}
+```
+
+- Keywords (blocked_keywords_files):
+
+```json
+{"keyword": "tracker"}
+{"keyword": "analytics"}
+```
+
+- IPs (blocked_ips_files):
+
+```json
+{"ip": "192.0.2.1", "action": "deny"}
+{"ip": "198.51.100.0/24", "action": "remove"}
+{"ip": "203.0.113.5", "action": "replace", "replace_with": "127.0.0.1"}
+```
+
+Notes:
+- Plain-text lines continue to work alongside JSON Lines within the same file.
+- Unknown actions default to deny (logged). Invalid JSON/regex/IP lines are logged and skipped.
+
+#### ListDownloader plugin
+
+Download domain-only blocklists from well-known sources to local files so the Filter plugin can load them.
+
+Notes:
+- Works with domain-per-line lists (e.g., Firebog "just domains"). Hosts-formatted lists (with IPs) are not supported without preprocessing.
+- Runs early (pre_priority 15) so files are present before Filter executes.
+
+**Configuration:**
+
+* `urls`: List of HTTP(S) URLs to domain-only lists (comments with `#` allowed).
+* `url_files`: List of file paths, each containing one URL per line (supports `#` comments and blank lines).
+* `download_path`: Directory to write files (default `./var/lists`).
+* `interval_seconds`: Optional periodic refresh interval while the server runs).
+
+Filenames are unique and stable per-URL: `{base}-{sha1(url)[:12]}{ext}`. If the URL has no extension, none is added (`{base}-{hash}`). Each file begins with a header line: `# YYYY-MM-DD HH:MM - URL`.
+
+**Example:**
+
+```yaml
+plugins:
+  - module: list_downloader
+    pre_priority: 15
+    config:
+      download_path: ./var/lists
+      interval_seconds: 3600
+      urls:
+        - https://v.firebog.net/hosts/AdguardDNS.txt
+        - https://v.firebog.net/hosts/Easylist.txt
+        - https://v.firebog.net/hosts/Prigent-Ads.txt
+        - https://v.firebog.net/hosts/Prigent-Malware.txt
+
+  - module: filter
+    pre_priority: 20
+    config:
+      default: deny
+      blocklist_files:
+        - ./var/lists/AdguardDNS-*.txt
+        - ./var/lists/Easylist-*.txt
+        - ./var/lists/Prigent-Ads-*.txt
+        - ./var/lists/Prigent-Malware-*.txt
 ```
 
 ## Complete `config.yaml` Example
 
-Here is a complete `config.yaml` file that uses all the available features:
+Here is a complete `config.yaml` file that uses the modern configuration format and shows how plugin priorities (including `setup_priority`) work:
 
 ```yaml
 # Example configuration for the DNS caching server
 listen:
-  host: 127.0.0.1
-  port: 5300
+  # Modern listener config; UDP is enabled by default.
+  udp:
+    enabled: true
+    host: 127.0.0.1
+    port: 5333
+  tcp:
+    enabled: false
+    host: 127.0.0.1
+    port: 5333
+  dot:
+    enabled: false
+    host: 127.0.0.1
+    port: 8853
+    # cert_file: /path/to/cert.pem
+    # key_file: /path/to/key.pem
+  doh:
+    enabled: false
+    host: 127.0.0.1
+    port: 8053
+    # Optional TLS for DoH
+    # cert_file: /path/to/cert.pem
+    # key_file: /path/to/key.pem
 
-# Multiple upstream DNS servers with automatic failover
+# Multiple upstream DNS servers with automatic failover.
+# All upstreams share a single timeout (timeout_ms) per attempt.
 upstream:
   - host: 8.8.8.8
     port: 53
+    transport: udp
   - host: 1.1.1.1
-    port: 53
+    port: 853
+    transport: dot
+    tls:
+      server_name: cloudflare-dns.com
+      verify: true
+      # ca_file: /etc/ssl/certs/ca-certificates.crt
+  - transport: doh
+    url: https://dns.google/dns-query
+    method: POST
+    headers:
+      user-agent: foghorn
+    tls:
+      verify: true
 
 # Global timeout applies to each upstream attempt
 timeout_ms: 2000
@@ -327,6 +509,12 @@ timeout_ms: 2000
 # Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
 min_cache_ttl: 60
 
+# Optional DNSSEC configuration
+# dnssec:
+#   mode: passthrough            # ignore | passthrough | validate
+#   validation: upstream_ad      # upstream_ad | local (local is experimental)
+#   udp_payload_size: 1232
+
 # Logging configuration
 logging:
   level: debug            # Available levels: debug, info, warn, error, crit
@@ -334,26 +522,41 @@ logging:
   file: /tmp/foghorn.log  # Optional: also log to this file
   syslog: false           # Optional: also log to syslog
 
+# Statistics (optional)
+statistics:
+  enabled: false
+  interval_seconds: 10
+  reset_on_log: false
+  include_qtype_breakdown: true
+  include_top_clients: true
+  include_top_domains: true
+  top_n: 10
+  track_latency: true
+  # reset_on_sigusr1: true
+  # sigusr2_resets_stats: true
+
 plugins:
+  # New-domain filter: simple pre-resolve policy plugin.
   - module: new_domain
     config:
       threshold_days: 14
 
+  # Greylist plugin.
   - module: greylist
     config:
       duration_seconds: 60
-  #     # duration_hours: 1 # Only if duration_seconds isn't provided
-  #     # db_path: ./greylist.db
+      # duration_hours: 1  # Only if duration_seconds isn't provided
+      # db_path: ./greylist.db
 
+  # Upstream router: route queries to specific upstreams by suffix.
+  # Uses the modern "upstreams" list format only.
   - module: router
     config:
       routes:
-        # Single upstream (legacy format)
         - suffix: ".mylan"
-          upstream:
-            host: 192.168.1.1
-            port: 53
-        # Multiple upstreams with failover (new format)
+          upstreams:
+            - host: 192.168.1.1
+              port: 53
         - suffix: "corp.internal"
           upstreams:
             - host: 10.0.0.1
@@ -361,8 +564,26 @@ plugins:
             - host: 10.0.0.2
               port: 53
 
+  # ListDownloader: runs early in the setup phase to download blocklists
+  # that the Filter plugin will read from disk.
+  - module: list_downloader
+    config:
+      # setup_priority controls when setup() runs relative to other plugins.
+      # Lower numbers run earlier. ListDownloader defaults to 15.
+      setup_priority: 15
+      download_path: ./var/lists
+      interval_seconds: 3600
+      urls:
+        - https://v.firebog.net/hosts/AdguardDNS.txt
+        - https://v.firebog.net/hosts/Easylist.txt
+
+  # Filter plugin: loads allowlists/blocklists and applies domain/IP filtering.
   - module: filter
     config:
+      # setup_priority controls when setup() runs. When omitted, it falls back to
+      # pre_priority for setupable plugins, or to the class default (50).
+      setup_priority: 20
+
       # Pre-resolve (domain) filtering
       blocked_domains:
         - "malware.com"
@@ -381,6 +602,20 @@ plugins:
         - "malware"
         - "phishing"
 
+      # Optional: file-backed allowlist/blocklist inputs (globs allowed)
+      # allowlist_files:
+      #   - config/allow.txt
+      #   - config/allow.d/*.list
+      # blocklist_files:
+      #   - config/block.txt
+      #   - config/block.d/*.txt
+      # blocked_patterns_files:
+      #   - config/patterns/*.re
+      # blocked_keywords_files:
+      #   - config/keywords.txt
+      # blocked_ips_files:
+      #   - config/ips.txt
+
       # Post-resolve (IP) filtering with per-IP actions
       blocked_ips:
         # Remove just the matching IP(s)
@@ -390,6 +625,7 @@ plugins:
         - ip: "1.2.3.4"
           action: "deny"
 
+  # Examples plugin: demonstrates additional policies and rewrites.
   - module: foghorn.plugins.examples.ExamplesPlugin
     config:
       # Pre-resolve policy
@@ -408,7 +644,7 @@ plugins:
 
 ## Logging
 
-Foghorn includes configurable logging with bracketed level tags and UTC timestamps. Log output includes the timestamp, level tag, logger name, and message:
+Foghorn includes configurable logging with bracketed level tags and UTC timestamps. Example output:
 
 ```
 2025-10-24T05:56:01Z [info] foghorn.main: Starting Foghorn on 127.0.0.1:5354
@@ -416,58 +652,8 @@ Foghorn includes configurable logging with bracketed level tags and UTC timestam
 2025-10-24T05:56:02Z [warn] foghorn.plugins.new_domain_filter: Domain example-new.com blocked (age: 3 days, threshold: 7)
 ```
 
-### Configuration
+See README-DEV.md for advanced logging and statistics options.
 
-Add a `logging` section to your `config.yaml`:
+## License
 
-```yaml
-logging:
-  level: info          # Available levels: debug, info, warn, error, crit
-  stderr: true         # Log to stderr (default: true)
-  file: ./foghorn.log  # Optional: also log to this file
-  syslog: true         # Optional: also log to syslog (default: false)
-```
-
-To configure syslog with custom options:
-
-```yaml
-logging:
-  level: info
-  syslog:
-    address: /dev/log  # Unix socket (default: /dev/log) or ("hostname", port) for network syslog
-    facility: USER     # Syslog facility (default: USER; others: LOCAL0-LOCAL7, DAEMON, etc.)
-```
-
-### Available Levels
-
-*   **debug**: Detailed diagnostic information including each query, cache hits/misses, plugin decisions
-*   **info**: General information about server startup, configuration, and important events
-*   **warn**: Warning conditions like denied queries, upstream timeouts, plugin errors
-*   **error**: Error conditions that don't stop the server
-*   **crit**: Critical errors that may cause the server to stop
-
-### File Logging
-
-When `file` is specified, Foghorn will:
-*   Create parent directories automatically if they don't exist
-*   Log to both stderr and the file (if `stderr: true`)
-*   Append to the file (it won't overwrite existing content)
-*   Use UTF-8 encoding
-
-### Plugin Logging
-
-Plugin authors can use Python's standard `logging` module and will inherit the same bracketed format:
-
-```python
-import logging
-
-logger = logging.getLogger(__name__)
-logger.warning("Custom plugin warning: %s", some_value)
-```
-
-## Plugin Development
-
-You can extend Foghorn by creating your own plugins. A plugin is a Python class that inherits from `BasePlugin` and implements one or both of the following methods:
-
-*   `pre_resolve(self, qname, qtype, ctx)`: This method is called before a query is resolved. It can return a `PluginDecision` to `allow`, `deny`, or `override` the query.
-*   `post_resolve(self, qname, qtype, response_wire, ctx)`: This method is called after a query has been resolved. It can also return a `PluginDecision` to modify the response.
+MIT

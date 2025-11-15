@@ -18,6 +18,8 @@ import time
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 from foghorn.transports.dot import dot_query
 
 

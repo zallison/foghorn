@@ -22,7 +22,7 @@ class AccessControlPlugin(BasePlugin):
                 - 192.168.1.0/24
     """
 
-    def __init__(self, **config):
+    def setup(self, **config):
         """
         Initializes the AccessControlPlugin.
 
@@ -36,7 +36,7 @@ class AccessControlPlugin(BasePlugin):
             >>> plugin.default
             'deny'
         """
-        super().__init__(**config)
+
         self.default = (self.config.get("default", "allow")).lower()
         self.allow_nets = [
             ipaddress.ip_network(n, strict=False) for n in self.config.get("allow", [])

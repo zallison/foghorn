@@ -59,7 +59,6 @@ def stub_server():
     try:
         yield f"http://{host}:{port}/dns-query"
     finally:
-
         srv.shutdown()
         srv.server_close()
 

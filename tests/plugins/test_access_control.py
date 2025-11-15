@@ -24,6 +24,7 @@ def test_access_control_init_default_allow(tmp_path):
       - None: Asserts default is 'allow'
     """
     plugin = AccessControlPlugin()
+    plugin.setup()
     assert plugin.default == "allow"
 
 
@@ -38,6 +39,7 @@ def test_access_control_init_default_deny(tmp_path):
       - None: Asserts default is 'deny'
     """
     plugin = AccessControlPlugin(default="deny")
+    plugin.setup()
     assert plugin.default == "deny"
 
 
@@ -52,6 +54,7 @@ def test_access_control_allow_list_parsing(tmp_path):
       - None: Asserts networks parsed
     """
     plugin = AccessControlPlugin(allow=["192.168.1.0/24", "10.0.0.0/8"])
+    plugin.setup()
     assert len(plugin.allow_nets) == 2
 
 
@@ -66,6 +69,7 @@ def test_access_control_deny_list_parsing(tmp_path):
       - None: Asserts networks parsed
     """
     plugin = AccessControlPlugin(deny=["192.168.1.10/32", "172.16.0.0/12"])
+    plugin.setup()
     assert len(plugin.deny_nets) == 2
 
 
@@ -81,6 +85,7 @@ def test_access_control_allows_by_default(tmp_path):
       - None: Asserts decision to allow (deny action returned)
     """
     plugin = AccessControlPlugin(default="allow")
+    plugin.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
     assert decision.action == "allow"
@@ -98,6 +103,7 @@ def test_access_control_denies_by_default(tmp_path):
       - None: Asserts decision to deny
     """
     plugin = AccessControlPlugin(default="deny")
+    plugin.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
     assert decision.action == "deny"
@@ -115,6 +121,7 @@ def test_access_control_allow_rule_matches(tmp_path):
       - None: Asserts None returned (allow)
     """
     plugin = AccessControlPlugin(default="deny", allow=["192.168.1.0/24"])
+    plugin.setup()
     ctx = PluginContext(client_ip="192.168.1.100")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
     assert decision is None
@@ -132,6 +139,7 @@ def test_access_control_deny_rule_matches(tmp_path):
       - None: Asserts decision to deny
     """
     plugin = AccessControlPlugin(default="allow", deny=["192.168.1.10"])
+    plugin.setup()
     ctx = PluginContext(client_ip="192.168.1.10")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
     assert decision is not None
@@ -152,6 +160,7 @@ def test_access_control_deny_takes_precedence(tmp_path):
     plugin = AccessControlPlugin(
         default="allow", allow=["192.168.1.0/24"], deny=["192.168.1.10"]
     )
+    plugin.setup()
     ctx = PluginContext(client_ip="192.168.1.10")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
     assert decision is not None
@@ -170,6 +179,8 @@ def test_access_control_ipv6_support(tmp_path):
       - None: Asserts IPv6 processed correctly
     """
     plugin = AccessControlPlugin(default="deny", allow=["2001:db8::/32"])
+    plugin.setup()
+
     ctx = PluginContext(client_ip="2001:db8::1")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
     assert decision is None
@@ -187,6 +198,7 @@ def test_access_control_single_ip_no_mask(tmp_path):
       - None: Asserts single IP parsed as /32
     """
     plugin = AccessControlPlugin(default="allow", deny=["10.0.0.1"])
+    plugin.setup()
     ctx = PluginContext(client_ip="10.0.0.1")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
     assert decision is not None
@@ -205,6 +217,7 @@ def test_access_control_no_rules_default_allow(tmp_path):
       - None: Asserts decision to allow
     """
     plugin = AccessControlPlugin(default="allow")
+    plugin.setup()
     ctx = PluginContext(client_ip="203.0.113.1")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
     assert decision.action == "allow"
@@ -222,6 +235,7 @@ def test_access_control_no_rules_default_deny(tmp_path):
       - None: Asserts decision to deny
     """
     plugin = AccessControlPlugin(default="deny")
+    plugin.setup()
     ctx = PluginContext(client_ip="203.0.113.1")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
     assert decision.action == "deny"

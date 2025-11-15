@@ -1,7 +1,6 @@
 # Name of the virtual‑env directory
 VENV ?= ./venv
 PREFIX ?=  ${USER}
-CONFIG_DIR ?= ./config
 CONTAINER_NAME ?= foghorn
 TAG ?= latest
 
@@ -16,7 +15,8 @@ IGNORE_EXTS :=  .yaml .yml
 #
 # ------------------------------------------------------------
 .PHONY: run
-run: env build
+run: build
+	python -m venv $(VENV) && . ${VENV}/bin/activate || true   # ignore error if it already exists
 	mkdir var 2>/dev/null || true
 	foghorn --config config.yaml
 
@@ -27,7 +27,7 @@ run: env build
 .PHONY: env
 env:
 	@echo "=== Creating virtual environment ==="
-	python -m venv $(VENV) && . ${VENV}/bin/activate || . ${VENV}/bin/activate   # ignore error if it already exists
+	python -m venv $(VENV) || true
 
 .PHONY: build
 build: env
@@ -39,9 +39,9 @@ build: env
 # ------------------------------------------------------------
 .PHONY: test tests
 tests: test
-test:
+test: build
 	@echo "=== Running tests (short) ==="
-	python -m venv $(VENV) && . ${VENV}/bin/activate || true   # ignore error if it already exists
+	source ${VENV}/bin/activate || true   # ignore error if it already exists
 	pytest --cov=foghorn tests
 
 # ------------------------------------------------------------
@@ -56,8 +56,8 @@ clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +;
 	# Delete .pyc, .tmp, backup (~) and vim swap files
 	find . -type f \
-	        \( -name '*.pyc' -o -name '*.tmp' -o -name '*~' -o -name '#*' -o -name '*.swp' \) -delete
-        # Keep YAML files – nothing more needed
+        \( -name '*.pyc' -o -name '*.tmp' -o -name '*~' -o -name '#*' -o -name '*.swp' \) -delete
+	# Keep YAML files – nothing more needed
 
 # ---------------
 # Docker
@@ -71,12 +71,12 @@ docker-build: docker-clean
 
 .PHONY: docker-clean
 docker-clean:
-	docker rmi ${PREFIX}/${CONTAINER_NAME}:${TAG} || true
+	docker rmi ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-run
 docker-run:
 	docker rm -f foghorn 2> /dev/null
-	docker run --name foghorn -d -p 53:5353/udp -p 53:5353/tcp -v /etc/hosts:/etc/hosts:ro --restart unless-stopped ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker run --name foghorn -d -p 53:5333/udp -p 53:53/tcp -p 8053:8053/tcp -p 801:1801/tcp -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-logs
 docker-logs:
@@ -92,14 +92,15 @@ dev-ship: clean docker-build
 .PHONY: help
 help:
 	@echo "Makefile targets:"
-	@echo "  run            – Execute foghorn --config config.yaml"
-	@echo "  env            – Create virtual environment"
-	@echo "  build          – Install project in editable mode (with dev dependencies)"
+	@echo "  run            – Execute foghorn --config config.yaml (depends on build)"
+	@echo "  env            – Create virtual environment in $(VENV)"
+	@echo "  build          – Install project in editable mode (with dev dependencies) into $(VENV)"
 	@echo "  test           – Run pytest with coverage"
-	@echo "  clean          – Remove venv/, var/, and temp files"
-	@echo "  docker         – Build, run, and follow logs for docker container"
-	@echo "  docker-build   – Build docker image"
-	@echo "  docker-clean   – Remove docker image"
-	@echo "  docker-run     – Run docker container"
+	@echo "  clean          – Remove venv/, var/, build/, and temp files"
+	@echo "  docker         – Clean image, build it, run container, then follow logs"
+	@echo "  docker-build   – Build docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
+	@echo "  docker-clean   – Remove docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
+	@echo "  docker-run     – Run docker container (ports 53/udp, 53/tcp, 8053/tcp)"
 	@echo "  docker-logs    – Follow docker container logs"
-	@echo "  dev-ship       – Clean, build, and push docker image"
+	@echo "  dev-ship       – Clean, build, and push docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
+
