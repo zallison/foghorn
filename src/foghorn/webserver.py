@@ -16,10 +16,7 @@ import json
 import logging
 import mimetypes
 import os
-<<<<<<< HEAD
 import signal
-=======
->>>>>>> dev/0.2.0-stat-server
 import threading
 import urllib.parse
 from datetime import datetime, timezone
@@ -247,7 +244,6 @@ def sanitize_config(
     return redacted
 
 
-<<<<<<< HEAD
 def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
     """Brief: Parse a /proc/meminfo-style file into byte counts.
 
@@ -344,8 +340,6 @@ def get_system_info() -> Dict[str, Any]:
     return payload
 
 
-=======
->>>>>>> dev/0.2.0-stat-server
 def _build_stats_payload_for_index(
     collector: Optional[StatsCollector],
 ) -> Dict[str, Any]:
@@ -375,10 +369,7 @@ def _build_stats_payload_for_index(
         "top_domains": snap.top_domains,
         "latency": snap.latency_stats,
         "latency_recent": snap.latency_recent_stats,
-<<<<<<< HEAD
         "system": get_system_info(),
-=======
->>>>>>> dev/0.2.0-stat-server
     }
     return payload
 
@@ -795,7 +786,6 @@ def create_app(
     @app.get("/index.html", response_class=HTMLResponse)
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
-<<<<<<< HEAD
         """Serve HTML index page.
 
         Inputs:
@@ -821,20 +811,6 @@ def create_app(
             return FileResponse(index_path)
 
         # Fallback to virtual dashboard when no static index is present
-=======
-        """Serve a virtual HTML index page with logo, stats, and sanitized config.
-
-        Inputs: none
-        Outputs: HTMLResponse representing the dashboard.
-        """
-
-        if not index_enabled:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="index disabled",
-            )
-
->>>>>>> dev/0.2.0-stat-server
         collector: Optional[StatsCollector] = app.state.stats_collector
         stats_payload = _build_stats_payload_for_index(collector)
 
@@ -1374,7 +1350,6 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_text(404, "index disabled")
             return
 
-<<<<<<< HEAD
         # Prefer static html/index.html when available
         index_path = os.path.abspath(os.path.join(self._www_root(), "index.html"))
         if os.path.isfile(index_path):
@@ -1393,8 +1368,6 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(data)
                 return
 
-=======
->>>>>>> dev/0.2.0-stat-server
         collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
         stats_payload = _build_stats_payload_for_index(collector)
 
