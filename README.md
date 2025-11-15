@@ -403,7 +403,6 @@ Notes:
 * `urls`: List of HTTP(S) URLs to domain-only lists (comments with `#` allowed).
 * `url_files`: List of file paths, each containing one URL per line (supports `#` comments and blank lines).
 * `download_path`: Directory to write files (default `./var/lists`).
-* `cache_days`: Skip re-download if local file is newer than this many days (default 7).
 * `interval_seconds`: Optional periodic refresh interval while the server runs).
 
 Filenames are unique and stable per-URL: `{base}-{sha1(url)[:12]}{ext}`. If the URL has no extension, none is added (`{base}-{hash}`). Each file begins with a header line: `# YYYY-MM-DD HH:MM - URL`.
@@ -416,7 +415,6 @@ plugins:
     pre_priority: 15
     config:
       download_path: ./var/lists
-      cache_days: 7
       interval_seconds: 3600
       urls:
         - https://v.firebog.net/hosts/AdguardDNS.txt
