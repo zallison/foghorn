@@ -187,34 +187,6 @@ def test_make_header_line_uses_supplied_datetime(downloader):
     assert line == "# 2024-01-02 03:04 - https://example.com"
 
 
-def test_should_skip_cache_respects_cache_days(tmp_path):
-    """Brief: _should_skip_cache is True for fresh files and False for stale ones.
-
-    Inputs:
-      - tmp_path: Temporary directory holding the cache file.
-
-    Outputs:
-      - None; asserts behavior for fresh and old mtimes.
-    """
-
-    dl = ListDownloader(
-        download_path=str(tmp_path), urls=[], url_files=[], cache_days=1
-    )
-    f = tmp_path / "cache.txt"
-    f.write_text("x")
-
-    now = time.time()
-    # Fresh file (younger than 1 day)
-    fresh_mtime = now - 100
-    os.utime(f, (fresh_mtime, fresh_mtime))
-    assert dl._should_skip_cache(str(f)) is True
-
-    # Stale file (older than 1 day)
-    old_mtime = now - 2 * 86400
-    os.utime(f, (old_mtime, old_mtime))
-    assert dl._should_skip_cache(str(f)) is False
-
-
 def test_needs_update_true_for_missing_file(tmp_path):
     """Brief: _needs_update returns True when local file does not exist.
 
@@ -469,7 +441,6 @@ def test_download_all_fetches_and_validates(monkeypatch, tmp_path):
 
     # Deterministic filename in tmp_path
     monkeypatch.setattr(dl, "_make_hashed_filename", lambda _url: "list.txt")
-    monkeypatch.setattr(dl, "_should_skip_cache", lambda _path: False)
     monkeypatch.setattr(dl, "_needs_update", lambda _url, _path: True)
 
     def fake_fetch(src_url, fpath):
@@ -487,28 +458,27 @@ def test_download_all_fetches_and_validates(monkeypatch, tmp_path):
     assert dl._validate_domain_list(str(out)) is True
 
 
-def test_download_all_skips_when_cache_fresh(monkeypatch, tmp_path):
-    """Brief: _download_all skips fetching when _should_skip_cache is True.
+def test_download_all_skips_when_no_update_needed(monkeypatch, tmp_path):
+    """Brief: _download_all skips fetching when _needs_update returns False.
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture.
       - tmp_path: Temporary directory for downloaded file.
 
     Outputs:
-      - None; asserts _needs_update and _fetch are not called when cache is fresh.
+      - None; asserts _fetch is not called and validation fails when file is missing.
     """
 
     dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
     url = "https://example.com/list.txt"
 
     monkeypatch.setattr(dl, "_make_hashed_filename", lambda _url: "list.txt")
-    monkeypatch.setattr(dl, "_should_skip_cache", lambda _path: True)
 
     called = {"needs_update": False, "fetch": False}
 
-    def fake_needs_update(_url, _path):  # pragma: no cover - should not be called
+    def fake_needs_update(_url, _path):
         called["needs_update"] = True
-        return True
+        return False
 
     def fake_fetch(_url, _path):  # pragma: no cover - should not be called
         called["fetch"] = True
@@ -516,8 +486,11 @@ def test_download_all_skips_when_cache_fresh(monkeypatch, tmp_path):
     monkeypatch.setattr(dl, "_needs_update", fake_needs_update)
     monkeypatch.setattr(dl, "_fetch", fake_fetch)
 
-    dl._download_all([url])
-    assert called["needs_update"] is False
+    # File does not exist, so _validate_domain_list will return False and raise.
+    with pytest.raises(ValueError):
+        dl._download_all([url])
+
+    assert called["needs_update"] is True
     assert called["fetch"] is False
 
 
@@ -536,7 +509,6 @@ def test_download_all_raises_on_invalid_content(monkeypatch, tmp_path):
     url = "https://example.com/list.txt"
 
     monkeypatch.setattr(dl, "_make_hashed_filename", lambda _url: "list.txt")
-    monkeypatch.setattr(dl, "_should_skip_cache", lambda _path: False)
     monkeypatch.setattr(dl, "_needs_update", lambda _url, _path: False)
 
     # Leave file missing so _validate_domain_list returns False
@@ -641,20 +613,19 @@ def test_maybe_run_force_ignores_interval(monkeypatch, tmp_path):
     assert calls[0] == ["https://example.com/a.txt"]
 
 
-def test_pre_resolve_calls_maybe_run_and_returns_none(monkeypatch, tmp_path):
-    """Brief: pre_resolve delegates to _maybe_run and returns None.
+def test_setup_calls_maybe_run_and_returns_none(monkeypatch, tmp_path):
+    """Brief: setup delegates to _maybe_run(force=True) and returns None.
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture.
       - tmp_path: Temporary directory for ListDownloader path.
 
     Outputs:
-      - None; asserts _maybe_run is called with force=False and return is None.
+      - None; asserts _maybe_run is called with force=True and return is None.
     """
 
-    # Avoid real network calls from the initial __init__-triggered _maybe_run by
-    # stubbing out requests.get at the module level before constructing the
-    # downloader.
+    # Avoid real network calls by stubbing out requests.get at the module level
+    # before constructing the downloader.
     class DummyResp:
         text = ""
 
@@ -677,6 +648,6 @@ def test_pre_resolve_calls_maybe_run_and_returns_none(monkeypatch, tmp_path):
 
     monkeypatch.setattr(dl, "_maybe_run", fake_maybe_run)
 
-    result = dl.pre_resolve("example.com", 1, b"", None)
+    result = dl.setup()
     assert result is None
-    assert called["force"] is False
+    assert called["force"] is True
