@@ -23,7 +23,7 @@ class EtcHosts(BasePlugin):
     from later files override earlier ones.
     """
 
-    def __init__(self, **config) -> None:
+    def setup(self) -> None:
         """
         Brief: Initialize the plugin and load host mappings.
 
@@ -42,7 +42,6 @@ class EtcHosts(BasePlugin):
           Multiple files (preferred):
             EtcHosts(file_paths=["/etc/hosts", "/etc/hosts.d/extra"])
         """
-        super().__init__(**config)
 
         # Normalize configuration into a list of paths. Default to /etc/hosts
         legacy = self.config.get("file_path")
