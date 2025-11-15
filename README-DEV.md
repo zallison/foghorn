@@ -8,8 +8,8 @@ This release introduces a few developer-visible breaking changes:
 
 - **Upstream config normalization**: `src/foghorn/main.py.normalize_upstream_config` no longer accepts `cfg['upstream']` as a single mapping with optional `timeout_ms`. Only list-based upstreams are supported; callers must ensure YAML uses the list form.
 - **UpstreamRouterPlugin routes**: `src/foghorn/plugins/upstream_router.py` now normalizes routes exclusively from `routes[*].upstreams`. The legacy `routes[*].upstream` single mapping is removed.
-- **BasePlugin priority**: `src/foghorn/plugins/base.py` no longer honors the legacy `priority` key. Only `pre_priority` and `post_priority` are used, with the same clamping semantics as before.
-- **DoH server shim**: the legacy asyncio-based `foghorn.doh_server.serve_doh` entrypoint has been removed. All DoH usage should go through `foghorn.doh_api.start_doh_server`; YAML `listen.doh` behavior is unchanged.
+- **BasePlugin priorities**: `src/foghorn/plugins/base.py` no longer honors the legacy `priority` key. Plugins must use `pre_priority`, `post_priority`, and (for setup-aware plugins) `setup_priority`. All three obey the same clamping semantics (1–255), and `setup_priority` falls back to the config-specified `pre_priority` or to the class attribute when omitted.
+- **DoH server shim**: the legacy asyncio-based `foghorn.doh_server.serve_doh` entrypoint has been removed. All DoH usage should go through `foghorn.doh_api.start_doh_server`; YAML `listen.doh` behavior is unchanged (requests still go through the standard plugin/caching pipeline).
 
 ## Architecture Overview
 
@@ -50,10 +50,31 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
 
 ## Configuration (highlights)
 
-- Listeners under `listen.{udp,tcp,dot,doh}` with `enabled`, `host`, `port`. DoT/DoH accept `cert_file` and `key_file` (optional for DoH if plain HTTP is desired).
+- Listeners under `listen.{udp,tcp,dot,doh}` with `enabled`, `host`, `port`. DoT/DoH accept `cert_file` and `key_file` (optional for DoH if plain HTTP is desired). The DoH listener is implemented via `foghorn.doh_api.start_doh_server` and shares the same resolver/plugin pipeline as UDP/TCP/DoT.
 - Upstreams accept optional `transport: udp|tcp|dot|doh`. For DoT set `tls.server_name`, `tls.verify`. For DoH set `url`, optional `method`, `headers`, and `tls.verify`/`tls.ca_file`.
 - `dnssec.mode: ignore|passthrough|validate`, `dnssec.validation: upstream_ad|local` (local is experimental), `dnssec.udp_payload_size` (default 1232).
 - `min_cache_ttl` (seconds) clamps cache expiry floor; negative values are clamped to 0.
+
+## Plugin lifecycle and priorities
+
+- Plugins subclass `BasePlugin` and are discovered via `plugins/registry.py` using aliases (e.g., `acl`, `router`, `new_domain`, `filter`).
+- Each plugin instance has three priority attributes:
+  - `pre_priority`: ordering for `pre_resolve` hooks (lower runs first).
+  - `post_priority`: ordering for `post_resolve` hooks (lower runs first).
+  - `setup_priority`: ordering for `setup()` during the startup phase (lower runs first).
+- `BasePlugin.__init__` accepts `pre_priority`, `post_priority`, and `setup_priority` in the plugin config. Values are coerced to integers, clamped to [1, 255], and fall back to class attributes when invalid.
+- `setup_priority` resolution:
+  - Prefer explicit `setup_priority` from config.
+  - Otherwise fall back to config-provided `pre_priority` for setup-aware plugins.
+  - Otherwise fall back to the class attribute `setup_priority` (default 50).
+- `main.run_setup_plugins()`:
+  - Filters the instantiated plugin list down to those that override `BasePlugin.setup`.
+  - Collects `(setup_priority, plugin)` pairs and runs `setup()` in ascending `setup_priority` order (stable sort; original registration order is preserved for ties).
+  - Reads `abort_on_failure` from each plugin’s `config` (defaults to `True`); if `setup()` raises and `abort_on_failure` is true, startup is aborted with `RuntimeError`. If `abort_on_failure` is false, the error is logged and startup continues.
+- Example setup ordering (ListDownloader and Filter):
+  - `ListDownloader` defines `setup_priority = 15` so it runs early, downloads lists, and validates them before other plugins.
+  - `FilterPlugin` typically uses a higher `setup_priority` (for example 20), so it runs after ListDownloader and can safely load the downloaded files.
+  - User config may override `setup_priority` on a per-plugin basis when composing plugin chains.
 
 ## Logging and Statistics
 

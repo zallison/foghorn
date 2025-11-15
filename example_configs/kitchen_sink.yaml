@@ -48,10 +48,11 @@ plugins:
       apply_to_qtypes: ["A", "AAAA"]
       # seed: 42
 
-  # 3) Download curated domain lists before filtering (ensures files exist)
+  # 3) Download curated domain lists before filtering (ensures files exist).
+  # Runs early in setup so files are present before Filter setup.
   - module: list_downloader
-    pre_priority: 15
     config:
+      setup_priority: 15
       download_path: ./var/lists
       interval_seconds: 3600
       urls:
@@ -64,6 +65,7 @@ plugins:
   - module: filter
     pre_priority: 20
     config:
+      setup_priority: 20
       default: deny
       db_path: ./var/blocklist.db
       cache_ttl_seconds: 600
