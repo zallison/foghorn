@@ -53,7 +53,6 @@ plugins:
     pre_priority: 15
     config:
       download_path: ./var/lists
-      cache_days: 7
       interval_seconds: 3600
       urls:
         - https://v.firebog.net/hosts/AdguardDNS.txt
