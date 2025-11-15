@@ -25,6 +25,7 @@ from foghorn.webserver import (
     sanitize_config,
     _Suppress2xxAccessFilter,
     install_uvicorn_2xx_suppression,
+    get_system_info,
 )
 
 
@@ -94,6 +95,79 @@ def test_stats_endpoint_disabled_when_no_collector() -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "disabled"
+
+
+def test_get_system_info_uses_meminfo_and_load(monkeypatch) -> None:
+    """Brief: get_system_info() should combine loadavg and meminfo safely.
+
+    Inputs:
+      - monkeypatch fixture to stub os.getloadavg and _read_proc_meminfo.
+
+    Outputs:
+      - Dict with expected numeric values for load and memory fields.
+    """
+
+    import foghorn.webserver as web_mod
+
+    def fake_getloadavg() -> tuple[float, float, float]:
+        return (1.0, 2.0, 3.0)
+
+    def fake_meminfo(path: str = "/proc/meminfo") -> dict[str, int]:  # noqa: ARG001
+        return {
+            "MemTotal": 1024 * 1024 * 1024,
+            "MemFree": 256 * 1024 * 1024,
+            "MemAvailable": 512 * 1024 * 1024,
+        }
+
+    monkeypatch.setattr(web_mod.os, "getloadavg", fake_getloadavg)
+    monkeypatch.setattr(web_mod, "_read_proc_meminfo", fake_meminfo)
+
+    info = get_system_info()
+    assert info["load_1m"] == 1.0
+    assert info["load_5m"] == 2.0
+    assert info["load_15m"] == 3.0
+    assert info["memory_total_bytes"] == 1024 * 1024 * 1024
+    assert info["memory_available_bytes"] == 512 * 1024 * 1024
+    assert info["memory_free_bytes"] == 256 * 1024 * 1024
+    assert info["memory_used_bytes"] == 512 * 1024 * 1024
+
+
+def test_stats_includes_system_section(monkeypatch) -> None:
+    """Brief: /stats must expose a "system" section with load and memory info.
+
+    Inputs:
+      - StatsCollector with minimal data and patched get_system_info().
+
+    Outputs:
+      - JSON body of /stats contains a "system" key with stubbed values.
+    """
+
+    import foghorn.webserver as web_mod
+
+    collector = StatsCollector(
+        track_uniques=True, include_qtype_breakdown=True, track_latency=True
+    )
+    collector.record_query("192.0.2.1", "example.com", "A")
+    collector.record_response_rcode("NOERROR")
+
+    def fake_sysinfo() -> dict[str, object]:
+        return {"load_1m": 0.5, "memory_total_bytes": 1024}
+
+    monkeypatch.setattr(web_mod, "get_system_info", fake_sysinfo)
+
+    app = create_app(
+        stats=collector,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+    )
+    client = TestClient(app)
+
+    resp = client.get("/stats")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "system" in data
+    assert data["system"]["load_1m"] == 0.5
+    assert data["system"]["memory_total_bytes"] == 1024
 
 
 def test_stats_and_traffic_with_collector() -> None:

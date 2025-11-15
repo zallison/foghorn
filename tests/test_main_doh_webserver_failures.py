@@ -103,7 +103,7 @@ def test_webserver_enabled_start_returns_none_is_fatal(monkeypatch, caplog):
       - None: asserts rc == 1 and fatal error logged.
     """
 
-    yaml_data = _basic_yaml_base() + ("webserver:\n" "  enabled: true\n")
+    yaml_data = _basic_yaml_base() + ("webserver:\n  enabled: true\n")
 
     _patch_minimal_server(monkeypatch)
 
