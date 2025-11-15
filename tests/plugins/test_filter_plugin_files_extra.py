@@ -53,6 +53,7 @@ def test_domains_files_allow_and_block(tmp_path):
         blocked_domains_files=[str(blockf)],
         default="deny",
     )
+    p.setup()
 
     assert p.is_allowed("ok.com") is True
     assert p.is_allowed("bad.com") is False
@@ -71,6 +72,7 @@ def test_patterns_and_keywords_files(tmp_path, caplog):
         blocked_keywords_files=[str(keys)],
         default="allow",
     )
+    p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     assert p.pre_resolve("ads.example", QTYPE.A, b"", ctx).action == "deny"
@@ -114,6 +116,7 @@ def test_blocked_ips_files_csv_simple_and_jsonl(tmp_path):
         blocked_ips_files=[str(ips), str(jsonl)],
         default="allow",
     )
+    p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     # Deny dominates overall when present (from simple/CSV and JSONL)
@@ -164,6 +167,7 @@ def test_glob_expansion_for_new_files(tmp_path):
         blocked_patterns_files=[str(d / "p*.re")],
         default="allow",
     )
+    p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     # keywords
@@ -177,7 +181,8 @@ def test_glob_expansion_for_new_files(tmp_path):
 
 def test_missing_files_raise(tmp_path):
     with pytest.raises(FileNotFoundError):
+        # File resolution now occurs during setup(), so invoke it explicitly
         FilterPlugin(
             db_path=str(tmp_path / "bl.db"),
             blocked_patterns_files=[str(tmp_path / "nope.re")],
-        )
+        ).setup()
