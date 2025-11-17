@@ -306,50 +306,62 @@ class StatsSnapshot:
 
 
 class StatsSQLiteStore:
-    """SQLite-backed persistence for :class:`StatsSnapshot` objects.
+    """SQLite-backed persistent statistics store.
 
     Inputs (constructor):
         db_path: Filesystem path to the SQLite database file.
-        max_snapshots: Optional maximum number of snapshots to retain.
-        max_age_seconds: Optional maximum age (in seconds) for snapshots.
+        batch_writes: Enable batched writes instead of per-call commits (default False).
+        batch_time_sec: Maximum age (in seconds) of a batch before it is flushed.
+        batch_max_size: Maximum number of queued operations before forced flush.
 
     Outputs:
-        StatsSQLiteStore instance used to save and load snapshots.
+        StatsSQLiteStore instance used to maintain aggregate counters (``counts``
+        table) and an append-only DNS query log (``query_log`` table).
+
+    The previous implementation stored :class:`StatsSnapshot` objects as JSON
+    blobs in a ``stats_snapshots`` table. That approach has been replaced with
+    a more normalized schema that is suitable for analytics and reconstruction
+    of statistics across restarts.
 
     Example:
         >>> store = StatsSQLiteStore("./var/stats.db")
-        >>> collector = StatsCollector()
-        >>> collector.record_cache_hit("example.com")
-        >>> snap = collector.snapshot()
-        >>> store.save_snapshot(snap)
-        >>> latest = store.load_latest_snapshot()
-        >>> latest.totals["cache_hits"]
-        1
+        >>> store.increment_count("totals", "total_queries")
+        >>> store.increment_count("domains", "example.com")
     """
 
     def __init__(
         self,
         db_path: str,
-        max_snapshots: Optional[int] = None,
-        max_age_seconds: Optional[int] = None,
+        batch_writes: bool = False,
+        batch_time_sec: float = 15.0,
+        batch_max_size: int = 1000,
     ) -> None:
         """Initialize SQLite store and ensure schema exists.
 
         Inputs:
             db_path: Path to SQLite database file.
-            max_snapshots: Optional retention limit by snapshot count.
-            max_age_seconds: Optional retention limit by snapshot age.
+            batch_writes: If True, queue writes and flush periodically.
+            batch_time_sec: Max age of a batch before flush when batching.
+            batch_max_size: Max queued operations before forced flush.
 
         Outputs:
             None
         """
         self._db_path = db_path
-        self._max_snapshots = max_snapshots
-        self._max_age_seconds = max_age_seconds
         self._conn = self._init_connection()
 
+        # Batching configuration
+        self._batch_writes = bool(batch_writes)
+        self._batch_time_sec = float(batch_time_sec)
+        self._batch_max_size = int(batch_max_size)
+
+        # Internal state for batching and thread-safety
+        self._lock = threading.RLock()
+        self._pending_ops: List[Tuple[str, Tuple[Any, ...]]] = []
+        self._last_flush: float = time.time()
+
     def _init_connection(self) -> sqlite3.Connection:
-        """Create SQLite connection and ensure schema.
+        """Create SQLite connection and ensure schema exists.
 
         Inputs:
             None
@@ -368,66 +380,409 @@ class StatsSQLiteStore:
         except Exception:  # pragma: no cover - environment specific
             pass
 
+        # Aggregate counters table
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS stats_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at REAL NOT NULL,
-                data_json TEXT NOT NULL
+            CREATE TABLE IF NOT EXISTS counts (
+                scope TEXT NOT NULL,
+                key   TEXT NOT NULL,
+                value INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (scope, key)
             )
             """
         )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_counts_scope_key_value
+            ON counts(scope, key, value)
+            """
+        )
+
+        # Raw DNS query log (append-only at the code level)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS query_log (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts           REAL NOT NULL,
+                client_ip    TEXT NOT NULL,
+                name         TEXT NOT NULL,
+                qtype        TEXT NOT NULL,
+                upstream_id  TEXT,
+                rcode        TEXT,
+                status       TEXT,
+                error        TEXT,
+                first        TEXT,
+                result_json  TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_query_log_ts
+            ON query_log(ts)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_query_log_name_ts
+            ON query_log(name, ts)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_query_log_client_ts
+            ON query_log(client_ip, ts)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_query_log_upstream_ts
+            ON query_log(upstream_id, ts)
+            """
+        )
+
         conn.commit()
         return conn
 
-    def save_snapshot(self, snapshot: StatsSnapshot) -> None:
-        """Persist a snapshot to SQLite as a JSON blob.
+    # ------------------------------------------------------------------
+    # Low-level execution helpers
+    # ------------------------------------------------------------------
+    def _execute(self, sql: str, params: Tuple[Any, ...]) -> None:
+        """Execute a single SQL statement, with optional batching.
 
         Inputs:
-            snapshot: StatsSnapshot instance to save.
+            sql: SQL statement with positional placeholders.
+            params: Tuple of parameters for the placeholders.
+
+        Outputs:
+            None
+        """
+        if not self._batch_writes:
+            try:
+                with self._conn:  # type: ignore[attr-defined]
+                    self._conn.execute(sql, params)  # type: ignore[attr-defined]
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error("StatsSQLiteStore execute error: %s", exc, exc_info=True)
+            return
+
+        # Batched mode
+        with self._lock:
+            self._pending_ops.append((sql, params))
+            self._maybe_flush_locked()
+
+    def _maybe_flush_locked(self) -> None:
+        """Flush pending batched operations if thresholds are exceeded.
+
+        Inputs:
+            None (must be called with _lock held when batching).
+
+        Outputs:
+            None
+        """
+        if not self._batch_writes:
+            return
+
+        now = time.time()
+        ops_len = len(self._pending_ops)
+        if ops_len == 0:
+            return
+
+        age = now - self._last_flush
+        if ops_len >= self._batch_max_size or age >= self._batch_time_sec:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        """Flush all pending operations in a single transaction.
+
+        Inputs:
+            None (must be called with _lock held).
+
+        Outputs:
+            None
+        """
+        if not self._pending_ops:
+            return
+        try:
+            with self._conn:  # type: ignore[attr-defined]
+                cur = self._conn.cursor()  # type: ignore[attr-defined]
+                for sql, params in self._pending_ops:
+                    cur.execute(sql, params)
+            self._pending_ops.clear()
+            self._last_flush = time.time()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("StatsSQLiteStore flush error: %s", exc, exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Public API: counters and query log
+    # ------------------------------------------------------------------
+    def increment_count(self, scope: str, key: str, delta: int = 1) -> None:
+        """Increment an aggregate counter in the counts table.
+
+        Inputs:
+            scope: Logical scope name (e.g., "totals", "domains").
+            key: Counter key within the scope.
+            delta: Increment value (may be negative for decrements).
 
         Outputs:
             None
         """
         try:
-            data = self._snapshot_to_dict(snapshot)
-            payload = json.dumps(data, separators=(",", ":"))
-            with self._conn:  # type: ignore[attr-defined]
-                self._conn.execute(  # type: ignore[attr-defined]
-                    "INSERT INTO stats_snapshots (created_at, data_json) VALUES (?, ?)",
-                    (snapshot.created_at, payload),
-                )
+            sql = (
+                "INSERT INTO counts (scope, key, value) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(scope, key) DO UPDATE SET value = counts.value + excluded.value"
+            )
+            self._execute(sql, (scope, key, int(delta)))
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error("StatsSQLiteStore save_snapshot error: %s", exc, exc_info=True)
+            logger.error(
+                "StatsSQLiteStore increment_count error: %s", exc, exc_info=True
+            )
 
-    def load_latest_snapshot(self) -> Optional[StatsSnapshot]:
-        """Load the most recent snapshot from SQLite, if any.
+    def set_count(self, scope: str, key: str, value: int) -> None:
+        """Set an aggregate counter in the counts table.
+
+        Inputs:
+            scope: Logical scope name.
+            key: Counter key within the scope.
+            value: New integer value to assign.
+
+        Outputs:
+            None
+        """
+        try:
+            sql = (
+                "INSERT INTO counts (scope, key, value) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value"
+            )
+            self._execute(sql, (scope, key, int(value)))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("StatsSQLiteStore set_count error: %s", exc, exc_info=True)
+
+    def insert_query_log(
+        self,
+        ts: float,
+        client_ip: str,
+        name: str,
+        qtype: str,
+        upstream_id: Optional[str],
+        rcode: Optional[str],
+        status: Optional[str],
+        error: Optional[str],
+        first: Optional[str],
+        result_json: str,
+    ) -> None:
+        """Append a DNS query entry to the query_log table.
+
+        Inputs:
+            ts: Unix timestamp with millisecond precision.
+            client_ip: Client IP address.
+            name: Normalized query name.
+            qtype: Query type string (e.g., "A").
+            upstream_id: Optional upstream identifier (e.g., "8.8.8.8:53").
+            rcode: Optional DNS response code ("NOERROR", "NXDOMAIN", etc.).
+            status: Optional high-level status ("ok", "timeout", "cache_hit", ...).
+            error: Optional error message summary.
+            first: Optional first answer record representation.
+            result_json: Structured result payload as JSON text.
+
+        Outputs:
+            None
+        """
+        try:
+            sql = (
+                "INSERT INTO query_log (ts, client_ip, name, qtype, upstream_id, rcode, "
+                "status, error, first, result_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            params: Tuple[Any, ...] = (
+                float(ts),
+                client_ip,
+                name,
+                qtype,
+                upstream_id,
+                rcode,
+                status,
+                error,
+                first,
+                result_json,
+            )
+            self._execute(sql, params)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "StatsSQLiteStore insert_query_log error: %s", exc, exc_info=True
+            )
+
+    # ------------------------------------------------------------------
+    # Rebuild and inspection helpers
+    # ------------------------------------------------------------------
+    def has_counts(self) -> bool:
+        """Return True if the counts table contains at least one row.
 
         Inputs:
             None
 
         Outputs:
-            Latest StatsSnapshot or None when no snapshots exist or on error.
+            bool: True when counts has rows, False otherwise.
         """
+        try:
+            cur = self._conn.execute("SELECT 1 FROM counts LIMIT 1")  # type: ignore[attr-defined]
+            return cur.fetchone() is not None
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("StatsSQLiteStore has_counts error: %s", exc, exc_info=True)
+            return False
+
+    def has_query_log(self) -> bool:
+        """Return True if the query_log table contains at least one row.
+
+        Inputs:
+            None
+
+        Outputs:
+            bool: True when query_log has rows, False otherwise.
+        """
+        try:
+            cur = self._conn.execute("SELECT 1 FROM query_log LIMIT 1")  # type: ignore[attr-defined]
+            return cur.fetchone() is not None
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("StatsSQLiteStore has_query_log error: %s", exc, exc_info=True)
+            return False
+
+    def rebuild_counts_from_query_log(
+        self, logger_obj: Optional[logging.Logger] = None
+    ) -> None:
+        """Rebuild counts table by aggregating over all rows in query_log.
+
+        Inputs:
+            logger_obj: Optional logger to use for warnings/errors.
+
+        Outputs:
+            None
+
+        Notes:
+            - Existing counts are cleared before recomputation.
+            - Aggregation approximates the live StatsCollector behavior by
+              incrementing totals, qtypes, clients, domains/subdomains,
+              rcodes, and upstreams based on each query_log row.
+        """
+        log = logger_obj or logger
+        log.warning(
+            "Rebuilding statistics counts from query_log; this may take a while"
+        )
+
+        # Clear existing counts so we always rebuild from a clean slate.
+        try:
+            with self._conn:  # type: ignore[attr-defined]
+                self._conn.execute("DELETE FROM counts")  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - defensive
+            log.error(
+                "Failed to clear counts table before rebuild: %s", exc, exc_info=True
+            )
+            return
+
         try:
             cur = self._conn.cursor()  # type: ignore[attr-defined]
             cur.execute(
-                "SELECT created_at, data_json FROM stats_snapshots ORDER BY id DESC LIMIT 1"
+                "SELECT client_ip, name, qtype, upstream_id, rcode, status, error FROM query_log"
             )
-            row = cur.fetchone()
-            if not row:
-                return None
-            created_at, data_json = row
-            data = json.loads(data_json)
-            return self._dict_to_snapshot(data, float(created_at))
+            for client_ip, name, qtype, upstream_id, rcode, status, error in cur:
+                domain = _normalize_domain(name or "")
+                parts = domain.split(".") if domain else []
+                base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
+
+                # Total queries
+                self.increment_count("totals", "total_queries", 1)
+
+                # Cache hits/misses (best-effort approximation)
+                if status == "cache_hit":
+                    self.increment_count("totals", "cache_hits", 1)
+                else:
+                    self.increment_count("totals", "cache_misses", 1)
+
+                # Qtype breakdown
+                if qtype:
+                    self.increment_count("qtypes", str(qtype), 1)
+
+                # Clients
+                if client_ip:
+                    self.increment_count("clients", str(client_ip), 1)
+
+                # Domains and subdomains
+                if domain:
+                    self.increment_count("sub_domains", domain, 1)
+                    if base:
+                        self.increment_count("domains", base, 1)
+
+                # Rcodes
+                if rcode:
+                    self.increment_count("rcodes", str(rcode), 1)
+
+                # Upstreams
+                if upstream_id:
+                    # Approximate outcome classification using status/rcode.
+                    outcome = "success"
+                    if rcode != "NOERROR" or (
+                        status and status not in ("ok", "cache_hit")
+                    ):
+                        outcome = str(status or "error")
+                    key = f"{upstream_id}|{outcome}"
+                    self.increment_count("upstreams", key, 1)
+
+            # Ensure any batched operations are flushed.
+            if self._batch_writes:
+                with self._lock:
+                    self._flush_locked()
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error(
-                "StatsSQLiteStore load_latest_snapshot error: %s", exc, exc_info=True
+            log.error(
+                "Error while rebuilding counts from query_log: %s", exc, exc_info=True
             )
-            return None
+
+    def rebuild_counts_if_needed(
+        self, force_rebuild: bool = False, logger_obj: Optional[logging.Logger] = None
+    ) -> None:
+        """Conditionally rebuild counts table based on current DB state and flags.
+
+        Inputs:
+            force_rebuild: If True, always rebuild counts when query_log has rows.
+            logger_obj: Optional logger to use for warnings/errors.
+
+        Outputs:
+            None
+
+        Behavior:
+            - If query_log is empty, no rebuild is performed.
+            - If counts is empty and query_log is not, a rebuild is performed.
+            - If force_rebuild is True and query_log is not empty, a rebuild is
+              performed even when counts already has data.
+        """
+        log = logger_obj or logger
+        has_counts = self.has_counts()
+        has_log = self.has_query_log()
+
+        if not has_log:
+            if force_rebuild:
+                log.warning(
+                    "Force rebuild requested but query_log is empty; skipping rebuild",
+                )
+            return
+
+        if has_counts and not force_rebuild:
+            # Normal case: counts already present and no override requested.
+            return
+
+        if has_counts and force_rebuild:
+            log.warning(
+                "Force rebuild requested: discarding existing counts and rebuilding from query_log",
+            )
+        elif not has_counts:
+            log.warning(
+                "Counts table is empty but query_log has rows; rebuilding counts from query_log",
+            )
+
+        self.rebuild_counts_from_query_log(logger_obj=log)
 
     def close(self) -> None:
-        """Close the underlying SQLite connection.
+        """Close the underlying SQLite connection, flushing any pending writes.
 
         Inputs:
             None
@@ -436,62 +791,14 @@ class StatsSQLiteStore:
             None
         """
         try:
+            if self._batch_writes:
+                with self._lock:
+                    self._flush_locked()
             conn = getattr(self, "_conn", None)
             if conn is not None:
                 conn.close()
         except Exception:  # pragma: no cover - defensive
             logger.exception("Error while closing StatsSQLiteStore connection")
-
-    @staticmethod
-    def _snapshot_to_dict(snapshot: StatsSnapshot) -> Dict[str, Any]:
-        """Convert StatsSnapshot to JSON-serializable dictionary.
-
-        Inputs:
-            snapshot: StatsSnapshot instance.
-
-        Outputs:
-            Dict[str, Any] suitable for json.dumps.
-        """
-        return {
-            "created_at": snapshot.created_at,
-            "totals": snapshot.totals,
-            "rcodes": snapshot.rcodes,
-            "qtypes": snapshot.qtypes,
-            "decisions": snapshot.decisions,
-            "upstreams": snapshot.upstreams,
-            "uniques": snapshot.uniques,
-            "top_clients": snapshot.top_clients,
-            "top_subdomains": snapshot.top_subdomains,
-            "top_domains": snapshot.top_domains,
-            "latency_stats": snapshot.latency_stats,
-            "latency_recent_stats": snapshot.latency_recent_stats,
-        }
-
-    @staticmethod
-    def _dict_to_snapshot(data: Dict[str, Any], created_at: float) -> StatsSnapshot:
-        """Rebuild StatsSnapshot from dictionary payload.
-
-        Inputs:
-            data: Mapping produced by _snapshot_to_dict.
-            created_at: Snapshot creation timestamp.
-
-        Outputs:
-            StatsSnapshot instance.
-        """
-        return StatsSnapshot(
-            created_at=created_at,
-            totals=data.get("totals", {}) or {},
-            rcodes=data.get("rcodes", {}) or {},
-            qtypes=data.get("qtypes", {}) or {},
-            decisions=data.get("decisions", {}) or {},
-            upstreams=data.get("upstreams", {}) or {},
-            uniques=data.get("uniques"),
-            top_clients=data.get("top_clients"),
-            top_subdomains=data.get("top_subdomains"),
-            top_domains=data.get("top_domains"),
-            latency_stats=data.get("latency_stats"),
-            latency_recent_stats=data.get("latency_recent_stats"),
-        )
 
 
 class StatsCollector:
@@ -531,9 +838,9 @@ class StatsCollector:
         include_top_domains: bool = False,
         top_n: int = 10,
         track_latency: bool = False,
+        stats_store: Optional[StatsSQLiteStore] = None,
     ) -> None:
-        """
-        Initialize statistics collector with configuration flags.
+        """Initialize statistics collector with configuration flags.
 
         Inputs:
             track_uniques: Enable unique client/domain tracking
@@ -555,6 +862,9 @@ class StatsCollector:
         self.include_top_domains = include_top_domains
         self.top_n = max(1, top_n)
         self.track_latency = track_latency
+
+        # Optional persistent store for long-lived aggregates and query logs
+        self._store: Optional[StatsSQLiteStore] = stats_store
 
         # Core counters
         self._totals: Dict[str, int] = defaultdict(int)
@@ -604,8 +914,7 @@ class StatsCollector:
         )
 
     def record_query(self, client_ip: str, qname: str, qtype: str) -> None:
-        """
-        Record an incoming DNS query.
+        """Record an incoming DNS query.
 
         Inputs:
             client_ip: Client IP address
@@ -645,9 +954,23 @@ class StatsCollector:
                 base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
                 self._top_domains.add(base)
 
+            # Mirror core counters into the persistent store when available.
+            if self._store is not None:
+                try:
+                    self._store.increment_count("totals", "total_queries")
+                    if self.include_qtype_breakdown:
+                        self._store.increment_count("qtypes", qtype)
+                    self._store.increment_count("clients", client_ip)
+                    self._store.increment_count("sub_domains", domain)
+                    self._store.increment_count("domains", base)
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "StatsCollector: failed to persist query counters",
+                        exc_info=True,
+                    )
+
     def record_cache_hit(self, qname: str) -> None:
-        """
-        Record a cache hit.
+        """Record a cache hit.
 
         Inputs:
             qname: Query domain name
@@ -661,10 +984,16 @@ class StatsCollector:
         """
         with self._lock:
             self._totals["cache_hits"] += 1
+            if self._store is not None:
+                try:
+                    self._store.increment_count("totals", "cache_hits")
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "StatsCollector: failed to persist cache_hit", exc_info=True
+                    )
 
     def record_cache_miss(self, qname: str) -> None:
-        """
-        Record a cache miss.
+        """Record a cache miss.
 
         Inputs:
             qname: Query domain name
@@ -678,6 +1007,13 @@ class StatsCollector:
         """
         with self._lock:
             self._totals["cache_misses"] += 1
+            if self._store is not None:
+                try:
+                    self._store.increment_count("totals", "cache_misses")
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "StatsCollector: failed to persist cache_miss", exc_info=True
+                    )
 
     def record_plugin_decision(
         self,
@@ -720,6 +1056,20 @@ class StatsCollector:
             elif action == "modify":
                 self._totals["modified"] += 1
 
+            if self._store is not None:
+                try:
+                    if action == "allow":
+                        self._store.increment_count("totals", "allowed")
+                    elif action == "block":
+                        self._store.increment_count("totals", "blocked")
+                    elif action == "modify":
+                        self._store.increment_count("totals", "modified")
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "StatsCollector: failed to persist plugin decision",
+                        exc_info=True,
+                    )
+
     def record_upstream_result(
         self,
         upstream_id: str,
@@ -746,6 +1096,15 @@ class StatsCollector:
         """
         with self._lock:
             self._upstreams[upstream_id][outcome] += 1
+            if self._store is not None:
+                try:
+                    key = f"{upstream_id}|{outcome}"
+                    self._store.increment_count("upstreams", key)
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "StatsCollector: failed to persist upstream result",
+                        exc_info=True,
+                    )
 
     def record_response_rcode(self, rcode: str) -> None:
         """
@@ -764,10 +1123,16 @@ class StatsCollector:
         """
         with self._lock:
             self._rcodes[rcode] += 1
+            if self._store is not None:
+                try:
+                    self._store.increment_count("rcodes", rcode)
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "StatsCollector: failed to persist rcode", exc_info=True
+                    )
 
     def record_latency(self, seconds: float) -> None:
-        """
-        Record request latency.
+        """Record request latency.
 
         Inputs:
             seconds: Latency duration in seconds
@@ -785,9 +1150,74 @@ class StatsCollector:
                 if self._latency_recent is not None:
                     self._latency_recent.add(seconds)
 
-    def snapshot(self, reset: bool = False) -> StatsSnapshot:
+    def record_query_result(
+        self,
+        client_ip: str,
+        qname: str,
+        qtype: str,
+        rcode: Optional[str],
+        upstream_id: Optional[str],
+        status: Optional[str],
+        error: Optional[str],
+        first: Optional[str],
+        result: Optional[Dict[str, Any]],
+        ts: Optional[float] = None,
+    ) -> None:
+        """Record a completed DNS query into the persistent query log.
+
+        Inputs:
+            client_ip: Client IP address.
+            qname: Query name (will be normalized for storage).
+            qtype: Query type string (e.g., "A", "AAAA").
+            rcode: Optional DNS response code ("NOERROR", "NXDOMAIN", etc.).
+            upstream_id: Optional upstream identifier (e.g., "8.8.8.8:53").
+            status: Optional high-level status ("ok", "timeout", "cache_hit", ...).
+            error: Optional error message summary.
+            first: Optional first answer record representation.
+            result: Optional structured result mapping to be JSON-encoded.
+            ts: Optional Unix timestamp; if omitted, current time is used with
+                millisecond precision.
+
+        Outputs:
+            None
+
+        Notes:
+            This method does not modify in-memory counters; callers should
+            continue to use the existing record_* APIs for live aggregation.
         """
-        Create immutable snapshot of current statistics.
+        if self._store is None:
+            return
+
+        # Normalize timestamp to milliseconds precision as a float.
+        if ts is None:
+            ts = round(time.time(), 3)
+
+        name = _normalize_domain(qname)
+        try:
+            payload = json.dumps(result or {}, separators=(",", ":"))
+        except Exception:  # pragma: no cover - defensive
+            payload = "{}"
+
+        try:
+            self._store.insert_query_log(
+                ts=ts,
+                client_ip=client_ip,
+                name=name,
+                qtype=qtype,
+                upstream_id=upstream_id,
+                rcode=rcode,
+                status=status,
+                error=error,
+                first=first,
+                result_json=payload,
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.debug(
+                "StatsCollector: failed to append query_log row", exc_info=True
+            )
+
+    def snapshot(self, reset: bool = False) -> StatsSnapshot:
+        """Create immutable snapshot of current statistics.
 
         Inputs:
             reset: If True, reset all counters after snapshot (default False)
@@ -1138,15 +1568,6 @@ class StatsReporter(threading.Thread):
                 snapshot = self.collector.snapshot(reset=self.reset_on_log)
                 json_line = format_snapshot_json(snapshot)
                 self.logger.log(self.log_level, json_line)
-
-                # Optionally persist snapshot to SQLite
-                if self.persistence_store is not None:
-                    try:
-                        self.persistence_store.save_snapshot(snapshot)
-                    except Exception as exc:  # pragma: no cover - defensive
-                        self.logger.error(
-                            "StatsReporter persistence error: %s", exc, exc_info=True
-                        )
 
                 # Always reset recent latency window after emission
                 self.collector.reset_latency_recent()
