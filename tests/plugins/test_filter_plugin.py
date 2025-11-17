@@ -220,9 +220,9 @@ def test_post_resolve_non_a_aaaa_and_parse_error(tmp_path):
     plugin.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
-    # Non A/AAAA raises TypeError
-    with pytest.raises(TypeError):
-        plugin.post_resolve("ex.com", QTYPE.MX, b"", ctx)
+    # Non A/AAAA simply returns
+    res = plugin.post_resolve("ex.com", QTYPE.MX, b"", ctx)
+    assert res is None
 
     # Parse error returns default action
     dec = plugin.post_resolve("ex.com", QTYPE.A, b"not-dns", ctx)
