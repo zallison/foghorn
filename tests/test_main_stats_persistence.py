@@ -1,10 +1,10 @@
 """
-Brief: Tests for statistics persistence and warm-start behavior in main().
+Brief: Tests for statistics persistence wiring in main().
 
 Inputs:
     - monkeypatch, tmp_path, mock_open
 Outputs:
-    - None; asserts main() wires StatsSQLiteStore and load_from_snapshot correctly.
+    - None; asserts main() wires StatsSQLiteStore into StatsCollector/StatsReporter.
 """
 
 from pathlib import Path
@@ -14,12 +14,12 @@ import foghorn.main as main_mod
 
 
 def test_main_warm_start_loads_latest_snapshot(monkeypatch, tmp_path: Path) -> None:
-    """Brief: When persistence is enabled and a snapshot is present, main() loads it.
+    """Brief: When persistence is enabled, main() wires a StatsSQLiteStore into StatsCollector.
 
     Inputs:
         monkeypatch/tmp_path fixtures
     Outputs:
-        None; asserts load_latest_snapshot and load_from_snapshot are invoked.
+        None; asserts StatsSQLiteStore is constructed and passed through.
     """
     yaml_data = (
         "listen:\n"
@@ -38,50 +38,15 @@ def test_main_warm_start_loads_latest_snapshot(monkeypatch, tmp_path: Path) -> N
 
     constructed: dict[str, object] = {}
 
-    class DummySnapshot:
-        """Brief: Minimal snapshot stand-in for warm-start tests.
-
-        Inputs:
-            None
-        Outputs:
-            None
-        """
-
-        def __init__(self) -> None:
-            self.created_at = 123.0
-            self.totals = {"total_queries": 42}
-            self.rcodes = {}
-            self.qtypes = {}
-            self.decisions = {}
-            self.upstreams = {}
-            self.uniques = None
-            self.top_clients = None
-            self.top_subdomains = None
-            self.top_domains = None
-            self.latency_stats = None
-            self.latency_recent_stats = None
-
     class DummyCollector:
         def __init__(self, **kw) -> None:
             constructed["collector_kwargs"] = kw
             constructed["collector"] = self
-            self.loaded_snapshot = None
-
-        def load_from_snapshot(self, snapshot) -> None:
-            self.loaded_snapshot = snapshot
-            constructed["loaded_snapshot"] = snapshot
 
     class DummyStore:
         def __init__(self, db_path: str, **kw) -> None:
             constructed["store_db_path"] = db_path
             constructed["store_kwargs"] = kw
-
-        def save_snapshot(self, snapshot) -> None:  # pragma: no cover - not used
-            pass
-
-        def load_latest_snapshot(self):
-            constructed["load_latest_called"] = True
-            return DummySnapshot()
 
         def close(self) -> None:
             constructed["store_closed"] = True
@@ -132,10 +97,9 @@ def test_main_warm_start_loads_latest_snapshot(monkeypatch, tmp_path: Path) -> N
     assert rc == 0
     # Store should be constructed with configured db_path
     assert str(tmp_path) in str(constructed["store_db_path"])
-    # Latest snapshot loaded
-    assert constructed.get("load_latest_called") is True
-    # Collector should have had load_from_snapshot invoked
-    assert constructed.get("loaded_snapshot") is not None
+    # Collector should have received the store via stats_store kwarg
+    ck = constructed["collector_kwargs"]
+    assert isinstance(ck.get("stats_store"), DummyStore)
     # Reporter started and wired with both collector and store
     assert constructed.get("reporter_started") is True
     assert constructed["reporter_args"]["collector"] is constructed["collector"]
