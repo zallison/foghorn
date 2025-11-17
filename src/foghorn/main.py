@@ -429,6 +429,17 @@ def main(argv: List[str] | None = None) -> int:
             stats_store=stats_persistence_store,
         )
 
+        # Best-effort warm-load of persisted aggregate counters on startup.
+        try:
+            stats_collector.warm_load_from_store()
+            logger.info("Statistics warm-load from SQLite store completed")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "Failed to warm-load statistics from SQLite store: %s",
+                exc,
+                exc_info=True,
+            )
+
         stats_reporter = StatsReporter(
             collector=stats_collector,
             interval_seconds=int(stats_cfg.get("interval_seconds", 10)),

@@ -632,6 +632,37 @@ class StatsSQLiteStore:
             logger.error("StatsSQLiteStore has_counts error: %s", exc, exc_info=True)
             return False
 
+    def export_counts(self) -> Dict[str, Dict[str, int]]:
+        """Export all aggregate counters from the counts table.
+
+        Inputs:
+            None
+
+        Outputs:
+            Dict[str, Dict[str, int]] mapping scope -> {key -> value}.
+
+        Example:
+            >>> store = StatsSQLiteStore("/tmp/stats.db")  # doctest: +SKIP
+            >>> store.increment_count("totals", "total_queries")  # doctest: +SKIP
+            >>> counts = store.export_counts()  # doctest: +SKIP
+            >>> counts["totals"]["total_queries"] >= 1  # doctest: +SKIP
+            True
+        """
+        result: Dict[str, Dict[str, int]] = {}
+        try:
+            cur = self._conn.cursor()  # type: ignore[attr-defined]
+            cur.execute("SELECT scope, key, value FROM counts")
+            for scope, key, value in cur:
+                scope_map = result.setdefault(str(scope), {})
+                try:
+                    scope_map[str(key)] = int(value)
+                except (TypeError, ValueError):
+                    # Skip rows with non-integer values defensively.
+                    continue
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("StatsSQLiteStore export_counts error: %s", exc, exc_info=True)
+        return result
+
     def has_query_log(self) -> bool:
         """Return True if the query_log table contains at least one row.
 
@@ -1390,6 +1421,120 @@ class StatsCollector:
             for upstream_id, outcomes in (snapshot.upstreams or {}).items():
                 if isinstance(outcomes, dict):
                     self._upstreams[upstream_id] = defaultdict(int, outcomes)
+
+    def warm_load_from_store(self) -> None:
+        """Warm-load core counters from the attached SQLite stats store.
+
+        Inputs:
+            None (uses self._store when configured).
+
+        Outputs:
+            None; mutates in-memory aggregate counters in place.
+
+        Example:
+            >>> store = StatsSQLiteStore("/tmp/stats.db")  # doctest: +SKIP
+            >>> store.increment_count("totals", "total_queries", 5)  # doctest: +SKIP
+            >>> collector = StatsCollector(stats_store=store)  # doctest: +SKIP
+            >>> collector.warm_load_from_store()  # doctest: +SKIP
+            >>> snap = collector.snapshot(reset=False)  # doctest: +SKIP
+            >>> snap.totals["total_queries"] >= 5  # doctest: +SKIP
+            True
+
+        Notes:
+            - This is a best-effort warm load used on process start. If the
+              store is not configured or an error occurs, the collector simply
+              starts from empty in-memory counters.
+            - Only scopes known to StatsCollector (totals, rcodes, qtypes,
+              clients, sub_domains, domains, upstreams) are applied.
+            - Top-N client/domain trackers and unique counts are approximated
+              from the aggregated counts when enabled.
+        """
+        if self._store is None:
+            return
+
+        try:
+            counts = self._store.export_counts()
+        except Exception:  # pragma: no cover - defensive
+            logger.error(
+                "StatsCollector warm_load_from_store: failed to export counts",
+                exc_info=True,
+            )
+            return
+
+        with self._lock:
+            # Core totals/qtypes/rcodes
+            for key, value in counts.get("totals", {}).items():
+                try:
+                    self._totals[key] = int(value)
+                except (TypeError, ValueError):
+                    continue
+
+            for key, value in counts.get("rcodes", {}).items():
+                try:
+                    self._rcodes[key] = int(value)
+                except (TypeError, ValueError):
+                    continue
+
+            for key, value in counts.get("qtypes", {}).items():
+                try:
+                    self._qtypes[key] = int(value)
+                except (TypeError, ValueError):
+                    continue
+
+            # Upstreams: keys are stored as "upstream_id|outcome".
+            for key, value in counts.get("upstreams", {}).items():
+                try:
+                    upstream_id, outcome = str(key).split("|", 1)
+                except ValueError:
+                    continue
+                try:
+                    self._upstreams[upstream_id][outcome] = int(value)
+                except (TypeError, ValueError):
+                    continue
+
+            # Clients/domains: rebuild uniques and top-K trackers when enabled.
+            client_counts = counts.get("clients", {})
+            subdomain_counts = counts.get("sub_domains", {})
+            domain_counts = counts.get("domains", {})
+
+            # Unique clients/domains are approximated from available keys.
+            if self._unique_clients is not None:
+                self._unique_clients = set(str(c) for c in client_counts.keys())
+            if self._unique_domains is not None:
+                # Prefer sub_domains keys (full qnames) when present; otherwise
+                # fall back to base domains.
+                src = subdomain_counts or domain_counts
+                self._unique_domains = set(str(d) for d in src.keys())
+
+            # Top clients
+            if self._top_clients is not None and client_counts:
+                items = sorted(
+                    ((str(k), int(v)) for k, v in client_counts.items()),
+                    key=lambda kv: kv[1],
+                    reverse=True,
+                )
+                limited = dict(items[: self._top_clients.capacity])
+                self._top_clients.counts = limited
+
+            # Top subdomains (full qnames)
+            if self._top_subdomains is not None and subdomain_counts:
+                items = sorted(
+                    ((str(k), int(v)) for k, v in subdomain_counts.items()),
+                    key=lambda kv: kv[1],
+                    reverse=True,
+                )
+                limited = dict(items[: self._top_subdomains.capacity])
+                self._top_subdomains.counts = limited
+
+            # Top base domains
+            if self._top_domains is not None and domain_counts:
+                items = sorted(
+                    ((str(k), int(v)) for k, v in domain_counts.items()),
+                    key=lambda kv: kv[1],
+                    reverse=True,
+                )
+                limited = dict(items[: self._top_domains.capacity])
+                self._top_domains.counts = limited
 
     def reset_latency_recent(self) -> None:
         """

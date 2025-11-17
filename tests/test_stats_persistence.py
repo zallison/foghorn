@@ -228,3 +228,116 @@ def test_sqlite_store_rebuild_counts_if_needed(tmp_path: Path) -> None:
     assert total_row is not None
     # Two query_log rows should yield total_queries == 2 after rebuild.
     assert total_row[0] == 2
+
+
+def test_stats_collector_warm_load_from_store_uses_counts(tmp_path: Path) -> None:
+    """Brief: StatsCollector.warm_load_from_store hydrates counters from SQLite counts.
+
+    Inputs:
+        tmp_path: pytest tmp path for an isolated SQLite DB.
+    Outputs:
+        None; asserts that totals/qtypes/rcodes/upstreams are restored.
+    """
+    db_path = tmp_path / "stats_warm_load.db"
+    store = StatsSQLiteStore(db_path=str(db_path))
+
+    try:
+        # Seed some aggregate counts directly via the store.
+        store.increment_count("totals", "total_queries", delta=3)
+        store.increment_count("rcodes", "NOERROR", delta=2)
+        store.increment_count("qtypes", "A", delta=3)
+        store.increment_count("upstreams", "8.8.8.8:53|success", delta=1)
+
+        # Create collector wired to the store and warm-load from counts.
+        collector = StatsCollector(
+            track_uniques=True,
+            include_qtype_breakdown=True,
+            include_top_clients=False,
+            include_top_domains=False,
+            track_latency=False,
+            stats_store=store,
+        )
+        # Collector starts empty.
+        snap_empty = collector.snapshot(reset=False)
+        assert snap_empty.totals.get("total_queries", 0) == 0
+        assert snap_empty.qtypes == {}
+        assert snap_empty.rcodes == {}
+        assert snap_empty.upstreams == {}
+
+        collector.warm_load_from_store()
+        snap = collector.snapshot(reset=False)
+
+        assert snap.totals["total_queries"] == 3
+        assert snap.rcodes["NOERROR"] == 2
+        assert snap.qtypes["A"] == 3
+        # Upstreams use nested mapping upstream_id -> {outcome -> count}.
+        assert snap.upstreams["8.8.8.8:53"]["success"] == 1
+    finally:
+        store.close()
+
+
+def test_stats_collector_warm_load_populates_top_lists(tmp_path: Path) -> None:
+    """Brief: warm_load_from_store reconstructs top clients/domains from counts.
+
+    Inputs:
+        tmp_path: pytest tmp path for an isolated SQLite DB.
+    Outputs:
+        None; asserts top_clients/top_domains/top_subdomains reflect DB aggregates.
+    """
+    db_path = tmp_path / "stats_warm_load_top.db"
+    store = StatsSQLiteStore(db_path=str(db_path))
+
+    try:
+        # Seed some per-client and per-domain counts.
+        store.increment_count("clients", "192.0.2.1", delta=5)
+        store.increment_count("clients", "192.0.2.2", delta=2)
+
+        store.increment_count("sub_domains", "www.example.com", delta=3)
+        store.increment_count("sub_domains", "api.example.com", delta=1)
+
+        store.increment_count("domains", "example.com", delta=4)
+        store.increment_count("domains", "other.com", delta=2)
+
+        collector = StatsCollector(
+            track_uniques=True,
+            include_qtype_breakdown=True,
+            include_top_clients=True,
+            include_top_domains=True,
+            top_n=5,
+            track_latency=False,
+            stats_store=store,
+        )
+
+        # Snapshot before warm-load should have no tops/uniques.
+        snap_empty = collector.snapshot(reset=False)
+        assert snap_empty.top_clients in (None, [])
+        assert snap_empty.top_domains in (None, [])
+        assert snap_empty.top_subdomains in (None, [])
+        if snap_empty.uniques:
+            assert snap_empty.uniques["clients"] == 0
+            assert snap_empty.uniques["domains"] == 0
+
+        collector.warm_load_from_store()
+        snap = collector.snapshot(reset=False)
+
+        # Top clients: 192.0.2.1 should be first with count 5.
+        assert snap.top_clients is not None
+        assert snap.top_clients[0][0] == "192.0.2.1"
+        assert snap.top_clients[0][1] == 5
+
+        # Top subdomains: www.example.com should lead with count 3.
+        assert snap.top_subdomains is not None
+        assert snap.top_subdomains[0][0] == "www.example.com"
+        assert snap.top_subdomains[0][1] == 3
+
+        # Top domains: example.com should lead with count 4.
+        assert snap.top_domains is not None
+        assert snap.top_domains[0][0] == "example.com"
+        assert snap.top_domains[0][1] == 4
+
+        # Unique counts reconstructed from keys.
+        assert snap.uniques is not None
+        assert snap.uniques["clients"] == 2
+        assert snap.uniques["domains"] >= 1
+    finally:
+        store.close()
