@@ -3,6 +3,7 @@ import argparse
 import gc
 import importlib
 import logging
+import os
 import signal
 import sys
 import threading
@@ -279,6 +280,14 @@ def main(argv: List[str] | None = None) -> int:
     """
     parser = argparse.ArgumentParser(description="Caching DNS server with plugins")
     parser.add_argument("--config", default="config.yaml", help="Path to YAML config")
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help=(
+            "Rebuild statistics counts from the persistent query_log on startup "
+            "(overrides existing counts when present)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     with open(args.config, "r") as f:
@@ -345,7 +354,68 @@ def main(argv: List[str] | None = None) -> int:
     stats_persistence_store = None
 
     if stats_enabled:
-        # Initialize in-memory collector first
+        # Optional SQLite-backed persistence; the store is responsible for
+        # maintaining long-lived aggregate counts and a raw query_log. The
+        # in-memory StatsCollector remains the live source for periodic
+        # logging and web API snapshots.
+        persistence_cfg = stats_cfg.get("persistence", {}) or {}
+        persistence_enabled = bool(persistence_cfg.get("enabled", True))
+        stats_persistence_store = None
+
+        if persistence_enabled:
+            db_path = str(persistence_cfg.get("db_path", "./var/stats.db"))
+            batch_writes = bool(persistence_cfg.get("batch_writes", False))
+            batch_time_sec = float(persistence_cfg.get("batch_time_sec", 15.0))
+            batch_max_size = int(persistence_cfg.get("batch_max_size", 1000))
+
+            # Determine whether a rebuild should be forced from CLI/config/env.
+            def _is_truthy_env(val: Optional[str]) -> bool:
+                """Return True if an environment variable string represents a truthy value.
+
+                Inputs:
+                    val: Environment variable value or None.
+
+                Outputs:
+                    bool: True for common truthy strings (1, true, yes, on), else False.
+                """
+                if val is None:
+                    return False
+                return str(val).strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+            force_rebuild_cfg = bool(persistence_cfg.get("force_rebuild", False))
+            force_rebuild_env = _is_truthy_env(os.getenv("FOGHORN_FORCE_REBUILD"))
+            force_rebuild = bool(args.rebuild or force_rebuild_cfg or force_rebuild_env)
+
+            try:
+                stats_persistence_store = StatsSQLiteStore(
+                    db_path=db_path,
+                    batch_writes=batch_writes,
+                    batch_time_sec=batch_time_sec,
+                    batch_max_size=batch_max_size,
+                )
+                logger.info("Initialized statistics SQLite store at %s", db_path)
+
+                # Optionally rebuild counts from the query_log when requested or
+                # when counts are empty but query_log has rows.
+                try:
+                    stats_persistence_store.rebuild_counts_if_needed(
+                        force_rebuild=force_rebuild, logger_obj=logger
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.error(
+                        "Failed to rebuild statistics counts from query_log: %s",
+                        exc,
+                        exc_info=True,
+                    )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error(
+                    "Failed to initialize statistics persistence: %s; continuing without persistence",
+                    exc,
+                    exc_info=True,
+                )
+                stats_persistence_store = None
+
+        # Initialize in-memory collector, wiring in the persistence store when present.
         stats_collector = StatsCollector(
             track_uniques=stats_cfg.get("track_uniques", True),
             include_qtype_breakdown=stats_cfg.get("include_qtype_breakdown", True),
@@ -356,29 +426,19 @@ def main(argv: List[str] | None = None) -> int:
             include_top_domains=bool(stats_cfg.get("include_top_domains", True)),
             top_n=int(stats_cfg.get("top_n", 10)),
             track_latency=bool(stats_cfg.get("track_latency", True)),
+            stats_store=stats_persistence_store,
         )
 
-        # Optional SQLite-backed persistence and warm-start
-        persistence_cfg = stats_cfg.get("persistence", {}) or {}
-        persistence_enabled = bool(persistence_cfg.get("enabled", True))
-        if persistence_enabled:
-            db_path = str(persistence_cfg.get("db_path", "./var/stats.db"))
-            try:
-                stats_persistence_store = StatsSQLiteStore(db_path=db_path)
-                latest = stats_persistence_store.load_latest_snapshot()
-                if latest is not None:
-                    logger.info(
-                        "Loaded statistics from latest persisted snapshot (created_at=%s)",
-                        latest.created_at,
-                    )
-                    stats_collector.load_from_snapshot(latest)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.error(
-                    "Failed to initialize statistics persistence: %s; continuing without persistence",
-                    exc,
-                    exc_info=True,
-                )
-                stats_persistence_store = None
+        # Best-effort warm-load of persisted aggregate counters on startup.
+        try:
+            stats_collector.warm_load_from_store()
+            logger.info("Statistics warm-load from SQLite store completed")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "Failed to warm-load statistics from SQLite store: %s",
+                exc,
+                exc_info=True,
+            )
 
         stats_reporter = StatsReporter(
             collector=stats_collector,
