@@ -325,7 +325,7 @@ class StatsSQLiteStore:
     of statistics across restarts.
 
     Example:
-        >>> store = StatsSQLiteStore("./var/stats.db")
+        >>> store = StatsSQLiteStore("./config/var/stats.db")
         >>> store.increment_count("totals", "total_queries")
         >>> store.increment_count("domains", "example.com")
     """

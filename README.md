@@ -419,7 +419,7 @@ Notes:
 
 * `urls`: List of HTTP(S) URLs to domain-only lists (comments with `#` allowed).
 * `url_files`: List of file paths, each containing one URL per line (supports `#` comments and blank lines).
-* `download_path`: Directory to write files (default `./var/lists`).
+* `download_path`: Directory to write files (default `./config/var/lists`).
 * `interval_days`: Optional periodic refresh interval (in days) while the server runs.
 
 Filenames are unique and stable per-URL: `{base}-{sha1(url)[:12]}{ext}`. If the URL has no extension, none is added (`{base}-{hash}`). Each file begins with a header line: `# YYYY-MM-DD HH:MM - URL`.
@@ -431,7 +431,7 @@ plugins:
   - module: list_downloader
     pre_priority: 15
     config:
-      download_path: ./var/lists
+      download_path: ./config/var/lists
       interval_days: 1
       urls:
         - https://v.firebog.net/hosts/AdguardDNS.txt
@@ -444,10 +444,10 @@ plugins:
     config:
       default: deny
       blocklist_files:
-        - ./var/lists/AdguardDNS-*.txt
-        - ./var/lists/Easylist-*.txt
-        - ./var/lists/Prigent-Ads-*.txt
-        - ./var/lists/Prigent-Malware-*.txt
+        - ./config/var/lists/AdguardDNS-*.txt
+        - ./config/var/lists/Easylist-*.txt
+        - ./config/var/lists/Prigent-Ads-*.txt
+        - ./config/var/lists/Prigent-Malware-*.txt
 ```
 
 ## Complete `config.yaml` Example
@@ -572,7 +572,7 @@ plugins:
       # setup_priority controls when setup() runs relative to other plugins.
       # Lower numbers run earlier. ListDownloader defaults to 15.
       setup_priority: 15
-      download_path: ./var/lists
+      download_path: ./config/var/lists
       interval_seconds: 3600
       urls:
         - https://v.firebog.net/hosts/AdguardDNS.txt

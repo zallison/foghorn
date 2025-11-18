@@ -34,7 +34,7 @@ plugins:
       duration_seconds: 3600
 
       # Persistent store for state
-      db_path: ./var/greylist.db
+      db_path: ./config/var/greylist.db
 
       # cache_ttl_seconds: 300
       # cache_max_entries: 100000

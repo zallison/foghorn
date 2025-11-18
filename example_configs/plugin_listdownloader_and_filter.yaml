@@ -20,12 +20,12 @@ logging:
   level: info
 
 plugins:
-  # 1) Download well-known domain-only blocklists to ./var/lists.
+  # 1) Download well-known domain-only blocklists to ./config/var/lists.
   # Runs early in the setup phase so files are present before Filter runs.
   - module: list_downloader
     config:
       setup_priority: 15  # lower runs earlier during setup()
-      download_path: ./var/lists
+      download_path: ./config/var/lists
       # Optionally refresh no more than once per day during runtime
       interval_days: 1
       urls:
@@ -40,7 +40,7 @@ plugins:
     config:
       setup_priority: 20  # run setup after list_downloader
       default: deny
-      db_path: ./var/blocklist.db
+      db_path: ./config/var/blocklist.db
       cache_ttl_seconds: 600
 
       # Inline rules (optional)
@@ -49,7 +49,7 @@ plugins:
 
       # Domain lists produced by the downloader above
       blocklist_files:
-        - ./var/lists/AdguardDNS.txt
-        - ./var/lists/Easylist.txt
-        - ./var/lists/Prigent-Ads.txt
-        - ./var/lists/Prigent-Malware.txt
+        - ./config/var/lists/AdguardDNS.txt
+        - ./config/var/lists/Easylist.txt
+        - ./config/var/lists/Prigent-Ads.txt
+        - ./config/var/lists/Prigent-Malware.txt

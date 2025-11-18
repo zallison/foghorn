@@ -81,7 +81,7 @@ class FilterPlugin(BasePlugin):
         self._domain_cache = TTLCache()
 
         self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 600)  # 10 minutes
-        self.db_path: str = self.config.get("db_path", "./var/blocklist.db")
+        self.db_path: str = self.config.get("db_path", "./config/var/blocklist.db")
         self.default = self.config.get("default", "deny")
 
         # Back-compat keep existing keys, add new *_domains_files keys

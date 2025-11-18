@@ -34,7 +34,7 @@ plugins:
       threshold_days: 14
 
       # Local cache for WHOIS lookups
-      whois_db_path: ./var/whois_cache.db
+      whois_db_path: ./config/var/whois_cache.db
       # whois_cache_ttl_seconds: 3600
       # whois_refresh_seconds: 86400
 

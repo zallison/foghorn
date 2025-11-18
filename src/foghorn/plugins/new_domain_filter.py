@@ -65,7 +65,7 @@ class NewDomainFilterPlugin(BasePlugin):
 
         # Caching configuration
         self.whois_db_path: str = self.config.get(
-            "whois_db_path", "./var/whois_cache.db"
+            "whois_db_path", "./config/var/whois_cache.db"
         )
         self.whois_cache_ttl_seconds: int = int(
             self.config.get("whois_cache_ttl_seconds", 3600)
