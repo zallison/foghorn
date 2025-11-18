@@ -1,1 +1,1 @@
-__all__ = []
+"""Foghorn package"""

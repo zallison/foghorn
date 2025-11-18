@@ -14,6 +14,8 @@ from .base import BasePlugin
 
 logger = logging.getLogger(__name__)
 
+ONE_DAY_SECONDS = 24 * 60 * 60
+
 
 class ListDownloader(BasePlugin):
     """
@@ -23,7 +25,9 @@ class ListDownloader(BasePlugin):
       - urls (List[str]): HTTP(S) URLs to domain-per-line lists (comments with '#').
       - url_files (List[str], optional): File paths containing one URL per line ('#' comments allowed).
       - download_path (str): Directory to store downloaded files (default: './var/lists').
-      - interval_seconds (int|None): If set, re-check and update no more often than this.
+      - interval_days (float|int|None): If set, re-check and update no more often than
+        this many days (legacy 'interval_seconds' is still accepted as a deprecated
+        alias).
 
     Outputs:
       - Writes one file per URL under download_path, named as '{base}-{sha1(url)[:12]}{ext}'.
@@ -47,14 +51,109 @@ class ListDownloader(BasePlugin):
     aliases = ("list_downloader", "lists")
 
     def __init__(self, **config):
+        """Brief: Initialize ListDownloader configuration and merge URL sources.
+
+        Inputs:
+          - **config: Arbitrary keyword configuration, typically including
+            'download_path', 'urls', 'url_files', and interval settings.
+
+        Outputs:
+          - None; populates instance attributes such as download_path, urls,
+            url_files, and interval_seconds.
+        """
+
         super().__init__(**config)
         self.download_path: str = str(self.config.get("download_path", "./var/lists"))
         self.urls: List[str] = list(self.config.get("urls", []) or [])
         self.url_files: List[str] = list(self.config.get("url_files", []) or [])
-        self.interval_seconds: int | None = self.config.get("interval_seconds")
+        # interval_days is the primary public setting; interval_seconds remains an
+        # internal, seconds-based representation. The legacy config key
+        # 'interval_seconds' is still accepted as a deprecated alias.
+        interval_days_cfg = self.config.get("interval_days")
+        legacy_interval_seconds = self.config.get("interval_seconds")
+        self.interval_seconds: int | None
+        if interval_days_cfg is not None:
+            try:
+                days = float(interval_days_cfg)
+                self.interval_seconds = int(days * ONE_DAY_SECONDS)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "ListDownloader interval_days %r is invalid; disabling periodic refresh",
+                    interval_days_cfg,
+                )
+                self.interval_seconds = None
+        elif legacy_interval_seconds is not None:
+            try:
+                self.interval_seconds = int(legacy_interval_seconds)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "ListDownloader interval_seconds %r is invalid; disabling periodic refresh",
+                    legacy_interval_seconds,
+                )
+                self.interval_seconds = None
+        else:
+            self.interval_seconds = None
         self._last_run: float = 0.0
         self._stop_event: threading.Event | None = None
         self._background_thread: threading.Thread | None = None
+
+        # Merge URLs from url_files early so callers see a unified, sorted list
+        # immediately after construction.
+        self._merge_urls_from_files()
+
+    def _merge_urls_from_files(self) -> None:
+        """Brief: Merge URLs from url_files into self.urls and log additions.
+
+        Inputs:
+          - None; uses self.url_files and self.urls.
+
+        Outputs:
+          - None; updates self.urls in-place to a sorted list of unique URLs.
+
+        Example:
+          >>> dl = ListDownloader(download_path="./var/lists", urls=["https://one"], url_files=[])
+          >>> dl.urls  # doctest: +ELLIPSIS
+          ['https://one']
+        """
+
+        if not self.url_files:
+            return
+
+        try:
+            urls_from_files = self._read_url_files(self.url_files)
+            if not urls_from_files:
+                return
+
+            merged: Set[str] = set(self.urls)
+            before_count = len(merged)
+            merged.update(urls_from_files)
+            added_count = len(merged) - before_count
+            self.urls = sorted(merged)
+            if added_count:
+                logger.debug("ListDownloader added %d URLs from url_files", added_count)
+        except Exception as exc:  # pragma: no cover - defensive logging only
+            logger.warning("Failed reading url_files: %s", exc)
+
+    # Run early in the setup phase so files exist before Filter runs
+    setup_priority = 15
+
+    def setup(self) -> None:
+        """Perform initial downloads and start optional periodic refresh.
+
+        Inputs:
+          - None (uses plugin configuration stored on self).
+        Outputs:
+          - None
+
+        Brief: Creates the download directory, performs an initial update of
+        all configured lists, and, when interval_days is set, starts a
+        background thread that periodically refreshes the lists.
+
+        Example use:
+          >>> from foghorn.plugins.list_downloader import ListDownloader
+          >>> dl = ListDownloader(download_path="./var/lists", urls=[], url_files=[])
+          >>> dl.setup()  # doctest: +SKIP
+        """
 
         # Merge URLs from url_files
         if self.url_files:
@@ -69,26 +168,6 @@ class ListDownloader(BasePlugin):
             except Exception as e:  # pragma: no cover
                 logger.warning("Failed reading url_files: %s", e)
 
-    # Run early in the setup phase so files exist before Filter runs
-    setup_priority = 15
-
-    def setup(self) -> None:
-        """Perform initial downloads and start optional periodic refresh.
-
-        Inputs:
-          - None (uses plugin configuration stored on self).
-        Outputs:
-          - None
-
-        Brief: Creates the download directory, performs an initial update of
-        all configured lists, and, when interval_seconds is set, starts a
-        background thread that periodically refreshes the lists.
-
-        Example use:
-          >>> from foghorn.plugins.list_downloader import ListDownloader
-          >>> dl = ListDownloader(download_path="./var/lists", urls=[], url_files=[])
-          >>> dl.setup()  # doctest: +SKIP
-        """
         os.makedirs(self.download_path, exist_ok=True)
         # Initial fetch at startup; failures propagate to caller so that
         # abort_on_failure semantics can be enforced by the setup runner.
@@ -101,7 +180,7 @@ class ListDownloader(BasePlugin):
             interval = int(self.interval_seconds)
         except (TypeError, ValueError):  # pragma: no cover
             logger.warning(
-                "ListDownloader interval_seconds %r is invalid; disabling periodic refresh",
+                "ListDownloader interval configuration %r is invalid; disabling periodic refresh",
                 self.interval_seconds,
             )
             return
@@ -159,7 +238,7 @@ class ListDownloader(BasePlugin):
         for url in urls:
             fname = self._make_hashed_filename(url)
             fpath = os.path.join(self.download_path, fname)
-
+            logger.info("ListDownloader updating: %s", url)
             # Try HEAD for last-modified; fall back to GET
             if self._needs_update(url, fpath):
                 logger.info(f"Downloading list {url} to {fpath}")
@@ -171,8 +250,36 @@ class ListDownloader(BasePlugin):
                 )
 
     def _needs_update(self, url: str, filepath: str) -> bool:
+        """Brief: Decide whether the local list file should be refreshed.
+
+        Inputs:
+          - url (str): Source URL for the list.
+          - filepath (str): Path to the local list file.
+
+        Outputs:
+          - (bool): True if the caller should download, False to reuse the file.
+
+        Behavior:
+          - If the file is missing, always returns True.
+          - If the file is younger than one day, returns False without a network call.
+          - Otherwise, consults the remote Last-Modified header when available and
+            returns True only when the remote copy is newer, falling back to True
+            on parsing or network errors.
+        """
         if not os.path.exists(filepath):
             return True
+
+        # Do not update files that are younger than one day; during setup this
+        # prevents recently-created list files from being rewritten unnecessarily.
+        try:
+            now = time.time()
+            local_mtime = os.path.getmtime(filepath)
+            if (now - local_mtime) < ONE_DAY_SECONDS:
+                return False
+        except OSError:
+            # If we cannot stat the file, fall back to remote checks.
+            pass
+
         try:
             res = requests.head(url, timeout=10)
             lm = res.headers.get("Last-Modified")

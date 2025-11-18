@@ -12,24 +12,21 @@ from __future__ import annotations
 import copy
 import html
 import http.server
+import importlib
 import json
 import logging
 import mimetypes
 import os
+import shutil
 import signal
+import socket
 import threading
 import urllib.parse
+import yaml
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-import yaml
-
-try:
-    import psutil  # type: ignore[import]
-except Exception:  # pragma: no cover - optional dependency fallback
-    psutil = None  # type: ignore[assignment]
-
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -37,6 +34,13 @@ from pydantic import BaseModel
 
 from .stats import StatsCollector, StatsSnapshot
 
+try:
+    import psutil  # type: ignore[import]
+except Exception:  # pragma: no cover - optional dependency fallback
+    psutil = None  # type: ignore[assignment]
+
+
+FOGHORN_VERSION = importlib.metadata.version("foghorn")
 logger = logging.getLogger("foghorn.webserver")
 
 
@@ -316,15 +320,67 @@ def get_system_info() -> Dict[str, Any]:
         "memory_available_bytes": None,
         "process_rss_bytes": None,
         "process_rss_mb": None,
+        "process_cpu_times": None,
+        "process_cpu_percent": None,
+        "process_io_counters": None,
+        "process_open_files_count": None,
+        "process_connections_count": None,
     }
 
-    # Process memory (RSS) in bytes and MB when psutil is available
+    # Process metrics when psutil is available
     if psutil is not None:
         try:
             proc = psutil.Process(os.getpid())
+
+            # Memory (RSS) in bytes and MB
             rss_bytes = int(proc.memory_info().rss)
             payload["process_rss_bytes"] = rss_bytes
             payload["process_rss_mb"] = round(rss_bytes / (1024 * 1024), 2)
+
+            # CPU times as a plain dict
+            try:
+                cpu_times = proc.cpu_times()
+                payload["process_cpu_times"] = (
+                    cpu_times._asdict()
+                    if hasattr(cpu_times, "_asdict")
+                    else tuple(cpu_times)
+                )
+            except Exception:
+                pass
+
+            # Non-blocking CPU percent sample (interval=0.0)
+            try:
+                payload["process_cpu_percent"] = float(proc.cpu_percent(interval=0.0))
+            except Exception:
+                pass
+
+            # I/O counters as a plain dict
+            try:
+                io_counters = proc.io_counters()
+                payload["process_io_counters"] = (
+                    io_counters._asdict()
+                    if hasattr(io_counters, "_asdict")
+                    else tuple(io_counters)
+                )
+            except Exception:
+                pass
+
+            # Counts of open files and connections
+            try:
+                files = proc.open_files()
+                payload["process_open_files_count"] = (
+                    len(files) if files is not None else 0
+                )
+            except Exception:
+                pass
+
+            try:
+                conns = proc.connections()
+                payload["process_connections_count"] = (
+                    len(conns) if conns is not None else 0
+                )
+            except Exception:
+                pass
         except Exception:  # pragma: no cover - environment specific
             pass
 
@@ -542,6 +598,24 @@ def create_app(
         if collector is None:
             return {"status": "disabled", "server_time": _utc_now_iso()}
         snap: StatsSnapshot = collector.snapshot(reset=bool(reset))
+
+        try:
+            hostname = socket.gethostname()
+        except Exception:  # pragma: no cover - environment specific
+            hostname = "unknown-host"
+        try:
+            host_ip = socket.gethostbyname(hostname)
+        except Exception:  # pragma: no cover - environment specific
+            host_ip = "0.0.0.0"
+
+        meta: Dict[str, Any] = {
+            "created_at": snap.created_at,
+            "server_time": _utc_now_iso(),
+            "hostname": hostname,
+            "ip": host_ip,
+            "version": FOGHORN_VERSION,
+        }
+
         payload: Dict[str, Any] = {
             "created_at": snap.created_at,
             "server_time": _utc_now_iso(),
@@ -550,6 +624,7 @@ def create_app(
             "qtypes": snap.qtypes,
             "uniques": snap.uniques,
             "upstreams": snap.upstreams,
+            "meta": meta,
             "top_clients": snap.top_clients,
             "top_subdomains": snap.top_subdomains,
             "top_domains": snap.top_domains,
@@ -585,12 +660,31 @@ def create_app(
         if collector is None:
             return {"status": "disabled", "server_time": _utc_now_iso()}
         snap: StatsSnapshot = collector.snapshot(reset=False)
+
+        try:
+            hostname = socket.gethostname()
+        except Exception:  # pragma: no cover - environment specific
+            hostname = "unknown-host"
+        try:
+            host_ip = socket.gethostbyname(hostname)
+        except Exception:  # pragma: no cover - environment specific
+            host_ip = "0.0.0.0"
+
+        meta: Dict[str, Any] = {
+            "created_at": snap.created_at,
+            "server_time": _utc_now_iso(),
+            "hostname": hostname,
+            "ip": host_ip,
+            "version": FOGHORN_VERSION,
+        }
+
         return {
             "server_time": _utc_now_iso(),
             "created_at": snap.created_at,
             "totals": snap.totals,
             "rcodes": snap.rcodes,
             "qtypes": snap.qtypes,
+            "meta": meta,
             "top_clients": snap.top_clients,
             "top_domains": snap.top_domains,
             "latency": snap.latency_stats,
@@ -696,21 +790,13 @@ def create_app(
         try:
             # Best-effort backup of existing file
             if os.path.exists(cfg_path_abs):
-                with open(cfg_path_abs, "rb") as src, open(backup_path, "wb") as dst:
-                    dst.write(src.read())
+                shutil.copy(cfg_path_abs, backup_path)
 
-            # Serialize new configuration to YAML
-            yaml_text = yaml.safe_dump(
-                body,
-                default_flow_style=False,
-                sort_keys=False,
-                indent=2,
-                allow_unicode=True,
-            )
+            with open(cfg_path_abs + ".new", "w", encoding="utf-8") as tmp:
+                tmp.write(body["raw_yaml"])
 
-            with open(tmp_path, "w", encoding="utf-8") as tmp:
-                tmp.write(yaml_text)
-            os.replace(tmp_path, cfg_path_abs)
+            shutil.copy(cfg_path_abs + ".new", cfg_path_abs)
+
         except Exception as exc:  # pragma: no cover - file system specific
             # Clean up tmp file if something went wrong
             try:
