@@ -8,8 +8,9 @@ Outputs:
   - None: asserts plugin handler is called and log reflects invocation count
 """
 
-from unittest.mock import mock_open, patch
 import logging
+from unittest.mock import mock_open, patch
+
 import foghorn.main as main_mod
 
 

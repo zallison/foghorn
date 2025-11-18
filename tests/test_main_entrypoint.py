@@ -8,15 +8,6 @@ Outputs:
   - None
 """
 
-import runpy
-from unittest.mock import mock_open, patch
-import sys
-import types
-import pytest
-
-import foghorn.main as main_mod
-
-
 ## def test_run_as_main_invokes_main_and_exits_zero(monkeypatch):
 ##     """
 ##     Brief: Executing module as __main__ raises SystemExit with code 0.

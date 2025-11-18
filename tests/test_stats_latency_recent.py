@@ -10,7 +10,7 @@ Outputs:
 
 import json
 import threading
-import time
+
 from foghorn.stats import StatsCollector, format_snapshot_json
 
 

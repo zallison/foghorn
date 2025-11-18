@@ -10,9 +10,9 @@ Outputs:
 
 import asyncio
 import base64
+import http.client
 import threading
 import time
-import http.client
 
 import pytest
 
@@ -25,15 +25,12 @@ def _echo_resolver(q: bytes, client_ip: str) -> bytes:
     return q
 
 
-import pytest
-
 pytestmark = pytest.mark.slow
 
 
 @pytest.fixture
 def running_doh_server():
     host = "127.0.0.1"
-    port = 0
     ready = threading.Event()
     actual = {}
 
@@ -42,17 +39,17 @@ def running_doh_server():
         loop = asyncio.get_event_loop()
 
         async def _start():
-            server = await asyncio.start_server(lambda r, w: None, host, 0)
+            await asyncio.start_server(lambda r, w: None, host, 0)
 
         # Start our DoH server
         async def main():
-            srv = await asyncio.start_server(lambda r, w: None, host, 0)
+            await asyncio.start_server(lambda r, w: None, host, 0)
 
         async def start_and_mark():
-            server = await asyncio.start_server(lambda r, w: None, host, 0)
+            await asyncio.start_server(lambda r, w: None, host, 0)
 
         async def real_start():
-            srv = await asyncio.start_server(lambda r, w: None, host, 0)
+            await asyncio.start_server(lambda r, w: None, host, 0)
 
         # Use serve_doh directly to bind ephemeral port, but need to know address first.
         async def bind_and_run():

@@ -10,7 +10,6 @@ backed by the in-process StatsCollector and current configuration dict.
 from __future__ import annotations
 
 import copy
-import html
 import http.server
 import importlib
 import json
@@ -22,14 +21,14 @@ import signal
 import socket
 import threading
 import urllib.parse
-import yaml
-
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from .stats import StatsCollector, StatsSnapshot

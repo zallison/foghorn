@@ -4,9 +4,6 @@ import json
 import logging
 import threading
 import time
-from unittest.mock import MagicMock
-
-import pytest
 
 from foghorn.stats import (
     LatencyHistogram,
@@ -363,8 +360,6 @@ class TestStatsReporter:
         collector.record_query("192.0.2.1", "example.com", "A")
 
         # Use simpler test: verify snapshot is called with reset flag
-        snapshot_count_before = collector._totals.get("total_queries", 0)
-
         reporter = StatsReporter(collector, interval_seconds=0.1, reset_on_log=False)
         # Speed up for tests: shorter interval
         reporter.interval_seconds = 0.01

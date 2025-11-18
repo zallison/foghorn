@@ -8,12 +8,11 @@ Outputs:
   - None
 """
 
-import ipaddress
 import pytest
-from dnslib import DNSRecord, QTYPE, RR, A, AAAA, TXT
+from dnslib import AAAA, QTYPE, RR, A, DNSRecord
 
+from foghorn.plugins.base import PluginContext, PluginDecision
 from foghorn.plugins.filter import FilterPlugin
-from foghorn.plugins.base import PluginDecision, PluginContext
 
 
 def _mk_response_with_ips(name, records):

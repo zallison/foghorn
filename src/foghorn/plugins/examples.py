@@ -1,11 +1,14 @@
 from __future__ import annotations
-from typing import Optional, Union, List
-import logging
-import functools
 
-from dnslib import DNSRecord, QTYPE, A, AAAA
-from .base import BasePlugin, PluginDecision, PluginContext
-from foghorn.plugins.base import BasePlugin, plugin_aliases
+import functools
+import logging
+from typing import List, Optional, Union
+
+from dnslib import AAAA, QTYPE, A, DNSRecord
+
+from foghorn.plugins.base import plugin_aliases
+
+from .base import BasePlugin, PluginContext, PluginDecision
 
 logger = logging.getLogger(__name__)
 

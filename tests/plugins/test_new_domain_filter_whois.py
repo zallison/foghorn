@@ -9,11 +9,9 @@ Outputs:
 """
 
 import datetime as dt
-import types
-import pytest
 
-from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin as NDF
 import foghorn.plugins.new_domain_filter as ndf_mod
+from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin as NDF
 
 
 def test_whois_lookup_with_whois_returns_min_from_list(monkeypatch):

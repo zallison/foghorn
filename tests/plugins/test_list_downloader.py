@@ -16,8 +16,8 @@ from datetime import datetime
 import pytest
 import requests
 
-from foghorn.plugins.list_downloader import ListDownloader
 import foghorn.plugins.list_downloader as list_downloader_mod
+from foghorn.plugins.list_downloader import ListDownloader
 
 
 @pytest.fixture

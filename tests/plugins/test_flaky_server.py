@@ -8,10 +8,11 @@ Outputs:
   - None (pytest assertions)
 """
 
+import importlib.util
+
 # Load the plugin class directly from source without relying on package discovery
 import os
 import sys
-import importlib.util
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 SRC_DIR = os.path.join(ROOT, "src")
@@ -39,8 +40,7 @@ assert spec.loader is not None
 spec.loader.exec_module(mod)
 FlakyServer = mod.FlakyServer
 
-import pytest
-from dnslib import DNSRecord, QTYPE, RCODE
+from dnslib import QTYPE, RCODE, DNSRecord
 
 from foghorn.plugins.base import PluginContext
 

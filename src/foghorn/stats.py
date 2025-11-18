@@ -7,15 +7,16 @@ guaranteed thread-safety for concurrent request handling.
 """
 
 from __future__ import annotations
+
+import functools
 import json
 import logging
-import functools
 import os
 import sqlite3
 import threading
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 

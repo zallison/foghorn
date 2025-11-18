@@ -25,7 +25,6 @@ from foghorn import webserver as web_mod
 from foghorn.doh_api import DoHServerHandle, start_doh_server
 from foghorn.webserver import RingBuffer, WebServerHandle, start_webserver
 
-
 pytestmark = pytest.mark.slow
 
 

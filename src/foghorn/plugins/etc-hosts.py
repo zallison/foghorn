@@ -1,14 +1,18 @@
 from __future__ import annotations
-import time
-from dnslib import DNSRecord, QTYPE, A, AAAA, QR, RR, DNSHeader
-import os
-import logging
-import pathlib
-import threading
-from typing import Dict, Optional, Iterable, List
 
-from foghorn.plugins.base import PluginDecision, PluginContext
-from foghorn.plugins.base import BasePlugin, plugin_aliases
+import logging
+import os
+import pathlib
+from typing import Dict, Iterable, List, Optional
+
+from dnslib import AAAA, QTYPE, RR, A, DNSHeader, DNSRecord
+
+from foghorn.plugins.base import (
+    BasePlugin,
+    PluginContext,
+    PluginDecision,
+    plugin_aliases,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +179,7 @@ class EtcHosts(BasePlugin):
             return None
 
         # Normalize domain
-        qname = str(request.q.qname).rstrip(".")
+        # qname = str(request.q.qname).rstrip(".")
 
         ip = ipaddr
         reply = DNSRecord(

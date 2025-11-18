@@ -29,11 +29,12 @@ dependencies = [
 
 [optional-dependencies]
 dev = [
-  "coverage",
-  "black",
-  "ipython",
-  "fastapi>=0.111.0",
-  "uvicorn>=0.30.0",
+   "coverage",
+   "black",
+   "ipython",
+   "fastapi>=0.111.0",
+   "uvicorn>=0.30.0",
+   "ruff",
 ]
 
 [project.scripts]
@@ -50,3 +51,7 @@ addopts = "--maxfail=1 --disable-warnings"
 markers = [
   "slow: marks tests that start real network servers or otherwise run slowly",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402"]
+"**/{tests,docs,tools}/*" = ["E402"]

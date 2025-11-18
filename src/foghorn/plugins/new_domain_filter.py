@@ -1,10 +1,11 @@
 from __future__ import annotations
+
 import datetime as dt
 import logging
 import sqlite3
 import threading
 import time
-from typing import Optional, Any
+from typing import Any, Optional
 
 from foghorn.cache import TTLCache
 
@@ -19,7 +20,7 @@ try:  # optional fallback library
 except Exception:  # pragma: no cover - import best effort
     _pythonwhois_mod = None
 
-from .base import BasePlugin, PluginDecision, PluginContext, plugin_aliases
+from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
 logger = logging.getLogger(__name__)
 

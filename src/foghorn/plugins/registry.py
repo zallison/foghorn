@@ -1,11 +1,12 @@
 import difflib
+import functools
 import importlib
 import inspect
 import logging
-import functools
 import pkgutil
 import re
 from typing import Dict, Iterable, Type
+
 from .base import BasePlugin
 
 logger = logging.getLogger(__name__)

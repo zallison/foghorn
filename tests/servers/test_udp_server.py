@@ -24,7 +24,6 @@ def _echo_resolver(q: bytes, client_ip: str) -> bytes:
 @pytest.fixture
 def running_udp_server():
     host = "127.0.0.1"
-    port = 0
     ready = threading.Event()
     actual = {}
 

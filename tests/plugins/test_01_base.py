@@ -8,7 +8,6 @@ Outputs:
   - None
 """
 
-import pytest
 from foghorn.plugins.base import (
     BasePlugin,
     PluginContext,

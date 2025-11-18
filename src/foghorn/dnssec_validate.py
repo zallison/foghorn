@@ -1,14 +1,15 @@
-import logging
 import functools
+import logging
 from typing import Optional
+
+import dns.dnssec
+import dns.flags
+import dns.message
 
 # dnspython imports
 import dns.name
-import dns.resolver
 import dns.rdatatype
-import dns.dnssec
-import dns.message
-import dns.flags
+import dns.resolver
 
 logger = logging.getLogger("foghorn.dnssec")
 

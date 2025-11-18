@@ -1,10 +1,11 @@
 from __future__ import annotations
+
 import logging
 import logging.handlers
-import sys
 import os
+import sys
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, Union
+from typing import Any, Dict, Optional
 
 _LEVELS = {
     "debug": logging.DEBUG,

@@ -17,7 +17,7 @@ def test_udp_query_source_ip_bind():
     # Find a local source port by binding and closing
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.bind(("127.0.0.1", 0))
-    src_port = s.getsockname()[1]
+    # src_port = s.getsockname()[1]
     s.close()
 
     # Echo server

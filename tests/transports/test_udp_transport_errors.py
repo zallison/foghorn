@@ -8,11 +8,9 @@ Outputs:
   - None
 """
 
-import socket
-
 import pytest
 
-from foghorn.transports.udp import udp_query, UDPError
+from foghorn.transports.udp import UDPError, udp_query
 
 
 def test_udp_timeout_raises(monkeypatch):

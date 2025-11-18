@@ -1,18 +1,24 @@
 from __future__ import annotations
+
 import csv
 import glob
 import ipaddress
 import json
 import logging
+import os
 import re
 import sqlite3
-import os
 import time
-from typing import Optional, List, Set, Union, Dict, Iterator, Tuple
-from dnslib import DNSRecord, QTYPE, RCODE, A as RDATA_A, AAAA as RDATA_AAAA
+from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
+
+from dnslib import AAAA as RDATA_AAAA
+from dnslib import QTYPE
+from dnslib import A as RDATA_A
+from dnslib import DNSRecord
+
 from foghorn.cache import TTLCache
 
-from .base import BasePlugin, PluginDecision, PluginContext, plugin_aliases
+from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
 logger = logging.getLogger(__name__)
 

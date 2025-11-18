@@ -10,12 +10,8 @@ Outputs:
 
 import logging
 from pathlib import Path
-import types
-import io
-import os
-import pytest
 
-from foghorn.logging_config import init_logging, BracketLevelFormatter, SyslogFormatter
+from foghorn.logging_config import BracketLevelFormatter, SyslogFormatter, init_logging
 
 
 def test_init_logging_adds_stderr_handler(caplog):
