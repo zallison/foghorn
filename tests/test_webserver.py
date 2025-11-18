@@ -21,8 +21,13 @@ from fastapi.testclient import TestClient
 from foghorn.stats import StatsCollector
 from foghorn.webserver import (
     RingBuffer,
+    WebServerHandle,
+    _read_proc_meminfo,
+    _utc_now_iso,
     create_app,
+    resolve_www_root,
     sanitize_config,
+    start_webserver,
     _Suppress2xxAccessFilter,
     install_uvicorn_2xx_suppression,
     get_system_info,
@@ -556,3 +561,422 @@ def test_token_auth_blocks_unauthorized_and_allows_with_token() -> None:
     # X-API-Key header
     resp_api_key = client.get("/stats", headers={"X-API-Key": "secret-token"})
     assert resp_api_key.status_code == 200
+
+
+def test_ringbuffer_capacity_and_snapshot_limit() -> None:
+    """Brief: RingBuffer enforces capacity and respects snapshot limits.
+
+    Inputs:
+      - Two ring buffers: one with small positive capacity, one with non-positive.
+
+    Outputs:
+      - snapshot() never returns more items than capacity and limit trims to
+        the newest N entries.
+    """
+
+    buf = RingBuffer(capacity=2)
+    buf.push(1)
+    buf.push(2)
+    buf.push(3)
+    # Capacity 2 -> only the last two items are retained
+    assert buf.snapshot() == [2, 3]
+    # Limit 1 -> only the newest item is returned
+    assert buf.snapshot(limit=1) == [3]
+
+    # Non-positive capacity is coerced to at least 1
+    buf2 = RingBuffer(capacity=0)
+    buf2.push("a")
+    buf2.push("b")
+    assert buf2.snapshot() == ["b"]
+
+
+def test_resolve_www_root_prefers_config_then_env_then_cwd(
+    monkeypatch, tmp_path
+) -> None:
+    """Brief: resolve_www_root prioritizes config.www_root, then env, then CWD html/.
+
+    Inputs:
+      - Temporary directories to stand in for configured and environment roots.
+
+    Outputs:
+      - When config.webserver.www_root exists, it is returned.
+      - Otherwise FOGHORN_WWW_ROOT is honored.
+      - Otherwise ./html under the current working directory is used when present.
+    """
+
+    import os
+    import foghorn.webserver as web_mod
+
+    # 1) Config override takes precedence when directory exists
+    cfg_root = tmp_path / "cfg_html"
+    cfg_root.mkdir()
+    cfg = {"webserver": {"www_root": os.fspath(cfg_root)}}
+    resolved_cfg = resolve_www_root(cfg)
+    assert resolved_cfg == os.fspath(cfg_root.resolve())
+
+    # 2) Environment variable is used when config doesn't specify www_root
+    env_root = tmp_path / "env_html"
+    env_root.mkdir()
+    monkeypatch.delenv("FOGHORN_WWW_ROOT", raising=False)
+    monkeypatch.setenv("FOGHORN_WWW_ROOT", os.fspath(env_root))
+    resolved_env = resolve_www_root({"webserver": {}})
+    assert resolved_env == os.fspath(env_root.resolve())
+
+    # 3) Falling back to ./html relative to current working directory
+    cwd_root = tmp_path / "cwd_root"
+    html_dir = cwd_root / "html"
+    html_dir.mkdir(parents=True)
+    monkeypatch.delenv("FOGHORN_WWW_ROOT", raising=False)
+    monkeypatch.setattr(web_mod.os, "getcwd", lambda: os.fspath(cwd_root))
+
+    resolved_cwd = resolve_www_root({})
+    assert resolved_cwd == os.fspath(html_dir.resolve())
+
+
+def test_static_www_serves_files_and_blocks_traversal(monkeypatch, tmp_path) -> None:
+    """Brief: Static FastAPI route must serve files and prevent path traversal.
+
+    Inputs:
+      - Temporary html directory with a simple file and attempted traversal path.
+
+    Outputs:
+      - Requesting an existing file under www_root returns HTTP 200.
+      - Requests that escape the html root or target missing files return 404.
+    """
+
+    import os
+
+    www_root = tmp_path / "html"
+    www_root.mkdir()
+    asset = www_root / "style.css"
+    asset.write_text("body { background: #000; }", encoding="utf-8")
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+    )
+    app.state.www_root = os.fspath(www_root)
+    client = TestClient(app)
+
+    # Existing asset is served via /{path:path} route
+    resp_ok = client.get("/style.css")
+    assert resp_ok.status_code == 200
+    assert "body { background: #000; }" in resp_ok.text
+
+    # Attempted traversal outside www_root is rejected
+    resp_traversal = client.get("/../secret.txt")
+    assert resp_traversal.status_code == 404
+
+    # Non-existent file under www_root also 404s
+    resp_missing = client.get("/missing.txt")
+    assert resp_missing.status_code == 404
+
+
+def test_config_raw_endpoint_reads_from_disk(tmp_path) -> None:
+    """Brief: /config/raw must return raw YAML text and parsed mapping.
+
+    Inputs:
+      - Temporary YAML config file with known contents.
+
+    Outputs:
+      - JSON payload contains raw_yaml with the original text and config
+        mapping reconstructed from that YAML.
+    """
+
+    cfg_path = tmp_path / "config.yaml"
+    yaml_text = "webserver:\n  enabled: true\nanswer: 42\n"
+    cfg_path.write_text(yaml_text, encoding="utf-8")
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+        config_path=str(cfg_path),
+    )
+    client = TestClient(app)
+
+    resp = client.get("/config/raw")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["raw_yaml"] == yaml_text
+    assert data["config"]["answer"] == 42
+
+
+def test_save_config_persists_raw_yaml_and_signals(monkeypatch, tmp_path) -> None:
+    """Brief: /config/save must overwrite config file and send SIGUSR1.
+
+    Inputs:
+      - Existing config file path and JSON body containing raw_yaml.
+
+    Outputs:
+      - Config file on disk is updated to the raw_yaml content.
+      - os.kill is invoked with SIGUSR1 for the current process.
+    """
+
+    import os
+    import foghorn.webserver as web_mod
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("initial: 1\n", encoding="utf-8")
+
+    kill_calls: dict[str, tuple[int, int] | None] = {"args": None}
+
+    def fake_kill(pid: int, sig: int) -> None:
+        kill_calls["args"] = (pid, sig)
+
+    monkeypatch.setattr(web_mod.os, "kill", fake_kill)
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+        config_path=str(cfg_path),
+    )
+    client = TestClient(app)
+
+    new_yaml = "answer: 42\n"
+    resp = client.post("/config/save", json={"raw_yaml": new_yaml})
+    assert resp.status_code == 200
+
+    # Config file is overwritten with the new YAML content
+    on_disk = cfg_path.read_text(encoding="utf-8")
+    assert on_disk == new_yaml
+
+    # SIGUSR1 was requested for current process
+    assert kill_calls["args"] is not None
+    pid, sig = kill_calls["args"]  # type: ignore[assignment]
+    assert pid == os.getpid()
+    assert sig == web_mod.signal.SIGUSR1
+
+
+def test_read_proc_meminfo_parses_sample_file(tmp_path) -> None:
+    """Brief: _read_proc_meminfo parses kB values from a meminfo-style file.
+
+    Inputs:
+      - Temporary file containing a subset of /proc/meminfo-style lines.
+
+    Outputs:
+      - Dict maps fields to byte counts; invalid lines are ignored.
+    """
+
+    meminfo_path = tmp_path / "meminfo"
+    meminfo_path.write_text(
+        "MemTotal:       1024 kB\n"
+        "MemFree:        256 kB\n"
+        "Bogus: not-a-number kB\n",
+        encoding="utf-8",
+    )
+
+    result = _read_proc_meminfo(str(meminfo_path))
+    assert result["MemTotal"] == 1024 * 1024
+    assert result["MemFree"] == 256 * 1024
+    assert "Bogus" not in result
+
+
+def test_utc_now_iso_returns_parseable_utc_timestamp() -> None:
+    """Brief: _utc_now_iso returns an ISO 8601 UTC timestamp string.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - A string that datetime.fromisoformat can parse and that represents UTC.
+    """
+
+    from datetime import datetime, timezone
+
+    ts = _utc_now_iso()
+    parsed = datetime.fromisoformat(ts)
+    assert parsed.tzinfo is not None
+    assert parsed.tzinfo.utcoffset(parsed) == timezone.utc.utcoffset(parsed)
+
+
+def test_get_system_info_handles_missing_psutil(monkeypatch) -> None:
+    """Brief: get_system_info must tolerate psutil being unavailable.
+
+    Inputs:
+      - monkeypatch fixture to force psutil to None.
+
+    Outputs:
+      - Returned dict still contains process_* keys but values may be None.
+    """
+
+    import foghorn.webserver as web_mod
+
+    monkeypatch.setattr(web_mod, "psutil", None)
+
+    info = get_system_info()
+    assert "process_rss_bytes" in info
+    assert "process_rss_mb" in info
+    # With psutil forced to None, these are expected to be None.
+    assert info["process_rss_bytes"] is None
+    assert info["process_rss_mb"] is None
+
+
+def test_token_auth_500_when_token_missing() -> None:
+    """Brief: auth.mode=token without a token yields HTTP 500 error on protected endpoints.
+
+    Inputs:
+      - webserver config with auth.mode=token and no token value.
+
+    Outputs:
+      - /stats responds with 500 and an explanatory error message.
+    """
+
+    cfg = {
+        "webserver": {
+            "enabled": True,
+            "auth": {"mode": "token"},
+        }
+    }
+    collector = StatsCollector(track_uniques=False)
+
+    app = create_app(stats=collector, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    resp = client.get("/stats")
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["detail"] == "webserver.auth.token not configured"
+
+
+def test_fastapi_cors_headers_when_enabled(monkeypatch) -> None:
+    """Brief: FastAPI admin app applies CORS headers when webserver.cors.enabled is true.
+
+    Inputs:
+      - webserver config enabling CORS with a specific allowlist origin.
+
+    Outputs:
+      - /health response includes Access-Control-Allow-Origin matching request Origin.
+    """
+
+    cfg = {
+        "webserver": {
+            "enabled": True,
+            "cors": {"enabled": True, "allowlist": ["https://example.com"]},
+        }
+    }
+
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    resp = client.get("/health", headers={"Origin": "https://example.com"})
+    # FastAPI/Starlette normalize header casing; use case-insensitive access.
+    assert resp.status_code == 200
+    assert resp.headers.get("access-control-allow-origin") == "https://example.com"
+
+
+def test_start_webserver_returns_none_when_disabled() -> None:
+    """Brief: start_webserver returns None when webserver.enabled is false.
+
+    Inputs:
+      - Config with webserver.enabled set to False.
+
+    Outputs:
+      - Function returns None and does not attempt to start any server.
+    """
+
+    cfg = {"webserver": {"enabled": False}}
+    handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+    assert handle is None
+
+
+def test_webserver_handle_is_running_and_stop_calls_shutdown_and_close() -> None:
+    """Brief: WebServerHandle delegates shutdown and join to server and thread.
+
+    Inputs:
+      - Dummy thread and server objects tracking method calls.
+
+    Outputs:
+      - is_running() proxies thread.is_alive() and stop() invokes shutdown/server_close.
+    """
+
+    class DummyThread:
+        def __init__(self) -> None:
+            self.join_called = False
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float) -> None:  # noqa: ARG002
+            self.join_called = True
+
+    class DummyServer:
+        def __init__(self) -> None:
+            self.shutdown_called = False
+            self.close_called = False
+
+        def shutdown(self) -> None:
+            self.shutdown_called = True
+
+        def server_close(self) -> None:
+            self.close_called = True
+
+    thread = DummyThread()
+    server = DummyServer()
+    handle = WebServerHandle(thread, server=server)
+
+    assert handle.is_running() is True
+    handle.stop(timeout=0.01)
+    assert thread.join_called is True
+    assert server.shutdown_called is True
+    assert server.close_called is True
+
+
+def test_start_webserver_uvicorn_path_uses_dummy_server(monkeypatch) -> None:
+    """Brief: start_webserver uses uvicorn path when asyncio works and uvicorn is available.
+
+    Inputs:
+      - monkeypatch fixtures to install a dummy uvicorn module.
+
+    Outputs:
+      - WebServerHandle is returned and dummy uvicorn.Server.run() is invoked.
+    """
+
+    import asyncio
+    import types
+    import sys
+
+    # Ensure asyncio loop creation succeeds and is exercised
+    orig_new_loop = asyncio.new_event_loop
+
+    def tracking_new_loop(*a, **kw):  # noqa: ANN001, ANN002
+        loop = orig_new_loop(*a, **kw)
+        loop.close()
+        return loop
+
+    monkeypatch.setattr(asyncio, "new_event_loop", tracking_new_loop, raising=True)
+
+    state: dict[str, object] = {}
+
+    class DummyConfig:
+        def __init__(self, app, host, port, log_level):  # noqa: ANN001, ANN002
+            self.app = app
+            self.host = host
+            self.port = port
+            self.log_level = log_level
+
+    class DummyServer:
+        def __init__(self, config):  # noqa: ANN001
+            state["config"] = config
+
+        def run(self) -> None:
+            state["ran"] = True
+
+    dummy_uvicorn = types.SimpleNamespace(Config=DummyConfig, Server=DummyServer)
+    monkeypatch.setitem(sys.modules, "uvicorn", dummy_uvicorn)
+
+    cfg = {"webserver": {"enabled": True, "host": "127.0.0.1", "port": 0}}
+    handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
+    assert isinstance(handle, WebServerHandle)
+
+    # Allow background thread to run run()
+    import time
+
+    time.sleep(0.05)
+
+    assert state.get("ran") is True
+    cfg_obj = state.get("config")
+    assert isinstance(cfg_obj, DummyConfig)
+    assert cfg_obj.host == "127.0.0.1"
