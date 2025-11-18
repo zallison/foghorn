@@ -4,12 +4,13 @@ Tests for SQLite-backed statistics persistence and warm-load helpers.
 Inputs:
     - StatsCollector, StatsSnapshot, StatsSQLiteStore
 Outputs:
-    - None; assertions verify round-trip persistence and load_from_snapshot.
+    - None; assertions verify load_from_snapshot and basic SQLite schema.
 """
 
 from pathlib import Path
 from typing import Dict
 
+import sqlite3
 import pytest
 
 from foghorn.stats import StatsCollector, StatsSnapshot, StatsSQLiteStore
@@ -89,53 +90,254 @@ def test_stats_collector_load_from_snapshot_restores_core_counters() -> None:
     assert snap_after.totals["total_queries"] == snap.totals["total_queries"]
 
 
-def test_sqlite_store_load_latest_snapshot_empty_db(tmp_path: Path) -> None:
-    """Brief: load_latest_snapshot returns None when no snapshots exist.
+def test_sqlite_store_counts_increment_and_set(tmp_path: Path) -> None:
+    """Brief: StatsSQLiteStore maintains counts via increment_count and set_count.
 
     Inputs:
         tmp_path: pytest-provided temporary directory
     Outputs:
-        None; asserts no snapshot is returned from an empty DB.
+        None; asserts counts table reflects increment and set operations.
     """
-    db_path = tmp_path / "stats.db"
+    db_path = tmp_path / "stats_counts.db"
     store = StatsSQLiteStore(db_path=str(db_path))
 
     try:
-        loaded = store.load_latest_snapshot()
+        # Increment "totals.total_queries" twice and then override via set.
+        store.increment_count("totals", "total_queries")
+        store.increment_count("totals", "total_queries", delta=2)
+        store.set_count("totals", "total_queries", 10)
+
+        # Verify via a direct sqlite3 query.
+        conn = sqlite3.connect(str(db_path))
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT value FROM counts WHERE scope = ? AND key = ?",
+                ("totals", "total_queries"),
+            )
+            row = cur.fetchone()
+        finally:
+            conn.close()
     finally:
         store.close()
 
-    assert loaded is None
+    assert row is not None
+    assert row[0] == 10
 
 
-def test_sqlite_store_roundtrip_snapshot(tmp_path: Path) -> None:
-    """Brief: StatsSQLiteStore can persist and reload a snapshot round-trip.
+def test_sqlite_store_query_log_insert(tmp_path: Path) -> None:
+    """Brief: StatsSQLiteStore.insert_query_log appends rows to query_log.
 
     Inputs:
         tmp_path: pytest-provided temporary directory
     Outputs:
-        None; asserts core fields survive save/load.
+        None; asserts a row is present with expected fields.
     """
-    db_path = tmp_path / "stats_roundtrip.db"
-    original = _make_sample_snapshot()
-
+    db_path = tmp_path / "stats_query_log.db"
     store = StatsSQLiteStore(db_path=str(db_path))
+
     try:
-        store.save_snapshot(original)
-        loaded = store.load_latest_snapshot()
+        store.insert_query_log(
+            ts=1763364639.432,
+            client_ip="192.0.2.1",
+            name="example.com",
+            qtype="A",
+            upstream_id="8.8.8.8:53",
+            rcode="NOERROR",
+            status="ok",
+            error=None,
+            first="93.184.216.34",
+            result_json='{"answers": []}',
+        )
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT client_ip, name, qtype, upstream_id, rcode, status FROM query_log"
+            )
+            row = cur.fetchone()
+        finally:
+            conn.close()
     finally:
         store.close()
 
-    assert loaded is not None
-    assert isinstance(loaded, StatsSnapshot)
+    assert row is not None
+    assert row[0] == "192.0.2.1"
+    assert row[1] == "example.com"
+    assert row[2] == "A"
+    assert row[3] == "8.8.8.8:53"
+    assert row[4] == "NOERROR"
+    assert row[5] == "ok"
 
-    # Compare core aggregates
-    assert loaded.totals == original.totals
-    assert loaded.rcodes == original.rcodes
-    assert loaded.qtypes == original.qtypes
-    assert loaded.upstreams == original.upstreams
-    assert loaded.decisions == original.decisions
 
-    # Sanity-check created_at ordering
-    assert loaded.created_at >= original.created_at
-    assert db_path.exists()
+def test_sqlite_store_rebuild_counts_if_needed(tmp_path: Path) -> None:
+    """Brief: rebuild_counts_if_needed populates counts from existing query_log rows.
+
+    Inputs:
+        tmp_path: pytest-provided temporary directory
+    Outputs:
+        None; asserts totals.total_queries reflects query_log row count after rebuild.
+    """
+    db_path = tmp_path / "stats_rebuild.db"
+    store = StatsSQLiteStore(db_path=str(db_path))
+
+    try:
+        # Insert two log rows with different clients/qtypes to drive aggregation.
+        store.insert_query_log(
+            ts=1763364639.100,
+            client_ip="192.0.2.10",
+            name="example.com",
+            qtype="A",
+            upstream_id="8.8.8.8:53",
+            rcode="NOERROR",
+            status="ok",
+            error=None,
+            first="93.184.216.34",
+            result_json='{"answers":[{"a":1}]}',
+        )
+        store.insert_query_log(
+            ts=1763364639.200,
+            client_ip="192.0.2.11",
+            name="example.com",
+            qtype="AAAA",
+            upstream_id=None,
+            rcode="NXDOMAIN",
+            status="error",
+            error="nx",
+            first=None,
+            result_json='{"answers":[]}',
+        )
+
+        # At this point counts is empty; request rebuild.
+        store.rebuild_counts_if_needed(force_rebuild=False)
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT value FROM counts WHERE scope = ? AND key = ?",
+                ("totals", "total_queries"),
+            )
+            total_row = cur.fetchone()
+        finally:
+            conn.close()
+    finally:
+        store.close()
+
+    assert total_row is not None
+    # Two query_log rows should yield total_queries == 2 after rebuild.
+    assert total_row[0] == 2
+
+
+def test_stats_collector_warm_load_from_store_uses_counts(tmp_path: Path) -> None:
+    """Brief: StatsCollector.warm_load_from_store hydrates counters from SQLite counts.
+
+    Inputs:
+        tmp_path: pytest tmp path for an isolated SQLite DB.
+    Outputs:
+        None; asserts that totals/qtypes/rcodes/upstreams are restored.
+    """
+    db_path = tmp_path / "stats_warm_load.db"
+    store = StatsSQLiteStore(db_path=str(db_path))
+
+    try:
+        # Seed some aggregate counts directly via the store.
+        store.increment_count("totals", "total_queries", delta=3)
+        store.increment_count("rcodes", "NOERROR", delta=2)
+        store.increment_count("qtypes", "A", delta=3)
+        store.increment_count("upstreams", "8.8.8.8:53|success", delta=1)
+
+        # Create collector wired to the store and warm-load from counts.
+        collector = StatsCollector(
+            track_uniques=True,
+            include_qtype_breakdown=True,
+            include_top_clients=False,
+            include_top_domains=False,
+            track_latency=False,
+            stats_store=store,
+        )
+        # Collector starts empty.
+        snap_empty = collector.snapshot(reset=False)
+        assert snap_empty.totals.get("total_queries", 0) == 0
+        assert snap_empty.qtypes == {}
+        assert snap_empty.rcodes == {}
+        assert snap_empty.upstreams == {}
+
+        collector.warm_load_from_store()
+        snap = collector.snapshot(reset=False)
+
+        assert snap.totals["total_queries"] == 3
+        assert snap.rcodes["NOERROR"] == 2
+        assert snap.qtypes["A"] == 3
+        # Upstreams use nested mapping upstream_id -> {outcome -> count}.
+        assert snap.upstreams["8.8.8.8:53"]["success"] == 1
+    finally:
+        store.close()
+
+
+def test_stats_collector_warm_load_populates_top_lists(tmp_path: Path) -> None:
+    """Brief: warm_load_from_store reconstructs top clients/domains from counts.
+
+    Inputs:
+        tmp_path: pytest tmp path for an isolated SQLite DB.
+    Outputs:
+        None; asserts top_clients/top_domains/top_subdomains reflect DB aggregates.
+    """
+    db_path = tmp_path / "stats_warm_load_top.db"
+    store = StatsSQLiteStore(db_path=str(db_path))
+
+    try:
+        # Seed some per-client and per-domain counts.
+        store.increment_count("clients", "192.0.2.1", delta=5)
+        store.increment_count("clients", "192.0.2.2", delta=2)
+
+        store.increment_count("sub_domains", "www.example.com", delta=3)
+        store.increment_count("sub_domains", "api.example.com", delta=1)
+
+        store.increment_count("domains", "example.com", delta=4)
+        store.increment_count("domains", "other.com", delta=2)
+
+        collector = StatsCollector(
+            track_uniques=True,
+            include_qtype_breakdown=True,
+            include_top_clients=True,
+            include_top_domains=True,
+            top_n=5,
+            track_latency=False,
+            stats_store=store,
+        )
+
+        # Snapshot before warm-load should have no tops/uniques.
+        snap_empty = collector.snapshot(reset=False)
+        assert snap_empty.top_clients in (None, [])
+        assert snap_empty.top_domains in (None, [])
+        assert snap_empty.top_subdomains in (None, [])
+        if snap_empty.uniques:
+            assert snap_empty.uniques["clients"] == 0
+            assert snap_empty.uniques["domains"] == 0
+
+        collector.warm_load_from_store()
+        snap = collector.snapshot(reset=False)
+
+        # Top clients: 192.0.2.1 should be first with count 5.
+        assert snap.top_clients is not None
+        assert snap.top_clients[0][0] == "192.0.2.1"
+        assert snap.top_clients[0][1] == 5
+
+        # Top subdomains: www.example.com should lead with count 3.
+        assert snap.top_subdomains is not None
+        assert snap.top_subdomains[0][0] == "www.example.com"
+        assert snap.top_subdomains[0][1] == 3
+
+        # Top domains: example.com should lead with count 4.
+        assert snap.top_domains is not None
+        assert snap.top_domains[0][0] == "example.com"
+        assert snap.top_domains[0][1] == 4
+
+        # Unique counts reconstructed from keys.
+        assert snap.uniques is not None
+        assert snap.uniques["clients"] == 2
+        assert snap.uniques["domains"] >= 1
+    finally:
+        store.close()

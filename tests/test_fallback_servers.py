@@ -111,6 +111,219 @@ def test_doh_fallback_threaded_server_roundtrip(monkeypatch: Any) -> None:
     handle.stop()
 
 
+def test_admin_fallback_logs_with_limit_and_static_files(
+    monkeypatch: Any, tmp_path
+) -> None:
+    """Brief: Threaded admin HTTP /logs handles limit and serves static files with path protection.
+
+    Inputs:
+      - monkeypatch: forces asyncio.new_event_loop() to raise PermissionError.
+      - tmp_path: pytest temp directory for creating html assets.
+
+    Outputs:
+      - Asserts that /logs respects the limit query parameter.
+      - Asserts that GET /style.css serves a static file from html/.
+      - Asserts that path traversal attempts (/../secret.txt) return 404.
+    """
+
+    def boom_new_loop(*_a: Any, **_kw: Any) -> asyncio.AbstractEventLoop:
+        raise PermissionError("no self-pipe")
+
+    monkeypatch.setattr(asyncio, "new_event_loop", boom_new_loop, raising=True)
+
+    # Create a temporary html directory with a static asset.
+    www_root = tmp_path / "html"
+    www_root.mkdir()
+    asset = www_root / "style.css"
+    asset.write_text("body { color: red; }", encoding="utf-8")
+
+    # Create an index.html file for testing / and /index.html.
+    index_file = www_root / "index.html"
+    index_file.write_text("<html><body>Admin UI</body></html>", encoding="utf-8")
+
+    # Pre-populate a RingBuffer with some log-like entries.
+    buf = RingBuffer(capacity=5)
+    buf.push({"msg": "entry1"})
+    buf.push({"msg": "entry2"})
+    buf.push({"msg": "entry3"})
+
+    cfg = {
+        "webserver": {
+            "enabled": True,
+            "host": "127.0.0.1",
+            "port": 0,
+            "www_root": str(www_root),
+        }
+    }
+
+    handle = start_webserver(stats=None, config=cfg, log_buffer=buf)
+    assert isinstance(handle, WebServerHandle)
+
+    server = handle._server  # type: ignore[attr-defined]
+    assert server is not None
+    host, port = server.server_address
+
+    time.sleep(0.05)
+
+    # Test /logs with a limit query parameter.
+    conn = http.client.HTTPConnection(host, port, timeout=1)
+    try:
+        conn.request("GET", "/logs?limit=2")
+        resp = conn.getresponse()
+        body = resp.read()
+        assert resp.status == 200
+        data = json.loads(body.decode("utf-8"))
+        # Buffer has 3 items; limit=2 should return the newest 2.
+        entries = data["entries"]
+        assert len(entries) == 2
+        assert entries[0]["msg"] == "entry2"
+        assert entries[1]["msg"] == "entry3"
+    finally:
+        conn.close()
+
+    # Test /logs with an invalid limit query parameter (should fall back to 100).
+    conn2 = http.client.HTTPConnection(host, port, timeout=1)
+    try:
+        conn2.request("GET", "/logs?limit=not-a-number")
+        resp2 = conn2.getresponse()
+        body2 = resp2.read()
+        assert resp2.status == 200
+        data2 = json.loads(body2.decode("utf-8"))
+        # Should return all 3 entries (fallback to limit=100).
+        assert len(data2["entries"]) == 3
+    finally:
+        conn2.close()
+
+    # Test static file serving: GET /style.css.
+    conn3 = http.client.HTTPConnection(host, port, timeout=1)
+    try:
+        conn3.request("GET", "/style.css")
+        resp3 = conn3.getresponse()
+        body3 = resp3.read()
+        assert resp3.status == 200
+        assert b"body { color: red; }" == body3
+    finally:
+        conn3.close()
+
+    # Test path traversal protection: GET /../secret.txt should return 404.
+    conn4 = http.client.HTTPConnection(host, port, timeout=1)
+    try:
+        conn4.request("GET", "/../secret.txt")
+        resp4 = conn4.getresponse()
+        resp4.read()
+        assert resp4.status == 404
+    finally:
+        conn4.close()
+
+    # Test GET / and /index.html serve the index file.
+    for path in ["/", "/index.html"]:
+        conn5 = http.client.HTTPConnection(host, port, timeout=1)
+        try:
+            conn5.request("GET", path)
+            resp5 = conn5.getresponse()
+            body5 = resp5.read()
+            assert resp5.status == 200
+            assert b"<html><body>Admin UI</body></html>" == body5
+        finally:
+            conn5.close()
+
+    handle.stop()
+
+
+def test_admin_fallback_config_raw_and_save(monkeypatch: Any, tmp_path) -> None:
+    """Brief: Threaded admin HTTP /config/raw and /config/save read/write YAML config.
+
+    Inputs:
+      - monkeypatch: forces asyncio.new_event_loop() to raise PermissionError.
+      - tmp_path: pytest temp directory for creating a config file.
+
+    Outputs:
+      - Asserts that /config/raw returns the raw YAML text and parsed config.
+      - Asserts that POST /config/save overwrites the config file and returns success.
+    """
+
+    def boom_new_loop(*_a: Any, **_kw: Any) -> asyncio.AbstractEventLoop:
+        raise PermissionError("no self-pipe")
+
+    monkeypatch.setattr(asyncio, "new_event_loop", boom_new_loop, raising=True)
+
+    # Prevent config-save from sending a real SIGUSR1 to the pytest process.
+    kill_calls: dict[str, tuple[int, int] | None] = {"args": None}
+
+    def fake_kill(pid: int, sig: int) -> None:
+        kill_calls["args"] = (pid, sig)
+
+    monkeypatch.setattr(web_mod.os, "kill", fake_kill)
+
+    # Create a temporary config file.
+    cfg_path = tmp_path / "config.yaml"
+    initial_yaml = "initial: 1\nwebserver:\n  enabled: true\n"
+    cfg_path.write_text(initial_yaml, encoding="utf-8")
+
+    cfg = {
+        "webserver": {
+            "enabled": True,
+            "host": "127.0.0.1",
+            "port": 0,
+        }
+    }
+
+    handle = start_webserver(
+        stats=None, config=cfg, log_buffer=RingBuffer(), config_path=str(cfg_path)
+    )
+    assert isinstance(handle, WebServerHandle)
+
+    server = handle._server  # type: ignore[attr-defined]
+    assert server is not None
+    host, port = server.server_address
+
+    time.sleep(0.05)
+
+    # Test GET /config/raw returns the on-disk YAML.
+    conn = http.client.HTTPConnection(host, port, timeout=1)
+    try:
+        conn.request("GET", "/config/raw")
+        resp = conn.getresponse()
+        body = resp.read()
+        assert resp.status == 200
+        data = json.loads(body.decode("utf-8"))
+        assert data["raw_yaml"] == initial_yaml
+        assert data["config"]["initial"] == 1
+    finally:
+        conn.close()
+
+    # Test POST /config/save overwrites the config file.
+    new_cfg = {"answer": 42, "webserver": {"enabled": True}}
+    conn2 = http.client.HTTPConnection(host, port, timeout=1)
+    try:
+        body_data = json.dumps(new_cfg).encode("utf-8")
+        conn2.request(
+            "POST",
+            "/config/save",
+            body=body_data,
+            headers={"Content-Type": "application/json"},
+        )
+        resp2 = conn2.getresponse()
+        body2 = resp2.read()
+        assert resp2.status == 200
+        data2 = json.loads(body2.decode("utf-8"))
+        assert data2["status"] == "ok"
+        assert "backed_up_to" in data2
+    finally:
+        conn2.close()
+
+    # Verify the config file on disk was updated.
+    on_disk = cfg_path.read_text(encoding="utf-8")
+    # The threaded handler uses yaml.safe_dump, so the output will be valid YAML.
+    import yaml
+
+    reloaded = yaml.safe_load(on_disk)
+    assert reloaded["answer"] == 42
+    assert reloaded["webserver"]["enabled"] is True
+
+    handle.stop()
+
+
 def test_admin_prefers_uvicorn_when_asyncio_ok(monkeypatch: Any) -> None:
     """Brief: When asyncio loop creation succeeds, admin webserver uses uvicorn.
 
