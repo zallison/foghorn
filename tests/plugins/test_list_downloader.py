@@ -159,7 +159,7 @@ def test_init_merges_url_files_and_logs_debug(tmp_path, caplog):
         download_path=str(tmp_path),
         urls=["https://c.example"],
         url_files=[str(url_file)],
-        interval_seconds=None,
+        interval_days=None,
     )
 
     # URLs should be merged and sorted
@@ -317,6 +317,34 @@ def test_needs_update_true_when_no_last_modified(monkeypatch, tmp_path):
     monkeypatch.setattr(list_downloader_mod.requests, "head", fake_head)
 
     assert dl._needs_update("https://example.com/a.txt", str(f)) is True
+
+
+def test_needs_update_false_for_recent_file(monkeypatch, tmp_path):
+    """Brief: _needs_update returns False when local file is younger than one day.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Temporary directory for local file.
+
+    Outputs:
+      - None; asserts False and avoids calling requests.head when file is fresh.
+    """
+
+    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    f = tmp_path / "list.txt"
+    f.write_text("# header\n")
+
+    # Make the file appear fresh: mtime within the last hour.
+    now = time.time()
+    fresh_mtime = now - 3600
+    os.utime(f, (fresh_mtime, fresh_mtime))
+
+    def fake_head(url, timeout):  # pragma: no cover - should not be called
+        raise AssertionError("requests.head should not be called for fresh files")
+
+    monkeypatch.setattr(list_downloader_mod.requests, "head", fake_head)
+
+    assert dl._needs_update("https://example.com/a.txt", str(f)) is False
 
 
 def test_validate_domain_list_accepts_good_domain_only_list(tmp_path):
@@ -517,7 +545,7 @@ def test_download_all_raises_on_invalid_content(monkeypatch, tmp_path):
 
 
 def test_maybe_run_respects_interval(monkeypatch, tmp_path):
-    """Brief: _maybe_run respects interval_seconds when force is False.
+    """Brief: _maybe_run respects the configured interval when force is False.
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture.
@@ -570,7 +598,7 @@ def test_maybe_run_respects_interval(monkeypatch, tmp_path):
 
 
 def test_maybe_run_force_ignores_interval(monkeypatch, tmp_path):
-    """Brief: _maybe_run with force=True bypasses interval_seconds.
+    """Brief: _maybe_run with force=True bypasses the configured interval.
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture.
