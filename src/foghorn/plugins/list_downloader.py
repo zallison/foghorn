@@ -25,7 +25,7 @@ class ListDownloader(BasePlugin):
     Inputs (config):
       - urls (List[str]): HTTP(S) URLs to domain-per-line lists (comments with '#').
       - url_files (List[str], optional): File paths containing one URL per line ('#' comments allowed).
-      - download_path (str): Directory to store downloaded files (default: './var/lists').
+      - download_path (str): Directory to store downloaded files (default: './config/var/lists').
       - interval_days (float|int|None): If set, re-check and update no more often than
         this many days (legacy 'interval_seconds' is still accepted as a deprecated
         alias).
@@ -40,7 +40,7 @@ class ListDownloader(BasePlugin):
           - module: list_downloader
             pre_priority: 15
             config:
-              download_path: ./var/lists
+              download_path: ./config/var/lists
               cache_days: 7
               urls:
                 - https://v.firebog.net/hosts/AdguardDNS.txt
@@ -64,7 +64,9 @@ class ListDownloader(BasePlugin):
         """
 
         super().__init__(**config)
-        self.download_path: str = str(self.config.get("download_path", "./var/lists"))
+        self.download_path: str = str(
+            self.config.get("download_path", "./config/var/lists")
+        )
         self.urls: List[str] = list(self.config.get("urls", []) or [])
         self.url_files: List[str] = list(self.config.get("url_files", []) or [])
         # interval_days is the primary public setting; interval_seconds remains an
@@ -112,7 +114,7 @@ class ListDownloader(BasePlugin):
           - None; updates self.urls in-place to a sorted list of unique URLs.
 
         Example:
-          >>> dl = ListDownloader(download_path="./var/lists", urls=["https://one"], url_files=[])
+          >>> dl = ListDownloader(download_path="./config/var/lists", urls=["https://one"], url_files=[])
           >>> dl.urls  # doctest: +ELLIPSIS
           ['https://one']
         """
@@ -152,7 +154,7 @@ class ListDownloader(BasePlugin):
 
         Example use:
           >>> from foghorn.plugins.list_downloader import ListDownloader
-          >>> dl = ListDownloader(download_path="./var/lists", urls=[], url_files=[])
+          >>> dl = ListDownloader(download_path="./config/var/lists", urls=[], url_files=[])
           >>> dl.setup()  # doctest: +SKIP
         """
 

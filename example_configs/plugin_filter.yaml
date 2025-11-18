@@ -32,7 +32,7 @@ plugins:
       default: deny
 
       # Persistent on-disk DB (SQLite) for stats/cache if enabled by plugin.
-      db_path: ./var/blocklist.db
+      db_path: ./config/var/blocklist.db
 
       # Cache TTL for in-memory decisions to reduce DB/CPU load.
       cache_ttl_seconds: 600
