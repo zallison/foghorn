@@ -54,7 +54,7 @@ plugins:
     config:
       setup_priority: 15
       download_path: ./var/lists
-      interval_seconds: 3600
+      interval_days: 1
       urls:
         - https://v.firebog.net/hosts/AdguardDNS.txt
         - https://v.firebog.net/hosts/Easylist.txt
