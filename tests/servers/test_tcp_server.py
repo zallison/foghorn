@@ -18,7 +18,6 @@ import pytest
 pytestmark = pytest.mark.slow
 
 from foghorn.tcp_server import serve_tcp
-import foghorn.tcp_server as tcp_server
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:

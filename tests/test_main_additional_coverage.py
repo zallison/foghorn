@@ -840,11 +840,13 @@ def test_start_without_udp_uses_keepalive_loop(monkeypatch, caplog):
     def fake_sleep(_sec: int) -> None:
         raise KeyboardInterrupt
 
+    import sys as _sys
+
     monkeypatch.setattr(main_mod, "DNSServer", forbidden_dnserver)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: DummyHandle())
     # Patch the _time module alias imported inside main for the keepalive loop.
-    monkeypatch.setitem(main_mod.sys.modules, "time", SimpleNamespace(sleep=fake_sleep))
+    monkeypatch.setitem(_sys.modules, "time", SimpleNamespace(sleep=fake_sleep))
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         with caplog.at_level(logging.INFO, logger="foghorn.main"):
@@ -982,8 +984,8 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
             if self._target is not None:
                 self._target()
 
-    import sys as _sys
     import asyncio as _asyncio
+    import sys as _sys
 
     fake_threading = SimpleNamespace(Thread=DummyThread)
 

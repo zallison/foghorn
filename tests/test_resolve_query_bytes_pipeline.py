@@ -8,10 +8,10 @@ Outputs:
   - None
 """
 
-from dnslib import DNSRecord, QTYPE, RCODE
+from dnslib import QTYPE, RCODE, DNSRecord
 
-from foghorn.server import resolve_query_bytes, DNSUDPHandler
-from foghorn.plugins.base import BasePlugin, PluginDecision, PluginContext
+from foghorn.plugins.base import BasePlugin, PluginContext, PluginDecision
+from foghorn.server import DNSUDPHandler, resolve_query_bytes
 
 
 class _DenyPlugin(BasePlugin):

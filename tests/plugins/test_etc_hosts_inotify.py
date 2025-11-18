@@ -11,9 +11,9 @@ Outputs:
 
 import os
 import platform
-import pytest
 import time
-from pathlib import Path
+
+import pytest
 
 # Skip all tests in this module if not on Linux or if pyinotify is unavailable
 pytestmark = [

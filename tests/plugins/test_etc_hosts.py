@@ -8,10 +8,11 @@ Outputs:
   - None
 """
 
-import pytest
-from dnslib import DNSRecord, QTYPE
-from foghorn.plugins.base import PluginContext
 import importlib
+
+from dnslib import QTYPE, DNSRecord
+
+from foghorn.plugins.base import PluginContext
 
 
 def test_etc_hosts_module_import():

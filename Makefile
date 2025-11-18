@@ -42,7 +42,8 @@ tests: test
 test: build
 	@echo "=== Running tests (short) ==="
 	source ${VENV}/bin/activate || true   # ignore error if it already exists
-	pytest --cov=foghorn tests
+	pytest --cov=foghorn --disable-warnings tests
+
 
 # ------------------------------------------------------------
 # Clean temporary artefacts
@@ -103,4 +104,3 @@ help:
 	@echo "  docker-run     – Run docker container (ports 53/udp, 53/tcp, 8053/tcp)"
 	@echo "  docker-logs    – Follow docker container logs"
 	@echo "  dev-ship       – Clean, build, and push docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
-

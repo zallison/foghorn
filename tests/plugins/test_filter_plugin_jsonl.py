@@ -8,11 +8,10 @@ Outputs:
   - None
 """
 
-import pytest
 from dnslib import QTYPE
 
-from foghorn.plugins.filter import FilterPlugin
 from foghorn.plugins.base import PluginContext
+from foghorn.plugins.filter import FilterPlugin
 
 
 def test_domains_jsonl_with_modes(tmp_path):

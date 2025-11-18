@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from foghorn.transports.doh import doh_query, DoHError
+from foghorn.transports.doh import DoHError, doh_query
 
 
 class _ErrHandler(BaseHTTPRequestHandler):

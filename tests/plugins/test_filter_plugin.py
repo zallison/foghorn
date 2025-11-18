@@ -9,11 +9,12 @@ Outputs:
 """
 
 import ipaddress
-import pytest
-from dnslib import DNSRecord, QTYPE, RR, A, AAAA, MX, TXT
 
+import pytest
+from dnslib import AAAA, QTYPE, RR, TXT, A, DNSRecord
+
+from foghorn.plugins.base import PluginContext, PluginDecision
 from foghorn.plugins.filter import FilterPlugin
-from foghorn.plugins.base import PluginDecision, PluginContext
 
 
 def _mk_query(name="example.com", qtype="A"):

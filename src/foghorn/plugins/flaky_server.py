@@ -1,13 +1,14 @@
 from __future__ import annotations
-import logging
+
 import ipaddress
-import secrets
+import logging
 import random
+import secrets
 from typing import List, Optional, Union
 
-from dnslib import DNSRecord, RCODE, QTYPE
+from dnslib import QTYPE, RCODE, DNSRecord
 
-from .base import BasePlugin, PluginDecision, PluginContext, plugin_aliases
+from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
 logger = logging.getLogger(__name__)
 

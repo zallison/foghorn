@@ -1,12 +1,13 @@
 from __future__ import annotations
+
+import hashlib
 import logging
 import os
+import threading
 import time
-import hashlib
 from datetime import datetime
 from typing import Iterable, List, Set
 from urllib.parse import urlparse
-import threading
 
 import requests
 
