@@ -361,7 +361,7 @@ def main(argv: List[str] | None = None) -> int:
         stats_persistence_store = None
 
         if persistence_enabled:
-            db_path = str(persistence_cfg.get("db_path", "./var/stats.db"))
+            db_path = str(persistence_cfg.get("db_path", "./config/var/stats.db"))
             batch_writes = bool(persistence_cfg.get("batch_writes", False))
             batch_time_sec = float(persistence_cfg.get("batch_time_sec", 15.0))
             batch_max_size = int(persistence_cfg.get("batch_max_size", 1000))
