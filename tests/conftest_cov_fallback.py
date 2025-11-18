@@ -4,7 +4,6 @@ This does NOT collect coverage; use scripts/run_coverage.sh for enforcement.
 """
 
 import importlib
-import pytest
 
 
 def _cov_available() -> bool:

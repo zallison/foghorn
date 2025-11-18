@@ -8,8 +8,9 @@ Outputs:
   - None: asserts reset happens and plugin handler invocation count is logged
 """
 
-from unittest.mock import mock_open, patch
 import logging
+from unittest.mock import mock_open, patch
+
 import foghorn.main as main_mod
 
 

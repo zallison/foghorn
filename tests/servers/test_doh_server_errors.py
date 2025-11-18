@@ -9,7 +9,6 @@ Outputs:
 """
 
 import asyncio
-import base64
 import http.client
 import threading
 

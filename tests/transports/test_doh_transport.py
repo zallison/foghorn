@@ -11,11 +11,11 @@ Outputs:
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from foghorn.transports.doh import doh_query, DoHError
+from foghorn.transports.doh import doh_query
 
 
 class _StubHandler(BaseHTTPRequestHandler):

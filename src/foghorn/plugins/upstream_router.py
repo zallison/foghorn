@@ -1,8 +1,9 @@
 from __future__ import annotations
+
 import logging
 from typing import Dict, List, Optional, Tuple
 
-from dnslib import DNSRecord, RCODE
+from dnslib import RCODE, DNSRecord
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 

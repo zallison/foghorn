@@ -8,8 +8,8 @@ Outputs:
   - None
 """
 
-from unittest.mock import mock_open, patch
 import logging
+from unittest.mock import mock_open, patch
 
 import foghorn.main as main_mod
 

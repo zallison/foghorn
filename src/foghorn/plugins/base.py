@@ -1,7 +1,9 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Optional, Tuple, ClassVar, Sequence, List, Dict, Union, final
+
 import logging
+from dataclasses import dataclass
+from typing import (ClassVar, Dict, List, Optional, Sequence, Tuple, Union,
+                    final)
 
 
 @dataclass

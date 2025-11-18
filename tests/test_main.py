@@ -8,17 +8,13 @@ Outputs:
   - None
 """
 
-import logging
-from unittest.mock import patch, mock_open
+from unittest.mock import mock_open, patch
+
 import pytest
 
 import foghorn.main as main_mod
-from foghorn.main import (
-    _get_min_cache_ttl,
-    normalize_upstream_config,
-    load_plugins,
-    main,
-)
+from foghorn.main import (_get_min_cache_ttl, load_plugins, main,
+                          normalize_upstream_config)
 
 
 def test_get_min_cache_ttl_various_inputs():

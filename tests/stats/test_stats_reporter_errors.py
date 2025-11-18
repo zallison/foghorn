@@ -8,12 +8,9 @@ Outputs:
   - None
 """
 
-import logging
 from unittest.mock import MagicMock
 
-import pytest
-
-from foghorn.stats import StatsCollector, StatsReporter, LatencyHistogram
+from foghorn.stats import LatencyHistogram, StatsCollector, StatsReporter
 
 
 def test_stats_reporter_logs_error_when_snapshot_raises(caplog):

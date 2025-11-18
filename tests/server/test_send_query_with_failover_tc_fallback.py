@@ -8,9 +8,7 @@ Outputs:
   - None
 """
 
-import types
-
-from dnslib import DNSRecord, DNSHeader, QTYPE, RCODE
+from dnslib import QTYPE, DNSRecord
 
 import foghorn.server as srv
 

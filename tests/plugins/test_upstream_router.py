@@ -8,13 +8,10 @@ Outputs:
   - None (assertions on PluginContext changes and forwarding outcomes)
 """
 
-import types
-import pytest
-from types import SimpleNamespace
-from dnslib import DNSRecord, QTYPE, RCODE, RR, A
+from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
-from foghorn.plugins.upstream_router import UpstreamRouterPlugin
 from foghorn.plugins.base import PluginContext
+from foghorn.plugins.upstream_router import UpstreamRouterPlugin
 
 
 def _mk_query(name="example.com", qtype="A"):

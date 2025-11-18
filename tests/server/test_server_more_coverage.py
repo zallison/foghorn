@@ -8,10 +8,7 @@ Outputs:
   - None (pytest assertions)
 """
 
-from typing import Tuple
-
-import pytest
-from dnslib import DNSRecord, RCODE, RR, A, QTYPE
+from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 import foghorn.server as srv
 
@@ -309,7 +306,8 @@ def test_dnssec_validate_mode_upstream_ad_and_local_paths(monkeypatch):
     h3.dnssec_mode = "validate"
     h3.dnssec_validation = "local"
     # Replace the stub with a raising one before handle() imports it
-    import sys, types
+    import sys
+    import types
 
     fake_mod2 = types.ModuleType("foghorn.dnssec_validate")
 

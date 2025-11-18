@@ -7,9 +7,10 @@ guaranteed thread-safety for concurrent request handling.
 """
 
 from __future__ import annotations
+
+import functools
 import json
 import logging
-import functools
 import os
 import sqlite3
 import threading

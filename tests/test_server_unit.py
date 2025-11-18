@@ -8,15 +8,11 @@ Outputs:
   - None
 """
 
-import pytest
-from foghorn.server import (
-    _set_response_id,
-    compute_effective_ttl,
-    send_query_with_failover,
-    DNSUDPHandler,
-)
+from dnslib import QTYPE, RCODE, RR, A, DNSRecord
+
 from foghorn.cache import TTLCache
-from dnslib import DNSRecord, DNSHeader, QTYPE, RR, A, RCODE
+from foghorn.server import (DNSUDPHandler, _set_response_id,
+                            compute_effective_ttl, send_query_with_failover)
 
 
 def test_set_response_id_rewrites_first_two_bytes():

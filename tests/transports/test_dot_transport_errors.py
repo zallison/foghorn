@@ -8,11 +8,9 @@ Outputs:
   - None
 """
 
-import socket
-
 import pytest
 
-from foghorn.transports.dot import dot_query, DoTError
+from foghorn.transports.dot import DoTError, dot_query
 
 
 def test_dot_verify_tls_fails_without_trust():

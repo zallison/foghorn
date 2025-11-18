@@ -8,9 +8,8 @@ Outputs:
   - None: asserts that on SIGUSR1, config is reloaded, snapshot is logged, and stats are reset when configured
 """
 
-from unittest.mock import mock_open, patch
 import logging
-import types
+from unittest.mock import mock_open, patch
 
 import foghorn.main as main_mod
 

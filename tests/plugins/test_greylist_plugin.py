@@ -8,12 +8,10 @@ Outputs:
   - None (assertions on decisions, DB state, and cache behavior)
 """
 
-import pytest
 from dnslib import QTYPE
-from unittest.mock import patch, MagicMock
 
-from foghorn.plugins.greylist import GreylistPlugin
 from foghorn.plugins.base import PluginContext
+from foghorn.plugins.greylist import GreylistPlugin
 
 
 def test_first_seen_inserts_and_denies(tmp_path, monkeypatch):

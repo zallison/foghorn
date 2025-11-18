@@ -8,13 +8,8 @@ Outputs:
   - None
 """
 
-import pytest
-from foghorn.plugins.base import (
-    BasePlugin,
-    PluginContext,
-    PluginDecision,
-    plugin_aliases,
-)
+from foghorn.plugins.base import (BasePlugin, PluginContext, PluginDecision,
+                                  plugin_aliases)
 
 
 def test_plugin_decision_creation():

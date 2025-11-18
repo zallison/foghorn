@@ -122,7 +122,7 @@ async def _handle_conn(
                 return
             qbytes = body
         elif method.upper() == "GET":
-            from urllib.parse import urlparse, parse_qs
+            from urllib.parse import parse_qs, urlparse
 
             qs = parse_qs(urlparse(target).query)
             if "dns" not in qs:

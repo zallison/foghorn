@@ -8,12 +8,12 @@ Outputs:
   - None
 """
 
-import pytest
-from dnslib import DNSRecord, QTYPE, RCODE
+from dnslib import QTYPE, RCODE, DNSRecord
 
 import foghorn.server as server_mod
-from foghorn.server import DNSUDPHandler, compute_effective_ttl, _set_response_id
 from foghorn.plugins.base import BasePlugin, PluginDecision
+from foghorn.server import (DNSUDPHandler, _set_response_id,
+                            compute_effective_ttl)
 
 
 def test_compute_effective_ttl_exception_returns_floor():
@@ -93,7 +93,7 @@ def test_cache_and_send_response_parse_exception(monkeypatch):
       - None: Asserts send still occurs
     """
     q = DNSRecord.question("example.com", "A")
-    data = q.pack()
+    # data = q.pack()
 
     class Sock:
         def __init__(self):

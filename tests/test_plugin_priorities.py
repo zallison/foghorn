@@ -8,9 +8,9 @@ Outputs:
   - None: Asserts ordering, clamping, and YAML override behavior
 """
 
-import pytest
 import logging
-from foghorn.plugins.base import BasePlugin, PluginDecision, PluginContext
+
+from foghorn.plugins.base import BasePlugin, PluginContext
 
 
 def test_default_priorities_are_50():

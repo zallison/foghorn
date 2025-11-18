@@ -8,9 +8,7 @@ Outputs:
   - None
 """
 
-from unittest.mock import patch
-
-from dnslib import DNSRecord, QTYPE, RCODE
+from dnslib import RCODE, DNSRecord
 
 import foghorn.server as srv
 
