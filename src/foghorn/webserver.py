@@ -781,20 +781,19 @@ def create_app(
 
         # Prepare backup and atomic write paths
         cfg_path_abs = os.path.abspath(cfg_path)
-        cfg_dir = os.path.dirname(cfg_path_abs)
         ts = datetime.now(timezone.utc).isoformat().replace(":", "-")
         backup_path = f"{cfg_path_abs}.bak.{ts}"
-        tmp_path = os.path.join(cfg_dir, f".tmp-{os.path.basename(cfg_path_abs)}-{ts}")
+        tmp_path = f"{cfg_path_abs}.new"
 
         try:
             # Best-effort backup of existing file
             if os.path.exists(cfg_path_abs):
                 shutil.copy(cfg_path_abs, backup_path)
 
-            with open(cfg_path_abs + ".new", "w", encoding="utf-8") as tmp:
+            with open(tmp_path, "w", encoding="utf-8") as tmp:
                 tmp.write(body["raw_yaml"])
 
-            shutil.copy(cfg_path_abs + ".new", cfg_path_abs)
+            shutil.copy(tmp_path, cfg_path_abs)
 
         except Exception as exc:  # pragma: no cover - file system specific
             # Clean up tmp file if something went wrong
@@ -1341,7 +1340,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 with open(cfg_path_abs, "rb") as src, open(backup_path, "wb") as dst:
                     dst.write(src.read())
 
-            yaml_text = yaml.safe_dump(
+            yaml.safe_dump(
                 body,
                 default_flow_style=False,
                 sort_keys=False,
@@ -1349,7 +1348,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 allow_unicode=True,
             )
             with open(tmp_path, "w", encoding="utf-8") as tmp:
-                tmp.write(yaml_text)
+                tmp.write(body["raw_yaml"])
             os.replace(tmp_path, cfg_path_abs)
         except Exception as exc:  # pragma: no cover
             try:
@@ -1563,7 +1562,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             msg = format % args
         except Exception:
             msg = format
-        logger.info("webserver HTTP: %s", msg)
+        logger.debug("webserver HTTP: %s", msg)
 
 
 def _start_admin_server_threaded(
