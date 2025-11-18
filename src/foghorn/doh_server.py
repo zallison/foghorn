@@ -1,8 +1,7 @@
 import asyncio
 import base64
-import ssl
 import functools
-from typing import Callable, Optional
+from typing import Callable
 
 _HTTP_OK = b"HTTP/1.1 200 OK\r\n"
 _HTTP_BAD = b"HTTP/1.1 400 Bad Request\r\n"

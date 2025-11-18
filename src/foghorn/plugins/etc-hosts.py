@@ -1,10 +1,8 @@
 from __future__ import annotations
-import time
-from dnslib import DNSRecord, QTYPE, A, AAAA, QR, RR, DNSHeader
+from dnslib import DNSRecord, QTYPE, A, AAAA, RR, DNSHeader
 import os
 import logging
 import pathlib
-import threading
 from typing import Dict, Optional, Iterable, List
 
 from foghorn.plugins.base import PluginDecision, PluginContext

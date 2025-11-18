@@ -6,7 +6,7 @@ from dnslib import DNSRecord, QTYPE, RCODE, RR, EDNS0
 
 from .cache import TTLCache
 from .plugins.base import BasePlugin, PluginDecision, PluginContext
-from .transports.dot import dot_query, DoTError, get_dot_pool
+from .transports.dot import DoTError, get_dot_pool
 from .transports.tcp import tcp_query, TCPError, get_tcp_pool
 
 logger = logging.getLogger("foghorn.server")
@@ -201,7 +201,6 @@ def send_query_with_failover(
                 ca_file = tls_cfg.get("ca_file")
                 from .transports.doh import (
                     doh_query,
-                    DoHError,
                 )  # local import to avoid overhead
 
                 body, resp_headers = doh_query(

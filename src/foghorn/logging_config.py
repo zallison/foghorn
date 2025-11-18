@@ -4,7 +4,7 @@ import logging.handlers
 import sys
 import os
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Any
 
 _LEVELS = {
     "debug": logging.DEBUG,

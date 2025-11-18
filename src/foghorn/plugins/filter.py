@@ -9,7 +9,7 @@ import sqlite3
 import os
 import time
 from typing import Optional, List, Set, Union, Dict, Iterator, Tuple
-from dnslib import DNSRecord, QTYPE, RCODE, A as RDATA_A, AAAA as RDATA_AAAA
+from dnslib import DNSRecord, QTYPE, A as RDATA_A, AAAA as RDATA_AAAA
 from foghorn.cache import TTLCache
 
 from .base import BasePlugin, PluginDecision, PluginContext, plugin_aliases
