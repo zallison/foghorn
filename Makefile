@@ -76,7 +76,7 @@ docker-clean:
 .PHONY: docker-run
 docker-run:
 	docker rm -f foghorn 2> /dev/null
-	docker run --name foghorn -d -p 53:5333/udp -p 53:53/tcp -p 8053:8053/tcp -p 801:1801/tcp -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker run --name foghorn -d -p 53:5333/udp -p 53:5333/tcp -p 8053:8053/tcp -p 801:1801/tcp -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-logs
 docker-logs:

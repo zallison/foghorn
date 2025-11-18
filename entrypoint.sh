@@ -1,3 +1,5 @@
 #!/usr/bin/env sh
 
-foghorn
+echo "Starting Foghorn:"
+foghorn --config /foghorn/config.yaml
+echo "Foghorn ended"

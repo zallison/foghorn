@@ -776,7 +776,25 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             if pre_decision is not None:
                 if pre_decision.action == "deny":
                     if self.stats_collector:
+                        # Pre-plugin deny: synthesize NXDOMAIN and log to stats and query_log.
+                        qname_for_log = qname_for_stats or qname
+                        qtype_for_log = qtype_for_stats or qtype
+                        qtype_name = QTYPE.get(qtype_for_log, str(qtype_for_log))
                         self.stats_collector.record_response_rcode("NXDOMAIN")
+                        try:
+                            self.stats_collector.record_query_result(
+                                client_ip=client_ip,
+                                qname=qname_for_log,
+                                qtype=qtype_name,
+                                rcode="NXDOMAIN",
+                                upstream_id=None,
+                                status="deny_pre",
+                                error=None,
+                                first=None,
+                                result={"source": "pre_plugin", "action": "deny"},
+                            )
+                        except Exception:  # pragma: no cover
+                            pass
                     wire = self._make_nxdomain_response(req)
                     sock.sendto(wire, self.client_address)
                     return
@@ -785,6 +803,48 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     and pre_decision.response is not None
                 ):
                     resp = _set_response_id(pre_decision.response, req.header.id)
+                    if self.stats_collector:
+                        # Pre-plugin override: log final rcode and response into query_log.
+                        try:
+                            parsed = DNSRecord.parse(resp)
+                            rcode_name = RCODE.get(
+                                parsed.header.rcode,
+                                str(parsed.header.rcode),
+                            )
+                            self.stats_collector.record_response_rcode(rcode_name)
+
+                            answers = [
+                                {
+                                    "name": str(rr.rname),
+                                    "type": QTYPE.get(rr.rtype, str(rr.rtype)),
+                                    "ttl": int(getattr(rr, "ttl", 0)),
+                                    "rdata": str(rr.rdata),
+                                }
+                                for rr in (parsed.rr or [])
+                            ]
+                            first = answers[0]["rdata"] if answers else None
+                            result = {
+                                "source": "pre_plugin_override",
+                                "answers": answers,
+                            }
+
+                            qname_for_log = qname_for_stats or qname
+                            qtype_for_log = qtype_for_stats or qtype
+                            qtype_name = QTYPE.get(qtype_for_log, str(qtype_for_log))
+
+                            self.stats_collector.record_query_result(
+                                client_ip=client_ip,
+                                qname=qname_for_log,
+                                qtype=qtype_name,
+                                rcode=rcode_name,
+                                upstream_id=None,
+                                status="override_pre",
+                                error=None,
+                                first=str(first) if first is not None else None,
+                                result=result,
+                            )
+                        except Exception:  # pragma: no cover
+                            pass
                     sock.sendto(resp, self.client_address)
                     return
 
@@ -794,13 +854,43 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             if cached is not None:
                 if self.stats_collector:
                     self.stats_collector.record_cache_hit(qname)
-                    # Parse to get rcode for stats
+                    # Parse to get rcode for stats and to enrich persistent log.
                     try:
                         parsed_cached = DNSRecord.parse(cached)
                         rcode_name = RCODE.get(
                             parsed_cached.header.rcode, str(parsed_cached.header.rcode)
                         )
                         self.stats_collector.record_response_rcode(rcode_name)
+
+                        # Build a minimal structured result for the query_log.
+                        answers = [
+                            {
+                                "name": str(rr.rname),
+                                "type": QTYPE.get(rr.rtype, str(rr.rtype)),
+                                "ttl": int(getattr(rr, "ttl", 0)),
+                                "rdata": str(rr.rdata),
+                            }
+                            for rr in (parsed_cached.rr or [])
+                        ]
+                        first = answers[0]["rdata"] if answers else None
+                        result = {"source": "cache", "answers": answers}
+
+                        # Use the normalized qname/qtype we recorded earlier when possible.
+                        qname_for_log = qname_for_stats or qname
+                        qtype_for_log = qtype_for_stats or qtype
+                        qtype_name = QTYPE.get(qtype_for_log, str(qtype_for_log))
+
+                        self.stats_collector.record_query_result(
+                            client_ip=client_ip,
+                            qname=qname_for_log,
+                            qtype=qtype_name,
+                            rcode=rcode_name,
+                            upstream_id=None,
+                            status="cache_hit",
+                            error=None,
+                            first=str(first) if first is not None else None,
+                            result=result,
+                        )
                     except Exception:  # pragma: no cover
                         pass  # pragma: no cover
                 resp = _set_response_id(cached, req.header.id)
@@ -815,7 +905,25 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             upstreams = self._choose_upstreams(qname, qtype, ctx)
             if not upstreams:
                 if self.stats_collector:
+                    # No upstreams configured: immediate SERVFAIL with query_log entry.
                     self.stats_collector.record_response_rcode("SERVFAIL")
+                    try:
+                        qname_for_log = qname_for_stats or qname
+                        qtype_for_log = qtype_for_stats or qtype
+                        qtype_name = QTYPE.get(qtype_for_log, str(qtype_for_log))
+                        self.stats_collector.record_query_result(
+                            client_ip=client_ip,
+                            qname=qname_for_log,
+                            qtype=qtype_name,
+                            rcode="SERVFAIL",
+                            upstream_id=None,
+                            status="no_upstreams",
+                            error="no upstreams configured",
+                            first=None,
+                            result={"source": "server", "error": "no_upstreams"},
+                        )
+                    except Exception:  # pragma: no cover
+                        pass
                 wire = self._make_servfail_response(req)
                 sock.sendto(wire, self.client_address)
                 return
@@ -833,6 +941,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             )
 
             # Record upstream result
+            upstream_id: Optional[str] = None
             if self.stats_collector and used_upstream:
                 upstream_id = f"{used_upstream['host']}:{used_upstream['port']}"
                 outcome = "success" if reason == "ok" else reason
@@ -841,6 +950,28 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             if reply is None:
                 if self.stats_collector:
                     self.stats_collector.record_response_rcode("SERVFAIL")
+                    try:
+                        qname_for_log = qname_for_stats or qname
+                        qtype_for_log = qtype_for_stats or qtype
+                        qtype_name = QTYPE.get(qtype_for_log, str(qtype_for_log))
+                        status = str(reason or "all_failed")
+                        self.stats_collector.record_query_result(
+                            client_ip=client_ip,
+                            qname=qname_for_log,
+                            qtype=qtype_name,
+                            rcode="SERVFAIL",
+                            upstream_id=upstream_id,
+                            status=status,
+                            error="all_upstreams_failed",
+                            first=None,
+                            result={
+                                "source": "upstream",
+                                "status": status,
+                                "error": "all_upstreams_failed",
+                            },
+                        )
+                    except Exception:  # pragma: no cover
+                        pass
 
                 logger.warning(
                     "All upstreams failed for %s %s, returning SERVFAIL", qname, qtype
@@ -915,7 +1046,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     reply, req, qname, qtype, sock, self.client_address, cache_key
                 )
 
-            # Record response rcode
+            # Record response rcode and append to persistent query_log when enabled.
             if self.stats_collector:
                 try:
                     parsed_reply = DNSRecord.parse(reply)
@@ -923,6 +1054,34 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         parsed_reply.header.rcode, str(parsed_reply.header.rcode)
                     )
                     self.stats_collector.record_response_rcode(rcode_name)
+
+                    answers = [
+                        {
+                            "name": str(rr.rname),
+                            "type": QTYPE.get(rr.rtype, str(rr.rtype)),
+                            "ttl": int(getattr(rr, "ttl", 0)),
+                            "rdata": str(rr.rdata),
+                        }
+                        for rr in (parsed_reply.rr or [])
+                    ]
+                    first = answers[0]["rdata"] if answers else None
+                    result = {"source": "upstream", "answers": answers}
+
+                    qname_for_log = qname_for_stats or qname
+                    qtype_for_log = qtype_for_stats or qtype
+                    qtype_name = QTYPE.get(qtype_for_log, str(qtype_for_log))
+
+                    self.stats_collector.record_query_result(
+                        client_ip=client_ip,
+                        qname=qname_for_log,
+                        qtype=qtype_name,
+                        rcode=rcode_name,
+                        upstream_id=upstream_id,
+                        status="ok" if rcode_name == "NOERROR" else "error",
+                        error=None,
+                        first=str(first) if first is not None else None,
+                        result=result,
+                    )
                 except Exception:  # pragma: no cover
                     pass  # pragma: no cover
 
@@ -941,9 +1100,29 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 cache_key = (qname.lower(), qtype)
                 r = req.reply()
                 r.header.rcode = RCODE.SERVFAIL
+                wire = r.pack()
                 self._cache_and_send_response(
-                    r.pack(), req, qname, qtype, sock, self.client_address, cache_key
+                    wire, req, qname, qtype, sock, self.client_address, cache_key
                 )
+                if self.stats_collector:
+                    try:
+                        qtype_name = QTYPE.get(qtype, str(qtype))
+                        self.stats_collector.record_query_result(
+                            client_ip=client_ip,
+                            qname=qname,
+                            qtype=qtype_name,
+                            rcode="SERVFAIL",
+                            upstream_id=None,
+                            status="error",
+                            error=str(e),
+                            first=None,
+                            result={
+                                "source": "server",
+                                "error": "unhandled_exception",
+                            },
+                        )
+                    except Exception:  # pragma: no cover
+                        pass
             except Exception as inner_e:  # pragma: no cover
                 logger.error("Failed to send SERVFAIL response: %s", str(inner_e))
         finally:
@@ -1004,7 +1183,19 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                     wire = _set_response_id(r.pack(), req.header.id)
                     if stats is not None:
                         try:
+                            qtype_name = QTYPE.get(qtype, str(qtype))
                             stats.record_response_rcode("NXDOMAIN")
+                            stats.record_query_result(
+                                client_ip=client_ip,
+                                qname=qname,
+                                qtype=qtype_name,
+                                rcode="NXDOMAIN",
+                                upstream_id=None,
+                                status="deny_pre",
+                                error=None,
+                                first=None,
+                                result={"source": "pre_plugin", "action": "deny"},
+                            )
                         except Exception:  # pragma: no cover
                             pass
                     return wire
@@ -1017,6 +1208,33 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                                 parsed.header.rcode, str(parsed.header.rcode)
                             )
                             stats.record_response_rcode(rcode_name)
+
+                            answers = [
+                                {
+                                    "name": str(rr.rname),
+                                    "type": QTYPE.get(rr.rtype, str(rr.rtype)),
+                                    "ttl": int(getattr(rr, "ttl", 0)),
+                                    "rdata": str(rr.rdata),
+                                }
+                                for rr in (parsed.rr or [])
+                            ]
+                            first = answers[0]["rdata"] if answers else None
+                            result = {
+                                "source": "pre_plugin_override",
+                                "answers": answers,
+                            }
+                            qtype_name = QTYPE.get(qtype, str(qtype))
+                            stats.record_query_result(
+                                client_ip=client_ip,
+                                qname=qname,
+                                qtype=qtype_name,
+                                rcode=rcode_name,
+                                upstream_id=None,
+                                status="override_pre",
+                                error=None,
+                                first=str(first) if first is not None else None,
+                                result=result,
+                            )
                         except Exception:  # pragma: no cover
                             pass
                     return wire
@@ -1033,6 +1251,30 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                         str(parsed_cached.header.rcode),
                     )
                     stats.record_response_rcode(rcode_name)
+
+                    answers = [
+                        {
+                            "name": str(rr.rname),
+                            "type": QTYPE.get(rr.rtype, str(rr.rtype)),
+                            "ttl": int(getattr(rr, "ttl", 0)),
+                            "rdata": str(rr.rdata),
+                        }
+                        for rr in (parsed_cached.rr or [])
+                    ]
+                    first = answers[0]["rdata"] if answers else None
+                    result = {"source": "cache", "answers": answers}
+                    qtype_name = QTYPE.get(qtype, str(qtype))
+                    stats.record_query_result(
+                        client_ip=client_ip,
+                        qname=qname,
+                        qtype=qtype_name,
+                        rcode=rcode_name,
+                        upstream_id=None,
+                        status="cache_hit",
+                        error=None,
+                        first=str(first) if first is not None else None,
+                        result=result,
+                    )
                 except Exception:  # pragma: no cover
                     pass
             return _set_response_id(cached, req.header.id)
@@ -1053,6 +1295,18 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
             if stats is not None:
                 try:
                     stats.record_response_rcode("SERVFAIL")
+                    qtype_name = QTYPE.get(qtype, str(qtype))
+                    stats.record_query_result(
+                        client_ip=client_ip,
+                        qname=qname,
+                        qtype=qtype_name,
+                        rcode="SERVFAIL",
+                        upstream_id=None,
+                        status="no_upstreams",
+                        error="no upstreams configured",
+                        first=None,
+                        result={"source": "server", "error": "no_upstreams"},
+                    )
                 except Exception:  # pragma: no cover
                     pass
             return wire
@@ -1093,6 +1347,7 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
             pass  # pragma: no cover
 
         # Forward with failover
+        upstream_id: Optional[str] = None
         reply, used_upstream, reason = send_query_with_failover(
             req, upstreams, DNSUDPHandler.timeout_ms, qname, qtype
         )
@@ -1115,6 +1370,23 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
             if stats is not None:
                 try:
                     stats.record_response_rcode("SERVFAIL")
+                    qtype_name = QTYPE.get(qtype, str(qtype))
+                    status = str(reason or "all_failed")
+                    stats.record_query_result(
+                        client_ip=client_ip,
+                        qname=qname,
+                        qtype=qtype_name,
+                        rcode="SERVFAIL",
+                        upstream_id=upstream_id,
+                        status=status,
+                        error="all_upstreams_failed",
+                        first=None,
+                        result={
+                            "source": "upstream",
+                            "status": status,
+                            "error": "all_upstreams_failed",
+                        },
+                    )
                 except Exception:  # pragma: no cover
                     pass
             return wire
@@ -1149,17 +1421,42 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
 
         wire = _set_response_id(out, req.header.id)
 
-        # Record response rcode
+        # Record response rcode and append to persistent query_log when enabled.
         if stats is not None:
             try:
                 parsed = DNSRecord.parse(wire)
                 rcode_name = RCODE.get(parsed.header.rcode, str(parsed.header.rcode))
                 stats.record_response_rcode(rcode_name)
+
+                answers = [
+                    {
+                        "name": str(rr.rname),
+                        "type": QTYPE.get(rr.rtype, str(rr.rtype)),
+                        "ttl": int(getattr(rr, "ttl", 0)),
+                        "rdata": str(rr.rdata),
+                    }
+                    for rr in (parsed.rr or [])
+                ]
+                first = answers[0]["rdata"] if answers else None
+                result = {"source": "upstream", "answers": answers}
+                qtype_name = QTYPE.get(qtype, str(qtype))
+                status = "ok" if rcode_name == "NOERROR" else "error"
+                stats.record_query_result(
+                    client_ip=client_ip,
+                    qname=qname,
+                    qtype=qtype_name,
+                    rcode=rcode_name,
+                    upstream_id=upstream_id,
+                    status=status,
+                    error=None,
+                    first=str(first) if first is not None else None,
+                    result=result,
+                )
             except Exception:  # pragma: no cover
                 pass
 
         return wire
-    except Exception:
+    except Exception as e:
         try:
             req = DNSRecord.parse(data)
             r = req.reply()
@@ -1168,6 +1465,22 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
             if stats is not None:
                 try:
                     stats.record_response_rcode("SERVFAIL")
+                    # Attempt to recover qname/qtype for logging
+                    q = req.questions[0]
+                    qname = str(q.qname).rstrip(".")
+                    qtype = q.qtype
+                    qtype_name = QTYPE.get(qtype, str(qtype))
+                    stats.record_query_result(
+                        client_ip=client_ip,
+                        qname=qname,
+                        qtype=qtype_name,
+                        rcode="SERVFAIL",
+                        upstream_id=None,
+                        status="error",
+                        error=str(e),
+                        first=None,
+                        result={"source": "server", "error": "unhandled_exception"},
+                    )
                 except Exception:  # pragma: no cover
                     pass
             return wire
