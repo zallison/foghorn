@@ -1,7 +1,7 @@
 from __future__ import annotations
 import logging
 import ipaddress
-from typing import List, Optional
+from typing import Optional
 from .base import BasePlugin, PluginDecision, PluginContext, plugin_aliases
 
 logger = logging.getLogger(__name__)

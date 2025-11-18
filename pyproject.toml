@@ -29,11 +29,12 @@ dependencies = [
 
 [optional-dependencies]
 dev = [
-  "coverage",
-  "black",
-  "ipython",
-  "fastapi>=0.111.0",
-  "uvicorn>=0.30.0",
+   "coverage",
+   "black",
+   "ipython",
+   "fastapi>=0.111.0",
+   "uvicorn>=0.30.0",
+   "ruff",
 ]
 
 [project.scripts]

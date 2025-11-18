@@ -10,7 +10,6 @@ backed by the in-process StatsCollector and current configuration dict.
 from __future__ import annotations
 
 import copy
-import html
 import http.server
 import importlib
 import json
@@ -29,7 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 from .stats import StatsCollector, StatsSnapshot

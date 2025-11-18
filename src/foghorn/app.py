@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .stats import StatsCollector
 from .webserver import RingBuffer, create_app
 
 
