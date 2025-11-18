@@ -33,19 +33,19 @@
                 <div class="fh-theme-toggle" role="radiogroup" aria-label="Color theme">
                     <button
                         id="btn-theme-dark"
-                        class="fh-theme-btn fh-theme-btn-active"
-                        type="button"
-                        role="radio"
-                        aria-checked="true"
+                            class="fh-theme-btn fh-theme-btn-active"
+                            type="button"
+                            role="radio"
+                            aria-checked="true"
                     >
                         Dark
                     </button>
                     <button
                         id="btn-theme-light"
-                        class="fh-theme-btn"
-                        type="button"
-                        role="radio"
-                        aria-checked="false"
+                            class="fh-theme-btn"
+                            type="button"
+                            role="radio"
+                            aria-checked="false"
                     >
                         Light
                     </button>
@@ -75,7 +75,8 @@
                     a live reload (SIGUSR1).
                 </div>
 
-                <div class="fh-config-toggle" role="tablist" aria-label="Configuration source">
+                <div style="display: none" class="fh-config-toggle" role="tablist" aria-label="Configuration source">
+                    <!-- Just show the YAML for now. -->
                     <button
                         id="btn-config-disk"
                         class="fh-toggle-btn fh-toggle-btn-active"
@@ -97,7 +98,7 @@
                 </div>
 
                 <div class="fh-config-actions" id="config-actions-view">
-                    <button id="btn-edit" class="fh-btn" type="button">Edit on-disk config</button>
+                    <button id="btn-edit" class="fh-btn" type="button">Edit Config</button>
                 </div>
 
                 <div class="fh-config-actions fh-config-actions-edit" id="config-actions-edit" hidden>
@@ -158,7 +159,7 @@
                  cache_misses: 'Queries that required contacting upstream servers.',
                  min_ms: 'Fastest observed query latency in milliseconds.',
                  max_ms: 'Slowest observed query latency in milliseconds.',
-                 avg_ms: 'Average query latency in milliseconds.',
+                 avg_ms: 'Average (mean) query latency in milliseconds.',
                  p50_ms: 'Median (50th percentile) query latency in milliseconds.',
                  p90_ms: '90th percentile query latency in milliseconds.',
                  p99_ms: '99th percentile query latency in milliseconds.',
@@ -293,6 +294,42 @@
                  statsGroupsEl.appendChild(group);
              }
 
+             function appendTopListGroup(title, entries) {
+                 if (!entries || !Array.isArray(entries) || !entries.length) {
+                     return;
+                 }
+                 var group = document.createElement('section');
+                 group.className = 'fh-stats-group';
+
+                 var heading = document.createElement('h3');
+                 heading.className = 'fh-stats-group-title';
+                 heading.textContent = title;
+                 group.appendChild(heading);
+
+                 var dl = document.createElement('dl');
+                 dl.className = 'fh-kv-list';
+
+                 entries.forEach(function (pair) {
+                     if (!pair || pair.length < 2) {
+                         return;
+                     }
+                     var key = pair[0];
+                     var count = pair[1];
+
+                     var dt = document.createElement('dt');
+                     dt.textContent = key;
+
+                     var dd = document.createElement('dd');
+                     dd.textContent = formatNumber(count);
+
+                     dl.appendChild(dt);
+                     dl.appendChild(dd);
+                 });
+
+                 group.appendChild(dl);
+                 statsGroupsEl.appendChild(group);
+             }
+
              function appendSystemGroup(system) {
                  if (!system || typeof system !== 'object') {
                      return;
@@ -308,6 +345,32 @@
                  var dl = document.createElement('dl');
                  dl.className = 'fh-kv-list';
 
+                 var memTotal = system.memory_total_bytes;
+                 var memTotalUsed = system.memory_used_bytes;
+                 var memTotalAvail = system.memory_available_bytes;
+                 var memTotalFree = system.memory_free_bytes;
+
+                 function addMemRow(label, value) {
+                     if (value == null) {
+                         return;
+                     }
+                     var dt = document.createElement('dt');
+                     dt.textContent = label;
+                     var dd = document.createElement('dd');
+                     if (value === '') {
+                         dd.textContent = '';
+                     } else {
+                         dd.textContent = formatBytes(value);
+                     }
+                     dl.appendChild(dt);
+                     dl.appendChild(dd);
+                 }
+
+                 addMemRow('Total Memory', memTotal);
+                 addMemRow('Total Memory used', memTotalUsed);
+                 addMemRow('Total Memory available', memTotalAvail);
+                 addMemRow('TotalMemory free', memTotalFree);
+
                  var loadKeys = ['load_1m', 'load_5m', 'load_15m'];
                  loadKeys.forEach(function (key) {
                      if (system[key] == null) {
@@ -321,36 +384,6 @@
                      dl.appendChild(dd);
                  });
 
-                 var memTotal = system.memory_total_bytes;
-                 var memTotalUsed = system.memory_used_bytes;
-                 var memTotalAvail = system.memory_available_bytes;
-                 var memTotalFree = system.memory_free_bytes;
-                 var processUsed = system.process_rss_bytes;
-
-                 function addMemRow(label, value) {
-                     if (value == null) {
-                         return;
-                     }
-                     var dt = document.createElement('dt');
-                     dt.textContent = label;
-                     var dd = document.createElement('dd');
-                     if (value == '') {
-                         dd.textContent = "";
-                     } else {
-                         dd.textContent = formatBytes(value);
-                     }
-                     dl.appendChild(dt);
-                     dl.appendChild(dd);
-                 }
-
-                 addMemRow('Foghorn Memory use', processUsed);
-                 addMemRow('', '');
-                 addMemRow('', '');
-                 addMemRow('', '');
-                 addMemRow('Total Memory', memTotal);
-                 addMemRow('Total Memory used', memTotalUsed);
-                 addMemRow('Total Memory available', memTotalAvail);
-                 addMemRow('TotalMemory free', memTotalFree);
 
                  group.appendChild(dl);
 
@@ -367,6 +400,46 @@
 
                  statsGroupsEl.appendChild(group);
              }
+
+             function appendProcessGroup(system) {
+                 if (!system || typeof system !== 'object') {
+                     return;
+                 }
+                 var group = document.createElement('section');
+                 group.className = 'fh-stats-group';
+
+                 var heading = document.createElement('h3');
+                 heading.className = 'fh-stats-group-title';
+                 heading.textContent = 'Process';
+                 group.appendChild(heading);
+
+                 var dl = document.createElement('dl');
+                 dl.className = 'fh-kv-list';
+
+                 var processUsed = system.process_rss_bytes;
+                 var processCpuPercent = system.process_cpu_percent;
+                 var processOpenFiles = system.process_open_files_count;
+                 var processConnections = system.process_connections_count;
+
+                 function addProcessRow(label, value) {
+                     var dt = document.createElement('dt');
+                     dt.textContent = label;
+                     var dd = document.createElement('dd');
+                     dd.textContent = value;
+                     dl.appendChild(dt);
+                     dl.appendChild(dd);
+                 }
+
+                 addProcessRow('Foghorn Memory use', formatBytes(processUsed));
+                 addProcessRow('Process CPU %', processCpuPercent + " %");
+                 addProcessRow('Process open files', processOpenFiles);
+                 addProcessRow('Process connections', processConnections);
+
+                 group.appendChild(dl);
+
+                 statsGroupsEl.appendChild(group);
+             }
+
 
              function renderStats(data) {
                  clearStatsGroups();
@@ -396,18 +469,16 @@
                      data.created_at !== undefined && data.created_at !== null
                      ? formatTimestamp(data.created_at)
                      : null;
-                 var serverFormatted =
-                     data.server_time !== undefined && data.server_time !== null
-                     ? formatTimestamp(data.server_time)
-                     : null;
 
                  var meta = {};
-                 if (createdFormatted !== null) {
-                     meta.created_at = createdFormatted;
+                 if (data.meta && typeof data.meta === 'object') {
+                     meta = data.meta;
+                     delete meta.server_time;
+                     if (createdFormatted !== null) {
+                         meta.created_at = createdFormatted;
+                     }
                  }
-                 if (serverFormatted !== null) {
-                     meta.server_time = serverFormatted;
-                 }
+
                  if (Object.keys(meta).length) {
                      appendDictGroup('Meta', meta);
                  }
@@ -417,9 +488,11 @@
                  appendDictGroup('Query types', data.qtypes || {});
                  appendDictGroup('Recent latency', data.latency_recent || {});
                  appendDictGroup('Latency', data.latency || {});
-                 appendDictGroup('Top Client', data.top_clients || {});
-                 appendDictGroup('Top Domains', data.top_domains || {});
-                 appendDictGroup('Top Sub Domains', data.top_subdomains || {});
+                 appendTopListGroup('Top Client', data.top_clients || []);
+                 appendTopListGroup('Top Domains', data.top_domains || []);
+                 appendTopListGroup('Top Sub Domains', data.top_subdomains || []);
+
+                 appendProcessGroup(data.system)
 
                  if (data.system) {
                      appendSystemGroup(data.system);
@@ -505,7 +578,7 @@
                  configEditContainer.hidden = false;
                  var text = lastDiskRawYaml != null ? lastDiskRawYaml : configOutputEl.textContent;
                  configEditorEl.value = text;
-                 setMessage('Editing on-disk config. Save will overwrite config.yaml and trigger reload.', 'info');
+                 setMessage('Editing on-disk config, save will overwrite!');
              }
 
              function exitEditMode(refresh) {
@@ -615,11 +688,11 @@
              });
 
              // Initial load
-              var initialTheme = root.getAttribute('data-theme') || 'dark';
-              applyTheme(initialTheme);
-              loadStats();
-              setInterval(loadStats, 5000);
-              setSource('disk');
+             var initialTheme = root.getAttribute('data-theme') || 'dark';
+             applyTheme(initialTheme);
+             loadStats();
+             setInterval(loadStats, 5000);
+             setSource('disk');
          })();
         </script>
     </body>
