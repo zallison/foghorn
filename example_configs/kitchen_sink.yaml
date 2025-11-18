@@ -53,7 +53,7 @@ plugins:
   - module: list_downloader
     config:
       setup_priority: 15
-      download_path: ./var/lists
+      download_path: ./config/var/lists
       interval_days: 1
       urls:
         - https://v.firebog.net/hosts/AdguardDNS.txt
@@ -67,7 +67,7 @@ plugins:
     config:
       setup_priority: 20
       default: deny
-      db_path: ./var/blocklist.db
+      db_path: ./config/var/blocklist.db
       cache_ttl_seconds: 600
       blocked_domains: ["tracker.example"]
       allowed_domains: ["intranet.example"]
@@ -76,12 +76,12 @@ plugins:
       blocked_ips:
         - { ip: "198.51.100.0/24", action: remove }
         - { ip: "203.0.113.5", action: replace, replace_with: "127.0.0.1" }
-      # Enable external lists (downloaded above to ./var/lists/)
+      # Enable external lists (downloaded above to ./config/var/lists/)
       blocklist_files:
-        - ./var/lists/AdguardDNS-*.txt
-        - ./var/lists/Easylist-*.txt
-        - ./var/lists/Prigent-Ads-*.txt
-        - ./var/lists/Prigent-Malware-*.txt
+        - ./config/var/lists/AdguardDNS-*.txt
+        - ./config/var/lists/Easylist-*.txt
+        - ./config/var/lists/Prigent-Ads-*.txt
+        - ./config/var/lists/Prigent-Malware-*.txt
       allowlist_files:
         - example_configs/lists/allowlist.txt
 
@@ -103,14 +103,14 @@ plugins:
     pre_priority: 40
     config:
       duration_seconds: 3600
-      db_path: ./var/greylist.db
+      db_path: ./config/var/greylist.db
 
   # 6) Block newly registered domains below threshold
   - module: new_domain
     pre_priority: 50
     config:
       threshold_days: 14
-      whois_db_path: ./var/whois_cache.db
+      whois_db_path: ./config/var/whois_cache.db
       # whois_cache_ttl_seconds: 3600
       # whois_refresh_seconds: 86400
 
