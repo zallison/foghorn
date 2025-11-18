@@ -98,6 +98,32 @@ async def _read_exact(reader: asyncio.StreamReader, n: int) -> bytes:
     return data
 
 
+def _recv_exact(sock, length):
+    """
+    Receive exactly 'length' bytes from the given socket.
+    This function blocks until the requested number of bytes is received
+    or the connection is closed.
+
+    Args:
+        sock: A connected socket object.
+        length (int): The number of bytes to receive.
+
+    Returns:
+        bytes: The received data, or None if the connection was closed.
+
+    Raises:
+        RuntimeError: If the connection is broken before receiving all data.
+    """
+    data = bytearray()
+    while len(data) < length:
+        chunk = sock.recv(length - len(data))
+        if not chunk:
+            # Connection closed by peer
+            return None
+        data.extend(chunk)
+    return bytes(data)
+
+
 async def _handle_conn(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,

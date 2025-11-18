@@ -16,8 +16,7 @@ from .logging_config import init_logging
 from .plugins.base import BasePlugin
 from .plugins.registry import discover_plugins, get_plugin_class
 from .server import DNSServer
-from .stats import (StatsCollector, StatsReporter, StatsSQLiteStore,
-                    format_snapshot_json)
+from .stats import StatsCollector, StatsReporter, StatsSQLiteStore, format_snapshot_json
 from .webserver import RingBuffer, start_webserver
 
 
