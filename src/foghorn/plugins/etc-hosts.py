@@ -7,8 +7,12 @@ from typing import Dict, Iterable, List, Optional
 
 from dnslib import AAAA, QTYPE, RR, A, DNSHeader, DNSRecord
 
-from foghorn.plugins.base import (BasePlugin, PluginContext, PluginDecision,
-                                  plugin_aliases)
+from foghorn.plugins.base import (
+    BasePlugin,
+    PluginContext,
+    PluginDecision,
+    plugin_aliases,
+)
 
 logger = logging.getLogger(__name__)
 

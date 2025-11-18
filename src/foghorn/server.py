@@ -200,8 +200,7 @@ def send_query_with_failover(
                 )
                 verify = bool(tls_cfg.get("verify", True))
                 ca_file = tls_cfg.get("ca_file")
-                from .transports.doh import \
-                    doh_query  # local import to avoid overhead
+                from .transports.doh import doh_query  # local import to avoid overhead
 
                 body, resp_headers = doh_query(
                     doh_url,
@@ -1001,8 +1000,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         == "local"
                     ):
                         try:
-                            from .dnssec_validate import \
-                                validate_response_local
+                            from .dnssec_validate import validate_response_local
 
                             valid = bool(
                                 validate_response_local(

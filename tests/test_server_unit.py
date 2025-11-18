@@ -11,8 +11,12 @@ Outputs:
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 from foghorn.cache import TTLCache
-from foghorn.server import (DNSUDPHandler, _set_response_id,
-                            compute_effective_ttl, send_query_with_failover)
+from foghorn.server import (
+    DNSUDPHandler,
+    _set_response_id,
+    compute_effective_ttl,
+    send_query_with_failover,
+)
 
 
 def test_set_response_id_rewrites_first_two_bytes():

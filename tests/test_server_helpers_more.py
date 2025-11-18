@@ -12,8 +12,7 @@ from dnslib import QTYPE, RCODE, DNSRecord
 
 import foghorn.server as server_mod
 from foghorn.plugins.base import BasePlugin, PluginDecision
-from foghorn.server import (DNSUDPHandler, _set_response_id,
-                            compute_effective_ttl)
+from foghorn.server import DNSUDPHandler, _set_response_id, compute_effective_ttl
 
 
 def test_compute_effective_ttl_exception_returns_floor():
