@@ -7,11 +7,8 @@ Outputs:
     - None; assertions verify load_from_snapshot and basic SQLite schema.
 """
 
-from pathlib import Path
-from typing import Dict
-
 import sqlite3
-import pytest
+from pathlib import Path
 
 from foghorn.stats import StatsCollector, StatsSnapshot, StatsSQLiteStore
 

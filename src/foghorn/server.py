@@ -1,13 +1,14 @@
-import logging
 import functools
+import logging
 import socketserver
-from typing import List, Tuple, Dict, Optional
-from dnslib import DNSRecord, QTYPE, RCODE, RR, EDNS0
+from typing import Dict, List, Optional, Tuple
+
+from dnslib import EDNS0, QTYPE, RCODE, RR, DNSRecord
 
 from .cache import TTLCache
-from .plugins.base import BasePlugin, PluginDecision, PluginContext
-from .transports.dot import dot_query, DoTError, get_dot_pool
-from .transports.tcp import tcp_query, TCPError, get_tcp_pool
+from .plugins.base import BasePlugin, PluginContext, PluginDecision
+from .transports.dot import DoTError, get_dot_pool
+from .transports.tcp import TCPError, get_tcp_pool, tcp_query
 
 logger = logging.getLogger("foghorn.server")
 
@@ -199,10 +200,7 @@ def send_query_with_failover(
                 )
                 verify = bool(tls_cfg.get("verify", True))
                 ca_file = tls_cfg.get("ca_file")
-                from .transports.doh import (
-                    doh_query,
-                    DoHError,
-                )  # local import to avoid overhead
+                from .transports.doh import doh_query  # local import to avoid overhead
 
                 body, resp_headers = doh_query(
                     doh_url,
@@ -751,6 +749,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         7. Sends the final response to the client.
         """
         import time as time_module
+
         from dnslib import QTYPE
 
         t0 = time_module.perf_counter() if self.stats_collector else None

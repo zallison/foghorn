@@ -1,8 +1,7 @@
 import asyncio
 import base64
-import ssl
 import functools
-from typing import Callable, Optional
+from typing import Callable
 
 _HTTP_OK = b"HTTP/1.1 200 OK\r\n"
 _HTTP_BAD = b"HTTP/1.1 400 Bad Request\r\n"
@@ -123,7 +122,7 @@ async def _handle_conn(
                 return
             qbytes = body
         elif method.upper() == "GET":
-            from urllib.parse import urlparse, parse_qs
+            from urllib.parse import parse_qs, urlparse
 
             qs = parse_qs(urlparse(target).query)
             if "dns" not in qs:

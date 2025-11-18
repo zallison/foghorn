@@ -8,8 +8,8 @@ Outputs:
   - None
 """
 
-import asyncio
 from unittest.mock import mock_open, patch
+
 import foghorn.main as main_mod
 
 
@@ -62,7 +62,8 @@ def test_main_tcp_listener_uses_legacy_host_and_starts(monkeypatch):
         def join(self, timeout=None):
             return
 
-    import sys, types
+    import sys
+    import types
 
     fake_threading = types.SimpleNamespace(Thread=DummyThread)
 

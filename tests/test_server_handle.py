@@ -8,12 +8,10 @@ Outputs:
   - None
 """
 
-import types
-import pytest
-from dnslib import DNSRecord, QTYPE, RCODE, A, RR
+from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
+from foghorn.plugins.base import BasePlugin, PluginDecision
 from foghorn.server import DNSUDPHandler
-from foghorn.plugins.base import BasePlugin, PluginDecision, PluginContext
 
 
 class FakeSock:

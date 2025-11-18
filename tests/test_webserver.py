@@ -23,14 +23,14 @@ from foghorn.webserver import (
     RingBuffer,
     WebServerHandle,
     _read_proc_meminfo,
+    _Suppress2xxAccessFilter,
     _utc_now_iso,
     create_app,
+    get_system_info,
+    install_uvicorn_2xx_suppression,
     resolve_www_root,
     sanitize_config,
     start_webserver,
-    _Suppress2xxAccessFilter,
-    install_uvicorn_2xx_suppression,
-    get_system_info,
 )
 
 
@@ -501,7 +501,6 @@ def test_root_index_serves_project_html_index(monkeypatch, tmp_path) -> None:
     """
 
     import os
-    import foghorn.webserver as web_mod
 
     # Point www_root to a temporary html directory for this test
     root_dir = tmp_path
@@ -605,6 +604,7 @@ def test_resolve_www_root_prefers_config_then_env_then_cwd(
     """
 
     import os
+
     import foghorn.webserver as web_mod
 
     # 1) Config override takes precedence when directory exists
@@ -715,6 +715,7 @@ def test_save_config_persists_raw_yaml_and_signals(monkeypatch, tmp_path) -> Non
     """
 
     import os
+
     import foghorn.webserver as web_mod
 
     cfg_path = tmp_path / "config.yaml"
@@ -935,8 +936,8 @@ def test_start_webserver_uvicorn_path_uses_dummy_server(monkeypatch) -> None:
     """
 
     import asyncio
-    import types
     import sys
+    import types
 
     # Ensure asyncio loop creation succeeds and is exercised
     orig_new_loop = asyncio.new_event_loop

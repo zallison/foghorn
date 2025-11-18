@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from foghorn.transports.tcp import tcp_query, TCPError
+from foghorn.transports.tcp import TCPError, tcp_query
 
 
 class _ShortReadServer:

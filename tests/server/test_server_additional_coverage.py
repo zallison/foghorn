@@ -8,11 +8,8 @@ Outputs:
   - None
 """
 
-from typing import Any, Dict
-from unittest.mock import Mock
-
 import pytest
-from dnslib import DNSRecord, QTYPE, RCODE, RR, A
+from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 import foghorn.server as srv
 from foghorn.server import DNSUDPHandler, send_query_with_failover
@@ -191,7 +188,8 @@ def test_dnssec_validate_local_true(monkeypatch):
     )
 
     # Inject fake validator module returning True
-    import sys, types
+    import sys
+    import types
 
     fake_mod = types.ModuleType("foghorn.dnssec_validate")
     fake_mod.validate_response_local = lambda *a, **k: True

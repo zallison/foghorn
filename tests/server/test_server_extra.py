@@ -8,11 +8,7 @@ Outputs:
   - None (pytest assertions)
 """
 
-from typing import Tuple
-from unittest.mock import patch
-
-import pytest
-from dnslib import DNSRecord, QTYPE, RCODE, RR, A, DNSHeader
+from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 import foghorn.server as srv
 

@@ -8,8 +8,9 @@ Outputs:
   - None
 """
 
-from foghorn.server import DNSUDPHandler, compute_effective_ttl
-from dnslib import DNSRecord, QTYPE, RCODE, DNSHeader, RR, A
+from dnslib import QTYPE, RCODE, RR, A, DNSRecord
+
+from foghorn.server import DNSUDPHandler
 
 
 def test_cache_store_paths():

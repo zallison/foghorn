@@ -9,7 +9,7 @@ Outputs:
 """
 
 import datetime as dt
-import pytest
+
 from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin
 
 

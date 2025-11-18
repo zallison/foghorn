@@ -8,11 +8,11 @@ Outputs:
   - None
 """
 
-import pytest
 import datetime as dt
-from unittest.mock import Mock, patch
-from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin
+from unittest.mock import patch
+
 from foghorn.plugins.base import PluginContext
+from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin
 
 
 def test_new_domain_filter_init_defaults(tmp_path):

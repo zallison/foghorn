@@ -1,14 +1,14 @@
 from __future__ import annotations
+
 import functools
 import logging
 import sqlite3
 import threading
 import time
-
 from typing import Optional
 
-from foghorn.plugins.base import BasePlugin, PluginDecision, PluginContext
 from foghorn.cache import TTLCache
+from foghorn.plugins.base import BasePlugin, PluginContext, PluginDecision
 
 log = logging.getLogger(__name__)
 

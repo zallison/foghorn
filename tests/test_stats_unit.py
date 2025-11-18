@@ -9,17 +9,16 @@ Outputs:
 """
 
 import time
-from unittest.mock import patch
 
 import pytest
 
 from foghorn.stats import (
-    _normalize_domain,
     LatencyHistogram,
-    TopK,
     StatsCollector,
-    format_snapshot_json,
     StatsReporter,
+    TopK,
+    _normalize_domain,
+    format_snapshot_json,
 )
 
 
@@ -99,7 +98,7 @@ def test_stats_collector_full_flow_and_reset():
     assert snap.latency_stats and snap.latency_stats["count"] == 1
 
     # Reset and verify cleared
-    snap2 = c.snapshot(reset=True)
+    c.snapshot(reset=True)
     snap3 = c.snapshot(reset=False)
     assert snap3.totals == {} and snap3.rcodes == {} and snap3.qtypes == {}
 

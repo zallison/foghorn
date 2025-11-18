@@ -9,7 +9,9 @@ Outputs:
 """
 
 import importlib
-from dnslib import DNSRecord, QTYPE
+
+from dnslib import QTYPE, DNSRecord
+
 from foghorn.plugins.base import PluginContext
 
 

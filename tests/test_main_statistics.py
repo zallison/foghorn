@@ -9,6 +9,7 @@ Outputs:
 """
 
 from unittest.mock import mock_open, patch
+
 import foghorn.main as main_mod
 
 

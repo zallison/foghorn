@@ -29,4 +29,3 @@ test:
     - pip install pytest
     - pip install --editable ".[test]"
     - pytest tests
-

@@ -1,28 +1,26 @@
 from __future__ import annotations
+
 import argparse
+import functools
 import gc
-import importlib
 import logging
 import os
 import signal
-import sys
 import threading
-import functools
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import yaml
 
-from typing import List, Tuple, Dict, Union, Any, Optional
-from unittest.mock import patch, mock_open
-
+from .doh_api import start_doh_server
 from .logging_config import init_logging
 from .plugins.base import BasePlugin
 from .plugins.registry import discover_plugins, get_plugin_class
 from .server import DNSServer
 from .stats import StatsCollector, StatsReporter, StatsSQLiteStore, format_snapshot_json
 from .webserver import RingBuffer, start_webserver
-from .doh_api import start_doh_server
 
 
-def _clear_lru_caches(wrappers: Optional[List[Object]]):
+def _clear_lru_caches(wrappers: Optional[List[object]]):
     # Collect all cached function wrappers
     gc.collect()
     if not wrappers:
@@ -534,7 +532,7 @@ def main(argv: List[str] | None = None) -> int:
                 try:
                     interval_seconds = int(s_cfg.get("interval_seconds", 10))
                     reset_on_log = bool(s_cfg.get("reset_on_log", False))
-                    log_level = str(s_cfg.get("log_level", "info"))
+                    # log_level = str(s_cfg.get("log_level", "info"))
                     if (
                         stats_reporter.interval_seconds != max(1, interval_seconds)
                         or stats_reporter.log_level
@@ -745,8 +743,9 @@ def main(argv: List[str] | None = None) -> int:
     # Optionally start TCP/DoT listeners based on listen config
 
     # Resolver adapter for TCP/DoT servers
-    from .server import resolve_query_bytes
     import asyncio
+
+    from .server import resolve_query_bytes
 
     loop_threads = []
 
