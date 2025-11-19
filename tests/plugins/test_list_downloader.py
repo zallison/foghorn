@@ -320,7 +320,7 @@ def test_needs_update_true_when_no_last_modified(monkeypatch, tmp_path):
 
 
 def test_needs_update_false_for_recent_file(monkeypatch, tmp_path):
-    """Brief: _needs_update returns False when local file is younger than one day.
+    """Brief: _needs_update returns False when local file is younger than default.
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture.
@@ -341,6 +341,39 @@ def test_needs_update_false_for_recent_file(monkeypatch, tmp_path):
 
     def fake_head(url, timeout):  # pragma: no cover - should not be called
         raise AssertionError("requests.head should not be called for fresh files")
+
+    monkeypatch.setattr(list_downloader_mod.requests, "head", fake_head)
+
+    assert dl._needs_update("https://example.com/a.txt", str(f)) is False
+
+
+def test_needs_update_uses_interval_days_for_min_age(monkeypatch, tmp_path):
+    """Brief: _needs_update uses interval_days to decide file freshness.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Temporary directory for local file.
+
+    Outputs:
+      - None; asserts False and avoids network when file is newer than interval.
+    """
+
+    dl = ListDownloader(
+        download_path=str(tmp_path), urls=[], url_files=[], interval_days=7
+    )
+    f = tmp_path / "list.txt"
+    f.write_text("# header\n")
+
+    # File age is 3 days, which is less than interval_days=7 -> treated as fresh.
+    now = time.time()
+    three_days = 3 * list_downloader_mod.ONE_DAY_SECONDS
+    fresh_mtime = now - three_days
+    os.utime(f, (fresh_mtime, fresh_mtime))
+
+    def fake_head(url, timeout):  # pragma: no cover - should not be called
+        raise AssertionError(
+            "requests.head should not be called when file is newer than interval_days"
+        )
 
     monkeypatch.setattr(list_downloader_mod.requests, "head", fake_head)
 
