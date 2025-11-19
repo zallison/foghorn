@@ -877,6 +877,8 @@ class StatsCollector:
         ignore_top_clients: Optional[List[str]] = None,
         ignore_top_domains: Optional[List[str]] = None,
         ignore_top_subdomains: Optional[List[str]] = None,
+        ignore_domains_as_suffix: bool = False,
+        ignore_subdomains_as_suffix: bool = False,
     ) -> None:
         """Initialize statistics collector with configuration flags.
 
@@ -891,6 +893,12 @@ class StatsCollector:
             ignore_top_clients: Optional list of client IPs/CIDRs to hide from top_clients
             ignore_top_domains: Optional list of base domains to hide from top_domains
             ignore_top_subdomains: Optional list of full qnames to hide from top_subdomains
+            ignore_domains_as_suffix: When True, treat ignore_top_domains entries
+                as suffixes for matching both top_domains and (when used as
+                fallback) top_subdomains.
+            ignore_subdomains_as_suffix: When True, treat ignore_top_subdomains
+                entries (or the fallback domain set) as suffixes when matching
+                top_subdomains.
 
         Outputs:
             None
@@ -961,6 +969,8 @@ class StatsCollector:
         self._ignore_top_client_networks: List[ipaddress._BaseNetwork] = []
         self._ignore_top_domains: Set[str] = set()
         self._ignore_top_subdomains: Set[str] = set()
+        self._ignore_domains_as_suffix: bool = bool(ignore_domains_as_suffix)
+        self._ignore_subdomains_as_suffix: bool = bool(ignore_subdomains_as_suffix)
 
         self.set_ignore_filters(
             ignore_top_clients or [],
@@ -1075,6 +1085,8 @@ class StatsCollector:
         clients: Optional[List[str]] = None,
         domains: Optional[List[str]] = None,
         subdomains: Optional[List[str]] = None,
+        domains_as_suffix: Optional[bool] = None,
+        subdomains_as_suffix: Optional[bool] = None,
     ) -> None:
         """Update display-only ignore filters for top statistics lists.
 
@@ -1083,13 +1095,25 @@ class StatsCollector:
                 ``top_clients`` (IPv4 and IPv6 supported). When None, the
                 client ignore list is cleared.
             domains: Optional list of base domains to hide from
-                ``top_domains`` (exact match after normalization). When None,
-                the domain ignore list is cleared.
+                ``top_domains`` (exact or suffix match after normalization,
+                depending on domains_as_suffix). When None, the domain ignore
+                list is cleared.
             subdomains: Optional list of full qnames to hide from
-                ``top_subdomains`` (exact match after normalization). When
-                None, the subdomain ignore list is cleared. When the resulting
-                ignore set is empty, the domain ignore set is used as a
-                fallback for subdomain filtering.
+                ``top_subdomains`` (exact or suffix match after
+                normalization, depending on subdomains_as_suffix). When
+                None, the subdomain ignore list is cleared. When the
+                resulting ignore set is empty, the domain ignore set is used
+                as a fallback for subdomain filtering.
+            domains_as_suffix: Optional flag controlling whether domain
+                ignores use suffix semantics. When True, a top_domains entry
+                is suppressed if its normalized name equals an ignore entry
+                or ends with "." + ignore entry. When None, the existing
+                setting is preserved.
+            subdomains_as_suffix: Optional flag controlling whether
+                subdomain ignores use suffix semantics. When True, a
+                top_subdomains entry is suppressed if its normalized name
+                equals an ignore entry or ends with "." + ignore entry.
+                When None, the existing setting is preserved.
 
         Outputs:
             None (updates internal ignore sets used only when exporting
@@ -1097,9 +1121,12 @@ class StatsCollector:
 
         Example:
             >>> collector = StatsCollector(include_top_clients=True)
-            >>> collector.set_ignore_filters([
-            ...     "10.0.0.0/8",
-            ... ], ["example.com"], ["www.example.com"])
+            >>> collector.set_ignore_filters(
+            ...     ["10.0.0.0/8"],
+            ...     ["example.com"],
+            ...     ["www.example.com"],
+            ...     domains_as_suffix=True,
+            ... )
             >>> snap = collector.snapshot(reset=False)
             >>> # top_clients/top_domains/top_subdomains will omit matching
             >>> # entries, but totals["total_queries"] counts all queries.
@@ -1137,6 +1164,10 @@ class StatsCollector:
             self._ignore_top_client_networks = client_networks
             self._ignore_top_domains = domain_set
             self._ignore_top_subdomains = subdomain_set
+            if domains_as_suffix is not None:
+                self._ignore_domains_as_suffix = bool(domains_as_suffix)
+            if subdomains_as_suffix is not None:
+                self._ignore_subdomains_as_suffix = bool(subdomains_as_suffix)
 
     def record_plugin_decision(
         self,
@@ -1421,15 +1452,21 @@ class StatsCollector:
                 filtered_domains: List[Tuple[str, int]] = []
                 for domain, count in top_domains:
                     norm = _normalize_domain(str(domain))
-                    if norm in self._ignore_top_domains:
-                        continue
+                    if self._ignore_domains_as_suffix:
+                        if any(
+                            norm == ig or norm.endswith("." + ig)
+                            for ig in self._ignore_top_domains
+                        ):
+                            continue
+                    else:
+                        if norm in self._ignore_top_domains:
+                            continue
                     filtered_domains.append((domain, count))
                 top_domains = filtered_domains
 
             if top_subdomains is not None:
                 # Fallback: if no explicit subdomain ignore list is configured,
-                # reuse the domain ignore set for top_subdomains, but still
-                # require exact matches after normalization.
+                # reuse the domain ignore set for top_subdomains.
                 active_subdomain_ignores: Set[str]
                 if self._ignore_top_subdomains:
                     active_subdomain_ignores = self._ignore_top_subdomains
@@ -1440,8 +1477,15 @@ class StatsCollector:
                     filtered_subdomains: List[Tuple[str, int]] = []
                     for name, count in top_subdomains:
                         norm = _normalize_domain(str(name))
-                        if norm in active_subdomain_ignores:
-                            continue
+                        if self._ignore_subdomains_as_suffix:
+                            if any(
+                                norm == ig or norm.endswith("." + ig)
+                                for ig in active_subdomain_ignores
+                            ):
+                                continue
+                        else:
+                            if norm in active_subdomain_ignores:
+                                continue
                         filtered_subdomains.append((name, count))
                     top_subdomains = filtered_subdomains
 
