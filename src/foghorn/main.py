@@ -418,6 +418,10 @@ def main(argv: List[str] | None = None) -> int:
         ignore_top_clients = list(ignore_cfg.get("top_clients", []) or [])
         ignore_top_domains = list(ignore_cfg.get("top_domains", []) or [])
         ignore_top_subdomains = list(ignore_cfg.get("top_subdomains", []) or [])
+        domains_mode = str(ignore_cfg.get("top_domains_mode", "exact")).lower()
+        subdomains_mode = str(ignore_cfg.get("top_subdomains_mode", "exact")).lower()
+        ignore_domains_as_suffix = domains_mode == "suffix"
+        ignore_subdomains_as_suffix = subdomains_mode == "suffix"
 
         stats_collector = StatsCollector(
             track_uniques=stats_cfg.get("track_uniques", True),
@@ -433,6 +437,8 @@ def main(argv: List[str] | None = None) -> int:
             ignore_top_clients=ignore_top_clients,
             ignore_top_domains=ignore_top_domains,
             ignore_top_subdomains=ignore_top_subdomains,
+            ignore_domains_as_suffix=ignore_domains_as_suffix,
+            ignore_subdomains_as_suffix=ignore_subdomains_as_suffix,
         )
 
         # Best-effort warm-load of persisted aggregate counters on startup.
@@ -515,12 +521,18 @@ def main(argv: List[str] | None = None) -> int:
         ignore_top_clients = list(ignore_cfg.get("top_clients", []) or [])
         ignore_top_domains = list(ignore_cfg.get("top_domains", []) or [])
         ignore_top_subdomains = list(ignore_cfg.get("top_subdomains", []) or [])
+        domains_mode = str(ignore_cfg.get("top_domains_mode", "exact")).lower()
+        subdomains_mode = str(ignore_cfg.get("top_subdomains_mode", "exact")).lower()
+        ignore_domains_as_suffix = domains_mode == "suffix"
+        ignore_subdomains_as_suffix = subdomains_mode == "suffix"
         if stats_collector is not None:
             try:
                 stats_collector.set_ignore_filters(
                     ignore_top_clients,
                     ignore_top_domains,
                     ignore_top_subdomains,
+                    domains_as_suffix=ignore_domains_as_suffix,
+                    subdomains_as_suffix=ignore_subdomains_as_suffix,
                 )
             except Exception:  # pragma: no cover - defensive
                 logging.getLogger("foghorn.main").error(

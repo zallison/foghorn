@@ -181,3 +181,43 @@ def test_set_ignore_filters_at_runtime() -> None:
     if snap2.top_domains is not None:
         domains = {d for d, _ in snap2.top_domains}
         assert "example.net" in domains
+
+
+def test_suffix_mode_for_domains_and_subdomains() -> None:
+    """Brief: When suffix modes are enabled, ignore lists act on suffix matches.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that names ending in ignored suffixes are excluded from
+      - top_domains and top_subdomains while totals still count all queries.
+    """
+
+    collector = StatsCollector(
+        include_top_domains=True,
+        ignore_top_domains=["example.com"],
+        ignore_top_subdomains=[],
+        ignore_domains_as_suffix=True,
+        ignore_subdomains_as_suffix=True,
+    )
+
+    collector.record_query("192.0.2.1", "example.com", "A")
+    collector.record_query("192.0.2.1", "a.example.com", "A")
+    collector.record_query("192.0.2.1", "b.a.example.com", "A")
+
+    snap = collector.snapshot(reset=False)
+    assert snap.totals["total_queries"] == 3
+
+    assert snap.top_domains is not None
+    domains = {d for d, _ in snap.top_domains}
+    # All base domains that collapse to example.com should be hidden
+    assert "example.com" not in domains
+
+    assert snap.top_subdomains is not None
+    subs = {d for d, _ in snap.top_subdomains}
+    # With suffix mode active and no explicit subdomain list, the domain set is
+    # reused as suffix ignore set for subdomains.
+    assert "example.com" not in subs
+    assert "a.example.com" not in subs
+    assert "b.a.example.com" not in subs
