@@ -63,8 +63,8 @@ def test_ignore_top_clients_cidr() -> None:
     assert "10.1.2.3" not in clients
 
 
-def test_ignore_top_subdomains_suffix() -> None:
-    """Brief: Subdomains matching ignore suffixes are omitted from top_subdomains.
+def test_ignore_top_subdomains_exact_match_and_fallback() -> None:
+    """Brief: Subdomains are ignored only on exact match; domains list is a fallback when subdomains list is empty.
 
     Inputs:
       - None.
@@ -86,14 +86,31 @@ def test_ignore_top_subdomains_suffix() -> None:
 
     assert snap.top_subdomains is not None
     subs = {d for d, _ in snap.top_subdomains}
-    # Both example.com and a.example.com should be filtered out
+    # Only the exact example.com entry should be filtered out; a.example.com
+    # must still be present because ignores are exact-match only.
     assert "example.com" not in subs
-    assert "a.example.com" not in subs
+    assert "a.example.com" in subs
     assert "allowed.test" in subs
 
+    # When ignore_top_subdomains is empty, ignore_top_domains acts as fallback
+    collector = StatsCollector(
+        include_top_domains=True,
+        ignore_top_domains=["example.com"],
+        ignore_top_subdomains=[],
+    )
+    collector.record_query("192.0.2.1", "example.com", "A")
+    collector.record_query("192.0.2.1", "a.example.com", "A")
+    snap2 = collector.snapshot(reset=False)
+    assert snap2.top_subdomains is not None
+    subs2 = {d for d, _ in snap2.top_subdomains}
+    # Fallback uses exact-match semantics as well: example.com is hidden,
+    # a.example.com remains visible.
+    assert "example.com" not in subs2
+    assert "a.example.com" in subs2
 
-def test_ignore_top_domains_suffix() -> None:
-    """Brief: Base domains matching ignore suffixes are omitted from top_domains.
+
+def test_ignore_top_domains_exact_match() -> None:
+    """Brief: Base domains are ignored only on exact match in top_domains.
 
     Inputs:
       - None.
@@ -115,9 +132,9 @@ def test_ignore_top_domains_suffix() -> None:
 
     assert snap.top_domains is not None
     domains = {d for d, _ in snap.top_domains}
-    # example.com (and a.example.com base) should be ignored
+    # example.com should be ignored, but example.net (and any other domain)
+    # must still be present.
     assert "example.com" not in domains
-    # example.net should still be present
     assert "example.net" in domains
 
 

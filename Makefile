@@ -18,7 +18,7 @@ IGNORE_EXTS :=  .yaml .yml
 run: build
 	python -m venv $(VENV) && . ${VENV}/bin/activate || true   # ignore error if it already exists
 	mkdir var 2>/dev/null || true
-	foghorn --config config.yaml
+	foghorn --config config/config.yaml
 
 
 # ------------------------------------------------------------
