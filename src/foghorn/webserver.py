@@ -31,7 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
-from .stats import StatsCollector, StatsSnapshot
+from .stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 
 try:
     import psutil  # type: ignore[import]
@@ -608,16 +608,20 @@ def create_app(
             host_ip = "0.0.0.0"
 
         meta: Dict[str, Any] = {
-            "created_at": snap.created_at,
+            "timestamp": datetime.fromtimestamp(
+                snap.created_at, tz=timezone.utc
+            ).isoformat(),
             "server_time": _utc_now_iso(),
             "hostname": hostname,
             "ip": host_ip,
             "version": FOGHORN_VERSION,
+            "uptime": get_process_uptime_seconds(),
         }
 
         payload: Dict[str, Any] = {
             "created_at": snap.created_at,
             "server_time": _utc_now_iso(),
+            "lag": float(datetime.now(timezone.utc).timestamp()) - snap.created_at,
             "totals": snap.totals,
             "rcodes": snap.rcodes,
             "qtypes": snap.qtypes,
@@ -1142,6 +1146,27 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         reset_raw = params.get("reset", ["false"])[0]
         reset = str(reset_raw).lower() in {"1", "true", "yes"}
         snap: StatsSnapshot = collector.snapshot(reset=reset)
+
+        try:
+            hostname = socket.gethostname()
+        except Exception:  # pragma: no cover - environment specific
+            hostname = "unknown-host"
+        try:
+            host_ip = socket.gethostbyname(hostname)
+        except Exception:  # pragma: no cover - environment specific
+            host_ip = "0.0.0.0"
+
+        meta: Dict[str, Any] = {
+            "timestamp": datetime.fromtimestamp(
+                snap.created_at, tz=timezone.utc
+            ).isoformat(),
+            "server_time": _utc_now_iso(),
+            "hostname": hostname,
+            "ip": host_ip,
+            "version": FOGHORN_VERSION,
+            "uptime": get_process_uptime_seconds(),
+        }
+
         payload: Dict[str, Any] = {
             "created_at": snap.created_at,
             "server_time": _utc_now_iso(),
@@ -1150,6 +1175,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             "qtypes": snap.qtypes,
             "uniques": snap.uniques,
             "upstreams": snap.upstreams,
+            "meta": meta,
             "top_clients": snap.top_clients,
             "top_subdomains": snap.top_subdomains,
             "top_domains": snap.top_domains,
@@ -1340,7 +1366,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 with open(cfg_path_abs, "rb") as src, open(backup_path, "wb") as dst:
                     dst.write(src.read())
 
-            yaml.safe_dump(
+            # Threaded admin handler accepts a structured config mapping and
+            # always serializes it back to YAML. This keeps the on-disk format
+            # valid even when the client does not provide a raw_yaml field.
+            yaml_text = yaml.safe_dump(
                 body,
                 default_flow_style=False,
                 sort_keys=False,
@@ -1348,7 +1377,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 allow_unicode=True,
             )
             with open(upload_path, "w", encoding="utf-8") as tmp:
-                tmp.write(body["raw_yaml"])
+                tmp.write(yaml_text)
             os.replace(upload_path, cfg_path_abs)
         except Exception as exc:  # pragma: no cover
             try:

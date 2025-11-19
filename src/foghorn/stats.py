@@ -12,6 +12,7 @@ import functools
 import json
 import logging
 import os
+import socket
 import sqlite3
 import threading
 import time
@@ -20,7 +21,37 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import importlib.metadata as importlib_metadata
+
 logger = logging.getLogger(__name__)
+
+
+try:
+    FOGHORN_VERSION = importlib_metadata.version("foghorn")
+except Exception:  # pragma: no cover - defensive fallback
+    FOGHORN_VERSION = "unknown"
+
+
+_PROCESS_START_TIME = time.time()
+
+
+def get_process_uptime_seconds() -> float:
+    """Return process uptime in seconds since this module was imported.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - float seconds representing elapsed wall-clock time since
+        ``_PROCESS_START_TIME``; always >= 0.0.
+
+    Example:
+      >>> uptime = get_process_uptime_seconds()
+      >>> uptime >= 0.0
+      True
+    """
+
+    return max(0.0, time.time() - _PROCESS_START_TIME)
 
 
 @functools.lru_cache(maxsize=1024)
@@ -1764,17 +1795,17 @@ class StatsCollector:
 
 
 def format_snapshot_json(snapshot: StatsSnapshot) -> str:
-    """
-    Format statistics snapshot as single-line JSON.
+    """Format statistics snapshot as single-line JSON with meta information.
 
     Inputs:
-        snapshot: StatsSnapshot to serialize
+        snapshot: StatsSnapshot to serialize.
 
     Outputs:
-        JSON string (single line, no trailing newline)
+        JSON string (single line, no trailing newline).
 
     The output is a compact JSON object suitable for structured logging.
-    Empty sections are omitted to minimize log size.
+    Empty sections are omitted to minimize log size. A top-level "meta"
+    object includes a timestamp, hostname, version, and process uptime.
 
     Example:
         >>> collector = StatsCollector()
@@ -1786,9 +1817,22 @@ def format_snapshot_json(snapshot: StatsSnapshot) -> str:
     """
     ts = datetime.fromtimestamp(snapshot.created_at, tz=timezone.utc).isoformat()
 
-    output: Dict = {
+    try:
+        hostname = socket.gethostname()
+    except Exception:  # pragma: no cover - environment specific
+        hostname = "unknown-host"
+
+    meta: Dict[str, Any] = {
+        "timestamp": ts,
+        "hostname": hostname,
+        "version": FOGHORN_VERSION,
+        "uptime": get_process_uptime_seconds(),
+    }
+
+    output: Dict[str, Any] = {
         "ts": ts,
         "totals": snapshot.totals,
+        "meta": meta,
     }
 
     if snapshot.uniques:
