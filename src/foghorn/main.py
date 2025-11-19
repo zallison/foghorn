@@ -414,6 +414,11 @@ def main(argv: List[str] | None = None) -> int:
                 stats_persistence_store = None
 
         # Initialize in-memory collector, wiring in the persistence store when present.
+        ignore_cfg = stats_cfg.get("ignore", {}) or {}
+        ignore_top_clients = list(ignore_cfg.get("top_clients", []) or [])
+        ignore_top_domains = list(ignore_cfg.get("top_domains", []) or [])
+        ignore_top_subdomains = list(ignore_cfg.get("top_subdomains", []) or [])
+
         stats_collector = StatsCollector(
             track_uniques=stats_cfg.get("track_uniques", True),
             include_qtype_breakdown=stats_cfg.get("include_qtype_breakdown", True),
@@ -425,6 +430,9 @@ def main(argv: List[str] | None = None) -> int:
             top_n=int(stats_cfg.get("top_n", 10)),
             track_latency=bool(stats_cfg.get("track_latency", True)),
             stats_store=stats_persistence_store,
+            ignore_top_clients=ignore_top_clients,
+            ignore_top_domains=ignore_top_domains,
+            ignore_top_subdomains=ignore_top_subdomains,
         )
 
         # Best-effort warm-load of persisted aggregate counters on startup.
@@ -501,6 +509,24 @@ def main(argv: List[str] | None = None) -> int:
         # updated so that long-lived sockets are unaffected by reloads.
         s_cfg = new_cfg.get("statistics", {}) or {}
         s_enabled = bool(s_cfg.get("enabled", False))
+
+        # Refresh display-only ignore filters for top lists on reload.
+        ignore_cfg = s_cfg.get("ignore", {}) or {}
+        ignore_top_clients = list(ignore_cfg.get("top_clients", []) or [])
+        ignore_top_domains = list(ignore_cfg.get("top_domains", []) or [])
+        ignore_top_subdomains = list(ignore_cfg.get("top_subdomains", []) or [])
+        if stats_collector is not None:
+            try:
+                stats_collector.set_ignore_filters(
+                    ignore_top_clients,
+                    ignore_top_domains,
+                    ignore_top_subdomains,
+                )
+            except Exception:  # pragma: no cover - defensive
+                logging.getLogger("foghorn.main").error(
+                    "Failed to apply statistics ignore filters on reload", exc_info=True
+                )
+
         # Start/stop reporter based on enabled flag
         if not s_enabled:
             if stats_reporter is not None:
