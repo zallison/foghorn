@@ -264,7 +264,10 @@ class ListDownloader(BasePlugin):
 
         Behavior:
           - If the file is missing, always returns True.
-          - If the file is younger than one day, returns False without a network call.
+          - If the file is younger than the configured interval (``interval_days``
+            converted to seconds) when set, returns False without a network call.
+          - If no interval is configured, files younger than one day are treated
+            as fresh and also return False.
           - Otherwise, consults the remote Last-Modified header when available and
             returns True only when the remote copy is newer, falling back to True
             on parsing or network errors.
@@ -272,12 +275,19 @@ class ListDownloader(BasePlugin):
         if not os.path.exists(filepath):
             return True
 
-        # Do not update files that are younger than one day; during setup this
+        # Do not update files that are younger than the configured interval_days
+        # (when present) or younger than one day by default; during setup this
         # prevents recently-created list files from being rewritten unnecessarily.
         try:
             now = time.time()
             local_mtime = os.path.getmtime(filepath)
-            if (now - local_mtime) < ONE_DAY_SECONDS:
+            min_age = ONE_DAY_SECONDS
+            if self.interval_seconds is not None:
+                try:
+                    min_age = max(0, int(self.interval_seconds))
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    min_age = ONE_DAY_SECONDS
+            if (now - local_mtime) < min_age:
                 return False
         except OSError:
             # If we cannot stat the file, fall back to remote checks.
