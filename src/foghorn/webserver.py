@@ -1332,8 +1332,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         cfg_path_abs = os.path.abspath(cfg_path)
         ts = datetime.now(timezone.utc).isoformat().replace(":", "-")
-        backup_path = f"old-{cfg_path_abs}-{ts}"
-        tmp_path = f"old-{cfg_path_abs}.new"
+        backup_path = f"{cfg_path_abs}-{ts}"
+        upload_path = f"old-{cfg_path_abs}.new"
 
         try:
             if os.path.exists(cfg_path_abs):
@@ -1347,13 +1347,13 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 indent=2,
                 allow_unicode=True,
             )
-            with open(tmp_path, "w", encoding="utf-8") as tmp:
+            with open(upload_path, "w", encoding="utf-8") as tmp:
                 tmp.write(body["raw_yaml"])
-            os.replace(tmp_path, cfg_path_abs)
+            os.replace(upload_path, cfg_path_abs)
         except Exception as exc:  # pragma: no cover
             try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                if os.path.exists(upload_path):
+                    os.remove(upload_path)
             except Exception:
                 pass
             self._send_json(
