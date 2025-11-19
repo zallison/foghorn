@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Foghorn"
-version = "0.2.0"
+version = "0.3.1"
 description = "Caching DNS server with plugin-based controls. DoT, DoH, ACL, query filters, etc."
 authors = [ { name = "Zack Allison", email = "zack@zackallison.com" } ]
 license = { text = "MIT" }

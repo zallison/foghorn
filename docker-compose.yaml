@@ -3,7 +3,7 @@ services:
     image: zallison/foghorn:latest
     container_name: foghorn
     volumes:
-      - /VMData/foghorn:/config
+      - /VMData/foghorn:/foghorn/config
     ports:
       - 53:5353/udp
       - 8053:8053

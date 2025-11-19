@@ -12,6 +12,7 @@ import functools
 import json
 import logging
 import os
+import socket
 import sqlite3
 import threading
 import time
@@ -20,7 +21,37 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import importlib.metadata as importlib_metadata
+
 logger = logging.getLogger(__name__)
+
+
+try:
+    FOGHORN_VERSION = importlib_metadata.version("foghorn")
+except Exception:  # pragma: no cover - defensive fallback
+    FOGHORN_VERSION = "unknown"
+
+
+_PROCESS_START_TIME = time.time()
+
+
+def get_process_uptime_seconds() -> float:
+    """Return process uptime in seconds since this module was imported.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - float seconds representing elapsed wall-clock time since
+        ``_PROCESS_START_TIME``; always >= 0.0.
+
+    Example:
+      >>> uptime = get_process_uptime_seconds()
+      >>> uptime >= 0.0
+      True
+    """
+
+    return max(0.0, time.time() - _PROCESS_START_TIME)
 
 
 @functools.lru_cache(maxsize=1024)
@@ -176,6 +207,9 @@ class LatencyHistogram:
                     return 10000.0  # overflow bin
 
         return self.max_ms or 0.0
+
+
+TOPK_CAPACITY_FACTOR = 4
 
 
 class TopK:
@@ -844,6 +878,9 @@ class StatsCollector:
         include_top_domains: Track top domains by request count (default False)
         top_n: Number of top items to track (default 10)
         track_latency: Enable latency histogram (default False)
+        ignore_top_clients: Optional list of client IPs/CIDRs to hide from top_clients
+        ignore_top_domains: Optional list of base domains to hide from top_domains
+        ignore_top_subdomains: Optional list of full qnames to hide from top_subdomains
 
     Outputs:
         StatsCollector instance for recording events and taking snapshots
@@ -871,6 +908,11 @@ class StatsCollector:
         top_n: int = 10,
         track_latency: bool = False,
         stats_store: Optional[StatsSQLiteStore] = None,
+        ignore_top_clients: Optional[List[str]] = None,
+        ignore_top_domains: Optional[List[str]] = None,
+        ignore_top_subdomains: Optional[List[str]] = None,
+        ignore_domains_as_suffix: bool = False,
+        ignore_subdomains_as_suffix: bool = False,
     ) -> None:
         """Initialize statistics collector with configuration flags.
 
@@ -881,10 +923,22 @@ class StatsCollector:
             include_top_domains: Enable top-N domain tracking
             top_n: Size of top-N lists
             track_latency: Enable latency histogram
+            stats_store: Optional SQLite-backed persistence store
+            ignore_top_clients: Optional list of client IPs/CIDRs to hide from top_clients
+            ignore_top_domains: Optional list of base domains to hide from top_domains
+            ignore_top_subdomains: Optional list of full qnames to hide from top_subdomains
+            ignore_domains_as_suffix: When True, treat ignore_top_domains entries
+                as suffixes for matching both top_domains and (when used as
+                fallback) top_subdomains.
+            ignore_subdomains_as_suffix: When True, treat ignore_top_subdomains
+                entries (or the fallback domain set) as suffixes when matching
+                top_subdomains.
 
         Outputs:
             None
         """
+        import ipaddress
+
         self._lock = threading.RLock()
 
         # Config flags
@@ -925,16 +979,20 @@ class StatsCollector:
         self._unique_clients: Optional[Set[str]] = set() if track_uniques else None
         self._unique_domains: Optional[Set[str]] = set() if track_uniques else None
 
-        # Optional: top-K trackers
+        # Optional: top-K trackers. Use a slightly larger internal capacity so
+        # that display-only ignore filters applied at snapshot time have enough
+        # headroom to still return up to top_n visible entries.
+        internal_capacity = max(1, self.top_n * TOPK_CAPACITY_FACTOR)
+
         self._top_clients: Optional[TopK] = (
-            TopK(capacity=top_n) if include_top_clients else None
+            TopK(capacity=internal_capacity) if include_top_clients else None
         )
         # Track both subdomains (full qname) and base domains (last two labels)
         self._top_subdomains: Optional[TopK] = (
-            TopK(capacity=top_n) if include_top_domains else None
+            TopK(capacity=internal_capacity) if include_top_domains else None
         )
         self._top_domains: Optional[TopK] = (
-            TopK(capacity=top_n) if include_top_domains else None
+            TopK(capacity=internal_capacity) if include_top_domains else None
         )
 
         # Optional: latency histogram
@@ -943,6 +1001,19 @@ class StatsCollector:
         )
         self._latency_recent: Optional[LatencyHistogram] = (
             LatencyHistogram() if track_latency else None
+        )
+
+        # Display-only ignore filters for top lists
+        self._ignore_top_client_networks: List[ipaddress._BaseNetwork] = []
+        self._ignore_top_domains: Set[str] = set()
+        self._ignore_top_subdomains: Set[str] = set()
+        self._ignore_domains_as_suffix: bool = bool(ignore_domains_as_suffix)
+        self._ignore_subdomains_as_suffix: bool = bool(ignore_subdomains_as_suffix)
+
+        self.set_ignore_filters(
+            ignore_top_clients or [],
+            ignore_top_domains or [],
+            ignore_top_subdomains or [],
         )
 
     def record_query(self, client_ip: str, qname: str, qtype: str) -> None:
@@ -1046,6 +1117,95 @@ class StatsCollector:
                     logger.debug(
                         "StatsCollector: failed to persist cache_miss", exc_info=True
                     )
+
+    def set_ignore_filters(
+        self,
+        clients: Optional[List[str]] = None,
+        domains: Optional[List[str]] = None,
+        subdomains: Optional[List[str]] = None,
+        domains_as_suffix: Optional[bool] = None,
+        subdomains_as_suffix: Optional[bool] = None,
+    ) -> None:
+        """Update display-only ignore filters for top statistics lists.
+
+        Inputs:
+            clients: Optional list of client IPs or CIDR strings to hide from
+                ``top_clients`` (IPv4 and IPv6 supported). When None, the
+                client ignore list is cleared.
+            domains: Optional list of base domains to hide from
+                ``top_domains`` (exact or suffix match after normalization,
+                depending on domains_as_suffix). When None, the domain ignore
+                list is cleared.
+            subdomains: Optional list of full qnames to hide from
+                ``top_subdomains`` (exact or suffix match after
+                normalization, depending on subdomains_as_suffix). When
+                None, the subdomain ignore list is cleared. When the
+                resulting ignore set is empty, the domain ignore set is used
+                as a fallback for subdomain filtering.
+            domains_as_suffix: Optional flag controlling whether domain
+                ignores use suffix semantics. When True, a top_domains entry
+                is suppressed if its normalized name equals an ignore entry
+                or ends with "." + ignore entry. When None, the existing
+                setting is preserved.
+            subdomains_as_suffix: Optional flag controlling whether
+                subdomain ignores use suffix semantics. When True, a
+                top_subdomains entry is suppressed if its normalized name
+                equals an ignore entry or ends with "." + ignore entry.
+                When None, the existing setting is preserved.
+
+        Outputs:
+            None (updates internal ignore sets used only when exporting
+            snapshot top lists; counters and TopK data are unchanged).
+
+        Example:
+            >>> collector = StatsCollector(include_top_clients=True)
+            >>> collector.set_ignore_filters(
+            ...     ["10.0.0.0/8"],
+            ...     ["example.com"],
+            ...     ["www.example.com"],
+            ...     domains_as_suffix=True,
+            ... )
+            >>> snap = collector.snapshot(reset=False)
+            >>> # top_clients/top_domains/top_subdomains will omit matching
+            >>> # entries, but totals["total_queries"] counts all queries.
+        """
+        import ipaddress
+
+        clients = clients or []
+        domains = domains or []
+        subdomains = subdomains or []
+
+        client_networks: List[ipaddress._BaseNetwork] = []
+        for raw in clients:
+            if not raw:
+                continue
+            try:
+                net = ipaddress.ip_network(str(raw), strict=False)
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("StatsCollector: invalid ignore client %r", raw)
+                continue
+            client_networks.append(net)
+
+        domain_set: Set[str] = set()
+        for raw in domains:
+            if not raw:
+                continue
+            domain_set.add(_normalize_domain(str(raw)))
+
+        subdomain_set: Set[str] = set()
+        for raw in subdomains:
+            if not raw:
+                continue
+            subdomain_set.add(_normalize_domain(str(raw)))
+
+        with self._lock:
+            self._ignore_top_client_networks = client_networks
+            self._ignore_top_domains = domain_set
+            self._ignore_top_subdomains = subdomain_set
+            if domains_as_suffix is not None:
+                self._ignore_domains_as_suffix = bool(domains_as_suffix)
+            if subdomains_as_suffix is not None:
+                self._ignore_subdomains_as_suffix = bool(subdomains_as_suffix)
 
     def record_plugin_decision(
         self,
@@ -1298,15 +1458,88 @@ class StatsCollector:
             # Top lists
             top_clients = None
             if self._top_clients is not None:
-                top_clients = self._top_clients.export(self.top_n)
+                # Export up to internal capacity so ignore filters can still
+                # produce a full top_n list when possible.
+                top_clients = self._top_clients.export(self._top_clients.capacity)
 
             top_subdomains = None
             if self._top_subdomains is not None:
-                top_subdomains = self._top_subdomains.export(self.top_n)
+                top_subdomains = self._top_subdomains.export(
+                    self._top_subdomains.capacity
+                )
 
             top_domains = None
             if self._top_domains is not None:
-                top_domains = self._top_domains.export(self.top_n)
+                top_domains = self._top_domains.export(self._top_domains.capacity)
+
+            # Apply display-only ignore filters to top lists. These filters do
+            # not affect counters or underlying TopK state; they only hide
+            # entries from exported snapshots and downstream JSON formatting.
+            if top_clients is not None and self._ignore_top_client_networks:
+                import ipaddress
+
+                filtered_clients: List[Tuple[str, int]] = []
+                for client, count in top_clients:
+                    try:
+                        addr = ipaddress.ip_address(str(client))
+                    except Exception:  # pragma: no cover - defensive
+                        filtered_clients.append((client, count))
+                        continue
+                    if any(addr in net for net in self._ignore_top_client_networks):
+                        continue
+                    filtered_clients.append((client, count))
+                top_clients = filtered_clients
+
+            # Always truncate exported top lists to the configured display size.
+            if top_clients is not None:
+                top_clients = top_clients[: self.top_n]
+
+            if top_domains is not None and self._ignore_top_domains:
+                filtered_domains: List[Tuple[str, int]] = []
+                for domain, count in top_domains:
+                    norm = _normalize_domain(str(domain))
+                    if self._ignore_domains_as_suffix:
+                        if any(
+                            norm == ig or norm.endswith("." + ig)
+                            for ig in self._ignore_top_domains
+                        ):
+                            continue
+                    else:
+                        if norm in self._ignore_top_domains:
+                            continue
+                    filtered_domains.append((domain, count))
+                top_domains = filtered_domains
+
+            if top_domains is not None:
+                top_domains = top_domains[: self.top_n]
+
+            if top_subdomains is not None:
+                # Fallback: if no explicit subdomain ignore list is configured,
+                # reuse the domain ignore set for top_subdomains.
+                active_subdomain_ignores: Set[str]
+                if self._ignore_top_subdomains:
+                    active_subdomain_ignores = self._ignore_top_subdomains
+                else:
+                    active_subdomain_ignores = self._ignore_top_domains
+
+                if active_subdomain_ignores:
+                    filtered_subdomains: List[Tuple[str, int]] = []
+                    for name, count in top_subdomains:
+                        norm = _normalize_domain(str(name))
+                        if self._ignore_subdomains_as_suffix:
+                            if any(
+                                norm == ig or norm.endswith("." + ig)
+                                for ig in active_subdomain_ignores
+                            ):
+                                continue
+                        else:
+                            if norm in active_subdomain_ignores:
+                                continue
+                        filtered_subdomains.append((name, count))
+                    top_subdomains = filtered_subdomains
+
+            if top_subdomains is not None:
+                top_subdomains = top_subdomains[: self.top_n]
 
             # Latency
             latency_stats = None
@@ -1562,17 +1795,17 @@ class StatsCollector:
 
 
 def format_snapshot_json(snapshot: StatsSnapshot) -> str:
-    """
-    Format statistics snapshot as single-line JSON.
+    """Format statistics snapshot as single-line JSON with meta information.
 
     Inputs:
-        snapshot: StatsSnapshot to serialize
+        snapshot: StatsSnapshot to serialize.
 
     Outputs:
-        JSON string (single line, no trailing newline)
+        JSON string (single line, no trailing newline).
 
     The output is a compact JSON object suitable for structured logging.
-    Empty sections are omitted to minimize log size.
+    Empty sections are omitted to minimize log size. A top-level "meta"
+    object includes a timestamp, hostname, version, and process uptime.
 
     Example:
         >>> collector = StatsCollector()
@@ -1584,9 +1817,22 @@ def format_snapshot_json(snapshot: StatsSnapshot) -> str:
     """
     ts = datetime.fromtimestamp(snapshot.created_at, tz=timezone.utc).isoformat()
 
-    output: Dict = {
+    try:
+        hostname = socket.gethostname()
+    except Exception:  # pragma: no cover - environment specific
+        hostname = "unknown-host"
+
+    meta: Dict[str, Any] = {
+        "timestamp": ts,
+        "hostname": hostname,
+        "version": FOGHORN_VERSION,
+        "uptime": get_process_uptime_seconds(),
+    }
+
+    output: Dict[str, Any] = {
         "ts": ts,
         "totals": snapshot.totals,
+        "meta": meta,
     }
 
     if snapshot.uniques:

@@ -31,7 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
-from .stats import StatsCollector, StatsSnapshot
+from .stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 
 try:
     import psutil  # type: ignore[import]
@@ -608,16 +608,20 @@ def create_app(
             host_ip = "0.0.0.0"
 
         meta: Dict[str, Any] = {
-            "created_at": snap.created_at,
+            "timestamp": datetime.fromtimestamp(
+                snap.created_at, tz=timezone.utc
+            ).isoformat(),
             "server_time": _utc_now_iso(),
             "hostname": hostname,
             "ip": host_ip,
             "version": FOGHORN_VERSION,
+            "uptime": get_process_uptime_seconds(),
         }
 
         payload: Dict[str, Any] = {
             "created_at": snap.created_at,
             "server_time": _utc_now_iso(),
+            "lag": float(datetime.now(timezone.utc).timestamp()) - snap.created_at,
             "totals": snap.totals,
             "rcodes": snap.rcodes,
             "qtypes": snap.qtypes,
@@ -1142,6 +1146,27 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         reset_raw = params.get("reset", ["false"])[0]
         reset = str(reset_raw).lower() in {"1", "true", "yes"}
         snap: StatsSnapshot = collector.snapshot(reset=reset)
+
+        try:
+            hostname = socket.gethostname()
+        except Exception:  # pragma: no cover - environment specific
+            hostname = "unknown-host"
+        try:
+            host_ip = socket.gethostbyname(hostname)
+        except Exception:  # pragma: no cover - environment specific
+            host_ip = "0.0.0.0"
+
+        meta: Dict[str, Any] = {
+            "timestamp": datetime.fromtimestamp(
+                snap.created_at, tz=timezone.utc
+            ).isoformat(),
+            "server_time": _utc_now_iso(),
+            "hostname": hostname,
+            "ip": host_ip,
+            "version": FOGHORN_VERSION,
+            "uptime": get_process_uptime_seconds(),
+        }
+
         payload: Dict[str, Any] = {
             "created_at": snap.created_at,
             "server_time": _utc_now_iso(),
@@ -1150,6 +1175,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             "qtypes": snap.qtypes,
             "uniques": snap.uniques,
             "upstreams": snap.upstreams,
+            "meta": meta,
             "top_clients": snap.top_clients,
             "top_subdomains": snap.top_subdomains,
             "top_domains": snap.top_domains,
@@ -1331,16 +1357,18 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         cfg_path_abs = os.path.abspath(cfg_path)
-        cfg_dir = os.path.dirname(cfg_path_abs)
         ts = datetime.now(timezone.utc).isoformat().replace(":", "-")
-        backup_path = f"{cfg_path_abs}.bak.{ts}"
-        tmp_path = os.path.join(cfg_dir, f".tmp-{os.path.basename(cfg_path_abs)}-{ts}")
+        backup_path = f"{cfg_path_abs}-{ts}"
+        upload_path = f"{cfg_path_abs}.new"
 
         try:
             if os.path.exists(cfg_path_abs):
                 with open(cfg_path_abs, "rb") as src, open(backup_path, "wb") as dst:
                     dst.write(src.read())
 
+            # Threaded admin handler accepts a structured config mapping and
+            # always serializes it back to YAML. This keeps the on-disk format
+            # valid even when the client does not provide a raw_yaml field.
             yaml_text = yaml.safe_dump(
                 body,
                 default_flow_style=False,
@@ -1348,13 +1376,13 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 indent=2,
                 allow_unicode=True,
             )
-            with open(tmp_path, "w", encoding="utf-8") as tmp:
+            with open(upload_path, "w", encoding="utf-8") as tmp:
                 tmp.write(yaml_text)
-            os.replace(tmp_path, cfg_path_abs)
+            os.replace(upload_path, cfg_path_abs)
         except Exception as exc:  # pragma: no cover
             try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                if os.path.exists(upload_path):
+                    os.remove(upload_path)
             except Exception:
                 pass
             self._send_json(
@@ -1563,7 +1591,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             msg = format % args
         except Exception:
             msg = format
-        logger.info("webserver HTTP: %s", msg)
+        logger.debug("webserver HTTP: %s", msg)
 
 
 def _start_admin_server_threaded(
@@ -1724,12 +1752,19 @@ def start_webserver(
 
         loop = asyncio.new_event_loop()
         loop.close()
-    except PermissionError as exc:  # pragma: no cover
+
+    except PermissionError as exc:  # pragma: no cover - best effort
         logger.warning(
-            "Asyncio loop creation failed for admin webserver; falling back to threaded HTTP server: %s",
+            "Asyncio loop creation failed for admin webserver: %s falling back to threaded HTTP server.",
             exc,
         )
+        container_path = "/.dockerenv"
+        if os.path.exists(container_path):
+            logger.warning(
+                "Possible container permission issues. Update, check seccomp settings, or run with --privileged "
+            )
         can_use_asyncio = False
+
     except Exception:
         can_use_asyncio = True
 

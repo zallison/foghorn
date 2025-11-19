@@ -535,6 +535,32 @@ statistics:
   track_latency: true
   # reset_on_sigusr1: true
   # sigusr2_resets_stats: true
+  # Optional display-only ignore filters for top lists. These do not affect
+  # totals or persisted aggregates; they only hide entries from the
+  # top_clients/top_domains/top_subdomains sections exposed via /stats.
+  # ignore:
+  #   # IPs/CIDRs to hide from top_clients only.
+  #   top_clients:
+  #     - 192.168.0.0/16
+  #     - 10.0.0.0/8
+  #
+  #   # Base domains to hide from top_domains and, when subdomains list is
+  #   # empty, from top_subdomains as well. Matching is exact by default.
+  #   top_domains:
+  #     - example.internal
+  #   # Matching mode for top_domains: "exact" (default) or "suffix".
+  #   # In suffix mode, a base domain D is ignored when D == value or
+  #   # D ends with "." + value.
+  #   top_domains_mode: suffix
+  #
+  #   # Full qnames to hide from top_subdomains. When this list is empty,
+  #   # the values from top_domains are reused as the ignore set.
+  #   top_subdomains:
+  #     - dev.example.internal
+  #   # Matching mode for top_subdomains: "exact" (default) or "suffix".
+  #   # In suffix mode, a subdomain name N is ignored when N == value or
+  #   # N ends with "." + value.
+  #   top_subdomains_mode: suffix
 
 plugins:
   # New-domain filter: simple pre-resolve policy plugin.
