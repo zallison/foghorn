@@ -1333,7 +1333,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         cfg_path_abs = os.path.abspath(cfg_path)
         ts = datetime.now(timezone.utc).isoformat().replace(":", "-")
         backup_path = f"{cfg_path_abs}-{ts}"
-        upload_path = f"old-{cfg_path_abs}.new"
+        upload_path = f"{cfg_path_abs}.new"
 
         try:
             if os.path.exists(cfg_path_abs):
