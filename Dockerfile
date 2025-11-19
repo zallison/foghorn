@@ -9,7 +9,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt update && \
     DEBIAN_FRONTEND=noninteractive apt install -y python3-pip
 
 # So we can cache this layer.
-run pip install --root-user-action=ignore   dnslib>=0.9.24 requests>=2.31.0 PyYAML>=6.0.1 whois lxml httpx dnspython>=2.6watchdog fastapi>=0.111.0 uvicorn>=0.30.0 pytest pytest-cov psutil
+run pip install --root-user-action=ignore -U dnslib>=0.9.24 requests>=2.31.0 PyYAML>=6.0.1 whois lxml httpx dnspython>=2.6watchdog fastapi>=0.111.0 uvicorn>=0.30.0 pytest pytest-cov psutil watchdog
 
 # Copy the current directory contents into the container
 COPY . /foghorn
