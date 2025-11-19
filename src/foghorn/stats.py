@@ -178,6 +178,9 @@ class LatencyHistogram:
         return self.max_ms or 0.0
 
 
+TOPK_CAPACITY_FACTOR = 4
+
+
 class TopK:
     """
     Approximate top-K heavy hitters tracker with bounded memory.
@@ -945,16 +948,20 @@ class StatsCollector:
         self._unique_clients: Optional[Set[str]] = set() if track_uniques else None
         self._unique_domains: Optional[Set[str]] = set() if track_uniques else None
 
-        # Optional: top-K trackers
+        # Optional: top-K trackers. Use a slightly larger internal capacity so
+        # that display-only ignore filters applied at snapshot time have enough
+        # headroom to still return up to top_n visible entries.
+        internal_capacity = max(1, self.top_n * TOPK_CAPACITY_FACTOR)
+
         self._top_clients: Optional[TopK] = (
-            TopK(capacity=top_n) if include_top_clients else None
+            TopK(capacity=internal_capacity) if include_top_clients else None
         )
         # Track both subdomains (full qname) and base domains (last two labels)
         self._top_subdomains: Optional[TopK] = (
-            TopK(capacity=top_n) if include_top_domains else None
+            TopK(capacity=internal_capacity) if include_top_domains else None
         )
         self._top_domains: Optional[TopK] = (
-            TopK(capacity=top_n) if include_top_domains else None
+            TopK(capacity=internal_capacity) if include_top_domains else None
         )
 
         # Optional: latency histogram
@@ -1420,15 +1427,19 @@ class StatsCollector:
             # Top lists
             top_clients = None
             if self._top_clients is not None:
-                top_clients = self._top_clients.export(self.top_n)
+                # Export up to internal capacity so ignore filters can still
+                # produce a full top_n list when possible.
+                top_clients = self._top_clients.export(self._top_clients.capacity)
 
             top_subdomains = None
             if self._top_subdomains is not None:
-                top_subdomains = self._top_subdomains.export(self.top_n)
+                top_subdomains = self._top_subdomains.export(
+                    self._top_subdomains.capacity
+                )
 
             top_domains = None
             if self._top_domains is not None:
-                top_domains = self._top_domains.export(self.top_n)
+                top_domains = self._top_domains.export(self._top_domains.capacity)
 
             # Apply display-only ignore filters to top lists. These filters do
             # not affect counters or underlying TopK state; they only hide
@@ -1448,6 +1459,10 @@ class StatsCollector:
                     filtered_clients.append((client, count))
                 top_clients = filtered_clients
 
+            # Always truncate exported top lists to the configured display size.
+            if top_clients is not None:
+                top_clients = top_clients[: self.top_n]
+
             if top_domains is not None and self._ignore_top_domains:
                 filtered_domains: List[Tuple[str, int]] = []
                 for domain, count in top_domains:
@@ -1463,6 +1478,9 @@ class StatsCollector:
                             continue
                     filtered_domains.append((domain, count))
                 top_domains = filtered_domains
+
+            if top_domains is not None:
+                top_domains = top_domains[: self.top_n]
 
             if top_subdomains is not None:
                 # Fallback: if no explicit subdomain ignore list is configured,
@@ -1488,6 +1506,9 @@ class StatsCollector:
                                 continue
                         filtered_subdomains.append((name, count))
                     top_subdomains = filtered_subdomains
+
+            if top_subdomains is not None:
+                top_subdomains = top_subdomains[: self.top_n]
 
             # Latency
             latency_stats = None
