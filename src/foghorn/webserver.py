@@ -1331,17 +1331,16 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         cfg_path_abs = os.path.abspath(cfg_path)
-        cfg_dir = os.path.dirname(cfg_path_abs)
         ts = datetime.now(timezone.utc).isoformat().replace(":", "-")
-        backup_path = f"{cfg_path_abs}.bak.{ts}"
-        tmp_path = os.path.join(cfg_dir, f".tmp-{os.path.basename(cfg_path_abs)}-{ts}")
+        backup_path = f"old-{cfg_path_abs}-{ts}"
+        tmp_path = f"old-{cfg_path_abs}.new"
 
         try:
             if os.path.exists(cfg_path_abs):
                 with open(cfg_path_abs, "rb") as src, open(backup_path, "wb") as dst:
                     dst.write(src.read())
 
-            yaml_text = yaml.safe_dump(
+            yaml.safe_dump(
                 body,
                 default_flow_style=False,
                 sort_keys=False,
@@ -1349,7 +1348,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 allow_unicode=True,
             )
             with open(tmp_path, "w", encoding="utf-8") as tmp:
-                tmp.write(yaml_text)
+                tmp.write(body["raw_yaml"])
             os.replace(tmp_path, cfg_path_abs)
         except Exception as exc:  # pragma: no cover
             try:
