@@ -1562,7 +1562,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             msg = format % args
         except Exception:
             msg = format
-        logger.info("webserver HTTP: %s", msg)
+        logger.debug("webserver HTTP: %s", msg)
 
 
 def _start_admin_server_threaded(
@@ -1723,12 +1723,19 @@ def start_webserver(
 
         loop = asyncio.new_event_loop()
         loop.close()
-    except PermissionError as exc:  # pragma: no cover
+
+    except PermissionError as exc:  # pragma: no cover - best effort
         logger.warning(
-            "Asyncio loop creation failed for admin webserver; falling back to threaded HTTP server: %s",
+            "Asyncio loop creation failed for admin webserver: %s falling back to threaded HTTP server.",
             exc,
         )
+        container_path = "/.dockerenv"
+        if os.path.exists(container_path):
+            logger.warning(
+                "Possible container permission issues. Update, check seccomp settings, or run with --privileged "
+            )
         can_use_asyncio = False
+
     except Exception:
         can_use_asyncio = True
 
