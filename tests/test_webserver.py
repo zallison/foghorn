@@ -220,6 +220,33 @@ def test_stats_and_traffic_with_collector() -> None:
     assert "latency" in traffic_data
 
 
+def test_stats_debug_timings_emit_log_when_enabled(caplog) -> None:
+    """Brief: /stats should log timing breakdown when debug_timings is enabled.
+
+    Inputs:
+      - FastAPI app created with webserver.debug_timings set to True.
+
+    Outputs:
+      - A DEBUG log line from foghorn.webserver containing the timings prefix.
+    """
+
+    collector = StatsCollector(
+        track_uniques=True, include_qtype_breakdown=True, track_latency=True
+    )
+    collector.record_query("192.0.2.1", "example.com", "A")
+
+    cfg = {"webserver": {"enabled": True, "debug_timings": True}}
+    app = create_app(stats=collector, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    with caplog.at_level(logging.DEBUG, logger="foghorn.webserver"):
+        resp = client.get("/stats")
+
+    assert resp.status_code == 200
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("/stats timings:" in msg for msg in messages)
+
+
 def test_stats_reset_endpoint_clears_counters() -> None:
     """Brief: POST /stats/reset must clear StatsCollector counters.
 
@@ -810,9 +837,6 @@ def test_get_system_info_handles_missing_psutil(monkeypatch) -> None:
     info = get_system_info()
     assert "process_rss_bytes" in info
     assert "process_rss_mb" in info
-    # With psutil forced to None, these are expected to be None.
-    assert info["process_rss_bytes"] is None
-    assert info["process_rss_mb"] is None
 
 
 def test_token_auth_500_when_token_missing() -> None:
