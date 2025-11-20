@@ -367,9 +367,11 @@
                  }
 
                  addMemRow('Total Memory', memTotal);
-                 addMemRow('Total Memory used', memTotalUsed);
-                 addMemRow('Total Memory available', memTotalAvail);
-                 addMemRow('TotalMemory free', memTotalFree);
+                 addMemRow('Memory used', memTotalUsed);
+                 addMemRow('Memory available', memTotalAvail);
+                 addMemRow('Buffer and Cache', memTotal - memTotalUsed - memTotalAvail);
+                 addMemRow('', '<hr />');
+                 addMemRow('', memTotalFree);
 
                  var loadKeys = ['load_1m', 'load_5m', 'load_15m'];
                  loadKeys.forEach(function (key) {
@@ -386,17 +388,6 @@
 
 
                  group.appendChild(dl);
-
-                 if (memTotal && memTotalUsed != null && memTotal > 0) {
-                     var pct = Math.max(0, Math.min(1, memTotalUsed / memTotal));
-                     var bar = document.createElement('div');
-                     bar.className = 'fh-system-bar';
-                     var inner = document.createElement('div');
-                     inner.className = 'fh-system-bar-inner';
-                     inner.style.transform = 'scaleX(' + pct.toFixed(3) + ')';
-                     bar.appendChild(inner);
-                     group.appendChild(bar);
-                 }
 
                  statsGroupsEl.appendChild(group);
              }
@@ -484,10 +475,11 @@
                  }
 
                  appendDictGroup('Totals', data.totals || {});
-                 appendDictGroup('Response codes', data.rcodes || {});
                  appendDictGroup('Query types', data.qtypes || {});
+                 appendDictGroup('Response codes', data.rcodes || {});
                  appendDictGroup('Recent latency', data.latency_recent || {});
                  appendDictGroup('Latency', data.latency || {});
+
                  appendTopListGroup('Top Client', data.top_clients || []);
                  appendTopListGroup('Top Domains', data.top_domains || []);
                  appendTopListGroup('Top Sub Domains', data.top_subdomains || []);
