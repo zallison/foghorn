@@ -75,14 +75,8 @@ class EtcHosts(BasePlugin):
         # inotify_enabled is accepted as a deprecated alias for backward
         # compatibility).
         watchdog_cfg = self.config.get("watchdog_enabled")
-        inotify_cfg = self.config.get("inotify_enabled")
         if watchdog_cfg is not None:
             watchdog_enabled = bool(watchdog_cfg)
-        elif inotify_cfg is not None:
-            logger.warning(
-                "EtcHosts: 'inotify_enabled' is deprecated; use 'watchdog_enabled' instead",
-            )
-            watchdog_enabled = bool(inotify_cfg)
         else:
             watchdog_enabled = True
 
@@ -328,6 +322,7 @@ class EtcHosts(BasePlugin):
         for directory in directories:
             try:
                 observer.schedule(handler, str(directory), recursive=False)
+                logger.info("Watching %s", directory)
             except Exception as exc:  # pragma: no cover - log and continue
                 logger.warning("Failed to watch directory %s: %s", directory, exc)
 
