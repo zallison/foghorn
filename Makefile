@@ -19,7 +19,7 @@ IGNORE_EXTS :=  .yaml .yml
 run: build
 	. ${VENV}/bin/activate
 	mkdir var 2>/dev/null || true
-	foghorn --config config/config.yaml
+	${VENV}/bin/foghorn --config config/config.yaml
 
 
 # ------------------------------------------------------------
