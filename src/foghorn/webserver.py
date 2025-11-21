@@ -1410,7 +1410,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             # Threaded admin handler accepts a structured config mapping and
             # always serializes it back to YAML. This keeps the on-disk format
             # valid even when the client does not provide a raw_yaml field.
-            yaml_text = yaml.safe_dump(
+            yaml.safe_dump(
                 body,
                 default_flow_style=False,
                 sort_keys=False,
@@ -1418,7 +1418,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 allow_unicode=True,
             )
             with open(upload_path, "w", encoding="utf-8") as tmp:
-                tmp.write(yaml_text)
+                tmp.write(body["raw_yaml"])
             os.replace(upload_path, cfg_path_abs)
         except Exception as exc:  # pragma: no cover
             try:
