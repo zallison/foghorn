@@ -19,9 +19,10 @@ import os
 import shutil
 import signal
 import socket
+import time
 import threading
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -41,6 +42,13 @@ except Exception:  # pragma: no cover - optional dependency fallback
 
 FOGHORN_VERSION = importlib.metadata.version("foghorn")
 logger = logging.getLogger("foghorn.webserver")
+
+# Lightweight cache for expensive system metrics to keep /stats fast under load.
+_SYSTEM_INFO_CACHE_TTL_SECONDS = 2.0
+_SYSTEM_INFO_CACHE_LOCK = threading.Lock()
+_last_system_info: Dict[str, Any] | None = None
+_last_system_info_ts: float = 0.0
+_SYSTEM_INFO_DETAIL_MODE = "full"  # "full" or "basic"
 
 
 class _Suppress2xxAccessFilter(logging.Filter):
@@ -309,6 +317,14 @@ def get_system_info() -> Dict[str, Any]:
       True
     """
 
+    global _last_system_info, _last_system_info_ts
+
+    now = time.time()
+    cached = _last_system_info
+    cached_ts = _last_system_info_ts
+    if cached is not None and now - cached_ts < _SYSTEM_INFO_CACHE_TTL_SECONDS:
+        return dict(cached)
+
     payload: Dict[str, Any] = {
         "load_1m": None,
         "load_5m": None,
@@ -330,6 +346,7 @@ def get_system_info() -> Dict[str, Any]:
     if psutil is not None:
         try:
             proc = psutil.Process(os.getpid())
+            detail_mode = _SYSTEM_INFO_DETAIL_MODE
 
             # Memory (RSS) in bytes and MB
             rss_bytes = int(proc.memory_info().rss)
@@ -364,22 +381,25 @@ def get_system_info() -> Dict[str, Any]:
             except Exception:
                 pass
 
-            # Counts of open files and connections
-            try:
-                files = proc.open_files()
-                payload["process_open_files_count"] = (
-                    len(files) if files is not None else 0
-                )
-            except Exception:
-                pass
+            # Counts of open files and connections can be relatively expensive,
+            # so only collect them when detail_mode is "full". The keys remain
+            # present in the payload and default to None when skipped.
+            if detail_mode == "full":
+                try:
+                    files = proc.open_files()
+                    payload["process_open_files_count"] = (
+                        len(files) if files is not None else 0
+                    )
+                except Exception:
+                    pass
 
-            try:
-                conns = proc.connections()
-                payload["process_connections_count"] = (
-                    len(conns) if conns is not None else 0
-                )
-            except Exception:
-                pass
+                try:
+                    conns = proc.connections()
+                    payload["process_connections_count"] = (
+                        len(conns) if conns is not None else 0
+                    )
+                except Exception:
+                    pass
         except Exception:  # pragma: no cover - environment specific
             pass
 
@@ -410,6 +430,12 @@ def get_system_info() -> Dict[str, Any]:
             used = total - available
             if used >= 0:
                 payload["memory_used_bytes"] = used
+
+    # Publish into cache for subsequent callers.
+    now = time.time()
+    with _SYSTEM_INFO_CACHE_LOCK:
+        _last_system_info = dict(payload)
+        _last_system_info_ts = now
 
     return payload
 
@@ -529,6 +555,17 @@ def create_app(
     web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
     app = FastAPI(title="Foghorn Admin HTTP API")
 
+    # Allow configuration to tune the system info cache TTL used by
+    # get_system_info(), while keeping a conservative default.
+    global _SYSTEM_INFO_CACHE_TTL_SECONDS, _SYSTEM_INFO_DETAIL_MODE
+    ttl_raw = web_cfg.get("system_info_ttl_seconds")
+    if isinstance(ttl_raw, (int, float)) and ttl_raw > 0:
+        _SYSTEM_INFO_CACHE_TTL_SECONDS = float(ttl_raw)
+
+    detail_raw = str(web_cfg.get("system_metrics_detail", "full")).lower()
+    if detail_raw in {"full", "basic"}:
+        _SYSTEM_INFO_DETAIL_MODE = detail_raw
+
     # Derived paths for optional static assets
     www_root = resolve_www_root(config)
 
@@ -554,6 +591,7 @@ def create_app(
         capacity=int(web_cfg.get("logs", {}).get("buffer_size", 500))
     )
     app.state.www_root = www_root
+    app.state.debug_stats_timings = bool(web_cfg.get("debug_timings", False))
 
     # CORS configuration
     cors_cfg = web_cfg.get("cors") or {}
@@ -608,20 +646,23 @@ def create_app(
             host_ip = "0.0.0.0"
 
         meta: Dict[str, Any] = {
-            "timestamp": datetime.fromtimestamp(
+            "created_at": datetime.fromtimestamp(
                 snap.created_at, tz=timezone.utc
             ).isoformat(),
             "server_time": _utc_now_iso(),
             "hostname": hostname,
             "ip": host_ip,
             "version": FOGHORN_VERSION,
-            "uptime": get_process_uptime_seconds(),
+            "uptime": timedelta(seconds=get_process_uptime_seconds()),
+            "lag": timedelta(
+                seconds=(
+                    float(datetime.now(timezone.utc).timestamp()) - snap.created_at
+                )
+            ),
         }
 
         payload: Dict[str, Any] = {
-            "created_at": snap.created_at,
             "server_time": _utc_now_iso(),
-            "lag": float(datetime.now(timezone.utc).timestamp()) - snap.created_at,
             "totals": snap.totals,
             "rcodes": snap.rcodes,
             "qtypes": snap.qtypes,
