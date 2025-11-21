@@ -851,11 +851,15 @@ class FilterPlugin(BasePlugin):
         Inputs:
             domain: Domain name to check.
         Outputs:
-            True when mode is "allow" or not blocked and the default is allow
+            True when mode is "allow" or not blocked and the default is allow.
         """
+        # Normalize to a plain string to avoid sqlite InterfaceError when callers
+        # pass dnslib labels or other non-str objects.
+        normalized = str(domain).rstrip(".")
+
         cur = self.conn.execute(
             "SELECT mode FROM blocked_domains WHERE domain = ?",
-            (domain,),
+            (normalized,),
         )
         row = cur.fetchone()
         allowed: bool = self.default == "allow"
