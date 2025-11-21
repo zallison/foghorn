@@ -22,7 +22,6 @@ dependencies = [
   "pytest",
   "pytest-cov",
   "requests>=2.31.0",
-  "six",
   "uvicorn>=0.30.0",
   "watchdog",
   "whois",
