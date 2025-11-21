@@ -494,8 +494,8 @@ class StatsSQLiteStore:
         """
         if not self._batch_writes:
             try:
-                with self._conn:  # type: ignore[attr-defined]
-                    self._conn.execute(sql, params)  # type: ignore[attr-defined]
+                with self._conn:
+                    self._conn.execute(sql, params)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.error("StatsSQLiteStore execute error: %s", exc, exc_info=True)
             return
@@ -1449,7 +1449,13 @@ class StatsCollector:
 
             # Unique counts
             uniques = None
-            if self._unique_clients is not None and self._unique_domains is not None:
+            # When track_uniques is disabled, do not expose uniques even if
+            # internal sets happen to be non-None (e.g., after a config reload).
+            if (
+                self.track_uniques
+                and self._unique_clients is not None
+                and self._unique_domains is not None
+            ):
                 uniques = {
                     "clients": len(self._unique_clients),
                     "domains": len(self._unique_domains),
