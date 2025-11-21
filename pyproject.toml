@@ -4,27 +4,28 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Foghorn"
-version = "0.3.1"
+version = "0.3.2"
 description = "Caching DNS server with plugin-based controls. DoT, DoH, ACL, query filters, etc."
 authors = [ { name = "Zack Allison", email = "zack@zackallison.com" } ]
 license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "dnslib>=0.9.24",
-  "requests>=2.31.0",
   "PyYAML>=6.0.1",
-  "whois",
-  "lxml",
-  "httpx",
+  "cachetools",
+  "dnslib>=0.9.24",
   "dnspython>=2.6.1",
-  "watchdog",
   "fastapi>=0.111.0",
-  "uvicorn>=0.30.0",
+  "httpx",
+  "lxml",
+  "psutil",
   "pytest",
   "pytest-cov",
-  "psutil",
-
+  "requests>=2.31.0",
+  "six",
+  "uvicorn>=0.30.0",
+  "watchdog",
+  "whois",
 ]
 
 [optional-dependencies]
@@ -32,8 +33,6 @@ dev = [
    "coverage",
    "black",
    "ipython",
-   "fastapi>=0.111.0",
-   "uvicorn>=0.30.0",
    "ruff",
 ]
 
