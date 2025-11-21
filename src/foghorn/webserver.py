@@ -22,15 +22,15 @@ import socket
 import time
 import threading
 import urllib.parse
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from typing import Any, Dict, List, Optional
-
 import yaml
+
+from datetime import datetime, timezone, timedelta
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
+from pathlib import Path
 from pydantic import BaseModel
+from typing import Any, Dict, List, Optional
 
 from .stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 
@@ -653,10 +653,12 @@ def create_app(
             "hostname": hostname,
             "ip": host_ip,
             "version": FOGHORN_VERSION,
-            "uptime": timedelta(seconds=get_process_uptime_seconds()),
-            "lag": timedelta(
-                seconds=(
-                    float(datetime.now(timezone.utc).timestamp()) - snap.created_at
+            "uptime": str(timedelta(seconds=get_process_uptime_seconds())),
+            "lag": str(
+                timedelta(
+                    seconds=(
+                        float(datetime.now(timezone.utc).timestamp()) - snap.created_at
+                    )
                 )
             ),
         }
@@ -1403,34 +1405,44 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         upload_path = f"{cfg_path_abs}.new"
 
         try:
+            # Validate
+            res = yaml.safe_load(body["raw_yaml"]) or None
+
+            if not res or res is None:
+                self._send_json(
+                    500,
+                    {
+                        "detail": f"failed to write config to {cfg_path_abs}: Probably a YAML error.",
+                        "server_time": _utc_now_iso(),
+                        "error": res,
+                    },
+                )
+                return
+
+            # Validated.  Now Backup the config.
             if os.path.exists(cfg_path_abs):
                 with open(cfg_path_abs, "rb") as src, open(backup_path, "wb") as dst:
                     dst.write(src.read())
 
-            # Threaded admin handler accepts a structured config mapping and
-            # always serializes it back to YAML. This keeps the on-disk format
-            # valid even when the client does not provide a raw_yaml field.
-            yaml.safe_dump(
-                body,
-                default_flow_style=False,
-                sort_keys=False,
-                indent=2,
-                allow_unicode=True,
-            )
+            # Upload and atomic move
             with open(upload_path, "w", encoding="utf-8") as tmp:
                 tmp.write(body["raw_yaml"])
             os.replace(upload_path, cfg_path_abs)
         except Exception as exc:  # pragma: no cover
             try:
+                # Clean up after ourselves.
                 if os.path.exists(upload_path):
                     os.remove(upload_path)
             except Exception:
                 pass
+
             self._send_json(
                 500,
                 {
-                    "detail": f"failed to write config to {cfg_path_abs}: {exc}",
+                    "detail": f" failed to update config: {exc}",
                     "server_time": _utc_now_iso(),
+                    "stats": "error",
+                    "error": exc,
                 },
             )
             return
