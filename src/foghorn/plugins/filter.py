@@ -805,7 +805,7 @@ class FilterPlugin(BasePlugin):
                 t = t[2:-1]
             return t
 
-        logger.info("Opening %s for %s", filename, mode)
+        logger.debug("Opening %s for %s", filename, mode)
         # Use a single transaction per file for performance on very large lists.
         with self.conn:
             with open(filename, "r", encoding="utf-8") as fh:
