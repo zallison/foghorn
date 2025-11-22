@@ -838,8 +838,12 @@ def create_app(
             if os.path.exists(cfg_path_abs):
                 shutil.copy(cfg_path_abs, backup_path)
 
-            with open(cfg_path_abs + ".new", "w", encoding="utf-8") as tmp:
-                tmp.write(body["raw_yaml"])
+            try:
+                with open(cfg_path_abs + ".new", "w", encoding="utf-8") as tmp:
+                    tmp.write(body["raw_yaml"])
+            except KeyError as e:
+                logger.crit("Request has no 'raw_yaml'")
+                return {"stats": "failed", "servercode": "500", "error": str(e)}
 
             shutil.copy(cfg_path_abs + ".new", cfg_path_abs)
 
