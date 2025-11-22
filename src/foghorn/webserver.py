@@ -19,18 +19,18 @@ import os
 import shutil
 import signal
 import socket
-import time
 import threading
+import time
 import urllib.parse
-import yaml
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from datetime import datetime, timezone, timedelta
+import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
-from pathlib import Path
 from pydantic import BaseModel
-from typing import Any, Dict, List, Optional
 
 from .stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 
@@ -680,9 +680,7 @@ def create_app(
             host_ip = "0.0.0.0"
 
         meta: Dict[str, Any] = {
-            "created_at": datetime.fromtimestamp(
-                snap.created_at, tz=timezone.utc
-            ).isoformat(),
+            "created_at": snap.created_at,
             "server_time": _utc_now_iso(),
             "hostname": hostname,
             "ip": host_ip,
@@ -709,6 +707,11 @@ def create_app(
                 t_after_system - t_start,
             )
 
+        if snap.uniques:
+            meta_with_uniques = meta | snap.uniques
+        else:
+            meta_with_uniques = meta
+
         payload: Dict[str, Any] = {
             "server_time": _utc_now_iso(),
             "totals": snap.totals,
@@ -716,13 +719,20 @@ def create_app(
             "qtypes": snap.qtypes,
             "uniques": snap.uniques,
             "upstreams": snap.upstreams,
-            "meta": meta,
+            "meta": meta_with_uniques,
             "top_clients": snap.top_clients,
             "top_subdomains": snap.top_subdomains,
             "top_domains": snap.top_domains,
+            "top_upstreams": snap.top_upstreams,
             "latency": snap.latency_stats,
             "latency_recent": snap.latency_recent_stats,
             "system": system_info,
+            "upstream_rcodes": snap.upstream_rcodes,
+            "upstream_qtypes": snap.upstream_qtypes,
+            "qtype_qnames": snap.qtype_qnames,
+            "rcode_domains": snap.rcode_domains,
+            "cache_hit_domains": snap.cache_hit_domains,
+            "cache_miss_domains": snap.cache_miss_domains,
         }
         return payload
 
@@ -1131,7 +1141,15 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self._apply_cors_headers()
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            logger.warning(
+                "Client disconnected while sending JSON response for %s %s",
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return
 
     def _send_text(self, status_code: int, text: str) -> None:
         """Brief: Send plain-text response.
@@ -1150,7 +1168,15 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self._apply_cors_headers()
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            logger.warning(
+                "Client disconnected while sending text response for %s %s",
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return
 
     def _send_html(self, status_code: int, html_body: str) -> None:
         """Brief: Send HTML response.
@@ -1169,7 +1195,15 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self._apply_cors_headers()
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            logger.warning(
+                "Client disconnected while sending HTML response for %s %s",
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return
 
     def _require_auth(self) -> bool:
         """Brief: Enforce auth.mode=token semantics for protected endpoints.
@@ -1249,9 +1283,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         ####
 
         meta: Dict[str, Any] = {
-            "timestamp": datetime.fromtimestamp(
-                snap.created_at, tz=timezone.utc
-            ).isoformat(),
+            "timestamp": snap.created_at,
             "server_time": _utc_now_iso(),
             "hostname": "-",
             "ip": "-",
@@ -1271,9 +1303,16 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             "top_clients": snap.top_clients,
             "top_subdomains": snap.top_subdomains,
             "top_domains": snap.top_domains,
+            "top_upstreams": snap.top_upstreams,
             "latency": snap.latency_stats,
             "latency_recent": snap.latency_recent_stats,
             "system": get_system_info(),
+            "upstream_rcodes": snap.upstream_rcodes,
+            "upstream_qtypes": snap.upstream_qtypes,
+            "qtype_qnames": snap.qtype_qnames,
+            "rcode_domains": snap.rcode_domains,
+            "cache_hit_domains": snap.cache_hit_domains,
+            "cache_miss_domains": snap.cache_miss_domains,
         }
         self._send_json(200, payload)
 
@@ -1557,7 +1596,15 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self._apply_cors_headers()
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except BrokenPipeError:
+            logger.warning(
+                "Client disconnected while sending index.html for %s %s",
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return
 
     def _www_root(self) -> str:
         """Brief: Resolve absolute path to the html directory for static assets.
@@ -1607,7 +1654,16 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self._apply_cors_headers()
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except BrokenPipeError:
+            logger.warning(
+                "Client disconnected while sending static file %s for %s %s",
+                candidate,
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return True
         return True
 
     # ---------- HTTP verb handlers ----------
