@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import time
 from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
 
@@ -79,6 +80,10 @@ class FilterPlugin(BasePlugin):
         """
         # super().__init__(**config)
         self._domain_cache = TTLCache()
+        # Serialize SQLite access across ThreadingUDPServer handler threads to
+        # avoid "InterfaceError: bad parameter or other API misuse" from
+        # concurrent use of a single connection.
+        self._db_lock = threading.Lock()
 
         self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 600)  # 10 minutes
         self.db_path: str = self.config.get("db_path", "./config/var/blocklist.db")
@@ -857,11 +862,17 @@ class FilterPlugin(BasePlugin):
         # pass dnslib labels or other non-str objects.
         normalized = str(domain).rstrip(".")
 
-        cur = self.conn.execute(
-            "SELECT mode FROM blocked_domains WHERE domain = ?",
-            (normalized,),
-        )
-        row = cur.fetchone()
+        # SQLite connections are not safe for concurrent use from multiple
+        # threads without external locking, even with check_same_thread=False.
+        # The DNS server uses ThreadingUDPServer, so guard DB access with a
+        # per-plugin lock to prevent "bad parameter or other API misuse".
+        with self._db_lock:
+            cur = self.conn.execute(
+                "SELECT mode FROM blocked_domains WHERE domain = ?",
+                (normalized,),
+            )
+            row = cur.fetchone()
+
         allowed: bool = self.default == "allow"
         if row:
             allowed = row[0] == "allow"
