@@ -1411,11 +1411,12 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 limit = max(0, int(raw))
             except ValueError:
                 limit = 100
-                entries = buf.snapshot(limit=limit)
-                self._send_json(
-                    200,
-                    {"server_time": _utc_now_iso(), "entries": entries},
-                )
+            entries = buf.snapshot(limit=limit)
+
+        self._send_json(
+            200,
+            {"server_time": _utc_now_iso(), "entries": entries},
+        )
 
     def _handle_config_save(self, body: Dict[str, Any]) -> None:
         """Brief: Handle POST /config/save to persist config and signal SIGUSR1.
@@ -1874,12 +1875,16 @@ def start_webserver(
             "Asyncio loop creation failed for admin webserver: %s falling back to threaded HTTP server.",
             exc,
         )
+        # Always disable asyncio path on PermissionError, regardless of whether
+        # we are running inside a container. This mirrors the DoH server logic
+        # and ensures we reliably use the threaded fallback when self-pipe
+        # creation is not permitted.
+        can_use_asyncio = False
         container_path = "/.dockerenv"
         if os.path.exists(container_path):
             logger.warning(
                 "Possible container permission issues. Update, check seccomp settings, or run with --privileged "
             )
-            can_use_asyncio = False
 
     except Exception:
         can_use_asyncio = True

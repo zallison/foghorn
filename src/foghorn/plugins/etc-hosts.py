@@ -71,6 +71,7 @@ class EtcHosts(BasePlugin):
         # Initial load
         self._load_hosts()
 
+        self._ttl = self.config.get("ttl", 300)
         # Optionally start watchdog-based reloads (watchdog_enabled is primary;
         # inotify_enabled is accepted as a deprecated alias for backward
         # compatibility).
@@ -135,6 +136,7 @@ class EtcHosts(BasePlugin):
         mapping: Dict[str, str] = {}
 
         for fp in self.file_paths:
+            logging.info("reading hostifle: {fp}")
             hosts_path = pathlib.Path(fp)
             with hosts_path.open("r", encoding="utf-8") as f:
                 for raw_line in f:
@@ -231,7 +233,13 @@ class EtcHosts(BasePlugin):
 
         if query_type == QTYPE.A:
             reply.add_answer(
-                RR(rname=request.q.qname, rtype=QTYPE.A, rclass=1, ttl=60, rdata=A(ip))
+                RR(
+                    rname=request.q.qname,
+                    rtype=QTYPE.A,
+                    rclass=1,
+                    ttl=self._ttl,
+                    rdata=A(ip),
+                )
             )
         elif query_type == QTYPE.AAAA:
             reply.add_answer(
@@ -338,7 +346,7 @@ class EtcHosts(BasePlugin):
         Outputs:
           - None
         """
-        logger.debug("Reloading hosts mapping due to filesystem change")
+        logger.info("Reloading hosts mapping due to filesystem change")
         try:
             self._load_hosts()
         except Exception as exc:  # pragma: no cover - defensive logging
