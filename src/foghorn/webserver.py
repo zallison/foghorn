@@ -110,7 +110,7 @@ def install_uvicorn_2xx_suppression() -> None:
     for f in getattr(access_logger, "filters", []):
         if isinstance(f, _Suppress2xxAccessFilter):
             return
-        access_logger.addFilter(_Suppress2xxAccessFilter())
+    access_logger.addFilter(_Suppress2xxAccessFilter())
 
 
 class LogEntry(BaseModel):
@@ -1830,7 +1830,9 @@ class WebServerHandle:
                         close()
                 except Exception:
                     logger.exception("Error while shutting down webserver instance")
-                    self._thread.join(timeout=timeout)
+            # Always wait for the thread to exit, regardless of whether
+            # a server instance was attached or shutdown raised.
+            self._thread.join(timeout=timeout)
         except Exception:
             logger.exception("Error while stopping webserver thread")
 
