@@ -221,3 +221,50 @@ def test_suffix_mode_for_domains_and_subdomains() -> None:
     assert "example.com" not in subs
     assert "a.example.com" not in subs
     assert "b.a.example.com" not in subs
+
+
+def test_ignore_single_host_hides_single_label_domains() -> None:
+    """Brief: ignore_single_host hides single-label hostnames from top lists.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that single-label names (e.g., "web") are absent from
+      - top_domains/top_subdomains when ignore_single_host is enabled, while
+      - fully-qualified names remain visible and totals still count all queries.
+    """
+
+    collector = StatsCollector(
+        include_top_domains=True,
+        ignore_single_host=True,
+    )
+
+    # Single-label hostnames
+    collector.record_query("192.0.2.1", "web", "A")
+    collector.record_query("192.0.2.1", "databases", "A")
+
+    # Fully-qualified domains
+    collector.record_query("192.0.2.1", "web.example.com", "A")
+    collector.record_query("192.0.2.1", "databases.internal", "A")
+
+    snap = collector.snapshot(reset=False)
+    assert snap.totals["total_queries"] == 4
+
+    # top_subdomains includes only multi-label names when enabled
+    assert snap.top_subdomains is not None
+    subdomains = {d for d, _ in snap.top_subdomains}
+    assert "web" not in subdomains
+    assert "databases" not in subdomains
+    assert "web.example.com" in subdomains
+    assert "databases.internal" in subdomains
+
+    # top_domains aggregates by base domain (last two labels) and should only
+    # see real domains. "databases.internal" remains visible while single-label
+    # hosts are hidden.
+    assert snap.top_domains is not None
+    domains = {d for d, _ in snap.top_domains}
+    assert "web" not in domains
+    assert "databases" not in domains
+    assert "example.com" in domains
+    assert "databases.internal" in domains
