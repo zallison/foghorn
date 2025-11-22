@@ -47,6 +47,10 @@ class EtcHosts(BasePlugin):
           - watchdog_enabled (bool, optional): When True (default), start a
             watchdog-based observer to reload files automatically on change.
             The legacy option inotify_enabled is still accepted as an alias.
+          - watchdog_poll_interval_seconds (float, optional): When greater than
+            zero, enable a stat-based polling loop to detect changes even when
+            filesystem events are not delivered (for example in some container
+            or read-only bind-mount setups).
 
         Outputs:
           - None
@@ -76,6 +80,20 @@ class EtcHosts(BasePlugin):
             self.config.get("watchdog_min_interval_seconds", 1.0)
         )
         self._last_watchdog_reload_ts = 0.0
+        # Timer used to coalesce multiple rapid watchdog events into a single
+        # deferred reload while still guaranteeing that no change is lost.
+        self._reload_debounce_timer = None
+        self._reload_timer_lock = threading.Lock()
+
+        # Polling-based fallback reload behaviour (useful when filesystem
+        # events are not delivered, such as in certain container or bind-mount
+        # environments).
+        self._poll_interval = float(
+            self.config.get("watchdog_poll_interval_seconds", 0.0)
+        )
+        self._last_stat_snapshot = None
+        self._poll_stop = None
+        self._poll_thread = None
 
         # Initial load
         self._load_hosts()
@@ -92,6 +110,15 @@ class EtcHosts(BasePlugin):
 
         if watchdog_enabled:
             self._start_watchdog()
+
+        # Optional polling-based fallback for environments where filesystem
+        # events are not reliably delivered (for example some Docker or
+        # network filesystems). When enabled, this runs alongside watchdog and
+        # is further rate-limited by the reload debouncing in
+        # _reload_hosts_from_watchdog.
+        if self._poll_interval > 0.0:
+            self._poll_stop = threading.Event()
+            self._start_polling()
 
     def _normalize_paths(
         self, file_paths: Optional[Iterable[str]], legacy: Optional[str]
@@ -358,6 +385,135 @@ class EtcHosts(BasePlugin):
         observer.start()
         self._observer = observer
 
+    def _start_polling(self) -> None:
+        """Brief: Start a stat-based polling loop to detect hosts file changes.
+
+        Inputs:
+          - None (uses self.file_paths and self._poll_interval)
+        Outputs:
+          - None
+
+        Example:
+          Called from setup() when ``watchdog_poll_interval_seconds`` is > 0.
+        """
+        if self._poll_interval <= 0.0:
+            return
+
+        stop_event = getattr(self, "_poll_stop", None)
+        if stop_event is None:
+            # If no stop event is configured, do not start polling to avoid
+            # leaking an unmanaged thread.
+            return
+
+        thread = threading.Thread(target=self._poll_loop, name="EtcHostsPoller")
+        thread.daemon = True
+        thread.start()
+        self._poll_thread = thread
+
+    def _poll_loop(self) -> None:
+        """Brief: Background loop that periodically checks for file changes.
+
+        Inputs:
+          - None
+        Outputs:
+          - None
+        """
+        stop_event = getattr(self, "_poll_stop", None)
+        interval = getattr(self, "_poll_interval", 0.0)
+        if stop_event is None or interval <= 0.0:
+            return
+
+        while not stop_event.is_set():
+            try:
+                if self._have_files_changed():
+                    self._reload_hosts_from_watchdog()
+            except Exception:  # pragma: no cover - defensive logging
+                logger.warning("Error during hosts polling loop", exc_info=True)
+
+            # Wait with wakeup on stop event or timeout.
+            stop_event.wait(interval)
+
+    def _have_files_changed(self) -> bool:
+        """Brief: Detect whether any configured hosts files have changed on disk.
+
+        Inputs:
+          - None (uses self.file_paths)
+        Outputs:
+          - bool: True if the current stat snapshot differs from the last one.
+
+        Example:
+          First invocation after setup() returns True and records baseline
+          snapshot; subsequent calls only return True when a file's inode,
+          size, or mtime changes.
+        """
+        snapshot = []
+        for fp in self.file_paths:
+            try:
+                st = os.stat(fp)
+            except FileNotFoundError:
+                snapshot.append((fp, None))
+            except OSError:
+                # Other OS-level errors are logged but do not crash the poller.
+                logger.warning("Failed to stat hosts file %s", fp, exc_info=True)
+                snapshot.append((fp, None))
+            else:
+                snapshot.append((fp, (st.st_ino, st.st_size, st.st_mtime)))
+
+        last = getattr(self, "_last_stat_snapshot", None)
+        if last is None or snapshot != last:
+            self._last_stat_snapshot = snapshot
+            return True
+        return False
+
+    def _schedule_debounced_reload(self, delay: float) -> None:
+        """Brief: Schedule a one-shot deferred reload after a minimum interval.
+
+        Inputs:
+          - delay: Seconds to wait before attempting the reload.
+
+        Outputs:
+          - None
+
+        Example:
+          Called internally when multiple watchdog events arrive within
+          ``watchdog_min_interval_seconds``; coalesces them into a single
+          reload instead of dropping later changes.
+        """
+        if delay <= 0.0:
+            # If there is effectively no delay, fall back to an immediate
+            # reload attempt.
+            self._reload_hosts_from_watchdog()
+            return
+
+        lock = getattr(self, "_reload_timer_lock", None)
+        if lock is None:
+            # During teardown ``close()`` may have removed timer state;
+            # in that case we simply avoid scheduling new work.
+            return
+
+        with lock:
+            timer = getattr(self, "_reload_debounce_timer", None)
+            if timer is not None and getattr(timer, "is_alive", lambda: False)():
+                # A timer is already scheduled; let it perform the reload.
+                return
+
+            def _timer_cb() -> None:
+                # Re-enter the normal reload path; by the time this fires the
+                # minimum interval will have elapsed, so the reload will be
+                # performed.
+                try:
+                    self._reload_hosts_from_watchdog()
+                except Exception:  # pragma: no cover - defensive logging
+                    logger.warning(
+                        "Error during deferred hosts reload from watchdog",
+                        exc_info=True,
+                    )
+
+            timer = threading.Timer(delay, _timer_cb)
+            timer.daemon = True
+            self._reload_debounce_timer = timer
+            timer.start()
+
     def _reload_hosts_from_watchdog(self) -> None:
         """Brief: Safely reload hosts mapping in response to watchdog events.
 
@@ -371,18 +527,25 @@ class EtcHosts(BasePlugin):
             ``watchdog_min_interval_seconds``) to avoid continuous reload
             loops when the act of reading the hosts file itself generates
             further filesystem events.
+          - When multiple events arrive within the minimum interval, schedules
+            a single deferred reload instead of dropping the later events.
         """
         now = time.time()
-        # Fast path: skip if we reloaded very recently. This protects against
-        # tight feedback loops from our own reads without significantly
-        # delaying legitimate updates.
-        if now - getattr(self, "_last_watchdog_reload_ts", 0.0) < getattr(
-            self, "_watchdog_min_interval", 1.0
-        ):
+        last_ts = getattr(self, "_last_watchdog_reload_ts", 0.0)
+        min_interval = getattr(self, "_watchdog_min_interval", 1.0)
+        elapsed = now - last_ts
+
+        # Fast path: if we reloaded very recently, schedule a deferred reload
+        # instead of skipping outright. This coalesces rapid events while still
+        # ensuring that at least one reload happens after the interval.
+        if elapsed < min_interval:
+            remaining = max(min_interval - elapsed, 0.0)
             logger.debug(
-                "Skipping hosts reload; last reload was %.3fs ago",
-                now - self._last_watchdog_reload_ts,
+                "Deferring hosts reload for %.3fs; last reload was %.3fs ago",
+                remaining,
+                elapsed,
             )
+            self._schedule_debounced_reload(remaining)
             return
 
         self._last_watchdog_reload_ts = now
@@ -402,11 +565,36 @@ class EtcHosts(BasePlugin):
           - None
         """
         observer = getattr(self, "_observer", None)
-        if observer is None:
-            return
-        try:
-            observer.stop()
-            observer.join(timeout=2.0)
-        except Exception:  # pragma: no cover
-            pass
-        self._observer = None
+        if observer is not None:
+            try:
+                observer.stop()
+                observer.join(timeout=2.0)
+            except Exception:  # pragma: no cover
+                pass
+            self._observer = None
+
+        # Stop polling loop, if configured.
+        stop_event = getattr(self, "_poll_stop", None)
+        if stop_event is not None:
+            try:
+                stop_event.set()
+            except Exception:  # pragma: no cover
+                pass
+
+        poll_thread = getattr(self, "_poll_thread", None)
+        if poll_thread is not None:
+            try:
+                poll_thread.join(timeout=2.0)
+            except Exception:  # pragma: no cover
+                pass
+            self._poll_thread = None
+
+        # Cancel any outstanding deferred reload timer so it does not fire
+        # after resources have been torn down.
+        timer = getattr(self, "_reload_debounce_timer", None)
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:  # pragma: no cover
+                pass
+            self._reload_debounce_timer = None
