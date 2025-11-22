@@ -19,9 +19,6 @@ IGNORE_EXTS :=  .yaml .yml
 run: build
 	. ${VENV}/bin/activate
 	mkdir var 2>/dev/null || true
-	black .
-	ruff check --fix .
-	isort .
 	${VENV}/bin/foghorn --config config/config.yaml
 
 
@@ -36,7 +33,12 @@ env:
 .PHONY: build
 build: env
 	@echo "=== Installing project witout dev tool (env-dev) ==="
-	$(VENV)/bin/pip install -e "."
+	$(VENV)/bin/pip install -e ".[dev]"
+	$(VENV)/bin/pip install black ruff isort
+	${VENV}/bin/black src/ tests/
+	${VENV}/bin/ruff check --fix . src/ tests/
+	${VENV}/bin/isort . src/ test/
+
 
 .PHONY: env-dev
 env-dev:
