@@ -45,7 +45,7 @@ env-dev:
 # ------------------------------------------------------------
 .PHONY: test tests
 tests: test
-test: build
+test: env build
 	@echo "=== Running tests (short) ==="
 	source ${VENV}/bin/activate || true   # ignore error if it already exists
 	${VENV}/bin/pytest --cov=foghorn --disable-warnings tests
@@ -57,7 +57,7 @@ test: build
 .PHONY: clean
 clean:
 	@echo "=== Removing virtual environment and var directory ==="
-	rm -rf $(VENV) var build
+	rm -rf $(VENV) var build docker-build
 	@echo "=== Removing temporary files and byte‑code ==="
 	# Delete __pycache__ directories
 	find . -type d -name "__pycache__" -exec rm -rf {} +;
@@ -74,11 +74,13 @@ docker: docker-build docker-run docker-logs
 
 .PHONY: docker-build
 docker-build: docker-clean
-	docker build . -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	rsync -Pvzr --exclude='*/__pycache__/*' --delete-during ./entrypoint.sh ./*md ./src ./html ./Makefile ./pyproject.toml ./Dockerfile ./docker-compose.yaml docker-build
+	docker build ./docker-build -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-clean
 docker-clean:
 	docker rmi -f ${PREFIX}/${CONTAINER_NAME}:${TAG} || true
+	rm -rf docker-build || true
 
 .PHONY: docker-run
 docker-run: docker build
@@ -88,6 +90,7 @@ docker-run: docker build
 
 .PHONY: docker-logs
 docker-logs:
+	. ${VENV}/bin/activate
 	docker logs -f foghorn
 
 .PHONY: dev-ship
@@ -100,12 +103,12 @@ dev-ship: clean docker-build
 .PHONY: help
 help:
 	@echo "Makefile targets:"
-	@echo "  run	    – Execute foghorn --config config/config.yaml (depends on build)"
-	@echo "  env	    – Create virtual environment in $(VENV)"
-	@echo "  build	  – Install project in editable mode (with dev dependencies) into $(VENV)"
-	@echo "  test	   – Run pytest with coverage"
-	@echo "  clean	  – Remove venv/, var/, build/, and temp files"
-	@echo "  docker	 – Clean image, build it, run container, then follow logs"
+	@echo "  run	        – Execute foghorn --config config/config.yaml (depends on build)"
+	@echo "  env	        – Create virtual environment in $(VENV)"
+	@echo "  build          – Install project in editable mode (with dev dependencies) into $(VENV)"
+	@echo "  test	        – Run pytest with coverage"
+	@echo "  clean	        – Remove venv/, var/, build/, and temp files"
+	@echo "  docker	        – Clean image, build it, run container, then follow logs"
 	@echo "  docker-build   – Build docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
 	@echo "  docker-clean   – Remove docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
 	@echo "  docker-run     – Run docker container (ports 53/udp, 53/tcp, 8053/tcp)"
