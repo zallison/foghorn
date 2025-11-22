@@ -6,7 +6,9 @@ WORKDIR /foghorn
 
 # Install python3-pip
 RUN DEBIAN_FRONTEND=noninteractive apt update && \
-    DEBIAN_FRONTEND=noninteractive apt install -y python3-pip
+    DEBIAN_FRONTEND=noninteractive apt install -y python3-pip && \
+    DEBIAN_FRONTEND=noninteractive apt clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # So we can cache this layer.
 RUN pip install --root-user-action=ignore -U dnslib requests PyYAML whois lxml httpx dnspython watchdog fastapi uvicorn pytest pytest-cov psutil watchdog cachetools
