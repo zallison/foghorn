@@ -188,9 +188,27 @@ class EtcHosts(BasePlugin):
                         )
 
                     ip = parts[0]
+
+                    # When adding an IPv4 address, also create the corresponding
+                    # in-addr.arpa reverse mapping so reverse lookups can be
+                    # resolved from the same hosts data.
+                    reverse_name: Optional[str] = None
+                    if ":" not in ip and "." in ip:
+                        octets = ip.split(".")
+                        if len(octets) == 4 and all(o.isdigit() for o in octets):
+                            try:
+                                if all(0 <= int(o) <= 255 for o in octets):
+                                    reverse_name = (
+                                        ".".join(reversed(octets)) + ".in-addr.arpa"
+                                    )
+                            except ValueError:
+                                reverse_name = None
+
                     for domain in parts[1:]:
                         # Later files override earlier ones by assignment
                         mapping[domain] = ip
+                        if reverse_name:
+                            mapping[reverse_name] = ip
 
         lock = getattr(self, "_hosts_lock", None)
         if lock is None:
