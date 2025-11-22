@@ -9,6 +9,7 @@ guaranteed thread-safety for concurrent request handling.
 from __future__ import annotations
 
 import functools
+import importlib.metadata as importlib_metadata
 import json
 import logging
 import os
@@ -20,8 +21,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
-
-import importlib.metadata as importlib_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -338,6 +337,16 @@ class StatsSnapshot:
     top_domains: Optional[List[Tuple[str, int]]]
     latency_stats: Optional[Dict[str, float]]
     latency_recent_stats: Optional[Dict[str, float]] = None
+    top_upstreams: Optional[List[Tuple[str, int]]] = None
+    upstream_rcodes: Optional[Dict[str, Dict[str, int]]] = None
+    upstream_qtypes: Optional[Dict[str, Dict[str, int]]] = None
+    qtype_qnames: Optional[Dict[str, List[Tuple[str, int]]]] = None
+    # Mapping of rcode -> list of (base_domain, count) tuples representing the
+    # most frequently seen base domains per response code.
+    rcode_domains: Optional[Dict[str, List[Tuple[str, int]]]] = None
+    # Top base domains by cache outcome, derived from cache hit/miss tracking.
+    cache_hit_domains: Optional[List[Tuple[str, int]]] = None
+    cache_miss_domains: Optional[List[Tuple[str, int]]] = None
 
 
 class StatsSQLiteStore:
@@ -729,7 +738,13 @@ class StatsSQLiteStore:
             - Existing counts are cleared before recomputation.
             - Aggregation approximates the live StatsCollector behavior by
               incrementing totals, qtypes, clients, domains/subdomains,
-              rcodes, and upstreams based on each query_log row.
+              rcodes, upstreams, and upstream_qtypes based on each
+              query_log row.
+            - Upstream aggregates include both outcome and rcode in the stored
+              key so that rcodes can be associated with upstream outcomes when
+              warm-loading from the persistent store.
+            - Upstream_qtypes aggregates store "upstream_id|qtype" keys for
+              per-upstream query type breakdowns.
         """
         log = logger_obj or logger
         log.warning(
@@ -759,11 +774,29 @@ class StatsSQLiteStore:
                 # Total queries
                 self.increment_count("totals", "total_queries", 1)
 
-                # Cache hits/misses (best-effort approximation)
+                # Cache hits/misses/cache_null (best-effort approximation).
+                # These semantics mirror the live StatsCollector behavior:
+                # - "cache_hit" rows are treated as cache hits.
+                # - Pre-plugin deny/override rows ("deny_pre"/"override_pre")
+                #   are treated as "cache_null" since no cache lookup occurs.
+                # - All other statuses are treated as cache misses.
                 if status == "cache_hit":
                     self.increment_count("totals", "cache_hits", 1)
+                elif status in ("deny_pre", "override_pre"):
+                    self.increment_count("totals", "cache_null", 1)
                 else:
                     self.increment_count("totals", "cache_misses", 1)
+
+                # Per-outcome cache-domain aggregates using base domains when
+                # available so that warm-loaded top lists align with the
+                # in-process StatsCollector tracking.
+                if base:
+                    if status == "cache_hit":
+                        self.increment_count("cache_hit_domains", base, 1)
+                    elif status not in ("deny_pre", "override_pre"):
+                        # Treat all non-cache_hit, non-cache_null rows as
+                        # cache misses for domain-level aggregates.
+                        self.increment_count("cache_miss_domains", base, 1)
 
                 # Qtype breakdown
                 if qtype:
@@ -779,9 +812,17 @@ class StatsSQLiteStore:
                     if base:
                         self.increment_count("domains", base, 1)
 
+                # Per-qtype domain counters for all qtypes.
+                if domain and qtype:
+                    qkey = f"{qtype}|{domain}"
+                    self.increment_count("qtype_qnames", qkey, 1)
+
                 # Rcodes
                 if rcode:
                     self.increment_count("rcodes", str(rcode), 1)
+                    if base:
+                        rkey = f"{rcode}|{base}"
+                        self.increment_count("rcode_domains", rkey, 1)
 
                 # Upstreams
                 if upstream_id:
@@ -791,8 +832,18 @@ class StatsSQLiteStore:
                         status and status not in ("ok", "cache_hit")
                     ):
                         outcome = str(status or "error")
-                    key = f"{upstream_id}|{outcome}"
+
+                    # Include rcode in the upstream key so that we can
+                    # reconstruct both outcome and rcode aggregates when
+                    # warm-loading from the persistent store.
+                    rcode_key = str(rcode or "UNKNOWN")
+                    key = f"{upstream_id}|{outcome}|{rcode_key}"
                     self.increment_count("upstreams", key, 1)
+
+                    # Track per-upstream qtype breakdowns as "upstream_id|qtype".
+                    if qtype:
+                        qt_key = f"{upstream_id}|{qtype}"
+                        self.increment_count("upstream_qtypes", qt_key, 1)
 
             # Ensure any batched operations are flushed.
             if self._batch_writes:
@@ -978,6 +1029,16 @@ class StatsCollector:
             lambda: defaultdict(int)
         )
 
+        # Upstream response codes: upstream_id -> {rcode -> count}
+        self._upstream_rcodes: Dict[str, Dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
+
+        # Upstream query types: upstream_id -> {qtype -> count}
+        self._upstream_qtypes: Dict[str, Dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
+
         # Optional: unique tracking
         self._unique_clients: Optional[Set[str]] = set() if track_uniques else None
         self._unique_domains: Optional[Set[str]] = set() if track_uniques else None
@@ -997,6 +1058,25 @@ class StatsCollector:
         self._top_domains: Optional[TopK] = (
             TopK(capacity=internal_capacity) if include_top_domains else None
         )
+        # Top upstreams by request volume; upstream cardinality is typically
+        # small so this is always enabled.
+        self._top_upstreams: Optional[TopK] = TopK(capacity=internal_capacity)
+
+        # Per-qtype top domains (full qnames). Keys are qtype strings such as
+        # "A", "AAAA", "PTR"; values are TopK trackers of normalized domains.
+        self._top_qtype_qnames: Dict[str, TopK] = {}
+
+        # Top base domains split by cache outcome.
+        self._top_cache_hit_domains: Optional[TopK] = (
+            TopK(capacity=internal_capacity) if include_top_domains else None
+        )
+        self._top_cache_miss_domains: Optional[TopK] = (
+            TopK(capacity=internal_capacity) if include_top_domains else None
+        )
+
+        # Per-rcode top base domains; trackers are created lazily when rcodes
+        # are observed with associated query names.
+        self._top_rcode_domains: Dict[str, TopK] = {}
 
         # Optional: latency histogram
         self._latency: Optional[LatencyHistogram] = (
@@ -1060,6 +1140,14 @@ class StatsCollector:
                 base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
                 self._top_domains.add(base)
 
+            # Per-qtype top domains (full qnames) for all observed qtypes.
+            if self.include_top_domains and qtype:
+                tracker = self._top_qtype_qnames.get(qtype)
+                if tracker is None:
+                    tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                    self._top_qtype_qnames[qtype] = tracker
+                tracker.add(domain)
+
             # Mirror core counters into the persistent store when available.
             if self._store is not None:
                 try:
@@ -1069,6 +1157,11 @@ class StatsCollector:
                     self._store.increment_count("clients", client_ip)
                     self._store.increment_count("sub_domains", domain)
                     self._store.increment_count("domains", base)
+                    # Persist per-qtype domain counts as "qtype|domain" so they
+                    # can be reconstructed on warm-load and via rebuild scripts.
+                    if qtype and domain:
+                        qkey = f"{qtype}|{domain}"
+                        self._store.increment_count("qtype_qnames", qkey)
                 except Exception:  # pragma: no cover - defensive
                     logger.debug(
                         "StatsCollector: failed to persist query counters",
@@ -1088,11 +1181,23 @@ class StatsCollector:
             >>> collector = StatsCollector()
             >>> collector.record_cache_hit("example.com")
         """
+        # Normalize to base domain so cache statistics align with other
+        # domain-oriented top lists.
+        domain = _normalize_domain(qname)
+        parts = domain.split(".") if domain else []
+        base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
+
         with self._lock:
             self._totals["cache_hits"] += 1
+
+            if self._top_cache_hit_domains is not None and base:
+                self._top_cache_hit_domains.add(base)
+
             if self._store is not None:
                 try:
                     self._store.increment_count("totals", "cache_hits")
+                    if base:
+                        self._store.increment_count("cache_hit_domains", base)
                 except Exception:  # pragma: no cover - defensive
                     logger.debug(
                         "StatsCollector: failed to persist cache_hit", exc_info=True
@@ -1111,14 +1216,50 @@ class StatsCollector:
             >>> collector = StatsCollector()
             >>> collector.record_cache_miss("example.com")
         """
+        domain = _normalize_domain(qname)
+        parts = domain.split(".") if domain else []
+        base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
+
         with self._lock:
             self._totals["cache_misses"] += 1
+
+            if self._top_cache_miss_domains is not None and base:
+                self._top_cache_miss_domains.add(base)
+
             if self._store is not None:
                 try:
                     self._store.increment_count("totals", "cache_misses")
+                    if base:
+                        self._store.increment_count("cache_miss_domains", base)
                 except Exception:  # pragma: no cover - defensive
                     logger.debug(
                         "StatsCollector: failed to persist cache_miss", exc_info=True
+                    )
+
+    def record_cache_null(self, qname: str) -> None:
+        """Record a response served directly by plugins without cache usage.
+
+        Inputs:
+            qname: Query domain name associated with the plugin-handled response.
+
+        Outputs:
+            None
+
+        Example:
+            >>> collector = StatsCollector()
+            >>> collector.record_cache_null("example.com")
+        """
+        _normalize_domain(qname)
+
+        with self._lock:
+            self._totals["cache_null"] += 1
+
+            if self._store is not None:
+                try:
+                    self._store.increment_count("totals", "cache_null")
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "StatsCollector: failed to persist cache_null", exc_info=True
                     )
 
     def set_ignore_filters(
@@ -1271,6 +1412,7 @@ class StatsCollector:
         outcome: str,
         bytes_out: Optional[int] = None,
         bytes_in: Optional[int] = None,
+        qtype: Optional[str] = None,
     ) -> None:
         """
         Record upstream resolution outcome.
@@ -1287,40 +1429,85 @@ class StatsCollector:
         Example:
             >>> collector = StatsCollector()
             >>> collector.record_upstream_result("8.8.8.8:53", "success")
-            >>> collector.record_upstream_result("1.1.1.1:53", "timeout")
+            >>> collector.record_upstream_result("1.1.1.1:53", "timeout", qtype="A")
         """
         with self._lock:
             self._upstreams[upstream_id][outcome] += 1
+            if qtype:
+                self._upstream_qtypes[upstream_id][qtype] += 1
+            if self._top_upstreams is not None:
+                self._top_upstreams.add(upstream_id)
             if self._store is not None:
                 try:
                     key = f"{upstream_id}|{outcome}"
                     self._store.increment_count("upstreams", key)
+                    if qtype:
+                        qt_key = f"{upstream_id}|{qtype}"
+                        self._store.increment_count("upstream_qtypes", qt_key)
                 except Exception:  # pragma: no cover - defensive
                     logger.debug(
                         "StatsCollector: failed to persist upstream result",
                         exc_info=True,
                     )
 
-    def record_response_rcode(self, rcode: str) -> None:
-        """
-        Record DNS response code.
+    def record_upstream_rcode(self, upstream_id: str, rcode: str) -> None:
+        """Record DNS response code grouped by upstream identifier.
 
         Inputs:
-            rcode: Response code ("NOERROR", "NXDOMAIN", "SERVFAIL", etc.)
+            upstream_id: Upstream identifier (e.g., "8.8.8.8:53").
+            rcode: Response code ("NOERROR", "NXDOMAIN", "SERVFAIL", etc.).
 
         Outputs:
             None
 
         Example:
             >>> collector = StatsCollector()
-            >>> collector.record_response_rcode("NOERROR")
+            >>> collector.record_upstream_rcode("8.8.8.8:53", "NOERROR")
+        """
+
+        with self._lock:
+            self._upstream_rcodes[upstream_id][rcode] += 1
+
+    def record_response_rcode(self, rcode: str, qname: Optional[str] = None) -> None:
+        """Record DNS response code.
+
+        Inputs:
+            rcode: Response code ("NOERROR", "NXDOMAIN", "SERVFAIL", etc.)
+            qname: Optional query name used to attribute rcodes to base domains
+                for per-rcode top-domain statistics.
+
+        Outputs:
+            None
+
+        Example:
+            >>> collector = StatsCollector()
+            >>> collector.record_response_rcode("NOERROR", qname="example.com")
             >>> collector.record_response_rcode("NXDOMAIN")
         """
+        base: Optional[str] = None
+        if qname:
+            domain = _normalize_domain(qname)
+            parts = domain.split(".") if domain else []
+            base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
+
         with self._lock:
             self._rcodes[rcode] += 1
+
+            # Track per-rcode top base domains when domain information is
+            # available and domain tracking is enabled.
+            if base and self.include_top_domains:
+                tracker = self._top_rcode_domains.get(rcode)
+                if tracker is None:
+                    tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                    self._top_rcode_domains[rcode] = tracker
+                tracker.add(base)
+
             if self._store is not None:
                 try:
                     self._store.increment_count("rcodes", rcode)
+                    if base:
+                        key = f"{rcode}|{base}"
+                        self._store.increment_count("rcode_domains", key)
                 except Exception:  # pragma: no cover - defensive
                     logger.debug(
                         "StatsCollector: failed to persist rcode", exc_info=True
@@ -1450,6 +1637,16 @@ class StatsCollector:
             for upstream_id, outcomes in self._upstreams.items():
                 upstreams[upstream_id] = dict(outcomes)
 
+            # Deep copy upstream response codes
+            upstream_rcodes: Dict[str, Dict[str, int]] = {}
+            for upstream_id, rcodes_map in self._upstream_rcodes.items():
+                upstream_rcodes[upstream_id] = dict(rcodes_map)
+
+            # Deep copy upstream query types
+            upstream_qtypes: Dict[str, Dict[str, int]] = {}
+            for upstream_id, qtypes_map in self._upstream_qtypes.items():
+                upstream_qtypes[upstream_id] = dict(qtypes_map)
+
             # Unique counts
             uniques = None
             # When track_uniques is disabled, do not expose uniques even if
@@ -1480,6 +1677,13 @@ class StatsCollector:
             top_domains = None
             if self._top_domains is not None:
                 top_domains = self._top_domains.export(self._top_domains.capacity)
+
+            top_upstreams = None
+            if self._top_upstreams is not None:
+                # No ignore filters for upstreams; simply return the most
+                # active upstreams by request volume.
+                top_upstreams = self._top_upstreams.export(self._top_upstreams.capacity)
+                top_upstreams = top_upstreams[: self.top_n]
 
             # Apply display-only ignore filters to top lists. These filters do
             # not affect counters or underlying TopK state; they only hide
@@ -1558,6 +1762,47 @@ class StatsCollector:
             if top_subdomains is not None:
                 top_subdomains = top_subdomains[: self.top_n]
 
+            # Per-qtype top domains (full qnames) for configured qtypes.
+            qtype_qnames: Optional[Dict[str, List[Tuple[str, int]]]] = None
+            if self._top_qtype_qnames:
+                qtype_qnames = {}
+                for qtype_name, tracker in self._top_qtype_qnames.items():
+                    entries = tracker.export(tracker.capacity)
+                    if not entries:
+                        continue
+                    qtype_qnames[qtype_name] = entries[: self.top_n]
+                if not qtype_qnames:
+                    qtype_qnames = None
+
+            # Per-rcode top base domains for configured rcodes.
+            rcode_domains: Optional[Dict[str, List[Tuple[str, int]]]] = None
+            if self._top_rcode_domains:
+                rcode_domains = {}
+                for rcode_name, tracker in self._top_rcode_domains.items():
+                    entries = tracker.export(tracker.capacity)
+                    if not entries:
+                        continue
+                    rcode_domains[rcode_name] = entries[: self.top_n]
+                if not rcode_domains:
+                    rcode_domains = None
+
+            # Top base domains split by cache outcome.
+            cache_hit_domains: Optional[List[Tuple[str, int]]] = None
+            if self._top_cache_hit_domains is not None:
+                entries = self._top_cache_hit_domains.export(
+                    self._top_cache_hit_domains.capacity
+                )
+                if entries:
+                    cache_hit_domains = entries[: self.top_n]
+
+            cache_miss_domains: Optional[List[Tuple[str, int]]] = None
+            if self._top_cache_miss_domains is not None:
+                entries = self._top_cache_miss_domains.export(
+                    self._top_cache_miss_domains.capacity
+                )
+                if entries:
+                    cache_miss_domains = entries[: self.top_n]
+
             # Latency
             latency_stats = None
             if self._latency is not None:
@@ -1580,6 +1825,13 @@ class StatsCollector:
                 top_domains=top_domains,
                 latency_stats=latency_stats,
                 latency_recent_stats=latency_recent_stats,
+                top_upstreams=top_upstreams,
+                upstream_rcodes=upstream_rcodes,
+                upstream_qtypes=upstream_qtypes,
+                qtype_qnames=qtype_qnames,
+                rcode_domains=rcode_domains,
+                cache_hit_domains=cache_hit_domains,
+                cache_miss_domains=cache_miss_domains,
             )
 
             # Reset if requested
@@ -1591,6 +1843,9 @@ class StatsCollector:
                 self._allowed_by.clear()
                 self._blocked_by.clear()
                 self._upstreams.clear()
+                self._upstream_rcodes.clear()
+                self._upstream_qtypes.clear()
+                self._top_qtype_qnames.clear()
 
                 if self._unique_clients is not None:
                     self._unique_clients.clear()
@@ -1603,6 +1858,13 @@ class StatsCollector:
                     self._top_subdomains.counts.clear()
                 if self._top_domains is not None:
                     self._top_domains.counts.clear()
+                if self._top_upstreams is not None:
+                    self._top_upstreams.counts.clear()
+                if self._top_cache_hit_domains is not None:
+                    self._top_cache_hit_domains.counts.clear()
+                if self._top_cache_miss_domains is not None:
+                    self._top_cache_miss_domains.counts.clear()
+                self._top_rcode_domains.clear()
 
                 if self._latency is not None:
                     self._latency = LatencyHistogram()
@@ -1673,6 +1935,44 @@ class StatsCollector:
                 if isinstance(outcomes, dict):
                     self._upstreams[upstream_id] = defaultdict(int, outcomes)
 
+            # Upstream response codes
+            self._upstream_rcodes.clear()
+            for upstream_id, rcodes_map in (snapshot.upstream_rcodes or {}).items():
+                if isinstance(rcodes_map, dict):
+                    try:
+                        self._upstream_rcodes[upstream_id] = defaultdict(
+                            int,
+                            {str(k): int(v) for k, v in rcodes_map.items()},
+                        )
+                    except Exception:
+                        continue
+
+            # Upstream query types
+            self._upstream_qtypes.clear()
+            for upstream_id, qtypes_map in (snapshot.upstream_qtypes or {}).items():
+                if isinstance(qtypes_map, dict):
+                    try:
+                        self._upstream_qtypes[upstream_id] = defaultdict(
+                            int,
+                            {str(k): int(v) for k, v in qtypes_map.items()},
+                        )
+                    except Exception:
+                        continue
+
+            # Per-qtype top domains (full qnames)
+            self._top_qtype_qnames.clear()
+            if snapshot.qtype_qnames:
+                for qtype_name, entries in snapshot.qtype_qnames.items():
+                    if not entries:
+                        continue
+                    tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                    for domain, count in entries:
+                        try:
+                            tracker.counts[str(domain)] = int(count)
+                        except (TypeError, ValueError):
+                            continue
+                    self._top_qtype_qnames[qtype_name] = tracker
+
     def warm_load_from_store(self) -> None:
         """Warm-load core counters from the attached SQLite stats store.
 
@@ -1696,7 +1996,9 @@ class StatsCollector:
               store is not configured or an error occurs, the collector simply
               starts from empty in-memory counters.
             - Only scopes known to StatsCollector (totals, rcodes, qtypes,
-              clients, sub_domains, domains, upstreams) are applied.
+              clients, sub_domains, domains, upstreams, upstream_qtypes,
+              qtype_qnames, cache_hit_domains, cache_miss_domains,
+              rcode_domains) are applied.
             - Top-N client/domain trackers and unique counts are approximated
               from the aggregated counts when enabled.
         """
@@ -1732,21 +2034,80 @@ class StatsCollector:
                 except (TypeError, ValueError):
                     continue
 
-            # Upstreams: keys are stored as "upstream_id|outcome".
+            # Upstreams: keys are stored as "upstream_id|outcome|rcode" in
+            # new data, but we also accept legacy "upstream_id|outcome" keys
+            # for backward compatibility.
             for key, value in counts.get("upstreams", {}).items():
+                parts = str(key).split("|")
+                if len(parts) == 3:
+                    upstream_id, outcome, rcode_key = parts
+                elif len(parts) == 2:
+                    # Legacy format without rcode dimension.
+                    upstream_id, outcome = parts
+                    rcode_key = None
+                else:
+                    continue
+
                 try:
-                    upstream_id, outcome = str(key).split("|", 1)
+                    int_value = int(value)
+                except (TypeError, ValueError):
+                    continue
+
+                # Always restore outcome-based upstream aggregates.
+                self._upstreams[upstream_id][outcome] = int_value
+
+                # When rcode is present in the key, also rebuild
+                # per-upstream rcode aggregates so that snapshot.upstream_rcodes
+                # reflects persisted history.
+                if rcode_key:
+                    self._upstream_rcodes[upstream_id][rcode_key] += int_value
+
+            # Upstream qtypes: keys are stored as "upstream_id|qtype".
+            for key, value in counts.get("upstream_qtypes", {}).items():
+                try:
+                    upstream_id, qtype = str(key).split("|", 1)
                 except ValueError:
                     continue
                 try:
-                    self._upstreams[upstream_id][outcome] = int(value)
+                    int_value = int(value)
                 except (TypeError, ValueError):
                     continue
+                self._upstream_qtypes[upstream_id][qtype] = int_value
+
+            # Per-qtype qname counters: keys are stored as "qtype|qname".
+            qtype_qname_counts: Dict[str, Dict[str, int]] = {}
+            for key, value in counts.get("qtype_qnames", {}).items():
+                try:
+                    qtype_name, qname = str(key).split("|", 1)
+                except ValueError:
+                    continue
+                try:
+                    int_value = int(value)
+                except (TypeError, ValueError):
+                    continue
+                inner = qtype_qname_counts.setdefault(qtype_name, {})
+                inner[str(qname)] = int_value
+
+            # Per-rcode base-domain counters: keys are stored as "rcode|domain".
+            rcode_domain_counts: Dict[str, Dict[str, int]] = {}
+            for key, value in counts.get("rcode_domains", {}).items():
+                try:
+                    rcode_name, dname = str(key).split("|", 1)
+                except ValueError:
+                    continue
+                try:
+                    int_value = int(value)
+                except (TypeError, ValueError):
+                    continue
+                inner = rcode_domain_counts.setdefault(rcode_name, {})
+                inner[str(dname)] = int_value
 
             # Clients/domains: rebuild uniques and top-K trackers when enabled.
             client_counts = counts.get("clients", {})
             subdomain_counts = counts.get("sub_domains", {})
             domain_counts = counts.get("domains", {})
+            cache_hit_domain_counts = counts.get("cache_hit_domains", {})
+            cache_miss_domain_counts = counts.get("cache_miss_domains", {})
 
             # Unique clients/domains are approximated from available keys.
             if self._unique_clients is not None:
@@ -1777,6 +2138,31 @@ class StatsCollector:
                 limited = dict(items[: self._top_subdomains.capacity])
                 self._top_subdomains.counts = limited
 
+            # Per-qtype top domains from qtype_qname_counts
+            if qtype_qname_counts and self.include_top_domains:
+                for qtype_name, qmap in qtype_qname_counts.items():
+                    items = sorted(
+                        ((str(k), int(v)) for k, v in qmap.items()),
+                        key=lambda kv: kv[1],
+                        reverse=True,
+                    )
+                    tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                    tracker.counts = dict(items[: tracker.capacity])
+                    self._top_qtype_qnames[qtype_name] = tracker
+
+            # Per-rcode top base domains from rcode_domain_counts.
+            if rcode_domain_counts and self.include_top_domains:
+                self._top_rcode_domains.clear()
+                for rcode_name, dmap in rcode_domain_counts.items():
+                    items = sorted(
+                        ((str(k), int(v)) for k, v in dmap.items()),
+                        key=lambda kv: kv[1],
+                        reverse=True,
+                    )
+                    tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                    tracker.counts = dict(items[: tracker.capacity])
+                    self._top_rcode_domains[rcode_name] = tracker
+
             # Top base domains
             if self._top_domains is not None and domain_counts:
                 items = sorted(
@@ -1786,6 +2172,25 @@ class StatsCollector:
                 )
                 limited = dict(items[: self._top_domains.capacity])
                 self._top_domains.counts = limited
+
+            # Top cache hit/miss base domains.
+            if self._top_cache_hit_domains is not None and cache_hit_domain_counts:
+                items = sorted(
+                    ((str(k), int(v)) for k, v in cache_hit_domain_counts.items()),
+                    key=lambda kv: kv[1],
+                    reverse=True,
+                )
+                limited = dict(items[: self._top_cache_hit_domains.capacity])
+                self._top_cache_hit_domains.counts = limited
+
+            if self._top_cache_miss_domains is not None and cache_miss_domain_counts:
+                items = sorted(
+                    ((str(k), int(v)) for k, v in cache_miss_domain_counts.items()),
+                    key=lambda kv: kv[1],
+                    reverse=True,
+                )
+                limited = dict(items[: self._top_cache_miss_domains.capacity])
+                self._top_cache_miss_domains.counts = limited
 
     def reset_latency_recent(self) -> None:
         """
@@ -1880,6 +2285,36 @@ def format_snapshot_json(snapshot: StatsSnapshot) -> str:
     if snapshot.top_domains:
         output["top_domains"] = [
             {"domain": d, "count": n} for d, n in snapshot.top_domains
+        ]
+
+    if snapshot.top_upstreams:
+        output["top_upstreams"] = [
+            {"upstream": u, "count": n} for u, n in snapshot.top_upstreams
+        ]
+
+    if snapshot.upstream_rcodes:
+        output["upstream_rcodes"] = snapshot.upstream_rcodes
+
+    if snapshot.upstream_qtypes:
+        output["upstream_qtypes"] = snapshot.upstream_qtypes
+
+    if snapshot.qtype_qnames:
+        output["qtype_qnames"] = snapshot.qtype_qnames
+
+    if snapshot.rcode_domains:
+        output["rcode_domains"] = {
+            rcode: [{"domain": d, "count": n} for d, n in entries]
+            for rcode, entries in snapshot.rcode_domains.items()
+        }
+
+    if snapshot.cache_hit_domains:
+        output["cache_hit_domains"] = [
+            {"domain": d, "count": n} for d, n in snapshot.cache_hit_domains
+        ]
+
+    if snapshot.cache_miss_domains:
+        output["cache_miss_domains"] = [
+            {"domain": d, "count": n} for d, n in snapshot.cache_miss_domains
         ]
 
     if snapshot.latency_stats:

@@ -244,13 +244,16 @@ def test_stats_collector_warm_load_from_store_uses_counts(tmp_path: Path) -> Non
         store.increment_count("rcodes", "NOERROR", delta=2)
         store.increment_count("qtypes", "A", delta=3)
         store.increment_count("upstreams", "8.8.8.8:53|success", delta=1)
+        store.increment_count("upstream_qtypes", "8.8.8.8:53|A", delta=3)
+        store.increment_count("qtype_qnames", "A|example.com", delta=3)
 
         # Create collector wired to the store and warm-load from counts.
         collector = StatsCollector(
             track_uniques=True,
             include_qtype_breakdown=True,
             include_top_clients=False,
-            include_top_domains=False,
+            include_top_domains=True,
+            top_n=5,
             track_latency=False,
             stats_store=store,
         )
@@ -269,6 +272,9 @@ def test_stats_collector_warm_load_from_store_uses_counts(tmp_path: Path) -> Non
         assert snap.qtypes["A"] == 3
         # Upstreams use nested mapping upstream_id -> {outcome -> count}.
         assert snap.upstreams["8.8.8.8:53"]["success"] == 1
+        # Per-qtype qname counts should warm-load into qtype_qnames.
+        assert snap.qtype_qnames is not None
+        assert "A" in snap.qtype_qnames
     finally:
         store.close()
 

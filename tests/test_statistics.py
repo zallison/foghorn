@@ -133,6 +133,15 @@ class TestStatsCollector:
         assert snapshot.totals["cache_hits"] == 1
         assert snapshot.totals["cache_misses"] == 1
 
+    def test_cache_null_counter(self):
+        """cache_null responses tracked separately from cache hits/misses."""
+        collector = StatsCollector()
+        collector.record_cache_null("plugin.example")
+        snapshot = collector.snapshot()
+        assert snapshot.totals["cache_null"] == 1
+        assert snapshot.totals.get("cache_hits", 0) == 0
+        assert snapshot.totals.get("cache_misses", 0) == 0
+
     def test_plugin_decisions(self):
         """Plugin decisions tracked with action and reason."""
         collector = StatsCollector()
@@ -156,6 +165,46 @@ class TestStatsCollector:
         snapshot = collector.snapshot()
         assert snapshot.upstreams["8.8.8.8:53"]["success"] == 2
         assert snapshot.upstreams["1.1.1.1:53"]["timeout"] == 1
+
+    def test_top_upstreams_and_rcodes(self):
+        """Top upstreams and per-upstream rcodes are tracked."""
+        collector = StatsCollector(include_top_domains=True, top_n=5)
+        # Mix of outcomes to drive upstream counters and TopK.
+        collector.record_upstream_result("8.8.8.8:53", "success", qtype="A")
+        collector.record_upstream_result("8.8.8.8:53", "timeout", qtype="AAAA")
+        collector.record_upstream_result("1.1.1.1:53", "success", qtype="A")
+
+        # Attribute a couple of rcodes to the primary upstream.
+        collector.record_upstream_rcode("8.8.8.8:53", "NOERROR")
+        collector.record_upstream_rcode("8.8.8.8:53", "SERVFAIL")
+
+        snapshot = collector.snapshot()
+        assert snapshot.top_upstreams is not None
+        # 8.8.8.8:53 should be the most frequently used upstream.
+        assert snapshot.top_upstreams[0][0] == "8.8.8.8:53"
+        assert snapshot.upstream_rcodes is not None
+        assert snapshot.upstream_rcodes["8.8.8.8:53"]["NOERROR"] == 1
+        assert snapshot.upstream_rcodes["8.8.8.8:53"]["SERVFAIL"] == 1
+        # Qtype-by-upstream counts should be tracked.
+        assert snapshot.upstream_qtypes is not None
+        assert snapshot.upstream_qtypes["8.8.8.8:53"]["A"] == 1
+        assert snapshot.upstream_qtypes["8.8.8.8:53"]["AAAA"] == 1
+
+    def test_qtype_qnames_top_domains(self):
+        """Per-qtype top domains (qnames) are tracked for multiple qtypes."""
+        collector = StatsCollector(include_top_domains=True, top_n=3)
+        # A/AAAA/PTR/TXT/SRV should be included (and other qtypes when seen).
+        collector.record_query("192.0.2.1", "example.com", "A")
+        collector.record_query("192.0.2.2", "example.com", "AAAA")
+        collector.record_query("192.0.2.3", "ptr.example.com", "PTR")
+        collector.record_query("192.0.2.4", "txt.example.com", "TXT")
+        collector.record_query("192.0.2.5", "srv.example.com", "SRV")
+
+        snapshot = collector.snapshot()
+        assert snapshot.qtype_qnames is not None
+        for qtype in ["A", "AAAA", "PTR", "TXT", "SRV"]:
+            assert qtype in snapshot.qtype_qnames
+            assert isinstance(snapshot.qtype_qnames[qtype], list)
 
     def test_response_rcodes(self):
         """Response codes tracked."""
