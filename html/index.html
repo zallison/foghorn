@@ -253,6 +253,31 @@
                  return y + '-' + m + '-' + d + ' ' + hh + ':' + mm + ':' + ss;
              }
 
+             function formatDurationSeconds(value) {
+                 if (value == null) {
+                     return null;
+                 }
+                 var n = Number(value);
+                 if (!isFinite(n) || n < 0) {
+                     return String(value);
+                 }
+                 var total = Math.floor(n);
+                 var days = Math.floor(total / 86400);
+                 var rem = total % 86400;
+                 var hours = Math.floor(rem / 3600);
+                 rem = rem % 3600;
+                 var minutes = Math.floor(rem / 60);
+                 var seconds = rem % 60;
+                 function pad2(num) {
+                     return num < 10 ? '0' + num : String(num);
+                 }
+                 var hms = pad2(hours) + ':' + pad2(minutes) + ':' + pad2(seconds);
+                 if (days > 0) {
+                     return days + 'd ' + hms;
+                 }
+                 return hms;
+             }
+
              function clearStatsGroups() {
                  while (statsGroupsEl.firstChild) {
                      statsGroupsEl.removeChild(statsGroupsEl.firstChild);
@@ -656,6 +681,9 @@
                      delete meta.server_time;
                      if (createdFormatted !== null) {
                          meta.created_at = createdFormatted;
+                     }
+                     if (meta.uptime !== undefined && meta.uptime !== null) {
+                         meta.uptime = formatDurationSeconds(meta.uptime);
                      }
                  }
 
