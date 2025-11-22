@@ -304,6 +304,7 @@ def _start_doh_server_threaded(
 
     def _serve() -> None:
         try:
+
             httpd.serve_forever()
         except Exception:  # pragma: no cover - unexpected runtime error
             logger.exception("Unhandled exception in threaded DoH server")

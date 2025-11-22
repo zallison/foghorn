@@ -942,7 +942,11 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             # Record upstream result
             upstream_id: Optional[str] = None
             if self.stats_collector and used_upstream:
-                upstream_id = f"{used_upstream['host']}:{used_upstream['port']}"
+                if "url" in used_upstream:
+                    upstream_id = "f{url}"
+                else:
+                    upstream_id = f"{used_upstream['host']}:{used_upstream['port']}"
+
                 outcome = "success" if reason == "ok" else reason
                 self.stats_collector.record_upstream_result(upstream_id, outcome)
 
