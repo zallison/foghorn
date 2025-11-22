@@ -346,8 +346,7 @@
                  addMemRow('Memory used', memTotalUsed);
                  addMemRow('Memory available', memTotalAvail);
                  addMemRow('Buffer and Cache', memTotal - memTotalUsed - memTotalAvail);
-                 addMemRow('', '<hr />');
-                 addMemRow('', memTotalFree);
+                 addMemRow('Free Memory', memTotalFree);
 
                  var loadKeys = ['load_1m', 'load_5m', 'load_15m'];
                  loadKeys.forEach(function (key) {
