@@ -2,9 +2,9 @@ import types
 
 import pytest
 
+import foghorn.webserver as webserver
 from foghorn.stats import StatsCollector
 from foghorn.webserver import RingBuffer, create_app
-import foghorn.webserver as webserver
 
 
 def _reset_system_info_cache() -> None:

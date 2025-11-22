@@ -14,7 +14,9 @@ server, keeping them fast and deterministic.
 
 from __future__ import annotations
 
+import json
 import logging
+import threading
 
 from fastapi.testclient import TestClient
 
@@ -218,6 +220,160 @@ def test_stats_and_traffic_with_collector() -> None:
     assert "qtypes" in traffic_data
     # Latency section may be present but count can be 0 if not recorded explicitly
     assert "latency" in traffic_data
+
+
+def test_stats_includes_top_upstreams_and_upstream_rcodes() -> None:
+    """Brief: /stats must expose top_upstreams, upstream_rcodes, upstream_qtypes, and qtype_qnames fields.
+
+    Inputs:
+      - StatsCollector with some upstream results and per-upstream rcodes.
+
+    Outputs:
+      - /stats JSON contains top_upstreams list, upstream_rcodes mapping,
+        upstream_qtypes mapping keyed by upstream_id, and qtype_qnames mapping
+        keyed by qtype.
+    """
+
+    collector = StatsCollector(
+        track_uniques=False,
+        include_qtype_breakdown=False,
+        include_top_domains=True,
+        top_n=5,
+    )
+    # Record a couple of queries so qtype_qnames has data for /stats.
+    collector.record_query("192.0.2.1", "example.com", "A")
+    collector.record_query("192.0.2.2", "example.com", "AAAA")
+
+    collector.record_upstream_result("8.8.8.8:53", "success", qtype="A")
+    collector.record_upstream_result("1.1.1.1:53", "timeout", qtype="AAAA")
+    collector.record_upstream_rcode("8.8.8.8:53", "NOERROR")
+
+    app = create_app(
+        stats=collector,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+    )
+    client = TestClient(app)
+
+    resp = client.get("/stats")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert "top_upstreams" in data
+    assert any(u[0] == "8.8.8.8:53" for u in data["top_upstreams"])
+
+    assert "upstream_rcodes" in data
+    assert data["upstream_rcodes"]["8.8.8.8:53"]["NOERROR"] == 1
+
+    assert "upstream_qtypes" in data
+    assert data["upstream_qtypes"]["8.8.8.8:53"]["A"] == 1
+
+    assert "qtype_qnames" in data
+    assert "A" in data["qtype_qnames"]
+
+
+def test_stats_fastapi_and_threaded_payloads_match(monkeypatch) -> None:
+    """Brief: /stats JSON from FastAPI and threaded HTTP servers must match in shape and values.
+
+    Inputs:
+      - StatsCollector with representative data (queries, upstreams, qtype_qnames, etc.).
+
+    Outputs:
+      - FastAPI /stats JSON equals threaded /stats JSON after accounting for trivial
+        differences (e.g., server_time timestamp field).
+    """
+
+    import foghorn.webserver as web_mod
+
+    # Build a collector with enough data to exercise the rich stats fields.
+    collector = StatsCollector(
+        track_uniques=True,
+        include_qtype_breakdown=True,
+        include_top_clients=True,
+        include_top_domains=True,
+        top_n=5,
+        track_latency=True,
+    )
+    # Queries to populate totals/qtypes/uniques/top lists/qtype_qnames.
+    collector.record_query("192.0.2.1", "example.com", "A")
+    collector.record_query("192.0.2.2", "example.com", "AAAA")
+    collector.record_query("192.0.2.3", "ptr.example.com", "PTR")
+    collector.record_response_rcode("NOERROR", qname="example.com")
+    collector.record_response_rcode("NXDOMAIN", qname="nx.example.com")
+
+    # Upstream stats so that top_upstreams, upstream_rcodes, upstream_qtypes are present.
+    collector.record_upstream_result("8.8.8.8:53", "success", qtype="A")
+    collector.record_upstream_result("1.1.1.1:53", "timeout", qtype="AAAA")
+    collector.record_upstream_rcode("8.8.8.8:53", "NOERROR")
+
+    # Cache domain stats for cache_hit_domains/cache_miss_domains.
+    collector.record_cache_hit("example.com")
+    collector.record_cache_miss("other.example.com")
+
+    base_cfg = {"webserver": {"enabled": True, "auth": {"mode": "none"}}}
+
+    # ---- FastAPI /stats ----
+    app = create_app(stats=collector, config=base_cfg, log_buffer=RingBuffer())
+    fastapi_client = TestClient(app)
+    fastapi_resp = fastapi_client.get("/stats")
+    assert fastapi_resp.status_code == 200
+    fastapi_data = fastapi_resp.json()
+
+    # ---- Threaded HTTP /stats ----
+    # Build a threaded admin server and send a real HTTP request to /stats.
+    httpd = web_mod._AdminHTTPServer(
+        ("127.0.0.1", 0),
+        web_mod._ThreadedAdminRequestHandler,
+        stats=collector,
+        config=base_cfg,
+        log_buffer=RingBuffer(),
+        config_path=None,
+    )
+
+    host, port = httpd.server_address
+
+    def _serve_once() -> None:
+        try:
+            httpd.handle_request()
+        except Exception:
+            httpd.server_close()
+            raise
+
+    t = threading.Thread(target=_serve_once, daemon=True)
+    t.start()
+
+    import http.client
+
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    try:
+        conn.request("GET", "/stats")
+        resp = conn.getresponse()
+        assert resp.status == 200
+        body = resp.read().decode("utf-8")
+    finally:
+        conn.close()
+        httpd.server_close()
+        t.join(timeout=1.0)
+
+    threaded_data = json.loads(body)
+
+    # Normalize expected non-deterministic fields.
+    def _normalize(payload: dict) -> dict:
+        cleaned = dict(payload)
+        # server_time and created_at can legitimately differ; drop them.
+        cleaned.pop("server_time", None)
+        cleaned.pop("created_at", None)
+        # meta may contain timestamps; drop it entirely for shape/value comparison.
+        cleaned.pop("meta", None)
+        return cleaned
+
+    norm_fast = _normalize(fastapi_data)
+    norm_thread = _normalize(threaded_data)
+
+    # Ensure both payloads expose the exact same top-level keys.
+    assert set(norm_fast.keys()) == set(norm_thread.keys())
+    # And that all corresponding values match.
+    assert norm_fast == norm_thread
 
 
 def test_stats_debug_timings_emit_log_when_enabled(caplog) -> None:

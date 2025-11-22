@@ -133,6 +133,7 @@
                  total_queries: 'Total DNS queries handled since the collector started or was last reset.',
                  cache_hits: 'Queries answered directly from the cache.',
                  cache_misses: 'Queries that required contacting upstream servers.',
+                 cache_null: 'Responses generated directly by plugins before cache or upstream lookup.',
                  min_ms: 'Fastest observed query latency in milliseconds.',
                  max_ms: 'Slowest observed query latency in milliseconds.',
                  avg_ms: 'Average (mean) query latency in milliseconds.',
@@ -176,13 +177,37 @@
                  });
              }
 
-             function formatNumber(value) {
-                 var n = Number(value);
-                 if (!isFinite(n)) {
-                     return String(value);
-                 }
-                 return n.toLocaleString(undefined, { maximumFractionDigits: 3 });
-             }
+            function formatNumber(value) {
+                var n = Number(value);
+                if (!isFinite(n)) {
+                    return String(value);
+                }
+                var opts = { maximumFractionDigits: 3 };
+                if (Math.abs(n) > 100 && n % 1 !== 0) {
+                    opts.maximumFractionDigits = 0;
+                }
+                return n.toLocaleString(undefined, opts);
+            }
+
+            function getNumberParts(value) {
+                var n = Number(value);
+                if (!isFinite(n)) {
+                    return { intPart: String(value), decPart: '' };
+                }
+                var opts = { maximumFractionDigits: 3 };
+                if (Math.abs(n) > 100 && n % 1 !== 0) {
+                    opts.maximumFractionDigits = 0;
+                }
+                var text = n.toLocaleString('en-US', opts);
+                var dotIndex = text.indexOf('.');
+                if (dotIndex === -1) {
+                    return { intPart: text, decPart: '' };
+                }
+                return {
+                    intPart: text.slice(0, dotIndex),
+                    decPart: text.slice(dotIndex),
+                };
+            }
 
              function formatBytes(value) {
                  var n = Number(value);
@@ -280,29 +305,190 @@
                  var heading = document.createElement('h3');
                  heading.className = 'fh-stats-group-title';
                  heading.textContent = title;
+                 if (title === 'Top Upstreams') {
+                     heading.title = 'Most frequently used upstream resolvers by request count.';
+                 }
                  group.appendChild(heading);
 
-                 var dl = document.createElement('dl');
-                 dl.className = 'fh-kv-list';
+                 // Special formatting for Top Upstreams: use table with split integer/decimal columns
+                 if (title === 'Top Upstreams') {
+                     var table = document.createElement('table');
+                     table.className = 'fh-table fh-table-upstreams';
+                     var tbody = document.createElement('tbody');
 
-                 entries.forEach(function (pair) {
-                     if (!pair || pair.length < 2) {
+                     entries.forEach(function (pair) {
+                         if (!pair || pair.length < 2) {
+                             return;
+                         }
+                         var key = pair[0];
+                         var count = pair[1];
+                         var parts = getNumberParts(count);
+
+                         var row = document.createElement('tr');
+                         var keyCell = document.createElement('td');
+                         keyCell.textContent = key;
+                         var intCell = document.createElement('td');
+                         intCell.className = 'fh-num-int';
+                         intCell.textContent = parts.intPart;
+                         var decCell = document.createElement('td');
+                         decCell.className = 'fh-num-dec';
+                         decCell.textContent = parts.decPart;
+
+                         row.appendChild(keyCell);
+                         row.appendChild(intCell);
+                         row.appendChild(decCell);
+                         tbody.appendChild(row);
+                     });
+
+                     table.appendChild(tbody);
+                     group.appendChild(table);
+                 } else {
+                     var dl = document.createElement('dl');
+                     dl.className = 'fh-kv-list';
+
+                     entries.forEach(function (pair) {
+                         if (!pair || pair.length < 2) {
+                             return;
+                         }
+                         var key = pair[0];
+                         var count = pair[1];
+
+                         var dt = document.createElement('dt');
+                         dt.textContent = key;
+
+                         var dd = document.createElement('dd');
+                         dd.textContent = formatNumber(count);
+
+                         dl.appendChild(dt);
+                         dl.appendChild(dd);
+                     });
+
+                     group.appendChild(dl);
+                 }
+
+                 statsGroupsEl.appendChild(group);
+             }
+
+             function appendUpstreamsGroup(upstreams) {
+                 if (!upstreams || typeof upstreams !== 'object') {
+                     return;
+                 }
+                 var upstreamIds = Object.keys(upstreams);
+                 if (!upstreamIds.length) {
+                     return;
+                 }
+
+                var group = document.createElement('section');
+                group.className = 'fh-stats-group';
+
+                var heading = document.createElement('h3');
+                heading.className = 'fh-stats-group-title';
+                heading.textContent = 'Upstreams';
+                heading.title = 'Per-upstream outcome counters such as success, timeout, servfail.';
+                group.appendChild(heading);
+
+                var table = document.createElement('table');
+                table.className = 'fh-table fh-table-upstreams';
+                var tbody = document.createElement('tbody');
+
+                 // Build sortable rows with pre-computed totals.
+                 var upstreamRows = [];
+                 upstreamIds.forEach(function (upstreamId) {
+                     var outcomes = upstreams[upstreamId];
+                     if (!outcomes || typeof outcomes !== 'object') {
                          return;
                      }
-                     var key = pair[0];
-                     var count = pair[1];
 
-                     var dt = document.createElement('dt');
-                     dt.textContent = key;
+                     var outcomeKeys = Object.keys(outcomes).sort();
+                     if (!outcomeKeys.length) {
+                         return;
+                     }
 
-                     var dd = document.createElement('dd');
-                     dd.textContent = formatNumber(count);
+                     var total = 0;
+                     outcomeKeys.forEach(function (key) {
+                         var val = Number(outcomes[key]);
+                         if (!isFinite(val)) {
+                             val = 0;
+                         }
+                         total += val;
+                     });
 
-                     dl.appendChild(dt);
-                     dl.appendChild(dd);
+                     upstreamRows.push({
+                         id: upstreamId,
+                         outcomes: outcomes,
+                         outcomeKeys: outcomeKeys,
+                         total: total,
+                     });
                  });
 
-                 group.appendChild(dl);
+                 // Sort by total count (descending), then by upstream id (ascending).
+                 upstreamRows.sort(function (a, b) {
+                     if (b.total === a.total) {
+                         if (a.id < b.id) return -1;
+                         if (a.id > b.id) return 1;
+                         return 0;
+                     }
+                     return b.total - a.total;
+                 });
+
+                 upstreamRows.forEach(function (rowData) {
+                     var upstreamId = rowData.id;
+                     var outcomes = rowData.outcomes;
+                     var outcomeKeys = rowData.outcomeKeys;
+                     var total = rowData.total;
+
+                     // Main row: "upstream", "", "total"
+                    var mainRow = document.createElement('tr');
+                    var mainUpstreamCell = document.createElement('td');
+                    mainUpstreamCell.textContent = upstreamId;
+                    var mainBlankCell = document.createElement('td');
+                    mainBlankCell.textContent = '';
+                    var mainTotalParts = getNumberParts(total);
+                    var mainTotalIntCell = document.createElement('td');
+                    mainTotalIntCell.className = 'fh-num-int';
+                    mainTotalIntCell.textContent = mainTotalParts.intPart;
+                    var mainTotalDecCell = document.createElement('td');
+                    mainTotalDecCell.className = 'fh-num-dec';
+                    mainTotalDecCell.textContent = mainTotalParts.decPart;
+                    mainRow.appendChild(mainUpstreamCell);
+                    mainRow.appendChild(mainBlankCell);
+                    mainRow.appendChild(mainTotalIntCell);
+                    mainRow.appendChild(mainTotalDecCell);
+                    tbody.appendChild(mainRow);
+
+                     // Detail rows: "", outcome type, count
+                     // When "success" is the only outcome, omit the detail
+                     // rows to avoid repeating the same total.
+                     var onlySuccess =
+                         outcomeKeys.length === 1 && outcomeKeys[0] === 'success';
+                     if (!onlySuccess) {
+                        outcomeKeys.forEach(function (key) {
+                            var val = outcomes[key];
+                            var row = document.createElement('tr');
+
+                            var blankCell = document.createElement('td');
+                            blankCell.textContent = '';
+                            var outcomeCell = document.createElement('td');
+                            outcomeCell.textContent = key;
+                            var parts = getNumberParts(val);
+                            var countIntCell = document.createElement('td');
+                            countIntCell.className = 'fh-num-int';
+                            countIntCell.textContent = parts.intPart;
+                            var countDecCell = document.createElement('td');
+                            countDecCell.className = 'fh-num-dec';
+                            countDecCell.textContent = parts.decPart;
+
+                            row.appendChild(blankCell);
+                            row.appendChild(outcomeCell);
+                            row.appendChild(countIntCell);
+                            row.appendChild(countDecCell);
+                            tbody.appendChild(row);
+                        });
+                     }
+                 });
+
+                 table.appendChild(tbody);
+                 group.appendChild(table);
                  statsGroupsEl.appendChild(group);
              }
 
@@ -407,6 +593,34 @@
              }
 
 
+             function appendQtypeTopDomains(qtypeQnames) {
+                 if (!qtypeQnames || typeof qtypeQnames !== 'object') {
+                     return;
+                 }
+                 var qtypes = Object.keys(qtypeQnames).sort();
+                 qtypes.forEach(function (qt) {
+                     var entries = qtypeQnames[qt];
+                     if (!entries || !Array.isArray(entries) || !entries.length) {
+                         return;
+                     }
+                     appendTopListGroup('Top ' + qt + ' Domains', entries);
+                 });
+             }
+
+             function appendRcodeTopDomains(rcodeDomains) {
+                 if (!rcodeDomains || typeof rcodeDomains !== 'object') {
+                     return;
+                 }
+                 var rcodes = Object.keys(rcodeDomains).sort();
+                 rcodes.forEach(function (rc) {
+                     var entries = rcodeDomains[rc];
+                     if (!entries || !Array.isArray(entries) || !entries.length) {
+                         return;
+                     }
+                     appendTopListGroup('Top ' + rc + ' Domains', entries);
+                 });
+             }
+
              function renderStats(data) {
                  clearStatsGroups();
 
@@ -455,9 +669,17 @@
                  appendDictGroup('Recent latency', data.latency_recent || {});
                  appendDictGroup('Latency', data.latency || {});
 
-                 appendTopListGroup('Top Client', data.top_clients || []);
-                 appendTopListGroup('Top Domains', data.top_domains || []);
-                 appendTopListGroup('Top Sub Domains', data.top_subdomains || []);
+                appendTopListGroup('Top Client', data.top_clients || []);
+                appendTopListGroup('Top Domains', data.top_domains || []);
+                appendTopListGroup('Top Sub Domains', data.top_subdomains || []);
+                appendTopListGroup('Top Cache Hit Domains', data.cache_hit_domains || []);
+                appendTopListGroup('Top Cache Miss Domains', data.cache_miss_domains || []);
+                appendTopListGroup('Top Upstreams', data.top_upstreams || []);
+                appendUpstreamsGroup(data.upstreams || {});
+                // Per-qtype top domains (qnames) for common query types.
+                appendQtypeTopDomains(data.qtype_qnames || {});
+                // Per-rcode top base domains.
+                appendRcodeTopDomains(data.rcode_domains || {});
 
                  appendProcessGroup(data.system)
 
