@@ -21,19 +21,12 @@ import threading
 from fastapi.testclient import TestClient
 
 from foghorn.stats import StatsCollector
-from foghorn.webserver import (
-    RingBuffer,
-    WebServerHandle,
-    _read_proc_meminfo,
-    _Suppress2xxAccessFilter,
-    _utc_now_iso,
-    create_app,
-    get_system_info,
-    install_uvicorn_2xx_suppression,
-    resolve_www_root,
-    sanitize_config,
-    start_webserver,
-)
+from foghorn.webserver import (RingBuffer, WebServerHandle, _read_proc_meminfo,
+                               _Suppress2xxAccessFilter, _utc_now_iso,
+                               create_app, get_system_info,
+                               install_uvicorn_2xx_suppression,
+                               resolve_www_root, sanitize_config,
+                               start_webserver)
 
 
 def test_sanitize_config_redacts_simple_keys() -> None:
