@@ -1929,7 +1929,6 @@ def start_webserver(
         loop.close()
 
     except PermissionError as exc:  # pragma: no cover - best effort
-        loop.close()
         logger.warning(
             "Asyncio loop creation failed for admin webserver: %s falling back to threaded HTTP server.",
             exc,
