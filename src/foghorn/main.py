@@ -86,7 +86,7 @@ def normalize_upstream_config(
         # DoH entries using URL
         if str(u.get("transport", "")).lower() == "doh":
             logger = logging.getLogger("foghorn.main.setup")
-            logger.warning("doh: {u}")
+            logger.warning(f"doh: {u}")
             rec: Dict[str, Union[str, int, dict]] = {
                 "transport": "doh",
                 "url": str(u["url"]),

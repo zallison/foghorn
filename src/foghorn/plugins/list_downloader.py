@@ -241,7 +241,7 @@ class ListDownloader(BasePlugin):
         for url in urls:
             fname = self._make_hashed_filename(url)
             fpath = os.path.join(self.download_path, fname)
-            logger.info("ListDownloader updating: %s", url)
+            logger.info("ListDownloader checking: %s", url)
             # Try HEAD for last-modified; fall back to GET
             if self._needs_update(url, fpath):
                 logger.info(f"Downloading list {url} to {fpath}")
