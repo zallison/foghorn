@@ -3,7 +3,7 @@ VENV ?= ./venv
 PREFIX ?= ${USER}
 CONTAINER_NAME ?= foghorn
 CONTAINER_DATA ?= ./.docker
-TAG ?= test
+TAG ?= latest
 
 # Files/folders that should NOT be deleted by `clean`
 # (Keep YAML files, so we exclude *.yaml and *.yml from the delete patterns)
@@ -19,6 +19,9 @@ IGNORE_EXTS :=  .yaml .yml
 run: build
 	. ${VENV}/bin/activate
 	mkdir var 2>/dev/null || true
+	black .
+	ruff check --fix .
+	isort .
 	${VENV}/bin/foghorn --config config/config.yaml
 
 
@@ -70,11 +73,11 @@ clean:
 # Docker
 # ---------------
 .PHONY: docker
-docker: docker-build docker-run docker-logs
+docker: clean docker-build docker-run docker-logs
 
 .PHONY: docker-build
-docker-build: docker-clean
-	rsync -Pvzr --exclude='*/__pycache__/*' --delete-during ./entrypoint.sh ./*md ./src ./html ./Makefile ./pyproject.toml ./Dockerfile ./docker-compose.yaml docker-build
+docker-build: docker-clean build
+	rsync -qr --exclude='*/__pycache__/*' --delete-during ./entrypoint.sh ./*md ./src ./html ./Makefile ./pyproject.toml ./Dockerfile ./docker-compose.yaml docker-build
 	docker build ./docker-build -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-clean
@@ -83,9 +86,8 @@ docker-clean:
 	rm -rf docker-build || true
 
 .PHONY: docker-run
-docker-run: docker build
+docker-run: docker-build
 	. ${VENV}/bin/activate
-	docker rm -f foghorn 2> /dev/null
 	docker run --name foghorn -v ${CONTAINER_DATA}:/foghorn/config -d -p 53:5333/udp -p 53:5333/tcp -p 8053:8053/tcp -p 801:1801/tcp -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-logs
