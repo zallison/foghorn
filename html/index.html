@@ -103,7 +103,7 @@
             &mdash; Open Source Software: MIT Licence
         </footer>
 
-<script>
+        <script>
          (function () {
              'use strict';
 
@@ -501,11 +501,11 @@
 
              // TODO: Remove legacy code.
              function loadMemoryConfig() {
-                 loadDiskConfig()l
+                 loadDiskConfig();
              }
 
              function setSource(newSource) {
-                  loadDiskConfig();
+                 loadDiskConfig();
              }
 
              function enterEditMode() {
@@ -607,17 +607,25 @@
                  }
              }
 
-             // Event bindings
+             //// Event bindings
+
+             // Enter Edit Mode
              btnEdit.addEventListener('click', function () {
                  enterEditMode();
              });
+
+             // Cancel Edit
              btnCancel.addEventListener('click', function () {
                  exitEditMode(true);
                  setMessage('Edit cancelled.', 'info');
              });
+
+             // Save config
              btnSave.addEventListener('click', function () {
                  saveConfig();
              });
+
+             // Theme control
              btnThemeDark.addEventListener('click', function () {
                  applyTheme('dark');
              });
