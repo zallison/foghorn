@@ -1770,11 +1770,46 @@ class StatsCollector:
                     entries = tracker.export(tracker.capacity)
                     if not entries:
                         continue
-                    qtype_qnames[qtype_name] = entries[: self.top_n]
+
+                    # Apply the same ignore filters used for top_subdomains so
+                    # that statistics.ignore.top_domains / statistics.ignore.subdomains
+                    # affect all "Top X Domains" style lists.
+                    active_subdomain_ignores: Set[str]
+                    if self._ignore_top_subdomains:
+                        active_subdomain_ignores = self._ignore_top_subdomains
+                    else:
+                        active_subdomain_ignores = self._ignore_top_domains
+
+                    if active_subdomain_ignores or self.ignore_single_host:
+                        filtered_entries: List[Tuple[str, int]] = []
+                        for name, count in entries:
+                            norm = _normalize_domain(str(name))
+                            # Optionally hide single-label hosts (no dots).
+                            if self.ignore_single_host and "." not in norm:
+                                continue
+                            if active_subdomain_ignores:
+                                # For per-qtype top domains, use the same
+                                # suffix/exact semantics as top_domains,
+                                # controlled via statistics.ignore.top_domains_mode.
+                                if self._ignore_domains_as_suffix:
+                                    if any(
+                                        norm == ig or norm.endswith("." + ig)
+                                        for ig in active_subdomain_ignores
+                                    ):
+                                        continue
+                                else:
+                                    if norm in active_subdomain_ignores:
+                                        continue
+                            filtered_entries.append((name, count))
+                        entries = filtered_entries
+
+                    if entries:
+                        qtype_qnames[qtype_name] = entries[: self.top_n]
+
                 if not qtype_qnames:
                     qtype_qnames = None
 
-            # Per-rcode top base domains for configured rcodes.
+            # Latency
             rcode_domains: Optional[Dict[str, List[Tuple[str, int]]]] = None
             if self._top_rcode_domains:
                 rcode_domains = {}
