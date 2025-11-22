@@ -84,10 +84,12 @@ def normalize_upstream_config(
             raise ValueError("each upstream entry must be a mapping")
 
         # DoH entries using URL
-        if str(u.get("transport", "")).lower() == "doh" and "url" in u:
+        if str(u.get("transport", "")).lower() == "doh":
+            logger = logging.getLogger("foghorn.main.setup")
+            logger.warning("doh: {u}")
             rec: Dict[str, Union[str, int, dict]] = {
                 "transport": "doh",
-                "url": str(u["url"]),
+                "url": str(u["host"]),
             }
             if "method" in u:
                 rec["method"] = str(u.get("method"))
@@ -772,7 +774,9 @@ def main(argv: List[str] | None = None) -> int:
             pass
 
     # Log startup info
-    upstream_info = ", ".join([f"{u['host']}:{u['port']}" for u in upstreams])
+    upstream_info = ", ".join(
+        [f"{u['url']}" if "url" in u else f"{u['host']}:{u['port']}" for u in upstreams]
+    )
     if server is not None:
         logger.info(
             "Starting Foghorn on %s:%d, upstreams: [%s], timeout: %dms\n",

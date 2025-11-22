@@ -4,6 +4,7 @@ import logging
 import os
 import pathlib
 import threading
+import time
 from typing import Dict, Iterable, List, Optional
 
 from dnslib import AAAA, QTYPE, RR, A, DNSHeader, DNSRecord
@@ -67,6 +68,14 @@ class EtcHosts(BasePlugin):
         self._hosts_lock = threading.RLock()
         self.hosts: Dict[str, str] = {}
         self._observer = None
+
+        # Watchdog reload debouncing: avoid tight reload loops when a single
+        # change event causes additional filesystem notifications (e.g. from
+        # our own reload reads).
+        self._watchdog_min_interval = float(
+            self.config.get("watchdog_min_interval_seconds", 1.0)
+        )
+        self._last_watchdog_reload_ts = 0.0
 
         # Initial load
         self._load_hosts()
@@ -136,7 +145,7 @@ class EtcHosts(BasePlugin):
         mapping: Dict[str, str] = {}
 
         for fp in self.file_paths:
-            logging.info("reading hostifle: {fp}")
+            logging.info(f"reading hostfile: {fp}")
             hosts_path = pathlib.Path(fp)
             with hosts_path.open("r", encoding="utf-8") as f:
                 for raw_line in f:
@@ -296,6 +305,17 @@ class EtcHosts(BasePlugin):
             return False
 
         def on_any_event(self, event) -> None:  # type: ignore[override]
+            # Ignore directory-level events; we only care about concrete file writes.
+            if getattr(event, "is_directory", False):
+                return
+
+            # Treat these event types as "writes". Many editors perform atomic
+            # saves via create+move rather than in-place modification, so we
+            # include "created" and "moved" in addition to "modified".
+            event_type = getattr(event, "event_type", None)
+            if event_type not in {"modified", "created", "moved"}:
+                return
+
             src = getattr(event, "src_path", None)
             dest = getattr(event, "dest_path", None)
             if self._should_reload(src, dest):
@@ -345,7 +365,27 @@ class EtcHosts(BasePlugin):
           - None
         Outputs:
           - None
+
+        Notes:
+          - Applies a minimum interval between reloads (configurable via
+            ``watchdog_min_interval_seconds``) to avoid continuous reload
+            loops when the act of reading the hosts file itself generates
+            further filesystem events.
         """
+        now = time.time()
+        # Fast path: skip if we reloaded very recently. This protects against
+        # tight feedback loops from our own reads without significantly
+        # delaying legitimate updates.
+        if now - getattr(self, "_last_watchdog_reload_ts", 0.0) < getattr(
+            self, "_watchdog_min_interval", 1.0
+        ):
+            logger.debug(
+                "Skipping hosts reload; last reload was %.3fs ago",
+                now - self._last_watchdog_reload_ts,
+            )
+            return
+
+        self._last_watchdog_reload_ts = now
         logger.info("Reloading hosts mapping due to filesystem change")
         try:
             self._load_hosts()
