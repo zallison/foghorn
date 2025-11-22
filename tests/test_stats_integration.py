@@ -57,6 +57,14 @@ def test_stats_collected_on_query():
     if snapshot.latency_stats:
         assert snapshot.latency_stats["count"] >= 1, "Should have recorded latency"
 
+    # Verify upstream statistics were populated for the configured upstream.
+    assert snapshot.top_upstreams is not None
+    upstream_ids = {u for u, _ in snapshot.top_upstreams}
+    assert "8.8.8.8:53" in upstream_ids
+    assert snapshot.upstream_rcodes is not None
+    # At least one NOERROR from the single upstream should be recorded.
+    assert snapshot.upstream_rcodes["8.8.8.8:53"]["NOERROR"] >= 1
+
 
 def test_stats_cache_hit():
     """Verify cache hits are recorded."""
