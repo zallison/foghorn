@@ -1194,22 +1194,17 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         reset = str(reset_raw).lower() in {"1", "true", "yes"}
         snap: StatsSnapshot = collector.snapshot(reset=reset)
 
-        try:
-            hostname = socket.gethostname()
-        except Exception:  # pragma: no cover - environment specific
-            hostname = "unknown-host"
-        try:
-            host_ip = socket.gethostbyname(hostname)
-        except Exception:  # pragma: no cover - environment specific
-            host_ip = "0.0.0.0"
+        ####
+        ## Hostname and IP info gathered here
+        ####
 
         meta: Dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(
                 snap.created_at, tz=timezone.utc
             ).isoformat(),
             "server_time": _utc_now_iso(),
-            "hostname": hostname,
-            "ip": host_ip,
+            "hostname": "-",
+            "ip": "-",
             "version": FOGHORN_VERSION,
             "uptime": get_process_uptime_seconds(),
         }
