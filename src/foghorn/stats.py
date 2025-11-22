@@ -913,6 +913,7 @@ class StatsCollector:
         ignore_top_subdomains: Optional[List[str]] = None,
         ignore_domains_as_suffix: bool = False,
         ignore_subdomains_as_suffix: bool = False,
+        ignore_single_host: bool = False,
     ) -> None:
         """Initialize statistics collector with configuration flags.
 
@@ -948,6 +949,8 @@ class StatsCollector:
         self.include_top_domains = include_top_domains
         self.top_n = max(1, top_n)
         self.track_latency = track_latency
+        # Display-only flag for hiding single-label hosts from top lists
+        self.ignore_single_host = bool(ignore_single_host)
 
         # Optional persistent store for long-lived aggregates and query logs
         self._store: Optional[StatsSQLiteStore] = stats_store
@@ -1500,19 +1503,23 @@ class StatsCollector:
             if top_clients is not None:
                 top_clients = top_clients[: self.top_n]
 
-            if top_domains is not None and self._ignore_top_domains:
+            if top_domains is not None:
                 filtered_domains: List[Tuple[str, int]] = []
                 for domain, count in top_domains:
                     norm = _normalize_domain(str(domain))
-                    if self._ignore_domains_as_suffix:
-                        if any(
-                            norm == ig or norm.endswith("." + ig)
-                            for ig in self._ignore_top_domains
-                        ):
-                            continue
-                    else:
-                        if norm in self._ignore_top_domains:
-                            continue
+                    # Optionally hide single-label hosts (no dots) from display.
+                    if self.ignore_single_host and "." not in norm:
+                        continue
+                    if self._ignore_top_domains:
+                        if self._ignore_domains_as_suffix:
+                            if any(
+                                norm == ig or norm.endswith("." + ig)
+                                for ig in self._ignore_top_domains
+                            ):
+                                continue
+                        else:
+                            if norm in self._ignore_top_domains:
+                                continue
                     filtered_domains.append((domain, count))
                 top_domains = filtered_domains
 
@@ -1528,19 +1535,23 @@ class StatsCollector:
                 else:
                     active_subdomain_ignores = self._ignore_top_domains
 
-                if active_subdomain_ignores:
+                if active_subdomain_ignores or self.ignore_single_host:
                     filtered_subdomains: List[Tuple[str, int]] = []
                     for name, count in top_subdomains:
                         norm = _normalize_domain(str(name))
-                        if self._ignore_subdomains_as_suffix:
-                            if any(
-                                norm == ig or norm.endswith("." + ig)
-                                for ig in active_subdomain_ignores
-                            ):
-                                continue
-                        else:
-                            if norm in active_subdomain_ignores:
-                                continue
+                        # Optionally hide single-label hosts (no dots) from display.
+                        if self.ignore_single_host and "." not in norm:
+                            continue
+                        if active_subdomain_ignores:
+                            if self._ignore_subdomains_as_suffix:
+                                if any(
+                                    norm == ig or norm.endswith("." + ig)
+                                    for ig in active_subdomain_ignores
+                                ):
+                                    continue
+                            else:
+                                if norm in active_subdomain_ignores:
+                                    continue
                         filtered_subdomains.append((name, count))
                     top_subdomains = filtered_subdomains
 

@@ -316,7 +316,8 @@ def main(argv: List[str] | None = None) -> int:
     # If listen.udp is present, prefer it; otherwise fall back to legacy listen.host/port.
     listen_cfg = cfg.get("listen", {}) or {}
     legacy_host = str(listen_cfg.get("host", "127.0.0.1"))
-    legacy_port = int(listen_cfg.get("port", 5353))
+    # Default legacy port is 5333 to match the recommended example config.
+    legacy_port = int(listen_cfg.get("port", 5333))
 
     def _sub(key, defaults):
         d = listen_cfg.get(key, {}) or {}
@@ -324,9 +325,11 @@ def main(argv: List[str] | None = None) -> int:
         return out
 
     udp_cfg = _sub("udp", {"enabled": True, "host": legacy_host, "port": legacy_port})
-    tcp_cfg = _sub("tcp", {"enabled": False, "host": legacy_host, "port": 53})
+    # Default TCP port now matches the UDP listener (5333) when not explicitly set.
+    tcp_cfg = _sub("tcp", {"enabled": False, "host": legacy_host, "port": legacy_port})
     dot_cfg = _sub("dot", {"enabled": False, "host": legacy_host, "port": 853})
-    doh_cfg = _sub("doh", {"enabled": False, "host": legacy_host, "port": 8053})
+    # Default DoH listener port is 1443 (non-privileged HTTPS-like port) when not explicitly set.
+    doh_cfg = _sub("doh", {"enabled": False, "host": legacy_host, "port": 1443})
 
     # Normalize upstream configuration
     upstreams, timeout_ms = normalize_upstream_config(cfg)
@@ -422,6 +425,7 @@ def main(argv: List[str] | None = None) -> int:
         subdomains_mode = str(ignore_cfg.get("top_subdomains_mode", "exact")).lower()
         ignore_domains_as_suffix = domains_mode == "suffix"
         ignore_subdomains_as_suffix = subdomains_mode == "suffix"
+        ignore_single_host = bool(ignore_cfg.get("ignore_single_host", False))
 
         stats_collector = StatsCollector(
             track_uniques=stats_cfg.get("track_uniques", True),
@@ -439,6 +443,7 @@ def main(argv: List[str] | None = None) -> int:
             ignore_top_subdomains=ignore_top_subdomains,
             ignore_domains_as_suffix=ignore_domains_as_suffix,
             ignore_subdomains_as_suffix=ignore_subdomains_as_suffix,
+            ignore_single_host=ignore_single_host,
         )
 
         # Best-effort warm-load of persisted aggregate counters on startup.
@@ -454,7 +459,8 @@ def main(argv: List[str] | None = None) -> int:
 
         stats_reporter = StatsReporter(
             collector=stats_collector,
-            interval_seconds=int(stats_cfg.get("interval_seconds", 10)),
+            # Default statistics interval is 300s (5 minutes) when not overridden in config.
+            interval_seconds=int(stats_cfg.get("interval_seconds", 300)),
             reset_on_log=stats_cfg.get("reset_on_log", False),
             log_level=stats_cfg.get("log_level", "info"),
             persistence_store=stats_persistence_store,
@@ -525,6 +531,7 @@ def main(argv: List[str] | None = None) -> int:
         subdomains_mode = str(ignore_cfg.get("top_subdomains_mode", "exact")).lower()
         ignore_domains_as_suffix = domains_mode == "suffix"
         ignore_subdomains_as_suffix = subdomains_mode == "suffix"
+        ignore_single_host = bool(ignore_cfg.get("ignore_single_host", False))
         if stats_collector is not None:
             try:
                 stats_collector.set_ignore_filters(
@@ -534,6 +541,8 @@ def main(argv: List[str] | None = None) -> int:
                     domains_as_suffix=ignore_domains_as_suffix,
                     subdomains_as_suffix=ignore_subdomains_as_suffix,
                 )
+                # Apply ignore_single_host as a simple attribute toggle on reload.
+                stats_collector.ignore_single_host = bool(ignore_single_host)
             except Exception:  # pragma: no cover - defensive
                 logging.getLogger("foghorn.main").error(
                     "Failed to apply statistics ignore filters on reload", exc_info=True
@@ -568,7 +577,8 @@ def main(argv: List[str] | None = None) -> int:
             else:
                 # If interval/reset_on_log/log_level differ, restart
                 try:
-                    interval_seconds = int(s_cfg.get("interval_seconds", 10))
+                    # Default to 300s (5 minutes) when interval_seconds is not provided.
+                    interval_seconds = int(s_cfg.get("interval_seconds", 300))
                     reset_on_log = bool(s_cfg.get("reset_on_log", False))
                     # log_level = str(s_cfg.get("log_level", "info"))
                     if (
@@ -588,7 +598,7 @@ def main(argv: List[str] | None = None) -> int:
                         pass
                 stats_reporter = StatsReporter(
                     collector=stats_collector,
-                    interval_seconds=int(s_cfg.get("interval_seconds", 10)),
+                    interval_seconds=int(s_cfg.get("interval_seconds", 300)),
                     reset_on_log=bool(s_cfg.get("reset_on_log", False)),
                     log_level=str(s_cfg.get("log_level", "info")),
                     persistence_store=stats_persistence_store,
