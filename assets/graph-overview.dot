@@ -1,0 +1,134 @@
+digraph FoghornHighLevel {
+  rankdir=TB;
+  node [shape=box, fontsize=10];
+
+  // =========================
+  // Clients (top)
+  // =========================
+  subgraph cluster_clients {
+    label="Clients";
+    style=dashed;
+    color=gray;
+
+    Clients [label="DNS Clients\n(stub resolvers, apps,\nother recursors)"];
+  }
+
+  // =========================
+  // Ingress: downstream protocols
+  // =========================
+  subgraph cluster_ingress {
+    label="Ingress: Downstream Protocols";
+    style=filled;
+    color=lightgrey;
+
+    L_UDP [label="UDP Listener(s)\nThreadingUDPServer\nDNSUDPHandler / _UDPHandler"];
+    L_TCP [label="TCP Listener(s)\nasyncio + ThreadingTCPServer"];
+    L_DOT [label="DoT Listener\nTLS over TCP\n(dot_server)"];
+    L_DOH [label="DoH Listener\nHTTP(S) /dns-query\n(doh_api FastAPI + threaded)"];
+  }
+
+  Clients -> L_UDP [label="UDP 53"];
+  Clients -> L_TCP [label="TCP 53"];
+  Clients -> L_DOT [label="TLS 853"];
+  Clients -> L_DOH [label="HTTP(S)\n/dns-query"];
+
+  // =========================
+  // Core resolver pipeline
+  // =========================
+  subgraph cluster_core {
+    label="Core Resolver & Plugins";
+    style=filled;
+    color="#e0f7ff";
+
+    CoreEntry [label="Core Entry\nDNSUDPHandler.handle\n/ resolve_query_bytes"];
+    Parse     [label="Parse & Context\nDNSRecord.parse\nqname,qtype\nPluginContext(client_ip)"];
+    PrePlug   [label="Pre-Plugins\n(BasePlugin.pre_resolve)\nallow / deny / override\nset upstream_candidates"];
+    CacheLk   [label="DNS Cache Lookup\nTTLCache.get((qname.lower(),qtype))"];
+    UpSel     [label="Upstream Selection\nctx.upstream_candidates\nor global upstream list"];
+    UpFw      [label="Upstream Resolution\nsend_query_with_failover\nUDP / TCP / DoT / DoH"];
+    PostPlug  [label="Post-Plugins\n(BasePlugin.post_resolve)\nfilter / rewrite / override"];
+    DNSSEC    [label="Optional DNSSEC Validate\n(mode: ignore / passthrough / validate)"];
+    CacheSt   [label="DNS Cache Store\ncompute_effective_ttl()\nTTLCache.set(...)"];
+    Resp      [label="Final Response\nfix DNS ID\nwire bytes"];
+  }
+
+  // Main top-to-bottom data flow
+  L_UDP -> CoreEntry;
+  L_TCP -> CoreEntry;
+  L_DOT -> CoreEntry;
+  L_DOH -> CoreEntry;
+
+  CoreEntry -> Parse;
+  Parse     -> PrePlug;
+  PrePlug   -> CacheLk;
+
+  // Cache hit vs miss
+  CacheLk -> Resp   [label="cache hit\n(cached wire)"];
+  CacheLk -> UpSel  [label="cache miss"];
+
+  // Upstream selection
+  UpSel -> UpFw     [label="have upstreams"];
+  UpSel -> Resp     [label="no upstreams\nSERVFAIL"];
+
+  // Upstream success → post-plugins
+  UpFw    -> PostPlug;
+  PostPlug -> DNSSEC;
+  DNSSEC   -> CacheSt;
+  CacheSt  -> Resp;
+
+  // =========================
+  // Caches & helper caches
+  // =========================
+  subgraph cluster_caches {
+    label="Caches (Logical View)";
+    style=filled;
+    color="#fff4d9";
+
+    DNSCache   [label="DNS Response Cache\nTTLCache\n(qname.lower(),qtype) → wire"];
+    PlugCache  [label="Plugin Decision Caches\ninheritable_ttl_cache\nper-plugin TTLCache\n(pre_resolve/post_resolve)"];
+    ConnPools  [label="Connection Pools\nTCPConnectionPool / DotConnectionPool\nreuse upstream TCP/TLS conns"];
+    HelperLRU  [label="Helper LRU Caches\n• _set_response_id_cached\n• stats._normalize_domain\n• plugin alias normalization"];
+  }
+
+  // How core stages use caches (high level)
+  CacheLk -> DNSCache [style=dashed, dir=both, label="get() / hit"];
+  CacheSt -> DNSCache [style=dashed, label="set()"];
+
+  PrePlug  -> PlugCache [style=dashed, label="cached pre decisions"];
+  PostPlug -> PlugCache [style=dashed, label="cached post decisions"];
+
+  UpFw -> ConnPools [style=dashed, dir=both, label="reuse\nTCP/DoT conns"];
+
+  Resp -> HelperLRU [style=dashed, label="ID fix,\nname norm.\n(implicit)"];
+
+  // =========================
+  // Statistics & observability
+  // =========================
+  subgraph cluster_stats {
+    label="Statistics & Observability";
+    style=filled;
+    color="#e0ffe8";
+
+    Stats [label="StatsCollector / StatsReporter\n• query counts\n• cache hit/miss\n• upstream outcomes & rcodes\n• per-query JSON log\n• latency histogram"];
+  }
+
+  // Tap stats at key points
+  Parse     -> Stats [style=dotted, label="record_query(...)"];
+  CacheLk   -> Stats [style=dotted, label="cache hit/miss"];
+  UpFw      -> Stats [style=dotted, label="upstream_result(...)"];
+  Resp      -> Stats [style=dotted, label="rcode,\nquery_result,\nlatency"];
+
+  // =========================
+  // Egress back to clients
+  // =========================
+  subgraph cluster_egress {
+    label="Egress: Back to Clients";
+    style=filled;
+    color=lightgrey;
+
+    ToClients [label="Listeners write back\nUDP datagram /\nTCP or TLS frame /\nHTTP(S) body"];
+  }
+
+  Resp      -> ToClients [label="final DNS response"];
+  ToClients -> Clients   [style=dashed, label="answers to clients"];
+}
