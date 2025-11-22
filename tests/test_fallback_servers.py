@@ -293,9 +293,12 @@ def test_admin_fallback_config_raw_and_save(monkeypatch: Any, tmp_path) -> None:
 
     # Test POST /config/save overwrites the config file.
     new_cfg = {"answer": 42, "webserver": {"enabled": True}}
+    import yaml
+
+    new_yaml = yaml.safe_dump(new_cfg)
     conn2 = http.client.HTTPConnection(host, port, timeout=1)
     try:
-        body_data = json.dumps(new_cfg).encode("utf-8")
+        body_data = json.dumps({"raw_yaml": new_yaml}).encode("utf-8")
         conn2.request(
             "POST",
             "/config/save",
