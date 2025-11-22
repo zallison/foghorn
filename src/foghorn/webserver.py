@@ -110,7 +110,7 @@ def install_uvicorn_2xx_suppression() -> None:
     for f in getattr(access_logger, "filters", []):
         if isinstance(f, _Suppress2xxAccessFilter):
             return
-    access_logger.addFilter(_Suppress2xxAccessFilter())
+        access_logger.addFilter(_Suppress2xxAccessFilter())
 
 
 class LogEntry(BaseModel):
@@ -158,9 +158,9 @@ class RingBuffer:
     def __init__(self, capacity: int = 500) -> None:
         if capacity <= 0:
             capacity = 1
-        self._capacity = int(capacity)
-        self._items: List[Any] = []
-        self._lock = threading.Lock()
+            self._capacity = int(capacity)
+            self._items: List[Any] = []
+            self._lock = threading.Lock()
 
     def push(self, item: Any) -> None:
         """Append an item, evicting the oldest when capacity is exceeded.
@@ -259,6 +259,35 @@ def sanitize_config(
 
     _walk(redacted)
     return redacted
+
+
+def _json_safe(value: Any) -> Any:
+    """Brief: Return a JSON-serializable representation of value.
+
+    Inputs:
+      - value: Arbitrary Python object that may not be JSON serializable.
+
+    Outputs:
+      - JSON-serializable structure where non-serializable objects (including
+        exceptions) have been converted to strings or simple dicts.
+    """
+
+    # Fast path for primitives
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+
+    # Preserve mapping and sequence structure
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+
+    # Represent exceptions explicitly
+    if isinstance(value, Exception):
+        return {"type": type(value).__name__, "message": str(value)}
+
+    # Fallback: string representation for anything else (e.g., datetime, Path).
+    return str(value)
 
 
 def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
@@ -634,7 +663,11 @@ def create_app(
         collector: Optional[StatsCollector] = app.state.stats_collector
         if collector is None:
             return {"status": "disabled", "server_time": _utc_now_iso()}
+
+        # Measure timings for optional debug logging.
+        t_start = time.time()
         snap: StatsSnapshot = collector.snapshot(reset=bool(reset))
+        t_after_snapshot = time.time()
 
         try:
             hostname = socket.gethostname()
@@ -663,6 +696,18 @@ def create_app(
             ),
         }
 
+        system_info = get_system_info()
+        t_after_system = time.time()
+
+        # Optional DEBUG timings log for /stats when enabled in config.
+        if getattr(app.state, "debug_stats_timings", False):
+            logger.debug(
+                "/stats timings: snapshot=%.6fs system_info=%.6fs total=%.6fs",
+                t_after_snapshot - t_start,
+                t_after_system - t_after_snapshot,
+                t_after_system - t_start,
+            )
+
         payload: Dict[str, Any] = {
             "server_time": _utc_now_iso(),
             "totals": snap.totals,
@@ -676,7 +721,7 @@ def create_app(
             "top_domains": snap.top_domains,
             "latency": snap.latency_stats,
             "latency_recent": snap.latency_recent_stats,
-            "system": get_system_info(),
+            "system": system_info,
         }
         return payload
 
@@ -780,7 +825,7 @@ def create_app(
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 raw_text = f.read()
-            raw_cfg = yaml.safe_load(raw_text) or {}
+                raw_cfg = yaml.safe_load(raw_text) or {}
         except (
             Exception
         ) as exc:  # pragma: no cover - I/O errors are environment-specific
@@ -838,12 +883,15 @@ def create_app(
             if os.path.exists(cfg_path_abs):
                 shutil.copy(cfg_path_abs, backup_path)
 
-            try:
-                with open(cfg_path_abs + ".new", "w", encoding="utf-8") as tmp:
-                    tmp.write(body["raw_yaml"])
-            except KeyError as e:
-                logger.crit("Request has no 'raw_yaml'")
-                return {"stats": "failed", "servercode": "500", "error": str(e)}
+            raw_yaml = body.get("raw_yaml")
+            if not isinstance(raw_yaml, str):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="request body must include 'raw_yaml' string field",
+                )
+
+            with open(cfg_path_abs + ".new", "w", encoding="utf-8") as tmp:
+                tmp.write(raw_yaml)
 
             shutil.copy(cfg_path_abs + ".new", cfg_path_abs)
 
@@ -1069,12 +1117,13 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         Inputs:
           - status_code: HTTP status code
-          - payload: JSON-serializable dict
+          - payload: Dict that will be converted to a JSON-safe structure.
         Outputs:
           - None
         """
 
-        body = json.dumps(payload).encode("utf-8")
+        safe_payload = _json_safe(payload)
+        body = json.dumps(safe_payload).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Connection", "close")
@@ -1324,7 +1373,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 raw_text = f.read()
-            raw_cfg = yaml.safe_load(raw_text) or {}
+                raw_cfg = yaml.safe_load(raw_text) or {}
         except Exception as exc:  # pragma: no cover - environment-specific
             self._send_json(
                 500,
@@ -1361,11 +1410,11 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 limit = max(0, int(raw))
             except ValueError:
                 limit = 100
-            entries = buf.snapshot(limit=limit)
-        self._send_json(
-            200,
-            {"server_time": _utc_now_iso(), "entries": entries},
-        )
+                entries = buf.snapshot(limit=limit)
+                self._send_json(
+                    200,
+                    {"server_time": _utc_now_iso(), "entries": entries},
+                )
 
     def _handle_config_save(self, body: Dict[str, Any]) -> None:
         """Brief: Handle POST /config/save to persist config and signal SIGUSR1.
@@ -1404,16 +1453,28 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         upload_path = f"{cfg_path_abs}.new"
 
         try:
-            # Validate
-            res = yaml.safe_load(body["raw_yaml"]) or None
+            # Validate request body
+            raw_yaml = body.get("raw_yaml")
+            if not isinstance(raw_yaml, str):
+                self._send_json(
+                    400,
+                    {
+                        "detail": "request body must include 'raw_yaml' string field",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+
+            # Validate YAML contents
+            res = yaml.safe_load(raw_yaml) or None
 
             if not res or res is None:
                 self._send_json(
-                    500,
+                    400,
                     {
-                        "detail": f"failed to write config to {cfg_path_abs}: Probably a YAML error.",
+                        "detail": f"failed to parse YAML for {cfg_path_abs}",
                         "server_time": _utc_now_iso(),
-                        "error": res,
+                        "error": "empty or invalid YAML document",
                     },
                 )
                 return
@@ -1425,8 +1486,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
             # Upload and atomic move
             with open(upload_path, "w", encoding="utf-8") as tmp:
-                tmp.write(body["raw_yaml"])
-            os.replace(upload_path, cfg_path_abs)
+                tmp.write(raw_yaml)
+                os.replace(upload_path, cfg_path_abs)
         except Exception as exc:  # pragma: no cover
             try:
                 # Clean up after ourselves.
@@ -1441,7 +1502,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                     "detail": f" failed to update config: {exc}",
                     "server_time": _utc_now_iso(),
                     "stats": "error",
-                    "error": exc,
+                    "error": str(exc),
                 },
             )
             return
@@ -1643,7 +1704,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             msg = format % args
         except Exception:
             msg = format
-        logger.debug("webserver HTTP: %s", msg)
+            logger.debug("webserver HTTP: %s", msg)
 
 
 def _start_admin_server_threaded(
@@ -1760,12 +1821,12 @@ class WebServerHandle:
                     shutdown = getattr(self._server, "shutdown", None)
                     if callable(shutdown):
                         shutdown()
-                    close = getattr(self._server, "server_close", None)
+                        close = getattr(self._server, "server_close", None)
                     if callable(close):
                         close()
                 except Exception:
                     logger.exception("Error while shutting down webserver instance")
-            self._thread.join(timeout=timeout)
+                    self._thread.join(timeout=timeout)
         except Exception:
             logger.exception("Error while stopping webserver thread")
 
@@ -1815,7 +1876,7 @@ def start_webserver(
             logger.warning(
                 "Possible container permission issues. Update, check seccomp settings, or run with --privileged "
             )
-        can_use_asyncio = False
+            can_use_asyncio = False
 
     except Exception:
         can_use_asyncio = True
