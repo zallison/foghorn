@@ -35,9 +35,9 @@ build: env
 	@echo "=== Installing project witout dev tool (env-dev) ==="
 	$(VENV)/bin/pip install -e ".[dev]"
 	$(VENV)/bin/pip install black ruff isort
-	${VENV}/bin/black src/ tests/
-	${VENV}/bin/ruff check --fix . src/ tests/
 	${VENV}/bin/isort . src/ test/
+	${VENV}/bin/ruff check --fix . src/ tests/
+	${VENV}/bin/black src/ tests/
 
 
 .PHONY: env-dev
