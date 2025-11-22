@@ -89,7 +89,7 @@ def normalize_upstream_config(
             logger.warning("doh: {u}")
             rec: Dict[str, Union[str, int, dict]] = {
                 "transport": "doh",
-                "url": str(u["host"]),
+                "url": str(u["url"]),
             }
             if "method" in u:
                 rec["method"] = str(u.get("method"))
