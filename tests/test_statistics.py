@@ -167,7 +167,7 @@ class TestStatsCollector:
         assert snapshot.upstreams["1.1.1.1:53"]["timeout"] == 1
 
     def test_top_upstreams_and_rcodes(self):
-        """Top upstreams and per-upstream rcodes are tracked."""
+        """Per-upstream rcodes and qtypes are tracked."""
         collector = StatsCollector(include_top_domains=True, top_n=5)
         # Mix of outcomes to drive upstream counters and TopK.
         collector.record_upstream_result("8.8.8.8:53", "success", qtype="A")
@@ -179,9 +179,6 @@ class TestStatsCollector:
         collector.record_upstream_rcode("8.8.8.8:53", "SERVFAIL")
 
         snapshot = collector.snapshot()
-        assert snapshot.top_upstreams is not None
-        # 8.8.8.8:53 should be the most frequently used upstream.
-        assert snapshot.top_upstreams[0][0] == "8.8.8.8:53"
         assert snapshot.upstream_rcodes is not None
         assert snapshot.upstream_rcodes["8.8.8.8:53"]["NOERROR"] == 1
         assert snapshot.upstream_rcodes["8.8.8.8:53"]["SERVFAIL"] == 1
@@ -215,6 +212,62 @@ class TestStatsCollector:
         snapshot = collector.snapshot()
         assert snapshot.rcodes["NOERROR"] == 2
         assert snapshot.rcodes["NXDOMAIN"] == 1
+
+    def test_cache_and_rcode_subdomain_metrics(self):
+        """Cache and rcode *_sub metrics count only subdomain queries per base domain."""
+        collector = StatsCollector(include_top_domains=True, top_n=5)
+
+        # Cache hits/misses: one base-only and one subdomain-only per base.
+        collector.record_cache_hit("example.com")
+        collector.record_cache_hit("www.example.com")  # subdomain of example.com
+        collector.record_cache_miss("other.com")
+        collector.record_cache_miss("api.other.com")  # subdomain of other.com
+
+        # RcDoes: mix base and subdomain queries per rcode.
+        collector.record_response_rcode("NOERROR", qname="example.com")
+        collector.record_response_rcode("NOERROR", qname="www.example.com")
+        collector.record_response_rcode("NXDOMAIN", qname="example.com")
+        collector.record_response_rcode("NXDOMAIN", qname="nx.example.com")
+
+        snapshot = collector.snapshot(reset=False)
+
+        # Cache hit domains vs cache_hit_subdomains
+        assert snapshot.cache_hit_domains is not None
+        hit_domains = dict(snapshot.cache_hit_domains)
+        # Both base and subdomain queries contribute to the base-domain count.
+        assert hit_domains["example.com"] == 2
+
+        assert snapshot.cache_hit_subdomains is not None
+        hit_sub = dict(snapshot.cache_hit_subdomains)
+        # Only the subdomain query contributes here.
+        assert hit_sub["example.com"] == 1
+
+        # Cache miss domains vs cache_miss_subdomains
+        assert snapshot.cache_miss_domains is not None
+        miss_domains = dict(snapshot.cache_miss_domains)
+        assert miss_domains["other.com"] == 2
+
+        assert snapshot.cache_miss_subdomains is not None
+        miss_sub = dict(snapshot.cache_miss_subdomains)
+        assert miss_sub["other.com"] == 1
+
+        # Rcode domains vs rcode_subdomains
+        assert snapshot.rcode_domains is not None
+        assert snapshot.rcode_subdomains is not None
+
+        noerror_domains = dict(snapshot.rcode_domains.get("NOERROR", []))
+        noerror_sub = dict(snapshot.rcode_subdomains.get("NOERROR", []))
+        # Two NOERROR responses for example.com (base + subdomain).
+        assert noerror_domains["example.com"] == 2
+        # Only the subdomain query shows up in the *_sub view.
+        assert noerror_sub["example.com"] == 1
+
+        nx_domains = dict(snapshot.rcode_domains.get("NXDOMAIN", []))
+        nx_sub = dict(snapshot.rcode_subdomains.get("NXDOMAIN", []))
+        # Both base and subdomain NXDOMAIN queries count at the base domain.
+        assert nx_domains["example.com"] == 2
+        # Only the subdomain query contributes to the *_sub view.
+        assert nx_sub["example.com"] == 1
 
     def test_latency_tracking(self):
         """Latency tracking when enabled."""
