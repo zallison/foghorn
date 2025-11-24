@@ -8,10 +8,14 @@ Outputs:
   - None
 """
 
+import logging
+
 from foghorn.plugins.base import (
     BasePlugin,
     PluginContext,
     PluginDecision,
+    inheritable_ttl_cache,
+    logger as base_logger,
     plugin_aliases,
 )
 
@@ -231,3 +235,132 @@ def test_base_plugin_subclass_inheritance():
     assert plugin.config == {"test_config": "value"}
     ctx = PluginContext(client_ip="10.0.0.1")
     assert plugin.pre_resolve("test.com", 1, b"", ctx) is None
+
+
+def test_base_plugin_priority_from_config_and_fallback(caplog):
+    """Brief: BasePlugin __init__ parses priorities and falls back via pre_priority.
+
+    Inputs:
+      - caplog fixture to capture warnings/info.
+
+    Outputs:
+      - None; asserts pre/post/setup priorities honor config and fallback rules.
+    """
+
+    caplog.set_level(logging.WARNING, logger=base_logger.name)
+
+    class P(BasePlugin):
+        pre_priority = 5
+        post_priority = 7
+        setup_priority = 9
+
+    # Explicit pre/post, no setup_priority: setup should fall back to configured pre.
+    p = P(pre_priority=10, post_priority="200")
+    assert p.pre_priority == 10
+    assert p.post_priority == 200
+    assert p.setup_priority == 10
+
+    # Invalid post_priority is logged and defaults to 50.
+    p2 = P(post_priority="not-an-int")
+    assert p2.post_priority == 50
+    assert any("Invalid post_priority" in r.message for r in caplog.records)
+
+
+def test_parse_priority_value_valid_and_clamped(caplog):
+    """Brief: _parse_priority_value handles invalid, low, and high values.
+
+    Inputs:
+      - caplog fixture for warnings.
+
+    Outputs:
+      - None; asserts default, low-clamp, and high-clamp behaviors.
+    """
+
+    caplog.set_level(logging.WARNING, logger=base_logger.name)
+
+    # Valid string value
+    assert BasePlugin._parse_priority_value("25", "pre_priority", base_logger) == 25
+
+    # Invalid type falls back to default 50
+    assert BasePlugin._parse_priority_value("xx", "pre_priority", base_logger) == 50
+    assert any("Invalid pre_priority" in r.message for r in caplog.records)
+
+    # Below range clamps to 1
+    assert BasePlugin._parse_priority_value(-10, "pre_priority", base_logger) == 1
+    assert any("pre_priority below 1" in r.message for r in caplog.records)
+
+    # Above range clamps to 255
+    assert BasePlugin._parse_priority_value(300, "pre_priority", base_logger) == 255
+    assert any("pre_priority above 255" in r.message for r in caplog.records)
+
+
+def test_inheritable_ttl_cache_per_class_and_ttl(monkeypatch):
+    """Brief: inheritable_ttl_cache caches per class and recreates on TTL change.
+
+    Inputs:
+      - monkeypatch fixture (unused but kept for symmetry).
+
+    Outputs:
+      - None; asserts underlying method called once per key until TTL config changes.
+    """
+
+    class Dummy:
+        cache_ttl = 60
+        cache_maxsize = 8
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @inheritable_ttl_cache(lambda self, x: x)
+        def compute(self, x: int) -> int:
+            self.calls += 1
+            return x * 2
+
+    a = Dummy()
+    b = Dummy()
+
+    # First call populates cache.
+    assert a.compute(1) == 2
+    assert a.calls == 1
+
+    # Same key and class uses cache; no extra calls.
+    assert a.compute(1) == 2
+    assert a.calls == 1
+
+    # Different instance, same class/key also uses same per-class cache.
+    assert b.compute(1) == 2
+    assert a.calls == 1
+    assert b.calls == 0
+
+    # Change TTL on class; next call should rebuild cache and invoke method again.
+    Dummy.cache_ttl = 120
+    assert a.compute(1) == 2
+    assert a.calls == 2
+
+
+def test_baseplugin_cache_wrapper_uses_inheritable_ttl_cache():
+    """Brief: BasePlugin.cache decorator applies inheritable_ttl_cache to methods.
+
+    Inputs:
+      - None; defines a simple plugin class with a cached method.
+
+    Outputs:
+      - None; asserts method result is cached across calls with same arguments.
+    """
+
+    class CachingPlugin(BasePlugin):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        @BasePlugin.cache(lambda self, x: x)
+        def compute(self, x: int) -> int:
+            self.calls += 1
+            return x * 3
+
+    p = CachingPlugin()
+    assert p.compute(2) == 6
+    assert p.calls == 1
+    # Second call with same arg hits cache
+    assert p.compute(2) == 6
+    assert p.calls == 1
