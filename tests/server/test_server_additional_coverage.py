@@ -52,11 +52,20 @@ class _Stats:
     def record_cache_miss(self, *a):
         self.calls.append(("record_cache_miss", a))
 
+    def record_cache_null(self, *a):
+        self.calls.append(("record_cache_null", a))
+
     def record_response_rcode(self, *a):
         self.calls.append(("record_response_rcode", a))
 
-    def record_upstream_result(self, *a):
-        self.calls.append(("record_upstream_result", a))
+    def record_upstream_result(self, *a, **k):
+        self.calls.append(("record_upstream_result", (a, k)))
+
+    def record_upstream_rcode(self, *a, **k):
+        self.calls.append(("record_upstream_rcode", (a, k)))
+
+    def record_query_result(self, *a, **k):
+        self.calls.append(("record_query_result", (a, k)))
 
     def record_latency(self, *a):
         self.calls.append(("record_latency", a))
@@ -148,6 +157,159 @@ def test_ensure_edns_called_in_handle_without_crashing(mode, monkeypatch):
     # response should be SERVFAIL due to no upstreams, but no exception from EDNS handling
     resp = DNSRecord.parse(sock.sent[-1][0])
     assert resp.header.rcode == RCODE.SERVFAIL
+
+
+def test_handle_pre_deny_records_stats_and_query_result():
+    """Brief: pre-resolve deny path records stats and NXDOMAIN.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None; asserts NXDOMAIN and key stats calls are present.
+    """
+
+    from foghorn.server import PluginDecision
+
+    class _PreDeny:
+        def pre_resolve(self, qname, qtype, data, ctx):
+            return PluginDecision(action="deny")
+
+        def post_resolve(self, qname, qtype, data, ctx):  # pragma: no cover - not used
+            return None
+
+    q = DNSRecord.question("predeny-stats.example", "A")
+    DNSUDPHandler.plugins = [_PreDeny()]
+    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+
+    stats = _Stats()
+    DNSUDPHandler.stats_collector = stats
+
+    h, sock = _mk_handler(q.pack())
+    h.handle()
+
+    DNSUDPHandler.stats_collector = None
+
+    wire = sock.sent[-1][0]
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NXDOMAIN
+
+    kinds = [k for k, _ in stats.calls]
+    assert "record_cache_null" in kinds
+    assert "record_response_rcode" in kinds
+    assert "record_query_result" in kinds
+
+
+def test_handle_pre_override_records_stats_and_query_result():
+    """Brief: pre-resolve override path records stats and uses override reply.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None; asserts stats calls present for override path.
+    """
+
+    from foghorn.server import PluginDecision
+
+    class _PreOverride:
+        def pre_resolve(self, qname, qtype, data, ctx):
+            rep = DNSRecord.parse(data).reply()
+            rep.header.rcode = RCODE.NXDOMAIN
+            return PluginDecision(action="override", response=rep.pack())
+
+        def post_resolve(self, qname, qtype, data, ctx):  # pragma: no cover - not used
+            return None
+
+    q = DNSRecord.question("preoverride-stats.example", "A")
+    DNSUDPHandler.plugins = [_PreOverride()]
+    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+
+    stats = _Stats()
+    DNSUDPHandler.stats_collector = stats
+
+    h, sock = _mk_handler(q.pack())
+    h.handle()
+
+    DNSUDPHandler.stats_collector = None
+
+    wire = sock.sent[-1][0]
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NXDOMAIN
+
+    kinds = [k for k, _ in stats.calls]
+    assert "record_cache_null" in kinds
+    assert "record_response_rcode" in kinds
+    assert "record_query_result" in kinds
+
+
+def test_handle_no_upstreams_with_stats_records_query_result():
+    """Brief: No upstreams with stats enabled records SERVFAIL and query result.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None; asserts stats hooks were invoked for no_upstreams path.
+    """
+
+    q = DNSRecord.question("no-upstreams-stats.example", "A")
+    DNSUDPHandler.plugins = []
+    DNSUDPHandler.upstream_addrs = []
+
+    stats = _Stats()
+    DNSUDPHandler.stats_collector = stats
+
+    h, sock = _mk_handler(q.pack())
+    h.handle()
+
+    DNSUDPHandler.stats_collector = None
+
+    wire = sock.sent[-1][0]
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.SERVFAIL
+
+    kinds = [k for k, _ in stats.calls]
+    assert "record_response_rcode" in kinds
+    assert "record_query_result" in kinds
+
+
+def test_handle_all_failed_with_stats_records_upstream_rcode(monkeypatch):
+    """Brief: All-upstreams-failed path records upstream result and upstream rcode.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts upstream result and upstream rcode were recorded.
+    """
+
+    q = DNSRecord.question("allfailed-stats.example", "A")
+    DNSUDPHandler.plugins = []
+    DNSUDPHandler.upstream_addrs = [
+        {"transport": "doh", "url": "https://resolver/dns-query"}
+    ]
+
+    def fake_forward(self, request, upstreams, qname, qtype):
+        return None, {"url": "https://resolver/dns-query"}, "all_failed"
+
+    monkeypatch.setattr(
+        DNSUDPHandler,
+        "_forward_with_failover_helper",
+        fake_forward,
+    )
+
+    stats = _Stats()
+    DNSUDPHandler.stats_collector = stats
+
+    h, sock = _mk_handler(q.pack())
+    h.handle()
+
+    DNSUDPHandler.stats_collector = None
+
+    kinds = [k for k, _ in stats.calls]
+    assert "record_upstream_result" in kinds
+    assert "record_upstream_rcode" in kinds
 
 
 # ---- DNSSEC validate branches ----

@@ -183,6 +183,38 @@ def test_send_query_with_failover_no_upstreams():
     assert resp is None and used is None and reason == "no_upstreams"
 
 
+def test_dnsserver_edns_udp_payload_config_and_fallback(monkeypatch):
+    """Brief: DNSServer applies edns_udp_payload and falls back to default on error.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts DNSUDPHandler.edns_udp_payload is set or reset as expected.
+    """
+
+    import foghorn.server as srv_mod
+
+    class _DummyServer:
+        def __init__(self, *a, **kw):
+            self.daemon_threads = False
+
+    # Avoid binding real UDP sockets in tests
+    monkeypatch.setattr(srv_mod.socketserver, "ThreadingUDPServer", _DummyServer)
+
+    # Normal numeric edns_udp_payload
+    srv_mod.DNSUDPHandler.edns_udp_payload = 0
+    srv_mod.DNSUDPHandler.dnssec_mode = "ignore"
+    srv_mod.DNSServer("127.0.0.1", 0, [], [], edns_udp_payload=1500)
+    assert srv_mod.DNSUDPHandler.dnssec_mode == "ignore"
+    assert srv_mod.DNSUDPHandler.edns_udp_payload == 1500
+
+    # Non-int -> fallback to default 1232
+    srv_mod.DNSUDPHandler.edns_udp_payload = 0
+    srv_mod.DNSServer("127.0.0.1", 0, [], [], edns_udp_payload="not-an-int")
+    assert srv_mod.DNSUDPHandler.edns_udp_payload == 1232
+
+
 def _make_handler_for_cache_tests(min_cache_ttl: int):
     """Brief: Construct a bare DNSUDPHandler instance suitable for calling _cache_and_send_response.
 
