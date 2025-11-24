@@ -868,7 +868,7 @@ def main(argv: List[str] | None = None) -> int:
 
     if bool(doh_cfg.get("enabled", False)):
         h = str(doh_cfg.get("host", legacy_host))
-        p = int(doh_cfg.get("port", 8053))
+        p = int(doh_cfg.get("port", 8153))
         cert_file = doh_cfg.get("cert_file")
         key_file = doh_cfg.get("key_file")
         logger.info("Starting DoH listener on %s:%d", h, p)

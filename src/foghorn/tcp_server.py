@@ -34,10 +34,10 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                 if len(hdr) != 2:
                     break
                 ln = int.from_bytes(hdr, "big")
-                if ln <= 0:
+                if ln <= 0:  # pragma: nocover - network error
                     break
                 body = _recv_exact(sock, ln)
-                if len(body) != ln:
+                if len(body) != ln:  # pragma: nocover - network error
                     break
                 resp = self.resolver(body, peer_ip)
                 sock.sendall(len(resp).to_bytes(2, "big") + resp)
