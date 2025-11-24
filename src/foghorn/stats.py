@@ -337,16 +337,23 @@ class StatsSnapshot:
     top_domains: Optional[List[Tuple[str, int]]]
     latency_stats: Optional[Dict[str, float]]
     latency_recent_stats: Optional[Dict[str, float]] = None
-    top_upstreams: Optional[List[Tuple[str, int]]] = None
     upstream_rcodes: Optional[Dict[str, Dict[str, int]]] = None
     upstream_qtypes: Optional[Dict[str, Dict[str, int]]] = None
     qtype_qnames: Optional[Dict[str, List[Tuple[str, int]]]] = None
     # Mapping of rcode -> list of (base_domain, count) tuples representing the
     # most frequently seen base domains per response code.
     rcode_domains: Optional[Dict[str, List[Tuple[str, int]]]] = None
+    # Mapping of rcode -> list of (base_domain, count) tuples representing
+    # base domains where subdomain queries (qname != base) produced the
+    # response code.
+    rcode_subdomains: Optional[Dict[str, List[Tuple[str, int]]]] = None
     # Top base domains by cache outcome, derived from cache hit/miss tracking.
     cache_hit_domains: Optional[List[Tuple[str, int]]] = None
     cache_miss_domains: Optional[List[Tuple[str, int]]] = None
+    # Top base domains where cache hits/misses were produced by subdomain
+    # queries only (qname != base).
+    cache_hit_subdomains: Optional[List[Tuple[str, int]]] = None
+    cache_miss_subdomains: Optional[List[Tuple[str, int]]] = None
 
 
 class StatsSQLiteStore:
@@ -1058,9 +1065,6 @@ class StatsCollector:
         self._top_domains: Optional[TopK] = (
             TopK(capacity=internal_capacity) if include_top_domains else None
         )
-        # Top upstreams by request volume; upstream cardinality is typically
-        # small so this is always enabled.
-        self._top_upstreams: Optional[TopK] = TopK(capacity=internal_capacity)
 
         # Per-qtype top domains (full qnames). Keys are qtype strings such as
         # "A", "AAAA", "PTR"; values are TopK trackers of normalized domains.
@@ -1073,10 +1077,21 @@ class StatsCollector:
         self._top_cache_miss_domains: Optional[TopK] = (
             TopK(capacity=internal_capacity) if include_top_domains else None
         )
+        # Top base domains where cache hits/misses were produced by
+        # subdomain queries only (qname != base).
+        self._top_cache_hit_subdomains: Optional[TopK] = (
+            TopK(capacity=internal_capacity) if include_top_domains else None
+        )
+        self._top_cache_miss_subdomains: Optional[TopK] = (
+            TopK(capacity=internal_capacity) if include_top_domains else None
+        )
 
         # Per-rcode top base domains; trackers are created lazily when rcodes
         # are observed with associated query names.
         self._top_rcode_domains: Dict[str, TopK] = {}
+        # Per-rcode top base domains where only subdomain queries (qname !=
+        # base) are counted.
+        self._top_rcode_subdomains: Dict[str, TopK] = {}
 
         # Optional: latency histogram
         self._latency: Optional[LatencyHistogram] = (
@@ -1192,12 +1207,23 @@ class StatsCollector:
 
             if self._top_cache_hit_domains is not None and base:
                 self._top_cache_hit_domains.add(base)
+            # Track cache hits attributed specifically to subdomain queries
+            # (qname != base) at the base-domain level.
+            if (
+                self._top_cache_hit_subdomains is not None
+                and domain
+                and base
+                and domain != base
+            ):
+                self._top_cache_hit_subdomains.add(base)
 
             if self._store is not None:
                 try:
                     self._store.increment_count("totals", "cache_hits")
                     if base:
                         self._store.increment_count("cache_hit_domains", base)
+                        if domain and domain != base:
+                            self._store.increment_count("cache_hit_subdomains", base)
                 except Exception:  # pragma: no cover - defensive
                     logger.debug(
                         "StatsCollector: failed to persist cache_hit", exc_info=True
@@ -1225,12 +1251,23 @@ class StatsCollector:
 
             if self._top_cache_miss_domains is not None and base:
                 self._top_cache_miss_domains.add(base)
+            # Track cache misses attributed specifically to subdomain queries
+            # (qname != base) at the base-domain level.
+            if (
+                self._top_cache_miss_subdomains is not None
+                and domain
+                and base
+                and domain != base
+            ):
+                self._top_cache_miss_subdomains.add(base)
 
             if self._store is not None:
                 try:
                     self._store.increment_count("totals", "cache_misses")
                     if base:
                         self._store.increment_count("cache_miss_domains", base)
+                        if domain and domain != base:
+                            self._store.increment_count("cache_miss_subdomains", base)
                 except Exception:  # pragma: no cover - defensive
                     logger.debug(
                         "StatsCollector: failed to persist cache_miss", exc_info=True
@@ -1435,8 +1472,6 @@ class StatsCollector:
             self._upstreams[upstream_id][outcome] += 1
             if qtype:
                 self._upstream_qtypes[upstream_id][qtype] += 1
-            if self._top_upstreams is not None:
-                self._top_upstreams.add(upstream_id)
             if self._store is not None:
                 try:
                     key = f"{upstream_id}|{outcome}"
@@ -1485,6 +1520,7 @@ class StatsCollector:
             >>> collector.record_response_rcode("NXDOMAIN")
         """
         base: Optional[str] = None
+        domain: Optional[str] = None
         if qname:
             domain = _normalize_domain(qname)
             parts = domain.split(".") if domain else []
@@ -1502,12 +1538,24 @@ class StatsCollector:
                     self._top_rcode_domains[rcode] = tracker
                 tracker.add(base)
 
+                # Additionally track per-rcode base domains where only
+                # subdomain queries (qname != base) are counted.
+                if domain and domain != base:
+                    sub_tracker = self._top_rcode_subdomains.get(rcode)
+                    if sub_tracker is None:
+                        sub_tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                        self._top_rcode_subdomains[rcode] = sub_tracker
+                    sub_tracker.add(base)
+
             if self._store is not None:
                 try:
                     self._store.increment_count("rcodes", rcode)
                     if base:
                         key = f"{rcode}|{base}"
                         self._store.increment_count("rcode_domains", key)
+                        if domain and domain != base:
+                            sub_key = f"{rcode}|{base}"
+                            self._store.increment_count("rcode_subdomains", sub_key)
                 except Exception:  # pragma: no cover - defensive
                     logger.debug(
                         "StatsCollector: failed to persist rcode", exc_info=True
@@ -1678,13 +1726,6 @@ class StatsCollector:
             if self._top_domains is not None:
                 top_domains = self._top_domains.export(self._top_domains.capacity)
 
-            top_upstreams = None
-            if self._top_upstreams is not None:
-                # No ignore filters for upstreams; simply return the most
-                # active upstreams by request volume.
-                top_upstreams = self._top_upstreams.export(self._top_upstreams.capacity)
-                top_upstreams = top_upstreams[: self.top_n]
-
             # Apply display-only ignore filters to top lists. These filters do
             # not affect counters or underlying TopK state; they only hide
             # entries from exported snapshots and downstream JSON formatting.
@@ -1809,7 +1850,7 @@ class StatsCollector:
                 if not qtype_qnames:
                     qtype_qnames = None
 
-            # Latency
+            # Per-rcode top base domains with domain ignore filters applied.
             rcode_domains: Optional[Dict[str, List[Tuple[str, int]]]] = None
             if self._top_rcode_domains:
                 rcode_domains = {}
@@ -1817,18 +1858,94 @@ class StatsCollector:
                     entries = tracker.export(tracker.capacity)
                     if not entries:
                         continue
-                    rcode_domains[rcode_name] = entries[: self.top_n]
+
+                    filtered_entries: List[Tuple[str, int]] = []
+                    for domain, count in entries:
+                        norm = _normalize_domain(str(domain))
+                        # Optionally hide single-label hosts (no dots).
+                        if self.ignore_single_host and "." not in norm:
+                            continue
+                        if self._ignore_top_domains:
+                            if self._ignore_domains_as_suffix:
+                                if any(
+                                    norm == ig or norm.endswith("." + ig)
+                                    for ig in self._ignore_top_domains
+                                ):
+                                    continue
+                            else:
+                                if norm in self._ignore_top_domains:
+                                    continue
+                        filtered_entries.append((domain, count))
+
+                    if not filtered_entries:
+                        continue
+
+                    rcode_domains[rcode_name] = filtered_entries[: self.top_n]
+
                 if not rcode_domains:
                     rcode_domains = None
 
-            # Top base domains split by cache outcome.
+            # Per-rcode top base domains restricted to subdomain queries only
+            # (qname != base), with the same domain ignore filters applied.
+            rcode_subdomains: Optional[Dict[str, List[Tuple[str, int]]]] = None
+            if self._top_rcode_subdomains:
+                rcode_subdomains = {}
+                for rcode_name, tracker in self._top_rcode_subdomains.items():
+                    entries = tracker.export(tracker.capacity)
+                    if not entries:
+                        continue
+
+                    filtered_entries: List[Tuple[str, int]] = []
+                    for domain, count in entries:
+                        norm = _normalize_domain(str(domain))
+                        if self.ignore_single_host and "." not in norm:
+                            continue
+                        if self._ignore_top_domains:
+                            if self._ignore_domains_as_suffix:
+                                if any(
+                                    norm == ig or norm.endswith("." + ig)
+                                    for ig in self._ignore_top_domains
+                                ):
+                                    continue
+                            else:
+                                if norm in self._ignore_top_domains:
+                                    continue
+                        filtered_entries.append((domain, count))
+
+                    if not filtered_entries:
+                        continue
+
+                    rcode_subdomains[rcode_name] = filtered_entries[: self.top_n]
+
+                if not rcode_subdomains:
+                    rcode_subdomains = None
+
+            # Top base domains split by cache outcome, sharing domain ignore filters.
             cache_hit_domains: Optional[List[Tuple[str, int]]] = None
             if self._top_cache_hit_domains is not None:
                 entries = self._top_cache_hit_domains.export(
                     self._top_cache_hit_domains.capacity
                 )
                 if entries:
-                    cache_hit_domains = entries[: self.top_n]
+                    filtered_entries = []
+                    for domain, count in entries:
+                        norm = _normalize_domain(str(domain))
+                        # Optionally hide single-label hosts (no dots).
+                        if self.ignore_single_host and "." not in norm:
+                            continue
+                        if self._ignore_top_domains:
+                            if self._ignore_domains_as_suffix:
+                                if any(
+                                    norm == ig or norm.endswith("." + ig)
+                                    for ig in self._ignore_top_domains
+                                ):
+                                    continue
+                            else:
+                                if norm in self._ignore_top_domains:
+                                    continue
+                        filtered_entries.append((domain, count))
+                    if filtered_entries:
+                        cache_hit_domains = filtered_entries[: self.top_n]
 
             cache_miss_domains: Optional[List[Tuple[str, int]]] = None
             if self._top_cache_miss_domains is not None:
@@ -1836,7 +1953,77 @@ class StatsCollector:
                     self._top_cache_miss_domains.capacity
                 )
                 if entries:
-                    cache_miss_domains = entries[: self.top_n]
+                    filtered_entries = []
+                    for domain, count in entries:
+                        norm = _normalize_domain(str(domain))
+                        # Optionally hide single-label hosts (no dots).
+                        if self.ignore_single_host and "." not in norm:
+                            continue
+                        if self._ignore_top_domains:
+                            if self._ignore_domains_as_suffix:
+                                if any(
+                                    norm == ig or norm.endswith("." + ig)
+                                    for ig in self._ignore_top_domains
+                                ):
+                                    continue
+                            else:
+                                if norm in self._ignore_top_domains:
+                                    continue
+                        filtered_entries.append((domain, count))
+                    if filtered_entries:
+                        cache_miss_domains = filtered_entries[: self.top_n]
+
+            # Top base domains for cache outcome restricted to subdomain
+            # queries only (qname != base).
+            cache_hit_subdomains: Optional[List[Tuple[str, int]]] = None
+            if self._top_cache_hit_subdomains is not None:
+                entries = self._top_cache_hit_subdomains.export(
+                    self._top_cache_hit_subdomains.capacity
+                )
+                if entries:
+                    filtered_entries = []
+                    for domain, count in entries:
+                        norm = _normalize_domain(str(domain))
+                        if self.ignore_single_host and "." not in norm:
+                            continue
+                        if self._ignore_top_domains:
+                            if self._ignore_domains_as_suffix:
+                                if any(
+                                    norm == ig or norm.endswith("." + ig)
+                                    for ig in self._ignore_top_domains
+                                ):
+                                    continue
+                            else:
+                                if norm in self._ignore_top_domains:
+                                    continue
+                        filtered_entries.append((domain, count))
+                    if filtered_entries:
+                        cache_hit_subdomains = filtered_entries[: self.top_n]
+
+            cache_miss_subdomains: Optional[List[Tuple[str, int]]] = None
+            if self._top_cache_miss_subdomains is not None:
+                entries = self._top_cache_miss_subdomains.export(
+                    self._top_cache_miss_subdomains.capacity
+                )
+                if entries:
+                    filtered_entries = []
+                    for domain, count in entries:
+                        norm = _normalize_domain(str(domain))
+                        if self.ignore_single_host and "." not in norm:
+                            continue
+                        if self._ignore_top_domains:
+                            if self._ignore_domains_as_suffix:
+                                if any(
+                                    norm == ig or norm.endswith("." + ig)
+                                    for ig in self._ignore_top_domains
+                                ):
+                                    continue
+                            else:
+                                if norm in self._ignore_top_domains:
+                                    continue
+                        filtered_entries.append((domain, count))
+                    if filtered_entries:
+                        cache_miss_subdomains = filtered_entries[: self.top_n]
 
             # Latency
             latency_stats = None
@@ -1860,13 +2047,15 @@ class StatsCollector:
                 top_domains=top_domains,
                 latency_stats=latency_stats,
                 latency_recent_stats=latency_recent_stats,
-                top_upstreams=top_upstreams,
                 upstream_rcodes=upstream_rcodes,
                 upstream_qtypes=upstream_qtypes,
                 qtype_qnames=qtype_qnames,
                 rcode_domains=rcode_domains,
+                rcode_subdomains=rcode_subdomains,
                 cache_hit_domains=cache_hit_domains,
                 cache_miss_domains=cache_miss_domains,
+                cache_hit_subdomains=cache_hit_subdomains,
+                cache_miss_subdomains=cache_miss_subdomains,
             )
 
             # Reset if requested
@@ -1893,13 +2082,16 @@ class StatsCollector:
                     self._top_subdomains.counts.clear()
                 if self._top_domains is not None:
                     self._top_domains.counts.clear()
-                if self._top_upstreams is not None:
-                    self._top_upstreams.counts.clear()
                 if self._top_cache_hit_domains is not None:
                     self._top_cache_hit_domains.counts.clear()
                 if self._top_cache_miss_domains is not None:
                     self._top_cache_miss_domains.counts.clear()
+                if self._top_cache_hit_subdomains is not None:
+                    self._top_cache_hit_subdomains.counts.clear()
+                if self._top_cache_miss_subdomains is not None:
+                    self._top_cache_miss_subdomains.counts.clear()
                 self._top_rcode_domains.clear()
+                self._top_rcode_subdomains.clear()
 
                 if self._latency is not None:
                     self._latency = LatencyHistogram()
@@ -2137,12 +2329,29 @@ class StatsCollector:
                 inner = rcode_domain_counts.setdefault(rcode_name, {})
                 inner[str(dname)] = int_value
 
+            # Per-rcode base-domain counters for subdomain-only traffic: keys
+            # are stored as "rcode|domain" as well.
+            rcode_subdomain_counts: Dict[str, Dict[str, int]] = {}
+            for key, value in counts.get("rcode_subdomains", {}).items():
+                try:
+                    rcode_name, dname = str(key).split("|", 1)
+                except ValueError:
+                    continue
+                try:
+                    int_value = int(value)
+                except (TypeError, ValueError):
+                    continue
+                inner = rcode_subdomain_counts.setdefault(rcode_name, {})
+                inner[str(dname)] = int_value
+
             # Clients/domains: rebuild uniques and top-K trackers when enabled.
             client_counts = counts.get("clients", {})
             subdomain_counts = counts.get("sub_domains", {})
             domain_counts = counts.get("domains", {})
             cache_hit_domain_counts = counts.get("cache_hit_domains", {})
             cache_miss_domain_counts = counts.get("cache_miss_domains", {})
+            cache_hit_subdomain_counts = counts.get("cache_hit_subdomains", {})
+            cache_miss_subdomain_counts = counts.get("cache_miss_subdomains", {})
 
             # Unique clients/domains are approximated from available keys.
             if self._unique_clients is not None:
@@ -2198,6 +2407,20 @@ class StatsCollector:
                     tracker.counts = dict(items[: tracker.capacity])
                     self._top_rcode_domains[rcode_name] = tracker
 
+            # Per-rcode top base domains for subdomain-only traffic from
+            # rcode_subdomain_counts.
+            if rcode_subdomain_counts and self.include_top_domains:
+                self._top_rcode_subdomains.clear()
+                for rcode_name, dmap in rcode_subdomain_counts.items():
+                    items = sorted(
+                        ((str(k), int(v)) for k, v in dmap.items()),
+                        key=lambda kv: kv[1],
+                        reverse=True,
+                    )
+                    tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                    tracker.counts = dict(items[: tracker.capacity])
+                    self._top_rcode_subdomains[rcode_name] = tracker
+
             # Top base domains
             if self._top_domains is not None and domain_counts:
                 items = sorted(
@@ -2226,6 +2449,31 @@ class StatsCollector:
                 )
                 limited = dict(items[: self._top_cache_miss_domains.capacity])
                 self._top_cache_miss_domains.counts = limited
+
+            # Top cache hit/miss base domains for subdomain-only traffic.
+            if (
+                self._top_cache_hit_subdomains is not None
+                and cache_hit_subdomain_counts
+            ):
+                items = sorted(
+                    ((str(k), int(v)) for k, v in cache_hit_subdomain_counts.items()),
+                    key=lambda kv: kv[1],
+                    reverse=True,
+                )
+                limited = dict(items[: self._top_cache_hit_subdomains.capacity])
+                self._top_cache_hit_subdomains.counts = limited
+
+            if (
+                self._top_cache_miss_subdomains is not None
+                and cache_miss_subdomain_counts
+            ):
+                items = sorted(
+                    ((str(k), int(v)) for k, v in cache_miss_subdomain_counts.items()),
+                    key=lambda kv: kv[1],
+                    reverse=True,
+                )
+                limited = dict(items[: self._top_cache_miss_subdomains.capacity])
+                self._top_cache_miss_subdomains.counts = limited
 
     def reset_latency_recent(self) -> None:
         """
@@ -2322,11 +2570,6 @@ def format_snapshot_json(snapshot: StatsSnapshot) -> str:
             {"domain": d, "count": n} for d, n in snapshot.top_domains
         ]
 
-    if snapshot.top_upstreams:
-        output["top_upstreams"] = [
-            {"upstream": u, "count": n} for u, n in snapshot.top_upstreams
-        ]
-
     if snapshot.upstream_rcodes:
         output["upstream_rcodes"] = snapshot.upstream_rcodes
 
@@ -2342,6 +2585,12 @@ def format_snapshot_json(snapshot: StatsSnapshot) -> str:
             for rcode, entries in snapshot.rcode_domains.items()
         }
 
+    if snapshot.rcode_subdomains:
+        output["rcode_subdomains"] = {
+            rcode: [{"domain": d, "count": n} for d, n in entries]
+            for rcode, entries in snapshot.rcode_subdomains.items()
+        }
+
     if snapshot.cache_hit_domains:
         output["cache_hit_domains"] = [
             {"domain": d, "count": n} for d, n in snapshot.cache_hit_domains
@@ -2350,6 +2599,16 @@ def format_snapshot_json(snapshot: StatsSnapshot) -> str:
     if snapshot.cache_miss_domains:
         output["cache_miss_domains"] = [
             {"domain": d, "count": n} for d, n in snapshot.cache_miss_domains
+        ]
+
+    if snapshot.cache_hit_subdomains:
+        output["cache_hit_subdomains"] = [
+            {"domain": d, "count": n} for d, n in snapshot.cache_hit_subdomains
+        ]
+
+    if snapshot.cache_miss_subdomains:
+        output["cache_miss_subdomains"] = [
+            {"domain": d, "count": n} for d, n in snapshot.cache_miss_subdomains
         ]
 
     if snapshot.latency_stats:
