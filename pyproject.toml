@@ -17,7 +17,6 @@ dependencies = [
   "dnspython>=2.6.1",
   "fastapi>=0.111.0",
   "httpx",
-  "lxml",
   "psutil",
   "pytest",
   "pytest-cov",
@@ -25,11 +24,11 @@ dependencies = [
   "uvicorn>=0.30.0",
   "watchdog",
   "whois",
+  "coverage",
 ]
 
 [optional-dependencies]
 dev = [
-   "coverage",
    "black",
    "ipython",
    "ruff",
