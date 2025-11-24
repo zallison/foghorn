@@ -222,14 +222,14 @@ def test_stats_and_traffic_with_collector() -> None:
     assert "latency" in traffic_data
 
 
-def test_stats_includes_top_upstreams_and_upstream_rcodes() -> None:
-    """Brief: /stats must expose top_upstreams, upstream_rcodes, upstream_qtypes, and qtype_qnames fields.
+def test_stats_includes_upstreams_and_upstream_rcodes() -> None:
+    """Brief: /stats must expose upstreams, upstream_rcodes, upstream_qtypes, and qtype_qnames fields.
 
     Inputs:
       - StatsCollector with some upstream results and per-upstream rcodes.
 
     Outputs:
-      - /stats JSON contains top_upstreams list, upstream_rcodes mapping,
+      - /stats JSON contains upstreams mapping, upstream_rcodes mapping,
         upstream_qtypes mapping keyed by upstream_id, and qtype_qnames mapping
         keyed by qtype.
     """
@@ -259,8 +259,8 @@ def test_stats_includes_top_upstreams_and_upstream_rcodes() -> None:
     assert resp.status_code == 200
     data = resp.json()
 
-    assert "top_upstreams" in data
-    assert any(u[0] == "8.8.8.8:53" for u in data["top_upstreams"])
+    assert "upstreams" in data
+    assert "8.8.8.8:53" in data["upstreams"]
 
     assert "upstream_rcodes" in data
     assert data["upstream_rcodes"]["8.8.8.8:53"]["NOERROR"] == 1
@@ -270,6 +270,9 @@ def test_stats_includes_top_upstreams_and_upstream_rcodes() -> None:
 
     assert "qtype_qnames" in data
     assert "A" in data["qtype_qnames"]
+
+    # Legacy top_upstreams key should no longer be present.
+    assert "top_upstreams" not in data
 
 
 def test_stats_fastapi_and_threaded_payloads_match(monkeypatch) -> None:
@@ -301,14 +304,17 @@ def test_stats_fastapi_and_threaded_payloads_match(monkeypatch) -> None:
     collector.record_response_rcode("NOERROR", qname="example.com")
     collector.record_response_rcode("NXDOMAIN", qname="nx.example.com")
 
-    # Upstream stats so that top_upstreams, upstream_rcodes, upstream_qtypes are present.
+    # Upstream stats so that upstreams, upstream_rcodes, upstream_qtypes are present.
     collector.record_upstream_result("8.8.8.8:53", "success", qtype="A")
     collector.record_upstream_result("1.1.1.1:53", "timeout", qtype="AAAA")
     collector.record_upstream_rcode("8.8.8.8:53", "NOERROR")
 
-    # Cache domain stats for cache_hit_domains/cache_miss_domains.
+    # Cache domain stats for cache_hit_domains/cache_miss_domains and their
+    # subdomain-only counterparts.
     collector.record_cache_hit("example.com")
+    collector.record_cache_hit("www.example.com")
     collector.record_cache_miss("other.example.com")
+    collector.record_cache_miss("api.other.example.com")
 
     base_cfg = {"webserver": {"enabled": True, "auth": {"mode": "none"}}}
 
@@ -374,6 +380,15 @@ def test_stats_fastapi_and_threaded_payloads_match(monkeypatch) -> None:
     assert set(norm_fast.keys()) == set(norm_thread.keys())
     # And that all corresponding values match.
     assert norm_fast == norm_thread
+
+    # New subdomain-oriented metrics should be present in the /stats payload
+    # when cache and rcode statistics are recorded.
+    assert "cache_hit_domains" in fastapi_data
+    assert "cache_miss_domains" in fastapi_data
+    assert "cache_hit_subdomains" in fastapi_data
+    assert "cache_miss_subdomains" in fastapi_data
+    assert "rcode_domains" in fastapi_data
+    assert "rcode_subdomains" in fastapi_data
 
 
 def test_stats_debug_timings_emit_log_when_enabled(caplog) -> None:
@@ -941,14 +956,16 @@ def test_read_proc_meminfo_parses_sample_file(tmp_path) -> None:
       - Temporary file containing a subset of /proc/meminfo-style lines.
 
     Outputs:
-      - Dict maps fields to byte counts; invalid lines are ignored.
+      - Dict maps fields to byte counts; invalid and malformed lines are ignored.
     """
 
     meminfo_path = tmp_path / "meminfo"
     meminfo_path.write_text(
         "MemTotal:       1024 kB\n"
         "MemFree:        256 kB\n"
-        "Bogus: not-a-number kB\n",
+        "NoColonLine\n"  # should be skipped entirely
+        "EmptyField:   \n"  # has ':' but no numeric parts -> skipped
+        "Bogus: not-a-number kB\n",  # numeric parse failure -> skipped
         encoding="utf-8",
     )
 
@@ -956,6 +973,8 @@ def test_read_proc_meminfo_parses_sample_file(tmp_path) -> None:
     assert result["MemTotal"] == 1024 * 1024
     assert result["MemFree"] == 256 * 1024
     assert "Bogus" not in result
+    assert "NoColonLine" not in result
+    assert "EmptyField" not in result
 
 
 def test_utc_now_iso_returns_parseable_utc_timestamp() -> None:
@@ -1161,3 +1180,597 @@ def test_start_webserver_uvicorn_path_uses_dummy_server(monkeypatch) -> None:
     cfg_obj = state.get("config")
     assert isinstance(cfg_obj, DummyConfig)
     assert cfg_obj.host == "127.0.0.1"
+
+
+def test_sanitize_config_non_dict_and_no_redact_keys() -> None:
+    """Brief: sanitize_config handles non-dict input and missing redact_keys.
+
+    Inputs:
+      - Non-dict cfg and dict cfg without redact_keys.
+
+    Outputs:
+      - Non-dict input yields empty dict; no redact_keys returns deep copy.
+    """
+
+    # Non-dict input -> empty mapping
+    assert sanitize_config("not-a-dict", ["token"]) == {}
+
+    # No redact_keys -> original structure preserved in a deep copy
+    cfg = {"webserver": {"auth": {"token": "secret"}}}
+    clean = sanitize_config(cfg, redact_keys=None)
+    assert clean == cfg
+    assert clean is not cfg
+
+
+def test_json_safe_handles_exceptions_and_custom_objects() -> None:
+    """Brief: _json_safe should serialize exceptions and arbitrary objects safely.
+
+    Inputs:
+      - Mapping containing an Exception and a custom object.
+
+    Outputs:
+      - Exception represented as {"type", "message"}; custom object as string.
+    """
+
+    import foghorn.webserver as web_mod
+
+    class Custom:
+        def __str__(self) -> str:  # noqa: D401
+            """Return a simple marker string."""
+
+            return "CUSTOM-OBJ"
+
+    err = ValueError("boom")
+    data = {"err": err, "obj": Custom()}
+    safe = web_mod._json_safe(data)
+
+    assert safe["err"]["type"] == "ValueError"
+    assert safe["err"]["message"] == "boom"
+    assert safe["obj"] == "CUSTOM-OBJ"
+
+
+def test_get_system_info_swallows_psutil_exceptions(monkeypatch) -> None:
+    """Brief: get_system_info must tolerate psutil Process methods raising.
+
+    Inputs:
+      - monkeypatch to install DummyProc that raises in various methods.
+
+    Outputs:
+      - Function returns dict with expected keys without raising.
+    """
+
+    import types
+    import foghorn.webserver as web_mod
+
+    class DummyMemInfo:
+        def __init__(self) -> None:
+            self.rss = 1234
+
+    class DummyProc:
+        def memory_info(self) -> DummyMemInfo:
+            return DummyMemInfo()
+
+        def cpu_times(self):  # noqa: D401
+            """Always raise to exercise exception path."""
+
+            raise RuntimeError("cpu_times boom")
+
+        def cpu_percent(self, interval: float = 0.0) -> float:  # noqa: ARG002
+            raise RuntimeError("cpu_percent boom")
+
+        def io_counters(self):  # noqa: D401
+            """Always raise to exercise io_counters exception path."""
+
+            raise RuntimeError("io boom")
+
+        def open_files(self):  # noqa: D401
+            """Always raise to exercise open_files exception path."""
+
+            raise RuntimeError("open_files boom")
+
+        def connections(self):  # noqa: D401
+            """Always raise to exercise connections exception path."""
+
+            raise RuntimeError("connections boom")
+
+    fake_psutil = types.SimpleNamespace(Process=lambda _pid: DummyProc())
+    monkeypatch.setattr(web_mod, "psutil", fake_psutil, raising=True)
+
+    info = get_system_info()
+
+    # Presence of keys is sufficient; values may be None when errors occur.
+    for key in [
+        "process_cpu_times",
+        "process_cpu_percent",
+        "process_io_counters",
+        "process_open_files_count",
+        "process_connections_count",
+    ]:
+        assert key in info
+
+
+def test_resolve_www_root_falls_back_to_package_html(monkeypatch, tmp_path) -> None:
+    """Brief: resolve_www_root falls back to package html/ when no overrides apply.
+
+    Inputs:
+      - monkeypatch and temporary directory for fake CWD.
+
+    Outputs:
+      - Returned path points under the foghorn html/ tree.
+    """
+
+    import os
+    import foghorn.webserver as web_mod
+
+    # Ensure no env override and a CWD without html/ directory
+    empty_root = tmp_path / "no_html_here"
+    empty_root.mkdir()
+    monkeypatch.delenv("FOGHORN_WWW_ROOT", raising=False)
+    monkeypatch.setattr(web_mod.os, "getcwd", lambda: os.fspath(empty_root))
+
+    path = resolve_www_root({})
+    # We don't assert the exact path, just that it ends with an html directory.
+    assert "html" in path.split(os.sep)
+
+
+def test_stats_reset_endpoint_disabled_when_no_collector() -> None:
+    """Brief: FastAPI /stats/reset returns disabled when no StatsCollector.
+
+    Inputs:
+      - App created with stats=None.
+
+    Outputs:
+      - JSON status == "disabled".
+    """
+
+    app = create_app(
+        stats=None, config={"webserver": {"enabled": True}}, log_buffer=RingBuffer()
+    )
+    client = TestClient(app)
+
+    resp = client.post("/stats/reset")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "disabled"
+
+
+def test_traffic_endpoint_disabled_when_no_collector() -> None:
+    """Brief: FastAPI /traffic reports disabled when no StatsCollector.
+
+    Inputs:
+      - App created with stats=None.
+
+    Outputs:
+      - JSON status == "disabled".
+    """
+
+    app = create_app(
+        stats=None, config={"webserver": {"enabled": True}}, log_buffer=RingBuffer()
+    )
+    client = TestClient(app)
+
+    resp = client.get("/traffic")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "disabled"
+
+
+def test_config_raw_500_when_config_path_missing() -> None:
+    """Brief: FastAPI /config/raw returns 500 when config_path is not set.
+
+    Inputs:
+      - App created without config_path.
+
+    Outputs:
+      - HTTP 500 with detail explaining missing config_path.
+    """
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+        config_path=None,
+    )
+    client = TestClient(app)
+
+    resp = client.get("/config/raw")
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["detail"] == "config_path not configured"
+
+
+def test_save_config_400_when_body_not_object(tmp_path) -> None:
+    """Brief: FastAPI /config/save rejects non-object bodies at runtime.
+
+    Inputs:
+      - Existing config file and list-valued body passed directly to endpoint.
+
+    Outputs:
+      - HTTPException 400 with message about JSON object requirement.
+    """
+
+    import asyncio
+    from fastapi import HTTPException
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("initial: 1\n", encoding="utf-8")
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+        config_path=str(cfg_path),
+    )
+
+    route = next(
+        r for r in app.router.routes if getattr(r, "path", None) == "/config/save"
+    )
+
+    async def run() -> None:
+        try:
+            await route.endpoint(["not", "object"])  # type: ignore[arg-type]
+        except HTTPException as exc:
+            assert exc.status_code == 400
+            assert exc.detail == "request body must be a JSON object"
+        else:  # pragma: no cover - defensive
+            assert False, "expected HTTPException for non-object body"
+
+    asyncio.run(run())
+
+
+def test_save_config_500_when_config_path_missing() -> None:
+    """Brief: FastAPI /config/save errors when config_path is not configured.
+
+    Inputs:
+      - App created with config_path=None and valid body.
+
+    Outputs:
+      - HTTP 500 with detail about missing config_path.
+    """
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+        config_path=None,
+    )
+    client = TestClient(app)
+
+    resp = client.post("/config/save", json={"raw_yaml": "answer: 1\n"})
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "config_path not configured"
+
+
+def test_save_config_400_when_raw_yaml_missing(tmp_path) -> None:
+    """Brief: /config/save surfaces raw_yaml validation error via wrapped 500.
+
+    Inputs:
+      - Existing config file and JSON body missing raw_yaml.
+
+    Outputs:
+      - HTTP 500 whose detail mentions the missing raw_yaml field.
+    """
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("initial: 1\n", encoding="utf-8")
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+        config_path=str(cfg_path),
+    )
+    client = TestClient(app)
+
+    resp = client.post("/config/save", json={})
+    # HTTPException from validation is wrapped by the outer handler into a 500
+    assert resp.status_code == 500
+    detail = resp.json()["detail"]
+    assert "request body must include 'raw_yaml' string field" in detail
+
+
+def test_root_index_404_when_disabled(tmp_path) -> None:
+    """Brief: FastAPI / and /index.html 404 when webserver.index is false.
+
+    Inputs:
+      - Temporary html directory with index.html but index disabled.
+
+    Outputs:
+      - Both routes return 404 with "index disabled" detail.
+    """
+
+    import os
+
+    html_dir = tmp_path / "html"
+    html_dir.mkdir()
+    (html_dir / "index.html").write_text("<html>index</html>", encoding="utf-8")
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True, "index": False}},
+        log_buffer=RingBuffer(),
+    )
+    app.state.www_root = os.fspath(html_dir)
+    client = TestClient(app)
+
+    for path in ["/", "/index.html"]:
+        resp = client.get(path)
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "index disabled"
+
+
+def test_root_index_404_when_index_missing(tmp_path) -> None:
+    """Brief: FastAPI index routes 404 when index.html is missing under www_root.
+
+    Inputs:
+      - Temporary html directory without index.html.
+
+    Outputs:
+      - / and /index.html both respond 404 with "index not found".
+    """
+
+    import os
+
+    html_dir = tmp_path / "html"
+    html_dir.mkdir()
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True, "index": True}},
+        log_buffer=RingBuffer(),
+    )
+    app.state.www_root = os.fspath(html_dir)
+    client = TestClient(app)
+
+    for path in ["/", "/index.html"]:
+        resp = client.get(path)
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "index not found"
+
+
+def test_static_www_empty_path_raises_404() -> None:
+    """Brief: Static FastAPI route must return 404 for empty path parameter.
+
+    Inputs:
+      - Direct call to the /{path:path} endpoint with empty string.
+
+    Outputs:
+      - HTTPException 404 with detail "not found".
+    """
+
+    import asyncio
+    from fastapi import HTTPException
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+    )
+
+    route = next(
+        r for r in app.router.routes if getattr(r, "path", None) == "/{path:path}"
+    )
+
+    async def run() -> None:
+        try:
+            await route.endpoint("")  # type: ignore[arg-type]
+        except HTTPException as exc:  # pragma: no cover - assertion is the goal
+            assert exc.status_code == 404
+            assert exc.detail == "not found"
+        else:  # pragma: no cover - defensive
+            assert False, "expected HTTPException for empty path"
+
+    asyncio.run(run())
+
+
+def test_webserver_handle_stop_logs_server_shutdown_error(caplog) -> None:
+    """Brief: WebServerHandle.stop logs when server shutdown/close fail.
+
+    Inputs:
+      - Dummy server raising from shutdown/server_close.
+
+    Outputs:
+      - Thread join is still attempted and an error log is emitted.
+    """
+
+    class DummyThread2:
+        def __init__(self) -> None:
+            self.join_called = False
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float) -> None:  # noqa: ARG002
+            self.join_called = True
+
+    class BadServer:
+        def shutdown(self) -> None:
+            raise RuntimeError("boom-shutdown")
+
+        def server_close(self) -> None:
+            raise RuntimeError("boom-close")
+
+    thread = DummyThread2()
+    server = BadServer()
+    handle = WebServerHandle(thread, server=server)
+
+    with caplog.at_level("ERROR", logger="foghorn.webserver"):
+        handle.stop(timeout=0.01)
+
+    assert thread.join_called is True
+    assert any(
+        "Error while shutting down webserver instance" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_webserver_handle_stop_logs_thread_join_error(caplog) -> None:
+    """Brief: WebServerHandle.stop logs when thread.join raises.
+
+    Inputs:
+      - Dummy thread whose join() raises.
+
+    Outputs:
+      - Error log mentioning failure to stop webserver thread.
+    """
+
+    class BadThread:
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float) -> None:  # noqa: ARG002
+            raise RuntimeError("boom-join")
+
+    handle = WebServerHandle(BadThread(), server=None)
+
+    with caplog.at_level("ERROR", logger="foghorn.webserver"):
+        handle.stop(timeout=0.01)
+
+    assert any(
+        "Error while stopping webserver thread" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_start_webserver_permission_error_uses_threaded_fallback(monkeypatch) -> None:
+    """Brief: PermissionError during asyncio loop creation forces threaded fallback.
+
+    Inputs:
+      - monkeypatch replacing asyncio.new_event_loop and _start_admin_server_threaded.
+
+    Outputs:
+      - start_webserver returns handle from threaded fallback.
+    """
+
+    import asyncio
+    import threading
+    import foghorn.webserver as web_mod
+
+    def boom_new_loop() -> None:
+        raise PermissionError("no self-pipe")
+
+    monkeypatch.setattr(
+        asyncio, "new_event_loop", lambda: boom_new_loop(), raising=True
+    )
+
+    calls: dict[str, object] = {}
+
+    def fake_threaded(
+        stats, config, log_buffer, config_path=None
+    ):  # noqa: ANN001, ANN201
+        calls["args"] = (stats, config, log_buffer, config_path)
+        return WebServerHandle(threading.Thread())
+
+    monkeypatch.setattr(
+        web_mod, "_start_admin_server_threaded", fake_threaded, raising=True
+    )
+    monkeypatch.setattr(web_mod.os.path, "exists", lambda p: False, raising=False)
+
+    cfg2 = {"webserver": {"enabled": True}}
+    handle = start_webserver(stats=None, config=cfg2, log_buffer=RingBuffer())
+
+    assert isinstance(handle, WebServerHandle)
+    assert "args" in calls
+
+
+def test_start_webserver_other_asyncio_error_keeps_async_path(monkeypatch) -> None:
+    """Brief: Non-PermissionError from asyncio.new_event_loop does not disable async path.
+
+    Inputs:
+      - monkeypatch causing asyncio.new_event_loop to raise RuntimeError.
+
+    Outputs:
+      - start_webserver still uses uvicorn path via dummy uvicorn module.
+    """
+
+    import asyncio
+    import sys
+    import types
+
+    def boom_new_loop2() -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        asyncio, "new_event_loop", lambda: boom_new_loop2(), raising=True
+    )
+
+    state2: dict[str, object] = {}
+
+    class DummyConfig2:
+        def __init__(self, app, host, port, log_level):  # noqa: ANN001, ANN002
+            self.app = app
+            self.host = host
+            self.port = port
+            self.log_level = log_level
+
+    class DummyServer2:
+        def __init__(self, config):  # noqa: ANN001
+            state2["config"] = config
+
+        def run(self) -> None:
+            state2["ran"] = True
+
+    dummy_uvicorn2 = types.SimpleNamespace(Config=DummyConfig2, Server=DummyServer2)
+    monkeypatch.setitem(sys.modules, "uvicorn", dummy_uvicorn2)
+
+    cfg3 = {"webserver": {"enabled": True, "host": "127.0.0.1", "port": 0}}
+    handle = start_webserver(stats=None, config=cfg3, log_buffer=RingBuffer())
+    assert isinstance(handle, WebServerHandle)
+
+    import time
+
+    time.sleep(0.05)
+
+    assert state2.get("ran") is True
+
+
+def test_start_webserver_warns_when_public_host_without_auth(
+    monkeypatch, caplog
+) -> None:
+    """Brief: start_webserver warns when binding to 0.0.0.0 without auth.
+
+    Inputs:
+      - Config with host 0.0.0.0 and auth.mode=none.
+
+    Outputs:
+      - Warning log mentioning unauthenticated binding.
+    """
+
+    import sys
+    import types
+
+    # Install dummy uvicorn implementation similar to earlier tests
+    state3: dict[str, object] = {}
+
+    class DummyConfig3:
+        def __init__(self, app, host, port, log_level):  # noqa: ANN001, ANN002
+            self.app = app
+            self.host = host
+            self.port = port
+            self.log_level = log_level
+
+    class DummyServer3:
+        def __init__(self, config):  # noqa: ANN001
+            state3["config"] = config
+
+        def run(self) -> None:
+            state3["ran"] = True
+
+    dummy_uvicorn3 = types.SimpleNamespace(Config=DummyConfig3, Server=DummyServer3)
+    monkeypatch.setitem(sys.modules, "uvicorn", dummy_uvicorn3)
+
+    cfg4 = {
+        "webserver": {
+            "enabled": True,
+            "host": "0.0.0.0",
+            "port": 0,
+            "auth": {"mode": "none"},
+        }
+    }
+
+    with caplog.at_level("WARNING", logger="foghorn.webserver"):
+        handle = start_webserver(stats=None, config=cfg4, log_buffer=RingBuffer())
+
+    assert isinstance(handle, WebServerHandle)
+    assert any(
+        "bound to 0.0.0.0 without authentication" in rec.getMessage()
+        for rec in caplog.records
+    )
