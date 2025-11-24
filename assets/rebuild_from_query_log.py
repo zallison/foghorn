@@ -128,19 +128,49 @@ def rebuild_counts_from_query_log(conn: sqlite3.Connection) -> None:
         # Total queries
         increment_local(conn, insert_sql, "totals", "total_queries", 1)
 
-        # Cache hits/misses (best-effort approximation using status).
+        # Cache hits/misses/cache_null (best-effort approximation).
+        # These semantics mirror the live StatsCollector behavior:
+        # - "cache_hit" rows are treated as cache hits.
+        # - Pre-plugin deny/override rows ("deny_pre"/"override_pre")
+        #   are treated as "cache_null" since no cache lookup occurs.
+        # - All other statuses are treated as cache misses.
+
+        upstream_str: Optional[str] = None
+        if upstream_id:
+            upstream_str = str(upstream_id)
+
         status_str = str(status) if status is not None else None
         if status_str == "cache_hit":
             increment_local(conn, insert_sql, "totals", "cache_hits", 1)
+        elif status_str in ("deny_pre", "override_pre"):
+            increment_local(conn, insert_sql, "totals", "cache_null", 1)
+            increment_local(conn, insert_sql, "cache_null", status_str, 1)
         else:
             increment_local(conn, insert_sql, "totals", "cache_misses", 1)
 
-        # Per-outcome cache-domain aggregates keyed by base domain so that
-        # warm-loaded top lists match in-process StatsCollector tracking.
+        # Per-outcome cache-domain aggregates using base domains when
+        # available so that warm-loaded top lists align with the
+        # in-process StatsCollector tracking.
         if base:
             if status_str == "cache_hit":
                 increment_local(conn, insert_sql, "cache_hit_domains", base, 1)
-            else:
+                if domain and domain != base:
+                    increment_local(
+                        conn,
+                        insert_sql,
+                        "cache_hit_subdomains",
+                        base,
+                        1,
+                    )
+            elif status_str not in ("deny_pre", "override_pre"):
+                if domain and domain != base:
+                    increment_local(
+                        conn,
+                        insert_sql,
+                        "cache_miss_subdomains",
+                        base,
+                        1,
+                    )
                 increment_local(conn, insert_sql, "cache_miss_domains", base, 1)
 
         # Qtype breakdown
@@ -159,15 +189,23 @@ def rebuild_counts_from_query_log(conn: sqlite3.Connection) -> None:
 
         # Per-qtype domain counters for all qtypes.
         if domain and qtype:
-            qkey = f"{qtype}|{domain}"
-            increment_local(conn, insert_sql, "qtype_qnames", qkey, 1)
+            key = f"{qtype}|{domain}"
+            increment_local(conn, insert_sql, "qtype_qnames", key, 1)
 
         # Rcodes
         if rcode:
             increment_local(conn, insert_sql, "rcodes", str(rcode), 1)
             if base:
-                rkey = f"{rcode}|{base}"
-                increment_local(conn, insert_sql, "rcode_domains", rkey, 1)
+                key = f"{rcode}|{base}"
+                increment_local(conn, insert_sql, "rcode_domains", key, 1)
+                if domain and domain != base:
+                    increment_local(
+                        conn,
+                        insert_sql,
+                        "rcode_subdomains",
+                        key,
+                        1,
+                    )
 
         # Upstreams: include outcome and rcode in the key, and track qtype.
         if upstream_id:
@@ -179,7 +217,7 @@ def rebuild_counts_from_query_log(conn: sqlite3.Connection) -> None:
             if rcode_str != "NOERROR" or (
                 status_str and status_str not in ("ok", "cache_hit")
             ):
-                outcome = status_str or "error"
+                outcome = status_str or "fatalError"
 
             upstream_key = f"{upstream_str}|{outcome}|{rcode_str}"
             increment_local(conn, insert_sql, "upstreams", upstream_key, 1)
