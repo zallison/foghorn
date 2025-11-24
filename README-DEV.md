@@ -15,10 +15,10 @@ This release introduces a few developer-visible breaking changes:
 
 - Entry: `src/foghorn/main.py` parses YAML, initializes logging/plugins, starts listeners, installs signal handlers.
 - Downstream servers:
-  - UDP 53: `src/foghorn/udp_server.py` (ThreadingUDPServer wrapper) — handler logic lives in `src/foghorn/server.py`.
-  - TCP 53: `src/foghorn/tcp_server.py` (length‑prefixed, persistent connections, RFC 7766; asyncio with threaded fallback).
-  - DoT 853: `src/foghorn/dot_server.py` (TLS, RFC 7858; asyncio).
-  - DoH 8053: `src/foghorn/doh_server.py` (HTTP/1.1 minimal parser, RFC 8484; optional TLS).
+  - UDP 5333: `src/foghorn/udp_server.py` (ThreadingUDPServer wrapper) — handler logic lives in `src/foghorn/server.py`.
+  - TCP 5333: `src/foghorn/tcp_server.py` (length‑prefixed, persistent connections, RFC 7766; asyncio with threaded fallback).
+  - DoT 1853: `src/foghorn/dot_server.py` (TLS, RFC 7858; asyncio).
+  - DoH 8153: `src/foghorn/doh_server.py` (HTTP/1.1 minimal parser, RFC 8484; optional TLS).
 - Upstream transports:
   - UDP: `src/foghorn/transports/udp.py` (dnslib send)
   - TCP: `src/foghorn/transports/tcp.py` with connection pooling
