@@ -6,9 +6,9 @@ WORKDIR /foghorn
 
 # Install python3-pip
 RUN DEBIAN_FRONTEND=noninteractive apt update && \
-    DEBIAN_FRONTEND=noninteractive apt install -y python3-pip && \
-    DEBIAN_FRONTEND=noninteractive apt clean && \
-    rm -rf /var/lib/apt/lists/*
+	DEBIAN_FRONTEND=noninteractive apt install -y python3-pip && \
+	DEBIAN_FRONTEND=noninteractive apt clean && \
+	rm -rf /var/lib/apt/lists/*
 
 # Copy the current directory contents into the container
 COPY . /foghorn
@@ -20,13 +20,18 @@ RUN pip install --root-user-action=ignore ".[dev]"
 ENV CUDA_VISIBLE_DEVICES=""
 
 #  Internal Port   # Normal Port to map from # Comment
-EXPOSE 5333 # 53   # Standard UDP/TCP
 
-EXPOSE 1801 # 801  # DNS-over-TLS
+# Standard UDP/TCP
+EXPOSE 5333 # 53
 
-EXPOSE 8153 # 443  # DNS-over-HTTP
+# 801  # DNS-over-TLS
+EXPOSE 1801
 
-EXPOSE 8053 # 8053 # Admin / API server (with stats, enabled seperately)
+# 443  # DNS-over-HTTP
+EXPOSE 8153
+
+# 8053 # Admin / API server (with stats, enabled seperately)
+EXPOSE 8053
 
 # Define the default command to run when the container starts
 CMD [ "foghorn --config /foghorn/config/config" ]
