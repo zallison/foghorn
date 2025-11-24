@@ -268,3 +268,41 @@ def test_ignore_single_host_hides_single_label_domains() -> None:
     assert "databases" not in domains
     assert "example.com" in domains
     assert "databases.internal" in domains
+
+
+def test_set_ignore_filters_skips_empty_entries() -> None:
+    """Brief: set_ignore_filters ignores empty client/domain/subdomain strings.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts no crash and ignore filters still apply to non-empty values.
+    """
+
+    collector = StatsCollector(include_top_clients=True, include_top_domains=True)
+
+    # Include empty strings that should be skipped by the parser.
+    collector.set_ignore_filters(
+        clients=["", "10.0.0.0/8"],
+        domains=["", "example.com"],
+        subdomains=["", "www.example.com"],
+    )
+
+    collector.record_query("10.1.2.3", "example.com", "A")
+    collector.record_query("1.2.3.4", "www.example.com", "A")
+    collector.record_query("1.2.3.5", "other.com", "A")
+
+    snap = collector.snapshot(reset=False)
+    assert snap.totals["total_queries"] == 3
+
+    # Ignored client and domains should be filtered from top lists, ensuring
+    # only the non-ignored entries remain visible.
+    assert snap.top_clients is not None
+    clients = {c for c, _ in snap.top_clients}
+    assert "10.1.2.3" not in clients
+
+    assert snap.top_domains is not None
+    domains = {d for d, _ in snap.top_domains}
+    assert "example.com" not in domains
+    assert "other.com" in domains

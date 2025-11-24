@@ -246,6 +246,13 @@ def test_stats_collector_warm_load_from_store_uses_counts(tmp_path: Path) -> Non
         store.increment_count("upstreams", "8.8.8.8:53|success", delta=1)
         store.increment_count("upstream_qtypes", "8.8.8.8:53|A", delta=3)
         store.increment_count("qtype_qnames", "A|example.com", delta=3)
+        # Per-rcode and cache-domain aggregates.
+        store.increment_count("rcode_domains", "NOERROR|example.com", delta=2)
+        store.increment_count("rcode_subdomains", "NOERROR|example.com", delta=1)
+        store.increment_count("cache_hit_domains", "example.com", delta=1)
+        store.increment_count("cache_miss_domains", "other.com", delta=1)
+        store.increment_count("cache_hit_subdomains", "example.com", delta=1)
+        store.increment_count("cache_miss_subdomains", "other.com", delta=1)
 
         # Create collector wired to the store and warm-load from counts.
         collector = StatsCollector(
@@ -275,6 +282,16 @@ def test_stats_collector_warm_load_from_store_uses_counts(tmp_path: Path) -> Non
         # Per-qtype qname counts should warm-load into qtype_qnames.
         assert snap.qtype_qnames is not None
         assert "A" in snap.qtype_qnames
+        # Per-rcode base-domain aggregates hydrated into rcode_domains/subdomains.
+        assert snap.rcode_domains is not None
+        assert "NOERROR" in snap.rcode_domains
+        assert snap.rcode_subdomains is not None
+        assert "NOERROR" in snap.rcode_subdomains
+        # Cache hit/miss domain and subdomain lists reconstructed.
+        assert snap.cache_hit_domains is not None
+        assert snap.cache_miss_domains is not None
+        assert snap.cache_hit_subdomains is not None
+        assert snap.cache_miss_subdomains is not None
     finally:
         store.close()
 
