@@ -11,6 +11,7 @@ Outputs:
 from dnslib import QTYPE, RCODE, DNSRecord
 
 import foghorn.server as server_mod
+from foghorn.cache import TTLCache
 from foghorn.plugins.base import BasePlugin, PluginDecision
 from foghorn.server import DNSUDPHandler, _set_response_id, compute_effective_ttl
 
@@ -204,6 +205,43 @@ def test_cache_store_if_applicable_ttl_zero_and_parse_error():
     DNSUDPHandler._cache_store_if_applicable(h, "example.com", 1, b"not-a-dns-packet")
 
 
+def test_cache_store_if_applicable_no_answer_ttls_branch(monkeypatch):
+    """Brief: _cache_store_if_applicable handles case where rr container yields no TTLs.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts no cache entry is created and no crash occurs.
+    """
+
+    class _RRContainer:
+        def __bool__(self):  # truthy so earlier rr check passes
+            return True
+
+        def __iter__(self):
+            return iter([])  # but iteration yields no RRs/TTLs
+
+    class _FakeResp:
+        class header:
+            rcode = RCODE.NOERROR
+
+        def __init__(self):
+            self.rr = _RRContainer()
+
+    monkeypatch.setattr(
+        server_mod.DNSRecord, "parse", staticmethod(lambda _b: _FakeResp())
+    )
+
+    h = object.__new__(DNSUDPHandler)
+    h.cache = TTLCache()
+    h.min_cache_ttl = 60
+
+    DNSUDPHandler._cache_store_if_applicable(h, "example.com", 1, b"wire")
+    # No entries should have been created for this key
+    assert h.cache.get(("example.com", 1)) is None
+
+
 def test_handle_inner_exception_logs_and_does_not_send(monkeypatch):
     """
     Brief: If exception handling also fails to parse, no response is sent.
@@ -285,3 +323,40 @@ def test_choose_upstreams_logs_when_empty(caplog):
     ctx = type("C", (), {"upstream_candidates": None})()
     ups = DNSUDPHandler._choose_upstreams(h, "x", 1, ctx)
     assert ups == []
+
+
+def test_apply_post_plugins_clears_ctx_post_override_and_resets_on_error():
+    """Brief: _apply_post_plugins clears ctx._post_override and resets when deletion fails.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None; asserts attribute removal and fallback flag behavior.
+    """
+
+    q = DNSRecord.question("example.com", "A")
+    wire = q.reply().pack()
+    h = object.__new__(DNSUDPHandler)
+    h.plugins = []
+
+    class _Ctx:
+        def __init__(self):
+            self._post_override = True
+
+    ctx = _Ctx()
+    out = DNSUDPHandler._apply_post_plugins(h, q, "example.com", QTYPE.A, wire, ctx)
+    assert out == wire
+    assert not hasattr(ctx, "_post_override")
+
+    class _BadCtx:
+        def __init__(self):
+            self._post_override = True
+
+        def __delattr__(self, name):
+            raise RuntimeError("boom")
+
+    bad = _BadCtx()
+    out2 = DNSUDPHandler._apply_post_plugins(h, q, "example.com", QTYPE.A, wire, bad)
+    assert out2 == wire
+    assert getattr(bad, "_post_override") is False
