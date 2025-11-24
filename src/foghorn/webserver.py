@@ -22,7 +22,7 @@ import socket
 import threading
 import time
 import urllib.parse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -679,20 +679,16 @@ def create_app(
         except Exception:  # pragma: no cover - environment specific
             host_ip = "0.0.0.0"
 
+        # Round uptime to the nearest second for display.
+        uptime_seconds = int(round(get_process_uptime_seconds()))
+
         meta: Dict[str, Any] = {
             "created_at": snap.created_at,
             "server_time": _utc_now_iso(),
             "hostname": hostname,
             "ip": host_ip,
             "version": FOGHORN_VERSION,
-            "uptime": str(timedelta(seconds=get_process_uptime_seconds())),
-            "lag": str(
-                timedelta(
-                    seconds=(
-                        float(datetime.now(timezone.utc).timestamp()) - snap.created_at
-                    )
-                )
-            ),
+            "uptime": uptime_seconds,
         }
 
         system_info = get_system_info()
@@ -723,7 +719,6 @@ def create_app(
             "top_clients": snap.top_clients,
             "top_subdomains": snap.top_subdomains,
             "top_domains": snap.top_domains,
-            "top_upstreams": snap.top_upstreams,
             "latency": snap.latency_stats,
             "latency_recent": snap.latency_recent_stats,
             "system": system_info,
@@ -731,8 +726,11 @@ def create_app(
             "upstream_qtypes": snap.upstream_qtypes,
             "qtype_qnames": snap.qtype_qnames,
             "rcode_domains": snap.rcode_domains,
+            "rcode_subdomains": snap.rcode_subdomains,
             "cache_hit_domains": snap.cache_hit_domains,
             "cache_miss_domains": snap.cache_miss_domains,
+            "cache_hit_subdomains": snap.cache_hit_subdomains,
+            "cache_miss_subdomains": snap.cache_miss_subdomains,
         }
         return payload
 
@@ -1044,11 +1042,39 @@ class _AdminHTTPServer(http.server.ThreadingHTTPServer):
         log_buffer: Optional[RingBuffer],
         config_path: str | None = None,
     ) -> None:
+        """Initialize admin HTTP server with shared state and host metadata.
+
+        Inputs:
+          - server_address: (host, port) tuple for the HTTP server bind.
+          - RequestHandlerClass: Request handler type.
+          - stats: Optional StatsCollector instance.
+          - config: Loaded configuration mapping.
+          - log_buffer: Optional RingBuffer for recent log entries.
+          - config_path: Optional path to the active YAML config file.
+
+        Outputs:
+          - None. The instance exposes attributes used by request handlers,
+            including cached hostname/ip values that are stable for the
+            lifetime of the process.
+        """
+
         super().__init__(server_address, RequestHandlerClass)
         self.stats = stats
         self.config = config
         self.log_buffer = log_buffer
         self.config_path = config_path
+
+        # Cache hostname and IP once; they are stable for the process lifetime
+        # and may be relatively expensive to resolve repeatedly in hot paths
+        # such as /stats.
+        try:
+            self.hostname = socket.gethostname()
+        except Exception:  # pragma: no cover - environment specific
+            self.hostname = "unknown-host"
+        try:
+            self.host_ip = socket.gethostbyname(self.hostname)
+        except Exception:  # pragma: no cover - environment specific
+            self.host_ip = "0.0.0.0"
 
 
 class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -1278,15 +1304,15 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         reset = str(reset_raw).lower() in {"1", "true", "yes"}
         snap: StatsSnapshot = collector.snapshot(reset=reset)
 
-        ####
-        ## Hostname and IP info gathered here
-        ####
+        server = self._server()
+        hostname = getattr(server, "hostname", "unknown-host")
+        host_ip = getattr(server, "host_ip", "0.0.0.0")
 
         meta: Dict[str, Any] = {
             "timestamp": snap.created_at,
             "server_time": _utc_now_iso(),
-            "hostname": "-",
-            "ip": "-",
+            "hostname": hostname,
+            "ip": host_ip,
             "version": FOGHORN_VERSION,
             "uptime": get_process_uptime_seconds(),
         }
@@ -1303,7 +1329,6 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             "top_clients": snap.top_clients,
             "top_subdomains": snap.top_subdomains,
             "top_domains": snap.top_domains,
-            "top_upstreams": snap.top_upstreams,
             "latency": snap.latency_stats,
             "latency_recent": snap.latency_recent_stats,
             "system": get_system_info(),
@@ -1311,8 +1336,11 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             "upstream_qtypes": snap.upstream_qtypes,
             "qtype_qnames": snap.qtype_qnames,
             "rcode_domains": snap.rcode_domains,
+            "rcode_subdomains": snap.rcode_subdomains,
             "cache_hit_domains": snap.cache_hit_domains,
             "cache_miss_domains": snap.cache_miss_domains,
+            "cache_hit_subdomains": snap.cache_hit_subdomains,
+            "cache_miss_subdomains": snap.cache_miss_subdomains,
         }
         self._send_json(200, payload)
 
