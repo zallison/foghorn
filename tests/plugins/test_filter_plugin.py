@@ -441,14 +441,13 @@ def test_post_resolve_pack_failure_returns_deny(tmp_path, monkeypatch):
 
 
 def test_post_resolve_unknown_action_runtime_returns_none(tmp_path):
-    """
-    Brief: Unknown action at runtime results in keeping record and no changes.
+    """Brief: Unknown action at runtime results in keeping record and no changes.
 
     Inputs:
-      - blocked_ips: patched with unsupported action
+      - blocked_ips: patched with unsupported action.
 
     Outputs:
-      - None: Asserts decision is None
+      - None: Asserts decision is None.
     """
     p = FilterPlugin(db_path=str(tmp_path / "bl.db"))
     plugin = p
@@ -460,6 +459,36 @@ def test_post_resolve_unknown_action_runtime_returns_none(tmp_path):
     ctx = PluginContext(client_ip="1.2.3.4")
     resp = _mk_response_with_ips("ex.com", [("A", "11.22.33.44", 60)])
     assert plugin.post_resolve("ex.com", QTYPE.A, resp, ctx) is None
+
+
+def test_post_resolve_unmatched_and_non_ip_records(tmp_path):
+    """Brief: IPs without rules and malformed A records are preserved without changes.
+
+    Inputs:
+      - tmp_path: temporary directory.
+
+    Outputs:
+      - None: Asserts post_resolve returns None while exercising 404–406 paths.
+    """
+
+    db = tmp_path / "bl.db"
+    plugin = FilterPlugin(db_path=str(db), blocked_ips=["1.2.3.4"])
+    plugin.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+
+    # Case 1: A record for an IP with no configured action exercises the
+    # "no action_config" branch, appending to modified_records without changes.
+    resp1 = _mk_response_with_ips("ex.com", [("A", "8.8.8.8", 60)])
+    dec1 = plugin.post_resolve("ex.com", QTYPE.A, resp1, ctx)
+    assert dec1 is None
+
+    # Case 2: Malformed A record rdata that cannot be parsed as an IP exercises
+    # the ValueError handler and keeps the record.
+    q = DNSRecord.question("weird.com", "A")
+    r = q.reply()
+    r.add_answer(RR("weird.com", QTYPE.A, rdata=TXT("not-an-ip"), ttl=60))
+    dec2 = plugin.post_resolve("weird.com", QTYPE.A, r.pack(), ctx)
+    assert dec2 is None
 
 
 def test_glob_expansion_for_blocklist_and_allowlist_files(tmp_path):
