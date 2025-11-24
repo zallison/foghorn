@@ -15,9 +15,9 @@ from foghorn.plugins.base import (
     PluginContext,
     PluginDecision,
     inheritable_ttl_cache,
-    logger as base_logger,
-    plugin_aliases,
 )
+from foghorn.plugins.base import logger as base_logger
+from foghorn.plugins.base import plugin_aliases
 
 
 def test_plugin_decision_creation():

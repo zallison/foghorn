@@ -181,9 +181,22 @@ def rebuild_counts_from_query_log(conn: sqlite3.Connection) -> None:
         if client_ip:
             increment_local(conn, insert_sql, "clients", str(client_ip), 1)
 
-        # Domains and subdomains
+        # Domains and subdomains: only treat names that satisfy the subdomain
+        # label rules as subdomains for aggregation purposes:
+        #   - At least three labels in general (e.g., www.example.com)
+        #   - At least four labels for names under *.co.uk (e.g.,
+        #     www.example.co.uk), so example.co.uk itself is not counted as a
+        #     subdomain.
         if domain:
-            increment_local(conn, insert_sql, "sub_domains", domain, 1)
+            labels = domain.split(".")
+            is_sub = False
+            if len(labels) >= 3:
+                if labels[-2:] == ["co", "uk"]:
+                    is_sub = len(labels) >= 4
+                else:
+                    is_sub = True
+            if is_sub:
+                increment_local(conn, insert_sql, "sub_domains", domain, 1)
             if base:
                 increment_local(conn, insert_sql, "domains", base, 1)
 

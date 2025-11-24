@@ -70,7 +70,9 @@ def test_ignore_top_subdomains_exact_match_and_fallback() -> None:
       - None.
 
     Outputs:
-      - Asserts that names with ignored suffixes are excluded from top_subdomains.
+      - Asserts that names with ignored suffixes are excluded from top_subdomains
+      - and that only true subdomains (at least three labels) appear in the
+      - subdomain stats.
     """
 
     collector = StatsCollector(
@@ -87,10 +89,12 @@ def test_ignore_top_subdomains_exact_match_and_fallback() -> None:
     assert snap.top_subdomains is not None
     subs = {d for d, _ in snap.top_subdomains}
     # Only the exact example.com entry should be filtered out; a.example.com
-    # must still be present because ignores are exact-match only.
+    # must still be present because ignores are exact-match only. Names with
+    # fewer than three labels (e.g., allowed.test) are not treated as
+    # subdomains and therefore never appear in this list.
     assert "example.com" not in subs
     assert "a.example.com" in subs
-    assert "allowed.test" in subs
+    assert "allowed.test" not in subs
 
     # When ignore_top_subdomains is empty, ignore_top_domains acts as fallback
     collector = StatsCollector(
@@ -251,13 +255,15 @@ def test_ignore_single_host_hides_single_label_domains() -> None:
     snap = collector.snapshot(reset=False)
     assert snap.totals["total_queries"] == 4
 
-    # top_subdomains includes only multi-label names when enabled
+    # top_subdomains includes only true subdomains (at least three labels)
     assert snap.top_subdomains is not None
     subdomains = {d for d, _ in snap.top_subdomains}
     assert "web" not in subdomains
     assert "databases" not in subdomains
     assert "web.example.com" in subdomains
-    assert "databases.internal" in subdomains
+    # "databases.internal" has only two labels and is treated as a base
+    # domain, so it must not appear in subdomain stats.
+    assert "databases.internal" not in subdomains
 
     # top_domains aggregates by base domain (last two labels) and should only
     # see real domains. "databases.internal" remains visible while single-label
@@ -268,6 +274,43 @@ def test_ignore_single_host_hides_single_label_domains() -> None:
     assert "databases" not in domains
     assert "example.com" in domains
     assert "databases.internal" in domains
+
+
+def test_co_uk_subdomain_label_rules() -> None:
+    """Brief: Subdomain stats require four labels under *.co.uk and three labels otherwise.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that example.co.uk (3 labels) is treated as a base domain, while
+      - www.example.co.uk (4 labels) is treated as a subdomain for top_subdomains.
+    """
+
+    collector = StatsCollector(
+        include_top_domains=True,
+    )
+
+    # Base domains
+    collector.record_query("192.0.2.1", "example.com", "A")
+    collector.record_query("192.0.2.1", "example.co.uk", "A")
+
+    # True subdomains
+    collector.record_query("192.0.2.2", "www.example.com", "A")
+    collector.record_query("192.0.2.2", "www.example.co.uk", "A")
+
+    snap = collector.snapshot(reset=False)
+
+    assert snap.top_subdomains is not None
+    subs = {d for d, _ in snap.top_subdomains}
+
+    # example.com and example.co.uk are bases, not subdomains
+    assert "example.com" not in subs
+    assert "example.co.uk" not in subs
+
+    # www.example.com (3 labels) and www.example.co.uk (4 labels) are subdomains
+    assert "www.example.com" in subs
+    assert "www.example.co.uk" in subs
 
 
 def test_set_ignore_filters_skips_empty_entries() -> None:

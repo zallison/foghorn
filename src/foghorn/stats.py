@@ -71,6 +71,50 @@ def _normalize_domain(domain: str) -> str:
     return domain.rstrip(".").lower()
 
 
+@functools.lru_cache(maxsize=1024)
+def _is_subdomain(domain: str) -> bool:
+    """Return True if the name should be treated as a subdomain.
+
+    Inputs:
+        domain: Raw or normalized domain name string.
+
+    Outputs:
+        Boolean indicating whether the normalized name should be counted as a
+        subdomain for statistics:
+
+        - For most domains, at least three labels (e.g., "www.example.com").
+        - For domains under "*.co.uk", at least four labels (e.g.,
+          "www.example.co.uk"), so that "example.co.uk" itself is treated as a
+          base domain, not a subdomain.
+
+    Example:
+        >>> _is_subdomain("www.example.com")
+        True
+        >>> _is_subdomain("example.com")
+        False
+        >>> _is_subdomain("www.example.co.uk")
+        True
+        >>> _is_subdomain("example.co.uk")
+        False
+    """
+    norm = _normalize_domain(domain or "")
+    if not norm:
+        return False
+
+    parts = norm.split(".")
+    if len(parts) < 3:
+        return False
+
+    # Special-case public suffix style domains ending in "co.uk": treat the
+    # registrable "example.co.uk" as the base, and only count queries with at
+    # least one additional label as subdomains.
+    if len(parts) >= 3 and parts[-2:] == ["co", "uk"]:
+        return len(parts) >= 4
+
+    # Default: any name with at least three labels is a subdomain.
+    return True
+
+
 class LatencyHistogram:
     """
     Thread-safe histogram for tracking request latencies with logarithmic bins.
@@ -813,9 +857,11 @@ class StatsSQLiteStore:
                 if client_ip:
                     self.increment_count("clients", str(client_ip), 1)
 
-                # Domains and subdomains
+                # Domains and subdomains: only treat names with at least three
+                # labels as subdomains for aggregation purposes.
                 if domain:
-                    self.increment_count("sub_domains", domain, 1)
+                    if _is_subdomain(domain):
+                        self.increment_count("sub_domains", domain, 1)
                     if base:
                         self.increment_count("domains", base, 1)
 
@@ -1146,13 +1192,17 @@ class StatsCollector:
             if self._top_clients is not None:
                 self._top_clients.add(client_ip)
 
-            if self._top_subdomains is not None:
+            # Compute base domain once so it can be reused for top_domains and
+            # persistence. The base domain is always the last two labels of the
+            # normalized name when available.
+            parts = domain.split(".") if domain else []
+            base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
+
+            if self._top_subdomains is not None and _is_subdomain(domain):
                 self._top_subdomains.add(domain)
 
             if self._top_domains is not None:
                 # Aggregate by base domain (last two labels)
-                parts = domain.split(".")
-                base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
                 self._top_domains.add(base)
 
             # Per-qtype top domains (full qnames) for all observed qtypes.
@@ -1170,8 +1220,10 @@ class StatsCollector:
                     if self.include_qtype_breakdown:
                         self._store.increment_count("qtypes", qtype)
                     self._store.increment_count("clients", client_ip)
-                    self._store.increment_count("sub_domains", domain)
-                    self._store.increment_count("domains", base)
+                    if _is_subdomain(domain):
+                        self._store.increment_count("sub_domains", domain)
+                    if base:
+                        self._store.increment_count("domains", base)
                     # Persist per-qtype domain counts as "qtype|domain" so they
                     # can be reconstructed on warm-load and via rebuild scripts.
                     if qtype and domain:
@@ -1780,25 +1832,30 @@ class StatsCollector:
                 else:
                     active_subdomain_ignores = self._ignore_top_domains
 
-                if active_subdomain_ignores or self.ignore_single_host:
-                    filtered_subdomains: List[Tuple[str, int]] = []
-                    for name, count in top_subdomains:
-                        norm = _normalize_domain(str(name))
-                        # Optionally hide single-label hosts (no dots) from display.
-                        if self.ignore_single_host and "." not in norm:
-                            continue
-                        if active_subdomain_ignores:
-                            if self._ignore_subdomains_as_suffix:
-                                if any(
-                                    norm == ig or norm.endswith("." + ig)
-                                    for ig in active_subdomain_ignores
-                                ):
-                                    continue
-                            else:
-                                if norm in active_subdomain_ignores:
-                                    continue
-                        filtered_subdomains.append((name, count))
-                    top_subdomains = filtered_subdomains
+                filtered_subdomains: List[Tuple[str, int]] = []
+                for name, count in top_subdomains:
+                    norm = _normalize_domain(str(name))
+                    # Only include true subdomains: names with at least three
+                    # labels (e.g., "www.example.com").
+                    if not _is_subdomain(norm):
+                        continue
+                    # Optionally hide single-label hosts (no dots) from display.
+                    # This check is largely redundant given the subdomain
+                    # requirement but kept for consistency with other lists.
+                    if self.ignore_single_host and "." not in norm:
+                        continue
+                    if active_subdomain_ignores:
+                        if self._ignore_subdomains_as_suffix:
+                            if any(
+                                norm == ig or norm.endswith("." + ig)
+                                for ig in active_subdomain_ignores
+                            ):
+                                continue
+                        else:
+                            if norm in active_subdomain_ignores:
+                                continue
+                    filtered_subdomains.append((name, count))
+                top_subdomains = filtered_subdomains
 
             if top_subdomains is not None:
                 top_subdomains = top_subdomains[: self.top_n]
