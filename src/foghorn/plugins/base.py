@@ -6,6 +6,20 @@ from functools import wraps
 from typing import ClassVar, Dict, List, Optional, Sequence, Tuple, Union, final
 
 from cachetools import TTLCache
+from dnslib import (  # noqa: F401 - imports are for implementations of this class
+    AAAA,
+    CNAME,
+    MX,
+    NAPTR,
+    PTR,
+    QTYPE,
+    RR,
+    SRV,
+    TXT,
+    A,
+    DNSHeader,
+    DNSRecord,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -380,6 +394,51 @@ class BasePlugin:
             True
         """
         return None
+
+    def _make_a_response(
+        self,
+        qname: str,
+        query_type: int,
+        raw_req: bytes,
+        ctx: PluginContext,
+        ipaddr: str,
+    ) -> Optional[bytes]:
+        try:
+            request = DNSRecord.parse(raw_req)
+        except Exception as e:
+            logger.warning("parse failure: %s", e)
+            return None
+
+        # Normalize domain
+        # qname = str(request.q.qname).rstrip(".")
+
+        ip = ipaddr
+        reply = DNSRecord(
+            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+        )
+
+        if query_type == QTYPE.A:
+            reply.add_answer(
+                RR(
+                    rname=request.q.qname,
+                    rtype=QTYPE.A,
+                    rclass=1,
+                    ttl=self._ttl,
+                    rdata=A(ip),
+                )
+            )
+        elif query_type == QTYPE.AAAA:
+            reply.add_answer(
+                RR(
+                    rname=request.q.qname,
+                    rtype=QTYPE.AAAA,
+                    rclass=1,
+                    ttl=60,
+                    rdata=AAAA(ip),
+                )
+            )
+
+        return reply.pack()
 
 
 def plugin_aliases(*aliases: str):
