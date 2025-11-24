@@ -96,7 +96,7 @@ def test_etc_hosts_ignores_comments(tmp_path):
 
     plugin = EtcHosts(file_path=str(hosts_file))
     plugin.setup()
-    assert len(plugin.hosts) == 1
+    assert len(plugin.hosts) == 2  # 127.0.0.1 and 1.0.0.124.in-addr.arpa
     assert "localhost" in plugin.hosts
 
 
@@ -118,7 +118,7 @@ def test_etc_hosts_ignores_empty_lines(tmp_path):
 
     plugin = EtcHosts(file_path=str(hosts_file))
     plugin.setup()
-    assert len(plugin.hosts) == 1
+    assert len(plugin.hosts) == 2
 
 
 def test_etc_hosts_pre_resolve_matched_a_record(tmp_path):
