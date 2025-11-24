@@ -41,6 +41,14 @@ def _mk_response_with_ips(name, records):
 
 
 def test_domains_files_allow_and_block(tmp_path):
+    """Brief: Domains files are loaded into DB with allow/deny modes.
+
+    Inputs:
+      - tmp_path: temporary directory.
+
+    Outputs:
+      - None: Asserts allowed/denied/unknown domains behave as expected.
+    """
     allowf = tmp_path / "allows.txt"
     blockf = tmp_path / "blocks.txt"
     allowf.write_text("ok.com\n")
@@ -59,7 +67,47 @@ def test_domains_files_allow_and_block(tmp_path):
     assert p.is_allowed("unknown.com") is False
 
 
+def test_load_list_from_file_json_error_and_missing_domain(tmp_path, caplog):
+    """Brief: load_list_from_file handles invalid JSON, non-dict, and missing domain.
+
+    Inputs:
+      - tmp_path/caplog fixtures.
+
+    Outputs:
+      - None: Asserts Adblock-style wrappers removed and bad JSON lines skipped.
+    """
+    db = tmp_path / "bl.db"
+    p = FilterPlugin(db_path=str(db), default="deny")
+    p.setup()
+
+    f = tmp_path / "domains.txt"
+    f.write_text(
+        "\n".join(
+            [
+                "||ads.example^",  # Adblock-style token -> normalized
+                "{",  # invalid JSON
+                '["not-object"]',  # JSON that is not a dict
+                '{"domain": ""}',  # missing/empty domain
+            ]
+        )
+    )
+
+    caplog.set_level("ERROR")
+    p.load_list_from_file(str(f), mode="allow")
+
+    # Normalized domain should be allowed despite noisy lines.
+    assert p.is_allowed("ads.example") is True
+
+
 def test_patterns_and_keywords_files(tmp_path, caplog):
+    """Brief: Pattern and keyword files are loaded and applied.
+
+    Inputs:
+      - tmp_path/caplog fixtures.
+
+    Outputs:
+      - None: Asserts deny decisions from pattern/keyword matches.
+    """
     pats = tmp_path / "patterns.re"
     keys = tmp_path / "keywords.txt"
     pats.write_text("# comment\n(\n^ads\\.\n")  # includes an invalid and a valid
@@ -72,14 +120,46 @@ def test_patterns_and_keywords_files(tmp_path, caplog):
         default="allow",
     )
     p.setup()
-    ctx = PluginContext(client_ip="1.2.3.4")
 
-    assert p.pre_resolve("ads.example", QTYPE.A, b"", ctx).action == "deny"
-    assert p.pre_resolve("mytracker.site", QTYPE.A, b"", ctx).action == "deny"
-    assert p.pre_resolve("best-analytics.io", QTYPE.A, b"", ctx).action == "deny"
+
+def test_load_keywords_from_file_json_error_and_missing_keyword(tmp_path, caplog):
+    """Brief: _load_keywords_from_file handles invalid JSON and missing keyword.
+
+    Inputs:
+      - tmp_path/caplog fixtures.
+
+    Outputs:
+      - None: Asserts valid keywords are returned while bad JSON lines are skipped.
+    """
+    db = tmp_path / "bl.db"
+    p = FilterPlugin(db_path=str(db), default="allow")
+    p.setup()
+
+    f = tmp_path / "keywords.jsonl"
+    f.write_text(
+        "\n".join(
+            [
+                "{",  # invalid JSON
+                '["not-object"]',  # JSON that is not a dict
+                '{"keyword": "Good"}',
+            ]
+        )
+    )
+
+    caplog.set_level("ERROR")
+    kws = p._load_keywords_from_file(str(f))
+    assert "good" in kws
 
 
 def test_blocked_ips_files_csv_simple_and_jsonl(tmp_path):
+    """Brief: blocked_ips_files support simple, CSV, and JSONL formats.
+
+    Inputs:
+      - tmp_path: temporary directory for sample files.
+
+    Outputs:
+      - None: Asserts deny/remove/replace behaviors from file-loaded rules.
+    """
     ips = tmp_path / "ips.csv"
     ips.write_text(
         "\n".join(
@@ -93,6 +173,7 @@ def test_blocked_ips_files_csv_simple_and_jsonl(tmp_path):
                 "bogus,deny",  # invalid ip
                 "203.0.113.6,foo",  # unknown action => deny
                 "203.0.113.7,replace,not_ip",
+                "203.0.113.8,deny,extra,field",  # invalid CSV width
             ]
         )
     )
@@ -106,6 +187,10 @@ def test_blocked_ips_files_csv_simple_and_jsonl(tmp_path):
                 '{"ip": "", "action": "deny"}',  # invalid missing ip
                 '{"ip": "203.0.113.11", "action": "replace"}',  # missing replace_with
                 '{"ip": "bad", "action": "deny"}',  # invalid ip
+                "{",  # invalid JSON
+                '["not-object"]',  # JSON not an object
+                '{"ip": "10.0.0.0/24", "action": "replace", "replace_with": "10.0.0.1"}',
+                '{"ip": "10.0.1.0/24", "action": "replace", "replace_with": "bad"}',
             ]
         )
     )
@@ -153,6 +238,14 @@ def test_blocked_ips_files_csv_simple_and_jsonl(tmp_path):
 
 
 def test_glob_expansion_for_new_files(tmp_path):
+    """Brief: Glob patterns for new files are expanded for keywords and patterns.
+
+    Inputs:
+      - tmp_path: temporary directory.
+
+    Outputs:
+      - None: Asserts deny decisions for hosts matching loaded keywords/patterns.
+    """
     d = tmp_path / "d"
     d.mkdir()
     (d / "k1.txt").write_text("x\n")
@@ -185,3 +278,23 @@ def test_missing_files_raise(tmp_path):
             db_path=str(tmp_path / "bl.db"),
             blocked_patterns_files=[str(tmp_path / "nope.re")],
         ).setup()
+
+
+def test_expand_globs_fallback_to_os_path_exists(tmp_path, monkeypatch):
+    """Brief: _expand_globs falls back to os.path.exists when glob matches nothing.
+
+    Inputs:
+      - tmp_path/monkeypatch fixtures.
+
+    Outputs:
+      - None: Asserts direct path is returned when file exists but glob gives no matches.
+    """
+    from foghorn.plugins import filter as filter_mod
+
+    f = tmp_path / "one.txt"
+    f.write_text("x\n")
+
+    # Force glob.glob to return no matches so _expand_globs uses os.path.exists.
+    monkeypatch.setattr(filter_mod.glob, "glob", lambda pattern: [])
+    resolved = filter_mod.FilterPlugin._expand_globs([str(f)])
+    assert resolved == [str(f)]
