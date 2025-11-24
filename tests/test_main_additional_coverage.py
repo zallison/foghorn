@@ -19,7 +19,8 @@ from unittest.mock import mock_open, patch
 import pytest
 
 import foghorn.main as main_mod
-from foghorn.main import _clear_lru_caches, normalize_upstream_config
+from foghorn.main import _clear_lru_caches, normalize_upstream_config, run_setup_plugins
+from foghorn.plugins.base import BasePlugin
 
 
 def test_clear_lru_caches_none_and_explicit_list():
@@ -87,6 +88,92 @@ def test_normalize_upstream_config_missing_host_and_optional_fields():
             "pool": {"size": 4},
         }
     ]
+
+
+def test_run_setup_plugins_priority_and_fallback(monkeypatch, caplog):
+    """Brief: run_setup_plugins sorts by priority and falls back on bad values.
+
+    Inputs:
+      - monkeypatch/caplog fixtures; two setup-capable plugins with different
+        setup_priority values (one invalid for int()).
+
+    Outputs:
+      - None: asserts setup() is called for both plugins and that the invalid
+        priority falls back to the default value without raising.
+    """
+
+    class POK(BasePlugin):
+        def __init__(self) -> None:
+            self.config = {"abort_on_failure": True}
+            self.calls: list[str] = []
+
+        def setup(self) -> None:  # type: ignore[override]
+            self.calls.append("ok")
+
+    class BadPriority:
+        def __int__(self) -> int:  # pragma: no cover - exercised via int() call
+            raise ValueError("bad priority")
+
+    class PBAD(BasePlugin):
+        def __init__(self) -> None:
+            # setup_priority that will cause int() to raise, hitting the
+            # except branch and defaulting to 50.
+            self.setup_priority = BadPriority()
+            self.config = {"abort_on_failure": False}
+            self.calls: list[str] = []
+
+        def setup(self) -> None:  # type: ignore[override]
+            self.calls.append("bad")
+
+    plugins = [POK(), PBAD()]
+
+    caplog.set_level(logging.INFO, logger="foghorn.main.setup")
+    run_setup_plugins(plugins)
+
+    # Both plugins must have had setup() invoked despite the bad priority.
+    assert plugins[0].calls == ["ok"]
+    assert plugins[1].calls == ["bad"]
+    # An info log should have been emitted for each plugin.
+    messages = [r.message for r in caplog.records]
+    assert any("Running setup for plugin" in m for m in messages)
+
+
+def test_main_returns_one_when_run_setup_plugins_fails(monkeypatch, caplog):
+    """Brief: main() returns 1 when run_setup_plugins raises RuntimeError.
+
+    Inputs:
+      - monkeypatch/caplog fixtures; run_setup_plugins patched to raise.
+
+    Outputs:
+      - None: asserts return code 1 and error log about plugin setup failure.
+    """
+
+    yaml_data = (
+        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
+        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "plugins: []\n"
+    )
+
+    class DummyServer:
+        def __init__(self, *a: Any, **kw: Any) -> None:  # pragma: no cover
+            raise AssertionError("DNSServer should not be constructed when setup fails")
+
+        def serve_forever(self) -> None:  # pragma: no cover
+            raise KeyboardInterrupt
+
+    def boom_run_setup(_plugins: list[Any]) -> None:
+        raise RuntimeError("setup failed")
+
+    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "run_setup_plugins", boom_run_setup)
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        with caplog.at_level(logging.ERROR, logger="foghorn.main"):
+            rc = main_mod.main(["--config", "conf.yaml"])
+
+    assert rc == 1
+    assert any("Plugin setup failed" in r.message for r in caplog.records)
 
 
 def _capture_sig_handlers() -> Dict[str, Any]:
@@ -649,6 +736,194 @@ def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
     assert any("Could not install SIGUSR1 handler" in r.message for r in caplog.records)
 
 
+def test_sigusr1_stats_reset_error_logged(monkeypatch, caplog):
+    """Brief: SIGUSR1 logs an error when statistics snapshot/reset fails.
+
+    Inputs:
+      - monkeypatch/caplog fixtures; StatsCollector.snapshot raises on reset.
+
+    Outputs:
+      - None: asserts error log from SIGUSR1 snapshot/reset handler.
+    """
+
+    initial_yaml = (
+        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
+        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "statistics:\n  enabled: true\n  interval_seconds: 10\n"
+    )
+
+    reload_yaml = (
+        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
+        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "statistics:\n  enabled: true\n  reset_on_sigusr1: true\n"
+    )
+
+    class ErrorCollector:
+        def __init__(self, **kw: Any) -> None:  # noqa: D401, ARG002 - simple stub
+            """Stub that raises on reset snapshot."""
+
+        def snapshot(self, reset: bool = False):  # type: ignore[override]
+            if reset:
+                raise RuntimeError("snap-fail")
+            return SimpleNamespace(totals={})
+
+    class DummyReporter:
+        def __init__(
+            self,
+            collector: ErrorCollector,
+            interval_seconds: int,
+            reset_on_log: bool,
+            log_level: str,
+            logger_name: str = "foghorn.stats",
+            persistence_store: Any | None = None,
+        ) -> None:
+            self.collector = collector
+            self.interval_seconds = interval_seconds
+            self.reset_on_log = reset_on_log
+            self.log_level = log_level
+            self.logger_name = logger_name
+            self.persistence_store = persistence_store
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    class DummyServer:
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            pass
+
+        def serve_forever(self) -> None:
+            if captured["sigusr1"] is not None:
+                captured["sigusr1"](None, None)
+            raise KeyboardInterrupt
+
+    handler_info = _capture_sig_handlers()
+    captured = handler_info["captured"]
+    fake_signal = handler_info["fake_signal"]
+
+    open_calls = {"count": 0}
+
+    def open_side_effect(*args: Any, **kwargs: Any):
+        open_calls["count"] += 1
+        data = initial_yaml if open_calls["count"] == 1 else reload_yaml
+        return mock_open(read_data=data)()
+
+    monkeypatch.setattr(main_mod, "StatsCollector", ErrorCollector)
+    monkeypatch.setattr(main_mod, "StatsReporter", DummyReporter)
+    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
+    monkeypatch.setattr(
+        main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
+    )
+
+    with patch("builtins.open", side_effect=open_side_effect):
+        caplog.set_level(logging.ERROR)
+        rc = main_mod.main(["--config", "cfg.yaml"])
+
+    assert rc == 0
+    assert any(
+        "SIGUSR1: error during statistics snapshot/reset" in r.message
+        for r in caplog.records
+    )
+
+
+def test_sigusr2_error_paths_and_coalescing(monkeypatch, caplog):
+    """Brief: SIGUSR2 covers stats reset error, plugin error, and coalescing.
+
+    Inputs:
+      - monkeypatch/caplog fixtures; customized stats collector and plugins.
+
+    Outputs:
+      - None: asserts error log for reset failure and coalescing of pending flag.
+    """
+
+    initial_yaml = (
+        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
+        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "statistics:\n  enabled: true\n  interval_seconds: 10\n"
+    )
+
+    reload_yaml = (
+        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
+        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "statistics:\n  enabled: true\n  reset_on_sigusr1: true\n"
+    )
+
+    class ErrorCollector:
+        def __init__(self, **kw: Any) -> None:  # noqa: D401, ARG002 - simple stub
+            """Stub that raises on reset snapshot."""
+
+        def snapshot(self, reset: bool = False):  # type: ignore[override]
+            if reset:
+                raise RuntimeError("snap-fail")
+            return SimpleNamespace(totals={})
+
+    class DummyReporter:
+        def __init__(
+            self,
+            collector: ErrorCollector,
+            interval_seconds: int,
+            reset_on_log: bool,
+            log_level: str,
+            logger_name: str = "foghorn.stats",
+            persistence_store: Any | None = None,
+        ) -> None:
+            self.collector = collector
+            self.interval_seconds = interval_seconds
+            self.reset_on_log = reset_on_log
+            self.log_level = log_level
+            self.logger_name = logger_name
+            self.persistence_store = persistence_store
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    class DummyServer:
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            pass
+
+        def serve_forever(self) -> None:
+            if captured["sigusr1"] is not None:
+                captured["sigusr1"](None, None)
+            raise KeyboardInterrupt
+
+    handler_info = _capture_sig_handlers()
+    captured = handler_info["captured"]
+    fake_signal = handler_info["fake_signal"]
+
+    open_calls = {"count": 0}
+
+    def open_side_effect(*args: Any, **kwargs: Any):
+        open_calls["count"] += 1
+        data = initial_yaml if open_calls["count"] == 1 else reload_yaml
+        return mock_open(read_data=data)()
+
+    monkeypatch.setattr(main_mod, "StatsCollector", ErrorCollector)
+    monkeypatch.setattr(main_mod, "StatsReporter", DummyReporter)
+    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
+    monkeypatch.setattr(
+        main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
+    )
+
+    with patch("builtins.open", side_effect=open_side_effect):
+        caplog.set_level(logging.ERROR)
+        rc = main_mod.main(["--config", "cfg.yaml"])
+
+    assert rc == 0
+    assert any(
+        "SIGUSR1: error during statistics snapshot/reset" in r.message
+        for r in caplog.records
+    )
+
+
 def test_sigusr2_error_paths_and_coalescing(monkeypatch, caplog):
     """Brief: SIGUSR2 covers stats reset error, no-collector branch, plugin error, and coalescing.
 
@@ -763,6 +1038,55 @@ def test_sigusr2_error_paths_and_coalescing(monkeypatch, caplog):
     )
     # Coalescing: proxy_process_sigusr2 should not have been called.
     assert call_counter["count"] == 0
+
+
+def test_sigusr2_logs_no_collector_active(monkeypatch, caplog):
+    """Brief: SIGUSR2 logs a message when no statistics collector is active.
+
+    Inputs:
+      - monkeypatch/caplog fixtures; StatsCollector patched to return None.
+
+    Outputs:
+      - None: asserts informational log about skipping reset when no collector exists.
+    """
+
+    yaml_data = (
+        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
+        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "statistics:\n  enabled: true\n  sigusr2_resets_stats: true\n"
+    )
+
+    handler_info = _capture_sig_handlers()
+    captured = handler_info["captured"]
+    fake_signal = handler_info["fake_signal"]
+
+    class DummyServer:
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            pass
+
+        def serve_forever(self) -> None:
+            handler = captured["sigusr2"]
+            handler(None, None)
+            raise KeyboardInterrupt
+
+    # StatsCollector returns None so the SIGUSR2 handler sees no active collector.
+    monkeypatch.setattr(main_mod, "StatsCollector", lambda **kw: None)
+    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
+    monkeypatch.setattr(
+        main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
+    )
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        with caplog.at_level(logging.INFO, logger="foghorn.main"):
+            rc = main_mod.main(["--config", "cfg.yaml"])
+
+    assert rc == 0
+    assert any(
+        "SIGUSR2: no statistics collector active, skipping reset" in r.message
+        for r in caplog.records
+    )
 
 
 def test_sigusr2_registration_failure_logs_warning(monkeypatch, caplog):
@@ -1071,6 +1395,98 @@ def test_dot_start_logs_info(monkeypatch, caplog):
 
     assert rc == 0
     assert any("Starting DoT listener on" in r.message for r in caplog.records)
+
+
+def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
+    """Brief: _start_asyncio_server runs coroutine and closes loop on success.
+
+    Inputs:
+      - monkeypatch fixture; asyncio event loop and threading.Thread patched.
+
+    Outputs:
+      - None: asserts DummyLoop.run_until_complete and close are both called.
+    """
+
+    yaml_data = (
+        "listen:\n"
+        "  host: 127.0.0.1\n"
+        "  port: 5354\n"
+        "  tcp:\n"
+        "    enabled: true\n"
+        "    host: 127.0.0.1\n"
+        "    port: 5354\n"
+        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+    )
+
+    class DummyServer:
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            pass
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt
+
+    holder: Dict[str, Any] = {}
+
+    class DummyLoop:
+        def __init__(self) -> None:
+            self.run_called = False
+            self.closed = False
+
+        def run_until_complete(self, coro) -> None:  # noqa: ARG002
+            self.run_called = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    import asyncio as _asyncio
+    import sys as _sys
+
+    def fake_new_event_loop() -> DummyLoop:
+        loop = DummyLoop()
+        holder["loop"] = loop
+        return loop
+
+    def fake_set_event_loop(loop: DummyLoop) -> None:
+        holder["loop_set"] = loop
+
+    def fake_get_event_loop() -> DummyLoop:
+        return holder["loop"]
+
+    async def fake_serve_tcp(host, port, resolver):  # noqa: ARG002
+        return None
+
+    class DummyThread:
+        def __init__(self, target=None, name=None, daemon=None) -> None:  # noqa: D401
+            """Thread stub that runs target synchronously in tests."""
+
+            self._target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target()
+
+    fake_threading = SimpleNamespace(Thread=DummyThread)
+
+    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(
+        main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
+    )
+    # Ensure serve_tcp imported inside main() refers to our stub.
+    monkeypatch.setattr("foghorn.tcp_server.serve_tcp", fake_serve_tcp)
+    monkeypatch.setattr(_asyncio, "new_event_loop", fake_new_event_loop)
+    monkeypatch.setattr(_asyncio, "set_event_loop", fake_set_event_loop)
+    monkeypatch.setattr(_asyncio, "get_event_loop", fake_get_event_loop)
+    monkeypatch.setitem(_sys.modules, "threading", fake_threading)
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        rc = main_mod.main(["--config", "cfg_asyncio.yaml"])
+
+    assert rc == 0
+    assert holder["loop"].run_called is True
+    assert holder["loop"].closed is True
 
 
 def test_doh_start_failure_returns_one(monkeypatch, caplog):
