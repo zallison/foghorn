@@ -924,7 +924,7 @@ def test_sigusr2_error_paths_and_coalescing(monkeypatch, caplog):
     )
 
 
-def test_sigusr2_error_paths_and_coalescing(monkeypatch, caplog):
+def test_sigusr2_error_paths_more(monkeypatch, caplog):
     """Brief: SIGUSR2 covers stats reset error, no-collector branch, plugin error, and coalescing.
 
     Inputs:

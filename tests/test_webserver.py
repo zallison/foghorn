@@ -1240,6 +1240,7 @@ def test_get_system_info_swallows_psutil_exceptions(monkeypatch) -> None:
     """
 
     import types
+
     import foghorn.webserver as web_mod
 
     class DummyMemInfo:
@@ -1300,6 +1301,7 @@ def test_resolve_www_root_falls_back_to_package_html(monkeypatch, tmp_path) -> N
     """
 
     import os
+
     import foghorn.webserver as web_mod
 
     # Ensure no env override and a CWD without html/ directory
@@ -1388,6 +1390,7 @@ def test_save_config_400_when_body_not_object(tmp_path) -> None:
     """
 
     import asyncio
+
     from fastapi import HTTPException
 
     cfg_path = tmp_path / "config.yaml"
@@ -1537,6 +1540,7 @@ def test_static_www_empty_path_raises_404() -> None:
     """
 
     import asyncio
+
     from fastapi import HTTPException
 
     app = create_app(
@@ -1642,6 +1646,7 @@ def test_start_webserver_permission_error_uses_threaded_fallback(monkeypatch) ->
 
     import asyncio
     import threading
+
     import foghorn.webserver as web_mod
 
     def boom_new_loop() -> None:

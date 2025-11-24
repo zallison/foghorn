@@ -232,7 +232,6 @@ def test_close_stops_polling_and_cancels_timer(monkeypatch):
     """
 
     import importlib
-    from types import SimpleNamespace
 
     mod = importlib.import_module("foghorn.plugins.etc-hosts")
     EtcHosts = mod.EtcHosts
