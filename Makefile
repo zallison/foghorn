@@ -36,7 +36,7 @@ build: env
 	$(VENV)/bin/pip install -e ".[dev]"
 	$(VENV)/bin/pip install black ruff isort
 	${VENV}/bin/isort . src/ test/
-	${VENV}/bin/ruff check --fix . src/ tests/
+	${VENV}/bin/ruff check src/ tests/
 	${VENV}/bin/black src/ tests/
 
 
@@ -78,7 +78,7 @@ clean:
 docker: clean docker-build docker-run docker-logs
 
 .PHONY: docker-build
-docker-build: docker-clean build
+docker-build: build
 	rsync -qr --exclude='*/__pycache__/*' --delete-during ./entrypoint.sh ./*md ./src ./html ./Makefile ./pyproject.toml ./Dockerfile ./docker-compose.yaml docker-build
 	docker build ./docker-build -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
