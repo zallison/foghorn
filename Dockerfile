@@ -16,12 +16,17 @@ COPY . /foghorn
 # Ensure dependencies
 RUN pip install --root-user-action=ignore ".[dev]"
 
-# UDP/TCP
-EXPOSE 5333
-# DNS-over-TLS
-EXPOSE 1801
-# API server (with frontpage)
-EXPOSE 8053
+# To prevent or tell which cuda device to use for fastapu
+ENV CUDA_VISIBLE_DEVICES=""
+
+#  Internal Port   # Normal Port to map from # Comment
+EXPOSE 5333 # 53   # Standard UDP/TCP
+
+EXPOSE 1801 # 801  # DNS-over-TLS
+
+EXPOSE 8153 # 443  # DNS-over-HTTP
+
+EXPOSE 8053 # 8053 # Admin / API server (with stats, enabled seperately)
 
 # Define the default command to run when the container starts
-CMD [ "/foghorn/entrypoint.sh" ]
+CMD [ "foghorn --config /foghorn/config/config" ]
