@@ -99,9 +99,8 @@ class EtcHosts(BasePlugin):
         self._load_hosts()
 
         self._ttl = self.config.get("ttl", 300)
-        # Optionally start watchdog-based reloads (watchdog_enabled is primary;
-        # inotify_enabled is accepted as a deprecated alias for backward
-        # compatibility).
+
+        # Optionally start watchdog-based reloads
         watchdog_cfg = self.config.get("watchdog_enabled")
         if watchdog_cfg is not None:
             watchdog_enabled = bool(watchdog_cfg)
@@ -117,6 +116,9 @@ class EtcHosts(BasePlugin):
         # is further rate-limited by the reload debouncing in
         # _reload_hosts_from_watchdog.
         if self._poll_interval > 0.0:
+            logger.warning(
+                "Watchdog falling back to polling every {self._poll_interval}"
+            )
             self._poll_stop = threading.Event()
             self._start_polling()
 
@@ -205,10 +207,10 @@ class EtcHosts(BasePlugin):
                                 reverse_name = None
 
                     for domain in parts[1:]:
-                        # Later files override earlier ones by assignment
+                        # Later entries override earlier ones by assignment
                         mapping[domain] = ip
                         if reverse_name:
-                            mapping[reverse_name] = ip
+                            mapping[reverse_name] = domain
 
         lock = getattr(self, "_hosts_lock", None)
         if lock is None:
