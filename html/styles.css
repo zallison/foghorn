@@ -99,6 +99,13 @@ body {
     color: var(--fg-text);
 }
 
+/* Unselected theme options: accent-colored 1px border */
+.fh-theme-toggle .fh-theme-btn:not(.fh-theme-btn-active) {
+    border-width: 1px;
+    border-style: solid;
+    border-color: var(--accent);
+}
+
 :root[data-theme='light'] .fh-theme-btn:not(.fh-theme-btn-active) {
     border-radius: 999px;
     border: 1px solid var(--accent-soft);
@@ -109,6 +116,39 @@ body {
 .fh-theme-btn-active {
     background: var(--accent);
     color: #111827;
+    border-color: var(--accent);
+}
+
+/* Tabs between header and main content */
+
+.fh-tabs {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: flex;
+    align-items: flex-end;
+    gap: 0.25rem;
+    border-bottom: 1px solid var(--accent-soft);
+}
+
+.fh-tabs .fh-theme-btn {
+    border-radius: 0.5rem 0.5rem 0 0;
+    border: 1px solid var(--accent-soft);
+    border-bottom: none;
+    background: var(--bg-card-inner);
+    color: var(--fg-muted);
+    padding: 0.35rem 1rem;
+}
+
+/* Inactive tabs: accent-colored 1px border */
+.fh-tabs .fh-theme-btn:not(.fh-theme-btn-active) {
+    border-width: 1px;
+    border-style: solid;
+    border-color: var(--accent);
+}
+
+.fh-tabs .fh-theme-btn.fh-theme-btn-active {
+    background: var(--bg-card);
+    color: var(--accent);
     border-color: var(--accent);
 }
 
@@ -127,7 +167,7 @@ body {
     min-width: 0;
     background: var(--bg-card);
     border-radius: 0.5rem;
-    padding: 1rem 1.25rem;
+    padding: 0 1.25rem 1rem 1.25rem;
     box-shadow: 0 4px 12px rgba(15, 23, 42, 0.6);
 }
 
@@ -148,6 +188,7 @@ body {
     justify-content: space-between;
     gap: 0.75rem;
     margin-bottom: 0.75rem;
+    padding-top: 10px;
 }
 
 /* Stats layout */
