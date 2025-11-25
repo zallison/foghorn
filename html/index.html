@@ -882,7 +882,9 @@
 					if (!entries || !Array.isArray(entries) || !entries.length) {
 						return;
 					}
-					appendTopListGroup('Top ' + qt + ' Domains', entries);
+					// All qtype-based "Top <qt> Domains" lists go to the right-hand pane when available.
+					var target = statsGroupsRightEl || statsGroupsEl;
+					appendTopListGroup('Top ' + qt + ' Domains', entries, target);
 				});
 			}
 
@@ -896,7 +898,10 @@
 					if (!entries || !Array.isArray(entries) || !entries.length) {
 						return;
 					}
-					appendTopListGroup('Top ' + rc + ' Domains', entries);
+					// Selected rcodes (NOERROR, NXDOMAIN, REFUSED, SERVFAIL) go to the right-hand pane.
+					var isRightRcode = rc === 'NOERROR' || rc === 'NXDOMAIN' || rc === 'REFUSED' || rc === 'SERVFAIL';
+					var target = isRightRcode && statsGroupsRightEl ? statsGroupsRightEl : statsGroupsEl;
+					appendTopListGroup('Top ' + rc + ' Domains', entries, target);
 				});
 			}
 
@@ -910,7 +915,10 @@
 					if (!entries || !Array.isArray(entries) || !entries.length) {
 						return;
 					}
-					appendTopListGroup('Top ' + rc + ' Subdomains', entries);
+					// NXDOMAIN and NOERROR subdomain lists go to the right-hand pane.
+					var isRightRcode = rc === 'NXDOMAIN' || rc === 'NOERROR';
+					var target = isRightRcode && statsGroupsRightEl ? statsGroupsRightEl : statsGroupsEl;
+					appendTopListGroup('Top ' + rc + ' Subdomains', entries, target);
 				});
 			}
 
@@ -970,10 +978,11 @@
 				appendTopListGroup('Top Client', data.top_clients || []);
 				appendTopListGroup('Top Domains', data.top_domains || []);
 				appendTopListGroup('Top Sub Domains', data.top_subdomains || []);
-				appendTopListGroup('Top Cache Hit Domains', data.cache_hit_domains || []);
-				appendTopListGroup('Top Cache Miss Domains', data.cache_miss_domains || []);
-				appendTopListGroup('Top Cache Hit Subdomains', data.cache_hit_subdomains || []);
-				appendTopListGroup('Top Cache Miss Subdomains', data.cache_miss_subdomains || []);
+				// Cache hit/miss lists live in the right-hand pane when available.
+				appendTopListGroup('Top Cache Hit Domains', data.cache_hit_domains || [], statsGroupsRightEl || statsGroupsEl);
+				appendTopListGroup('Top Cache Miss Domains', data.cache_miss_domains || [], statsGroupsRightEl || statsGroupsEl);
+				appendTopListGroup('Top Cache Hit Subdomains', data.cache_hit_subdomains || [], statsGroupsRightEl || statsGroupsEl);
+				appendTopListGroup('Top Cache Miss Subdomains', data.cache_miss_subdomains || [], statsGroupsRightEl || statsGroupsEl);
 
 				// Per-qtype top domains (qnames) for common query types.
 				appendQtypeTopDomains(data.qtype_qnames || {});
@@ -1127,6 +1136,30 @@
 				}
 			}
 
+			function applyTab(tab) {
+				var isStats = tab === 'stats';
+				if (page1) {
+					// When Stats is selected, page1 should be hidden and page2 shown.
+					page1.style.display = isStats ? 'none' : '';
+				}
+				if (page2) {
+					page2.style.display = isStats ? '' : 'none';
+				}
+				if (btnTabStats && btnTabEdit) {
+					if (isStats) {
+						btnTabStats.classList.add('fh-theme-btn-active');
+						btnTabStats.setAttribute('aria-selected', 'true');
+						btnTabEdit.classList.remove('fh-theme-btn-active');
+						btnTabEdit.setAttribute('aria-selected', 'false');
+					} else {
+						btnTabEdit.classList.add('fh-theme-btn-active');
+						btnTabEdit.setAttribute('aria-selected', 'true');
+						btnTabStats.classList.remove('fh-theme-btn-active');
+						btnTabStats.setAttribute('aria-selected', 'false');
+					}
+				}
+			}
+
 			//// Event bindings
 
 			// Enter Edit Mode
@@ -1153,9 +1186,22 @@
 				applyTheme('light');
 			});
 
+			// Tabs control
+			if (btnTabStats) {
+				btnTabStats.addEventListener('click', function () {
+					applyTab('stats');
+				});
+			}
+			if (btnTabEdit) {
+				btnTabEdit.addEventListener('click', function () {
+					applyTab('edit');
+				});
+			}
+
 			// Initial load
 			var initialTheme = root.getAttribute('data-theme') || 'dark';
 			applyTheme(initialTheme);
+			applyTab('stats');
 			loadStats();
 			setInterval(loadStats, 15000);
 			setSource('disk');
