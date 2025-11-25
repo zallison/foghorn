@@ -2,428 +2,467 @@
 <html lang="en">
 
 <head>
-    <meta charset="utf-8" />
-    <title>Foghorn</title>
-    <link rel="stylesheet" href="/styles.css" />
-    <script>
-        (function () {
-            'use strict';
-            var root = document.documentElement;
-            var stored = null;
-            try {
-                stored = window.localStorage ? localStorage.getItem('foghorn-theme') : null;
-            } catch (e) {
-                stored = null;
-            }
-            var initial = stored === 'light' || stored === 'dark' ? stored : 'dark';
-            root.setAttribute('data-theme', initial);
-        })();
-    </script>
+	<meta charset="utf-8" />
+	<title>Foghorn</title>
+	<link rel="stylesheet" href="/styles.css" />
+	<script>
+		(function () {
+			'use strict';
+			var root = document.documentElement;
+			var stored = null;
+			try {
+				stored = window.localStorage ? localStorage.getItem('foghorn-theme') : null;
+			} catch (e) {
+				stored = null;
+			}
+			var initial = stored === 'light' || stored === 'dark' ? stored : 'dark';
+			root.setAttribute('data-theme', initial);
+		})();
+	</script>
 </head>
 
 <body>
-    <header class="fh-header">
-        <div class="fh-header-inner">
-            <div class="fh-header-main">
-                <!-- Logo image switches based on theme: transparent-logo.png (light), transparent-white-logo.png (dark) -->
-                <img src="/transparent-white-logo.png" alt="Foghorn logo" class="fh-logo" id="fh-logo" />
-                <div class="fh-title-block">
-                    <h1 class="fh-title">Foghorn</h1>
-                    <p class="fh-subtitle">Runtime statistics and configuration</p>
-                </div>
-                <div class="fh-theme-toggle" role="radiogroup" aria-label="Color theme">
-                    <button id="btn-theme-dark" class="fh-theme-btn fh-theme-btn-active" type="button" role="radio"
-                        aria-checked="true">
-                        Dark
-                    </button>
-                    <button id="btn-theme-light" class="fh-theme-btn" type="button" role="radio" aria-checked="false">
-                        Light
-                    </button>
-                </div>
-            </div>
-        </div>
-    </header>
+	<header class="fh-header">
+		<div class="fh-header-inner">
+			<div class="fh-header-main">
+				<!-- Logo image switches based on theme: transparent-logo.png (light), transparent-white-logo.png (dark) -->
+				<img src="/transparent-white-logo.png" alt="Foghorn logo" class="fh-logo" id="fh-logo" />
+				<div class="fh-title-block">
+					<h1 class="fh-title">Foghorn</h1>
+					<p class="fh-subtitle">Runtime statistics and configuration</p>
+				</div>
+				<div class="fh-theme-toggle" role="radiogroup" aria-label="Color theme">
+					<button id="btn-theme-dark" class="fh-theme-btn fh-theme-btn-active" type="button" role="radio"
+						aria-checked="true">
+						Dark
+					</button>
+					<button id="btn-theme-light" class="fh-theme-btn" type="button" role="radio" aria-checked="false">
+						Light
+					</button>
+				</div>
+			</div>
+		</div>
+	</header>
+	<div class="fh-tabs" role="tablist" aria-label="Pages">
+		<button id="btn-tab-stats" class="fh-theme-btn fh-theme-btn-active" type="button" role="tab"
+			aria-selected="true">
+			Stats
+		</button>
+		<button id="btn-tab-edit" class="fh-theme-btn" type="button" role="tab" aria-selected="false">
+			Advanced/Config
+		</button>
+	</div>
+	<main class="fh-main" id="page2">
+		<section class="fh-pane fh-pane-left">
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title">Statistics</h2>
+				<p class="fh-pane-help">Live snapshot from <code>/stats</code>.</p>
+			</div>
+			<div id="stats-groups" class="fh-stats-groups">
+			</div>
+		</section>
 
-    <main class="fh-main">
-        <section class="fh-pane fh-pane-left">
-            <div class="fh-pane-header">
-                <h2 class="fh-pane-title">Statistics</h2>
-                <p class="fh-pane-help">Live snapshot from <code>/stats</code>.</p>
-            </div>
-            <div id="stats-groups" class="fh-stats-groups">
-                <!-- Filled by JavaScript -->
-            </div>
-            <div class="fh-stats-group">
-                <h3 class="fh-stats-group-title">Raw stats JSON</h3>
-                <pre id="stats-raw" class="fh-pre fh-pre-compact">Loading statistics...</pre>
-            </div>
-        </section>
+		<section class="fh-pane fh-pane-right">
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title">More Statistics</h2>
+			</div>
+			<div id="stats-groups-right" class="fh-stats-groups">
+				<!-- Filled by JavaScript: e.g. Top A Domains -->
+			</div>
+		</section>
+	</main>
+	<main class="fh-main" id="page1">
 
-        <section class="fh-pane fh-pane-right">
-            <div class="fh-pane-header">
-                <h2 class="fh-pane-title">Configuration</h2>
-                <div class="fh-config-actions" id="config-actions-view">
-                    <button id="btn-edit" class="fh-btn" type="button">Edit</button>
-                </div>
-                <div class="fh-config-actions fh-config-actions-edit" id="config-actions-edit" hidden>
-                    <button id="btn-cancel" class="fh-btn fh-btn-secondary" type="button">Cancel</button>
-                    <button id="btn-save" class="fh-btn fh-btn-primary" type="button">Save</button>
-                </div>
-            </div>
-            <div class="fh-warning" id="config-warning" style="display:hidden;">
-                <strong>Warning:</strong> Saving will overwrite <code>config.yaml</code> and trigger a live reload
-                (SIGUSR1).
-            </div>
+		<section class="fh-pane fh-pane-left">
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title">Raw JSON Stats</h2>
+				<p class="fh-pane-help"></p>
+			</div>
+			<div id="stats-groups" class="fh-stats-groups">
+				<!-- Filled by JavaScript -->
+			</div>
+			<div class="fh-stats-group">
+				<h3 class="fh-stats-group-title">Raw stats JSON</h3>
+				<pre id="stats-raw" class="fh-pre fh-pre-compact">Loading statistics...</pre>
+			</div>
+		</section>
 
-            <div id="config-messages" class="fh-messages" aria-live="polite"></div>
+		<section class="fh-pane fh-pane-right">
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title">Configuration</h2>
+				<div class="fh-config-actions" id="config-actions-view">
+					<button id="btn-edit" class="fh-btn" type="button">Edit Config</button>
+				</div>
+				<div class="fh-config-actions fh-config-actions-edit" id="config-actions-edit" hidden>
+					<button id="btn-cancel" class="fh-btn fh-btn-secondary" type="button">Cancel</button>
+					<button id="btn-save" class="fh-btn fh-btn-primary" type="button">Save</button>
+				</div>
+			</div>
+			<div class="fh-warning" id="config-warning" style="display:hidden;">
+				<strong>Warning:</strong> Saving will overwrite <code>config.yaml</code> and trigger a live reload
+				(SIGUSR1).
+			</div>
 
-            <div id="config-view-container">
-                <pre id="config-output" class="fh-pre">Loading configuration...</pre>
-            </div>
+			<div id="config-messages" class="fh-messages" aria-live="polite"></div>
 
-            <div id="config-edit-container" hidden>
-                <textarea id="config-editor" class="fh-textarea" spellcheck="false"></textarea>
-            </div>
-        </section>
-    </main>
+			<div id="config-view-container">
+				<pre id="config-output" class="fh-pre">Loading configuration...</pre>
+			</div>
 
-    <footer class="fh-footer">
-        Foghorn&copy; 2025, Zack Allison. GitHub:
-        <a href="https://github.com/zallison/foghorn">https://github.com/zallison/foghorn</a>
-        &mdash; Open Source Software: MIT Licence
-    </footer>
+			<div id="config-edit-container" hidden>
+				<textarea id="config-editor" class="fh-textarea" spellcheck="false"></textarea>
+			</div>
+		</section>
+	</main>
 
-    <script>
-        (function () {
-            'use strict';
+	<footer class="fh-footer">
+		Foghorn&copy; 2025, Zack Allison. GitHub:
+		<a href="https://github.com/zallison/foghorn">https://github.com/zallison/foghorn</a>
+		&mdash; Open Source Software: MIT Licence
+	</footer>
 
-            var root = document.documentElement;
-            var logoEl = document.getElementById('fh-logo');
-            var statsRawEl = document.getElementById('stats-raw');
-            var statsGroupsEl = document.getElementById('stats-groups');
-            var configOutputEl = document.getElementById('config-output');
-            var configEditorEl = document.getElementById('config-editor');
-            var configViewContainer = document.getElementById('config-view-container');
-            var configEditContainer = document.getElementById('config-edit-container');
-            var msgEl = document.getElementById('config-messages');
-            if (msgEl) {
-                msgEl.style.display = 'none';
-            }
-            var warningEl = document.getElementById('config-warning');
-            if (warningEl) {
-                warningEl.style.display = 'none';
-            }
+	<script>
+		(function () {
+			'use strict';
 
-            var btnDisk = document.getElementById('btn-config-disk');
-            var btnEdit = document.getElementById('btn-edit');
-            var btnCancel = document.getElementById('btn-cancel');
-            var btnSave = document.getElementById('btn-save');
-            var actionsView = document.getElementById('config-actions-view');
-            var actionsEdit = document.getElementById('config-actions-edit');
-            var btnThemeDark = document.getElementById('btn-theme-dark');
-            var btnThemeLight = document.getElementById('btn-theme-light');
+			var root = document.documentElement;
+			var logoEl = document.getElementById('fh-logo');
+			var statsRawEl = document.getElementById('stats-raw');
+			var statsGroupsEl = document.getElementById('stats-groups');
+			var statsGroupsRightEl = document.getElementById('stats-groups-right');
+			var configOutputEl = document.getElementById('config-output');
+			var configEditorEl = document.getElementById('config-editor');
+			var configViewContainer = document.getElementById('config-view-container');
+			var configEditContainer = document.getElementById('config-edit-container');
+			var msgEl = document.getElementById('config-messages');
+			if (msgEl) {
+				msgEl.style.display = 'none';
+			}
+			var warningEl = document.getElementById('config-warning');
+			if (warningEl) {
+				warningEl.style.display = 'none';
+			}
 
-            var currentSource = 'disk'; // 'disk' or 'memory'
-            var lastDiskConfigObj = null;
-            var lastDiskRawYaml = null;
-            var isEditing = false;
+			var btnDisk = document.getElementById('btn-config-disk');
+			var btnEdit = document.getElementById('btn-edit');
+			var btnCancel = document.getElementById('btn-cancel');
+			var btnSave = document.getElementById('btn-save');
+			var actionsView = document.getElementById('config-actions-view');
+			var actionsEdit = document.getElementById('config-actions-edit');
+			var btnThemeDark = document.getElementById('btn-theme-dark');
+			var btnThemeLight = document.getElementById('btn-theme-light');
+			var page1 = document.getElementById('page1');
+			var page2 = document.getElementById('page2');
+			var btnTabStats = document.getElementById('btn-tab-stats');
+			var btnTabEdit = document.getElementById('btn-tab-edit');
 
-            var STATS_TOOLTIPS = {
-                total_queries: 'Total DNS queries handled since the collector started or was last reset.',
-                cache_hits: 'Queries answered directly from the cache.',
-                cache_misses: 'Queries that required contacting upstream servers.',
-                cache_null: 'Responses generated directly by plugins before cache or upstream lookup.',
-                min_ms: 'Fastest observed query latency in milliseconds.',
-                max_ms: 'Slowest observed query latency in milliseconds.',
-                avg_ms: 'Average (mean) query latency in milliseconds.',
-                p50_ms: 'Median (50th percentile) query latency in milliseconds.',
-                p90_ms: '90th percentile query latency in milliseconds.',
-                p99_ms: '99th percentile query latency in milliseconds.',
-                load_1m: 'System load average over the last 1 minute.',
-                load_5m: 'System load average over the last 5 minutes.',
-                load_15m: 'System load average over the last 15 minutes.',
-            };
+			var currentSource = 'disk'; // 'disk' or 'memory'
+			var lastDiskConfigObj = null;
+			var lastDiskRawYaml = null;
+			var isEditing = false;
 
-            function setMessage(text, level) {
-                if (!msgEl) {
-                    return;
-                }
-                msgEl.textContent = text || '';
-                msgEl.className = 'fh-messages';
-                if (!text) {
-                    msgEl.style.display = 'none';
-                    return;
-                }
-                msgEl.style.display = 'block';
-                if (level === 'error') {
-                    msgEl.classList.add('fh-messages-error');
-                } else if (level === 'success') {
-                    msgEl.classList.add('fh-messages-success');
-                } else {
-                    msgEl.classList.add('fh-messages-info');
-                }
-            }
+			var STATS_TOOLTIPS = {
+				total_queries: 'Total DNS queries handled since the collector started or was last reset.',
+				cache_hits: 'Queries answered directly from the cache.',
+				cache_misses: 'Queries that required contacting upstream servers.',
+				cache_null: 'Responses generated directly by plugins before cache or upstream lookup.',
+				min_ms: 'Fastest observed query latency in milliseconds.',
+				max_ms: 'Slowest observed query latency in milliseconds.',
+				avg_ms: 'Average (mean) query latency in milliseconds.',
+				p50_ms: 'Median (50th percentile) query latency in milliseconds.',
+				p90_ms: '90th percentile query latency in milliseconds.',
+				p99_ms: '99th percentile query latency in milliseconds.',
+				load_1m: 'System load average over the last 1 minute.',
+				load_5m: 'System load average over the last 5 minutes.',
+				load_15m: 'System load average over the last 15 minutes.',
+			};
 
-            function pretty(obj) {
-                try {
-                    return JSON.stringify(obj, null, 2);
-                } catch (e) {
-                    return String(obj);
-                }
-            }
+			function setMessage(text, level) {
+				if (!msgEl) {
+					return;
+				}
+				msgEl.textContent = text || '';
+				msgEl.className = 'fh-messages';
+				if (!text) {
+					msgEl.style.display = 'none';
+					return;
+				}
+				msgEl.style.display = 'block';
+				if (level === 'error') {
+					msgEl.classList.add('fh-messages-error');
+				} else if (level === 'success') {
+					msgEl.classList.add('fh-messages-success');
+				} else {
+					msgEl.classList.add('fh-messages-info');
+				}
+			}
 
-            function fetchJson(path) {
-                return fetch(path, { cache: 'no-store' }).then(function (resp) {
-                    if (!resp.ok) {
-                        throw new Error('HTTP ' + resp.status + ' from ' + path);
-                    }
-                    return resp.json();
-                });
-            }
+			function pretty(obj) {
+				try {
+					return JSON.stringify(obj, null, 2);
+				} catch (e) {
+					return String(obj);
+				}
+			}
 
-            function formatNumber(value) {
-                var n = Number(value);
-                if (!isFinite(n)) {
-                    return String(value);
-                }
-                var opts = { maximumFractionDigits: 3 };
-                if (Math.abs(n) > 100 && n % 1 !== 0) {
-                    opts.maximumFractionDigits = 0;
-                }
-                return n.toLocaleString(undefined, opts);
-            }
+			function fetchJson(path) {
+				return fetch(path, { cache: 'no-store' }).then(function (resp) {
+					if (!resp.ok) {
+						throw new Error('HTTP ' + resp.status + ' from ' + path);
+					}
+					return resp.json();
+				});
+			}
 
-            function getNumberParts(value) {
-                var n = Number(value);
-                if (!isFinite(n)) {
-                    return { intPart: String(value), decPart: '' };
-                }
-                var opts = { maximumFractionDigits: 3 };
-                if (Math.abs(n) > 100 && n % 1 !== 0) {
-                    opts.maximumFractionDigits = 0;
-                }
-                var text = n.toLocaleString('en-US', opts);
-                var dotIndex = text.indexOf('.');
-                if (dotIndex === -1) {
-                    return { intPart: text, decPart: '' };
-                }
-                return {
-                    intPart: text.slice(0, dotIndex),
-                    decPart: text.slice(dotIndex),
-                };
-            }
+			function formatNumber(value) {
+				var n = Number(value);
+				if (!isFinite(n)) {
+					return String(value);
+				}
+				var opts = { maximumFractionDigits: 3 };
+				if (Math.abs(n) > 100 && n % 1 !== 0) {
+					opts.maximumFractionDigits = 0;
+				}
+				return n.toLocaleString(undefined, opts);
+			}
 
-            function formatBytes(value) {
-                var n = Number(value);
-                if (!isFinite(n) || n < 0) {
-                    return '–';
-                }
-                var units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-                var idx = 0;
-                while (n >= 1024 && idx < units.length - 1) {
-                    n = n / 1024;
-                    idx += 1;
-                }
-                return n.toFixed(idx === 0 ? 0 : 1) + ' ' + units[idx];
-            }
+			function getNumberParts(value) {
+				var n = Number(value);
+				if (!isFinite(n)) {
+					return { intPart: String(value), decPart: '' };
+				}
+				var opts = { maximumFractionDigits: 3 };
+				if (Math.abs(n) > 100 && n % 1 !== 0) {
+					opts.maximumFractionDigits = 0;
+				}
+				var text = n.toLocaleString('en-US', opts);
+				var dotIndex = text.indexOf('.');
+				if (dotIndex === -1) {
+					return { intPart: text, decPart: '' };
+				}
+				return {
+					intPart: text.slice(0, dotIndex),
+					decPart: text.slice(dotIndex),
+				};
+			}
 
-            function formatTimestamp(value) {
-                if (value == null) {
-                    return null;
-                }
-                var date;
-                if (typeof value === 'number') {
-                    date = new Date(value * 1000);
-                } else {
-                    var n = Number(value);
-                    if (isFinite(n)) {
-                        date = new Date(n * 1000);
-                    } else {
-                        date = new Date(String(value));
-                    }
-                }
-                if (isNaN(date.getTime())) {
-                    return String(value);
-                }
-                function pad2(num) {
-                    return num < 10 ? '0' + num : String(num);
-                }
-                var y = date.getFullYear();
-                var m = pad2(date.getMonth() + 1);
-                var d = pad2(date.getDate());
-                var hh = pad2(date.getHours());
-                var mm = pad2(date.getMinutes());
-                var ss = pad2(date.getSeconds());
-                return y + '-' + m + '-' + d + ' ' + hh + ':' + mm + ':' + ss;
-            }
+			function formatBytes(value) {
+				var n = Number(value);
+				if (!isFinite(n) || n < 0) {
+					return '–';
+				}
+				var units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+				var idx = 0;
+				while (n >= 1024 && idx < units.length - 1) {
+					n = n / 1024;
+					idx += 1;
+				}
+				return n.toFixed(idx === 0 ? 0 : 1) + ' ' + units[idx];
+			}
 
-            function formatDurationSeconds(value) {
-                if (value == null) {
-                    return null;
-                }
-                var n = Number(value);
-                if (!isFinite(n) || n < 0) {
-                    return String(value);
-                }
-                var total = Math.floor(n);
-                var days = Math.floor(total / 86400);
-                var rem = total % 86400;
-                var hours = Math.floor(rem / 3600);
-                rem = rem % 3600;
-                var minutes = Math.floor(rem / 60);
-                var seconds = rem % 60;
-                function pad2(num) {
-                    return num < 10 ? '0' + num : String(num);
-                }
-                var hms = pad2(hours) + ':' + pad2(minutes) + ':' + pad2(seconds);
-                if (days > 0) {
-                    return days + 'd ' + hms;
-                }
-                return hms;
-            }
+			function formatTimestamp(value) {
+				if (value == null) {
+					return null;
+				}
+				var date;
+				if (typeof value === 'number') {
+					date = new Date(value * 1000);
+				} else {
+					var n = Number(value);
+					if (isFinite(n)) {
+						date = new Date(n * 1000);
+					} else {
+						date = new Date(String(value));
+					}
+				}
+				if (isNaN(date.getTime())) {
+					return String(value);
+				}
+				function pad2(num) {
+					return num < 10 ? '0' + num : String(num);
+				}
+				var y = date.getFullYear();
+				var m = pad2(date.getMonth() + 1);
+				var d = pad2(date.getDate());
+				var hh = pad2(date.getHours());
+				var mm = pad2(date.getMinutes());
+				var ss = pad2(date.getSeconds());
+				return y + '-' + m + '-' + d + ' ' + hh + ':' + mm + ':' + ss;
+			}
 
-            function clearStatsGroups() {
-                while (statsGroupsEl.firstChild) {
-                    statsGroupsEl.removeChild(statsGroupsEl.firstChild);
-                }
-            }
+			function formatDurationSeconds(value) {
+				if (value == null) {
+					return null;
+				}
+				var n = Number(value);
+				if (!isFinite(n) || n < 0) {
+					return String(value);
+				}
+				var total = Math.floor(n);
+				var days = Math.floor(total / 86400);
+				var rem = total % 86400;
+				var hours = Math.floor(rem / 3600);
+				rem = rem % 3600;
+				var minutes = Math.floor(rem / 60);
+				var seconds = rem % 60;
+				function pad2(num) {
+					return num < 10 ? '0' + num : String(num);
+				}
+				var hms = pad2(hours) + ':' + pad2(minutes) + ':' + pad2(seconds);
+				if (days > 0) {
+					return days + 'd ' + hms;
+				}
+				return hms;
+			}
 
-            function appendDictGroup(title, mapping) {
-                if (!mapping || typeof mapping !== 'object') {
-                    return;
-                }
-                var keys = Object.keys(mapping);
-                if (!keys.length) {
-                    return;
-                }
-                var group = document.createElement('section');
-                group.className = 'fh-stats-group';
+			function clearStatsGroups() {
+				while (statsGroupsEl.firstChild) {
+					statsGroupsEl.removeChild(statsGroupsEl.firstChild);
+				}
+				if (statsGroupsRightEl) {
+					while (statsGroupsRightEl.firstChild) {
+						statsGroupsRightEl.removeChild(statsGroupsRightEl.firstChild);
+					}
+				}
+			}
 
-                var heading = document.createElement('h3');
-                heading.className = 'fh-stats-group-title';
-                heading.textContent = title;
-                group.appendChild(heading);
+			function appendDictGroup(title, mapping) {
+				if (!mapping || typeof mapping !== 'object') {
+					return;
+				}
+				var keys = Object.keys(mapping);
+				if (!keys.length) {
+					return;
+				}
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
 
-                var dl = document.createElement('dl');
-                dl.className = 'fh-kv-list';
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = title;
+				group.appendChild(heading);
 
-                // For Totals, Query types, and Response codes we sort by value (descending)
-                // and then by key name (ascending) to make the highest counters easiest to see.
-                var sortByValueDesc =
-                    title === 'Totals' || title === 'Query types' || title === 'Response codes';
+				var dl = document.createElement('dl');
+				dl.className = 'fh-kv-list';
 
-                var entries = keys.map(function (key) {
-                    var raw = mapping[key];
-                    var num = Number(raw);
-                    if (!isFinite(num)) {
-                        // Treat non-numeric as 0 for ordering but still display original.
-                        num = 0;
-                    }
-                    return { key: key, value: raw, numeric: num };
-                });
+				// For Totals, Query types, and Response codes we sort by value (descending)
+				// and then by key name (ascending) to make the highest counters easiest to see.
+				var sortByValueDesc =
+					title === 'Totals' || title === 'Query types' || title === 'Response codes';
 
-                if (sortByValueDesc) {
-                    entries.sort(function (a, b) {
-                        if (b.numeric === a.numeric) {
-                            if (a.key < b.key) return -1;
-                            if (a.key > b.key) return 1;
-                            return 0;
-                        }
-                        return b.numeric - a.numeric;
-                    });
-                } else {
-                    entries.sort(function (a, b) {
-                        if (a.key < b.key) return -1;
-                        if (a.key > b.key) return 1;
-                        return 0;
-                    });
-                }
+				var entries = keys.map(function (key) {
+					var raw = mapping[key];
+					var num = Number(raw);
+					if (!isFinite(num)) {
+						// Treat non-numeric as 0 for ordering but still display original.
+						num = 0;
+					}
+					return { key: key, value: raw, numeric: num };
+				});
 
-                entries.forEach(function (entry) {
-                    var key = entry.key;
-                    var dt = document.createElement('dt');
-                    dt.textContent = key;
-                    if (Object.prototype.hasOwnProperty.call(STATS_TOOLTIPS, key)) {
-                        dt.title = STATS_TOOLTIPS[key];
-                    }
-                    var dd = document.createElement('dd');
-                    dd.textContent = formatNumber(entry.value);
-                    if (dt.title) {
-                        dd.title = dt.title;
-                    }
-                    dl.appendChild(dt);
-                    dl.appendChild(dd);
-                });
-                group.appendChild(dl);
-                statsGroupsEl.appendChild(group);
-            }
+				if (sortByValueDesc) {
+					entries.sort(function (a, b) {
+						if (b.numeric === a.numeric) {
+							if (a.key < b.key) return -1;
+							if (a.key > b.key) return 1;
+							return 0;
+						}
+						return b.numeric - a.numeric;
+					});
+				} else {
+					entries.sort(function (a, b) {
+						if (a.key < b.key) return -1;
+						if (a.key > b.key) return 1;
+						return 0;
+					});
+				}
 
-            function appendTopListGroup(title, entries) {
-                if (!entries || !Array.isArray(entries) || !entries.length) {
-                    return;
-                }
-                var group = document.createElement('section');
-                group.className = 'fh-stats-group';
+				entries.forEach(function (entry) {
+					var key = entry.key;
+					var dt = document.createElement('dt');
+					dt.textContent = key;
+					if (Object.prototype.hasOwnProperty.call(STATS_TOOLTIPS, key)) {
+						dt.title = STATS_TOOLTIPS[key];
+					}
+					var dd = document.createElement('dd');
+					dd.textContent = formatNumber(entry.value);
+					if (dt.title) {
+						dd.title = dt.title;
+					}
+					dl.appendChild(dt);
+					dl.appendChild(dd);
+				});
+				group.appendChild(dl);
+				statsGroupsEl.appendChild(group);
+			}
 
-                var heading = document.createElement('h3');
-                heading.className = 'fh-stats-group-title';
-                heading.textContent = title;
-                group.appendChild(heading);
+			function appendTopListGroup(title, entries, container) {
+				if (!entries || !Array.isArray(entries) || !entries.length) {
+					return;
+				}
+				var target = container || statsGroupsEl;
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
 
-                var dl = document.createElement('dl');
-                dl.className = 'fh-kv-list';
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = title;
+				group.appendChild(heading);
 
-                entries.forEach(function (pair) {
-                    if (!pair || pair.length < 2) {
-                        return;
-                    }
-                    var key = pair[0];
-                    var count = pair[1];
+				var dl = document.createElement('dl');
+				dl.className = 'fh-kv-list';
 
-                    var dt = document.createElement('dt');
-                    dt.textContent = key;
+				entries.forEach(function (pair) {
+					if (!pair || pair.length < 2) {
+						return;
+					}
+					var key = pair[0];
+					var count = pair[1];
 
-                    var dd = document.createElement('dd');
-                    dd.textContent = formatNumber(count);
+					var dt = document.createElement('dt');
+					dt.textContent = key;
 
-                    dl.appendChild(dt);
-                    dl.appendChild(dd);
-                });
+					var dd = document.createElement('dd');
+					dd.textContent = formatNumber(count);
 
-                group.appendChild(dl);
-                statsGroupsEl.appendChild(group);
-            }
+					dl.appendChild(dt);
+					dl.appendChild(dd);
+				});
 
-            function appendUpstreamsGroup(upstreams, upstreamRcodes) {
-                if (!upstreams || typeof upstreams !== 'object') {
-                    return;
-                }
-                var upstreamIds = Object.keys(upstreams);
-                if (!upstreamIds.length) {
-                    return;
-                }
+				group.appendChild(dl);
+				target.appendChild(group);
+			}
 
-                var group = document.createElement('section');
-                group.className = 'fh-stats-group';
+			function appendUpstreamsGroup(upstreams, upstreamRcodes) {
+				if (!upstreams || typeof upstreams !== 'object') {
+					return;
+				}
+				var upstreamIds = Object.keys(upstreams);
+				if (!upstreamIds.length) {
+					return;
+				}
 
-                var heading = document.createElement('h3');
-                heading.className = 'fh-stats-group-title';
-                heading.textContent = 'Upstreams';
-                heading.title = 'Per-upstream totals with breakdown by response code (NOERROR, NXDOMAIN, SERVFAIL, etc.).';
-                group.appendChild(heading);
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
 
-                var table = document.createElement('table');
-                table.className = 'fh-table fh-table-upstreams';
-                var tbody = document.createElement('tbody');
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = 'Upstreams';
+				heading.title = 'Per-upstream totals with breakdown by response code (NOERROR, NXDOMAIN, SERVFAIL, etc.).';
+				group.appendChild(heading);
 
-                // Build sortable rows with pre-computed totals.
-                var upstreamRows = [];
-                upstreamRcodes = upstreamRcodes || {};
+				var table = document.createElement('table');
+				table.className = 'fh-table fh-table-upstreams';
+				var tbody = document.createElement('tbody');
 
-                upstreamIds.forEach(function (upstreamId) {
-                    var outcomes = upstreams[upstreamId];
-                    if (!outcomes || typeof outcomes !== 'object') {
-outcomes = {};
+				// Build sortable rows with pre-computed totals.
+				var upstreamRows = [];
+				upstreamRcodes = upstreamRcodes || {};
+
+				upstreamIds.forEach(function (upstreamId) {
+					var outcomes = upstreams[upstreamId];
+					if (!outcomes || typeof outcomes !== 'object') {
+						outcomes = {};
 					}
 
 					var rcMap = {};
