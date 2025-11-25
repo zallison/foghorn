@@ -21,8 +21,8 @@ ENV CUDA_VISIBLE_DEVICES=""
 
 #  Internal Port   # Normal Port to map from # Comment
 
-# Standard UDP/TCP
-EXPOSE 5333 # 53
+# 53 # Standard UDP/TCP
+EXPOSE 5333
 
 # 801  # DNS-over-TLS
 EXPOSE 1801
