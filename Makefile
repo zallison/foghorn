@@ -33,12 +33,7 @@ env:
 .PHONY: build
 build: env
 	@echo "=== Installing project witout dev tool (env-dev) ==="
-	$(VENV)/bin/pip install -e ".[dev]"
-	$(VENV)/bin/pip install black ruff isort
-	${VENV}/bin/isort . src/ test/
-	${VENV}/bin/ruff check src/ tests/
-	${VENV}/bin/black src/ tests/
-
+	$(VENV)/bin/pip install -e "."
 
 .PHONY: env-dev
 env-dev:
