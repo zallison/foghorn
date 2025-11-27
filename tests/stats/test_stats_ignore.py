@@ -335,6 +335,8 @@ def test_set_ignore_filters_skips_empty_entries() -> None:
     collector.record_query("10.1.2.3", "example.com", "A")
     collector.record_query("1.2.3.4", "www.example.com", "A")
     collector.record_query("1.2.3.5", "other.com", "A")
+    collector.record_query("1.2.3.6", "notexample.com", "A")
+    collector.record_query("1.2.3.7", "fakeexample.com", "A")
 
     snap = collector.snapshot(reset=False)
     assert snap.totals["total_queries"] == 3
@@ -349,3 +351,5 @@ def test_set_ignore_filters_skips_empty_entries() -> None:
     domains = {d for d, _ in snap.top_domains}
     assert "example.com" not in domains
     assert "other.com" in domains
+    assert "notexample.com" in domains
+    assert "fakeexample.com" in domains
