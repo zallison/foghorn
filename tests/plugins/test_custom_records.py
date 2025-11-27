@@ -1,417 +1,940 @@
-"""
-Brief: Tests for foghorn.plugins.custom-records.CustomRecords plugin.
-
-Inputs:
-  - None
-
-Outputs:
-  - None
-"""
-
 import importlib
+import pathlib
+import threading
+import os
 
 import pytest
-from dnslib import QTYPE, DNSRecord
+
+from dnslib import DNSRecord, QTYPE
 
 from foghorn.plugins.base import PluginContext
 
 
-def _write_records_file(path, lines):
-    """Brief: Write lines to a temporary custom-records file.
+def _make_query(name: str, qtype: int) -> bytes:
+    """Create a minimal DNS query for the given name and qtype.
 
     Inputs:
-      - path: pathlib.Path for the output file.
-      - lines: iterable of text lines to write.
+      name: Domain name to query.
+      qtype: Numeric DNS record type code.
 
     Outputs:
-      - None
+      Raw DNS query bytes suitable for passing to CustomRecords.pre_resolve.
     """
-    path.write_text("\n".join(lines) + "\n")
+    # dnslib expects the qtype either as a mnemonic string (e.g. "A") or as a
+    # QTYPE instance; when we receive the numeric code, map it back to its
+    # mnemonic for constructing the question.
+    qtype_name = QTYPE.get(qtype, str(qtype))
+    q = DNSRecord.question(name, qtype=qtype_name)
+    return q.pack()
 
 
-def _mk_query(name="example.com", qtype="A"):
-    """Brief: Build a DNS query for the given name and qtype.
+def test_load_records_uniques_and_preserves_order_single_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    """CustomRecords._load_records keeps first TTL and value order from a single file.
 
     Inputs:
-      - name: domain name string.
-      - qtype: record type name string.
+      tmp_path: pytest-provided temporary directory.
 
     Outputs:
-      - tuple[DNSRecord, bytes]: Query object and packed wire bytes.
+      Asserts that duplicate values are dropped while preserving the order of
+      first occurrences and the initial TTL.
     """
-    q = DNSRecord.question(name, qtype)
-    return q, q.pack()
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                "example.com|A|300|1.1.1.1",
+                "example.com|A|300|2.2.2.2",
+                # Duplicate value with a different TTL; should be ignored.
+                "example.com|A|600|1.1.1.1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    plugin = CustomRecords(file_path=str(records_file))
+    plugin.setup()
+
+    key = ("example.com", int(QTYPE.A))
+    ttl, values = plugin.records[key]
+
+    assert ttl == 300
+    assert values == ["1.1.1.1", "2.2.2.2"]
 
 
-def test_custom_records_module_import():
-    """Brief: Verify custom-records module imports correctly.
+def test_load_records_across_multiple_files_order_and_dedup(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Values from multiple files are merged in config order with later dups dropped.
 
     Inputs:
-      - None
+      tmp_path: pytest temporary directory fixture.
 
     Outputs:
-      - None: Asserts module name
+      Asserts that values appear in order of first definition across files and
+      that later duplicates do not change TTL or ordering.
+    """
+    f1 = tmp_path / "records1.txt"
+    f2 = tmp_path / "records2.txt"
+
+    f1.write_text(
+        "\n".join(
+            [
+                "example.com|A|100|1.1.1.1",
+                "example.com|A|100|2.2.2.2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    f2.write_text(
+        "\n".join(
+            [
+                # New value should be appended after existing ones.
+                "example.com|A|200|3.3.3.3",
+                # Duplicate of an earlier value with different TTL; ignored.
+                "example.com|A|400|2.2.2.2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    plugin = CustomRecords(file_paths=[str(f1), str(f2)])
+    plugin.setup()
+
+    key = ("example.com", int(QTYPE.A))
+    ttl, values = plugin.records[key]
+
+    # TTL comes from the first occurrence, and values follow their first
+    # appearance order across files.
+    assert ttl == 100
+    assert values == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
+
+
+def test_pre_resolve_uses_value_order_from_config(tmp_path: pathlib.Path) -> None:
+    """pre_resolve answers follow the order of values defined in the records files.
+
+    Inputs:
+      tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      Asserts that the order of A records in the DNS answer matches the order
+      of values from the records file.
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                "ordered.example|A|300|2.2.2.2",
+                "ordered.example|A|300|1.1.1.1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    plugin = CustomRecords(file_path=str(records_file))
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req_bytes = _make_query("ordered.example", int(QTYPE.A))
+
+    decision = plugin.pre_resolve("ordered.example", int(QTYPE.A), req_bytes, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+
+    response = DNSRecord.parse(decision.response)
+    ips = [str(a.rdata) for a in response.rr if a.rtype == QTYPE.A]
+
+    # The answers must appear in the same order as in the config file.
+    assert ips == ["2.2.2.2", "1.1.1.1"]
+
+
+def test_normalize_paths_raises_when_no_paths(tmp_path: pathlib.Path) -> None:
+    """Brief: _normalize_paths and setup() fail when neither file_path nor file_paths are provided.
+
+    Inputs:
+      - tmp_path: pytest temporary directory (unused but kept for consistency).
+
+    Outputs:
+      - Asserts that ValueError is raised when no paths are configured.
     """
     mod = importlib.import_module("foghorn.plugins.custom-records")
-    assert mod.__name__ == "foghorn.plugins.custom-records"
+    CustomRecords = mod.CustomRecords
+
+    plugin = CustomRecords()
+    with pytest.raises(ValueError):
+        plugin.setup()
 
 
-def test_setup_normalizes_paths_and_loads_records(tmp_path):
-    """Brief: setup() normalizes file_paths then loads and merges records.
+def test_load_records_skips_blank_and_comment_lines(tmp_path: pathlib.Path) -> None:
+    """Brief: _load_records ignores empty and comment-only lines.
 
     Inputs:
       - tmp_path: pytest-provided temporary directory.
 
     Outputs:
-      - None: Asserts mapping populated with merged values and latest TTL.
+      - Asserts that only valid record lines contribute entries.
     """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                "   # comment-only line",
+                "",
+                "example.com|A|300|1.1.1.1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
     mod = importlib.import_module("foghorn.plugins.custom-records")
     CustomRecords = mod.CustomRecords
 
-    f1 = tmp_path / "records1.txt"
-    f2 = tmp_path / "records2.txt"
-    _write_records_file(
-        f1,
-        [
-            "example.com|A|60|1.2.3.4",
-            "example.com|A|60|2.3.4.5",
-        ],
-    )
-    _write_records_file(f2, ["example.com|A|120|3.4.5.6"])
+    plugin = CustomRecords(file_path=str(records_file))
+    plugin.setup()
 
-    # Use _normalize_paths directly to exercise normalization/merging logic.
-    plugin = CustomRecords()
-    paths = plugin._normalize_paths([str(f1), str(f2), str(f2)])
-    plugin.file_paths = paths
+    key = ("example.com", int(QTYPE.A))
+    ttl, values = plugin.records[key]
+
+    assert ttl == 300
+    assert values == ["1.1.1.1"]
+
+
+def test_load_records_malformed_line_wrong_field_count(tmp_path: pathlib.Path) -> None:
+    """Brief: _load_records raises ValueError when a line does not have four fields.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a ValueError is raised for malformed lines.
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("bad-line-without-separators\n", encoding="utf-8")
+
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    plugin = CustomRecords(file_path=str(records_file))
+    with pytest.raises(ValueError):
+        plugin.setup()
+
+
+def test_load_records_malformed_line_empty_field(tmp_path: pathlib.Path) -> None:
+    """Brief: _load_records raises ValueError when any of the four fields is empty.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a ValueError is raised for lines with empty fields.
+    """
+    records_file = tmp_path / "records.txt"
+    # Empty value field after the last '|'.
+    records_file.write_text("example.com|A|300|\n", encoding="utf-8")
+
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    plugin = CustomRecords(file_path=str(records_file))
+    with pytest.raises(ValueError):
+        plugin.setup()
+
+
+def test_load_records_qtype_numeric_and_negative_ttl(tmp_path: pathlib.Path) -> None:
+    """Brief: _load_records accepts numeric qtype but rejects negative TTL values.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a ValueError is raised when TTL is negative even with numeric qtype.
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|1|-10|1.2.3.4\n", encoding="utf-8")
+
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    plugin = CustomRecords(file_path=str(records_file))
+    with pytest.raises(ValueError):
+        plugin.setup()
+
+
+def test_load_records_invalid_ttl_non_integer(tmp_path: pathlib.Path) -> None:
+    """Brief: _load_records rejects TTL values that cannot be parsed as integers.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a ValueError is raised for non-integer TTL.
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|abc|1.2.3.4\n", encoding="utf-8")
+
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    plugin = CustomRecords(file_path=str(records_file))
+    with pytest.raises(ValueError):
+        plugin.setup()
+
+
+def test_load_records_qtype_fallback_to_get_int(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """Brief: _load_records uses QTYPE.get when getattr raises AttributeError.
+
+    Inputs:
+      - monkeypatch: pytest fixture for runtime patching.
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that qtype_code is taken from QTYPE.get when it returns an int.
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|FOO|300|1.2.3.4\n", encoding="utf-8")
+
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+
+    class DummyQType:
+        def __getattr__(self, name: str) -> int:
+            raise AttributeError(name)
+
+        def get(self, name, default=None):  # type: ignore[override]
+            return 42
+
+    monkeypatch.setattr(mod, "QTYPE", DummyQType())
+    CustomRecords = mod.CustomRecords
+
+    plugin = CustomRecords(file_path=str(records_file))
+    plugin.setup()
+
+    key = ("example.com", 42)
+    assert key in plugin.records
+
+
+def test_load_records_qtype_unknown_raises(monkeypatch, tmp_path: pathlib.Path) -> None:
+    """Brief: _load_records raises ValueError when QTYPE.get does not return an int.
+
+    Inputs:
+      - monkeypatch: pytest fixture for runtime patching.
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a ValueError is raised when qtype_code would be None.
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|BAR|300|1.2.3.4\n", encoding="utf-8")
+
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+
+    class DummyQType:
+        def __getattr__(self, name: str) -> int:
+            raise AttributeError(name)
+
+        def get(self, name, default=None):  # type: ignore[override]
+            return "NOT_INT"
+
+    monkeypatch.setattr(mod, "QTYPE", DummyQType())
+    CustomRecords = mod.CustomRecords
+
+    plugin = CustomRecords(file_path=str(records_file))
+    with pytest.raises(ValueError):
+        plugin.setup()
+
+
+def test_load_records_assigns_without_lock(tmp_path: pathlib.Path) -> None:
+    """Brief: _load_records assigns records directly when no _records_lock is present.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that records are populated even when _records_lock is None.
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
+
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    plugin = CustomRecords(file_path=str(records_file))
+    plugin.setup()
+
+    # Remove the lock and force a reload to exercise the lock-is-None path.
+    plugin._records_lock = None  # type: ignore[assignment]
     plugin._load_records()
 
-    # _mapping uses lowercased domain and qtype name, TTL from latest line.
-    key = ("example.com", "A")
-    entry = plugin._mapping.get(key)
-    assert entry is not None
-    assert entry["ttl"] == 120
-    values = entry["values"]
-    assert {"1.2.3.4", "2.3.4.5", "3.4.5.6"} <= values
+    assert plugin.records[("example.com", int(QTYPE.A))][1] == ["1.2.3.4"]
 
 
-def test_normalize_paths_errors_on_missing():
-    """Brief: _normalize_paths raises ValueError when no paths given.
+def test_pre_resolve_no_entry_and_no_lock(tmp_path: pathlib.Path) -> None:
+    """Brief: pre_resolve returns None and logs when no records entry exists.
 
     Inputs:
-      - None
+      - tmp_path: pytest temporary directory.
 
     Outputs:
-      - None: Asserts ValueError raised.
+      - Asserts that pre_resolve returns None when key is missing and _records_lock is None.
     """
-    mod = importlib.import_module("foghorn.plugins.custom-records")
-    CustomRecords = mod.CustomRecords
-    plugin = CustomRecords()
-    with pytest.raises(ValueError):
-        plugin._normalize_paths([])
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
 
-
-def test_load_records_rejects_malformed_lines(tmp_path):
-    """Brief: _load_records rejects malformed and bad-TTL lines.
-
-    Inputs:
-      - tmp_path: temporary directory path.
-
-    Outputs:
-      - None: Asserts ValueError on malformed lines and TTL.
-    """
     mod = importlib.import_module("foghorn.plugins.custom-records")
     CustomRecords = mod.CustomRecords
 
-    bad_fields = tmp_path / "bad_fields.txt"
-    bad_ttl = tmp_path / "bad_ttl.txt"
-    bad_empty = tmp_path / "bad_empty.txt"
+    plugin = CustomRecords(file_path=str(records_file))
+    plugin.setup()
 
-    _write_records_file(bad_fields, ["only|three|fields"])
-    _write_records_file(bad_ttl, ["example.com|A|notanint|1.2.3.4"])
-    _write_records_file(bad_empty, ["|A|60|1.2.3.4"])
-
-    plugin = CustomRecords()
-    plugin.file_paths = [str(bad_fields)]
-    with pytest.raises(ValueError):
-        plugin._load_records()
-
-    plugin = CustomRecords()
-    plugin.file_paths = [str(bad_ttl)]
-    with pytest.raises(ValueError):
-        plugin._load_records()
-
-    plugin = CustomRecords()
-    plugin.file_paths = [str(bad_empty)]
-    with pytest.raises(ValueError):
-        plugin._load_records()
-
-
-def test_pre_resolve_returns_override_for_match(tmp_path):
-    """Brief: pre_resolve returns override with packed response when mapping has entry.
-
-    Inputs:
-      - tmp_path: temporary directory path.
-
-    Outputs:
-      - None: Asserts override decision and usable DNS response.
-    """
-    mod = importlib.import_module("foghorn.plugins.custom-records")
-    CustomRecords = mod.CustomRecords
-
-    rec_file = tmp_path / "records.txt"
-    _write_records_file(rec_file, ["example.com|A|60|1.2.3.4"])
-
-    plugin = CustomRecords()
-    plugin.file_paths = [str(rec_file)]
-    plugin._records_lock = None
-    plugin._mapping = {("example.com", "A"): {"ttl": 60, "values": {"1.2.3.4"}}}
+    # Remove lock so we exercise the lock-is-None branch.
+    plugin._records_lock = None  # type: ignore[assignment]
 
     ctx = PluginContext(client_ip="127.0.0.1")
-    q, wire = _mk_query("example.com", "A")
+    req_bytes = _make_query("other.example", int(QTYPE.A))
 
-    decision = plugin.pre_resolve("example.com", QTYPE.A, wire, ctx)
-    assert decision is not None
-    assert decision.action == "override"
-    assert decision.response is not None
-
-    resp = DNSRecord.parse(decision.response)
-    assert len(resp.rr) == 1
-
-
-def test_pre_resolve_returns_none_on_no_match(tmp_path):
-    """Brief: pre_resolve returns None when no mapping entry exists.
-
-    Inputs:
-      - tmp_path: temporary directory path.
-
-    Outputs:
-      - None: Asserts None decision.
-    """
-    mod = importlib.import_module("foghorn.plugins.custom-records")
-    CustomRecords = mod.CustomRecords
-
-    rec_file = tmp_path / "records.txt"
-    _write_records_file(rec_file, ["other.com|A|60|1.2.3.4"])
-
-    plugin = CustomRecords()
-    plugin.file_paths = [str(rec_file)]
-    plugin._records_lock = None
-    # Mapping only contains other.com entry -> example.com should not match.
-    plugin._mapping = {("other.com", "A"): {"ttl": 60, "values": {"1.2.3.4"}}}
-
-    ctx = PluginContext(client_ip="127.0.0.1")
-    _, wire = _mk_query("example.com", "A")
-    decision = plugin.pre_resolve("example.com", QTYPE.A, wire, ctx)
+    decision = plugin.pre_resolve("other.example", int(QTYPE.A), req_bytes, ctx)
     assert decision is None
 
 
-def test_pre_resolve_ignores_unknown_qtype(tmp_path, caplog):
-    """Brief: pre_resolve returns None and logs warning on unknown qtype code.
+def test_pre_resolve_returns_none_when_rr_parsing_fails(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """Brief: pre_resolve returns None when RR.fromZone raises for all values.
 
     Inputs:
-      - tmp_path: temporary directory path.
+      - monkeypatch: pytest fixture for runtime patching.
+      - tmp_path: pytest temporary directory.
 
     Outputs:
-      - None: Asserts None decision for unknown qtype.
+      - Asserts that no override decision is made when answers cannot be built.
     """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
+
     mod = importlib.import_module("foghorn.plugins.custom-records")
     CustomRecords = mod.CustomRecords
 
-    rec_file = tmp_path / "records.txt"
-    _write_records_file(rec_file, ["example.com|A|60|1.2.3.4"])
+    plugin = CustomRecords(file_path=str(records_file))
+    plugin.setup()
 
-    plugin = CustomRecords()
-    plugin.file_paths = [str(rec_file)]
-    plugin._records_lock = None
-    plugin._mapping = {("example.com", "A"): {"ttl": 60, "values": {"1.2.3.4"}}}
+    # Force RR.fromZone to fail so that no answers are added.
+    monkeypatch.setattr(
+        mod,
+        "RR",
+        type(
+            "_RR",
+            (),
+            {
+                "fromZone": staticmethod(
+                    lambda zone: (_ for _ in ()).throw(RuntimeError("bad"))
+                )
+            },
+        ),
+    )
 
     ctx = PluginContext(client_ip="127.0.0.1")
-    _, wire = _mk_query("example.com", "A")
+    req_bytes = _make_query("example.com", int(QTYPE.A))
 
-    unknown_qtype = 65535
-    caplog.set_level("WARNING")
-    decision = plugin.pre_resolve("example.com", unknown_qtype, wire, ctx)
+    decision = plugin.pre_resolve("example.com", int(QTYPE.A), req_bytes, ctx)
     assert decision is None
 
 
-def test_make_response_for_values_handles_parse_error(tmp_path, monkeypatch, caplog):
-    """Brief: _make_response_for_values returns None and logs warning on parse error.
+def test_watchdog_handler_should_reload_and_on_any_event(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: _WatchdogHandler only reloads for matching file events.
 
     Inputs:
-      - tmp_path: temporary directory path.
+      - tmp_path: pytest temporary directory.
 
     Outputs:
-      - None: Asserts None returned when DNSRecord.parse fails.
+      - Asserts _should_reload and on_any_event behaviour for various event shapes.
     """
     mod = importlib.import_module("foghorn.plugins.custom-records")
     CustomRecords = mod.CustomRecords
 
-    rec_file = tmp_path / "records.txt"
-    _write_records_file(rec_file, ["example.com|A|60|1.2.3.4"])
+    class DummyPlugin:
+        def __init__(self) -> None:
+            self.reloaded = 0
 
-    plugin = CustomRecords()
+        def _reload_records_from_watchdog(self) -> None:
+            self.reloaded += 1
 
-    caplog.set_level("WARNING")
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
+    watched = [records_file]
 
-    # Monkeypatch DNSRecord.parse to raise, exercising the defensive path.
-    monkeypatch.setattr(mod, "DNSRecord", mod.DNSRecord)
-    original_parse = mod.DNSRecord.parse
+    plugin = DummyPlugin()
+    handler = CustomRecords._WatchdogHandler(plugin, watched)
 
-    def boom(*_a, **_k):  # noqa: ANN001, D401
-        """Brief: Raise RuntimeError to simulate parse failure.
+    # No paths -> False
+    assert handler._should_reload(None, None) is False
 
-        Inputs:
-          - _a, _k: positional and keyword args (ignored).
+    # Unrelated path -> False
+    assert handler._should_reload("/not/watched", None) is False
 
-        Outputs:
-          - None: Always raises RuntimeError.
-        """
-        raise RuntimeError("parse-fail")
+    # Matching source path -> True
+    assert handler._should_reload(str(records_file), None) is True
 
-    monkeypatch.setattr(mod.DNSRecord, "parse", staticmethod(boom))
-    try:
-        res = plugin._make_response_for_values(QTYPE.A, b"bad", 60, ["1.2.3.4"])
-        assert res is None
-        assert any(
-            "parse failure in custom-records" in r.getMessage() for r in caplog.records
-        )
-    finally:
-        monkeypatch.setattr(mod.DNSRecord, "parse", original_parse)
+    class Event:
+        def __init__(
+            self,
+            is_directory: bool,
+            event_type: str,
+            src_path: str | None = None,
+            dest_path: str | None = None,
+        ) -> None:
+            self.is_directory = is_directory
+            self.event_type = event_type
+            self.src_path = src_path
+            self.dest_path = dest_path
 
-
-def test_make_response_for_values_builds_records_for_supported_types(tmp_path):
-    """Brief: _make_response_for_values builds responses for supported qtypes.
-
-    Inputs:
-      - tmp_path: temporary directory path.
-
-    Outputs:
-      - None: Asserts non-empty responses for each supported type.
-    """
-    mod = importlib.import_module("foghorn.plugins.custom-records")
-    CustomRecords = mod.CustomRecords
-
-    rec_file = tmp_path / "records.txt"
-    _write_records_file(rec_file, ["example.com|A|60|1.2.3.4"])
-
-    plugin = CustomRecords()
-    q, wire = _mk_query("example.com", "A")
-
-    for qtype_name in ["A", "AAAA", "CNAME", "PTR", "TXT", "MX", "SRV"]:
-        q = DNSRecord.question("example.com", qtype_name)
-        wire = q.pack()
-        # Use numeric constants (QTYPE.A, etc.) instead of forward lookup by string.
-        qtype_code = getattr(QTYPE, qtype_name)
-
-        # Choose a value appropriate for the record type.
-        if qtype_name == "A":
-            values = ["1.2.3.4"]
-        elif qtype_name == "AAAA":
-            values = ["2001:db8::1"]
-        elif qtype_name == "CNAME":
-            values = ["alias.example.com."]
-        elif qtype_name == "PTR":
-            values = ["ptr.example.com."]
-        elif qtype_name == "TXT":
-            values = ["hello"]
-        elif qtype_name == "MX":
-            values = ["10 mail.example.com."]
-        elif qtype_name == "SRV":
-            values = ["10 5 443 svc.example.com."]
-        else:
-            values = ["ignored"]
-
-        res = plugin._make_response_for_values(qtype_code, wire, 60, values)
-        if qtype_name in {"MX", "SRV"}:
-            # For MX/SRV we only assert that the helper handles the value without raising;
-            # current implementation logs and skips invalid payloads, returning None.
-            assert res is None or isinstance(res, (bytes, bytearray))
-        else:
-            assert res is not None
-
-
-def test_make_response_for_values_rejects_unsupported_type(tmp_path, caplog):
-    """Brief: _make_response_for_values returns None for unsupported qtype.
-
-    Inputs:
-      - tmp_path: temporary directory path.
-
-    Outputs:
-      - None: Asserts None and warning for unsupported type.
-    """
-    mod = importlib.import_module("foghorn.plugins.custom-records")
-    CustomRecords = mod.CustomRecords
-
-    rec_file = tmp_path / "records.txt"
-    _write_records_file(rec_file, ["example.com|A|60|1.2.3.4"])
-
-    plugin = CustomRecords()
-    plugin.file_paths = [str(rec_file)]
-    plugin._records_lock = None
-
-    q, wire = _mk_query("example.com", "A")
-    caplog.set_level("WARNING")
-
-    # Use TXT qtype but request an unsupported numeric type (e.g., NS which plugin does not handle).
-    unsupported_qtype = QTYPE.NS
-    res = plugin._make_response_for_values(
-        unsupported_qtype, wire, 60, ["ns1.example.com."]
+    # Directory events are ignored.
+    handler.on_any_event(
+        Event(is_directory=True, event_type="modified", src_path=str(records_file))
     )
-    assert res is None
-    assert any(
-        "custom-records does not support qtype" in r.getMessage()
-        for r in caplog.records
+    assert plugin.reloaded == 0
+
+    # Unsupported event types are ignored.
+    handler.on_any_event(
+        Event(is_directory=False, event_type="deleted", src_path=str(records_file))
     )
+    assert plugin.reloaded == 0
+
+    # Supported event type with matching path triggers reload.
+    handler.on_any_event(
+        Event(is_directory=False, event_type="modified", src_path=str(records_file))
+    )
+    assert plugin.reloaded == 1
 
 
-def test_have_files_changed_detects_changes(tmp_path):
-    """Brief: _have_files_changed tracks snapshot differences.
+def test_start_watchdog_observer_none(monkeypatch, tmp_path: pathlib.Path) -> None:
+    """Brief: _start_watchdog logs and disables observer when Observer is None.
 
     Inputs:
-      - tmp_path: temporary directory path.
+      - monkeypatch: pytest fixture for runtime patching.
+      - tmp_path: pytest temporary directory.
 
     Outputs:
-      - None: Asserts initial True, then False, then True after modification.
+      - Asserts that _observer is left as None when Observer is unavailable.
     """
     mod = importlib.import_module("foghorn.plugins.custom-records")
     CustomRecords = mod.CustomRecords
 
-    rec_file = tmp_path / "records.txt"
-    _write_records_file(rec_file, ["example.com|A|60|1.2.3.4"])
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
 
-    plugin = CustomRecords()
-    plugin.file_paths = [str(rec_file)]
+    plugin = CustomRecords(file_path=str(records_file), watchdog_enabled=False)
+    plugin.setup()
 
-    # First call treats baseline as change.
+    # Force Observer to be treated as unavailable.
+    monkeypatch.setattr(mod, "Observer", None)
+
+    plugin._start_watchdog()
+    assert getattr(plugin, "_observer", None) is None
+
+
+def test_start_watchdog_with_no_directories(monkeypatch) -> None:
+    """Brief: _start_watchdog returns early when there are no directories to watch.
+
+    Inputs:
+      - monkeypatch: pytest fixture for runtime patching.
+
+    Outputs:
+      - Asserts that _observer is set to None when file_paths is empty.
+    """
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    # Construct a bare instance without going through __init__ to allow empty file_paths.
+    plugin = object.__new__(CustomRecords)
+    plugin.file_paths = []  # type: ignore[assignment]
+
+    class DummyObserver:
+        def __init__(self) -> None:  # pragma: no cover - simple stub
+            pass
+
+    monkeypatch.setattr(mod, "Observer", DummyObserver)
+
+    plugin._start_watchdog()
+    assert getattr(plugin, "_observer", None) is None
+
+
+def test_start_polling_variants(tmp_path: pathlib.Path) -> None:
+    """Brief: _start_polling handles disabled, missing-stop, and enabled cases.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that polling thread is only started when both interval and stop_event are set.
+    """
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
+
+    # Disabled polling: interval <= 0
+    plugin = CustomRecords(file_path=str(records_file))
+    plugin.setup()
+    plugin._poll_interval = 0.0  # type: ignore[assignment]
+    plugin._poll_stop = threading.Event()
+    plugin._start_polling()
+    assert getattr(plugin, "_poll_thread", None) is None
+
+    # Interval set but no stop_event configured -> no thread
+    plugin2 = CustomRecords(file_path=str(records_file))
+    plugin2.setup()
+    plugin2._poll_interval = 0.1  # type: ignore[assignment]
+    plugin2._poll_stop = None  # type: ignore[assignment]
+    plugin2._start_polling()
+    assert getattr(plugin2, "_poll_thread", None) is None
+
+    # Proper configuration starts a polling thread.
+    plugin3 = CustomRecords(
+        file_path=str(records_file), watchdog_poll_interval_seconds=0.01
+    )
+    plugin3.setup()
+    assert getattr(plugin3, "_poll_thread", None) is not None
+    plugin3.close()
+
+
+def test_poll_loop_early_return_and_iteration(tmp_path: pathlib.Path) -> None:
+    """Brief: _poll_loop returns early when misconfigured and loops once when configured.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts both the early-return and single-iteration behaviours.
+    """
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
+
+    plugin = CustomRecords(file_path=str(records_file))
+    plugin.setup()
+
+    # Early return when stop_event is None.
+    plugin._poll_stop = None  # type: ignore[assignment]
+    plugin._poll_interval = 0.1  # type: ignore[assignment]
+    plugin._poll_loop()
+
+    # Single iteration when configured; have_files_changed clears the stop event.
+    stop = threading.Event()
+    plugin._poll_stop = stop  # type: ignore[assignment]
+    plugin._poll_interval = 0.01  # type: ignore[assignment]
+
+    def fake_have_files_changed() -> bool:
+        stop.set()
+        return False
+
+    plugin._have_files_changed = fake_have_files_changed  # type: ignore[assignment]
+    plugin._poll_loop()
+
+
+def test_have_files_changed_tracks_snapshot(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """Brief: _have_files_changed builds snapshots and detects changes.
+
+    Inputs:
+      - monkeypatch: pytest fixture for runtime patching.
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that the first call returns True and subsequent identical stats return False.
+    """
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
+
+    plugin = CustomRecords(file_path=str(records_file))
+    plugin.setup()
+
+    missing = tmp_path / "missing.txt"
+
+    real_stat = os.stat
+
+    def fake_stat(path: str):
+        if path == str(missing):
+            raise FileNotFoundError
+        if path.endswith("error.txt"):
+            raise OSError("boom")
+        return real_stat(path)
+
+    extra = tmp_path / "error.txt"
+    extra.write_text("ignore\n", encoding="utf-8")
+
+    plugin.file_paths = [str(records_file), str(missing), str(extra)]  # type: ignore[assignment]
+
+    monkeypatch.setattr(mod.os, "stat", fake_stat)
+
+    # First call establishes snapshot.
     assert plugin._have_files_changed() is True
-    # Second call without changes returns False.
+    # Second call with same stats returns False.
     assert plugin._have_files_changed() is False
 
-    # Modify file and ensure True again.
-    _write_records_file(rec_file, ["example.com|A|60|5.6.7.8"])
-    assert plugin._have_files_changed() is True
 
-
-def test_close_stops_watchers_gracefully(tmp_path):
-    """Brief: close() stops observer, polling, and timers without error.
+def test_schedule_debounced_reload_variants(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """Brief: _schedule_debounced_reload covers immediate, lock-less, and timer cases.
 
     Inputs:
-      - tmp_path: temporary directory path.
+      - monkeypatch: pytest fixture for runtime patching.
+      - tmp_path: pytest temporary directory.
 
     Outputs:
-      - None: Asserts close() can be called after setup.
+      - Asserts that reload is called immediately for zero delay and scheduled via Timer otherwise.
     """
     mod = importlib.import_module("foghorn.plugins.custom-records")
     CustomRecords = mod.CustomRecords
 
-    rec_file = tmp_path / "records.txt"
-    _write_records_file(rec_file, ["example.com|A|60|1.2.3.4"])
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
 
-    plugin = CustomRecords()
-    # Simulate internal state as if setup() had run without starting threads.
-    plugin._observer = None
-    plugin._poll_stop = type("E", (), {"set": lambda self: None})()
-    plugin._poll_thread = None
-    plugin._reload_debounce_timer = None
+    plugin = CustomRecords(file_path=str(records_file))
+    plugin.setup()
+
+    called = {"count": 0}
+
+    def fake_reload() -> None:
+        called["count"] += 1
+
+    plugin._reload_records_from_watchdog = fake_reload  # type: ignore[assignment]
+
+    # Immediate path when delay <= 0.
+    plugin._schedule_debounced_reload(0.0)
+    assert called["count"] == 1
+
+    # No lock configured -> no scheduling.
+    plugin2 = CustomRecords(file_path=str(records_file))
+    plugin2.setup()
+    plugin2._reload_records_from_watchdog = fake_reload  # type: ignore[assignment]
+    plugin2._reload_timer_lock = None  # type: ignore[assignment]
+    plugin2._schedule_debounced_reload(1.0)
+    assert called["count"] == 1
+
+    # Existing live timer prevents new scheduling.
+    class DummyTimer:
+        def is_alive(self) -> bool:  # pragma: no cover - trivial.
+            return True
+
+    plugin3 = CustomRecords(file_path=str(records_file))
+    plugin3.setup()
+    plugin3._reload_records_from_watchdog = fake_reload  # type: ignore[assignment]
+    plugin3._reload_timer_lock = threading.Lock()  # type: ignore[assignment]
+    plugin3._reload_debounce_timer = DummyTimer()  # type: ignore[assignment]
+    plugin3._schedule_debounced_reload(1.0)
+    assert called["count"] == 1
+
+    # Normal scheduling path with Timer replacement that calls callback immediately.
+    calls = {"timer_cb": 0}
+
+    def make_timer(delay, cb):  # type: ignore[override]
+        class ImmediateTimer:
+            def __init__(self) -> None:
+                self.delay = delay
+                self._cb = cb
+
+            def is_alive(self) -> bool:  # pragma: no cover - not used in this branch.
+                return False
+
+            def start(self) -> None:
+                cb()
+
+            @property
+            def daemon(self) -> bool:  # pragma: no cover - attribute only.
+                return True
+
+            @daemon.setter
+            def daemon(self, value: bool) -> None:  # pragma: no cover - ignore.
+                pass
+
+        calls["timer_cb"] += 1
+        return ImmediateTimer()
+
+    monkeypatch.setattr(mod.threading, "Timer", make_timer)
+
+    plugin4 = CustomRecords(file_path=str(records_file))
+    plugin4.setup()
+    plugin4._reload_records_from_watchdog = fake_reload  # type: ignore[assignment]
+    plugin4._reload_timer_lock = threading.Lock()  # type: ignore[assignment]
+    plugin4._schedule_debounced_reload(0.01)
+
+    assert called["count"] >= 2
+    assert calls["timer_cb"] == 1
+
+
+def test_reload_records_from_watchdog_deferred_and_immediate(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """Brief: _reload_records_from_watchdog both defers and immediately reloads.
+
+    Inputs:
+      - monkeypatch: pytest fixture for runtime patching.
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that short intervals schedule a deferred reload and long ones call _load_records.
+    """
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
+
+    plugin = CustomRecords(file_path=str(records_file))
+    plugin.setup()
+
+    # Deferred path: elapsed < min_interval. Use a fixed time source for determinism.
+    monkeypatch.setattr(mod.time, "time", lambda: 105.0)
+    plugin._last_watchdog_reload_ts = 100.0  # type: ignore[assignment]
+    plugin._watchdog_min_interval = 10.0  # type: ignore[assignment]
+
+    scheduled = {"delay": None}
+
+    def fake_schedule(delay: float) -> None:
+        scheduled["delay"] = delay
+
+    plugin._schedule_debounced_reload = fake_schedule  # type: ignore[assignment]
+    plugin._reload_records_from_watchdog()
+    assert scheduled["delay"] is not None
+
+    # Immediate path: elapsed >= min_interval causes an in-place reload.
+    monkeypatch.setattr(mod.time, "time", lambda: 200.0)
+    plugin._last_watchdog_reload_ts = 0.0  # type: ignore[assignment]
+    called = {"load": 0}
+
+    def fake_load() -> None:
+        called["load"] += 1
+
+    plugin._load_records = fake_load  # type: ignore[assignment]
+    plugin._watchdog_min_interval = 0.0  # type: ignore[assignment]
+    plugin._reload_records_from_watchdog()
+    assert called["load"] == 1
+
+
+def test_close_stops_observer_polling_and_timers() -> None:
+    """Brief: close() stops observer, polling loop, and cancels timers.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that observer, poll_thread, and debounce timer are cleared.
+    """
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    plugin = object.__new__(CustomRecords)
+
+    class DummyObserver:
+        def __init__(self) -> None:
+            self.stopped = False
+            self.joined = False
+
+        def stop(self) -> None:
+            self.stopped = True
+
+        def join(self, timeout: float | None = None) -> None:
+            self.joined = True
+
+    class DummyEvent:
+        def __init__(self) -> None:
+            self.set_called = False
+
+        def set(self) -> None:
+            self.set_called = True
+
+    class DummyThread:
+        def __init__(self) -> None:
+            self.join_called = False
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_called = True
+
+    class DummyTimer:
+        def __init__(self) -> None:
+            self.cancel_called = False
+
+        def cancel(self) -> None:
+            self.cancel_called = True
+
+    observer = DummyObserver()
+    stop_event = DummyEvent()
+    poll_thread = DummyThread()
+    timer = DummyTimer()
+
+    plugin._observer = observer  # type: ignore[assignment]
+    plugin._poll_stop = stop_event  # type: ignore[assignment]
+    plugin._poll_thread = poll_thread  # type: ignore[assignment]
+    plugin._reload_debounce_timer = timer  # type: ignore[assignment]
 
     plugin.close()
+
+    assert observer.stopped and observer.joined
+    assert stop_event.set_called
+    assert poll_thread.join_called
+    assert plugin._observer is None  # type: ignore[attr-defined]
+    assert plugin._poll_thread is None  # type: ignore[attr-defined]
+    assert plugin._reload_debounce_timer is None  # type: ignore[attr-defined]
+
+
+def test_setup_watchdog_enabled_flag_controls_start(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """Brief: setup() honours the watchdog_enabled configuration flag.
+
+    Inputs:
+      - monkeypatch: pytest fixture for runtime patching.
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that _start_watchdog is only called when watchdog_enabled is truthy.
+    """
+    mod = importlib.import_module("foghorn.plugins.custom-records")
+    CustomRecords = mod.CustomRecords
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
+
+    calls = {"start": 0}
+
+    def fake_start(self) -> None:  # type: ignore[override]
+        calls["start"] += 1
+
+    monkeypatch.setattr(CustomRecords, "_start_watchdog", fake_start, raising=False)
+
+    # Explicitly disabled -> no call.
+    plugin_disabled = CustomRecords(file_path=str(records_file), watchdog_enabled=False)
+    plugin_disabled.setup()
+
+    # Truthy non-bool value -> treated as True and calls _start_watchdog.
+    plugin_enabled = CustomRecords(file_path=str(records_file), watchdog_enabled="yes")
+    plugin_enabled.setup()
+
+    assert calls["start"] == 1
