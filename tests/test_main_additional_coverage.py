@@ -197,6 +197,8 @@ def _capture_sig_handlers() -> Dict[str, Any]:
 
     return {"captured": captured, "fake_signal": fake_signal}
 
+
+
     pytest.skip("SIGUSR1 no longer reloads configuration from disk.")
 
 
