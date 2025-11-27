@@ -834,7 +834,8 @@ class StatsSQLiteStore:
                 if status == "cache_hit":
                     self.increment_count("totals", "cache_hits", 1)
                 elif status in ("deny_pre", "override_pre"):
-                    self.increment_count("totals", status, 1)
+                    self.increment_count("totals", "cache_" + status, 1)
+                    self.increment_count("totals", "cache_null", 1)
                 else:
                     self.increment_count("totals", "cache_misses", 1)
 
