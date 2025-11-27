@@ -9,6 +9,7 @@ Outputs:
 """
 
 from dnslib import QTYPE
+from contextlib import closing
 
 from foghorn.plugins.base import PluginContext
 from foghorn.plugins.greylist import GreylistPlugin
@@ -29,14 +30,15 @@ def test_first_seen_inserts_and_denies(tmp_path, monkeypatch):
     p.start()
     ctx = PluginContext(client_ip="1.2.3.4")
 
-    monkeypatch.setattr("time.time", lambda: 1000)
-    dec = p.pre_resolve("sub.example.com.", QTYPE.A, b"", ctx)
-    assert dec.action == "deny"
+    with closing(p.conn):
+        monkeypatch.setattr("time.time", lambda: 1000)
+        dec = p.pre_resolve("sub.example.com.", QTYPE.A, b"", ctx)
+        assert dec.action == "deny"
 
-    # DB contains first_seen
-    assert p._db_get_first_seen("example.com") == 1000
-    # Cache-get should return same (and not hit DB)
-    assert p._cache_get_or_db_load("example.com") == 1000
+        # DB contains first_seen
+        assert p._db_get_first_seen("example.com") == 1000
+        # Cache-get should return same (and not hit DB)
+        assert p._cache_get_or_db_load("example.com") == 1000
 
 
 def test_within_window_denies_again_without_updating_first_seen(tmp_path, monkeypatch):
@@ -54,16 +56,17 @@ def test_within_window_denies_again_without_updating_first_seen(tmp_path, monkey
     p.start()
     ctx = PluginContext(client_ip="1.2.3.4")
 
-    monkeypatch.setattr("time.time", lambda: 1000)
-    p.pre_resolve("sub.example.com.", QTYPE.A, b"", ctx)
-    assert p._db_get_first_seen("example.com") == 1000
+    with closing(p.conn):
+        monkeypatch.setattr("time.time", lambda: 1000)
+        p.pre_resolve("sub.example.com.", QTYPE.A, b"", ctx)
+        assert p._db_get_first_seen("example.com") == 1000
 
-    # Within window
-    monkeypatch.setattr("time.time", lambda: 1050)
-    dec2 = p.pre_resolve("sub.example.com.", QTYPE.A, b"", ctx)
-    assert dec2.action == "deny"
-    # Still 1000 (INSERT OR IGNORE means no update)
-    assert p._db_get_first_seen("example.com") == 1000
+        # Within window
+        monkeypatch.setattr("time.time", lambda: 1050)
+        dec2 = p.pre_resolve("sub.example.com.", QTYPE.A, b"", ctx)
+        assert dec2.action == "deny"
+        # Still 1000 (INSERT OR IGNORE means no update)
+        assert p._db_get_first_seen("example.com") == 1000
 
 
 def test_after_window_allows_and_does_not_update_first_seen(tmp_path, monkeypatch):
@@ -81,15 +84,16 @@ def test_after_window_allows_and_does_not_update_first_seen(tmp_path, monkeypatc
     p.start()
     ctx = PluginContext(client_ip="1.2.3.4")
 
-    monkeypatch.setattr("time.time", lambda: 1000)
-    p.pre_resolve("sub.example.com.", QTYPE.A, b"", ctx)
-    assert p._db_get_first_seen("example.com") == 1000
+    with closing(p.conn):
+        monkeypatch.setattr("time.time", lambda: 1000)
+        p.pre_resolve("sub.example.com.", QTYPE.A, b"", ctx)
+        assert p._db_get_first_seen("example.com") == 1000
 
-    # After window
-    monkeypatch.setattr("time.time", lambda: 1065)
-    dec = p.pre_resolve("sub.example.com.", QTYPE.A, b"", ctx)
-    assert dec is None
-    assert p._db_get_first_seen("example.com") == 1000
+        # After window
+        monkeypatch.setattr("time.time", lambda: 1065)
+        dec = p.pre_resolve("sub.example.com.", QTYPE.A, b"", ctx)
+        assert dec is None
+        assert p._db_get_first_seen("example.com") == 1000
 
 
 def test_to_base_domain_extraction_cases():
@@ -125,18 +129,19 @@ def test_cache_hit_bypasses_db(monkeypatch, tmp_path):
     p.start()
     ctx = PluginContext(client_ip="1.2.3.4")
 
-    # Seed cache directly
-    p._cache.set(("example.com", 0), 300, b"2000")
+    with closing(p.conn):
+        # Seed cache directly
+        p._cache.set(("example.com", 0), 300, b"2000")
 
-    # If DB is consulted, raise
-    def boom(*a, **k):
-        raise RuntimeError("DB should not be called on cache hit")
+        # If DB is consulted, raise
+        def boom(*a, **k):
+            raise RuntimeError("DB should not be called on cache hit")
 
-    monkeypatch.setattr(p, "_db_get_first_seen", boom)
-    monkeypatch.setattr("time.time", lambda: 2100)
+        monkeypatch.setattr(p, "_db_get_first_seen", boom)
+        monkeypatch.setattr("time.time", lambda: 2100)
 
-    dec = p.pre_resolve("a.example.com", QTYPE.A, b"", ctx)
-    assert dec is None
+        dec = p.pre_resolve("a.example.com", QTYPE.A, b"", ctx)
+        assert dec is None
 
 
 def test_db_load_populates_cache(tmp_path, monkeypatch):
@@ -153,15 +158,16 @@ def test_db_load_populates_cache(tmp_path, monkeypatch):
     p = GreylistPlugin(db_path=str(db), duration_seconds=60, cache_ttl_seconds=300)
     p.start()
 
-    # Insert directly into DB
-    p._db_upsert_first_seen("example.com", 1000)
+    with closing(p.conn):
+        # Insert directly into DB
+        p._db_upsert_first_seen("example.com", 1000)
 
-    # First call should fetch from DB and seed cache
-    assert p._cache_get_or_db_load("example.com") == 1000
+        # First call should fetch from DB and seed cache
+        assert p._cache_get_or_db_load("example.com") == 1000
 
-    # Now make DB path explode; subsequent call should come from cache
-    def boom(*a, **k):
-        raise RuntimeError("DB should not be called on cache hit")
+        # Now make DB path explode; subsequent call should come from cache
+        def boom(*a, **k):
+            raise RuntimeError("DB should not be called on cache hit")
 
-    monkeypatch.setattr(p, "_db_get_first_seen", boom)
-    assert p._cache_get_or_db_load("example.com") == 1000
+        monkeypatch.setattr(p, "_db_get_first_seen", boom)
+        assert p._cache_get_or_db_load("example.com") == 1000

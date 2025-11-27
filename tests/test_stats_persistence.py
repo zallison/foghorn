@@ -8,6 +8,7 @@ Outputs:
 """
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from foghorn.stats import StatsCollector, StatsSnapshot, StatsSQLiteStore
@@ -105,16 +106,13 @@ def test_sqlite_store_counts_increment_and_set(tmp_path: Path) -> None:
         store.set_count("totals", "total_queries", 10)
 
         # Verify via a direct sqlite3 query.
-        conn = sqlite3.connect(str(db_path))
-        try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT value FROM counts WHERE scope = ? AND key = ?",
                 ("totals", "total_queries"),
             )
             row = cur.fetchone()
-        finally:
-            conn.close()
     finally:
         store.close()
 
@@ -147,15 +145,12 @@ def test_sqlite_store_query_log_insert(tmp_path: Path) -> None:
             result_json='{"answers": []}',
         )
 
-        conn = sqlite3.connect(str(db_path))
-        try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT client_ip, name, qtype, upstream_id, rcode, status FROM query_log"
             )
             row = cur.fetchone()
-        finally:
-            conn.close()
     finally:
         store.close()
 
@@ -209,16 +204,13 @@ def test_sqlite_store_rebuild_counts_if_needed(tmp_path: Path) -> None:
         # At this point counts is empty; request rebuild.
         store.rebuild_counts_if_needed(force_rebuild=False)
 
-        conn = sqlite3.connect(str(db_path))
-        try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT value FROM counts WHERE scope = ? AND key = ?",
                 ("totals", "total_queries"),
             )
             total_row = cur.fetchone()
-        finally:
-            conn.close()
     finally:
         store.close()
 
@@ -244,13 +236,23 @@ def test_stats_collector_warm_load_from_store_uses_counts(tmp_path: Path) -> Non
         store.increment_count("rcodes", "NOERROR", delta=2)
         store.increment_count("qtypes", "A", delta=3)
         store.increment_count("upstreams", "8.8.8.8:53|success", delta=1)
+        store.increment_count("upstream_qtypes", "8.8.8.8:53|A", delta=3)
+        store.increment_count("qtype_qnames", "A|example.com", delta=3)
+        # Per-rcode and cache-domain aggregates.
+        store.increment_count("rcode_domains", "NOERROR|example.com", delta=2)
+        store.increment_count("rcode_subdomains", "NOERROR|example.com", delta=1)
+        store.increment_count("cache_hit_domains", "example.com", delta=1)
+        store.increment_count("cache_miss_domains", "other.com", delta=1)
+        store.increment_count("cache_hit_subdomains", "example.com", delta=1)
+        store.increment_count("cache_miss_subdomains", "other.com", delta=1)
 
         # Create collector wired to the store and warm-load from counts.
         collector = StatsCollector(
             track_uniques=True,
             include_qtype_breakdown=True,
             include_top_clients=False,
-            include_top_domains=False,
+            include_top_domains=True,
+            top_n=5,
             track_latency=False,
             stats_store=store,
         )
@@ -269,6 +271,19 @@ def test_stats_collector_warm_load_from_store_uses_counts(tmp_path: Path) -> Non
         assert snap.qtypes["A"] == 3
         # Upstreams use nested mapping upstream_id -> {outcome -> count}.
         assert snap.upstreams["8.8.8.8:53"]["success"] == 1
+        # Per-qtype qname counts should warm-load into qtype_qnames.
+        assert snap.qtype_qnames is not None
+        assert "A" in snap.qtype_qnames
+        # Per-rcode base-domain aggregates hydrated into rcode_domains/subdomains.
+        assert snap.rcode_domains is not None
+        assert "NOERROR" in snap.rcode_domains
+        assert snap.rcode_subdomains is not None
+        assert "NOERROR" in snap.rcode_subdomains
+        # Cache hit/miss domain and subdomain lists reconstructed.
+        assert snap.cache_hit_domains is not None
+        assert snap.cache_miss_domains is not None
+        assert snap.cache_hit_subdomains is not None
+        assert snap.cache_miss_subdomains is not None
     finally:
         store.close()
 

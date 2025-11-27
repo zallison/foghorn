@@ -1,29 +1,21 @@
 """
-Brief: Tests for inotify-based automatic reload in EtcHosts plugin.
+Brief: Tests for watchdog-based automatic reload in EtcHosts plugin.
 
 Inputs:
   - tmp_path: pytest fixture for temp directory
-  - platform and pyinotify: conditionally skip on non-Linux or when pyinotify unavailable
+  - watchdog: conditionally skip when watchdog is unavailable
 
 Outputs:
   - None: assertions verifying reload within 2 seconds of file changes
 """
 
 import os
-import platform
 import time
 
 import pytest
 
-# Skip all tests in this module if not on Linux or if pyinotify is unavailable
-pytestmark = [
-    pytest.mark.skipif(
-        platform.system().lower() != "linux", reason="inotify only on Linux"
-    ),
-]
-
-# Try to import pyinotify; skip entire module if not available
-pytest.importorskip("pyinotify")
+# Require watchdog for these tests
+pytest.importorskip("watchdog")
 
 
 def wait_until(predicate, timeout=2.0, interval=0.05):
@@ -49,7 +41,7 @@ def wait_until(predicate, timeout=2.0, interval=0.05):
     return False
 
 
-def test_inotify_reload_on_modify(tmp_path):
+def test_watchdog_reload_on_modify(tmp_path):
     """
     Brief: Modifying the hosts file triggers a reload within 2 seconds.
 
@@ -72,7 +64,8 @@ def test_inotify_reload_on_modify(tmp_path):
     hosts = tmp_path / "hosts"
     hosts.write_text("127.0.0.1 foo.test\n", encoding="utf-8")
 
-    plugin = EtcHosts(file_paths=[str(hosts)], inotify_enabled=True)
+    plugin = EtcHosts(file_paths=[str(hosts)], watchdog_enabled=True)
+    plugin.setup()
     try:
         assert plugin.hosts.get("foo.test") == "127.0.0.1"
 
@@ -90,7 +83,7 @@ def test_inotify_reload_on_modify(tmp_path):
         plugin.close()
 
 
-def test_inotify_reload_on_atomic_replace(tmp_path):
+def test_watchdog_reload_on_atomic_replace(tmp_path):
     """
     Brief: Atomic file replacement (write temp + rename) triggers reload within 2 seconds.
 
@@ -114,7 +107,8 @@ def test_inotify_reload_on_atomic_replace(tmp_path):
     hosts = tmp_path / "hosts"
     hosts.write_text("127.0.0.1 alpha.test\n", encoding="utf-8")
 
-    plugin = EtcHosts(file_paths=[str(hosts)], inotify_enabled=True)
+    plugin = EtcHosts(file_paths=[str(hosts)], watchdog_enabled=True)
+    plugin.setup()
     try:
         assert plugin.hosts.get("alpha.test") == "127.0.0.1"
 
@@ -131,7 +125,7 @@ def test_inotify_reload_on_atomic_replace(tmp_path):
         plugin.close()
 
 
-def test_inotify_reload_entry_removal(tmp_path):
+def test_watchdog_reload_entry_removal(tmp_path):
     """
     Brief: Removing an entry from the file is reflected within 2 seconds.
 
@@ -155,7 +149,8 @@ def test_inotify_reload_entry_removal(tmp_path):
     hosts = tmp_path / "hosts"
     hosts.write_text("127.0.0.1 keep.test\n127.0.0.1 drop.test\n", encoding="utf-8")
 
-    plugin = EtcHosts(file_paths=[str(hosts)], inotify_enabled=True)
+    plugin = EtcHosts(file_paths=[str(hosts)], watchdog_enabled=True)
+    plugin.setup()
     try:
         assert plugin.hosts.get("drop.test") == "127.0.0.1"
         assert plugin.hosts.get("keep.test") == "127.0.0.1"
@@ -175,9 +170,9 @@ def test_inotify_reload_entry_removal(tmp_path):
         plugin.close()
 
 
-def test_inotify_disabled_no_reload(tmp_path):
+def test_watchdog_disabled_no_reload(tmp_path):
     """
-    Brief: With inotify disabled, file changes are not automatically detected.
+    Brief: With watchdog disabled, file changes are not automatically detected.
 
     Inputs:
       - tmp_path: pytest fixture for temp directory
@@ -186,7 +181,7 @@ def test_inotify_disabled_no_reload(tmp_path):
       - None: assertions verify reload does not happen
 
     Example:
-      Initial (inotify_enabled=False): 127.0.0.1 foo.test
+      Initial (watchdog_enabled=False): 127.0.0.1 foo.test
       Append:  127.0.0.1 bar.test
       After 1s: plugin.resolve('bar.test') is None (still not reloaded)
     """
@@ -198,7 +193,8 @@ def test_inotify_disabled_no_reload(tmp_path):
     hosts = tmp_path / "hosts"
     hosts.write_text("127.0.0.1 foo.test\n", encoding="utf-8")
 
-    plugin = EtcHosts(file_paths=[str(hosts)], inotify_enabled=False)
+    plugin = EtcHosts(file_paths=[str(hosts)], watchdog_enabled=False)
+    plugin.setup()
     try:
         assert plugin.hosts.get("foo.test") == "127.0.0.1"
 
@@ -215,9 +211,9 @@ def test_inotify_disabled_no_reload(tmp_path):
         plugin.close()
 
 
-def test_inotify_multiple_files(tmp_path):
+def test_watchdog_multiple_files(tmp_path):
     """
-    Brief: inotify watches multiple configured files and reloads when any change.
+    Brief: watchdog watches multiple configured files and reloads when any change.
 
     Inputs:
       - tmp_path: pytest fixture for temp directory
@@ -241,7 +237,8 @@ def test_inotify_multiple_files(tmp_path):
     f1.write_text("127.0.0.1 host1\n", encoding="utf-8")
     f2.write_text("127.0.0.1 host2\n", encoding="utf-8")
 
-    plugin = EtcHosts(file_paths=[str(f1), str(f2)], inotify_enabled=True)
+    plugin = EtcHosts(file_paths=[str(f1), str(f2)], watchdog_enabled=True)
+    plugin.setup()
     try:
         assert plugin.hosts.get("host1") == "127.0.0.1"
         assert plugin.hosts.get("host2") == "127.0.0.1"

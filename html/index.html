@@ -1,699 +1,1213 @@
 <!DOCTYPE html>
 <html lang="en">
-    <head>
-        <meta charset="utf-8" />
-        <title>Foghorn</title>
-        <link rel="stylesheet" href="/styles.css" />
-        <script>
-         (function () {
-             'use strict';
-             var root = document.documentElement;
-             var stored = null;
-             try {
-                 stored = window.localStorage ? localStorage.getItem('foghorn-theme') : null;
-             } catch (e) {
-                 stored = null;
-             }
-             var initial = stored === 'light' || stored === 'dark' ? stored : 'dark';
-             root.setAttribute('data-theme', initial);
-         })();
-        </script>
-    </head>
-    <body>
-        <header class="fh-header">
-            <div class="fh-header-inner">
-                <div class="fh-header-main">
-                    <!-- Logo image switches based on theme: transparent-logo.png (light), transparent-white-logo.png (dark) -->
-                    <img src="/transparent-white-logo.png" alt="Foghorn logo" class="fh-logo" id="fh-logo" />
-                    <div class="fh-title-block">
-                        <h1 class="fh-title">Foghorn</h1>
-                        <p class="fh-subtitle">Runtime statistics and configuration</p>
-                    </div>
-                </div>
-                <div class="fh-theme-toggle" role="radiogroup" aria-label="Color theme">
-                    <button
-                        id="btn-theme-dark"
-                            class="fh-theme-btn fh-theme-btn-active"
-                            type="button"
-                            role="radio"
-                            aria-checked="true"
-                    >
-                        Dark
-                    </button>
-                    <button
-                        id="btn-theme-light"
-                            class="fh-theme-btn"
-                            type="button"
-                            role="radio"
-                            aria-checked="false"
-                    >
-                        Light
-                    </button>
-                </div>
-            </div>
-        </header>
-
-        <main class="fh-main">
-            <section class="fh-pane fh-pane-left">
-                <div class="fh-pane-header">
-                    <h2 class="fh-pane-title">Statistics</h2>
-                    <p class="fh-pane-help">Live snapshot from <code>/stats</code>.</p>
-                </div>
-                <div id="stats-groups" class="fh-stats-groups">
-                    <!-- Filled by JavaScript -->
-                </div>
-                <div class="fh-stats-group">
-                    <h3 class="fh-stats-group-title">Raw stats JSON</h3>
-                    <pre id="stats-raw" class="fh-pre fh-pre-compact">Loading statisticsa0a0a0</pre>
-                </div>
-            </section>
-
-            <section class="fh-pane fh-pane-right">
-                <h2 class="fh-pane-title">Configuration</h2>
-                <div class="fh-warning" id="config-warning" hidden>
-                    <strong>Warning:</strong> Saving will overwrite <code>config.yaml</code>, remove YAML comments, and trigger
-                    a live reload (SIGUSR1).
-                </div>
-
-                <div style="display: none" class="fh-config-toggle" role="tablist" aria-label="Configuration source">
-                    <!-- Just show the YAML for now. -->
-                    <button
-                        id="btn-config-disk"
-                        class="fh-toggle-btn fh-toggle-btn-active"
-                        type="button"
-                        role="tab"
-                        aria-selected="true"
-                    >
-                        On-disk config.yaml
-                    </button>
-                    <button
-                        id="btn-config-memory"
-                        class="fh-toggle-btn"
-                        type="button"
-                        role="tab"
-                        aria-selected="false"
-                    >
-                        In-memory config
-                    </button>
-                </div>
-
-                <div class="fh-config-actions" id="config-actions-view">
-                    <button id="btn-edit" class="fh-btn" type="button">Edit Config</button>
-                </div>
-
-                <div class="fh-config-actions fh-config-actions-edit" id="config-actions-edit" hidden>
-                    <button id="btn-cancel" class="fh-btn fh-btn-secondary" type="button">Cancel</button>
-                    <button id="btn-save" class="fh-btn fh-btn-primary" type="button">Save</button>
-                </div>
-
-                <div id="config-messages" class="fh-messages" aria-live="polite"></div>
-
-                <div id="config-view-container">
-                    <pre id="config-output" class="fh-pre">Loading configurationa0a0a0</pre>
-                </div>
-
-                <div id="config-edit-container" hidden>
-                    <textarea id="config-editor" class="fh-textarea" spellcheck="false"></textarea>
-                </div>
-            </section>
-        </main>
-
-        <footer class="fh-footer">
-            Foghorn &copy; 2025, GitHub:
-            <a href="https://github.com/zallison/foghorn">https://github.com/zallison/foghorn</a>
-            &mdash; Open Source Software: MIT Licence
-        </footer>
-
-        <script>
-         (function () {
-             'use strict';
-
-             var root = document.documentElement;
-             var logoEl = document.getElementById('fh-logo');
-             var statsRawEl = document.getElementById('stats-raw');
-             var statsGroupsEl = document.getElementById('stats-groups');
-             var configOutputEl = document.getElementById('config-output');
-             var configEditorEl = document.getElementById('config-editor');
-             var configViewContainer = document.getElementById('config-view-container');
-             var configEditContainer = document.getElementById('config-edit-container');
-             var msgEl = document.getElementById('config-messages');
-             var warningEl = document.getElementById('config-warning');
-             var btnDisk = document.getElementById('btn-config-disk');
-             var btnMemory = document.getElementById('btn-config-memory');
-             var btnEdit = document.getElementById('btn-edit');
-             var btnCancel = document.getElementById('btn-cancel');
-             var btnSave = document.getElementById('btn-save');
-             var actionsView = document.getElementById('config-actions-view');
-             var actionsEdit = document.getElementById('config-actions-edit');
-             var btnThemeDark = document.getElementById('btn-theme-dark');
-             var btnThemeLight = document.getElementById('btn-theme-light');
-
-             var currentSource = 'disk'; // 'disk' or 'memory'
-             var lastDiskConfigObj = null;
-             var lastDiskRawYaml = null;
-             var isEditing = false;
-
-             var STATS_TOOLTIPS = {
-                 total_queries: 'Total DNS queries handled since the collector started or was last reset.',
-                 cache_hits: 'Queries answered directly from the cache.',
-                 cache_misses: 'Queries that required contacting upstream servers.',
-                 min_ms: 'Fastest observed query latency in milliseconds.',
-                 max_ms: 'Slowest observed query latency in milliseconds.',
-                 avg_ms: 'Average (mean) query latency in milliseconds.',
-                 p50_ms: 'Median (50th percentile) query latency in milliseconds.',
-                 p90_ms: '90th percentile query latency in milliseconds.',
-                 p99_ms: '99th percentile query latency in milliseconds.',
-                 load_1m: 'System load average over the last 1 minute.',
-                 load_5m: 'System load average over the last 5 minutes.',
-                 load_15m: 'System load average over the last 15 minutes.',
-             };
-
-             function setMessage(text, level) {
-                 msgEl.textContent = text || '';
-                 msgEl.className = 'fh-messages';
-                 if (!text) {
-                     return;
-                 }
-                 if (level === 'error') {
-                     msgEl.classList.add('fh-messages-error');
-                 } else if (level === 'success') {
-                     msgEl.classList.add('fh-messages-success');
-                 } else {
-                     msgEl.classList.add('fh-messages-info');
-                 }
-             }
-
-             function pretty(obj) {
-                 try {
-                     return JSON.stringify(obj, null, 2);
-                 } catch (e) {
-                     return String(obj);
-                 }
-             }
-
-             function fetchJson(path) {
-                 return fetch(path, { cache: 'no-store' }).then(function (resp) {
-                     if (!resp.ok) {
-                         throw new Error('HTTP ' + resp.status + ' from ' + path);
-                     }
-                     return resp.json();
-                 });
-             }
-
-             function formatNumber(value) {
-                 var n = Number(value);
-                 if (!isFinite(n)) {
-                     return String(value);
-                 }
-                 return n.toLocaleString(undefined, { maximumFractionDigits: 3 });
-             }
-
-             function formatBytes(value) {
-                 var n = Number(value);
-                 if (!isFinite(n) || n < 0) {
-                     return '–';
-                 }
-                 var units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-                 var idx = 0;
-                 while (n >= 1024 && idx < units.length - 1) {
-                     n = n / 1024;
-                     idx += 1;
-                 }
-                 return n.toFixed(idx === 0 ? 0 : 1) + ' ' + units[idx];
-             }
-
-             function formatTimestamp(value) {
-                 if (value == null) {
-                     return null;
-                 }
-                 var date;
-                 if (typeof value === 'number') {
-                     date = new Date(value * 1000);
-                 } else {
-                     var n = Number(value);
-                     if (isFinite(n)) {
-                         date = new Date(n * 1000);
-                     } else {
-                         date = new Date(String(value));
-                     }
-                 }
-                 if (isNaN(date.getTime())) {
-                     return String(value);
-                 }
-                 function pad2(num) {
-                     return num < 10 ? '0' + num : String(num);
-                 }
-                 var y = date.getFullYear();
-                 var m = pad2(date.getMonth() + 1);
-                 var d = pad2(date.getDate());
-                 var hh = pad2(date.getHours());
-                 var mm = pad2(date.getMinutes());
-                 var ss = pad2(date.getSeconds());
-                 return y + '-' + m + '-' + d + ' ' + hh + ':' + mm + ':' + ss;
-             }
-
-             function clearStatsGroups() {
-                 while (statsGroupsEl.firstChild) {
-                     statsGroupsEl.removeChild(statsGroupsEl.firstChild);
-                 }
-             }
-
-             function appendDictGroup(title, mapping) {
-                 if (!mapping || typeof mapping !== 'object') {
-                     return;
-                 }
-                 var keys = Object.keys(mapping);
-                 if (!keys.length) {
-                     return;
-                 }
-                 var group = document.createElement('section');
-                 group.className = 'fh-stats-group';
-
-                 var heading = document.createElement('h3');
-                 heading.className = 'fh-stats-group-title';
-                 heading.textContent = title;
-                 group.appendChild(heading);
-
-                 var dl = document.createElement('dl');
-                 dl.className = 'fh-kv-list';
-                 keys.sort().forEach(function (key) {
-                     var dt = document.createElement('dt');
-                     dt.textContent = key;
-                     if (Object.prototype.hasOwnProperty.call(STATS_TOOLTIPS, key)) {
-                         dt.title = STATS_TOOLTIPS[key];
-                     }
-                     var dd = document.createElement('dd');
-                     dd.textContent = formatNumber(mapping[key]);
-                     if (dt.title) {
-                         dd.title = dt.title;
-                     }
-                     dl.appendChild(dt);
-                     dl.appendChild(dd);
-                 });
-                 group.appendChild(dl);
-                 statsGroupsEl.appendChild(group);
-             }
-
-             function appendTopListGroup(title, entries) {
-                 if (!entries || !Array.isArray(entries) || !entries.length) {
-                     return;
-                 }
-                 var group = document.createElement('section');
-                 group.className = 'fh-stats-group';
-
-                 var heading = document.createElement('h3');
-                 heading.className = 'fh-stats-group-title';
-                 heading.textContent = title;
-                 group.appendChild(heading);
-
-                 var dl = document.createElement('dl');
-                 dl.className = 'fh-kv-list';
-
-                 entries.forEach(function (pair) {
-                     if (!pair || pair.length < 2) {
-                         return;
-                     }
-                     var key = pair[0];
-                     var count = pair[1];
-
-                     var dt = document.createElement('dt');
-                     dt.textContent = key;
-
-                     var dd = document.createElement('dd');
-                     dd.textContent = formatNumber(count);
-
-                     dl.appendChild(dt);
-                     dl.appendChild(dd);
-                 });
-
-                 group.appendChild(dl);
-                 statsGroupsEl.appendChild(group);
-             }
-
-             function appendSystemGroup(system) {
-                 if (!system || typeof system !== 'object') {
-                     return;
-                 }
-                 var group = document.createElement('section');
-                 group.className = 'fh-stats-group';
-
-                 var heading = document.createElement('h3');
-                 heading.className = 'fh-stats-group-title';
-                 heading.textContent = 'System';
-                 group.appendChild(heading);
-
-                 var dl = document.createElement('dl');
-                 dl.className = 'fh-kv-list';
-
-                 var memTotal = system.memory_total_bytes;
-                 var memTotalUsed = system.memory_used_bytes;
-                 var memTotalAvail = system.memory_available_bytes;
-                 var memTotalFree = system.memory_free_bytes;
-
-                 function addMemRow(label, value) {
-                     if (value == null) {
-                         return;
-                     }
-                     var dt = document.createElement('dt');
-                     dt.textContent = label;
-                     var dd = document.createElement('dd');
-                     if (value === '') {
-                         dd.textContent = '';
-                     } else {
-                         dd.textContent = formatBytes(value);
-                     }
-                     dl.appendChild(dt);
-                     dl.appendChild(dd);
-                 }
-
-                 addMemRow('Total Memory', memTotal);
-                 addMemRow('Total Memory used', memTotalUsed);
-                 addMemRow('Total Memory available', memTotalAvail);
-                 addMemRow('TotalMemory free', memTotalFree);
-
-                 var loadKeys = ['load_1m', 'load_5m', 'load_15m'];
-                 loadKeys.forEach(function (key) {
-                     if (system[key] == null) {
-                         return;
-                     }
-                     var dt = document.createElement('dt');
-                     dt.textContent = key.replace('_', ' ');
-                     var dd = document.createElement('dd');
-                     dd.textContent = formatNumber(system[key]);
-                     dl.appendChild(dt);
-                     dl.appendChild(dd);
-                 });
-
-
-                 group.appendChild(dl);
-
-                 if (memTotal && memTotalUsed != null && memTotal > 0) {
-                     var pct = Math.max(0, Math.min(1, memTotalUsed / memTotal));
-                     var bar = document.createElement('div');
-                     bar.className = 'fh-system-bar';
-                     var inner = document.createElement('div');
-                     inner.className = 'fh-system-bar-inner';
-                     inner.style.transform = 'scaleX(' + pct.toFixed(3) + ')';
-                     bar.appendChild(inner);
-                     group.appendChild(bar);
-                 }
-
-                 statsGroupsEl.appendChild(group);
-             }
-
-             function appendProcessGroup(system) {
-                 if (!system || typeof system !== 'object') {
-                     return;
-                 }
-                 var group = document.createElement('section');
-                 group.className = 'fh-stats-group';
-
-                 var heading = document.createElement('h3');
-                 heading.className = 'fh-stats-group-title';
-                 heading.textContent = 'Process';
-                 group.appendChild(heading);
-
-                 var dl = document.createElement('dl');
-                 dl.className = 'fh-kv-list';
-
-                 var processUsed = system.process_rss_bytes;
-                 var processCpuPercent = system.process_cpu_percent;
-                 var processOpenFiles = system.process_open_files_count;
-                 var processConnections = system.process_connections_count;
-
-                 function addProcessRow(label, value) {
-                     var dt = document.createElement('dt');
-                     dt.textContent = label;
-                     var dd = document.createElement('dd');
-                     dd.textContent = value;
-                     dl.appendChild(dt);
-                     dl.appendChild(dd);
-                 }
-
-                 addProcessRow('Foghorn Memory use', formatBytes(processUsed));
-                 addProcessRow('Process CPU %', processCpuPercent + " %");
-                 addProcessRow('Process open files', processOpenFiles);
-                 addProcessRow('Process connections', processConnections);
-
-                 group.appendChild(dl);
-
-                 statsGroupsEl.appendChild(group);
-             }
-
-
-             function renderStats(data) {
-                 clearStatsGroups();
-
-                 if (!data || typeof data !== 'object') {
-                     statsRawEl.textContent = 'No statistics payload returned from /stats';
-                     return;
-                 }
-
-                 if (data.status === 'disabled') {
-                     var disabledGroup = document.createElement('section');
-                     disabledGroup.className = 'fh-stats-group';
-                     var heading = document.createElement('h3');
-                     heading.className = 'fh-stats-group-title';
-                     heading.textContent = 'Status';
-                     disabledGroup.appendChild(heading);
-                     var p = document.createElement('p');
-                     p.className = 'fh-pane-help';
-                     p.textContent = 'Statistics are disabled for this server instance.';
-                     disabledGroup.appendChild(p);
-                     statsGroupsEl.appendChild(disabledGroup);
-                     statsRawEl.textContent = pretty(data);
-                     return;
-                 }
-
-                 var createdFormatted =
-                     data.created_at !== undefined && data.created_at !== null
-                     ? formatTimestamp(data.created_at)
-                     : null;
-
-                 var meta = {};
-                 if (data.meta && typeof data.meta === 'object') {
-                     meta = data.meta;
-                     delete meta.server_time;
-                     if (createdFormatted !== null) {
-                         meta.created_at = createdFormatted;
-                     }
-                 }
-
-                 if (Object.keys(meta).length) {
-                     appendDictGroup('Meta', meta);
-                 }
-
-                 appendDictGroup('Totals', data.totals || {});
-                 appendDictGroup('Response codes', data.rcodes || {});
-                 appendDictGroup('Query types', data.qtypes || {});
-                 appendDictGroup('Recent latency', data.latency_recent || {});
-                 appendDictGroup('Latency', data.latency || {});
-                 appendTopListGroup('Top Client', data.top_clients || []);
-                 appendTopListGroup('Top Domains', data.top_domains || []);
-                 appendTopListGroup('Top Sub Domains', data.top_subdomains || []);
-
-                 appendProcessGroup(data.system)
-
-                 if (data.system) {
-                     appendSystemGroup(data.system);
-                 }
-
-                 statsRawEl.textContent = pretty(data);
-             }
-
-             function loadStats() {
-                 fetchJson('/stats')
-                     .then(function (data) {
-                         renderStats(data);
-                     })
-                     .catch(function (err) {
-                         statsRawEl.textContent = 'Failed to load statistics: ' + err.message;
-                     });
-             }
-
-             function loadDiskConfig() {
-                 fetchJson('/config/raw')
-                     .then(function (data) {
-                         var cfg = data && data.config ? data.config : {};
-                         lastDiskConfigObj = cfg;
-                         var rawYaml = data && typeof data.raw_yaml === 'string' ? data.raw_yaml : null;
-                         if (rawYaml != null) {
-                             lastDiskRawYaml = rawYaml;
-                         }
-                         if (!isEditing) {
-                             configOutputEl.textContent = rawYaml != null ? rawYaml : pretty(cfg);
-                         }
-                     })
-                     .catch(function (err) {
-                         configOutputEl.textContent = 'Failed to load on-disk config: ' + err.message;
-                     });
-             }
-
-             function loadMemoryConfig() {
-                 fetchJson('/config')
-                     .then(function (data) {
-                         var cfg = data && data.config ? data.config : data;
-                         configOutputEl.textContent = pretty(cfg);
-                     })
-                     .catch(function (err) {
-                         configOutputEl.textContent = 'Failed to load in-memory config: ' + err.message;
-                     });
-             }
-
-             function setSource(newSource) {
-                 if (isEditing && newSource !== 'disk') {
-                     return;
-                 }
-                 currentSource = newSource;
-                 if (newSource === 'disk') {
-                     btnDisk.classList.add('fh-toggle-btn-active');
-                     btnDisk.setAttribute('aria-selected', 'true');
-                     btnMemory.classList.remove('fh-toggle-btn-active');
-                     btnMemory.setAttribute('aria-selected', 'false');
-                     actionsView.hidden = false;
-                     if (!isEditing) {
-                         loadDiskConfig();
-                     }
-                 } else {
-                     btnMemory.classList.add('fh-toggle-btn-active');
-                     btnMemory.setAttribute('aria-selected', 'true');
-                     btnDisk.classList.remove('fh-toggle-btn-active');
-                     btnDisk.setAttribute('aria-selected', 'false');
-                     actionsView.hidden = true;
-                     loadMemoryConfig();
-                 }
-             }
-
-             function enterEditMode() {
-                 if (currentSource !== 'disk') {
-                     return;
-                 }
-                 isEditing = true;
-                 actionsView.hidden = true;
-                 actionsEdit.hidden = false;
-                 if (warningEl) {
-                     warningEl.hidden = false;
-                 }
-                 configViewContainer.hidden = true;
-                 configEditContainer.hidden = false;
-                 var text = lastDiskRawYaml != null ? lastDiskRawYaml : configOutputEl.textContent;
-                 configEditorEl.value = text;
-                 setMessage('Editing on-disk config, save will overwrite!');
-             }
-
-             function exitEditMode(refresh) {
-                 isEditing = false;
-                 actionsEdit.hidden = true;
-                 actionsView.hidden = currentSource !== 'disk';
-                 if (warningEl) {
-                     warningEl.hidden = true;
-                 }
-                 configEditContainer.hidden = true;
-                 configViewContainer.hidden = false;
-                 if (refresh && currentSource === 'disk') {
-                     loadDiskConfig();
-                 }
-             }
-
-             function saveConfig() {
-                 setMessage('', null);
-                 var yamlText = configEditorEl.value || '';
-                 if (!yamlText.trim()) {
-                     setMessage('Configuration text is empty; refusing to save.', 'error');
-                     return;
-                 }
-
-                 if (!window.confirm('Are you sure you want to overwrite config.yaml and trigger a reload?')) {
-                     return;
-                 }
-
-                 fetch('/config/save', {
-                     method: 'POST',
-                     headers: { 'Content-Type': 'application/json' },
-                     body: JSON.stringify({ raw_yaml: yamlText }),
-                 })
-                     .then(function (resp) {
-                         if (!resp.ok) {
-                             return resp.text().then(function (text) {
-                                 throw new Error('HTTP ' + resp.status + ': ' + text);
-                             });
-                         }
-                         return resp.json().catch(function () {
-                             return {};
-                         });
-                     })
-                     .then(function (data) {
-                         setMessage('Configuration saved and reload signalled. Path: ' + (data.path || ''), 'success');
-                         exitEditMode(true);
-                         loadDiskConfig();
-                         loadMemoryConfig();
-                         loadStats();
-                     })
-                     .catch(function (err) {
-                         setMessage('Failed to save configuration: ' + err.message, 'error');
-                     });
-             }
-
-             function applyTheme(theme) {
-                 var next = theme === 'light' ? 'light' : 'dark';
-                 root.setAttribute('data-theme', next);
-                 if (logoEl) {
-                     if (next === 'dark') {
-                         logoEl.src = '/transparent-white-logo.png';
-                     } else {
-                         logoEl.src = '/transparent-logo.png';
-                     }
-                 }
-                 try {
-                     if (window.localStorage) {
-                         localStorage.setItem('foghorn-theme', next);
-                     }
-                 } catch (e) {}
-
-                 if (next === 'dark') {
-                     btnThemeDark.classList.add('fh-theme-btn-active');
-                     btnThemeDark.setAttribute('aria-checked', 'true');
-                     btnThemeLight.classList.remove('fh-theme-btn-active');
-                     btnThemeLight.setAttribute('aria-checked', 'false');
-                 } else {
-                     btnThemeLight.classList.add('fh-theme-btn-active');
-                     btnThemeLight.setAttribute('aria-checked', 'true');
-                     btnThemeDark.classList.remove('fh-theme-btn-active');
-                     btnThemeDark.setAttribute('aria-checked', 'false');
-                 }
-             }
-
-             // Event bindings
-             btnDisk.addEventListener('click', function () {
-                 setSource('disk');
-             });
-             btnMemory.addEventListener('click', function () {
-                 setSource('memory');
-             });
-             btnEdit.addEventListener('click', function () {
-                 enterEditMode();
-             });
-             btnCancel.addEventListener('click', function () {
-                 exitEditMode(true);
-                 setMessage('Edit cancelled.', 'info');
-             });
-             btnSave.addEventListener('click', function () {
-                 saveConfig();
-             });
-             btnThemeDark.addEventListener('click', function () {
-                 applyTheme('dark');
-             });
-             btnThemeLight.addEventListener('click', function () {
-                 applyTheme('light');
-             });
-
-             // Initial load
-             var initialTheme = root.getAttribute('data-theme') || 'dark';
-             applyTheme(initialTheme);
-             loadStats();
-             setInterval(loadStats, 5000);
-             setSource('disk');
-         })();
-        </script>
-    </body>
+
+<head>
+	<meta charset="utf-8" />
+	<title>Foghorn</title>
+	<link rel="stylesheet" href="/styles.css" />
+	<script>
+		(function () {
+			'use strict';
+			var root = document.documentElement;
+			var stored = null;
+			try {
+				stored = window.localStorage ? localStorage.getItem('foghorn-theme') : null;
+			} catch (e) {
+				stored = null;
+			}
+			var initial = stored === 'light' || stored === 'dark' ? stored : 'dark';
+			root.setAttribute('data-theme', initial);
+		})();
+	</script>
+</head>
+
+<body>
+	<header class="fh-header">
+		<div class="fh-header-inner">
+			<div class="fh-header-main">
+				<!-- Logo image switches based on theme: transparent-logo.png (light), transparent-white-logo.png (dark) -->
+				<img src="/transparent-white-logo.png" alt="Foghorn logo" class="fh-logo" id="fh-logo" />
+				<div class="fh-title-block">
+					<h1 class="fh-title">Foghorn</h1>
+					<p class="fh-subtitle">Runtime statistics and configuration</p>
+				</div>
+				<div class="fh-theme-toggle" role="radiogroup" aria-label="Color theme">
+					<button id="btn-theme-dark" class="fh-theme-btn fh-theme-btn-active" type="button" role="radio"
+						aria-checked="true">
+						Dark
+					</button>
+					<button id="btn-theme-light" class="fh-theme-btn" type="button" role="radio" aria-checked="false">
+						Light
+					</button>
+				</div>
+			</div>
+		</div>
+	</header>
+	<div class="fh-tabs" role="tablist" aria-label="Pages">
+		<button id="btn-tab-stats" class="fh-theme-btn fh-theme-btn-active" type="button" role="tab"
+			aria-selected="true">
+			Stats
+		</button>
+		<button id="btn-tab-edit" class="fh-theme-btn" type="button" role="tab" aria-selected="false">
+			Advanced/Config
+		</button>
+	</div>
+	<main class="fh-main" id="page2">
+		<section class="fh-pane fh-pane-left">
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title">Statistics</h2>
+				<p class="fh-pane-help">Live snapshot from <code>/stats</code>.</p>
+			</div>
+			<div id="stats-groups" class="fh-stats-groups">
+			</div>
+		</section>
+
+		<section class="fh-pane fh-pane-right">
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title">More Statistics</h2>
+			</div>
+			<div id="stats-groups-right" class="fh-stats-groups">
+				<!-- Filled by JavaScript: e.g. Top A Domains -->
+			</div>
+		</section>
+	</main>
+	<main class="fh-main" id="page1">
+
+		<section class="fh-pane fh-pane-left">
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title">Raw JSON Stats</h2>
+				<p class="fh-pane-help"></p>
+			</div>
+			<div id="stats-groups" class="fh-stats-groups">
+				<!-- Filled by JavaScript -->
+			</div>
+			<div class="fh-stats-group">
+				<h3 class="fh-stats-group-title">Raw stats JSON</h3>
+				<pre id="stats-raw" class="fh-pre fh-pre-compact">Loading statistics...</pre>
+			</div>
+		</section>
+
+		<section class="fh-pane fh-pane-right">
+				<div class="fh-pane-header">
+					<h2 class="fh-pane-title">Configuration</h2>
+					<div class="fh-config-actions" id="config-actions-view">
+						<button id="btn-edit" class="fh-btn" type="button">Edit Config</button>
+					</div>
+				<div class="fh-config-actions fh-config-actions-edit" id="config-actions-edit" hidden>
+					<button id="btn-cancel" class="fh-btn fh-btn-secondary" type="button">Cancel</button>
+					<button id="btn-save" class="fh-btn fh-btn-primary" type="button">Save</button>
+				</div>
+			</div>
+			<div class="fh-warning" id="config-warning" style="display:hidden;">
+				<strong>Warning:</strong> Saving will overwrite <code>config.yaml</code>. Changes take effect
+				after the server is restarted; sending SIGUSR1/SIGUSR2 only notifies plugins and may reset
+				statistics when configured.
+			</div>
+
+			<div id="config-messages" class="fh-messages" aria-live="polite"></div>
+
+			<div id="config-view-container">
+				<pre id="config-output" class="fh-pre">Loading configuration...</pre>
+			</div>
+
+			<div id="config-edit-container" hidden>
+				<textarea id="config-editor" class="fh-textarea" spellcheck="false"></textarea>
+			</div>
+		</section>
+	</main>
+
+	<footer class="fh-footer">
+		Foghorn&copy; 2025, Zack Allison. GitHub:
+		<a href="https://github.com/zallison/foghorn">https://github.com/zallison/foghorn</a>
+		&mdash; Open Source Software: MIT Licence
+	</footer>
+
+	<script>
+		(function () {
+			'use strict';
+
+			var root = document.documentElement;
+			var logoEl = document.getElementById('fh-logo');
+			var statsRawEl = document.getElementById('stats-raw');
+			var statsGroupsEl = document.getElementById('stats-groups');
+			var statsGroupsRightEl = document.getElementById('stats-groups-right');
+			var configOutputEl = document.getElementById('config-output');
+			var configEditorEl = document.getElementById('config-editor');
+			var configViewContainer = document.getElementById('config-view-container');
+			var configEditContainer = document.getElementById('config-edit-container');
+			var msgEl = document.getElementById('config-messages');
+			if (msgEl) {
+				msgEl.style.display = 'none';
+			}
+			var warningEl = document.getElementById('config-warning');
+			if (warningEl) {
+				warningEl.style.display = 'none';
+			}
+
+			var btnDisk = document.getElementById('btn-config-disk');
+			var btnEdit = document.getElementById('btn-edit');
+			var btnCancel = document.getElementById('btn-cancel');
+			var btnSave = document.getElementById('btn-save');
+			var actionsView = document.getElementById('config-actions-view');
+			var actionsEdit = document.getElementById('config-actions-edit');
+			var btnThemeDark = document.getElementById('btn-theme-dark');
+			var btnThemeLight = document.getElementById('btn-theme-light');
+			var page1 = document.getElementById('page1');
+			var page2 = document.getElementById('page2');
+			var btnTabStats = document.getElementById('btn-tab-stats');
+			var btnTabEdit = document.getElementById('btn-tab-edit');
+
+			var currentSource = 'disk'; // 'disk' or 'memory'
+			var lastDiskConfigObj = null;
+			var lastDiskRawYaml = null;
+			var isEditing = false;
+
+			var STATS_TOOLTIPS = {
+				total_queries: 'Total DNS queries handled since the collector started or was last reset.',
+				cache_hits: 'Queries answered directly from the cache.',
+				cache_misses: 'Queries that required contacting upstream servers.',
+				cache_null: 'Responses generated directly by plugins before cache or upstream lookup.',
+				min_ms: 'Fastest observed query latency in milliseconds.',
+				max_ms: 'Slowest observed query latency in milliseconds.',
+				avg_ms: 'Average (mean) query latency in milliseconds.',
+				p50_ms: 'Median (50th percentile) query latency in milliseconds.',
+				p90_ms: '90th percentile query latency in milliseconds.',
+				p99_ms: '99th percentile query latency in milliseconds.',
+				load_1m: 'System load average over the last 1 minute.',
+				load_5m: 'System load average over the last 5 minutes.',
+				load_15m: 'System load average over the last 15 minutes.',
+			};
+
+			function setMessage(text, level) {
+				if (!msgEl) {
+					return;
+				}
+				msgEl.textContent = text || '';
+				msgEl.className = 'fh-messages';
+				if (!text) {
+					msgEl.style.display = 'none';
+					return;
+				}
+				msgEl.style.display = 'block';
+				if (level === 'error') {
+					msgEl.classList.add('fh-messages-error');
+				} else if (level === 'success') {
+					msgEl.classList.add('fh-messages-success');
+				} else {
+					msgEl.classList.add('fh-messages-info');
+				}
+			}
+
+			function pretty(obj) {
+				try {
+					return JSON.stringify(obj, null, 2);
+				} catch (e) {
+					return String(obj);
+				}
+			}
+
+			function fetchJson(path) {
+				return fetch(path, { cache: 'no-store' }).then(function (resp) {
+					if (!resp.ok) {
+						throw new Error('HTTP ' + resp.status + ' from ' + path);
+					}
+					return resp.json();
+				});
+			}
+
+			function formatNumber(value) {
+				var n = Number(value);
+				if (!isFinite(n)) {
+					return String(value);
+				}
+				var opts = { maximumFractionDigits: 3 };
+				if (Math.abs(n) > 100 && n % 1 !== 0) {
+					opts.maximumFractionDigits = 0;
+				}
+				return n.toLocaleString(undefined, opts);
+			}
+
+			function getNumberParts(value) {
+				var n = Number(value);
+				if (!isFinite(n)) {
+					return { intPart: String(value), decPart: '' };
+				}
+				var opts = { maximumFractionDigits: 3 };
+				if (Math.abs(n) > 100 && n % 1 !== 0) {
+					opts.maximumFractionDigits = 0;
+				}
+				var text = n.toLocaleString('en-US', opts);
+				var dotIndex = text.indexOf('.');
+				if (dotIndex === -1) {
+					return { intPart: text, decPart: '' };
+				}
+				return {
+					intPart: text.slice(0, dotIndex),
+					decPart: text.slice(dotIndex),
+				};
+			}
+
+			function formatBytes(value) {
+				var n = Number(value);
+				if (!isFinite(n) || n < 0) {
+					return '–';
+				}
+				var units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+				var idx = 0;
+				while (n >= 1024 && idx < units.length - 1) {
+					n = n / 1024;
+					idx += 1;
+				}
+				return n.toFixed(idx === 0 ? 0 : 1) + ' ' + units[idx];
+			}
+
+			function formatTimestamp(value) {
+				if (value == null) {
+					return null;
+				}
+				var date;
+				if (typeof value === 'number') {
+					date = new Date(value * 1000);
+				} else {
+					var n = Number(value);
+					if (isFinite(n)) {
+						date = new Date(n * 1000);
+					} else {
+						date = new Date(String(value));
+					}
+				}
+				if (isNaN(date.getTime())) {
+					return String(value);
+				}
+				function pad2(num) {
+					return num < 10 ? '0' + num : String(num);
+				}
+				var y = date.getFullYear();
+				var m = pad2(date.getMonth() + 1);
+				var d = pad2(date.getDate());
+				var hh = pad2(date.getHours());
+				var mm = pad2(date.getMinutes());
+				var ss = pad2(date.getSeconds());
+				return y + '-' + m + '-' + d + ' ' + hh + ':' + mm + ':' + ss;
+			}
+
+			function formatDurationSeconds(value) {
+				if (value == null) {
+					return null;
+				}
+				var n = Number(value);
+				if (!isFinite(n) || n < 0) {
+					return String(value);
+				}
+				var total = Math.floor(n);
+				var days = Math.floor(total / 86400);
+				var rem = total % 86400;
+				var hours = Math.floor(rem / 3600);
+				rem = rem % 3600;
+				var minutes = Math.floor(rem / 60);
+				var seconds = rem % 60;
+				function pad2(num) {
+					return num < 10 ? '0' + num : String(num);
+				}
+				var hms = pad2(hours) + ':' + pad2(minutes) + ':' + pad2(seconds);
+				if (days > 0) {
+					return days + 'd ' + hms;
+				}
+				return hms;
+			}
+
+			function clearStatsGroups() {
+				while (statsGroupsEl.firstChild) {
+					statsGroupsEl.removeChild(statsGroupsEl.firstChild);
+				}
+				if (statsGroupsRightEl) {
+					while (statsGroupsRightEl.firstChild) {
+						statsGroupsRightEl.removeChild(statsGroupsRightEl.firstChild);
+					}
+				}
+			}
+
+			function appendDictGroup(title, mapping) {
+				if (!mapping || typeof mapping !== 'object') {
+					return;
+				}
+				var keys = Object.keys(mapping);
+				if (!keys.length) {
+					return;
+				}
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = title;
+				group.appendChild(heading);
+
+				var dl = document.createElement('dl');
+				dl.className = 'fh-kv-list';
+
+				// For Totals, Query types, and Response codes we sort by value (descending)
+				// and then by key name (ascending) to make the highest counters easiest to see.
+				var sortByValueDesc =
+					title === 'Totals' || title === 'Query types' || title === 'Response codes';
+
+				var entries = keys.map(function (key) {
+					var raw = mapping[key];
+					var num = Number(raw);
+					if (!isFinite(num)) {
+						// Treat non-numeric as 0 for ordering but still display original.
+						num = 0;
+					}
+					return { key: key, value: raw, numeric: num };
+				});
+
+				if (sortByValueDesc) {
+					entries.sort(function (a, b) {
+						if (b.numeric === a.numeric) {
+							if (a.key < b.key) return -1;
+							if (a.key > b.key) return 1;
+							return 0;
+						}
+						return b.numeric - a.numeric;
+					});
+				} else {
+					entries.sort(function (a, b) {
+						if (a.key < b.key) return -1;
+						if (a.key > b.key) return 1;
+						return 0;
+					});
+				}
+
+				entries.forEach(function (entry) {
+					var key = entry.key;
+					var dt = document.createElement('dt');
+					dt.textContent = key;
+					if (Object.prototype.hasOwnProperty.call(STATS_TOOLTIPS, key)) {
+						dt.title = STATS_TOOLTIPS[key];
+					}
+					var dd = document.createElement('dd');
+					dd.textContent = formatNumber(entry.value);
+					if (dt.title) {
+						dd.title = dt.title;
+					}
+					dl.appendChild(dt);
+					dl.appendChild(dd);
+				});
+				group.appendChild(dl);
+				statsGroupsEl.appendChild(group);
+			}
+
+			function appendTopListGroup(title, entries, container) {
+				if (!entries || !Array.isArray(entries) || !entries.length) {
+					return;
+				}
+				var target = container || statsGroupsEl;
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = title;
+				group.appendChild(heading);
+
+				var dl = document.createElement('dl');
+				dl.className = 'fh-kv-list';
+
+				entries.forEach(function (pair) {
+					if (!pair || pair.length < 2) {
+						return;
+					}
+					var key = pair[0];
+					var count = pair[1];
+
+					var dt = document.createElement('dt');
+					dt.textContent = key;
+
+					var dd = document.createElement('dd');
+					dd.textContent = formatNumber(count);
+
+					dl.appendChild(dt);
+					dl.appendChild(dd);
+				});
+
+				group.appendChild(dl);
+				target.appendChild(group);
+			}
+
+			function appendUpstreamsGroup(upstreams, upstreamRcodes) {
+				if (!upstreams || typeof upstreams !== 'object') {
+					return;
+				}
+				var upstreamIds = Object.keys(upstreams);
+				if (!upstreamIds.length) {
+					return;
+				}
+
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = 'Upstreams';
+				heading.title = 'Per-upstream totals with breakdown by response code (NOERROR, NXDOMAIN, SERVFAIL, etc.).';
+				group.appendChild(heading);
+
+				var table = document.createElement('table');
+				table.className = 'fh-table fh-table-upstreams';
+				var tbody = document.createElement('tbody');
+
+				// Build sortable rows with pre-computed totals.
+				var upstreamRows = [];
+				upstreamRcodes = upstreamRcodes || {};
+
+				upstreamIds.forEach(function (upstreamId) {
+					var outcomes = upstreams[upstreamId];
+					if (!outcomes || typeof outcomes !== 'object') {
+						outcomes = {};
+					}
+
+					var rcMap = {};
+					if (upstreamRcodes && typeof upstreamRcodes === 'object') {
+						rcMap = upstreamRcodes[upstreamId] || {};
+					}
+					var rcodeKeys = Object.keys(rcMap).sort();
+
+					var total = 0;
+					if (rcodeKeys.length) {
+						rcodeKeys.forEach(function (key) {
+							var val = Number(rcMap[key]);
+							if (!isFinite(val)) {
+								val = 0;
+							}
+							total += val;
+						});
+					} else {
+						var outcomeKeys = Object.keys(outcomes).sort();
+						if (!outcomeKeys.length) {
+							return;
+						}
+						outcomeKeys.forEach(function (key) {
+							var val = Number(outcomes[key]);
+							if (!isFinite(val)) {
+								val = 0;
+							}
+							total += val;
+						});
+					}
+
+					upstreamRows.push({
+						id: upstreamId,
+						outcomes: outcomes,
+						rcodes: rcMap,
+						rcodeKeys: rcodeKeys,
+						total: total,
+					});
+				});
+
+				// Sort by total count (descending), then by upstream id (ascending).
+				upstreamRows.sort(function (a, b) {
+					if (b.total === a.total) {
+						if (a.id < b.id) return -1;
+						if (a.id > b.id) return 1;
+						return 0;
+					}
+					return b.total - a.total;
+				});
+
+				upstreamRows.forEach(function (rowData) {
+					var upstreamId = rowData.id;
+					var total = rowData.total;
+					var rcodes = rowData.rcodes || {};
+					var rcodeKeys = rowData.rcodeKeys || [];
+
+					// Main row: "upstream", "", "total"
+					var mainRow = document.createElement('tr');
+					var mainUpstreamCell = document.createElement('td');
+					mainUpstreamCell.textContent = upstreamId;
+					var mainBlankCell = document.createElement('td');
+					mainBlankCell.textContent = '';
+					var mainTotalParts = getNumberParts(total);
+					var mainTotalIntCell = document.createElement('td');
+					mainTotalIntCell.className = 'fh-num-int';
+					mainTotalIntCell.textContent = mainTotalParts.intPart;
+					var mainTotalDecCell = document.createElement('td');
+					mainTotalDecCell.className = 'fh-num-dec';
+					mainTotalDecCell.textContent = mainTotalParts.decPart;
+					mainRow.appendChild(mainUpstreamCell);
+					mainRow.appendChild(mainBlankCell);
+					mainRow.appendChild(mainTotalIntCell);
+					mainRow.appendChild(mainTotalDecCell);
+					tbody.appendChild(mainRow);
+
+					// Detail rows: "", rcode or outcome, count. Prefer rcodes
+					// when available, fall back to outcomes otherwise.
+					if (rcodeKeys.length > 1) {
+						// Sort rcodes (excluding NOERROR) by count descending, then name.
+						var rcodeEntries = rcodeKeys
+							.filter(function (key) {
+								return key !== 'NOERROR';
+							})
+							.map(function (key) {
+								var num = Number(rcodes[key]);
+								if (!isFinite(num)) {
+									num = 0;
+								}
+								return { key: key, value: rcodes[key], numeric: num };
+							});
+
+						rcodeEntries.sort(function (a, b) {
+							if (b.numeric === a.numeric) {
+								if (a.key < b.key) return -1;
+								if (a.key > b.key) return 1;
+								return 0;
+							}
+							return b.numeric - a.numeric;
+						});
+
+						rcodeEntries.forEach(function (entry) {
+							var key = entry.key;
+							var val = entry.value;
+							var row = document.createElement('tr');
+
+							var blankCell = document.createElement('td');
+							blankCell.textContent = '';
+							var labelCell = document.createElement('td');
+							labelCell.textContent = key.toLowerCase();
+							var parts = getNumberParts(val);
+							var countIntCell = document.createElement('td');
+							countIntCell.className = 'fh-num-int';
+							countIntCell.textContent = parts.intPart;
+							var countDecCell = document.createElement('td');
+							countDecCell.className = 'fh-num-dec';
+							countDecCell.textContent = parts.decPart;
+							row.appendChild(blankCell);
+							row.appendChild(labelCell);
+							row.appendChild(countIntCell);
+							row.appendChild(countDecCell);
+							tbody.appendChild(row);
+						});
+					} else if (!rcodeKeys.length) {
+						var outcomes = rowData.outcomes || {};
+						var outcomeKeys = Object.keys(outcomes);
+						var onlySuccess =
+							outcomeKeys.length === 1 && outcomeKeys[0] === 'success';
+						if (!onlySuccess) {
+							var outcomeEntries = outcomeKeys.map(function (key) {
+								var num = Number(outcomes[key]);
+								if (!isFinite(num)) {
+									num = 0;
+								}
+								return { key: key, value: outcomes[key], numeric: num };
+							});
+
+							outcomeEntries.sort(function (a, b) {
+								if (b.numeric === a.numeric) {
+									if (a.key < b.key) return -1;
+									if (a.key > b.key) return 1;
+									return 0;
+								}
+								return b.numeric - a.numeric;
+							});
+
+							outcomeEntries.forEach(function (entry) {
+								var key = entry.key;
+								var val = entry.value;
+								var row = document.createElement('tr');
+
+								var blankCell = document.createElement('td');
+								blankCell.textContent = '';
+								var outcomeCell = document.createElement('td');
+								outcomeCell.textContent = key;
+								var parts = getNumberParts(val);
+								var countIntCell = document.createElement('td');
+								countIntCell.className = 'fh-num-int';
+								countIntCell.textContent = parts.intPart;
+								var countDecCell = document.createElement('td');
+								countDecCell.className = 'fh-num-dec';
+								countDecCell.textContent = parts.decPart;
+
+								row.appendChild(blankCell);
+								row.appendChild(outcomeCell);
+								row.appendChild(countIntCell);
+								row.appendChild(countDecCell);
+								tbody.appendChild(row);
+							});
+						}
+					}
+				});
+
+				table.appendChild(tbody);
+				group.appendChild(table);
+				statsGroupsEl.appendChild(group);
+			}
+
+			function appendUpstreamQtypesGroup(upstreamQtypes) {
+				if (!upstreamQtypes || typeof upstreamQtypes !== 'object') {
+					return;
+				}
+				var upstreamIds = Object.keys(upstreamQtypes);
+				if (!upstreamIds.length) {
+					return;
+				}
+
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = 'Upstreams by Query type';
+				heading.title = 'Per-upstream totals with breakdown by DNS query type (A, AAAA, PTR, etc.).';
+				group.appendChild(heading);
+
+				var table = document.createElement('table');
+				table.className = 'fh-table fh-table-upstreams';
+				var tbody = document.createElement('tbody');
+
+				var upstreamRows = [];
+				upstreamIds.forEach(function (upstreamId) {
+					var qmap = upstreamQtypes[upstreamId];
+					if (!qmap || typeof qmap !== 'object') {
+						qmap = {};
+					}
+					var qtypes = Object.keys(qmap);
+					if (!qtypes.length) {
+						return;
+					}
+					var total = 0;
+					qtypes.forEach(function (qt) {
+						var val = Number(qmap[qt]);
+						if (!isFinite(val)) {
+							val = 0;
+						}
+						total += val;
+					});
+					upstreamRows.push({
+						id: upstreamId,
+						qtypes: qmap,
+						qtypeKeys: qtypes,
+						total: total,
+					});
+				});
+
+				if (!upstreamRows.length) {
+					return;
+				}
+
+				upstreamRows.sort(function (a, b) {
+					if (b.total === a.total) {
+						if (a.id < b.id) return -1;
+						if (a.id > b.id) return 1;
+						return 0;
+					}
+					return b.total - a.total;
+				});
+
+				upstreamRows.forEach(function (rowData) {
+					var upstreamId = rowData.id;
+					var total = rowData.total;
+					var qtypes = rowData.qtypes || {};
+					var qtypeKeys = rowData.qtypeKeys || [];
+
+					var mainRow = document.createElement('tr');
+					var mainUpstreamCell = document.createElement('td');
+					mainUpstreamCell.textContent = upstreamId;
+					var mainBlankCell = document.createElement('td');
+					mainBlankCell.textContent = '';
+					var mainTotalParts = getNumberParts(total);
+					var mainTotalIntCell = document.createElement('td');
+					mainTotalIntCell.className = 'fh-num-int';
+					mainTotalIntCell.textContent = mainTotalParts.intPart;
+					var mainTotalDecCell = document.createElement('td');
+					mainTotalDecCell.className = 'fh-num-dec';
+					mainTotalDecCell.textContent = mainTotalParts.decPart;
+					mainRow.appendChild(mainUpstreamCell);
+					mainRow.appendChild(mainBlankCell);
+					mainRow.appendChild(mainTotalIntCell);
+					mainRow.appendChild(mainTotalDecCell);
+					tbody.appendChild(mainRow);
+
+					var qtypeEntries = qtypeKeys.map(function (qt) {
+						var num = Number(qtypes[qt]);
+						if (!isFinite(num)) {
+							num = 0;
+						}
+						return { key: qt, value: qtypes[qt], numeric: num };
+					});
+
+					qtypeEntries.sort(function (a, b) {
+						if (b.numeric === a.numeric) {
+							if (a.key < b.key) return -1;
+							if (a.key > b.key) return 1;
+							return 0;
+						}
+						return b.numeric - a.numeric;
+					});
+
+					qtypeEntries.forEach(function (entry) {
+						var qt = entry.key;
+						var val = entry.value;
+						var row = document.createElement('tr');
+
+						var blankCell = document.createElement('td');
+						blankCell.textContent = '';
+						var labelCell = document.createElement('td');
+						labelCell.textContent = qt;
+						var parts = getNumberParts(val);
+						var countIntCell = document.createElement('td');
+						countIntCell.className = 'fh-num-int';
+						countIntCell.textContent = parts.intPart;
+						var countDecCell = document.createElement('td');
+						countDecCell.className = 'fh-num-dec';
+						countDecCell.textContent = parts.decPart;
+
+						row.appendChild(blankCell);
+						row.appendChild(labelCell);
+						row.appendChild(countIntCell);
+						row.appendChild(countDecCell);
+						tbody.appendChild(row);
+					});
+				});
+
+				table.appendChild(tbody);
+				group.appendChild(table);
+				statsGroupsEl.appendChild(group);
+			}
+
+			function appendSystemGroup(system) {
+				if (!system || typeof system !== 'object') {
+					return;
+				}
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = 'System';
+				group.appendChild(heading);
+
+				var dl = document.createElement('dl');
+				dl.className = 'fh-kv-list';
+
+				var memTotal = system.memory_total_bytes;
+				var memTotalUsed = system.memory_used_bytes;
+				var memTotalAvail = system.memory_available_bytes;
+				var memTotalFree = system.memory_free_bytes;
+
+				function addMemRow(label, value) {
+					if (value == null) {
+						return;
+					}
+					var dt = document.createElement('dt');
+					dt.textContent = label;
+					var dd = document.createElement('dd');
+					if (value === '') {
+						dd.textContent = '';
+					} else {
+						dd.textContent = formatBytes(value);
+					}
+					dl.appendChild(dt);
+					dl.appendChild(dd);
+				}
+
+				addMemRow('Total Memory', memTotal);
+				addMemRow('Memory used', memTotalUsed);
+				addMemRow('Memory available', memTotalAvail);
+				addMemRow('Buffer and Cache', memTotal - memTotalUsed - memTotalAvail);
+				addMemRow('Free Memory', memTotalFree);
+
+				var loadKeys = ['load_1m', 'load_5m', 'load_15m'];
+				loadKeys.forEach(function (key) {
+					if (system[key] == null) {
+						return;
+					}
+					var dt = document.createElement('dt');
+					dt.textContent = key.replace('_', ' ');
+					var dd = document.createElement('dd');
+					dd.textContent = formatNumber(system[key]);
+					dl.appendChild(dt);
+					dl.appendChild(dd);
+				});
+
+
+				group.appendChild(dl);
+
+				statsGroupsEl.appendChild(group);
+			}
+
+			function appendProcessGroup(system) {
+				if (!system || typeof system !== 'object') {
+					return;
+				}
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = 'Process';
+				group.appendChild(heading);
+
+				var dl = document.createElement('dl');
+				dl.className = 'fh-kv-list';
+
+				var processUsed = system.process_rss_bytes;
+				var processCpuPercent = system.process_cpu_percent;
+				var processOpenFiles = system.process_open_files_count;
+				var processConnections = system.process_connections_count;
+
+				function addProcessRow(label, value) {
+					var dt = document.createElement('dt');
+					dt.textContent = label;
+					var dd = document.createElement('dd');
+					dd.textContent = value;
+					dl.appendChild(dt);
+					dl.appendChild(dd);
+				}
+
+				addProcessRow('Foghorn Memory use', formatBytes(processUsed));
+				addProcessRow('Process CPU %', processCpuPercent + " %");
+				addProcessRow('Process open files', processOpenFiles);
+				addProcessRow('Process connections', processConnections);
+
+				group.appendChild(dl);
+
+				statsGroupsEl.appendChild(group);
+			}
+
+			function appendQtypeTopDomains(qtypeQnames) {
+				if (!qtypeQnames || typeof qtypeQnames !== 'object') {
+					return;
+				}
+				var qtypes = Object.keys(qtypeQnames).sort();
+				qtypes.forEach(function (qt) {
+					var entries = qtypeQnames[qt];
+					if (!entries || !Array.isArray(entries) || !entries.length) {
+						return;
+					}
+					// All qtype-based "Top <qt> Domains" lists go to the right-hand pane when available.
+					var target = statsGroupsRightEl || statsGroupsEl;
+					appendTopListGroup('Top ' + qt + ' Domains', entries, target);
+				});
+			}
+
+			function appendRcodeTopDomains(rcodeDomains) {
+				if (!rcodeDomains || typeof rcodeDomains !== 'object') {
+					return;
+				}
+				var rcodes = Object.keys(rcodeDomains).sort();
+				rcodes.forEach(function (rc) {
+					var entries = rcodeDomains[rc];
+					if (!entries || !Array.isArray(entries) || !entries.length) {
+						return;
+					}
+					// Selected rcodes (NOERROR, NXDOMAIN, REFUSED, SERVFAIL) go to the right-hand pane.
+					var isRightRcode = rc === 'NOERROR' || rc === 'NXDOMAIN' || rc === 'REFUSED' || rc === 'SERVFAIL';
+					var target = isRightRcode && statsGroupsRightEl ? statsGroupsRightEl : statsGroupsEl;
+					appendTopListGroup('Top ' + rc + ' Domains', entries, target);
+				});
+			}
+
+			function appendRcodeTopSubdomains(rcodeSubdomains) {
+				if (!rcodeSubdomains || typeof rcodeSubdomains !== 'object') {
+					return;
+				}
+				var rcodes = Object.keys(rcodeSubdomains).sort();
+				rcodes.forEach(function (rc) {
+					var entries = rcodeSubdomains[rc];
+					if (!entries || !Array.isArray(entries) || !entries.length) {
+						return;
+					}
+					// NXDOMAIN and NOERROR subdomain lists go to the right-hand pane.
+					var isRightRcode = rc === 'NXDOMAIN' || rc === 'NOERROR';
+					var target = isRightRcode && statsGroupsRightEl ? statsGroupsRightEl : statsGroupsEl;
+					appendTopListGroup('Top ' + rc + ' Subdomains', entries, target);
+				});
+			}
+
+			function renderStats(data) {
+				clearStatsGroups();
+
+				if (!data || typeof data !== 'object') {
+					statsRawEl.textContent = 'No statistics payload returned from /stats';
+					return;
+				}
+
+				if (data.status === 'disabled') {
+					var disabledGroup = document.createElement('section');
+					disabledGroup.className = 'fh-stats-group';
+					var heading = document.createElement('h3');
+					heading.className = 'fh-stats-group-title';
+					heading.textContent = 'Status';
+					disabledGroup.appendChild(heading);
+					var p = document.createElement('p');
+					p.className = 'fh-pane-help';
+					p.textContent = 'Statistics are disabled for this server instance.';
+					disabledGroup.appendChild(p);
+					statsGroupsEl.appendChild(disabledGroup);
+					statsRawEl.textContent = pretty(data);
+					return;
+				}
+
+				var createdFormatted =
+					data.created_at !== undefined && data.created_at !== null
+						? formatTimestamp(data.created_at)
+						: null;
+
+				var meta = {};
+				if (data.meta && typeof data.meta === 'object') {
+					meta = data.meta;
+					delete meta.server_time;
+					if (createdFormatted !== null) {
+						meta.created_at = createdFormatted;
+					}
+					if (meta.uptime !== undefined && meta.uptime !== null) {
+						meta.uptime = formatDurationSeconds(meta.uptime);
+					}
+				}
+
+				if (Object.keys(meta).length) {
+					appendDictGroup('Meta', meta);
+				}
+
+				appendDictGroup('Totals', data.totals || {});
+				appendUpstreamsGroup(data.upstreams || {}, data.upstream_rcodes || {});
+				appendUpstreamQtypesGroup(data.upstream_qtypes || {});
+				appendDictGroup('Query types', data.qtypes || {});
+				appendDictGroup('Response codes', data.rcodes || {});
+				appendDictGroup('Recent latency', data.latency_recent || {});
+				appendDictGroup('Latency', data.latency || {});
+
+				appendTopListGroup('Top Client', data.top_clients || []);
+				appendTopListGroup('Top Domains', data.top_domains || []);
+				appendTopListGroup('Top Sub Domains', data.top_subdomains || []);
+				// Cache hit/miss lists live in the right-hand pane when available.
+				appendTopListGroup('Top Cache Hit Domains', data.cache_hit_domains || [], statsGroupsRightEl || statsGroupsEl);
+				appendTopListGroup('Top Cache Miss Domains', data.cache_miss_domains || [], statsGroupsRightEl || statsGroupsEl);
+				appendTopListGroup('Top Cache Hit Subdomains', data.cache_hit_subdomains || [], statsGroupsRightEl || statsGroupsEl);
+				appendTopListGroup('Top Cache Miss Subdomains', data.cache_miss_subdomains || [], statsGroupsRightEl || statsGroupsEl);
+
+				// Per-qtype top domains (qnames) for common query types.
+				appendQtypeTopDomains(data.qtype_qnames || {});
+				// Per-rcode top base domains.
+				appendRcodeTopDomains(data.rcode_domains || {});
+				// Per-rcode top base domains for subdomain-only traffic.
+				appendRcodeTopSubdomains(data.rcode_subdomains || {});
+
+				appendProcessGroup(data.system)
+
+				if (data.system) {
+					appendSystemGroup(data.system);
+				}
+
+				statsRawEl.textContent = pretty(data);
+			}
+
+			function loadStats() {
+				fetchJson('/stats')
+					.then(function (data) {
+						renderStats(data);
+					})
+					.catch(function (err) {
+						statsRawEl.textContent = 'Failed to load statistics: ' + err.message;
+					});
+			}
+
+			function loadDiskConfig() {
+				fetchJson('/config/raw')
+					.then(function (data) {
+						var cfg = data && data.config ? data.config : {};
+						lastDiskConfigObj = cfg;
+						var rawYaml = data && typeof data.raw_yaml === 'string' ? data.raw_yaml : null;
+						if (rawYaml != null) {
+							lastDiskRawYaml = rawYaml;
+						}
+						if (!isEditing) {
+							configOutputEl.textContent = rawYaml != null ? rawYaml : pretty(cfg);
+						}
+					})
+					.catch(function (err) {
+						configOutputEl.textContent = 'Failed to load on-disk config: ' + err.message;
+					});
+			}
+
+			// TODO: Remove legacy code.
+			function loadMemoryConfig() {
+				loadDiskConfig();
+			}
+
+			function setSource(newSource) {
+				loadDiskConfig();
+			}
+
+			function enterEditMode() {
+				if (currentSource !== 'disk') {
+					return;
+				}
+				isEditing = true;
+				actionsView.hidden = true;
+				actionsEdit.hidden = false;
+				if (warningEl) {
+					warningEl.hidden = false;
+				}
+				configViewContainer.hidden = true;
+				configEditContainer.hidden = false;
+				var text = lastDiskRawYaml != null ? lastDiskRawYaml : configOutputEl.textContent;
+				configEditorEl.value = text;
+				setMessage('Editing on-disk config, save will overwrite!');
+			}
+
+			function exitEditMode(refresh) {
+				isEditing = false;
+				actionsEdit.hidden = true;
+				actionsView.hidden = currentSource !== 'disk';
+				if (warningEl) {
+					warningEl.hidden = true;
+				}
+				configEditContainer.hidden = true;
+				configViewContainer.hidden = false;
+				if (refresh && currentSource === 'disk') {
+					loadDiskConfig();
+				}
+			}
+
+			function saveConfig() {
+				setMessage('', null);
+				var yamlText = configEditorEl.value || '';
+				if (!yamlText.trim()) {
+					setMessage('Configuration text is empty; refusing to save.', 'error');
+					return;
+				}
+
+				if (!window.confirm('Are you sure you want to overwrite config.yaml and trigger a reload?')) {
+					return;
+				}
+
+				fetch('/config/save', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ raw_yaml: yamlText }),
+				})
+					.then(function (resp) {
+						if (!resp.ok) {
+							return resp.text().then(function (text) {
+								throw new Error('HTTP ' + resp.status + ': ' + text);
+							});
+						}
+						return resp.json().catch(function () {
+							return {};
+						});
+					})
+					.then(function (data) {
+						setMessage('Configuration saved and reload signalled. Path: ' + (data.path || ''), 'success');
+						exitEditMode(true);
+						loadDiskConfig();
+						loadMemoryConfig();
+						loadStats();
+					})
+					.catch(function (err) {
+						setMessage('Failed to save configuration: ' + err.message, 'error');
+					});
+			}
+
+			function applyTheme(theme) {
+				var next = theme === 'light' ? 'light' : 'dark';
+				root.setAttribute('data-theme', next);
+				if (logoEl) {
+					if (next === 'dark') {
+						logoEl.src = '/transparent-white-logo.png';
+					} else {
+						logoEl.src = '/transparent-logo.png';
+					}
+				}
+				try {
+					if (window.localStorage) {
+						localStorage.setItem('foghorn-theme', next);
+					}
+				} catch (e) {}
+
+				if (next === 'dark') {
+					btnThemeDark.classList.add('fh-theme-btn-active');
+					btnThemeDark.setAttribute('aria-checked', 'true');
+					btnThemeLight.classList.remove('fh-theme-btn-active');
+					btnThemeLight.setAttribute('aria-checked', 'false');
+				} else {
+					btnThemeLight.classList.add('fh-theme-btn-active');
+					btnThemeLight.setAttribute('aria-checked', 'true');
+					btnThemeDark.classList.remove('fh-theme-btn-active');
+					btnThemeDark.setAttribute('aria-checked', 'false');
+				}
+			}
+
+			function applyTab(tab) {
+				var isStats = tab === 'stats';
+				if (page1) {
+					// When Stats is selected, page1 should be hidden and page2 shown.
+					page1.style.display = isStats ? 'none' : '';
+				}
+				if (page2) {
+					page2.style.display = isStats ? '' : 'none';
+				}
+				if (btnTabStats && btnTabEdit) {
+					if (isStats) {
+						btnTabStats.classList.add('fh-theme-btn-active');
+						btnTabStats.setAttribute('aria-selected', 'true');
+						btnTabEdit.classList.remove('fh-theme-btn-active');
+						btnTabEdit.setAttribute('aria-selected', 'false');
+					} else {
+						btnTabEdit.classList.add('fh-theme-btn-active');
+						btnTabEdit.setAttribute('aria-selected', 'true');
+						btnTabStats.classList.remove('fh-theme-btn-active');
+						btnTabStats.setAttribute('aria-selected', 'false');
+					}
+				}
+			}
+
+			//// Event bindings
+
+			// Enter Edit Mode
+			btnEdit.addEventListener('click', function () {
+				enterEditMode();
+			});
+
+			// Cancel Edit
+			btnCancel.addEventListener('click', function () {
+				exitEditMode(true);
+				setMessage('Edit cancelled.', 'info');
+			});
+
+			// Save config
+			btnSave.addEventListener('click', function () {
+				saveConfig();
+			});
+
+			// Theme control
+			btnThemeDark.addEventListener('click', function () {
+				applyTheme('dark');
+			});
+			btnThemeLight.addEventListener('click', function () {
+				applyTheme('light');
+			});
+
+			// Tabs control
+			if (btnTabStats) {
+				btnTabStats.addEventListener('click', function () {
+					applyTab('stats');
+				});
+			}
+			if (btnTabEdit) {
+				btnTabEdit.addEventListener('click', function () {
+					applyTab('edit');
+				});
+			}
+
+			// Initial load
+			var initialTheme = root.getAttribute('data-theme') || 'dark';
+			applyTheme(initialTheme);
+			applyTab('stats');
+			loadStats();
+			setInterval(loadStats, 15000);
+			setSource('disk');
+		})();
+	</script>
+</body>
+
 </html>

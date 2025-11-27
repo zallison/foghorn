@@ -96,7 +96,7 @@ def test_etc_hosts_ignores_comments(tmp_path):
 
     plugin = EtcHosts(file_path=str(hosts_file))
     plugin.setup()
-    assert len(plugin.hosts) == 1
+    assert len(plugin.hosts) == 2  # 127.0.0.1 and 1.0.0.124.in-addr.arpa
     assert "localhost" in plugin.hosts
 
 
@@ -118,7 +118,7 @@ def test_etc_hosts_ignores_empty_lines(tmp_path):
 
     plugin = EtcHosts(file_path=str(hosts_file))
     plugin.setup()
-    assert len(plugin.hosts) == 1
+    assert len(plugin.hosts) == 2
 
 
 def test_etc_hosts_pre_resolve_matched_a_record(tmp_path):
@@ -252,3 +252,37 @@ def test_etc_hosts_ipv6_support(tmp_path):
     assert "localhost6" in plugin.hosts
     assert plugin.hosts["localhost6"] == "::1"
     assert plugin.hosts["ipv6host"] == "2001:db8::1"
+
+
+def test_etc_hosts_polling_detects_file_changes(tmp_path):
+    """Brief: Verify polling-based detector notices file changes.
+
+    Inputs:
+      - tmp_path: pytest-provided temporary directory for hosts file.
+
+    Outputs:
+      - None: Asserts that _have_files_changed() returns True on initial
+        snapshot and after a subsequent modification.
+    """
+    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    EtcHosts = mod.EtcHosts
+
+    hosts_file = tmp_path / "hosts"
+    hosts_file.write_text("127.0.0.1 localhost\n")
+
+    # Disable watchdog to focus this test purely on the polling helper.
+    plugin = EtcHosts(file_path=str(hosts_file), watchdog_enabled=False)
+    plugin.setup()
+
+    # First call should treat the baseline snapshot as a change.
+    assert plugin._have_files_changed() is True
+
+    # Subsequent call without any modification should report no change.
+    assert plugin._have_files_changed() is False
+
+    # Modify the file so that size/mtime change, then verify the detector
+    # observes the new snapshot.
+    hosts_file.write_text(
+        "127.0.0.1 localhost\n127.0.0.2 other.local\n",
+    )
+    assert plugin._have_files_changed() is True

@@ -277,7 +277,7 @@ def _start_doh_server_threaded(
     - DoHServerHandle if server started successfully, else None.
 
     Example:
-      >>> handle = _start_doh_server_threaded('127.0.0.1', 8053, lambda q, ip: q)
+      >>> handle = _start_doh_server_threaded('127.0.0.1', 8153, lambda q, ip: q)
     """
     handler_cls = _ThreadedDoHRequestHandler
     handler_cls.resolver = staticmethod(resolver)  # type: ignore[assignment]
@@ -390,7 +390,7 @@ def start_doh_server(
     - DoHServerHandle if server started, else None.
 
     Example:
-      >>> handle = start_doh_server('127.0.0.1', 8053, lambda q, ip: q)
+      >>> handle = start_doh_server('127.0.0.1', 8153, lambda q, ip: q)
     """
     # First, detect environments where asyncio cannot create its self-pipe
     # (e.g., restricted containers or seccomp profiles). In that case, skip

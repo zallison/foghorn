@@ -2,35 +2,118 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from functools import wraps
 from typing import ClassVar, Dict, List, Optional, Sequence, Tuple, Union, final
+
+from cachetools import TTLCache
+from dnslib import (  # noqa: F401 - imports are for implementations of this class
+    AAAA,
+    CNAME,
+    MX,
+    NAPTR,
+    PTR,
+    QTYPE,
+    RR,
+    SRV,
+    TXT,
+    A,
+    DNSHeader,
+    DNSRecord,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class PluginDecision:
     """
-    Represents a decision made by a plugin.
+    Brief: Represents a decision made by a plugin.
 
-    Example use:
-        >>> from foghorn.plugins.base import PluginDecision
-        >>> decision = PluginDecision(action="deny")
-        >>> decision.action
-        'deny'
+    Inputs:
+      - action: str indicating the decision (e.g., "allow", "deny", "override").
+      - response: Optional[bytes] DNS response to use when action == "override".
+
+    Outputs:
+      - PluginDecision instance with attributes populated.
     """
 
-    action: str  # "allow", "deny", or "override"
+    action: str
     response: Optional[bytes] = None
 
 
-class PluginContext:
+def inheritable_ttl_cache(keyfunc=None):
+    """Brief: Create an inheritable per-subclass TTL cache decorator for instance methods.
+
+    Inputs:
+      - keyfunc: Optional callable used to build the cache key. When provided it
+        is called as ``keyfunc(self, *args, **kwargs)`` and must return a
+        hashable object. When omitted, the key defaults to
+        ``(args, tuple(sorted(kwargs.items())))``.
+
+    Outputs:
+      - Callable decorator that wraps an instance method so that each plugin
+        subclass gets its own ``cachetools.TTLCache`` instance, using
+        ``cache_ttl`` and ``cache_maxsize`` attributes on the subclass
+        (defaults: 60 seconds, 128 entries).
+
+    Example:
+        >>> from foghorn.plugins.base import BasePlugin, inheritable_ttl_cache
+        >>> class MyPlugin(BasePlugin):
+        ...     cache_ttl = 120
+        ...
+        ...     @inheritable_ttl_cache(lambda self, qname, qtype, req, ctx: (qname, qtype))
+        ...     def pre_resolve(self, qname, qtype, req, ctx):
+        ...         return None
     """
-    Context passed to plugins during pre- and post-resolve phases.
+
+    def decorator(method):
+        caches: Dict[type, TTLCache] = {}
+
+        @wraps(method)
+        def wrapper(self, *args, **kwargs):
+            cls = type(self)
+            ttl = int(getattr(cls, "cache_ttl", 60))
+            maxsize = int(getattr(cls, "cache_maxsize", 128))
+
+            cache = caches.get(cls)
+            if cache is None or cache.ttl != ttl or cache.maxsize != maxsize:
+                cache = TTLCache(maxsize=maxsize, ttl=ttl)
+                caches[cls] = cache
+
+            if keyfunc is not None:
+                key = keyfunc(self, *args, **kwargs)
+            else:
+                key = (args, tuple(sorted(kwargs.items())))
+
+            try:
+                return cache[key]
+            except KeyError:
+                result = method(self, *args, **kwargs)
+                cache[key] = result
+                return result
+
+        # Expose caches for inspection/testing if needed
+        wrapper._caches = caches  # type: ignore[attr-defined]
+        return wrapper
+
+    return decorator
+
+
+class PluginContext:
+    """Brief: Context passed to plugins during pre- and post-resolve phases.
+
+    Inputs:
+      - client_ip: str IP address of the requesting client.
 
     Attributes (inputs to plugins):
-      - client_ip: str of the requestor's IP address
+      - client_ip: Requestor's IP address.
       - upstream_candidates: Optional[list[dict]] overrides global upstreams when set;
         each item is {'host': str, 'port': int}. When provided, the server must use
         only these upstreams for this request and return SERVFAIL if all fail.
-      - upstream_override: Optional[tuple] legacy single upstream override (host, port)
+      - upstream_override: Optional[tuple[str, int]] legacy single upstream override.
+
+    Outputs:
+      - PluginContext instance with fields initialized.
 
     Example use:
         >>> from foghorn.plugins.base import PluginContext
@@ -42,17 +125,13 @@ class PluginContext:
 
     @final
     def __init__(self, client_ip: str) -> None:
-        """
-        Initializes the PluginContext.
+        """Initialize the PluginContext.
 
-        Args:
-            client_ip: The IP address of the client that sent the query.
+        Inputs:
+          - client_ip: The IP address of the client that sent the query.
 
-        Example use:
-            >>> from foghorn.plugins.base import PluginContext
-            >>> ctx = PluginContext(client_ip="192.0.2.1")
-            >>> ctx.client_ip
-            '192.0.2.1'
+        Outputs:
+          - None (sets client_ip, upstream_candidates, upstream_override).
         """
         self.client_ip = client_ip
         # Optional per-request upstream candidates override
@@ -62,8 +141,7 @@ class PluginContext:
 
 
 class BasePlugin:
-    """
-    Base class for all plugins.
+    """Brief: Base class for all plugins.
 
     Plugins can control execution order using:
       - pre_priority (for pre_resolve hooks; lower runs first)
@@ -90,36 +168,64 @@ class BasePlugin:
         25
     """
 
+    ttl: ClassVar[int] = 300
+
     pre_priority: ClassVar[int] = 50
     post_priority: ClassVar[int] = 50
     setup_priority: ClassVar[int] = 50
-
     aliases: ClassVar[Sequence[str]] = ()
 
     @classmethod
     def get_aliases(cls) -> Sequence[str]:
-        # Always returns a sequence (even if empty) for discovery
-        return tuple(getattr(cls, "aliases", ()))
-
-    @final
-    def __init__(self, **config):
-        """
-        Initializes the BasePlugin.
+        """Brief: Return plugin aliases used for discovery.
 
         Inputs:
-          - **config: Plugin configuration including:
-            - pre_priority (int): Priority for pre_resolve (1-255, default from class).
-            - post_priority (int): Priority for post_resolve (1-255, default from class).
-            - setup_priority (int): Priority for setup() (1-255, default from class).
+          - None
+
+        Outputs:
+          - tuple[str, ...]: Sequence of alias strings (may be empty).
+        """
+        return tuple(getattr(cls, "aliases", ()))
+
+    @classmethod
+    def cache(cls, keyfunc=None):
+        """Brief: Convenience wrapper around :func:`inheritable_ttl_cache`.
+
+        Inputs:
+          - keyfunc: Optional callable used to build cache keys, passed through
+            to :func:`inheritable_ttl_cache`.
+
+        Outputs:
+          - Callable decorator that applies an inheritable TTL cache to an
+            instance method.
+
+        Example:
+            >>> from foghorn.plugins.base import BasePlugin
+            >>> class MyPlugin(BasePlugin):
+            ...     cache_ttl = 120
+            ...
+            ...     @BasePlugin.cache(lambda self, qname, qtype, req, ctx: (qname, qtype))
+            ...     def pre_resolve(self, qname, qtype, req, ctx):
+            ...         return None
+        """
+        return inheritable_ttl_cache(keyfunc)
+
+    @final
+    def __init__(self, **config: object) -> None:
+        """Initialize the BasePlugin with configuration and priorities.
+
+        Inputs:
+          - **config: Plugin configuration including (optional):
+            - pre_priority (int | str): Priority for pre_resolve (1-255, default from class).
+            - post_priority (int | str): Priority for post_resolve (1-255, default from class).
+            - setup_priority (int | str): Priority for setup() (1-255, default from class).
               If setup_priority is not provided, pre_priority from config is used as a
               fallback for setup plugins.
 
         Outputs:
-          - None (sets self.config, self.pre_priority, self.post_priority,
-            self.setup_priority).
+          - None (sets self.config, self.pre_priority, self.post_priority, self.setup_priority).
 
-        Priority values are clamped to [1, 255]. Invalid types use class
-        defaults.
+        Priority values are clamped to [1, 255]. Invalid types use class defaults.
 
         Example use:
             >>> from foghorn.plugins.base import BasePlugin
@@ -128,8 +234,8 @@ class BasePlugin:
             10
         """
         self.config = config
-        logger = logging.getLogger(__name__)
-        logger.info(f"loading {self}")
+        logger.debug("loading %s", self)
+
         # Standard path: use class defaults or config overrides
         self.pre_priority = self._parse_priority_value(
             config.get("pre_priority", self.__class__.pre_priority),
@@ -154,27 +260,26 @@ class BasePlugin:
         )
 
     @staticmethod
-    def _parse_priority_value(value, key: str, logger) -> int:
-        """
-        Parse and clamp a priority value to [1, 255].
+    def _parse_priority_value(value: object, key: str, logger: logging.Logger) -> int:
+        """Brief: Parse and clamp a priority value to the inclusive range [1, 255].
 
         Inputs:
           - value: Priority value (int, str, or other).
-          - key: Config key name for logging.
-          - logger: Logger instance.
+          - key: Config key name for logging (e.g., "pre_priority").
+          - logger: Logger instance for warnings.
 
         Outputs:
-          - int: Clamped priority in range [1, 255].
+          - int: Clamped priority value in range [1, 255]; defaults to 50 on invalid input.
 
         Example:
-            >>> BasePlugin._parse_priority_value("25", "pre_priority", logging.getLogger())
+            >>> BasePlugin._parse_priority_value("25", "pre_priority", logger)
             25
-            >>> BasePlugin._parse_priority_value(300, "post_priority", logging.getLogger())
+            >>> BasePlugin._parse_priority_value(300, "post_priority", logger)
             255
         """
         default = 50
         try:
-            val = int(value)
+            val = int(value)  # type: ignore[arg-type]
         except (ValueError, TypeError):
             logger.warning("Invalid %s %r; using default %d", key, value, default)
             return default
@@ -187,21 +292,24 @@ class BasePlugin:
             return 255
         return val
 
+    @inheritable_ttl_cache(lambda self, qname, qtype, req, ctx: (qname, int(qtype)))
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
-        """
-        A hook that runs before the DNS query is resolved.
-        Args:
-            qname: The queried domain name.
-            qtype: The query type.
-            req: The raw DNS request.
-            ctx: The plugin context.
-        Returns:
-            A PluginDecision, or None to allow the query to proceed.
+        """Brief: Hook that runs before the DNS query is resolved.
+
+        Inputs:
+          - qname: The queried domain name.
+          - qtype: The query type.
+          - req: The raw DNS request.
+          - ctx: The plugin context.
+
+        Outputs:
+          - PluginDecision instance to modify/short-circuit handling, or None to allow
+            the query to proceed unchanged (default).
 
         Example use:
-            >>> from foghorn.plugins.base import BasePlugin, PluginDecision, PluginContext
+            >>> from foghorn.plugins.base import BasePlugin, PluginContext
             >>> plugin = BasePlugin()
             >>> ctx = PluginContext('127.0.0.1')
             >>> plugin.pre_resolve("example.com", 1, b'', ctx) is None
@@ -209,21 +317,30 @@ class BasePlugin:
         """
         return None
 
+    @inheritable_ttl_cache(
+        lambda self, qname, qtype, response_wire, ctx: (
+            qname,
+            int(qtype),
+            response_wire,
+        )
+    )
     def post_resolve(
         self, qname: str, qtype: int, response_wire: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
-        """
-        A hook that runs after the DNS query has been resolved.
-        Args:
-            qname: The queried domain name.
-            qtype: The query type.
-            response_wire: The response from the upstream server.
-            ctx: The plugin context.
-        Returns:
-            A PluginDecision, or None to allow the response to be sent as-is.
+        """Brief: Hook that runs after the DNS query has been resolved.
+
+        Inputs:
+          - qname: The queried domain name.
+          - qtype: The query type.
+          - response_wire: DNS response from the upstream server.
+          - ctx: The plugin context.
+
+        Outputs:
+          - PluginDecision instance to override/modify the response, or None to send
+            the upstream response as-is (default).
 
         Example use:
-            >>> from foghorn.plugins.base import BasePlugin, PluginDecision, PluginContext
+            >>> from foghorn.plugins.base import BasePlugin, PluginContext
             >>> plugin = BasePlugin()
             >>> ctx = PluginContext('127.0.0.1')
             >>> plugin.post_resolve("example.com", 1, b"response", ctx) is None
@@ -232,16 +349,13 @@ class BasePlugin:
         return None
 
     def handle_sigusr2(self) -> None:
-        """
-        Handle SIGUSR2 signal.
+        """Brief: Handle SIGUSR2 signal (default implementation is a no-op).
 
         Inputs:
           - None
-        Outputs:
-          - None
 
-        Brief: Default implementation does nothing; plugins may override to
-        perform maintenance or resets when SIGUSR2 is received.
+        Outputs:
+          - None (subclasses may override to perform maintenance or resets).
 
         Example:
             >>> class P(BasePlugin):
@@ -253,18 +367,19 @@ class BasePlugin:
         return None
 
     def setup(self) -> None:
-        """
-        Run one-time initialization logic for setup-aware plugins.
+        """Brief: Run one-time initialization logic for setup-aware plugins.
 
         Inputs:
           - None (uses plugin configuration and instance attributes).
+
         Outputs:
           - None
 
-        Brief: Base implementation is a no-op; plugins that participate in the
-        setup phase should override this method. The main process will invoke
-        setup() on such plugins in ascending setup_priority order before
-        starting listeners.
+        Notes:
+          - Base implementation is a no-op; plugins that participate in the
+            setup phase should override this method. The main process will
+            invoke setup() on such plugins in ascending setup_priority order
+            before starting listeners.
 
         Example:
             >>> from foghorn.plugins.base import BasePlugin
@@ -280,17 +395,71 @@ class BasePlugin:
         """
         return None
 
+    def _make_a_response(
+        self,
+        qname: str,
+        query_type: int,
+        raw_req: bytes,
+        ctx: PluginContext,
+        ipaddr: str,
+    ) -> Optional[bytes]:
+        try:
+            request = DNSRecord.parse(raw_req)
+        except Exception as e:
+            logger.warning("parse failure: %s", e)
+            return None
+
+        # Normalize domain
+        # qname = str(request.q.qname).rstrip(".")
+
+        ip = ipaddr
+        reply = DNSRecord(
+            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+        )
+
+        if query_type == QTYPE.A:
+            reply.add_answer(
+                RR(
+                    rname=request.q.qname,
+                    rtype=QTYPE.A,
+                    rclass=1,
+                    ttl=self._ttl,
+                    rdata=A(ip),
+                )
+            )
+        elif query_type == QTYPE.AAAA:
+            reply.add_answer(
+                RR(
+                    rname=request.q.qname,
+                    rtype=QTYPE.AAAA,
+                    rclass=1,
+                    ttl=60,
+                    rdata=AAAA(ip),
+                )
+            )
+
+        return reply.pack()
+
 
 def plugin_aliases(*aliases: str):
-    """
-    Decorator to set aliases on a plugin class.
-    Usage:
-        @plugin_aliases("acl", "access")
-        class AccessControlPlugin(BasePlugin):
-            ...
+    """Brief: Decorator to set aliases on a plugin class for registry discovery.
+
+    Inputs:
+      - *aliases: Variable number of alias strings for the plugin.
+
+    Outputs:
+      - Callable that applies the aliases to a plugin class and returns it.
+
+    Example:
+        >>> from foghorn.plugins.base import BasePlugin, plugin_aliases
+        >>> @plugin_aliases("acl", "access")
+        ... class AccessControlPlugin(BasePlugin):
+        ...     pass
+        >>> AccessControlPlugin.aliases
+        ('acl', 'access')
     """
 
-    def _wrap(cls):
+    def _wrap(cls: type) -> type:
         cls.aliases = tuple(aliases)
         return cls
 

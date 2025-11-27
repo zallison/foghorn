@@ -5,9 +5,9 @@ import os
 import pathlib
 import threading
 import time
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from dnslib import AAAA, QTYPE, RR, A, DNSHeader, DNSRecord
+from dnslib import QTYPE, RR, DNSHeader, DNSRecord
 
 try:  # watchdog is used for cross-platform file watching
     from watchdog.events import FileSystemEventHandler
@@ -26,51 +26,45 @@ from foghorn.plugins.base import (
 logger = logging.getLogger(__name__)
 
 
-@plugin_aliases("hosts", "etc-hosts", "/etc/hosts")
-class EtcHosts(BasePlugin):
-    """
-    Brief: Resolve A/AAAA queries from one or more hosts files.
-
-    Load IPs and hostnames from /etc/hosts or other host files. Supports reading
-    multiple files; when the same hostname appears in more than one file, entries
-    from later files override earlier ones.
-    """
+@plugin_aliases("custom", "records")
+class CustomRecords(BasePlugin):
 
     def setup(self) -> None:
         """
-        Brief: Initialize the plugin, load host mappings, and configure watchers.
+                Brief: Initialize the plugin, load record mappings, and configure watchers.
 
-        Inputs:
-          - file_path (str, optional): Single hosts file path (legacy, preserved)
-          - file_paths (list[str], optional): List of hosts file paths
-            to load and merge in order (later overrides earlier)
-          - watchdog_enabled (bool, optional): When True (default), start a
-            watchdog-based observer to reload files automatically on change.
-            The legacy option inotify_enabled is still accepted as an alias.
-          - watchdog_poll_interval_seconds (float, optional): When greater than
-            zero, enable a stat-based polling loop to detect changes even when
-            filesystem events are not delivered (for example in some container
-            or read-only bind-mount setups).
+                Inputs:
+                  - file_path (str, optional): Single records file path (legacy, preserved)
+                  - file_paths (list[str], optional): List of records file paths
+                    to load and merge in order (later overrides earlier)
+        atchdog_enabled (bool, optional): When True (default), start a
+                    watchdog-based observer to reload files automatically on change.
+                    The legacy option inotify_enabled is still accepted as an alias.
+                  - watchdog_poll_interval_seconds (float, optional): When greater than
+                    zero, enable a stat-based polling loop to detect changes even when
+                    filesystem events are not delivered (for example in some container
+                    or read-only bind-mount setups).
 
-        Outputs:
-          - None
+                Outputs:
+                  - None
 
-        Example:
-          Legacy single file:
-            EtcHosts(file_path="/custom/hosts")
+                Example:
+                  Legacy single file:
+                    CustomRecords(file_path="/custom/records")
 
-          Multiple files (preferred):
-            EtcHosts(file_paths=["/etc/hosts", "/etc/hosts.d/extra"], inotify_enabled=True)
+                  Multiple files (preferred):
+                    CustomRecords(file_paths=["/foghorn/conf/var/records.txt", "/etc/records.d/extra.txt"], watchdog_enabled=True)
         """
 
-        # Normalize configuration into a list of paths. Default to /etc/hosts
+        # Normalize configuration into a list of paths.
         legacy = self.config.get("file_path")
         provided = self.config.get("file_paths")
         self.file_paths: List[str] = self._normalize_paths(provided, legacy)
 
         # Internal synchronization and state
-        self._hosts_lock = threading.RLock()
-        self.hosts: Dict[str, str] = {}
+        self._records_lock = threading.RLock()
+        # Mapping of (domain, qtype) -> (ttl, ordered list of unique values)
+        self.records: Dict[Tuple[str, int], Tuple[int, List[str]]] = {}
         self._observer = None
 
         # Watchdog reload debouncing: avoid tight reload loops when a single
@@ -96,7 +90,7 @@ class EtcHosts(BasePlugin):
         self._poll_thread = None
 
         # Initial load
-        self._load_hosts()
+        self._load_records()
 
         self._ttl = self.config.get("ttl", 300)
 
@@ -114,10 +108,10 @@ class EtcHosts(BasePlugin):
         # events are not reliably delivered (for example some Docker or
         # network filesystems). When enabled, this runs alongside watchdog and
         # is further rate-limited by the reload debouncing in
-        # _reload_hosts_from_watchdog.
+        # _reload_records_from_watchdog.
         if self._poll_interval > 0.0:
             logger.warning(
-                "Watchdog falling back to polling every {self._poll_interval}"
+                "CustomRecords Watchdog falling back to polling every {self._poll_interval}"
             )
             self._poll_stop = threading.Event()
             self._start_polling()
@@ -125,23 +119,21 @@ class EtcHosts(BasePlugin):
     def _normalize_paths(
         self, file_paths: Optional[Iterable[str]], legacy: Optional[str]
     ) -> List[str]:
-        """
-        Brief: Coerce provided file path inputs into an ordered, de-duplicated list.
+        """Brief: Coerce provided file path inputs into an ordered, de-duplicated list.
 
         Inputs:
           - file_paths: iterable of file path strings (may be None)
           - legacy: single legacy file path string (may be None)
 
-        Outputs:
-          - list[str]: Non-empty list of unique paths (order preserved). Defaults
-            to ["/etc/hosts"]. If both file_paths and legacy file_path are given,
-            the legacy path is included in the set of file paths.
+        Outputs: - list[str]: Non-empty list of unique paths (order preserved).
+        If both file_paths and legacy file_path are given, the legacy path is included in the set of file paths.
 
         Example:
           _normalize_paths(["/a", "/b"], None) -> ["/a", "/b"]
           _normalize_paths(["/a", "/b"], "/a") -> ["/a", "/b"]
           _normalize_paths(None, "/a") -> ["/a"]
-          _normalize_paths(None, None) -> ["/etc/hosts"]
+          _normalize_paths(None, None) -> []
+
         """
         paths: List[str] = []
         if file_paths:
@@ -151,179 +143,205 @@ class EtcHosts(BasePlugin):
             # Include legacy file_path in the set of file paths
             paths.append(os.path.expanduser(str(legacy)))
         if not paths:
-            paths = ["/etc/hosts"]  # pragma: no cover
+            raise ValueError(f"No paths given {self.config}")
         # De-duplicate while preserving order
         paths = list(dict.fromkeys(paths))
         return paths
 
-    def _load_hosts(self) -> None:
+    def _load_records(self) -> None:
         """
-        Brief: Read hosts files and build a mapping of domain -> IP.
-
-        - Supports comments beginning with '#', including inline comments.
-        - Requires at least one hostname after the IP on each non-comment line.
-        - Multiple hostnames per line are supported and mapped to the same IP.
-        - When multiple files are provided, later files override earlier ones on
-          conflicts for the same hostname.
+        Brief: Read custom records files and build a mapping of (domain, qtype) -> (ttl, values).
 
         Inputs:
           - None (uses self.file_paths)
+
         Outputs:
-          - None (populates self.hosts: Dict[str, str])
+          - None (populates self.records: Dict[Tuple[str, int], Tuple[int, List[str]]])
         """
-        mapping: Dict[str, str] = {}
+        # Build a fresh mapping so that reloads are atomic when swapped in.
+        #
+        # For each (domain, qtype) key we:
+        #   - preserve the order in which values appear across files
+        #   - de-duplicate values, keeping the first occurrence
+        #   - keep the TTL from the first occurrence (later duplicates are
+        #     ignored entirely)
+        mapping: Dict[Tuple[str, int], Tuple[int, List[str]]] = {}
 
         for fp in self.file_paths:
-            logging.info(f"reading hostfile: {fp}")
-            hosts_path = pathlib.Path(fp)
-            with hosts_path.open("r", encoding="utf-8") as f:
-                for raw_line in f:
+            logger.info("reading recordfile: %s", fp)
+            records_path = pathlib.Path(fp)
+            with records_path.open("r", encoding="utf-8") as f:
+                for lineno, raw_line in enumerate(f, start=1):
                     # Remove inline comments and surrounding whitespace
                     line = raw_line.split("#", 1)[0].strip()
                     if not line:
                         continue
 
-                    parts = line.split()
-                    if len(parts) < 2:
+                    parts = [p.strip() for p in line.split("|")]
+                    if len(parts) != 4:
                         raise ValueError(
-                            f"File {hosts_path} malformed line: {raw_line}"
+                            f"File {records_path} malformed line {lineno}: "
+                            f"expected <domain>|<qtype>|<ttl>|<value>, got {raw_line!r}"
                         )
 
-                    ip = parts[0]
+                    domain_raw, qtype_raw, ttl_raw, value_raw = parts
+                    if not domain_raw or not qtype_raw or not ttl_raw or not value_raw:
+                        raise ValueError(
+                            f"File {records_path} malformed line {lineno}: "
+                            f"empty field in {raw_line!r}"
+                        )
 
-                    # When adding an IPv4 address, also create the corresponding
-                    # in-addr.arpa reverse mapping so reverse lookups can be
-                    # resolved from the same hosts data.
-                    reverse_name: Optional[str] = None
-                    if ":" not in ip and "." in ip:
-                        octets = ip.split(".")
-                        if len(octets) == 4 and all(o.isdigit() for o in octets):
-                            try:
-                                if all(0 <= int(o) <= 255 for o in octets):
-                                    reverse_name = (
-                                        ".".join(reversed(octets)) + ".in-addr.arpa"
-                                    )
-                            except ValueError:
-                                reverse_name = None
+                    domain = domain_raw.rstrip(".").lower()
 
-                    for domain in parts[1:]:
-                        # Later entries override earlier ones by assignment
-                        mapping[domain] = ip
-                        if reverse_name:
-                            mapping[reverse_name] = domain
+                    # Parse qtype as number or mnemonic (e.g., "A", "AAAA").
+                    qtype_code: Optional[int]
+                    if qtype_raw.isdigit():
+                        qtype_code = int(qtype_raw)
+                    else:
+                        name = qtype_raw.upper()
+                        try:
+                            qtype_code = int(getattr(QTYPE, name))
+                        except AttributeError:
+                            qtype_val = QTYPE.get(name, None)
+                            qtype_code = (
+                                int(qtype_val) if isinstance(qtype_val, int) else None
+                            )
+                    if qtype_code is None:
+                        raise ValueError(
+                            f"File {records_path} malformed line {lineno}: unknown qtype {qtype_raw!r}"
+                        )
 
-        lock = getattr(self, "_hosts_lock", None)
+                    try:
+                        ttl = int(ttl_raw)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"File {records_path} malformed line {lineno}: invalid ttl {ttl_raw!r}"
+                        ) from exc
+                    if ttl < 0:
+                        raise ValueError(
+                            f"File {records_path} malformed line {lineno}: negative ttl {ttl}"
+                        )
+
+                    value = value_raw
+
+                    key = (domain, int(qtype_code))
+                    existing = mapping.get(key)
+
+                    if existing is None:
+                        # First occurrence for this (domain, qtype): start a new
+                        # ordered list of values and remember its TTL.
+                        stored_ttl = ttl
+                        values: List[str] = []
+                    else:
+                        # Subsequent occurrences: extend the list, but only with
+                        # values we have not seen before. The TTL from the first
+                        # occurrence is retained and later duplicates are
+                        # dropped entirely.
+                        stored_ttl, values = existing
+
+                    if value not in values:
+                        values.append(value)
+
+                    mapping[key] = (stored_ttl, values)
+
+        lock = getattr(self, "_records_lock", None)
+
         if lock is None:
-            self.hosts = mapping
+            self.records = mapping
         else:
             with lock:
-                self.hosts = mapping
+                self.records = mapping
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
         """
-        Brief: Return an override decision if qname exists in loaded hosts.
+        Brief: Return an override decision when a (domain, qtype) key exists in loaded records.
 
         Inputs:
             qname: Queried domain name.
             qtype: DNS record type.
             req: Raw DNS request bytes.
             ctx: Plugin context.
+
         Outputs:
-            PluginDecision("override") when domain is mapped (and type matches),
-            otherwise None.
-
+            PluginDecision("override") with all matching RRs when present, otherwise None.
         """
-        if qtype not in (QTYPE.A, QTYPE.AAAA):
-            return None
+        # Normalize domain to a consistent cache key.
+        try:
+            name = str(qname).rstrip(".").lower()
+        except Exception:  # pragma: no cover
+            name = str(qname).lower()
 
-        qname = qname.rstrip(".")
+        qtype_int = int(qtype)
+        type_name = QTYPE.get(qtype_int, str(qtype_int))
+        logging.debug(f"pre-resolve custom {name} {type_name}")
 
-        # Safe concurrent read from the hosts mapping when a watcher may be
+        key = (name, qtype_int)
+        # Safe concurrent read from the records mapping when a watcher may be
         # reloading it in the background.
-        lock = getattr(self, "_hosts_lock", None)
+        lock = getattr(self, "_records_lock", None)
         if lock is None:
-            ip = self.hosts.get(qname)
+            entry = self.records.get(key)
         else:
             with lock:
-                ip = self.hosts.get(qname)
+                entry = self.records.get(key)
 
-        if not ip:
+        if not entry:
             return None
 
-        # If the requested type doesn't match the IP version we have, let normal
-        # resolution continue (avoid constructing invalid AAAA from IPv4, etc.).
-        is_v6 = ":" in ip
-        is_v4 = "." in ip
-        if qtype == QTYPE.AAAA and is_v4 and not is_v6:
-            return None
-        if qtype == QTYPE.A and is_v6 and not is_v4:
-            return None
-
-        # Build a proper DNS response with the same TXID
-        wire = self._make_a_response(qname, qtype, req, ctx, ip)
-        return PluginDecision(action="override", response=wire)
-
-    def _make_a_response(
-        self,
-        qname: str,
-        query_type: int,
-        raw_req: bytes,
-        ctx: PluginContext,
-        ipaddr: str,
-    ) -> Optional[bytes]:
+        ttl, values = entry
+        logging.warning(f"got entry for {name} {type_name} -> {values}")
         try:
-            request = DNSRecord.parse(raw_req)
-        except Exception as e:
-            logger.warning("parse failure: %s", e)
+            request = DNSRecord.parse(req)
+        except Exception as e:  # pragma: no cover - defensive parsing
+            logger.warning("CustomRecords parse failure: %s", e)
             return None
 
-        # Normalize domain
-        # qname = str(request.q.qname).rstrip(".")
-
-        ip = ipaddr
         reply = DNSRecord(
             DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
         )
 
-        if query_type == QTYPE.A:
-            reply.add_answer(
-                RR(
-                    rname=request.q.qname,
-                    rtype=QTYPE.A,
-                    rclass=1,
-                    ttl=self._ttl,
-                    rdata=A(ip),
+        added = False
+        owner = str(request.q.qname).rstrip(".") + "."
+        # Preserve the order of values as they were defined in the records
+        # files; do not sort here so that answers follow configuration order.
+        for value in values:
+            zone_line = f"{owner} {ttl} IN {type_name} {value}"
+            try:
+                rrs = RR.fromZone(zone_line)
+            except Exception as exc:  # pragma: no cover - invalid record value
+                logger.warning(
+                    "CustomRecords invalid value %r for qtype %s: %s",
+                    value,
+                    type_name,
+                    exc,
                 )
-            )
-        elif query_type == QTYPE.AAAA:
-            reply.add_answer(
-                RR(
-                    rname=request.q.qname,
-                    rtype=QTYPE.AAAA,
-                    rclass=1,
-                    ttl=60,
-                    rdata=AAAA(ip),
-                )
-            )
+                continue
 
-        return reply.pack()
+            for rr in rrs:
+                reply.add_answer(rr)
+                added = True
+
+        if not added:
+            return None
+
+        return PluginDecision(action="override", response=reply.pack())
 
     class _WatchdogHandler(FileSystemEventHandler):
-        """Brief: Internal watchdog handler that reloads hosts on file changes.
+        """Brief: Internal watchdog handler that reloads records on file changes.
 
         Inputs:
-          - plugin: EtcHosts instance to notify on changes.
-          - watched_files: Iterable of concrete hosts file paths to track.
+          - plugin: CustomRecords instance to notify on changes.
+          - watched_files: Iterable of concrete records file paths to track.
 
         Outputs:
-          - None (invokes plugin._reload_hosts_from_watchdog when a watched path changes).
+          - None (invokes plugin._reload_records_from_watchdog when a watched path changes).
         """
 
         def __init__(
             self,
-            plugin: "EtcHosts",
+            plugin: "CustomRecords",
             watched_files: Iterable[pathlib.Path],
         ) -> None:
             super().__init__()
@@ -366,10 +384,10 @@ class EtcHosts(BasePlugin):
             src = getattr(event, "src_path", None)
             dest = getattr(event, "dest_path", None)
             if self._should_reload(src, dest):
-                self._plugin._reload_hosts_from_watchdog()
+                self._plugin._reload_records_from_watchdog()
 
     def _start_watchdog(self) -> None:
-        """Brief: Start a watchdog observer to reload hosts files on change.
+        """Brief: Start a watchdog observer to reload records files on change.
 
         Inputs:
           - None (uses self.file_paths)
@@ -379,14 +397,14 @@ class EtcHosts(BasePlugin):
 
         if Observer is None:
             logger.warning(
-                "watchdog is not available; automatic /etc/hosts reload disabled",
+                "watchdog is not available; automatic CustomRecords reload disabled",
             )
             self._observer = None
             return
 
-        host_paths = [pathlib.Path(p).expanduser() for p in self.file_paths]
-        watched_files = [p.resolve() for p in host_paths]
-        directories = {p.parent.resolve() for p in host_paths}
+        record_paths = [pathlib.Path(p).expanduser() for p in self.file_paths]
+        watched_files = [p.resolve() for p in record_paths]
+        directories = {p.parent.resolve() for p in record_paths}
 
         if not directories:
             self._observer = None
@@ -406,7 +424,7 @@ class EtcHosts(BasePlugin):
         self._observer = observer
 
     def _start_polling(self) -> None:
-        """Brief: Start a stat-based polling loop to detect hosts file changes.
+        """Brief: Start a stat-based polling loop to detect records file changes.
 
         Inputs:
           - None (uses self.file_paths and self._poll_interval)
@@ -425,7 +443,7 @@ class EtcHosts(BasePlugin):
             # leaking an unmanaged thread.
             return
 
-        thread = threading.Thread(target=self._poll_loop, name="EtcHostsPoller")
+        thread = threading.Thread(target=self._poll_loop, name="CustomRecordsPoller")
         thread.daemon = True
         thread.start()
         self._poll_thread = thread
@@ -446,15 +464,15 @@ class EtcHosts(BasePlugin):
         while not stop_event.is_set():
             try:
                 if self._have_files_changed():
-                    self._reload_hosts_from_watchdog()
+                    self._reload_records_from_watchdog()
             except Exception:  # pragma: no cover - defensive logging
-                logger.warning("Error during hosts polling loop", exc_info=True)
+                logger.warning("Error during records polling loop", exc_info=True)
 
             # Wait with wakeup on stop event or timeout.
             stop_event.wait(interval)
 
     def _have_files_changed(self) -> bool:
-        """Brief: Detect whether any configured hosts files have changed on disk.
+        """Brief: Detect whether any configured records files have changed on disk.
 
         Inputs:
           - None (uses self.file_paths)
@@ -474,7 +492,7 @@ class EtcHosts(BasePlugin):
                 snapshot.append((fp, None))
             except OSError:
                 # Other OS-level errors are logged but do not crash the poller.
-                logger.warning("Failed to stat hosts file %s", fp, exc_info=True)
+                logger.warning("Failed to stat records file %s", fp, exc_info=True)
                 snapshot.append((fp, None))
             else:
                 snapshot.append((fp, (st.st_ino, st.st_size, st.st_mtime)))
@@ -502,7 +520,7 @@ class EtcHosts(BasePlugin):
         if delay <= 0.0:
             # If there is effectively no delay, fall back to an immediate
             # reload attempt.
-            self._reload_hosts_from_watchdog()
+            self._reload_records_from_watchdog()
             return
 
         lock = getattr(self, "_reload_timer_lock", None)
@@ -522,10 +540,10 @@ class EtcHosts(BasePlugin):
                 # minimum interval will have elapsed, so the reload will be
                 # performed.
                 try:
-                    self._reload_hosts_from_watchdog()
+                    self._reload_records_from_watchdog()
                 except Exception:  # pragma: no cover - defensive logging
                     logger.warning(
-                        "Error during deferred hosts reload from watchdog",
+                        "Error during deferred records reload from watchdog",
                         exc_info=True,
                     )
 
@@ -534,8 +552,8 @@ class EtcHosts(BasePlugin):
             self._reload_debounce_timer = timer
             timer.start()
 
-    def _reload_hosts_from_watchdog(self) -> None:
-        """Brief: Safely reload hosts mapping in response to watchdog events.
+    def _reload_records_from_watchdog(self) -> None:
+        """Brief: Safely reload records mapping in response to watchdog events.
 
         Inputs:
           - None
@@ -545,7 +563,7 @@ class EtcHosts(BasePlugin):
         Notes:
           - Applies a minimum interval between reloads (configurable via
             ``watchdog_min_interval_seconds``) to avoid continuous reload
-            loops when the act of reading the hosts file itself generates
+            loops when the act of reading the records file itself generates
             further filesystem events.
           - When multiple events arrive within the minimum interval, schedules
             a single deferred reload instead of dropping the later events.
@@ -561,7 +579,7 @@ class EtcHosts(BasePlugin):
         if elapsed < min_interval:
             remaining = max(min_interval - elapsed, 0.0)
             logger.debug(
-                "Deferring hosts reload for %.3fs; last reload was %.3fs ago",
+                "Deferring records reload for %.3fs; last reload was %.3fs ago",
                 remaining,
                 elapsed,
             )
@@ -569,11 +587,11 @@ class EtcHosts(BasePlugin):
             return
 
         self._last_watchdog_reload_ts = now
-        logger.info("Reloading hosts mapping due to filesystem change")
+        logger.info("Reloading records mapping due to filesystem change")
         try:
-            self._load_hosts()
+            self._load_records()
         except Exception as exc:  # pragma: no cover - defensive logging
-            logger.warning("Failed to reload hosts from watchdog event: %s", exc)
+            logger.warning("Failed to reload records from watchdog event: %s", exc)
 
     def close(self) -> None:
         """

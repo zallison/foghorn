@@ -20,7 +20,9 @@ import shutil
 import signal
 import socket
 import threading
+import time
 import urllib.parse
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -31,7 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
-from .stats import StatsCollector, StatsSnapshot
+from .stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 
 try:
     import psutil  # type: ignore[import]
@@ -41,6 +43,13 @@ except Exception:  # pragma: no cover - optional dependency fallback
 
 FOGHORN_VERSION = importlib.metadata.version("foghorn")
 logger = logging.getLogger("foghorn.webserver")
+
+# Lightweight cache for expensive system metrics to keep /stats fast under load.
+_SYSTEM_INFO_CACHE_TTL_SECONDS = 2.0
+_SYSTEM_INFO_CACHE_LOCK = threading.Lock()
+_last_system_info: Dict[str, Any] | None = None
+_last_system_info_ts: float = 0.0
+_SYSTEM_INFO_DETAIL_MODE = "full"  # "full" or "basic"
 
 
 class _Suppress2xxAccessFilter(logging.Filter):
@@ -150,6 +159,7 @@ class RingBuffer:
     def __init__(self, capacity: int = 500) -> None:
         if capacity <= 0:
             capacity = 1
+
         self._capacity = int(capacity)
         self._items: List[Any] = []
         self._lock = threading.Lock()
@@ -253,6 +263,35 @@ def sanitize_config(
     return redacted
 
 
+def _json_safe(value: Any) -> Any:
+    """Brief: Return a JSON-serializable representation of value.
+
+    Inputs:
+      - value: Arbitrary Python object that may not be JSON serializable.
+
+    Outputs:
+      - JSON-serializable structure where non-serializable objects (including
+        exceptions) have been converted to strings or simple dicts.
+    """
+
+    # Fast path for primitives
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+
+    # Preserve mapping and sequence structure
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+
+    # Represent exceptions explicitly
+    if isinstance(value, Exception):
+        return {"type": type(value).__name__, "message": str(value)}
+
+    # Fallback: string representation for anything else (e.g., datetime, Path).
+    return str(value)
+
+
 def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
     """Brief: Parse a /proc/meminfo-style file into byte counts.
 
@@ -309,6 +348,14 @@ def get_system_info() -> Dict[str, Any]:
       True
     """
 
+    global _last_system_info, _last_system_info_ts
+
+    now = time.time()
+    cached = _last_system_info
+    cached_ts = _last_system_info_ts
+    if cached is not None and now - cached_ts < _SYSTEM_INFO_CACHE_TTL_SECONDS:
+        return dict(cached)
+
     payload: Dict[str, Any] = {
         "load_1m": None,
         "load_5m": None,
@@ -330,6 +377,7 @@ def get_system_info() -> Dict[str, Any]:
     if psutil is not None:
         try:
             proc = psutil.Process(os.getpid())
+            detail_mode = _SYSTEM_INFO_DETAIL_MODE
 
             # Memory (RSS) in bytes and MB
             rss_bytes = int(proc.memory_info().rss)
@@ -364,22 +412,25 @@ def get_system_info() -> Dict[str, Any]:
             except Exception:
                 pass
 
-            # Counts of open files and connections
-            try:
-                files = proc.open_files()
-                payload["process_open_files_count"] = (
-                    len(files) if files is not None else 0
-                )
-            except Exception:
-                pass
+            # Counts of open files and connections can be relatively expensive,
+            # so only collect them when detail_mode is "full". The keys remain
+            # present in the payload and default to None when skipped.
+            if detail_mode == "full":
+                try:
+                    files = proc.open_files()
+                    payload["process_open_files_count"] = (
+                        len(files) if files is not None else 0
+                    )
+                except Exception:
+                    pass
 
-            try:
-                conns = proc.connections()
-                payload["process_connections_count"] = (
-                    len(conns) if conns is not None else 0
-                )
-            except Exception:
-                pass
+                try:
+                    conns = proc.connections()
+                    payload["process_connections_count"] = (
+                        len(conns) if conns is not None else 0
+                    )
+                except Exception:
+                    pass
         except Exception:  # pragma: no cover - environment specific
             pass
 
@@ -410,6 +461,12 @@ def get_system_info() -> Dict[str, Any]:
             used = total - available
             if used >= 0:
                 payload["memory_used_bytes"] = used
+
+    # Publish into cache for subsequent callers.
+    now = time.time()
+    with _SYSTEM_INFO_CACHE_LOCK:
+        _last_system_info = dict(payload)
+        _last_system_info_ts = now
 
     return payload
 
@@ -527,24 +584,37 @@ def create_app(
     """
 
     web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
-    app = FastAPI(title="Foghorn Admin HTTP API")
 
-    # Derived paths for optional static assets
-    www_root = resolve_www_root(config)
-
-    # Install default suppression of 2xx uvicorn access logs on startup so it
-    # applies both to embedded and external uvicorn usage.
-    @app.on_event("startup")
-    async def _install_logging_filter() -> None:
-        """FastAPI startup hook that installs the 2xx access-log suppression filter.
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """FastAPI lifespan context that installs the 2xx access-log suppression filter.
 
         Inputs:
-          - None
+          - app: FastAPI application instance.
+
         Outputs:
-          - None (mutates global logging configuration).
+          - Async context manager that runs install_uvicorn_2xx_suppression() on startup
+            and yields control back to FastAPI for normal request handling.
         """
 
         install_uvicorn_2xx_suppression()
+        yield
+
+    app = FastAPI(title="Foghorn Admin HTTP API", lifespan=lifespan)
+
+    # Allow configuration to tune the system info cache TTL used by
+    # get_system_info(), while keeping a conservative default.
+    global _SYSTEM_INFO_CACHE_TTL_SECONDS, _SYSTEM_INFO_DETAIL_MODE
+    ttl_raw = web_cfg.get("system_info_ttl_seconds")
+    if isinstance(ttl_raw, (int, float)) and ttl_raw > 0:
+        _SYSTEM_INFO_CACHE_TTL_SECONDS = float(ttl_raw)
+
+    detail_raw = str(web_cfg.get("system_metrics_detail", "full")).lower()
+    if detail_raw in {"full", "basic"}:
+        _SYSTEM_INFO_DETAIL_MODE = detail_raw
+
+    # Derived paths for optional static assets
+    www_root = resolve_www_root(config)
 
     # Attach shared state
     app.state.stats_collector = stats
@@ -554,6 +624,7 @@ def create_app(
         capacity=int(web_cfg.get("logs", {}).get("buffer_size", 500))
     )
     app.state.www_root = www_root
+    app.state.debug_stats_timings = bool(web_cfg.get("debug_timings", False))
 
     # CORS configuration
     cors_cfg = web_cfg.get("cors") or {}
@@ -596,7 +667,11 @@ def create_app(
         collector: Optional[StatsCollector] = app.state.stats_collector
         if collector is None:
             return {"status": "disabled", "server_time": _utc_now_iso()}
+
+        # Measure timings for optional debug logging.
+        t_start = time.time()
         snap: StatsSnapshot = collector.snapshot(reset=bool(reset))
+        t_after_snapshot = time.time()
 
         try:
             hostname = socket.gethostname()
@@ -607,29 +682,58 @@ def create_app(
         except Exception:  # pragma: no cover - environment specific
             host_ip = "0.0.0.0"
 
+        # Round uptime to the nearest second for display.
+        uptime_seconds = int(round(get_process_uptime_seconds()))
+
         meta: Dict[str, Any] = {
             "created_at": snap.created_at,
             "server_time": _utc_now_iso(),
             "hostname": hostname,
             "ip": host_ip,
             "version": FOGHORN_VERSION,
+            "uptime": uptime_seconds,
         }
 
+        system_info = get_system_info()
+        t_after_system = time.time()
+
+        # Optional DEBUG timings log for /stats when enabled in config.
+        if getattr(app.state, "debug_stats_timings", False):
+            logger.debug(
+                "/stats timings: snapshot=%.6fs system_info=%.6fs total=%.6fs",
+                t_after_snapshot - t_start,
+                t_after_system - t_after_snapshot,
+                t_after_system - t_start,
+            )
+
+        if snap.uniques:
+            meta_with_uniques = meta | snap.uniques
+        else:
+            meta_with_uniques = meta
+
         payload: Dict[str, Any] = {
-            "created_at": snap.created_at,
             "server_time": _utc_now_iso(),
             "totals": snap.totals,
             "rcodes": snap.rcodes,
             "qtypes": snap.qtypes,
             "uniques": snap.uniques,
             "upstreams": snap.upstreams,
-            "meta": meta,
+            "meta": meta_with_uniques,
             "top_clients": snap.top_clients,
             "top_subdomains": snap.top_subdomains,
             "top_domains": snap.top_domains,
             "latency": snap.latency_stats,
             "latency_recent": snap.latency_recent_stats,
-            "system": get_system_info(),
+            "system": system_info,
+            "upstream_rcodes": snap.upstream_rcodes,
+            "upstream_qtypes": snap.upstream_qtypes,
+            "qtype_qnames": snap.qtype_qnames,
+            "rcode_domains": snap.rcode_domains,
+            "rcode_subdomains": snap.rcode_subdomains,
+            "cache_hit_domains": snap.cache_hit_domains,
+            "cache_miss_domains": snap.cache_miss_domains,
+            "cache_hit_subdomains": snap.cache_hit_subdomains,
+            "cache_miss_subdomains": snap.cache_miss_subdomains,
         }
         return payload
 
@@ -733,7 +837,7 @@ def create_app(
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 raw_text = f.read()
-            raw_cfg = yaml.safe_load(raw_text) or {}
+                raw_cfg = yaml.safe_load(raw_text) or {}
         except (
             Exception
         ) as exc:  # pragma: no cover - I/O errors are environment-specific
@@ -745,7 +849,7 @@ def create_app(
 
     @app.post("/config/save", dependencies=[Depends(auth_dep)])
     async def save_config(body: Dict[str, Any]) -> Dict[str, Any]:
-        """Persist new configuration to disk and signal SIGUSR1 for reload.
+        """Persist new configuration to disk and signal SIGUSR1 for plugin notification.
 
         Inputs:
           - body: JSON object representing the full configuration mapping to
@@ -791,8 +895,15 @@ def create_app(
             if os.path.exists(cfg_path_abs):
                 shutil.copy(cfg_path_abs, backup_path)
 
+            raw_yaml = body.get("raw_yaml")
+            if not isinstance(raw_yaml, str):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="request body must include 'raw_yaml' string field",
+                )
+
             with open(cfg_path_abs + ".new", "w", encoding="utf-8") as tmp:
-                tmp.write(body["raw_yaml"])
+                tmp.write(raw_yaml)
 
             shutil.copy(cfg_path_abs + ".new", cfg_path_abs)
 
@@ -808,7 +919,7 @@ def create_app(
                 detail=f"failed to write config to {cfg_path_abs}: {exc}",
             ) from exc
 
-        # Signal main process to reload configuration
+        # Signal main process so plugins can react to the updated configuration
         try:
             os.kill(os.getpid(), signal.SIGUSR1)
         except Exception as exc:  # pragma: no cover - platform specific
@@ -934,11 +1045,39 @@ class _AdminHTTPServer(http.server.ThreadingHTTPServer):
         log_buffer: Optional[RingBuffer],
         config_path: str | None = None,
     ) -> None:
+        """Initialize admin HTTP server with shared state and host metadata.
+
+        Inputs:
+          - server_address: (host, port) tuple for the HTTP server bind.
+          - RequestHandlerClass: Request handler type.
+          - stats: Optional StatsCollector instance.
+          - config: Loaded configuration mapping.
+          - log_buffer: Optional RingBuffer for recent log entries.
+          - config_path: Optional path to the active YAML config file.
+
+        Outputs:
+          - None. The instance exposes attributes used by request handlers,
+            including cached hostname/ip values that are stable for the
+            lifetime of the process.
+        """
+
         super().__init__(server_address, RequestHandlerClass)
         self.stats = stats
         self.config = config
         self.log_buffer = log_buffer
         self.config_path = config_path
+
+        # Cache hostname and IP once; they are stable for the process lifetime
+        # and may be relatively expensive to resolve repeatedly in hot paths
+        # such as /stats.
+        try:
+            self.hostname = socket.gethostname()
+        except Exception:  # pragma: no cover - environment specific
+            self.hostname = "unknown-host"
+        try:
+            self.host_ip = socket.gethostbyname(self.hostname)
+        except Exception:  # pragma: no cover - environment specific
+            self.host_ip = "0.0.0.0"
 
 
 class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -1018,19 +1157,28 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         Inputs:
           - status_code: HTTP status code
-          - payload: JSON-serializable dict
+          - payload: Dict that will be converted to a JSON-safe structure.
         Outputs:
           - None
         """
 
-        body = json.dumps(payload).encode("utf-8")
+        safe_payload = _json_safe(payload)
+        body = json.dumps(safe_payload).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
         self._apply_cors_headers()
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            logger.warning(
+                "Client disconnected while sending JSON response for %s %s",
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return
 
     def _send_text(self, status_code: int, text: str) -> None:
         """Brief: Send plain-text response.
@@ -1049,7 +1197,15 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self._apply_cors_headers()
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            logger.warning(
+                "Client disconnected while sending text response for %s %s",
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return
 
     def _send_html(self, status_code: int, html_body: str) -> None:
         """Brief: Send HTML response.
@@ -1068,7 +1224,15 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self._apply_cors_headers()
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            logger.warning(
+                "Client disconnected while sending HTML response for %s %s",
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return
 
     def _require_auth(self) -> bool:
         """Brief: Enforce auth.mode=token semantics for protected endpoints.
@@ -1142,6 +1306,20 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         reset_raw = params.get("reset", ["false"])[0]
         reset = str(reset_raw).lower() in {"1", "true", "yes"}
         snap: StatsSnapshot = collector.snapshot(reset=reset)
+
+        server = self._server()
+        hostname = getattr(server, "hostname", "unknown-host")
+        host_ip = getattr(server, "host_ip", "0.0.0.0")
+
+        meta: Dict[str, Any] = {
+            "timestamp": snap.created_at,
+            "server_time": _utc_now_iso(),
+            "hostname": hostname,
+            "ip": host_ip,
+            "version": FOGHORN_VERSION,
+            "uptime": get_process_uptime_seconds(),
+        }
+
         payload: Dict[str, Any] = {
             "created_at": snap.created_at,
             "server_time": _utc_now_iso(),
@@ -1150,12 +1328,22 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             "qtypes": snap.qtypes,
             "uniques": snap.uniques,
             "upstreams": snap.upstreams,
+            "meta": meta,
             "top_clients": snap.top_clients,
             "top_subdomains": snap.top_subdomains,
             "top_domains": snap.top_domains,
             "latency": snap.latency_stats,
             "latency_recent": snap.latency_recent_stats,
             "system": get_system_info(),
+            "upstream_rcodes": snap.upstream_rcodes,
+            "upstream_qtypes": snap.upstream_qtypes,
+            "qtype_qnames": snap.qtype_qnames,
+            "rcode_domains": snap.rcode_domains,
+            "rcode_subdomains": snap.rcode_subdomains,
+            "cache_hit_domains": snap.cache_hit_domains,
+            "cache_miss_domains": snap.cache_miss_domains,
+            "cache_hit_subdomains": snap.cache_hit_subdomains,
+            "cache_miss_subdomains": snap.cache_miss_subdomains,
         }
         self._send_json(200, payload)
 
@@ -1256,7 +1444,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 raw_text = f.read()
-            raw_cfg = yaml.safe_load(raw_text) or {}
+                raw_cfg = yaml.safe_load(raw_text) or {}
         except Exception as exc:  # pragma: no cover - environment-specific
             self._send_json(
                 500,
@@ -1294,13 +1482,14 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             except ValueError:
                 limit = 100
             entries = buf.snapshot(limit=limit)
+
         self._send_json(
             200,
             {"server_time": _utc_now_iso(), "entries": entries},
         )
 
     def _handle_config_save(self, body: Dict[str, Any]) -> None:
-        """Brief: Handle POST /config/save to persist config and signal SIGUSR1.
+        """Brief: Handle POST /config/save to persist config and signal SIGUSR1 for plugins.
 
         Inputs:
           - body: Parsed JSON object representing full configuration mapping.
@@ -1331,37 +1520,62 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         cfg_path_abs = os.path.abspath(cfg_path)
-        cfg_dir = os.path.dirname(cfg_path_abs)
         ts = datetime.now(timezone.utc).isoformat().replace(":", "-")
-        backup_path = f"{cfg_path_abs}.bak.{ts}"
-        tmp_path = os.path.join(cfg_dir, f".tmp-{os.path.basename(cfg_path_abs)}-{ts}")
+        backup_path = f"{cfg_path_abs}-{ts}"
+        upload_path = f"{cfg_path_abs}.new"
 
         try:
+            # Validate request body
+            raw_yaml = body.get("raw_yaml")
+            if not isinstance(raw_yaml, str):
+                self._send_json(
+                    400,
+                    {
+                        "detail": "request body must include 'raw_yaml' string field",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+
+            # Validate YAML contents
+            res = yaml.safe_load(raw_yaml) or None
+
+            if not res or res is None:
+                self._send_json(
+                    400,
+                    {
+                        "detail": f"failed to parse YAML for {cfg_path_abs}",
+                        "server_time": _utc_now_iso(),
+                        "error": "empty or invalid YAML document",
+                    },
+                )
+                return
+
+            # Validated.  Now Backup the config.
             if os.path.exists(cfg_path_abs):
                 with open(cfg_path_abs, "rb") as src, open(backup_path, "wb") as dst:
                     dst.write(src.read())
 
-            yaml_text = yaml.safe_dump(
-                body,
-                default_flow_style=False,
-                sort_keys=False,
-                indent=2,
-                allow_unicode=True,
-            )
-            with open(tmp_path, "w", encoding="utf-8") as tmp:
-                tmp.write(yaml_text)
-            os.replace(tmp_path, cfg_path_abs)
+            # Upload and atomic move
+            with open(upload_path, "w", encoding="utf-8") as tmp:
+                tmp.write(raw_yaml)
+
+            os.replace(upload_path, cfg_path_abs)
         except Exception as exc:  # pragma: no cover
             try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
+                # Clean up after ourselves.
+                if os.path.exists(upload_path):
+                    os.remove(upload_path)
             except Exception:
                 pass
+
             self._send_json(
                 500,
                 {
-                    "detail": f"failed to write config to {cfg_path_abs}: {exc}",
+                    "detail": f" failed to update config: {exc}",
                     "server_time": _utc_now_iso(),
+                    "stats": "error",
+                    "error": str(exc),
                 },
             )
             return
@@ -1369,7 +1583,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         try:
             os.kill(os.getpid(), signal.SIGUSR1)
         except Exception as exc:  # pragma: no cover
-            logger.error("Failed to send SIGUSR1 after config save (threaded): %s", exc)
+            logger.error(
+                "Failed to send SIGUSR1 after config save (threaded) for plugin notification: %s",
+                exc,
+            )
 
         self._send_json(
             200,
@@ -1413,7 +1630,15 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self._apply_cors_headers()
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except BrokenPipeError:
+            logger.warning(
+                "Client disconnected while sending index.html for %s %s",
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return
 
     def _www_root(self) -> str:
         """Brief: Resolve absolute path to the html directory for static assets.
@@ -1463,7 +1688,16 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self._apply_cors_headers()
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except BrokenPipeError:
+            logger.warning(
+                "Client disconnected while sending static file %s for %s %s",
+                candidate,
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return True
         return True
 
     # ---------- HTTP verb handlers ----------
@@ -1563,7 +1797,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             msg = format % args
         except Exception:
             msg = format
-        logger.info("webserver HTTP: %s", msg)
+            logger.debug("webserver HTTP: %s", msg)
 
 
 def _start_admin_server_threaded(
@@ -1680,11 +1914,14 @@ class WebServerHandle:
                     shutdown = getattr(self._server, "shutdown", None)
                     if callable(shutdown):
                         shutdown()
+
                     close = getattr(self._server, "server_close", None)
                     if callable(close):
                         close()
                 except Exception:
                     logger.exception("Error while shutting down webserver instance")
+            # Always wait for the thread to exit, regardless of whether
+            # a server instance was attached or shutdown raised.
             self._thread.join(timeout=timeout)
         except Exception:
             logger.exception("Error while stopping webserver thread")
@@ -1724,12 +1961,23 @@ def start_webserver(
 
         loop = asyncio.new_event_loop()
         loop.close()
-    except PermissionError as exc:  # pragma: no cover
+
+    except PermissionError as exc:  # pragma: no cover - best effort
         logger.warning(
-            "Asyncio loop creation failed for admin webserver; falling back to threaded HTTP server: %s",
+            "Asyncio loop creation failed for admin webserver: %s falling back to threaded HTTP server.",
             exc,
         )
+        # Always disable asyncio path on PermissionError, regardless of whether
+        # we are running inside a container. This mirrors the DoH server logic
+        # and ensures we reliably use the threaded fallback when self-pipe
+        # creation is not permitted.
         can_use_asyncio = False
+        container_path = "/.dockerenv"
+        if os.path.exists(container_path):
+            logger.warning(
+                "Possible container permission issues. Update, check seccomp settings, or run with --privileged "
+            )
+            logger.warning("Now enjoy this exception I can do nothing about: \n")
     except Exception:
         can_use_asyncio = True
 
