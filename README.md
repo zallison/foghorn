@@ -8,6 +8,27 @@ With special thanks to Fiona Weatherwax for their contributions and inspiration.
 
 For developer documentation (architecture, transports, plugin internals, testing), see README-DEV.md.
 
+## Index
+
+- [Features](#features)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [Docker](#docker)
+  - [DNSSEC modes](#dnssec-modes)
+- [Configuration](#configuration)
+  - [`listen`](#listen)
+  - [`upstream`](#upstream)
+  - [`plugins`](#plugins)
+    - [AccessControlPlugin](#accesscontrolplugin)
+    - [NewDomainFilterPlugin](#newdomainfilterplugin)
+    - [UpstreamRouterPlugin](#upstreamrouterplugin)
+    - [FilterPlugin](#filterplugin)
+    - [ListDownloader plugin](#listdownloader-plugin)
+    - [CustomRecords plugin](#customrecords-plugin)
+  - [Complete `config.yaml` Example](#complete-configyaml-example)
+- [Logging](#logging)
+- [License](#license)
+
 ## Features
 
 *   **DNS Caching:** Speeds up DNS resolution by caching responses from upstream servers.
