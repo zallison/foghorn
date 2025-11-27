@@ -99,8 +99,9 @@
 				</div>
 			</div>
 			<div class="fh-warning" id="config-warning" style="display:hidden;">
-				<strong>Warning:</strong> Saving will overwrite <code>config.yaml</code> and trigger a live reload
-				(SIGUSR1).
+				<strong>Warning:</strong> Saving will overwrite <code>config.yaml</code>. Changes take effect
+				after the server is restarted; sending SIGUSR1/SIGUSR2 only notifies plugins and may reset
+				statistics when configured.
 			</div>
 
 			<div id="config-messages" class="fh-messages" aria-live="polite"></div>
