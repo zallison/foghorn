@@ -49,6 +49,7 @@ def test_sigusr1_resets_stats_and_notifies_plugins(monkeypatch, caplog):
         def snapshot(self, reset=False):
             if reset:
                 self.reset_called = True
+
             # Minimal object for compatibility with other code paths
             class S:  # pragma: no cover - structure only
                 totals = {}

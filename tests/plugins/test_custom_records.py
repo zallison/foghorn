@@ -28,7 +28,9 @@ def _make_query(name: str, qtype: int) -> bytes:
     return q.pack()
 
 
-def test_load_records_uniques_and_preserves_order_single_file(tmp_path: pathlib.Path) -> None:
+def test_load_records_uniques_and_preserves_order_single_file(
+    tmp_path: pathlib.Path,
+) -> None:
     """CustomRecords._load_records keeps first TTL and value order from a single file.
 
     Inputs:
@@ -65,7 +67,9 @@ def test_load_records_uniques_and_preserves_order_single_file(tmp_path: pathlib.
     assert values == ["1.1.1.1", "2.2.2.2"]
 
 
-def test_load_records_across_multiple_files_order_and_dedup(tmp_path: pathlib.Path) -> None:
+def test_load_records_across_multiple_files_order_and_dedup(
+    tmp_path: pathlib.Path,
+) -> None:
     """Values from multiple files are merged in config order with later dups dropped.
 
     Inputs:
@@ -292,7 +296,9 @@ def test_load_records_invalid_ttl_non_integer(tmp_path: pathlib.Path) -> None:
         plugin.setup()
 
 
-def test_load_records_qtype_fallback_to_get_int(monkeypatch, tmp_path: pathlib.Path) -> None:
+def test_load_records_qtype_fallback_to_get_int(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
     """Brief: _load_records uses QTYPE.get when getattr raises AttributeError.
 
     Inputs:
@@ -407,7 +413,9 @@ def test_pre_resolve_no_entry_and_no_lock(tmp_path: pathlib.Path) -> None:
     assert decision is None
 
 
-def test_pre_resolve_returns_none_when_rr_parsing_fails(monkeypatch, tmp_path: pathlib.Path) -> None:
+def test_pre_resolve_returns_none_when_rr_parsing_fails(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
     """Brief: pre_resolve returns None when RR.fromZone raises for all values.
 
     Inputs:
@@ -427,7 +435,19 @@ def test_pre_resolve_returns_none_when_rr_parsing_fails(monkeypatch, tmp_path: p
     plugin.setup()
 
     # Force RR.fromZone to fail so that no answers are added.
-    monkeypatch.setattr(mod, "RR", type("_RR", (), {"fromZone": staticmethod(lambda zone: (_ for _ in ()).throw(RuntimeError("bad")))}))
+    monkeypatch.setattr(
+        mod,
+        "RR",
+        type(
+            "_RR",
+            (),
+            {
+                "fromZone": staticmethod(
+                    lambda zone: (_ for _ in ()).throw(RuntimeError("bad"))
+                )
+            },
+        ),
+    )
 
     ctx = PluginContext(client_ip="127.0.0.1")
     req_bytes = _make_query("example.com", int(QTYPE.A))
@@ -436,7 +456,9 @@ def test_pre_resolve_returns_none_when_rr_parsing_fails(monkeypatch, tmp_path: p
     assert decision is None
 
 
-def test_watchdog_handler_should_reload_and_on_any_event(tmp_path: pathlib.Path) -> None:
+def test_watchdog_handler_should_reload_and_on_any_event(
+    tmp_path: pathlib.Path,
+) -> None:
     """Brief: _WatchdogHandler only reloads for matching file events.
 
     Inputs:
@@ -472,22 +494,34 @@ def test_watchdog_handler_should_reload_and_on_any_event(tmp_path: pathlib.Path)
     assert handler._should_reload(str(records_file), None) is True
 
     class Event:
-        def __init__(self, is_directory: bool, event_type: str, src_path: str | None = None, dest_path: str | None = None) -> None:
+        def __init__(
+            self,
+            is_directory: bool,
+            event_type: str,
+            src_path: str | None = None,
+            dest_path: str | None = None,
+        ) -> None:
             self.is_directory = is_directory
             self.event_type = event_type
             self.src_path = src_path
             self.dest_path = dest_path
 
     # Directory events are ignored.
-    handler.on_any_event(Event(is_directory=True, event_type="modified", src_path=str(records_file)))
+    handler.on_any_event(
+        Event(is_directory=True, event_type="modified", src_path=str(records_file))
+    )
     assert plugin.reloaded == 0
 
     # Unsupported event types are ignored.
-    handler.on_any_event(Event(is_directory=False, event_type="deleted", src_path=str(records_file)))
+    handler.on_any_event(
+        Event(is_directory=False, event_type="deleted", src_path=str(records_file))
+    )
     assert plugin.reloaded == 0
 
     # Supported event type with matching path triggers reload.
-    handler.on_any_event(Event(is_directory=False, event_type="modified", src_path=str(records_file)))
+    handler.on_any_event(
+        Event(is_directory=False, event_type="modified", src_path=str(records_file))
+    )
     assert plugin.reloaded == 1
 
 
@@ -575,7 +609,9 @@ def test_start_polling_variants(tmp_path: pathlib.Path) -> None:
     assert getattr(plugin2, "_poll_thread", None) is None
 
     # Proper configuration starts a polling thread.
-    plugin3 = CustomRecords(file_path=str(records_file), watchdog_poll_interval_seconds=0.01)
+    plugin3 = CustomRecords(
+        file_path=str(records_file), watchdog_poll_interval_seconds=0.01
+    )
     plugin3.setup()
     assert getattr(plugin3, "_poll_thread", None) is not None
     plugin3.close()
@@ -617,7 +653,9 @@ def test_poll_loop_early_return_and_iteration(tmp_path: pathlib.Path) -> None:
     plugin._poll_loop()
 
 
-def test_have_files_changed_tracks_snapshot(monkeypatch, tmp_path: pathlib.Path) -> None:
+def test_have_files_changed_tracks_snapshot(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
     """Brief: _have_files_changed builds snapshots and detects changes.
 
     Inputs:
@@ -660,7 +698,9 @@ def test_have_files_changed_tracks_snapshot(monkeypatch, tmp_path: pathlib.Path)
     assert plugin._have_files_changed() is False
 
 
-def test_schedule_debounced_reload_variants(monkeypatch, tmp_path: pathlib.Path) -> None:
+def test_schedule_debounced_reload_variants(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
     """Brief: _schedule_debounced_reload covers immediate, lock-less, and timer cases.
 
     Inputs:
@@ -749,7 +789,9 @@ def test_schedule_debounced_reload_variants(monkeypatch, tmp_path: pathlib.Path)
     assert calls["timer_cb"] == 1
 
 
-def test_reload_records_from_watchdog_deferred_and_immediate(monkeypatch, tmp_path: pathlib.Path) -> None:
+def test_reload_records_from_watchdog_deferred_and_immediate(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
     """Brief: _reload_records_from_watchdog both defers and immediately reloads.
 
     Inputs:
@@ -862,7 +904,9 @@ def test_close_stops_observer_polling_and_timers() -> None:
     assert plugin._reload_debounce_timer is None  # type: ignore[attr-defined]
 
 
-def test_setup_watchdog_enabled_flag_controls_start(monkeypatch, tmp_path: pathlib.Path) -> None:
+def test_setup_watchdog_enabled_flag_controls_start(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
     """Brief: setup() honours the watchdog_enabled configuration flag.
 
     Inputs:
