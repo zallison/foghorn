@@ -8,6 +8,7 @@ Outputs:
 """
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from foghorn.stats import StatsCollector, StatsSnapshot, StatsSQLiteStore
@@ -105,16 +106,13 @@ def test_sqlite_store_counts_increment_and_set(tmp_path: Path) -> None:
         store.set_count("totals", "total_queries", 10)
 
         # Verify via a direct sqlite3 query.
-        conn = sqlite3.connect(str(db_path))
-        try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT value FROM counts WHERE scope = ? AND key = ?",
                 ("totals", "total_queries"),
             )
             row = cur.fetchone()
-        finally:
-            conn.close()
     finally:
         store.close()
 
@@ -147,15 +145,12 @@ def test_sqlite_store_query_log_insert(tmp_path: Path) -> None:
             result_json='{"answers": []}',
         )
 
-        conn = sqlite3.connect(str(db_path))
-        try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT client_ip, name, qtype, upstream_id, rcode, status FROM query_log"
             )
             row = cur.fetchone()
-        finally:
-            conn.close()
     finally:
         store.close()
 
@@ -209,16 +204,13 @@ def test_sqlite_store_rebuild_counts_if_needed(tmp_path: Path) -> None:
         # At this point counts is empty; request rebuild.
         store.rebuild_counts_if_needed(force_rebuild=False)
 
-        conn = sqlite3.connect(str(db_path))
-        try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT value FROM counts WHERE scope = ? AND key = ?",
                 ("totals", "total_queries"),
             )
             total_row = cur.fetchone()
-        finally:
-            conn.close()
     finally:
         store.close()
 
