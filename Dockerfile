@@ -34,4 +34,4 @@ EXPOSE 8153
 EXPOSE 8053
 
 # Define the default command to run when the container starts
-CMD [ "foghorn --config /foghorn/config/config" ]
+CMD [ "/foghorn/entrypoint.sh" ]

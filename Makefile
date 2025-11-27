@@ -86,7 +86,7 @@ docker-clean:
 docker-run: docker-build
 	. ${VENV}/bin/activate
 	docker rm -f foghorn
-	docker run --name foghorn -v ${CONTAINER_DATA}:/foghorn/config -d -p 53:5333/udp -p 53:5333/tcp -p 8053:8053/tcp -p 801:1801/tcp -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker run --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ -d -p 53:5333/udp -p 53:5333/tcp -p 8053:8053/tcp -p 801:1801/tcp -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-logs
 docker-logs:
