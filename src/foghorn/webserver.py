@@ -22,6 +22,7 @@ import socket
 import threading
 import time
 import urllib.parse
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -583,7 +584,23 @@ def create_app(
     """
 
     web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
-    app = FastAPI(title="Foghorn Admin HTTP API")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """FastAPI lifespan context that installs the 2xx access-log suppression filter.
+
+        Inputs:
+          - app: FastAPI application instance.
+
+        Outputs:
+          - Async context manager that runs install_uvicorn_2xx_suppression() on startup
+            and yields control back to FastAPI for normal request handling.
+        """
+
+        install_uvicorn_2xx_suppression()
+        yield
+
+    app = FastAPI(title="Foghorn Admin HTTP API", lifespan=lifespan)
 
     # Allow configuration to tune the system info cache TTL used by
     # get_system_info(), while keeping a conservative default.
@@ -598,20 +615,6 @@ def create_app(
 
     # Derived paths for optional static assets
     www_root = resolve_www_root(config)
-
-    # Install default suppression of 2xx uvicorn access logs on startup so it
-    # applies both to embedded and external uvicorn usage.
-    @app.on_event("startup")
-    async def _install_logging_filter() -> None:
-        """FastAPI startup hook that installs the 2xx access-log suppression filter.
-
-        Inputs:
-          - None
-        Outputs:
-          - None (mutates global logging configuration).
-        """
-
-        install_uvicorn_2xx_suppression()
 
     # Attach shared state
     app.state.stats_collector = stats
@@ -846,7 +849,7 @@ def create_app(
 
     @app.post("/config/save", dependencies=[Depends(auth_dep)])
     async def save_config(body: Dict[str, Any]) -> Dict[str, Any]:
-        """Persist new configuration to disk and signal SIGUSR1 for reload.
+        """Persist new configuration to disk and signal SIGUSR1 for plugin notification.
 
         Inputs:
           - body: JSON object representing the full configuration mapping to
@@ -916,7 +919,7 @@ def create_app(
                 detail=f"failed to write config to {cfg_path_abs}: {exc}",
             ) from exc
 
-        # Signal main process to reload configuration
+        # Signal main process so plugins can react to the updated configuration
         try:
             os.kill(os.getpid(), signal.SIGUSR1)
         except Exception as exc:  # pragma: no cover - platform specific
@@ -1486,7 +1489,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _handle_config_save(self, body: Dict[str, Any]) -> None:
-        """Brief: Handle POST /config/save to persist config and signal SIGUSR1.
+        """Brief: Handle POST /config/save to persist config and signal SIGUSR1 for plugins.
 
         Inputs:
           - body: Parsed JSON object representing full configuration mapping.
@@ -1580,7 +1583,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         try:
             os.kill(os.getpid(), signal.SIGUSR1)
         except Exception as exc:  # pragma: no cover
-            logger.error("Failed to send SIGUSR1 after config save (threaded): %s", exc)
+            logger.error(
+                "Failed to send SIGUSR1 after config save (threaded) for plugin notification: %s",
+                exc,
+            )
 
         self._send_json(
             200,

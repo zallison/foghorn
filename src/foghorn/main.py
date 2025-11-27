@@ -383,7 +383,14 @@ def main(argv: List[str] | None = None) -> int:
                 """
                 if val is None:
                     return False
-                return str(val).strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+                return str(val).strip().lower() in {
+                    "1",
+                    "true",
+                    "t",
+                    "yes",
+                    "y",
+                    "on",
+                }  # pragma: nocover - best effort
 
             force_rebuild_cfg = bool(persistence_cfg.get("force_rebuild", False))
             force_rebuild_env = _is_truthy_env(os.getenv("FOGHORN_FORCE_REBUILD"))
@@ -480,209 +487,30 @@ def main(argv: List[str] | None = None) -> int:
         web_log_buffer = RingBuffer(capacity=buffer_size)
 
     # --- Signal handling (SIGUSR1/SIGUSR2) ---
-    # Use Events to coalesce multiple signals so that expensive work (config
-    # reload, stats reset, plugin notifications) is never running concurrently
-    # for the same signal type.
+    # Use Events to coalesce multiple signals so that expensive work (statistics
+    # reset and plugin notifications) is never running concurrently for the same
+    # signal type.
     _sigusr1_pending = threading.Event()
     _sigusr2_pending = threading.Event()
 
-    def _apply_runtime_config(new_cfg: dict) -> None:
-        """Apply runtime-safe settings from a freshly-loaded config mapping.
+    def _process_usr_signal(sig_label: str) -> None:
+        """Brief: Handle SIGUSR1/SIGUSR2 by optionally resetting statistics and
+        notifying plugins.
 
         Inputs:
-          - new_cfg: dict configuration just loaded
+          - sig_label: Human-readable signal label used in log messages (e.g.,
+            "SIGUSR1" or "SIGUSR2").
+
         Outputs:
           - None
 
         Notes:
-          - Reinitializes logging and DNSSEC knobs
-          - Manages StatsReporter per configuration changes without touching listeners
+          - Both SIGUSR1 and SIGUSR2 share the same behavior: when statistics
+            are enabled and the configuration flag sigusr2_resets_stats is
+            true, the in-memory statistics are reset. In all cases, active
+            plugins that implement handle_sigusr2() are notified.
         """
-        nonlocal stats_collector, stats_reporter, stats_persistence_store
-        # Re-init logging
-        init_logging(new_cfg.get("logging"))
-        # Apply DNSSEC/EDNS knobs to UDP handler
-        dnssec_cfg = new_cfg.get("dnssec", {}) or {}
-        try:
-            from . import server as _server_mod
 
-            _server_mod.DNSUDPHandler.dnssec_mode = str(
-                dnssec_cfg.get("mode", "ignore")
-            ).lower()
-            _server_mod.DNSUDPHandler.edns_udp_payload = max(
-                512, int(dnssec_cfg.get("udp_payload_size", 1232))
-            )
-            _server_mod.DNSUDPHandler.dnssec_validation = str(
-                dnssec_cfg.get("validation", "upstream_ad")
-            ).lower()
-        except Exception:
-            pass
-
-        # Stats management: we intentionally avoid touching the DNS listeners
-        # here. Only logging and StatsCollector/StatsReporter wiring are
-        # updated so that long-lived sockets are unaffected by reloads.
-        s_cfg = new_cfg.get("statistics", {}) or {}
-        s_enabled = bool(s_cfg.get("enabled", False))
-
-        # Refresh display-only ignore filters for top lists on reload.
-        ignore_cfg = s_cfg.get("ignore", {}) or {}
-        ignore_top_clients = list(ignore_cfg.get("top_clients", []) or [])
-        ignore_top_domains = list(ignore_cfg.get("top_domains", []) or [])
-        ignore_top_subdomains = list(ignore_cfg.get("top_subdomains", []) or [])
-        domains_mode = str(ignore_cfg.get("top_domains_mode", "exact")).lower()
-        subdomains_mode = str(ignore_cfg.get("top_subdomains_mode", "exact")).lower()
-        ignore_domains_as_suffix = domains_mode == "suffix"
-        ignore_subdomains_as_suffix = subdomains_mode == "suffix"
-        ignore_single_host = bool(ignore_cfg.get("ignore_single_host", False))
-        if stats_collector is not None:
-            try:
-                stats_collector.set_ignore_filters(
-                    ignore_top_clients,
-                    ignore_top_domains,
-                    ignore_top_subdomains,
-                    domains_as_suffix=ignore_domains_as_suffix,
-                    subdomains_as_suffix=ignore_subdomains_as_suffix,
-                )
-                # Apply ignore_single_host as a simple attribute toggle on reload.
-                stats_collector.ignore_single_host = bool(ignore_single_host)
-            except Exception:  # pragma: no cover - defensive
-                logging.getLogger("foghorn.main").error(
-                    "Failed to apply statistics ignore filters on reload", exc_info=True
-                )
-
-        # Start/stop reporter based on enabled flag
-        if not s_enabled:
-            if stats_reporter is not None:
-                logging.getLogger("foghorn.main").info(
-                    "Disabling statistics reporter per reload"
-                )
-                try:
-                    stats_reporter.stop()
-                finally:
-                    stats_reporter = None
-            # keep collector instance to allow later re-enable, but it will be unused
-        else:
-            # Ensure we have a collector
-            if stats_collector is None:
-                stats_collector = StatsCollector(
-                    track_uniques=s_cfg.get("track_uniques", True),
-                    include_qtype_breakdown=s_cfg.get("include_qtype_breakdown", True),
-                    include_top_clients=bool(s_cfg.get("include_top_clients", True)),
-                    include_top_domains=bool(s_cfg.get("include_top_domains", True)),
-                    top_n=int(s_cfg.get("top_n", 10)),
-                    track_latency=bool(s_cfg.get("track_latency", True)),
-                )
-            # Recreate reporter if settings changed or reporter missing
-            need_restart = False
-            if stats_reporter is None:
-                need_restart = True
-            else:
-                # If interval/reset_on_log/log_level differ, restart
-                try:
-                    # Default to 300s (5 minutes) when interval_seconds is not provided.
-                    interval_seconds = int(s_cfg.get("interval_seconds", 300))
-                    reset_on_log = bool(s_cfg.get("reset_on_log", False))
-                    # log_level = str(s_cfg.get("log_level", "info"))
-                    if (
-                        stats_reporter.interval_seconds != max(1, interval_seconds)
-                        or stats_reporter.log_level
-                        != logging.getLogger().getEffectiveLevel()  # rough check
-                        or reset_on_log != stats_reporter.reset_on_log
-                    ):
-                        need_restart = True
-                except Exception:
-                    need_restart = True
-            if need_restart:
-                if stats_reporter is not None:
-                    try:
-                        stats_reporter.stop()
-                    except Exception:
-                        pass
-                stats_reporter = StatsReporter(
-                    collector=stats_collector,
-                    interval_seconds=int(s_cfg.get("interval_seconds", 300)),
-                    reset_on_log=bool(s_cfg.get("reset_on_log", False)),
-                    log_level=str(s_cfg.get("log_level", "info")),
-                    persistence_store=stats_persistence_store,
-                )
-                stats_reporter.start()
-
-    def _process_sigusr1() -> None:
-        """
-        Brief: Handle SIGUSR1 by reloading config, re-applying runtime settings, and optionally logging and resetting statistics.
-
-        Inputs: none
-        Outputs: none
-
-        Example:
-            >>> # Internal use; invoked by signal handler thread
-        """
-        nonlocal cfg, stats_collector, stats_reporter
-        logger = logging.getLogger("foghorn.main")
-        try:
-            with open(cfg_path, "r") as f:
-                new_cfg = yaml.safe_load(f) or {}
-        except Exception as e:
-            logger.error("SIGUSR1: failed to read config %s: %s", cfg_path, e)
-            return
-        # Apply runtime config (logging, DNSSEC, reporter)
-        _apply_runtime_config(new_cfg)
-        # Handle statistics reset if enabled and configured. This is only
-        # invoked on successful reload and only when explicitly requested via
-        # statistics.reset_on_sigusr1.
-        s_cfg = new_cfg.get("statistics", {}) or {}
-        if bool(s_cfg.get("enabled", False)) and bool(
-            s_cfg.get("reset_on_sigusr1", False)
-        ):
-            if stats_collector is not None:
-                try:
-                    # Log snapshot then reset
-                    snap = stats_collector.snapshot(reset=False)
-                    json_line = format_snapshot_json(snap)
-                    logging.getLogger("foghorn.stats").info(json_line)
-                    # Now reset
-                    stats_collector.snapshot(reset=True)
-                    logger.info("SIGUSR1: statistics reset completed")
-                except Exception as e:
-                    logger.error(
-                        "SIGUSR1: error during statistics snapshot/reset: %s", e
-                    )
-        else:
-            logger.info(
-                "SIGUSR1: statistics reset skipped (disabled or reset_on_sigusr1 not set)"
-            )
-        # Replace current cfg
-        cfg = new_cfg
-
-    def _sigusr1_handler(_signum, _frame):
-        # coalesce multiple signals
-        if _sigusr1_pending.is_set():
-            return
-        _sigusr1_pending.set()
-        try:
-            _process_sigusr1()
-        finally:
-            _sigusr1_pending.clear()
-
-    # Register handlers (Unix only)
-    try:
-        signal.signal(signal.SIGUSR1, _sigusr1_handler)
-        logger.info(
-            "Installed SIGUSR1 handler for config reload and optional stats reset"
-        )
-    except Exception:
-        logger.warning("Could not install SIGUSR1 handler on this platform")
-
-    def _process_sigusr2() -> None:
-        """
-        Brief: Handle SIGUSR2 by optionally resetting statistics and invoking handle_sigusr2() on all active plugins.
-
-        Inputs: none
-        Outputs: none
-
-        Example:
-            >>> # Internal use; invoked by signal handler thread
-        """
         nonlocal cfg, stats_collector
         log = logging.getLogger("foghorn.main")
 
@@ -690,24 +518,38 @@ def main(argv: List[str] | None = None) -> int:
         # never prevent plugin notifications from running.
         try:
             s_cfg = (cfg.get("statistics") or {}) if isinstance(cfg, dict) else {}
-            if bool(s_cfg.get("enabled", False)) and bool(
-                s_cfg.get("sigusr2_resets_stats", False)
-            ):
+            enabled = bool(s_cfg.get("enabled", False))
+            # reset_on_sigusr1 is treated as a backwards-compatible alias for
+            # sigusr2_resets_stats so existing configs continue to work.
+            reset_flag = bool(
+                s_cfg.get(
+                    "sigusr2_resets_stats",
+                    s_cfg.get("reset_on_sigusr1", False),
+                )
+            )
+            if enabled and reset_flag:
                 if stats_collector is not None:
                     try:
                         stats_collector.snapshot(reset=True)
-                        log.info("SIGUSR2: statistics reset completed")
-                    except Exception as e:
-                        log.error("SIGUSR2: error during statistics reset: %s", e)
+                        log.info("%s: statistics reset completed", sig_label)
+                    except Exception as e:  # pragma: no cover - defensive
+                        log.error("%s: error during statistics reset: %s", sig_label, e)
                 else:
-                    log.info("SIGUSR2: no statistics collector active, skipping reset")
+                    log.info(
+                        "%s: no statistics collector active, skipping reset", sig_label
+                    )
             else:
                 log.info(
-                    "SIGUSR2: statistics reset skipped (disabled or sigusr2_resets_stats not set)"
+                    "%s: statistics reset skipped (disabled or sigusr2_resets_stats not set)",
+                    sig_label,
                 )
-        except Exception as e:  # defensive: do not block plugin notifications
+        except (
+            Exception
+        ) as e:  # pragma: nocover - defensive: do not block plugin notifications
             log.error(
-                "SIGUSR2: unexpected error checking statistics reset config: %s", e
+                "%s: unexpected error checking statistics reset config: %s",
+                sig_label,
+                e,
             )
 
         # Invoke plugin handlers. Each plugin can optionally expose
@@ -721,24 +563,48 @@ def main(argv: List[str] | None = None) -> int:
                 if callable(handler):
                     handler()
                     count += 1
-            except Exception as e:
+            except Exception as e:  # pragma: no cover - defensive
                 log.error(
-                    "SIGUSR2: plugin %s handler error: %s", p.__class__.__name__, e
+                    "%s: plugin %s handler error: %s",
+                    sig_label,
+                    p.__class__.__name__,
+                    e,
                 )
-        log.info("SIGUSR2: invoked handle_sigusr2 on %d plugins", count)
+        log.info("%s: invoked handle_sigusr2 on %d plugins", sig_label, count)
+
+    def _sigusr1_handler(_signum, _frame):
+        # coalesce multiple signals
+        if _sigusr1_pending.is_set():
+            return
+        _sigusr1_pending.set()
+        try:
+            _process_usr_signal("SIGUSR1")
+        finally:
+            _sigusr1_pending.clear()
 
     def _sigusr2_handler(_signum, _frame):
         if _sigusr2_pending.is_set():
             return
         _sigusr2_pending.set()
         try:
-            _process_sigusr2()
+            _process_usr_signal("SIGUSR2")
         finally:
             _sigusr2_pending.clear()
 
+    # Register handlers (Unix only)
+    try:
+        signal.signal(signal.SIGUSR1, _sigusr1_handler)
+        logger.info(
+            "Installed SIGUSR1 handler to notify plugins and optionally reset statistics"
+        )
+    except Exception:
+        logger.warning("Could not install SIGUSR1 handler on this platform")
+
     try:
         signal.signal(signal.SIGUSR2, _sigusr2_handler)
-        logger.info("Installed SIGUSR2 handler to notify plugins")
+        logger.info(
+            "Installed SIGUSR2 handler to notify plugins and optionally reset statistics"
+        )
     except Exception:
         logger.warning("Could not install SIGUSR2 handler on this platform")
 
