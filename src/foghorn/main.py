@@ -383,14 +383,7 @@ def main(argv: List[str] | None = None) -> int:
                 """
                 if val is None:
                     return False
-                return str(val).strip().lower() in {
-                    "1",
-                    "true",
-                    "t",
-                    "yes",
-                    "y",
-                    "on",
-                }  # pragma: nocover - best effort
+                return str(val).strip().lower() in {"1", "true", "t", "yes", "y", "on"} # pragma: nocover - best effort
 
             force_rebuild_cfg = bool(persistence_cfg.get("force_rebuild", False))
             force_rebuild_env = _is_truthy_env(os.getenv("FOGHORN_FORCE_REBUILD"))
@@ -533,7 +526,9 @@ def main(argv: List[str] | None = None) -> int:
                         stats_collector.snapshot(reset=True)
                         log.info("%s: statistics reset completed", sig_label)
                     except Exception as e:  # pragma: no cover - defensive
-                        log.error("%s: error during statistics reset: %s", sig_label, e)
+                        log.error(
+                            "%s: error during statistics reset: %s", sig_label, e
+                        )
                 else:
                     log.info(
                         "%s: no statistics collector active, skipping reset", sig_label
@@ -543,9 +538,7 @@ def main(argv: List[str] | None = None) -> int:
                     "%s: statistics reset skipped (disabled or sigusr2_resets_stats not set)",
                     sig_label,
                 )
-        except (
-            Exception
-        ) as e:  # pragma: nocover - defensive: do not block plugin notifications
+        except Exception as e:  # pragma: nocover - defensive: do not block plugin notifications
             log.error(
                 "%s: unexpected error checking statistics reset config: %s",
                 sig_label,

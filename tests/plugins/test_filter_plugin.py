@@ -155,9 +155,7 @@ def test_post_resolve_deny_overrides_remove_and_replace_paths(tmp_path):
 
     with closing(p.conn):
         # Deny path (presence of a deny IP causes overall deny)
-        resp = _mk_response_with_ips(
-            "ex.com", [("A", "1.2.3.4", 60), ("A", "9.9.9.9", 60)]
-        )
+        resp = _mk_response_with_ips("ex.com", [("A", "1.2.3.4", 60), ("A", "9.9.9.9", 60)])
         dec = p.post_resolve("ex.com", QTYPE.A, resp, ctx)
         assert isinstance(dec, PluginDecision) and dec.action == "deny"
 
@@ -263,16 +261,9 @@ def test_add_to_cache_and_get_ip_action(tmp_path):
 
         # _get_ip_action checks exact then networks
         plugin.blocked_ips[ipaddress.ip_address("1.2.3.4")] = {"action": "deny"}
-        plugin.blocked_networks[ipaddress.ip_network("10.0.0.0/8")] = {
-            "action": "remove"
-        }
-        assert (
-            plugin._get_ip_action(ipaddress.ip_address("1.2.3.4"))["action"] == "deny"
-        )
-        assert (
-            plugin._get_ip_action(ipaddress.ip_address("10.1.2.3"))["action"]
-            == "remove"
-        )
+        plugin.blocked_networks[ipaddress.ip_network("10.0.0.0/8")] = {"action": "remove"}
+        assert plugin._get_ip_action(ipaddress.ip_address("1.2.3.4"))["action"] == "deny"
+        assert plugin._get_ip_action(ipaddress.ip_address("10.1.2.3"))["action"] == "remove"
         # Non-matching IP returns None
         assert plugin._get_ip_action(ipaddress.ip_address("192.0.2.1")) is None
 
@@ -407,9 +398,7 @@ def test_add_to_cache_error_logs(tmp_path, monkeypatch, caplog):
 
     with closing(plugin.conn):
         plugin.add_to_cache("x.com", True)
-        assert any(
-            "exception adding to cache" in r.getMessage() for r in caplog.records
-        )
+        assert any("exception adding to cache" in r.getMessage() for r in caplog.records)
 
 
 def test_pre_resolve_cached_allow_returns_none(tmp_path):
