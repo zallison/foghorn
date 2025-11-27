@@ -10,6 +10,8 @@ Outputs:
 
 import logging
 
+from dnslib import DNSRecord, QTYPE
+
 from foghorn.plugins.base import (
     BasePlugin,
     PluginContext,
@@ -338,6 +340,35 @@ def test_inheritable_ttl_cache_per_class_and_ttl(monkeypatch):
     assert a.calls == 2
 
 
+def test_inheritable_ttl_cache_default_key_uses_args_and_kwargs():
+    """Brief: inheritable_ttl_cache without keyfunc uses (args, sorted kwargs) as key.
+
+    Inputs:
+      - None; defines a dummy class with a cached method using kwargs.
+
+    Outputs:
+      - None; asserts method is only invoked once for identical args/kwargs.
+    """
+
+    class Dummy:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        @inheritable_ttl_cache()
+        def compute(self, x: int, scale: int = 1) -> int:
+            self.calls += 1
+            return x * scale
+
+    d = Dummy()
+    # First call populates cache and executes underlying method.
+    assert d.compute(2, scale=3) == 6
+    assert d.calls == 1
+
+    # Second call with same args/kwargs reuses cached value (hits default key path).
+    assert d.compute(2, scale=3) == 6
+    assert d.calls == 1
+
+
 def test_baseplugin_cache_wrapper_uses_inheritable_ttl_cache():
     """Brief: BasePlugin.cache decorator applies inheritable_ttl_cache to methods.
 
@@ -364,3 +395,131 @@ def test_baseplugin_cache_wrapper_uses_inheritable_ttl_cache():
     # Second call with same arg hits cache
     assert p.compute(2) == 6
     assert p.calls == 1
+
+
+def test_base_plugin_handle_sigusr2_default_noop():
+    """Brief: Default handle_sigusr2 implementation is a no-op that returns None.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts method returns None and does not raise.
+    """
+    plugin = BasePlugin()
+    assert plugin.handle_sigusr2() is None
+
+
+def test_base_plugin_setup_default_noop():
+    """Brief: Default setup implementation is a no-op that returns None.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts setup() returns None and does not raise.
+    """
+    plugin = BasePlugin()
+    assert plugin.setup() is None
+
+
+def _make_raw_query(name: str, qtype: int) -> bytes:
+    """Brief: Helper to construct a minimal DNS query wire for BasePlugin tests.
+
+    Inputs:
+      - name: Domain name to query.
+      - qtype: Numeric QTYPE code.
+
+    Outputs:
+      - bytes: Packed DNS query suitable for BasePlugin._make_a_response.
+    """
+    qtype_name = QTYPE.get(qtype, str(qtype))
+    query = DNSRecord.question(name, qtype=qtype_name)
+    return query.pack()
+
+
+def test_make_a_response_parse_failure_returns_none():
+    """Brief: _make_a_response returns None when DNSRecord.parse raises.
+
+    Inputs:
+      - None; uses deliberately invalid raw request bytes.
+
+    Outputs:
+      - None; asserts that a parse error path returns None.
+    """
+    plugin = BasePlugin()
+    # Call setup() to mirror plugin lifecycle expectations.
+    plugin.setup()
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    result = plugin._make_a_response(
+        qname="example.com",
+        query_type=int(QTYPE.A),
+        raw_req=b"not-a-valid-dns-packet",
+        ctx=ctx,
+        ipaddr="1.2.3.4",
+    )
+    assert result is None
+
+
+def test_make_a_response_builds_a_record_with_custom_ttl():
+    """Brief: _make_a_response builds an A record answer using self._ttl.
+
+    Inputs:
+      - None; constructs a valid A query and uses a fake _ttl value.
+
+    Outputs:
+      - None; asserts A record IP and TTL match expected values.
+    """
+    plugin = BasePlugin()
+    plugin.setup()
+    # Inject a custom TTL so we can assert it.
+    plugin._ttl = 123  # type: ignore[assignment]
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    raw_req = _make_raw_query("a.example", int(QTYPE.A))
+    wire = plugin._make_a_response(
+        qname="a.example",
+        query_type=int(QTYPE.A),
+        raw_req=raw_req,
+        ctx=ctx,
+        ipaddr="5.6.7.8",
+    )
+    assert wire is not None
+
+    response = DNSRecord.parse(wire)
+    answers = [rr for rr in response.rr if rr.rtype == QTYPE.A]
+    assert len(answers) == 1
+    assert str(answers[0].rdata) == "5.6.7.8"
+    assert answers[0].ttl == 123
+
+
+def test_make_a_response_builds_aaaa_record_with_fixed_ttl():
+    """Brief: _make_a_response builds an AAAA record answer with fixed TTL 60.
+
+    Inputs:
+      - None; constructs a valid AAAA query.
+
+    Outputs:
+      - None; asserts AAAA record IP and TTL use the hard-coded value.
+    """
+    plugin = BasePlugin()
+    plugin.setup()
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    raw_req = _make_raw_query("aaaa.example", int(QTYPE.AAAA))
+    wire = plugin._make_a_response(
+        qname="aaaa.example",
+        query_type=int(QTYPE.AAAA),
+        raw_req=raw_req,
+        ctx=ctx,
+        ipaddr="2001:db8::1",
+    )
+    assert wire is not None
+
+    response = DNSRecord.parse(wire)
+    answers = [rr for rr in response.rr if rr.rtype == QTYPE.AAAA]
+    assert len(answers) == 1
+    assert str(answers[0].rdata) == "2001:db8::1"
+    # TTL for AAAA answers is hard-coded to 60 seconds in _make_a_response.
+    assert answers[0].ttl == 60
