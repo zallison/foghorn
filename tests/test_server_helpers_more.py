@@ -303,8 +303,9 @@ def test_forward_with_failover_helper_delegates(monkeypatch):
     q = DNSRecord.question("example.com", "A")
     h = object.__new__(DNSUDPHandler)
     h.timeout_ms = 123
-    out = DNSUDPHandler._forward_with_failover_helper(h, q, [1], "ex", 1)
-    assert out[2] == "ok" and called["args"] == ([1], 123, "ex", 1)
+    upstreams = [{"host": "u1", "port": 53}]
+    out = DNSUDPHandler._forward_with_failover_helper(h, q, upstreams, "ex", 1)
+    assert out[2] == "ok" and called["args"] == (upstreams, 123, "ex", 1)
 
 
 def test_choose_upstreams_logs_when_empty(caplog):
