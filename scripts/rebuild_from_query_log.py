@@ -21,230 +21,16 @@ Behavior:
 
 import argparse
 import logging
-import sqlite3
 import sys
 from typing import Iterable, Optional
+
+from foghorn.stats import StatsSQLiteStore
 
 logger = logging.getLogger(__name__)
 
 
-def normalize_domain(domain: str) -> str:
-    """Brief: Normalize domain name for aggregation.
-
-    Inputs:
-        domain: Raw domain string (may have trailing dot, mixed case, etc.).
-
-    Outputs:
-        str: Lowercase domain without trailing dot.
-    """
-    return (domain or "").rstrip(".").lower()
-
-
-def increment_local(
-    conn: sqlite3.Connection,
-    sql: str,
-    scope: str,
-    key: str,
-    delta: int = 1,
-) -> None:
-    """Brief: Increment an aggregate counter row in `counts`.
-
-    Inputs:
-        conn: Open sqlite3.Connection, inside an explicit transaction.
-        sql:  Prepared SQL string using INSERT ... ON CONFLICT ... DO UPDATE.
-        scope: Logical scope name (e.g. "totals", "qtypes", "upstreams").
-        key:   Counter key string within the scope.
-        delta: Increment value (integer, may be negative if needed).
-
-    Outputs:
-        None; executes a single SQL statement against `counts`.
-    """
-    if not scope or not key:
-        return
-    conn.execute(sql, (scope, key, int(delta)))
-
-
-def rebuild_counts_from_query_log(conn: sqlite3.Connection) -> None:
-    """Brief: Rebuild `counts` by aggregating all rows from `query_log`.
-
-    Inputs:
-        conn: sqlite3.Connection with an active transaction.
-
-    Outputs:
-        None; mutates the `counts` table in-place.
-
-    Notes:
-        - Assumes `BEGIN EXCLUSIVE` (or other write transaction) has already been
-          executed on the connection.
-        - Clears `counts` before recomputing.
-        - Aggregation logic mirrors Foghorn's in-process behavior:
-          * totals.total_queries
-          * totals.cache_hits / totals.cache_misses
-          * qtypes.<qtype>
-          * clients.<client_ip>
-          * sub_domains.<full_domain>, domains.<base_domain>
-          * rcodes.<rcode>
-          * upstreams."upstream_id|outcome|rcode"
-          * qtype_qnames."qtype|normalized_qname" for all observed qtypes
-    """
-    # Clear existing counts to start from a clean slate.
-    conn.execute("DELETE FROM counts")
-
-    # Single prepared statement reused for all increments.
-    insert_sql = (
-        "INSERT INTO counts (scope, key, value) "
-        "VALUES (?, ?, ?) "
-        "ON CONFLICT(scope, key) DO UPDATE SET value = counts.value + excluded.value"
-    )
-
-    cur = conn.execute(
-        """
-        SELECT
-            client_ip,
-            name,
-            qtype,
-            upstream_id,
-            rcode,
-            status,
-            error
-        FROM query_log
-        """
-    )
-
-    for (
-        client_ip,
-        name,
-        qtype,
-        upstream_id,
-        rcode,
-        status,
-        error,  # noqa: F841  (error is unused but kept for parity)
-    ) in cur:  # type: ignore[misc]
-        # Normalize domain and compute base domain (last two labels).
-        domain = normalize_domain(name or "")
-        parts = domain.split(".") if domain else []
-        base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
-
-        # Total queries
-        increment_local(conn, insert_sql, "totals", "total_queries", 1)
-
-        # Cache hits/misses/cache_null (best-effort approximation).
-        # These semantics mirror the live StatsCollector behavior:
-        # - "cache_hit" rows are treated as cache hits.
-        # - Pre-plugin deny/override rows ("deny_pre"/"override_pre")
-        #   are treated as "cache_null" since no cache lookup occurs.
-        # - All other statuses are treated as cache misses.
-
-        upstream_str: Optional[str] = None
-        if upstream_id:
-            upstream_str = str(upstream_id)
-
-        status_str = str(status) if status is not None else None
-        if status_str == "cache_hit":
-            increment_local(conn, insert_sql, "totals", "cache_hits", 1)
-        elif status_str in ("deny_pre", "override_pre"):
-            increment_local(conn, insert_sql, "totals", "cache_null", 1)
-            increment_local(conn, insert_sql, "cache_null", status_str, 1)
-        else:
-            increment_local(conn, insert_sql, "totals", "cache_misses", 1)
-
-        # Per-outcome cache-domain aggregates using base domains when
-        # available so that warm-loaded top lists align with the
-        # in-process StatsCollector tracking.
-        if base:
-            if status_str == "cache_hit":
-                increment_local(conn, insert_sql, "cache_hit_domains", base, 1)
-                if domain and domain != base:
-                    increment_local(
-                        conn,
-                        insert_sql,
-                        "cache_hit_subdomains",
-                        base,
-                        1,
-                    )
-            elif status_str not in ("deny_pre", "override_pre"):
-                if domain and domain != base:
-                    increment_local(
-                        conn,
-                        insert_sql,
-                        "cache_miss_subdomains",
-                        base,
-                        1,
-                    )
-                increment_local(conn, insert_sql, "cache_miss_domains", base, 1)
-
-        # Qtype breakdown
-        if qtype:
-            increment_local(conn, insert_sql, "qtypes", str(qtype), 1)
-
-        # Clients
-        if client_ip:
-            increment_local(conn, insert_sql, "clients", str(client_ip), 1)
-
-        # Domains and subdomains: only treat names that satisfy the subdomain
-        # label rules as subdomains for aggregation purposes:
-        #   - At least three labels in general (e.g., www.example.com)
-        #   - At least four labels for names under *.co.uk (e.g.,
-        #     www.example.co.uk), so example.co.uk itself is not counted as a
-        #     subdomain.
-        if domain:
-            labels = domain.split(".")
-            is_sub = False
-            if len(labels) >= 3:
-                if labels[-2:] == ["co", "uk"]:
-                    is_sub = len(labels) >= 4
-                else:
-                    is_sub = True
-            if is_sub:
-                increment_local(conn, insert_sql, "sub_domains", domain, 1)
-            if base:
-                increment_local(conn, insert_sql, "domains", base, 1)
-
-        # Per-qtype domain counters for all qtypes.
-        if domain and qtype:
-            key = f"{qtype}|{domain}"
-            increment_local(conn, insert_sql, "qtype_qnames", key, 1)
-
-        # Rcodes
-        if rcode:
-            increment_local(conn, insert_sql, "rcodes", str(rcode), 1)
-            if base:
-                key = f"{rcode}|{base}"
-                increment_local(conn, insert_sql, "rcode_domains", key, 1)
-                if domain and domain != base:
-                    increment_local(
-                        conn,
-                        insert_sql,
-                        "rcode_subdomains",
-                        key,
-                        1,
-                    )
-
-        # Upstreams: include outcome and rcode in the key, and track qtype.
-        if upstream_id:
-            upstream_str = str(upstream_id)
-
-            # Approximate outcome classification from status/rcode.
-            rcode_str = str(rcode) if rcode is not None else "UNKNOWN"
-            outcome = "success"
-            if rcode_str != "NOERROR" or (
-                status_str and status_str not in ("ok", "cache_hit")
-            ):
-                outcome = status_str or "fatalError"
-
-            upstream_key = f"{upstream_str}|{outcome}|{rcode_str}"
-            increment_local(conn, insert_sql, "upstreams", upstream_key, 1)
-
-            # Per-upstream qtype breakdown: "upstream_id|qtype".
-            if qtype:
-                upstream_qtype_key = f"{upstream_str}|{qtype}"
-                increment_local(
-                    conn, insert_sql, "upstream_qtypes", upstream_qtype_key, 1
-                )
-
-
 def run_rebuild(db_path: str) -> None:
-    """Brief: Open the SQLite DB, lock it, and rebuild counts.
+    """Brief: Rebuild counts by delegating to StatsSQLiteStore helper.
 
     Inputs:
         db_path: Filesystem path to the SQLite stats database file.
@@ -253,33 +39,16 @@ def run_rebuild(db_path: str) -> None:
         None; raises on failure.
 
     Behavior:
-        - Connects in autocommit mode (isolation_level=None).
-        - Applies PRAGMA journal_mode=WAL on a best-effort basis.
-        - Executes BEGIN EXCLUSIVE to lock the database for writes while
-          rebuilding.
-        - Commits on success, rolls back on any exception.
+        - Opens the stats database using StatsSQLiteStore.
+        - Invokes StatsSQLiteStore.rebuild_counts_from_query_log so the script
+          uses the same aggregation logic as the live server.
+        - Ensures the underlying connection is closed on completion.
     """
-    # isolation_level=None puts the connection in autocommit mode so we can
-    # manage transactions manually with explicit BEGIN/COMMIT/ROLLBACK.
-    conn = sqlite3.connect(db_path, isolation_level=None)
+    store = StatsSQLiteStore(db_path=db_path)
     try:
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-        except Exception:
-            # Best-effort; do not fail the rebuild if PRAGMA is unsupported.
-            logger.debug("Failed to set journal_mode=WAL", exc_info=True)
-
-        # Acquire an exclusive write transaction; this effectively locks the DB
-        # while we rebuild counts.
-        conn.execute("BEGIN EXCLUSIVE TRANSACTION")
-        try:
-            rebuild_counts_from_query_log(conn)
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
+        store.rebuild_counts_from_query_log(logger_obj=logger)
     finally:
-        conn.close()
+        store.close()
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
