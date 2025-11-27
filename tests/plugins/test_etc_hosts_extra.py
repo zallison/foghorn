@@ -10,6 +10,7 @@ Outputs:
 
 import importlib
 import threading
+import os
 
 from dnslib import QTYPE, DNSRecord
 
@@ -94,6 +95,38 @@ def test_load_hosts_without_lock_sets_mapping(tmp_path):
     # _load_hosts should fall back to assigning self.hosts directly.
     plugin._load_hosts()
     assert plugin.hosts["no.lock.local"] == "10.0.0.1"
+
+
+def test_load_hosts_valueerror_in_reverse_mapping_is_ignored(tmp_path):
+    """Brief: _load_hosts handles ValueError when building reverse mapping.
+
+    Inputs:
+      - tmp_path: Temporary directory for a crafted hosts file.
+
+    Outputs:
+      - None; asserts that a ValueError during reverse mapping does not break loading.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    EtcHosts = mod.EtcHosts
+
+    hosts_file = tmp_path / "hosts"
+    # Use a Unicode digit in the second octet: isdigit() returns True, but int() fails,
+    # triggering the ValueError path in reverse mapping without patching builtins.
+    hosts_file.write_text(
+        "10.0.0.1 ok.local\n1.①.2.3 bad.local\n",
+        encoding="utf-8",
+    )
+
+    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin.setup()
+
+    # Forward mappings are still populated.
+    assert plugin.hosts["ok.local"] == "10.0.0.1"
+    assert plugin.hosts["bad.local"] == "1.①.2.3"
+
+    # Reverse mapping for the malformed IPv4 is not created due to ValueError.
+    assert "3.2.①.1.in-addr.arpa" not in plugin.hosts
 
 
 def test_pre_resolve_without_lock_uses_plain_hosts_lookup():
@@ -182,6 +215,32 @@ def test_start_watchdog_no_observer_logs_warning(monkeypatch, tmp_path, caplog):
     )
 
 
+def test_start_watchdog_with_no_directories(monkeypatch):
+    """Brief: _start_watchdog returns early when there are no directories to watch.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that _observer stays None when file_paths is empty.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    EtcHosts = mod.EtcHosts
+
+    plugin = EtcHosts.__new__(EtcHosts)  # type: ignore[call-arg]
+    plugin.file_paths = []  # type: ignore[assignment]
+
+    class DummyObserver:
+        def __init__(self) -> None:  # pragma: no cover - trivial stub
+            pass
+
+    monkeypatch.setattr(mod, "Observer", DummyObserver, raising=False)
+
+    plugin._start_watchdog()
+    assert getattr(plugin, "_observer", None) is None
+
+
 def test_schedule_debounced_reload_immediate_and_existing_timer(monkeypatch, caplog):
     """Brief: _schedule_debounced_reload handles delay<=0 and existing timers.
 
@@ -209,6 +268,13 @@ def test_schedule_debounced_reload_immediate_and_existing_timer(monkeypatch, cap
 
     # delay <= 0 -> immediate reload
     plugin._schedule_debounced_reload(0.0)
+    assert calls["reload"] == 1
+
+    # Case: delay > 0 but no lock configured -> no scheduling or reload.
+    plugin_no_lock = EtcHosts.__new__(EtcHosts)  # type: ignore[call-arg]
+    plugin_no_lock._reload_hosts_from_watchdog = fake_reload  # type: ignore[assignment]
+    plugin_no_lock._reload_timer_lock = None  # type: ignore[assignment]
+    plugin_no_lock._schedule_debounced_reload(1.0)
     assert calls["reload"] == 1
 
     # Next, configure a dummy lock and an existing live timer object
@@ -263,3 +329,154 @@ def test_close_stops_polling_and_cancels_timer(monkeypatch):
     assert plugin._poll_stop.is_set() is True
     assert thread.join_called is True
     assert cancelled["called"] is True
+
+
+def test_setup_enables_polling_when_interval_configured(tmp_path):
+    """Brief: setup() with watchdog_poll_interval_seconds starts polling thread.
+
+    Inputs:
+      - tmp_path: pytest temporary directory for a simple hosts file.
+
+    Outputs:
+      - None; asserts that poll_stop Event and poll_thread are created.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    EtcHosts = mod.EtcHosts
+
+    hosts_file = tmp_path / "hosts"
+    hosts_file.write_text("127.0.0.1 polling.local\n", encoding="utf-8")
+
+    plugin = EtcHosts(
+        file_path=str(hosts_file),
+        watchdog_enabled=False,
+        watchdog_poll_interval_seconds=0.01,
+    )
+    plugin.setup()
+
+    assert getattr(plugin, "_poll_interval", 0.0) > 0.0
+    assert getattr(plugin, "_poll_stop", None) is not None
+    assert getattr(plugin, "_poll_thread", None) is not None
+
+    plugin.close()
+
+
+def test_start_polling_variants_for_etc_hosts(tmp_path):
+    """Brief: _start_polling handles disabled, missing-stop, and enabled cases.
+
+    Inputs:
+      - tmp_path: pytest temporary directory for a simple hosts file.
+
+    Outputs:
+      - None; asserts that threads are only started when both interval and stop_event are set.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    EtcHosts = mod.EtcHosts
+
+    hosts_file = tmp_path / "hosts"
+    hosts_file.write_text("127.0.0.1 polling2.local\n", encoding="utf-8")
+
+    plugin = EtcHosts(file_path=str(hosts_file), watchdog_enabled=False)
+    plugin.setup()
+
+    # Disabled polling: interval <= 0
+    plugin._poll_interval = 0.0  # type: ignore[assignment]
+    plugin._poll_stop = threading.Event()
+    plugin._poll_thread = None  # type: ignore[assignment]
+    plugin._start_polling()
+    assert getattr(plugin, "_poll_thread", None) is None
+
+    # Interval set but no stop_event configured -> no thread
+    plugin._poll_interval = 0.1  # type: ignore[assignment]
+    plugin._poll_stop = None  # type: ignore[assignment]
+    plugin._poll_thread = None  # type: ignore[assignment]
+    plugin._start_polling()
+    assert getattr(plugin, "_poll_thread", None) is None
+
+    # Proper configuration starts a polling thread.
+    plugin._poll_interval = 0.01  # type: ignore[assignment]
+    plugin._poll_stop = threading.Event()
+    plugin._start_polling()
+    assert getattr(plugin, "_poll_thread", None) is not None
+    plugin.close()
+
+
+def test_poll_loop_early_return_and_iteration(tmp_path):
+    """Brief: _poll_loop returns early when misconfigured and loops once when configured.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - None; asserts both the early-return and single-iteration behaviours.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    EtcHosts = mod.EtcHosts
+
+    hosts_file = tmp_path / "hosts"
+    hosts_file.write_text("127.0.0.1 poll.local\n", encoding="utf-8")
+
+    plugin = EtcHosts(file_path=str(hosts_file), watchdog_enabled=False)
+    plugin.setup()
+
+    # Early return when stop_event is None.
+    plugin._poll_stop = None  # type: ignore[assignment]
+    plugin._poll_interval = 0.1  # type: ignore[assignment]
+    plugin._poll_loop()
+
+    # Single iteration when configured; have_files_changed clears the stop event.
+    stop = threading.Event()
+    plugin._poll_stop = stop  # type: ignore[assignment]
+    plugin._poll_interval = 0.01  # type: ignore[assignment]
+
+    def fake_have_files_changed() -> bool:
+        stop.set()
+        return False
+
+    plugin._have_files_changed = fake_have_files_changed  # type: ignore[assignment]
+    plugin._poll_loop()
+
+
+def test_have_files_changed_handles_missing_and_oserror(monkeypatch, tmp_path):
+    """Brief: _have_files_changed handles FileNotFoundError and OSError gracefully.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - tmp_path: temporary directory for existing/missing/error files.
+
+    Outputs:
+      - None; asserts that snapshots are recorded even when stat() fails.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    EtcHosts = mod.EtcHosts
+
+    hosts_file = tmp_path / "hosts"
+    hosts_file.write_text("127.0.0.1 existing.local\n", encoding="utf-8")
+
+    plugin = EtcHosts(file_path=str(hosts_file), watchdog_enabled=False)
+    plugin.setup()
+
+    missing = tmp_path / "missing"
+    error = tmp_path / "error"
+    error.write_text("boom\n", encoding="utf-8")
+
+    real_stat = os.stat
+
+    def fake_stat(path: str):
+        if path == str(missing):
+            raise FileNotFoundError
+        if path == str(error):
+            raise OSError("boom")
+        return real_stat(path)
+
+    plugin.file_paths = [str(hosts_file), str(missing), str(error)]  # type: ignore[assignment]
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+
+    # First call establishes snapshot.
+    assert plugin._have_files_changed() is True
+    # Second call with same stats returns False.
+    assert plugin._have_files_changed() is False
