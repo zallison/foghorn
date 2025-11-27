@@ -184,7 +184,7 @@ def test_set_ignore_filters_at_runtime() -> None:
     # example.net remains present.
     if snap2.top_domains is not None:
         domains = {d for d, _ in snap2.top_domains}
-        assert "example.net" in domains
+        assert any(d == "example.net" for d in domains)
 
 
 def test_suffix_mode_for_domains_and_subdomains() -> None:
