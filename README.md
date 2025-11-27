@@ -8,6 +8,27 @@ With special thanks to Fiona Weatherwax for their contributions and inspiration.
 
 For developer documentation (architecture, transports, plugin internals, testing), see README-DEV.md.
 
+## Index
+
+- [Features](#features)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [Docker](#docker)
+  - [DNSSEC modes](#dnssec-modes)
+- [Configuration](#configuration)
+  - [`listen`](#listen)
+  - [`upstream`](#upstream)
+  - [`plugins`](#plugins)
+    - [AccessControlPlugin](#accesscontrolplugin)
+    - [NewDomainFilterPlugin](#newdomainfilterplugin)
+    - [UpstreamRouterPlugin](#upstreamrouterplugin)
+    - [FilterPlugin](#filterplugin)
+    - [ListDownloader plugin](#listdownloader-plugin)
+    - [CustomRecords plugin](#customrecords-plugin)
+  - [Complete `config.yaml` Example](#complete-configyaml-example)
+- [Logging](#logging)
+- [License](#license)
+
 ## Features
 
 *   **DNS Caching:** Speeds up DNS resolution by caching responses from upstream servers.
@@ -59,19 +80,19 @@ Foghorn is available on Docker Hub at `zallison/foghorn:latest`.
 
 ```bash
 docker run -d -p 5353:5353/udp \
-  -v /path/to/your/config.yaml:/foghorn/config.yaml \
+  -v /path/to/your/config/:/foghorn/config/ \
   zallison/foghorn:latest
 ```
 
 **Building locally:**
 
 ```bash
-[cp /path/to/your/config.yaml .] # Optional
+[cp /path/to/your/config.yaml ./config/config.yaml] # Optional
 docker build -t my/foghorn .
 docker run -d -p 5353:5353/udp my/foghorn
 ```
 
-**Important:** Mount your `config.yaml` to `/foghorn/config.yaml` inside the container unless you've built your own image that contains your config.
+**Important:** Mount your `config.yaml` to `/foghorn/config/config.yaml` inside the container unless you've built your own image that contains your config.
 
 If you need to expose additional listeners (TCP/DoT/DoH), add the corresponding port mappings:
 
@@ -110,26 +131,26 @@ You can enable one or more listeners. UDP is enabled by default; TCP, DoT, and D
 ```yaml
 listen:
   udp:
-    enabled: true
-    host: 127.0.0.1
-    port: 5353
+	enabled: true
+	host: 127.0.0.1
+	port: 5353
   tcp:
-    enabled: false
-    host: 127.0.0.1
-    port: 5353
+	enabled: false
+	host: 127.0.0.1
+	port: 5353
   dot:
-    enabled: false
-    host: 127.0.0.1
-    port: 8853
-    cert_file: /path/to/cert.pem
-    key_file: /path/to/key.pem
+	enabled: false
+	host: 127.0.0.1
+	port: 8853
+	cert_file: /path/to/cert.pem
+	key_file: /path/to/key.pem
   doh:
-    enabled: false
-    host: 127.0.0.1
-    port: 8053
-    # Optional TLS
-    # cert_file: /path/to/cert.pem
-    # key_file: /path/to/key.pem
+	enabled: false
+	host: 127.0.0.1
+	port: 8053
+	# Optional TLS
+	# cert_file: /path/to/cert.pem
+	# key_file: /path/to/key.pem
 
 Note: The DoH listener is served by a dedicated FastAPI app using uvicorn in a
 single background thread. TLS is applied via `cert_file`/`key_file`. Behavior is
@@ -144,28 +165,28 @@ You can mix transports per upstream. If `transport` is omitted it defaults to UD
 ```yaml
 upstream:
   - host: 1.1.1.1
-    port: 853
-    transport: dot
-    tls:
-      server_name: cloudflare-dns.com
-      verify: true
-    pool:
-      max_connections: 64
-      idle_timeout_ms: 30000
+	port: 853
+	transport: dot
+	tls:
+	  server_name: cloudflare-dns.com
+	  verify: true
+	pool:
+	  max_connections: 64
+	  idle_timeout_ms: 30000
   - host: 8.8.8.8
-    port: 53
-    # transport: udp (default)
-    pool:
-      max_connections: 32
-      idle_timeout_ms: 15000
+	port: 53
+	# transport: udp (default)
+	pool:
+	  max_connections: 32
+	  idle_timeout_ms: 15000
   - transport: doh
-    url: https://dns.google/dns-query
-    method: POST   # or GET
-    headers:
-      user-agent: foghorn
-    tls:
-      verify: true
-      # ca_file: /etc/ssl/certs/ca-certificates.crt
+	url: https://dns.google/dns-query
+	method: POST   # or GET
+	headers:
+	  user-agent: foghorn
+	tls:
+	  verify: true
+	  # ca_file: /etc/ssl/certs/ca-certificates.crt
 ```
 
 ### `plugins`
@@ -213,13 +234,13 @@ This plugin provides access control based on the client's IP address.
 ```yaml
 plugins:
   - module: foghorn.plugins.access_control.AccessControlPlugin
-    config:
-      default: allow
-      allow:
-        - "192.168.0.0/16"
-        - "10.0.0.0/8"
-      deny:
-        - "203.0.113.0/24"
+	config:
+	  default: allow
+	  allow:
+		- "192.168.0.0/16"
+		- "10.0.0.0/8"
+	  deny:
+		- "203.0.113.0/24"
 ```
 
 **Example (short alias):**
@@ -227,10 +248,10 @@ plugins:
 ```yaml
 plugins:
   - module: acl
-    config:
-      default: allow
-      allow:
-        - "192.168.0.0/16"
+	config:
+	  default: allow
+	  allow:
+		- "192.168.0.0/16"
 ```
 
 #### NewDomainFilterPlugin
@@ -247,9 +268,9 @@ This plugin blocks domains that were registered recently by checking the domain'
 ```yaml
 plugins:
   - module: foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
-    config:
-      threshold_days: 7
-      timeout_ms: 2000
+	config:
+	  threshold_days: 7
+	  timeout_ms: 2000
 ```
 
 **Example (short alias):**
@@ -257,8 +278,8 @@ plugins:
 ```yaml
 plugins:
   - module: new_domain
-    config:
-      threshold_days: 14
+	config:
+	  threshold_days: 14
 ```
 
 #### UpstreamRouterPlugin
@@ -274,16 +295,16 @@ This plugin routes queries to different upstream DNS servers based on the querie
 ```yaml
 plugins:
   - module: foghorn.plugins.upstream_router.UpstreamRouterPlugin
-    config:
-      routes:
-        - domain: "internal.corp.com"
-          upstreams:
-            - host: 10.0.0.1
-              port: 53
-        - suffix: ".dev.example.com"
-          upstreams:
-            - host: 192.168.1.1
-              port: 53
+	config:
+	  routes:
+		- domain: "internal.corp.com"
+		  upstreams:
+			- host: 10.0.0.1
+			  port: 53
+		- suffix: ".dev.example.com"
+		  upstreams:
+			- host: 192.168.1.1
+			  port: 53
 ```
 
 **Example (short alias):**
@@ -291,12 +312,12 @@ plugins:
 ```yaml
 plugins:
   - module: router
-    config:
-      routes:
-        - suffix: "corp"
-          upstreams:
-            - host: 10.0.0.53
-              port: 53
+	config:
+	  routes:
+		- suffix: "corp"
+		  upstreams:
+			- host: 10.0.0.53
+			  port: 53
 ```
 
 #### FilterPlugin
@@ -337,39 +358,39 @@ Load order and precedence for domains (last write wins):
 ```yaml
 plugins:
   - module: filter
-    config:
-      # Pre-resolve (domain) filtering
-      blocked_domains:
-        - "malware.com"
-        - "phishing-site.org"
+	config:
+	  # Pre-resolve (domain) filtering
+	  blocked_domains:
+		- "malware.com"
+		- "phishing-site.org"
 
-      blocked_patterns:
-        - ".*\\.porn\\..*"
+	  blocked_patterns:
+		- ".*\\.porn\\..*"
 
-      blocked_keywords:
-        - "gambling"
+	  blocked_keywords:
+		- "gambling"
 
-      # Post-resolve (IP) filtering
-      blocked_ips:
-        - ip: "1.2.3.4"
-          action: "deny" # Deny the whole response
-        - ip: "8.8.8.0/24"
-          action: "remove" # Remove just this A/AAAA record
+	  # Post-resolve (IP) filtering
+	  blocked_ips:
+		- ip: "1.2.3.4"
+		  action: "deny" # Deny the whole response
+		- ip: "8.8.8.0/24"
+		  action: "remove" # Remove just this A/AAAA record
 
-      # File-backed examples (globs allowed)
-      allowed_domains_files:
-        - config/allow.txt
-        - config/allow.d/*.list
-      blocked_domains_files:
-        - config/block.txt
-        - config/block.d/*.txt
-      blocked_patterns_files:
-        - config/patterns/*.re
-      blocked_keywords_files:
-        - config/keywords.txt
-      blocked_ips_files:
-        - config/ips.txt
-        - config/ips.d/*.csv
+	  # File-backed examples (globs allowed)
+	  allowed_domains_files:
+		- config/allow.txt
+		- config/allow.d/*.list
+	  blocked_domains_files:
+		- config/block.txt
+		- config/block.d/*.txt
+	  blocked_patterns_files:
+		- config/patterns/*.re
+	  blocked_keywords_files:
+		- config/keywords.txt
+	  blocked_ips_files:
+		- config/ips.txt
+		- config/ips.d/*.csv
 ```
 
 ##### JSON Lines examples for files
@@ -430,25 +451,25 @@ Filenames are unique and stable per-URL: `{base}-{sha1(url)[:12]}{ext}`. If the 
 ```yaml
 plugins:
   - module: list_downloader
-    pre_priority: 15
-    config:
-      download_path: ./config/var/lists
-      interval_days: 1
-      urls:
-        - https://v.firebog.net/hosts/AdguardDNS.txt
-        - https://v.firebog.net/hosts/Easylist.txt
-        - https://v.firebog.net/hosts/Prigent-Ads.txt
-        - https://v.firebog.net/hosts/Prigent-Malware.txt
+	pre_priority: 15
+	config:
+	  download_path: ./config/var/lists
+	  interval_days: 1
+	  urls:
+		- https://v.firebog.net/hosts/AdguardDNS.txt
+		- https://v.firebog.net/hosts/Easylist.txt
+		- https://v.firebog.net/hosts/Prigent-Ads.txt
+		- https://v.firebog.net/hosts/Prigent-Malware.txt
 
   - module: filter
-    pre_priority: 20
-    config:
-      default: deny
-      blocklist_files:
-        - ./config/var/lists/AdguardDNS-*.txt
-        - ./config/var/lists/Easylist-*.txt
-        - ./config/var/lists/Prigent-Ads-*.txt
-        - ./config/var/lists/Prigent-Malware-*.txt
+	pre_priority: 20
+	config:
+	  default: deny
+	  blocklist_files:
+		- ./config/var/lists/AdguardDNS-*.txt
+		- ./config/var/lists/Easylist-*.txt
+		- ./config/var/lists/Prigent-Ads-*.txt
+		- ./config/var/lists/Prigent-Malware-*.txt
 ```
 
 #### CustomRecords plugin
@@ -480,19 +501,19 @@ first-seen ordering. This ordering is reflected in the final DNS answer.
 ```yaml
 plugins:
   - module: custom
-    config:
-      # Use either a single file_path (legacy) or a list of file_paths
-      # (preferred). When both are given, the legacy path is added to
-      # the list; later files extend earlier ones.
-      file_path: ./config/custom-records.txt        # optional
-      file_paths:                                   # optional
-        - ./config/custom-records.txt
-        - ./config/custom-records-extra.txt
+	config:
+	  # Use either a single file_path (legacy) or a list of file_paths
+	  # (preferred). When both are given, the legacy path is added to
+	  # the list; later files extend earlier ones.
+	  file_path: ./config/custom-records.txt        # optional
+	  file_paths:                                   # optional
+		- ./config/custom-records.txt
+		- ./config/custom-records-extra.txt
 
-      # Optional: control how filesystem changes are detected
-      watchdog_enabled: true                        # default true when omitted
-      watchdog_min_interval_seconds: 1.0            # minimum time between reloads
-      watchdog_poll_interval_seconds: 0.0           # >0 enables stat-based polling
+	  # Optional: control how filesystem changes are detected
+	  watchdog_enabled: true                        # default true when omitted
+	  watchdog_min_interval_seconds: 1.0            # minimum time between reloads
+	  watchdog_poll_interval_seconds: 0.0           # >0 enables stat-based polling
 ```
 
 `module` may be any of:
@@ -516,47 +537,47 @@ Here is a complete `config.yaml` file that uses the modern configuration format 
 listen:
   # Modern listener config; UDP is enabled by default.
   udp:
-    enabled: true
-    host: 127.0.0.1
-    port: 5333
+	enabled: true
+	host: 127.0.0.1
+	port: 5333
   tcp:
-    enabled: false
-    host: 127.0.0.1
-    port: 5333
+	enabled: false
+	host: 127.0.0.1
+	port: 5333
   dot:
-    enabled: false
-    host: 127.0.0.1
-    port: 8853
-    # cert_file: /path/to/cert.pem
-    # key_file: /path/to/key.pem
+	enabled: false
+	host: 127.0.0.1
+	port: 8853
+	# cert_file: /path/to/cert.pem
+	# key_file: /path/to/key.pem
   doh:
-    enabled: false
-    host: 127.0.0.1
-    port: 8053
-    # Optional TLS for DoH
-    # cert_file: /path/to/cert.pem
-    # key_file: /path/to/key.pem
+	enabled: false
+	host: 127.0.0.1
+	port: 8053
+	# Optional TLS for DoH
+	# cert_file: /path/to/cert.pem
+	# key_file: /path/to/key.pem
 
 # Multiple upstream DNS servers with automatic failover.
 # All upstreams share a single timeout (timeout_ms) per attempt.
 upstream:
   - host: 8.8.8.8
-    port: 53
-    transport: udp
+	port: 53
+	transport: udp
   - host: 1.1.1.1
-    port: 853
-    transport: dot
-    tls:
-      server_name: cloudflare-dns.com
-      verify: true
-      # ca_file: /etc/ssl/certs/ca-certificates.crt
+	port: 853
+	transport: dot
+	tls:
+	  server_name: cloudflare-dns.com
+	  verify: true
+	  # ca_file: /etc/ssl/certs/ca-certificates.crt
   - transport: doh
-    url: https://dns.google/dns-query
-    method: POST
-    headers:
-      user-agent: foghorn
-    tls:
-      verify: true
+	url: https://dns.google/dns-query
+	method: POST
+	headers:
+	  user-agent: foghorn
+	tls:
+	  verify: true
 
 # Global timeout applies to each upstream attempt
 timeout_ms: 2000
@@ -623,107 +644,107 @@ statistics:
 plugins:
   # New-domain filter: simple pre-resolve policy plugin.
   - module: new_domain
-    config:
-      threshold_days: 14
+	config:
+	  threshold_days: 14
 
   # Greylist plugin.
   - module: greylist
-    config:
-      duration_seconds: 60
-      # duration_hours: 1  # Only if duration_seconds isn't provided
-      # db_path: ./greylist.db
+	config:
+	  duration_seconds: 60
+	  # duration_hours: 1  # Only if duration_seconds isn't provided
+	  # db_path: ./greylist.db
 
   # Upstream router: route queries to specific upstreams by suffix.
   # Uses the modern "upstreams" list format only.
   - module: router
-    config:
-      routes:
-        - suffix: ".mylan"
-          upstreams:
-            - host: 192.168.1.1
-              port: 53
-        - suffix: "corp.internal"
-          upstreams:
-            - host: 10.0.0.1
-              port: 53
-            - host: 10.0.0.2
-              port: 53
+	config:
+	  routes:
+		- suffix: ".mylan"
+		  upstreams:
+			- host: 192.168.1.1
+			  port: 53
+		- suffix: "corp.internal"
+		  upstreams:
+			- host: 10.0.0.1
+			  port: 53
+			- host: 10.0.0.2
+			  port: 53
 
   # ListDownloader: runs early in the setup phase to download blocklists
   # that the Filter plugin will read from disk.
   - module: list_downloader
-    config:
-      # setup_priority controls when setup() runs relative to other plugins.
-      # Lower numbers run earlier. ListDownloader defaults to 15.
-      setup_priority: 15
-      download_path: ./config/var/lists
-      interval_seconds: 3600
-      urls:
-        - https://v.firebog.net/hosts/AdguardDNS.txt
-        - https://v.firebog.net/hosts/Easylist.txt
+	config:
+	  # setup_priority controls when setup() runs relative to other plugins.
+	  # Lower numbers run earlier. ListDownloader defaults to 15.
+	  setup_priority: 15
+	  download_path: ./config/var/lists
+	  interval_seconds: 3600
+	  urls:
+		- https://v.firebog.net/hosts/AdguardDNS.txt
+		- https://v.firebog.net/hosts/Easylist.txt
 
   # Filter plugin: loads allowlists/blocklists and applies domain/IP filtering.
   - module: filter
-    config:
-      # setup_priority controls when setup() runs. When omitted, it falls back to
-      # pre_priority for setupable plugins, or to the class default (50).
-      setup_priority: 20
+	config:
+	  # setup_priority controls when setup() runs. When omitted, it falls back to
+	  # pre_priority for setupable plugins, or to the class default (50).
+	  setup_priority: 20
 
-      # Pre-resolve (domain) filtering
-      blocked_domains:
-        - "malware.com"
-        - "phishing-site.org"
-        - "spam.example"
+	  # Pre-resolve (domain) filtering
+	  blocked_domains:
+		- "malware.com"
+		- "phishing-site.org"
+		- "spam.example"
 
-      blocked_patterns:
-        - ".*\\.porn\\..*"      # Block any domain with "porn" in subdomain
-        - "casino[0-9]+\\..*"   # Block casino1.com, casino2.net, etc.
-        - ".*adult.*"           # Block domains containing "adult"
+	  blocked_patterns:
+		- ".*\\.porn\\..*"      # Block any domain with "porn" in subdomain
+		- "casino[0-9]+\\..*"   # Block casino1.com, casino2.net, etc.
+		- ".*adult.*"           # Block domains containing "adult"
 
-      blocked_keywords:
-        - "porn"
-        - "gambling"
-        - "casino"
-        - "malware"
-        - "phishing"
+	  blocked_keywords:
+		- "porn"
+		- "gambling"
+		- "casino"
+		- "malware"
+		- "phishing"
 
-      # Optional: file-backed allowlist/blocklist inputs (globs allowed)
-      # allowlist_files:
-      #   - config/allow.txt
-      #   - config/allow.d/*.list
-      # blocklist_files:
-      #   - config/block.txt
-      #   - config/block.d/*.txt
-      # blocked_patterns_files:
-      #   - config/patterns/*.re
-      # blocked_keywords_files:
-      #   - config/keywords.txt
-      # blocked_ips_files:
-      #   - config/ips.txt
+	  # Optional: file-backed allowlist/blocklist inputs (globs allowed)
+	  # allowlist_files:
+	  #   - config/allow.txt
+	  #   - config/allow.d/*.list
+	  # blocklist_files:
+	  #   - config/block.txt
+	  #   - config/block.d/*.txt
+	  # blocked_patterns_files:
+	  #   - config/patterns/*.re
+	  # blocked_keywords_files:
+	  #   - config/keywords.txt
+	  # blocked_ips_files:
+	  #   - config/ips.txt
 
-      # Post-resolve (IP) filtering with per-IP actions
-      blocked_ips:
-        # Remove just the matching IP(s)
-        - ip: "23.220.75.245/16"
-          action: "remove"
-        # Deny entire response if any returned IPs are found
-        - ip: "1.2.3.4"
-          action: "deny"
+	  # Post-resolve (IP) filtering with per-IP actions
+	  blocked_ips:
+		# Remove just the matching IP(s)
+		- ip: "23.220.75.245/16"
+		  action: "remove"
+		# Deny entire response if any returned IPs are found
+		- ip: "1.2.3.4"
+		  action: "deny"
 
   # Examples plugin: demonstrates additional policies and rewrites.
   - module: foghorn.plugins.examples.ExamplesPlugin
-    config:
-      # Pre-resolve policy
-      max_subdomains: 5
-      max_length_no_dots: 50
-      base_labels: 2
+	config:
+	  # Pre-resolve policy
+	  max_subdomains: 5
+	  max_length_no_dots: 50
+	  base_labels: 2
 
-      # Post-resolve IP rewrite rules
-      rewrite_first_ipv4:
-        - apply_to_qtypes: ["A"]
-          ip_override: 127.0.0.1
-        - apply_to_qtypes: ["AAAA"]
-          ip_override: ::1
+	  # Post-resolve IP rewrite rules
+	  rewrite_first_ipv4:
+		- apply_to_qtypes: ["A"]
+		  ip_override: 127.0.0.1
+		- apply_to_qtypes: ["AAAA"]
+		  ip_override: ::1
 
 ```
 
