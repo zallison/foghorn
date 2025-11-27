@@ -909,7 +909,8 @@ def test_save_config_persists_raw_yaml_and_signals(monkeypatch, tmp_path) -> Non
 
     Outputs:
       - Config file on disk is updated to the raw_yaml content.
-      - os.kill is invoked with SIGUSR1 for the current process.
+      - os.kill is invoked with SIGUSR1 for the current process so plugins can
+        react to configuration changes.
     """
 
     import os
