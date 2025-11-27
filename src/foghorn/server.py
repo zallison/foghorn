@@ -681,7 +681,10 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                 pass
 
 
-from .udp_server import DNSUDPHandler, DNSServer  # re-export for backwards compatibility
+from .udp_server import (
+    DNSUDPHandler,
+    DNSServer,
+)  # re-export for backwards compatibility
 
 
 class DNSServer:

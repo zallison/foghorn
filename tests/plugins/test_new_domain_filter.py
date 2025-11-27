@@ -180,7 +180,9 @@ def test_new_domain_filter_fetch_creation_date_caching(tmp_path):
         # Mock the whois lookup to return a fixed date
         mock_date = dt.datetime(2023, 1, 1, tzinfo=dt.timezone.utc)
 
-        with patch.object(plugin, "_whois_lookup_creation_date", return_value=mock_date):
+        with patch.object(
+            plugin, "_whois_lookup_creation_date", return_value=mock_date
+        ):
             # First call should hit the whois lookup
             date1 = plugin._fetch_creation_date("example.com")
             assert date1 == mock_date
