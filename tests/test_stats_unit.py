@@ -116,6 +116,211 @@ def test_format_snapshot_json_compact_and_fields():
     assert "qtypes" not in js  # omitted when empty and disabled
 
 
+def test_format_snapshot_json_includes_extended_sections():
+    """Brief: format_snapshot_json emits extended sections when populated.
+
+    Inputs:
+      - Synthetic StatsSnapshot with non-empty extended fields.
+
+    Outputs:
+      - None; asserts JSON contains plugins, upstream_rcodes/qtypes, qtype_qnames,
+        rcode_domains/subdomains, and cache hit/miss sections.
+    """
+
+    import json as _json
+
+    from foghorn.stats import StatsSnapshot
+
+    created = time.time()
+    snap = StatsSnapshot(
+        created_at=created,
+        totals={"total_queries": 1},
+        rcodes={"NOERROR": 1},
+        qtypes={"A": 1},
+        decisions={"P": {"allow": 1}},
+        upstreams={"up": {"success": 1}},
+        uniques={"clients": 1, "domains": 1},
+        top_clients=[("1.2.3.4", 2)],
+        top_subdomains=[("www.example.com", 3)],
+        top_domains=[("example.com", 3)],
+        latency_stats={
+            "count": 1,
+            "min_ms": 1.0,
+            "max_ms": 1.0,
+            "avg_ms": 1.0,
+            "p50_ms": 1.0,
+            "p90_ms": 1.0,
+            "p99_ms": 1.0,
+        },
+        latency_recent_stats={
+            "count": 1,
+            "min_ms": 1.0,
+            "max_ms": 1.0,
+            "avg_ms": 1.0,
+            "p50_ms": 1.0,
+            "p90_ms": 1.0,
+            "p99_ms": 1.0,
+        },
+        upstream_rcodes={"up": {"NOERROR": 1}},
+        upstream_qtypes={"up": {"A": 1}},
+        qtype_qnames={"A": [("example.com", 2)]},
+        rcode_domains={"NOERROR": [("example.com", 3)]},
+        rcode_subdomains={"NOERROR": [("sub.example.com", 2)]},
+        cache_hit_domains=[("example.com", 1)],
+        cache_miss_domains=[("other.com", 1)],
+        cache_hit_subdomains=[("sub.example.com", 1)],
+        cache_miss_subdomains=[("sub.other.com", 1)],
+    )
+
+    js = format_snapshot_json(snap)
+    parsed = _json.loads(js)
+
+    assert "plugins" in parsed
+    assert "upstream_rcodes" in parsed
+    assert "upstream_qtypes" in parsed
+    assert "qtype_qnames" in parsed
+    assert "rcode_domains" in parsed
+    assert "rcode_subdomains" in parsed
+    assert "cache_hit_domains" in parsed
+    assert "cache_miss_domains" in parsed
+    assert "cache_hit_subdomains" in parsed
+    assert "cache_miss_subdomains" in parsed
+
+
+class _FakeStore:
+    """Brief: Simple in-memory fake StatsSQLiteStore for persistence tests.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Object recording increment_count and insert_query_log calls.
+    """
+
+    def __init__(self) -> None:
+        self.increment_calls: list[tuple[str, str, int]] = []
+        self.query_logs: list[dict[str, object]] = []
+
+    def increment_count(self, scope: str, key: str, delta: int = 1) -> None:
+        self.increment_calls.append((scope, key, int(delta)))
+
+    def insert_query_log(
+        self,
+        ts: float,
+        client_ip: str,
+        name: str,
+        qtype: str,
+        upstream_id: str | None,
+        rcode: str | None,
+        status: str | None,
+        error: str | None,
+        first: str | None,
+        result_json: str,
+    ) -> None:
+        self.query_logs.append(
+            {
+                "ts": ts,
+                "client_ip": client_ip,
+                "name": name,
+                "qtype": qtype,
+                "upstream_id": upstream_id,
+                "rcode": rcode,
+                "status": status,
+                "error": error,
+                "first": first,
+                "result_json": result_json,
+            }
+        )
+
+
+def test_stats_collector_persists_to_store():
+    """Brief: StatsCollector writes core events into the attached store.
+
+    Inputs:
+      - None; uses _FakeStore instead of a real SQLite store.
+
+    Outputs:
+      - None; asserts expected increment_count and insert_query_log calls.
+    """
+
+    store = _FakeStore()
+    c = StatsCollector(
+        track_uniques=True,
+        include_qtype_breakdown=True,
+        include_top_clients=False,
+        include_top_domains=True,
+        top_n=3,
+        track_latency=False,
+        stats_store=store,
+    )
+
+    # Query and caches
+    c.record_query("1.2.3.4", "www.example.com", "A")
+    c.record_cache_hit("www.example.com")
+    c.record_cache_miss("www.example.com")
+    c.record_cache_null("www.example.com")
+
+    # Plugin decisions
+    c.record_plugin_decision("P", "allow", reason="r1")
+    c.record_plugin_decision("P", "block", reason="r2")
+    c.record_plugin_decision("P", "modify")
+
+    # Upstream stats
+    c.record_upstream_result("up", "success", qtype="A")
+    c.record_upstream_rcode("up", "NOERROR")
+
+    # Response rcodes with subdomain so rcode_domains/subdomains are updated.
+    c.record_response_rcode("NXDOMAIN", qname="www.example.com")
+
+    # Query-log row
+    c.record_query_result(
+        client_ip="1.2.3.4",
+        qname="www.example.com",
+        qtype="A",
+        rcode="NOERROR",
+        upstream_id="up",
+        status="ok",
+        error=None,
+        first="93.184.216.34",
+        result={"answers": ["93.184.216.34"]},
+    )
+
+    keys = {(s, k) for (s, k, _d) in store.increment_calls}
+
+    # Core counters
+    assert ("totals", "total_queries") in keys
+    assert ("totals", "cache_hits") in keys
+    assert ("totals", "cache_misses") in keys
+    assert ("totals", "cache_null") in keys
+
+    # Cache domain aggregates
+    assert ("cache_hit_domains", "example.com") in keys
+    assert ("cache_miss_domains", "example.com") in keys
+    assert ("cache_hit_subdomains", "example.com") in keys
+    assert ("cache_miss_subdomains", "example.com") in keys
+
+    # Plugin decision totals
+    assert ("totals", "allowed") in keys
+    assert ("totals", "blocked") in keys
+    assert ("totals", "modified") in keys
+
+    # Upstream aggregates
+    assert any(s == "upstreams" for (s, _k, _d) in store.increment_calls)
+    assert any(s == "upstream_qtypes" for (s, _k, _d) in store.increment_calls)
+
+    # Rcode aggregates
+    assert ("rcodes", "NXDOMAIN") in keys
+    assert ("rcode_domains", "NXDOMAIN|example.com") in keys
+    assert ("rcode_subdomains", "NXDOMAIN|example.com") in keys
+
+    # Query log insert
+    assert len(store.query_logs) == 1
+    log_row = store.query_logs[0]
+    assert log_row["client_ip"] == "1.2.3.4"
+    assert log_row["name"] == "www.example.com"
+    assert log_row["qtype"] == "A"
+
+
 @pytest.mark.flaky(reruns=1)
 def test_stats_reporter_logs_and_stops(caplog):
     c = StatsCollector()

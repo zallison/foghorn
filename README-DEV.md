@@ -15,16 +15,16 @@ This release introduces a few developer-visible breaking changes:
 
 - Entry: `src/foghorn/main.py` parses YAML, initializes logging/plugins, starts listeners, installs signal handlers.
 - Downstream servers:
-  - UDP 53: `src/foghorn/udp_server.py` (ThreadingUDPServer wrapper) — handler logic lives in `src/foghorn/server.py`.
-  - TCP 53: `src/foghorn/tcp_server.py` (length‑prefixed, persistent connections, RFC 7766; asyncio with threaded fallback).
-  - DoT 853: `src/foghorn/dot_server.py` (TLS, RFC 7858; asyncio).
-  - DoH 8053: `src/foghorn/doh_server.py` (HTTP/1.1 minimal parser, RFC 8484; optional TLS).
+  - UDP 5333: `src/foghorn/udp_server.py` (ThreadingUDPServer wrapper) — handler logic lives in `src/foghorn/server.py`.
+  - TCP 5333: `src/foghorn/tcp_server.py` (length‑prefixed, persistent connections, RFC 7766; asyncio with threaded fallback).
+  - DoT 1853: `src/foghorn/dot_server.py` (TLS, RFC 7858; asyncio).
+  - DoH 8153: `src/foghorn/doh_server.py` (HTTP/1.1 minimal parser, RFC 8484; optional TLS).
 - Upstream transports:
   - UDP: `src/foghorn/transports/udp.py` (dnslib send)
   - TCP: `src/foghorn/transports/tcp.py` with connection pooling
   - DoT: `src/foghorn/transports/dot.py` with connection pooling
   - DoH: `src/foghorn/transports/doh.py` (stdlib http.client; GET/POST; TLS verification controls)
-- Plugins: `src/foghorn/plugins/*`, discovered via `plugins/registry.py`. Hooks: `pre_resolve`, `post_resolve`. Aliases supported (e.g., `acl`, `router`, `new_domain`, `filter`).
+- Plugins: `src/foghorn/plugins/*`, discovered via `plugins/registry.py`. Hooks: `pre_resolve`, `post_resolve`. Aliases supported (e.g., `acl`, `router`, `new_domain`, `filter`, `custom`, `records`).
 - Cache: `src/foghorn/cache.py` TTLCache with opportunistic cleanup.
 
 ## Request Pipeline
@@ -87,8 +87,8 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
 
 ## Signals
 
-- SIGUSR1: reloads configuration from `--config`, re‑applies logging and DNSSEC knobs, and if statistics are enabled with `reset_on_sigusr1: true`, logs a JSON snapshot and resets the counters.
-- SIGUSR2: invokes `handle_sigusr2()` on all active plugins if implemented (useful for ad‑hoc plugin actions).
+- SIGUSR1: notifies active plugins (via `handle_sigusr2()`) and, when statistics are enabled with `sigusr2_resets_stats: true`, resets in-memory statistics counters.
+- SIGUSR2: identical behavior to SIGUSR1; retained for backwards compatibility so existing tooling can continue to send either signal.
 
 ## Testing
 
@@ -146,6 +146,54 @@ Project-specific notes
 - FilterPlugin is the only component that reads JSONL from external files; specifically the file-backed input fields: allowed_domains_files, allowlist_files, blocked_domains_files, blocklist_files, blocked_patterns_files, blocked_keywords_files, blocked_ips_files
 - The core YAML config does not accept JSONL; it only references which files to load
 - Statistics snapshots are logged as single-line JSON objects (conceptually JSONL when collected)
+
+## CustomRecords plugin internals
+
+`CustomRecords` is a pre-resolve plugin that answers selected queries directly
+from configured records files.
+
+- Location: `src/foghorn/plugins/custom-records.py`
+- Aliases: `custom`, `records`
+- Hooks: implements `setup()` and `pre_resolve()`; no post-resolve hook
+
+Records files are parsed line-by-line; each non-empty, non-comment line must
+have the shape:
+
+`<domain>|<qtype>|<ttl>|<value>`
+
+- `domain` is normalized to lower-case without a trailing dot for lookup.
+- `qtype` may be a numeric code or mnemonic; resolution uses `dnslib.QTYPE`.
+- `ttl` must be a non-negative integer.
+- `value` is preserved as a string and later converted to RRs via
+  `RR.fromZone` when building responses.
+
+Configuration:
+
+- `file_path`: legacy single records file (string)
+- `file_paths`: list of records files; when both are supplied the legacy
+  `file_path` is appended to the list
+- `watchdog_enabled` (default `True` when omitted): when truthy and
+  `watchdog` is importable, start a per-directory observer that reloads
+  records on writes/creates/moves
+- `watchdog_min_interval_seconds` (default 1.0): minimum spacing between
+  reloads triggered by filesystem events; additional events within the
+  interval schedule a deferred reload via a background timer
+- `watchdog_poll_interval_seconds` (default 0.0): when greater than zero,
+  enables a stat-based polling loop that compares `(inode, size, mtime)`
+  snapshots for each configured file; useful on filesystems where events
+  are unreliable
+
+Semantics:
+
+- Records from multiple files are merged in configuration order; for each
+  `(domain, qtype)` key the first TTL is kept and values are de-duplicated
+  while preserving first-seen order across files.
+- `pre_resolve()` performs a read under an optional `_records_lock` and, when
+  a mapping entry exists, constructs an authoritative `DNSRecord` with all
+  configured answers in the stored order and returns
+  `PluginDecision(action="override", response=...)`.
+- Background reloads replace the entire `records` mapping atomically under
+  `_records_lock` to avoid exposing partially updated state.
 
 ## FilterPlugin file parsing internals
 

@@ -14,13 +14,14 @@ For developer documentation (architecture, transports, plugin internals, testing
 *   **Extensible Plugin System:** Easily add custom logic to control DNS resolution.
 *   **Flexible Configuration:** Configure listeners, upstream resolvers (UDP/TCP/DoT/DoH), and plugins using YAML.
 *   **Built-in Plugins:**
-    *   **Access Control:** CIDR-based allow/deny (allowlist/blocklist terminology in docs).
-    *   **EtcHosts:** Answer queries based on host file(s).
-    *   **Greylist:** Temporarily block newly seen domains.
-    *   **New Domain Filter:** Block recently registered domains.
-    *   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
-    *   **Filter:** Filter by domain patterns/keywords IPs.
-    *   **Examples:** Showcase of simple policies and rewrites.
+*   **Access Control:** CIDR-based allow/deny (allowlist/blocklist terminology in docs).
+*   **EtcHosts:** Answer queries based on host file(s).
+*   **Greylist:** Temporarily block newly seen domains.
+*   **New Domain Filter:** Block recently registered domains.
+*   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
+*   **Filter:** Filter by domain patterns/keywords IPs.
+*   **CustomRecords:** Serve static DNS records from one or more files, with optional live reload on change.
+*   **Examples:** Showcase of simple policies and rewrites.
 
 ## Installation
 
@@ -450,6 +451,62 @@ plugins:
         - ./config/var/lists/Prigent-Malware-*.txt
 ```
 
+#### CustomRecords plugin
+
+The `CustomRecords` plugin answers selected queries directly from one or more
+local files, bypassing upstream resolvers and the cache for those names.
+
+**Record file format**
+
+Each non-empty, non-comment line in a records file must be:
+
+`<domain>|<qtype>|<ttl>|<value>`
+
+- `domain`: hostname (with or without trailing dot); stored and matched case-insensitively.
+- `qtype`: mnemonic (for example `A`, `AAAA`, `TXT`, `CNAME`) or numeric type code.
+- `ttl`: non-negative integer TTL in seconds.
+- `value`: RDATA for the given type (for example an IP for `A`/`AAAA`, a target
+  name for `CNAME`, the text for `TXT`, and so on).
+
+Lines beginning with `#` (after stripping leading whitespace), or that are
+empty after removing inline `#` comments, are ignored.
+
+When the same `(domain, qtype)` appears multiple times (even across multiple
+files), the first TTL is kept and values are de-duplicated while preserving
+first-seen ordering. This ordering is reflected in the final DNS answer.
+
+**Configuration keys**
+
+```yaml
+plugins:
+  - module: custom
+    config:
+      # Use either a single file_path (legacy) or a list of file_paths
+      # (preferred). When both are given, the legacy path is added to
+      # the list; later files extend earlier ones.
+      file_path: ./config/custom-records.txt        # optional
+      file_paths:                                   # optional
+        - ./config/custom-records.txt
+        - ./config/custom-records-extra.txt
+
+      # Optional: control how filesystem changes are detected
+      watchdog_enabled: true                        # default true when omitted
+      watchdog_min_interval_seconds: 1.0            # minimum time between reloads
+      watchdog_poll_interval_seconds: 0.0           # >0 enables stat-based polling
+```
+
+`module` may be any of:
+
+- Full dotted path: `foghorn.plugins.custom-records.CustomRecords`
+- Alias: `custom` or `records`
+
+When `watchdog_enabled` is true and the optional `watchdog` dependency is
+installed, the plugin watches the parent directories of all configured records
+files and reloads them when changed. When
+`watchdog_poll_interval_seconds > 0`, a lightweight polling loop supplements
+filesystem events, which is useful in some container or network filesystem
+setups where file change notifications are unreliable.
+
 ## Complete `config.yaml` Example
 
 Here is a complete `config.yaml` file that uses the modern configuration format and shows how plugin priorities (including `setup_priority`) work:
@@ -533,8 +590,35 @@ statistics:
   include_top_domains: true
   top_n: 10
   track_latency: true
-  # reset_on_sigusr1: true
+  # When true, either SIGUSR1 or SIGUSR2 will reset in-memory statistics before
+  # notifying plugins.
   # sigusr2_resets_stats: true
+  # Optional display-only ignore filters for top lists. These do not affect
+  # totals or persisted aggregates; they only hide entries from the
+  # top_clients/top_domains/top_subdomains sections exposed via /stats.
+  # ignore:
+  #   # IPs/CIDRs to hide from top_clients only.
+  #   top_clients:
+  #     - 192.168.0.0/16
+  #     - 10.0.0.0/8
+  #
+  #   # Base domains to hide from top_domains and, when subdomains list is
+  #   # empty, from top_subdomains as well. Matching is exact by default.
+  #   top_domains:
+  #     - example.internal
+  #   # Matching mode for top_domains: "exact" (default) or "suffix".
+  #   # In suffix mode, a base domain D is ignored when D == value or
+  #   # D ends with "." + value.
+  #   top_domains_mode: suffix
+  #
+  #   # Full qnames to hide from top_subdomains. When this list is empty,
+  #   # the values from top_domains are reused as the ignore set.
+  #   top_subdomains:
+  #     - dev.example.internal
+  #   # Matching mode for top_subdomains: "exact" (default) or "suffix".
+  #   # In suffix mode, a subdomain name N is ignored when N == value or
+  #   # N ends with "." + value.
+  #   top_subdomains_mode: suffix
 
 plugins:
   # New-domain filter: simple pre-resolve policy plugin.

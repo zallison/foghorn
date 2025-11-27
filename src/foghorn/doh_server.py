@@ -161,12 +161,3 @@ async def _handle_conn(
             await writer.wait_closed()
         except Exception:  # pragma: no cover
             pass
-
-
-# NOTE: This module previously exposed a backwards-compatibility asyncio DoH
-# server. That implementation has been superseded by the FastAPI/uvicorn-based
-# server in foghorn.doh_api. New code should use foghorn.doh_api.start_doh_server
-# directly.
-
-# The legacy serve_doh coroutine is removed; importing this module is no longer
-# required for DoH operation.

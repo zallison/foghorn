@@ -9,6 +9,7 @@ Outputs:
 """
 
 from dnslib import QTYPE
+from contextlib import closing
 
 from foghorn.plugins.base import PluginContext
 from foghorn.plugins.filter import FilterPlugin
@@ -33,10 +34,11 @@ def test_domains_jsonl_with_modes(tmp_path):
     )
     p.setup()
 
-    assert p.is_allowed("a-allow.com") is True
-    assert p.is_allowed("b-deny.com") is False
-    # Falls back to file-level mode 'allow'
-    assert p.is_allowed("c-default.com") is True
+    with closing(p.conn):
+        assert p.is_allowed("a-allow.com") is True
+        assert p.is_allowed("b-deny.com") is False
+        # Falls back to file-level mode 'allow'
+        assert p.is_allowed("c-default.com") is True
 
 
 def test_patterns_keywords_jsonl(tmp_path):
@@ -68,7 +70,8 @@ def test_patterns_keywords_jsonl(tmp_path):
     p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
-    assert p.pre_resolve("ads.example", QTYPE.A, b"", ctx).action == "deny"
-    assert p.pre_resolve("track.example", QTYPE.A, b"", ctx).action == "deny"
-    assert p.pre_resolve("xtrackerx.example", QTYPE.A, b"", ctx).action == "deny"
-    assert p.pre_resolve("best-analytics.io", QTYPE.A, b"", ctx).action == "deny"
+    with closing(p.conn):
+        assert p.pre_resolve("ads.example", QTYPE.A, b"", ctx).action == "deny"
+        assert p.pre_resolve("track.example", QTYPE.A, b"", ctx).action == "deny"
+        assert p.pre_resolve("xtrackerx.example", QTYPE.A, b"", ctx).action == "deny"
+        assert p.pre_resolve("best-analytics.io", QTYPE.A, b"", ctx).action == "deny"

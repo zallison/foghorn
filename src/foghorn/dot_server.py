@@ -53,12 +53,12 @@ async def _handle_conn(
             if len(hdr) != 2:
                 break
             ln = int.from_bytes(hdr, byteorder="big")
-            if ln <= 0:
+            if ln <= 0:  # pragma: nocover - network error
                 break
             query = await asyncio.wait_for(
                 _read_exact(reader, ln), timeout=idle_timeout
             )
-            if len(query) != ln:
+            if len(query) != ln:  # pragma: nocover - network error
                 break
             response = await asyncio.get_running_loop().run_in_executor(
                 None, resolver, query, client_ip

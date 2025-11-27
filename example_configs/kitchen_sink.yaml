@@ -1,46 +1,131 @@
-# Foghorn kitchen-sink example: combine multiple plugins
-# Demonstrates ordering and interactions via pre_priority/post_priority.
+# config.yaml – defaults for Foghorn with a minimal plugin set
+# Below are the defaults
 
 listen:
   udp:
     enabled: true
     host: 127.0.0.1
-    port: 5353
+    port: 5333
   tcp:
     enabled: false
+    host: 127.0.0.1
+    port: 5333
   dot:
     enabled: false
+    host: 127.0.0.1
+    port: 8853
+    # cert_file: /path/to/cert.pem
+    # key_file: /path/to/key.pem
+  doh:
+    enabled: false
+    host: 127.0.0.1
+    port: 8053
+    # cert_file: /path/to/cert.pem
+    # key_file: /path/to/key.pem
 
-# A safe default upstream set; specific routes may override
 upstream:
-  - { host: 1.1.1.1, port: 53 }
-  - { host: 8.8.8.8, port: 53 }
+  # UDP upstream
+  - host: 8.8.8.8
+    port: 53
+    transport: udp
+
+  # TCP upstream
+  - host: 8.8.4.4
+    port: 53
+    transport: tcp
+    pool:
+      max_connections: 32
+      idle_timeout_ms: 15000
+
+  # DoT upstream (DNS-over-TLS)
+  - host: 1.1.1.1
+    port: 853
+    transport: dot
+    tls:
+      server_name: cloudflare-dns.com
+      verify: true
+      # ca_file: /etc/ssl/certs/ca-certificates.crt
+    pool:
+      max_connections: 64
+      idle_timeout_ms: 30000
+
+  # DoH upstream (DNS-over-HTTPS)
+  - transport: doh
+    url: https://dns.google/dns-query
+    method: POST
+    headers:
+      user-agent: foghorn
+    tls:
+      verify: true
+      # ca_file: /etc/ssl/certs/ca-certificates.crt
+
+timeout_ms: 2000
+min_cache_ttl: 60
 
 dnssec:
-  mode: passthrough
+  mode: ignore
   validation: upstream_ad
   udp_payload_size: 1232
 
-timeout_ms: 2000
 logging:
   level: info
+  stderr: true
+  # file: /var/log/foghorn/foghorn.log
+  # syslog: true
+
+statistics:
+  enabled: false
+  interval_seconds: 300        # 5 minutes
+  reset_on_log: false
+  include_qtype_breakdown: true
+  include_top_clients: true
+  include_top_domains: true
+  top_n: 10
+  track_latency: true
+
+  persistence:
+    enabled: true
+    db_path: ./config/var/stats.db
+    batch_writes: true
+    batch_time_sec: 15.0
+    batch_max_size: 1000
+
+  ignore:
+    top_clients: []
+    top_domains: []
+    top_subdomains: []
+    top_domains_mode: exact
+    top_subdomains_mode: exact
+    ignore_single_host: false
+
+webserver:
+  enabled: false
+  host: 127.0.0.1
+  port: 8053
+  logs:
+    buffer_size: 500
+  system_info_ttl_seconds: 2.0
+  system_metrics_detail: full
+  debug_timings: false
+  index: true
+
+  auth:
+    mode: none
+    # token: "change-me"
+
+  cors:
+    enabled: false
+    allowlist: []
+
+  redact_keys:
+    - token
+    - password
+    - secret
 
 plugins:
-  # 1) Run ACL very early to drop unwanted clients ASAP
-  - module: acl
-    pre_priority: 10
-    config:
-      default: allow
-      allow:
-        - 192.0.2.0/24
-        - 10.0.0.0/8
-        # - 2001:db8::/32
-      deny:
-        - 203.0.113.0/24
-
-  # 2) Introduce flakiness early (test client resilience)
-  - module: flaky
-    pre_priority: 15
+  # 1) /etc/hosts resolver – answers from hosts files first when possible
+  - module: hosts
+    pre_priority: 10           # run early
     config:
       allow: ["192.0.2.0/24", "2001:db8::/32"]
       servfail_one_in: 20
@@ -64,6 +149,7 @@ plugins:
   # 4) Filter domains/IPs before routing (policy enforcement)
   - module: filter
     pre_priority: 20
+    post_priority: 20
     config:
       setup_priority: 20
       default: deny
@@ -83,7 +169,11 @@ plugins:
         - ./config/var/lists/Prigent-Ads-*.txt
         - ./config/var/lists/Prigent-Malware-*.txt
       allowlist_files:
-        - example_configs/lists/allowlist.txt
+        - ./config/allow.txt
+      blocklist_files:
+        - ./config/block.txt
+      allowed_domains_files: []
+      blocked_domains_files: []
 
   # 4) Route certain domains to internal upstreams
   - module: upstream
@@ -120,18 +210,21 @@ plugins:
     config:
       # file_path: /etc/hosts
 
-  # 8) Example post-processing rewrite at the end
-  - module: examples
-    post_priority: 90
+  # 3) Upstream router – send certain suffixes to specific upstreams
+  - module: router
+    pre_priority: 30
     config:
-      max_subdomains: 5
-      max_length_no_dots: 50
-      base_labels: 2
-      apply_to_qtypes: ["*"]
-      rewrite_first_ipv4:
-        - { apply_to_qtypes: ["A"], ip_override: "127.0.0.1" }
-
-# Ordering notes:
-# - Lower pre_priority runs earlier; higher post_priority runs later.
-# - Typical chain (pre): ACL -> Flaky -> Filter -> Router -> Greylist -> NewDomain -> EtcHosts
-# - Post-processing (e.g., Examples rewrite) should be last to avoid interfering with policy checks.
+      routes: []
+      # Example: internal corp domains to some internal resolver
+      # - suffix: corp.internal
+      #   upstreams:
+      #     - host: 10.0.0.1
+      #       port: 53
+      #     - host: 10.0.0.2
+      #       port: 53
+      #
+      # Example: lab domains to a lab resolver
+      # - suffix: lab.local
+      #   upstreams:
+      #     - host: 192.168.1.1
+      #       port: 53
