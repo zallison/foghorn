@@ -967,7 +967,7 @@
 				if (Object.keys(meta).length) {
 					appendDictGroup('Meta', meta);
 				}
-
+				appendProcessGroup(data.system)
 				appendDictGroup('Totals', data.totals || {});
 				appendUpstreamsGroup(data.upstreams || {}, data.upstream_rcodes || {});
 				appendUpstreamQtypesGroup(data.upstream_qtypes || {});
@@ -992,7 +992,6 @@
 				// Per-rcode top base domains for subdomain-only traffic.
 				appendRcodeTopSubdomains(data.rcode_subdomains || {});
 
-				appendProcessGroup(data.system)
 
 				if (data.system) {
 					appendSystemGroup(data.system);
