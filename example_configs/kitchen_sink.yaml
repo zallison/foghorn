@@ -127,27 +127,47 @@ plugins:
   - module: hosts
     pre_priority: 10           # run early
     config:
-      # Default is ['/etc/hosts'] if both unset; you can add more files:
-      # file_paths:
-      #   - /etc/hosts
-      #   - /etc/hosts.d/extra
-      watchdog_enabled: true
+      allow: ["192.0.2.0/24", "2001:db8::/32"]
+      servfail_one_in: 20
+      nxdomain_one_in: 50
+      apply_to_qtypes: ["A", "AAAA"]
+      # seed: 42
 
-  # 2) Filter plugin – allow/block domains and IPs
+  # 3) Download curated domain lists before filtering (ensures files exist).
+  # Runs early in setup so files are present before Filter setup.
+  - module: list_downloader
+    config:
+      setup_priority: 15
+      download_path: ./config/var/lists
+      interval_days: 1
+      urls:
+        - https://v.firebog.net/hosts/AdguardDNS.txt
+        - https://v.firebog.net/hosts/Easylist.txt
+        - https://v.firebog.net/hosts/Prigent-Ads.txt
+        - https://v.firebog.net/hosts/Prigent-Malware.txt
+
+  # 4) Filter domains/IPs before routing (policy enforcement)
   - module: filter
     pre_priority: 20
     post_priority: 20
     config:
-      cache_ttl_seconds: 600
+      setup_priority: 20
+      default: deny
       db_path: ./config/var/blocklist.db
-      default: deny            # deny if not explicitly allowed
-      clear: 1                 # drop & rebuild DB on startup
-
-      # Inline allow/block (start empty)
-      allowed_domains: []
-      blocked_domains: []
-
-      # File-backed allow/block lists (you can create these files later)
+      cache_ttl_seconds: 600
+      blocked_domains: ["tracker.example"]
+      allowed_domains: ["intranet.example"]
+      blocked_patterns: [".*\\.ads\\..*"]
+      blocked_keywords: ["gambling"]
+      blocked_ips:
+        - { ip: "198.51.100.0/24", action: remove }
+        - { ip: "203.0.113.5", action: replace, replace_with: "127.0.0.1" }
+      # Enable external lists (downloaded above to ./config/var/lists/)
+      blocklist_files:
+        - ./config/var/lists/AdguardDNS-*.txt
+        - ./config/var/lists/Easylist-*.txt
+        - ./config/var/lists/Prigent-Ads-*.txt
+        - ./config/var/lists/Prigent-Malware-*.txt
       allowlist_files:
         - ./config/allow.txt
       blocklist_files:
@@ -155,15 +175,40 @@ plugins:
       allowed_domains_files: []
       blocked_domains_files: []
 
-      # Patterns and keywords (inline and file-backed)
-      blocked_patterns: []
-      blocked_keywords: []
-      blocked_patterns_files: []
-      blocked_keywords_files: []
+  # 4) Route certain domains to internal upstreams
+  - module: upstream
+    pre_priority: 30
+    config:
+      routes:
+        - domain: "internal.example"
+          upstreams:
+            - { host: "10.0.0.2", port: 53 }
+            - { host: "10.0.0.3", port: 53 }
+        - suffix: "corp"
+          upstreams:
+            - { host: "10.0.1.1", port: 53 }
 
-      # IP-based rules (inline and file-backed)
-      blocked_ips: []
-      blocked_ips_files: []
+  # 5) Greylist to slow down first-seen domains
+  - module: greylist
+    pre_priority: 40
+    config:
+      duration_seconds: 3600
+      db_path: ./config/var/greylist.db
+
+  # 6) Block newly registered domains below threshold
+  - module: new_domain
+    pre_priority: 50
+    config:
+      threshold_days: 14
+      whois_db_path: ./config/var/whois_cache.db
+      # whois_cache_ttl_seconds: 3600
+      # whois_refresh_seconds: 86400
+
+  # 7) Local overrides from hosts file (A-only)
+  - module: etc-hosts
+    pre_priority: 55
+    config:
+      # file_path: /etc/hosts
 
   # 3) Upstream router – send certain suffixes to specific upstreams
   - module: router
