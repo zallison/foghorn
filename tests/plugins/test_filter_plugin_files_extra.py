@@ -10,6 +10,7 @@ Outputs:
 
 import pytest
 from dnslib import AAAA, QTYPE, RR, A, DNSRecord
+from contextlib import closing
 
 from foghorn.plugins.base import PluginContext, PluginDecision
 from foghorn.plugins.filter import FilterPlugin
@@ -62,9 +63,10 @@ def test_domains_files_allow_and_block(tmp_path):
     )
     p.setup()
 
-    assert p.is_allowed("ok.com") is True
-    assert p.is_allowed("bad.com") is False
-    assert p.is_allowed("unknown.com") is False
+    with closing(p.conn):
+        assert p.is_allowed("ok.com") is True
+        assert p.is_allowed("bad.com") is False
+        assert p.is_allowed("unknown.com") is False
 
 
 def test_load_list_from_file_json_error_and_missing_domain(tmp_path, caplog):
@@ -93,10 +95,10 @@ def test_load_list_from_file_json_error_and_missing_domain(tmp_path, caplog):
     )
 
     caplog.set_level("ERROR")
-    p.load_list_from_file(str(f), mode="allow")
-
-    # Normalized domain should be allowed despite noisy lines.
-    assert p.is_allowed("ads.example") is True
+    with closing(p.conn):
+        p.load_list_from_file(str(f), mode="allow")
+        # Normalized domain should be allowed despite noisy lines.
+        assert p.is_allowed("ads.example") is True
 
 
 def test_patterns_and_keywords_files(tmp_path, caplog):
@@ -120,6 +122,11 @@ def test_patterns_and_keywords_files(tmp_path, caplog):
         default="allow",
     )
     p.setup()
+
+    # This test primarily ensures setup does not raise when files contain a mix
+    # of invalid and valid lines; specific deny behavior is covered elsewhere.
+    with closing(p.conn):
+        pass
 
 
 def test_load_keywords_from_file_json_error_and_missing_keyword(tmp_path, caplog):
@@ -147,7 +154,8 @@ def test_load_keywords_from_file_json_error_and_missing_keyword(tmp_path, caplog
     )
 
     caplog.set_level("ERROR")
-    kws = p._load_keywords_from_file(str(f))
+    with closing(p.conn):
+        kws = p._load_keywords_from_file(str(f))
     assert "good" in kws
 
 
@@ -203,38 +211,39 @@ def test_blocked_ips_files_csv_simple_and_jsonl(tmp_path):
     p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
-    # Deny dominates overall when present (from simple/CSV and JSONL)
-    resp = _mk_response_with_ips(
-        "ex.com",
-        [
-            ("A", "192.0.2.1", 60),
-            ("A", "203.0.113.2", 60),
-            ("A", "203.0.113.9", 60),
-        ],
-    )
-    dec = p.post_resolve("ex.com", QTYPE.A, resp, ctx)
-    assert isinstance(dec, PluginDecision) and dec.action == "deny"
+    with closing(p.conn):
+        # Deny dominates overall when present (from simple/CSV and JSONL)
+        resp = _mk_response_with_ips(
+            "ex.com",
+            [
+                ("A", "192.0.2.1", 60),
+                ("A", "203.0.113.2", 60),
+                ("A", "203.0.113.9", 60),
+            ],
+        )
+        dec = p.post_resolve("ex.com", QTYPE.A, resp, ctx)
+        assert isinstance(dec, PluginDecision) and dec.action == "deny"
 
-    # Remove-only path => NXDOMAIN when all removed (CIDR remove from either file)
-    resp2 = _mk_response_with_ips("ex.com", [("A", "198.51.100.200", 60)])
-    dec2 = p.post_resolve("ex.com", QTYPE.A, resp2, ctx)
-    assert isinstance(dec2, PluginDecision) and dec2.action == "deny"
+        # Remove-only path => NXDOMAIN when all removed (CIDR remove from either file)
+        resp2 = _mk_response_with_ips("ex.com", [("A", "198.51.100.200", 60)])
+        dec2 = p.post_resolve("ex.com", QTYPE.A, resp2, ctx)
+        assert isinstance(dec2, PluginDecision) and dec2.action == "deny"
 
-    # Replace path from JSONL
-    resp3 = _mk_response_with_ips("ex.com", [("A", "203.0.113.10", 60)])
-    dec3 = p.post_resolve("ex.com", QTYPE.A, resp3, ctx)
-    assert dec3.action == "override"
-    mod = DNSRecord.parse(dec3.response)
-    assert str(mod.rr[0].rdata) == "203.0.113.200"
+        # Replace path from JSONL
+        resp3 = _mk_response_with_ips("ex.com", [("A", "203.0.113.10", 60)])
+        dec3 = p.post_resolve("ex.com", QTYPE.A, resp3, ctx)
+        assert dec3.action == "override"
+        mod = DNSRecord.parse(dec3.response)
+        assert str(mod.rr[0].rdata) == "203.0.113.200"
 
-    # IPv6 replace path remains override with changed AAAA
-    q = DNSRecord.question("ex6.com", "AAAA")
-    r = q.reply()
-    r.add_answer(RR("ex6.com", QTYPE.AAAA, rdata=AAAA("2001:db8::1"), ttl=60))
-    dec4 = p.post_resolve("ex6.com", QTYPE.AAAA, r.pack(), ctx)
-    assert dec4.action == "override"
-    mod4 = DNSRecord.parse(dec4.response)
-    assert str(mod4.rr[0].rdata) == "2001:db8::ffff"
+        # IPv6 replace path remains override with changed AAAA
+        q = DNSRecord.question("ex6.com", "AAAA")
+        r = q.reply()
+        r.add_answer(RR("ex6.com", QTYPE.AAAA, rdata=AAAA("2001:db8::1"), ttl=60))
+        dec4 = p.post_resolve("ex6.com", QTYPE.AAAA, r.pack(), ctx)
+        assert dec4.action == "override"
+        mod4 = DNSRecord.parse(dec4.response)
+        assert str(mod4.rr[0].rdata) == "2001:db8::ffff"
 
 
 def test_glob_expansion_for_new_files(tmp_path):
@@ -262,22 +271,34 @@ def test_glob_expansion_for_new_files(tmp_path):
     p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
-    # keywords
-    assert p.pre_resolve("xhost", QTYPE.A, b"", ctx).action == "deny"
-    assert p.pre_resolve("yhost", QTYPE.A, b"", ctx).action == "deny"
+    with closing(p.conn):
+        # keywords
+        assert p.pre_resolve("xhost", QTYPE.A, b"", ctx).action == "deny"
+        assert p.pre_resolve("yhost", QTYPE.A, b"", ctx).action == "deny"
 
-    # patterns
-    assert p.pre_resolve("test", QTYPE.A, b"", ctx).action == "deny"
-    assert p.pre_resolve("demo", QTYPE.A, b"", ctx).action == "deny"
+        # patterns
+        assert p.pre_resolve("test", QTYPE.A, b"", ctx).action == "deny"
+        assert p.pre_resolve("demo", QTYPE.A, b"", ctx).action == "deny"
 
 
 def test_missing_files_raise(tmp_path):
+    """Brief: setup() raises FileNotFoundError when a patterns file is missing.
+
+    Inputs:
+      - tmp_path: temporary directory for nonexistent patterns file.
+
+    Outputs:
+      - None: asserts FileNotFoundError while ensuring any opened DB is closed.
+    """
+    p = FilterPlugin(
+        db_path=str(tmp_path / "bl.db"),
+        blocked_patterns_files=[str(tmp_path / "nope.re")],
+    )
     with pytest.raises(FileNotFoundError):
-        # File resolution now occurs during setup(), so invoke it explicitly
-        FilterPlugin(
-            db_path=str(tmp_path / "bl.db"),
-            blocked_patterns_files=[str(tmp_path / "nope.re")],
-        ).setup()
+        p.setup()
+    # setup() may have opened the SQLite DB before failing; close defensively.
+    if getattr(p, "conn", None) is not None:
+        p.conn.close()
 
 
 def test_expand_globs_fallback_to_os_path_exists(tmp_path, monkeypatch):
