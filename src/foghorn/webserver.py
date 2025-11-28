@@ -22,6 +22,8 @@ import socket
 import threading
 import time
 import urllib.parse
+
+from cachetools import cached, TTLCache
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -182,6 +184,7 @@ class RingBuffer:
                 if overflow > 0:
                     self._items = self._items[overflow:]
 
+    @cached(cache=TTLCache(maxsize=10, ttl=2))
     def snapshot(self, limit: Optional[int] = None) -> List[Any]:
         """Return a copy of buffered items, optionally truncated to newest N.
 
@@ -263,6 +266,7 @@ def sanitize_config(
     return redacted
 
 
+@cached(cache=TTLCache(maxsize=1024, ttl=300))
 def _json_safe(value: Any) -> Any:
     """Brief: Return a JSON-serializable representation of value.
 
@@ -291,7 +295,7 @@ def _json_safe(value: Any) -> Any:
     # Fallback: string representation for anything else (e.g., datetime, Path).
     return str(value)
 
-
+@cached(cache=TTLCache(maxsize=1024, ttl=2))
 def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
     """Brief: Parse a /proc/meminfo-style file into byte counts.
 
@@ -329,6 +333,7 @@ def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
     return result
 
 
+@cached(cache=TTLCache(maxsize=1, ttl=2))
 def get_system_info() -> Dict[str, Any]:
     """Brief: Collect simple system and process memory usage snapshot.
 
