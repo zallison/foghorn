@@ -99,9 +99,9 @@
 				</div>
 			</div>
 			<div class="fh-warning" id="config-warning" style="display:hidden;">
-				<strong>Warning:</strong> Saving will overwrite <code>config.yaml</code>. Changes take effect
-				after the server is restarted; sending SIGUSR1/SIGUSR2 only notifies plugins and may reset
-				statistics when configured.
+				<strong>Warning:</strong> Saving will overwrite <code>config.yaml</code>, then after a brief
+				delay send SIGHUP to the main process. Changes take effect after the server restarts;
+				SIGUSR1/SIGUSR2 only notify plugins and may reset statistics when configured.
 			</div>
 
 			<div id="config-messages" class="fh-messages" aria-live="polite"></div>
@@ -1010,8 +1010,12 @@
 					});
 			}
 
-			function loadDiskConfig() {
-				fetchJson('/config/raw')
+			function loadDiskConfig(raw=0) {
+				var url = "/config";
+				if (raw != 0 || isEditing) {
+					url += "/raw";
+				}
+				fetchJson(url)
 					.then(function (data) {
 						var cfg = data && data.config ? data.config : {};
 						lastDiskConfigObj = cfg;
@@ -1049,7 +1053,7 @@
 				}
 				configViewContainer.hidden = true;
 				configEditContainer.hidden = false;
-				var text = lastDiskRawYaml != null ? lastDiskRawYaml : configOutputEl.textContent;
+				var text = lastDiskRawYaml = loadDiskConfig(1);
 				configEditorEl.value = text;
 				setMessage('Editing on-disk config, save will overwrite!');
 			}
@@ -1076,7 +1080,7 @@
 					return;
 				}
 
-				if (!window.confirm('Are you sure you want to overwrite config.yaml and trigger a reload?')) {
+				if (!window.confirm('Are you sure you want to overwrite config.yaml and request a restart via SIGHUP?')) {
 					return;
 				}
 
@@ -1096,7 +1100,7 @@
 						});
 					})
 					.then(function (data) {
-						setMessage('Configuration saved and reload signalled. Path: ' + (data.path || ''), 'success');
+						setMessage('Configuration saved; restart requested via SIGHUP. Path: ' + (data.path || ''), 'success');
 						exitEditMode(true);
 						loadDiskConfig();
 						loadMemoryConfig();

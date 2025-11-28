@@ -89,6 +89,7 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
 
 - SIGUSR1: notifies active plugins (via `handle_sigusr2()`) and, when statistics are enabled with `sigusr2_resets_stats: true`, resets in-memory statistics counters.
 - SIGUSR2: identical behavior to SIGUSR1; retained for backwards compatibility so existing tooling can continue to send either signal.
+- SIGHUP: requests a clean shutdown with exit code 0; intended for supervisors (e.g., systemd) to restart Foghorn with a new configuration. The `/config/save` admin endpoint writes the updated config file and then, after a brief delay, sends SIGHUP to the main process.
 
 ## Testing
 
