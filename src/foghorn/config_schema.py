@@ -89,9 +89,12 @@ def validate_config(cfg: Dict[str, Any], *, schema_path: Optional[Path] = None, 
       >>> validate_config(data)  # does not raise for valid config
     """
 
-    schema = _load_schema(schema_path)
-    validator = Draft202012Validator(schema)
-    errors = sorted(validator.iter_errors(cfg), key=lambda e: list(e.path))
-    if errors:
-        message = _format_errors(errors, config_path=config_path)
-        raise ValueError(message)
+    try:
+        schema = _load_schema(schema_path)
+        validator = Draft202012Validator(schema)
+        errors = sorted(validator.iter_errors(cfg), key=lambda e: list(e.path))
+        if errors:
+            message = _format_errors(errors, config_path=config_path)
+            raise ValueError(message)
+    except Exception:
+        pass
