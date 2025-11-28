@@ -564,6 +564,30 @@ def _build_auth_dependency(web_cfg: Dict[str, Any]):
     return _no_auth
 
 
+def _schedule_sighup_after_config_save(delay_seconds: float = 1.0) -> None:
+    """Brief: Schedule SIGHUP to the main process after a small delay.
+
+    Inputs:
+      - delay_seconds: Number of seconds to wait before sending SIGHUP.
+
+    Outputs:
+      - None; best-effort scheduling of a background timer that will send
+        signal.SIGHUP to the current process ID. Failures are logged.
+    """
+
+    pid = os.getpid()
+
+    def _send() -> None:
+        try:
+            os.kill(pid, signal.SIGHUP)
+        except Exception as exc:  # pragma: no cover - platform specific
+            logger.error("Failed to send SIGHUP after config save: %s", exc)
+
+    timer = threading.Timer(delay_seconds, _send)
+    timer.daemon = True
+    timer.start()
+
+
 def create_app(
     stats: Optional[StatsCollector],
     config: Dict[str, Any],
@@ -854,7 +878,7 @@ def create_app(
 
     @app.post("/config/save", dependencies=[Depends(auth_dep)])
     async def save_config(body: Dict[str, Any]) -> Dict[str, Any]:
-        """Persist new configuration to disk and signal SIGUSR1 for plugin notification.
+        """Persist new configuration to disk and schedule SIGHUP for the main process.
 
         Inputs:
           - body: JSON object representing the full configuration mapping to
@@ -924,11 +948,10 @@ def create_app(
                 detail=f"failed to write config to {cfg_path_abs}: {exc}",
             ) from exc
 
-        # Signal main process so plugins can react to the updated configuration
-        try:
-            os.kill(os.getpid(), signal.SIGUSR1)
-        except Exception as exc:  # pragma: no cover - platform specific
-            logger.error("Failed to send SIGUSR1 after config save: %s", exc)
+        # Schedule a SIGHUP for the main process after a short delay so that
+        # supervisors can observe a clean shutdown and restart with the new
+        # configuration applied.
+        _schedule_sighup_after_config_save()
 
         return {
             "status": "ok",
@@ -1494,7 +1517,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _handle_config_save(self, body: Dict[str, Any]) -> None:
-        """Brief: Handle POST /config/save to persist config and signal SIGUSR1 for plugins.
+        """Brief: Handle POST /config/save to persist config and schedule SIGHUP.
 
         Inputs:
           - body: Parsed JSON object representing full configuration mapping.
@@ -1585,13 +1608,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
-        try:
-            os.kill(os.getpid(), signal.SIGUSR1)
-        except Exception as exc:  # pragma: no cover
-            logger.error(
-                "Failed to send SIGUSR1 after config save (threaded) for plugin notification: %s",
-                exc,
-            )
+        # Schedule a SIGHUP for the main process after the updated configuration
+        # has been safely written to disk.
+        _schedule_sighup_after_config_save()
 
         self._send_json(
             200,
