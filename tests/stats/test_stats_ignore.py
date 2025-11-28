@@ -339,7 +339,9 @@ def test_set_ignore_filters_skips_empty_entries() -> None:
     collector.record_query("1.2.3.7", "fakeexample.com", "A")
 
     snap = collector.snapshot(reset=False)
-    assert snap.totals["total_queries"] == 3
+    # Totals include all five queries; ignore filters are display-only and do
+    # not affect core counters.
+    assert snap.totals["total_queries"] == 5
 
     # Ignored client and domains should be filtered from top lists, ensuring
     # only the non-ignored entries remain visible.

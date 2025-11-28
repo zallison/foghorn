@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
 
+from .config_schema import validate_config
 from .doh_api import start_doh_server
 from .logging_config import init_logging
 from .plugins.base import BasePlugin
@@ -292,6 +293,13 @@ def main(argv: List[str] | None = None) -> int:
 
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f) or {}
+
+    # Validate configuration against JSON Schema before proceeding.
+    try:
+        validate_config(cfg, config_path=args.config)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
 
     # Initialize logging before any other operations
     init_logging(cfg.get("logging"))

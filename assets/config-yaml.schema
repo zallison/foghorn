@@ -1,0 +1,308 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/foghorn/config.schema.json",
+  "title": "Foghorn Config (modern YAML layout)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["listen", "upstream"],
+  "$defs": {
+    "listener_udp": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "listener_tcp": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "listener_dot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "cert_file": { "type": "string" },
+        "key_file": { "type": "string" }
+      }
+    },
+    "listener_doh": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "cert_file": { "type": "string" },
+        "key_file": { "type": "string" }
+      }
+    },
+    "upstream_host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host"],
+      "properties": {
+        "host": { "type": "string", "minLength": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "transport": {
+          "type": "string",
+          "enum": ["udp", "tcp", "dot"],
+          "default": "udp"
+        },
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "server_name": { "type": "string" },
+            "verify": { "type": "boolean" },
+            "ca_file": { "type": "string" }
+          }
+        },
+        "pool": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_connections": { "type": "integer", "minimum": 1 },
+            "idle_timeout_ms": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "upstream_doh": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transport", "url"],
+      "properties": {
+        "transport": { "type": "string", "const": "doh" },
+        "url": { "type": "string", "minLength": 1 },
+        "method": { "type": "string", "enum": ["GET", "POST"] },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "tls": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "verify": { "type": "boolean" },
+            "ca_file": { "type": "string" }
+          }
+        }
+      }
+    },
+    "plugin_entry": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["module"],
+          "properties": {
+            "module": { "type": "string", "minLength": 1 },
+            "config": { "type": "object" },
+            "pre_priority": { "type": "integer" },
+            "post_priority": { "type": "integer" },
+            "setup_priority": { "type": "integer" }
+          }
+        }
+      ]
+    }
+  },
+  "properties": {
+    "listen": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "udp": { "$ref": "#/$defs/listener_udp" },
+        "tcp": { "$ref": "#/$defs/listener_tcp" },
+        "dot": { "$ref": "#/$defs/listener_dot" },
+        "doh": { "$ref": "#/$defs/listener_doh" }
+      }
+    },
+    "upstream": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/upstream_host" },
+          { "$ref": "#/$defs/upstream_doh" }
+        ]
+      }
+    },
+    "timeout_ms": { "type": "integer", "minimum": 1 },
+    "min_cache_ttl": { "type": "integer", "minimum": 0 },
+    "dnssec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["ignore", "passthrough", "validate"],
+          "default": "ignore"
+        },
+        "validation": {
+          "type": "string",
+          "enum": ["upstream_ad", "local"],
+          "default": "upstream_ad"
+        },
+        "udp_payload_size": { "type": "integer", "minimum": 512 }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "warning",
+            "error",
+            "crit",
+            "critical"
+          ]
+        },
+        "stderr": { "type": "boolean" },
+        "file": { "type": "string" },
+        "syslog": {
+          "oneOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "address": {},
+                "facility": {},
+                "tag": {}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "statistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "interval_seconds": { "type": "integer", "minimum": 1 },
+        "reset_on_log": { "type": "boolean" },
+        "track_uniques": { "type": "boolean" },
+        "include_qtype_breakdown": { "type": "boolean" },
+        "include_top_clients": { "type": "boolean" },
+        "include_top_domains": { "type": "boolean" },
+        "top_n": { "type": "integer", "minimum": 1 },
+        "track_latency": { "type": "boolean" },
+        "log_level": { "type": "string" },
+        "sigusr2_resets_stats": { "type": "boolean" },
+        "reset_on_sigusr1": { "type": "boolean" },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "db_path": { "type": "string" },
+            "batch_writes": { "type": "boolean" },
+            "batch_time_sec": { "type": "number", "minimum": 0 },
+            "batch_max_size": { "type": "integer", "minimum": 1 },
+            "force_rebuild": { "type": "boolean" }
+          }
+        },
+        "ignore": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "top_clients": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "top_domains": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "top_subdomains": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "top_domains_mode": {
+              "type": "string",
+              "enum": ["exact", "suffix"]
+            },
+            "top_subdomains_mode": {
+              "type": "string",
+              "enum": ["exact", "suffix"]
+            },
+            "ignore_single_host": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "webserver": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "logs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "buffer_size": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "system_info_ttl_seconds": { "type": "number", "minimum": 0 },
+        "system_metrics_detail": {
+          "type": "string",
+          "enum": ["full", "basic"]
+        },
+        "debug_timings": { "type": "boolean" },
+        "index": { "type": "boolean" },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["none", "token", "basic"]
+            },
+            "token": { "type": "string" }
+          }
+        },
+        "cors": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "allowlist": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "www_root": { "type": "string" },
+        "redact_keys": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "plugins": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/plugin_entry" }
+    }
+  }
+}
