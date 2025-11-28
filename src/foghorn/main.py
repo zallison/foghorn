@@ -499,7 +499,9 @@ def main(argv: List[str] | None = None) -> int:
     # SIGHUP, SIGTERM) requests the process to exit. exit_code communicates the
     # desired process exit status back to the main() return value.
     shutdown_event = threading.Event()
+    shutdown_complete = threading.Event()
     exit_code = 0
+    hard_kill_timer: threading.Timer | None = None
 
     # --- Signal handling (SIGUSR1/SIGUSR2) ---
     # Use Events to coalesce multiple signals so that expensive work (statistics
@@ -617,9 +619,15 @@ def main(argv: List[str] | None = None) -> int:
         Outputs:
           - None. Sets shutdown_event/exit_code and triggers server shutdown
             when running with a UDP listener.
+
+        Notes:
+          - For SIGTERM and SIGINT, a best-effort hard-kill timer is started.
+            If the process has not completed its shutdown sequence within
+            ~10 seconds, a last-resort SIGKILL (or os._exit fallback) is
+            issued to avoid hanging indefinitely.
         """
 
-        nonlocal exit_code, server
+        nonlocal exit_code, server, hard_kill_timer
         log = logging.getLogger("foghorn.main")
 
         if shutdown_event.is_set():
@@ -628,6 +636,29 @@ def main(argv: List[str] | None = None) -> int:
         exit_code = code
         shutdown_event.set()
         log.info("Received %s, initiating shutdown (exit code=%d)", reason, code)
+
+        # For termination-style signals, arm a hard-kill timer so that a stuck
+        # shutdown cannot leave the process running indefinitely. The timer is
+        # cancelled implicitly when shutdown_complete is set before it fires.
+        if reason in {"SIGTERM", "SIGINT"} and hard_kill_timer is None:
+            def _force_exit() -> None:
+                # If shutdown has completed in the meantime, do nothing.
+                if shutdown_complete.is_set():
+                    return
+                try:
+                    log.error(
+                        "Hard-kill timeout exceeded after %s; sending SIGKILL to self",
+                        reason,
+                    )
+                    os.kill(os.getpid(), signal.SIGKILL)
+                except Exception:
+                    # As a last resort, force immediate exit with the best
+                    # available exit code.
+                    os._exit(code or 2)
+
+            hard_kill_timer = threading.Timer(10.0, _force_exit)
+            hard_kill_timer.daemon = True
+            hard_kill_timer.start()
 
         # When a UDP server is active, ask socketserver to stop its loop so the
         # main thread can proceed to the coordinated shutdown logic.
@@ -854,8 +885,11 @@ def main(argv: List[str] | None = None) -> int:
             # termination signals to request shutdown via shutdown_event.
             import time as _time
 
+            # Use a short sleep interval so that termination-style signals
+            # (SIGHUP/SIGTERM/SIGINT), which set shutdown_event, are honored
+            # promptly even when no UDP listener is active.
             while not shutdown_event.is_set():
-                _time.sleep(3600)
+                _time.sleep(1.0)
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down")
         if not shutdown_event.is_set():
@@ -886,6 +920,10 @@ def main(argv: List[str] | None = None) -> int:
         if web_handle is not None:
             logger.info("Stopping webserver")
             web_handle.stop()
+
+        # Mark shutdown as complete so any pending hard-kill timers can detect
+        # successful termination and avoid forcing an unnecessary SIGKILL.
+        shutdown_complete.set()
 
     return exit_code
 
