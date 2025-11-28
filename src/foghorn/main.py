@@ -494,6 +494,13 @@ def main(argv: List[str] | None = None) -> int:
         buffer_size = int((web_cfg.get("logs") or {}).get("buffer_size", 500))
         web_log_buffer = RingBuffer(capacity=buffer_size)
 
+    # --- Coordinated shutdown state ---
+    # shutdown_event is set when a termination-like signal (KeyboardInterrupt,
+    # SIGHUP, SIGTERM) requests the process to exit. exit_code communicates the
+    # desired process exit status back to the main() return value.
+    shutdown_event = threading.Event()
+    exit_code = 0
+
     # --- Signal handling (SIGUSR1/SIGUSR2) ---
     # Use Events to coalesce multiple signals so that expensive work (statistics
     # reset and plugin notifications) is never running concurrently for the same
@@ -599,6 +606,46 @@ def main(argv: List[str] | None = None) -> int:
         finally:
             _sigusr2_pending.clear()
 
+    # --- Termination-oriented signals (SIGHUP/SIGTERM) ---
+    def _request_shutdown(reason: str, code: int) -> None:
+        """Brief: Request coordinated shutdown and set desired exit code.
+
+        Inputs:
+          - reason: Human-readable signal/reason name (e.g., 'SIGHUP', 'SIGTERM').
+          - code: Desired process exit code to return from main().
+
+        Outputs:
+          - None. Sets shutdown_event/exit_code and triggers server shutdown
+            when running with a UDP listener.
+        """
+
+        nonlocal exit_code, server
+        log = logging.getLogger("foghorn.main")
+
+        if shutdown_event.is_set():
+            return
+
+        exit_code = code
+        shutdown_event.set()
+        log.info("Received %s, initiating shutdown (exit code=%d)", reason, code)
+
+        # When a UDP server is active, ask socketserver to stop its loop so the
+        # main thread can proceed to the coordinated shutdown logic.
+        try:
+            if server is not None and getattr(server, "server", None) is not None:
+                server.server.shutdown()
+        except Exception:  # pragma: no cover - defensive
+            log.exception("Error while requesting UDP server shutdown for %s", reason)
+
+    def _sighup_handler(_signum, _frame):
+        _request_shutdown("SIGHUP", 0)
+
+    def _sigterm_handler(_signum, _frame):
+        _request_shutdown("SIGTERM", 2)
+
+    def _sigint_handler(_signum, _frame):
+        _request_shutdown("SIGINT", 2)
+
     # Register handlers (Unix only)
     try:
         signal.signal(signal.SIGUSR1, _sigusr1_handler)
@@ -615,6 +662,24 @@ def main(argv: List[str] | None = None) -> int:
         )
     except Exception:
         logger.warning("Could not install SIGUSR2 handler on this platform")
+
+    try:
+        signal.signal(signal.SIGHUP, _sighup_handler)
+        logger.info("Installed SIGHUP handler for clean shutdown (exit code 0)")
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("Could not install SIGHUP handler on this platform")
+
+    try:
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+        logger.info("Installed SIGTERM handler for immediate shutdown (exit code 2)")
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("Could not install SIGTERM handler on this platform")
+
+    try:
+        signal.signal(signal.SIGINT, _sigint_handler)
+        logger.info("Installed SIGINT handler for immediate shutdown (exit code 2)")
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("Could not install SIGINT handler on this platform")
 
     # DNSSEC config (ignore|passthrough|validate)
     dnssec_cfg = cfg.get("dnssec", {}) or {}
@@ -781,20 +846,31 @@ def main(argv: List[str] | None = None) -> int:
 
     try:
         if server is not None:
+            # UDP listener path: serve_forever() blocks until shutdown() is
+            # called (from _request_shutdown) or a KeyboardInterrupt occurs.
             server.serve_forever()
         else:
-            #  keep main thread alive while async listeners run
+            # keep main thread alive while async listeners run, but allow
+            # termination signals to request shutdown via shutdown_event.
             import time as _time
 
-            while True:
+            while not shutdown_event.is_set():
                 _time.sleep(3600)
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down")
+        if not shutdown_event.is_set():
+            # KeyboardInterrupt maps to a clean shutdown and exit code 0 unless
+            # an explicit termination-like signal has already set a code.
+            shutdown_event.set()
+            exit_code = 0
     except Exception as e:  # pragma: no cover
         logger.exception(
             f"Unhandled exception during server operation {e}"
         )  # pragma: no cover
-        return 1  # pragma: no cover
+        # Preserve a non-zero exit when an unhandled exception occurs unless a
+        # stronger exit code (e.g., from SIGTERM) is already in place.
+        if exit_code == 0:
+            exit_code = 1
     finally:
         # Stop statistics reporter on shutdown so background reporting threads
         # never outlive the main process and do not keep it alive.
@@ -811,7 +887,7 @@ def main(argv: List[str] | None = None) -> int:
             logger.info("Stopping webserver")
             web_handle.stop()
 
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
