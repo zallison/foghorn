@@ -902,7 +902,7 @@ def test_config_raw_endpoint_reads_from_disk(tmp_path) -> None:
 
 
 def test_save_config_persists_raw_yaml_and_signals(monkeypatch, tmp_path) -> None:
-    """Brief: /config/save must overwrite config file and send SIGUSR1.
+    """Brief: /config/save must overwrite config file and schedule SIGHUP.
 
     Inputs:
       - Existing config file path and JSON body containing raw_yaml.
@@ -943,11 +943,19 @@ def test_save_config_persists_raw_yaml_and_signals(monkeypatch, tmp_path) -> Non
     on_disk = cfg_path.read_text(encoding="utf-8")
     assert on_disk == new_yaml
 
-    # SIGUSR1 was requested for current process
+    # SIGHUP should be scheduled for the current process shortly after the
+    # config write. Because the signal is sent from a background timer, wait
+    # briefly for os.kill to be invoked.
+    import time
+
+    deadline = time.time() + 2.0
+    while kill_calls["args"] is None and time.time() < deadline:
+        time.sleep(0.01)
+
     assert kill_calls["args"] is not None
     pid, sig = kill_calls["args"]  # type: ignore[assignment]
     assert pid == os.getpid()
-    assert sig == web_mod.signal.SIGUSR1
+    assert sig == web_mod.signal.SIGHUP
 
 
 def test_read_proc_meminfo_parses_sample_file(tmp_path) -> None:
