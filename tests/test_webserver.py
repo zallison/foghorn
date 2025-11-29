@@ -19,6 +19,7 @@ import logging
 import threading
 
 from fastapi.testclient import TestClient
+import yaml
 
 from foghorn.stats import StatsCollector
 from foghorn.webserver import (
@@ -27,6 +28,7 @@ from foghorn.webserver import (
     _read_proc_meminfo,
     _Suppress2xxAccessFilter,
     _utc_now_iso,
+    _redact_yaml_text_preserving_layout,
     create_app,
     get_system_info,
     install_uvicorn_2xx_suppression,
@@ -452,13 +454,13 @@ def test_stats_reset_endpoint_clears_counters() -> None:
 
 
 def test_config_endpoint_returns_sanitized_config() -> None:
-    """Brief: /config must return sanitized config with secrets redacted.
+    """Brief: /config must return sanitized YAML config with secrets redacted.
 
     Inputs:
       - Config containing nested password and token fields.
 
     Outputs:
-      - /config JSON config has those values replaced with '***'.
+      - /config YAML config has those values replaced with '***'.
     """
 
     cfg = {
@@ -477,8 +479,45 @@ def test_config_endpoint_returns_sanitized_config() -> None:
 
     resp = client.get("/config")
     assert resp.status_code == 200
+    yaml_text = resp.text
+    config_out = yaml.safe_load(yaml_text) or {}
+
+    auth_out = config_out["webserver"]["auth"]
+    assert auth_out["token"] == "***"
+    assert auth_out["password"] == "***"
+
+    upstream_out = config_out["upstream"][0]
+    assert upstream_out["token"] == "***"
+
+
+def test_config_json_endpoint_returns_sanitized_config() -> None:
+    """Brief: /config.json must return sanitized JSON config with secrets redacted.
+
+    Inputs:
+      - Config containing nested password and token fields.
+
+    Outputs:
+      - /config.json JSON config has those values replaced with '***'.
+    """
+
+    cfg = {
+        "webserver": {
+            "enabled": True,
+            "redact_keys": ["token", "password"],
+            "auth": {"token": "secret-token", "password": "pw"},
+        },
+        "upstream": [
+            {"host": "1.1.1.1", "token": "upstream-token"},
+        ],
+    }
+
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    resp = client.get("/config.json")
+    assert resp.status_code == 200
     data = resp.json()
-    assert "config" in data
+    assert "server_time" in data
     config_out = data["config"]
 
     auth_out = config_out["webserver"]["auth"]
@@ -878,8 +917,7 @@ def test_config_raw_endpoint_reads_from_disk(tmp_path) -> None:
       - Temporary YAML config file with known contents.
 
     Outputs:
-      - JSON payload contains raw_yaml with the original text and config
-        mapping reconstructed from that YAML.
+      - Response body contains the original YAML text and can be parsed back.
     """
 
     cfg_path = tmp_path / "config.yaml"
@@ -896,9 +934,218 @@ def test_config_raw_endpoint_reads_from_disk(tmp_path) -> None:
 
     resp = client.get("/config/raw")
     assert resp.status_code == 200
+    data_text = resp.text
+    assert data_text == yaml_text
+    parsed = yaml.safe_load(data_text) or {}
+    assert parsed["webserver"]["enabled"] is True
+    assert parsed["answer"] == 42
+
+
+def test_config_endpoint_preserves_comments_and_redacts_values_and_subkeys(tmp_path) -> None:
+    """Brief: YAML redaction should preserve comments while redacting values and subkeys.
+
+    Inputs:
+      - On-disk-style YAML config with comments, inline comments, and nested auth block.
+
+    Outputs:
+      - Redacted YAML retains comments and structure but replaces sensitive
+        values and all subkeys under a redacted key with '***'.
+    """
+
+    yaml_text = (
+        "# top comment\\n"
+        "webserver:\n"
+        "  enabled: true  # inline comment\\n"
+        "  auth:\n"
+        "    # auth comment\\n"
+        "    token: secret-token\\n"
+        "    password: secret-password\\n"
+        "  note: safe-value\\n"
+    )
+
+    # Directly exercise the textual YAML redaction helper, which is used by
+    # the /config endpoint when config_path is available.
+    body = _redact_yaml_text_preserving_layout(yaml_text, ["auth"])
+
+    # Comments are preserved
+    assert "# top comment" in body
+    assert "# inline comment" in body
+    assert "# auth comment" in body
+
+    # auth subtree is redacted, including its subkeys
+    assert "auth:" in body
+    assert "token: ***" in body
+    assert "password: ***" in body
+    assert "secret-token" not in body
+    assert "secret-password" not in body
+
+    # Non-redacted keys remain visible
+    assert "note: safe-value" in body
+
+
+def test_config_raw_json_endpoint_reads_from_disk(tmp_path) -> None:
+    """Brief: /config/raw.json must return parsed config mapping and raw YAML text.
+
+    Inputs:
+      - Temporary YAML config file with known contents.
+
+    Outputs:
+      - JSON payload contains raw_yaml with the original text and config
+        mapping reconstructed from that YAML.
+    """
+
+    cfg_path = tmp_path / "config.yaml"
+    yaml_text = "webserver:\n  enabled: true\nanswer: 42\n"
+    cfg_path.write_text(yaml_text, encoding="utf-8")
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+        config_path=str(cfg_path),
+    )
+    client = TestClient(app)
+
+    resp = client.get("/config/raw.json")
+    assert resp.status_code == 200
     data = resp.json()
     assert data["raw_yaml"] == yaml_text
-    assert data["config"]["answer"] == 42
+    parsed = data["config"] or {}
+    assert parsed["webserver"]["enabled"] is True
+    assert parsed["answer"] == 42
+
+
+def test_config_json_fastapi_and_threaded_payloads_match() -> None:
+    """Brief: /config.json JSON from FastAPI and threaded admin must match.
+
+    Inputs:
+      - Shared configuration containing redacted fields.
+
+    Outputs:
+      - FastAPI and threaded /config.json responses match after normalizing timestamps.
+    """
+
+    import http.client
+
+    import foghorn.webserver as web_mod
+
+    cfg = {
+        "webserver": {
+            "enabled": True,
+            "auth": {"mode": "none"},
+            "redact_keys": ["token", "password"],
+        },
+        "upstream": [
+            {"host": "1.1.1.1", "token": "upstream-token"},
+        ],
+    }
+
+    # FastAPI /config.json
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+    fastapi_resp = client.get("/config.json")
+    assert fastapi_resp.status_code == 200
+    fastapi_data = fastapi_resp.json()
+
+    # Threaded /config.json
+    httpd = web_mod._AdminHTTPServer(
+        ("127.0.0.1", 0),
+        web_mod._ThreadedAdminRequestHandler,
+        stats=None,
+        config=cfg,
+        log_buffer=RingBuffer(),
+        config_path=None,
+    )
+
+    host, port = httpd.server_address
+
+    def _serve_once() -> None:
+        try:
+            httpd.handle_request()
+        finally:
+            httpd.server_close()
+
+    t = threading.Thread(target=_serve_once, daemon=True)
+    t.start()
+
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    try:
+        conn.request("GET", "/config.json")
+        resp = conn.getresponse()
+        assert resp.status == 200
+        body = resp.read().decode("utf-8")
+    finally:
+        conn.close()
+        t.join(timeout=1.0)
+
+    threaded_data = json.loads(body)
+
+    def _normalize(payload: dict) -> dict:
+        cleaned = dict(payload)
+        cleaned.pop("server_time", None)
+        return cleaned
+
+    norm_fast = _normalize(fastapi_data)
+    norm_thread = _normalize(threaded_data)
+
+    assert norm_fast == norm_thread
+
+
+def test_config_raw_json_threaded_endpoint_reads_from_disk(tmp_path) -> None:
+    """Brief: Threaded /config/raw.json must read config from disk and echo raw_yaml.
+
+    Inputs:
+      - Temporary YAML config file with known contents.
+
+    Outputs:
+      - JSON payload contains raw_yaml with the original text and parsed mapping.
+    """
+
+    import http.client
+
+    import foghorn.webserver as web_mod
+
+    cfg_path = tmp_path / "config.yaml"
+    yaml_text = "webserver:\n  enabled: true\nanswer: 42\n"
+    cfg_path.write_text(yaml_text, encoding="utf-8")
+
+    cfg = {"webserver": {"enabled": True, "auth": {"mode": "none"}}}
+
+    httpd = web_mod._AdminHTTPServer(
+        ("127.0.0.1", 0),
+        web_mod._ThreadedAdminRequestHandler,
+        stats=None,
+        config=cfg,
+        log_buffer=RingBuffer(),
+        config_path=str(cfg_path),
+    )
+
+    host, port = httpd.server_address
+
+    def _serve_once() -> None:
+        try:
+            httpd.handle_request()
+        finally:
+            httpd.server_close()
+
+    t = threading.Thread(target=_serve_once, daemon=True)
+    t.start()
+
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    try:
+        conn.request("GET", "/config/raw.json")
+        resp = conn.getresponse()
+        assert resp.status == 200
+        body = resp.read().decode("utf-8")
+    finally:
+        conn.close()
+        t.join(timeout=1.0)
+
+    data = json.loads(body)
+    assert data["raw_yaml"] == yaml_text
+    parsed = data["config"] or {}
+    assert parsed["webserver"]["enabled"] is True
+    assert parsed["answer"] == 42
 
 
 def test_save_config_persists_raw_yaml_and_signals(monkeypatch, tmp_path) -> None:
