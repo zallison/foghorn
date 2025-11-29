@@ -16,6 +16,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import shutil
 import signal
 import socket
@@ -263,6 +264,104 @@ def sanitize_config(
                 _walk(item)
 
     _walk(redacted)
+    return redacted
+
+
+# Precompiled regexes for lightweight YAML redaction that preserves layout/comments.
+_YAML_KEY_LINE_RE = re.compile(r"^(\s*)([^:\s][^:]*)\s*:(.*)$")
+_YAML_LIST_LINE_RE = re.compile(r"^(\s*)-\s*(.*)$")
+
+
+def _split_yaml_value_and_comment(rest: str) -> tuple[str, str]:
+    """Split the portion of a YAML line after ':' or '-' into value and comment.
+
+    Inputs:
+      - rest: Substring after the ':' or '-' token, including any value and comment.
+
+    Outputs:
+      - Tuple (value, comment_suffix) where comment_suffix includes leading ' #'
+        when a comment is present, otherwise an empty string.
+    """
+
+    if "#" not in rest:
+        return rest.rstrip(), ""
+    before, comment = rest.split("#", 1)
+    return before.rstrip(), " #" + comment
+
+
+def _redact_yaml_text_preserving_layout(
+    raw_yaml: str, redact_keys: List[str] | None
+) -> str:
+    """Redact sensitive keys in raw YAML text while preserving comments/spacing.
+
+    Inputs:
+      - raw_yaml: Original YAML document text as read from disk.
+      - redact_keys: List of key names whose values (and subkeys) should be redacted.
+
+    Outputs:
+      - New YAML text with the same overall layout and comments, but with values
+        for matching keys and any nested subkeys replaced by '***'.
+
+    Notes:
+      - This is a best-effort textual transformation intended for human-facing
+        display (e.g., the admin UI). It is not a full YAML parser and may not
+        handle all edge cases, but it preserves common constructs well.
+    """
+
+    if not raw_yaml or not redact_keys:
+        return raw_yaml
+
+    targets = {str(k) for k in redact_keys}
+    lines = raw_yaml.splitlines(keepends=False)
+    out_lines: list[str] = []
+    # Stack of indentation levels for active redaction blocks.
+    redact_indent_stack: list[int] = []
+
+    for line in lines:
+        # Compute indentation and whether we are still inside any redact block.
+        stripped = line.lstrip(" ")
+        leading_spaces_len = len(line) - len(stripped)
+
+        # Pop blocks when we encounter a non-blank line that is not nested inside.
+        if stripped and redact_indent_stack:
+            while redact_indent_stack and leading_spaces_len <= redact_indent_stack[-1]:
+                redact_indent_stack.pop()
+        inside_block = bool(redact_indent_stack)
+
+        m_key = _YAML_KEY_LINE_RE.match(line)
+        if m_key:
+            indent, key, rest = m_key.groups()
+            key_clean = key.strip()
+            start_block = key_clean in targets
+            redact_here = start_block or inside_block
+
+            if redact_here:
+                value_part, comment_part = _split_yaml_value_and_comment(rest)
+                # Always replace value with '***' but keep any inline comment suffix.
+                new_rest = " ***" + comment_part
+                new_line = f"{indent}{key_clean}:{new_rest}"
+                out_lines.append(new_line)
+                if start_block:
+                    redact_indent_stack.append(leading_spaces_len)
+                continue
+
+        # Redact list items nested under any redacted block.
+        if inside_block:
+            m_list = _YAML_LIST_LINE_RE.match(line)
+            if m_list:
+                indent, rest = m_list.groups()
+                value_part, comment_part = _split_yaml_value_and_comment(rest)
+                new_rest = "***" + comment_part
+                new_line = f"{indent}- {new_rest}"
+                out_lines.append(new_line)
+                continue
+
+        out_lines.append(line)
+
+    redacted = "\n".join(out_lines)
+    # Preserve a trailing newline if the original had one.
+    if raw_yaml.endswith("\n") and not redacted.endswith("\n"):
+        redacted += "\n"
     return redacted
 
 
@@ -837,11 +936,28 @@ def create_app(
             "password",
             "secret",
         ]
-        clean = sanitize_config(cfg, redact_keys=redact_keys)
-        try:
-            body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
-        except Exception:  # pragma: no cover - defensive
-            body = ""
+
+        # Prefer to redact directly over the on-disk YAML so comments/spacing are preserved.
+        cfg_path = getattr(app.state, "config_path", None)
+        if cfg_path:
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    raw_text = f.read()
+                body = _redact_yaml_text_preserving_layout(raw_text, redact_keys)
+            except Exception:  # pragma: no cover - defensive / I/O specific
+                # Fall back to structure-based redaction when disk read fails.
+                clean = sanitize_config(cfg, redact_keys=redact_keys)
+                try:
+                    body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
+                except Exception:
+                    body = ""
+        else:
+            clean = sanitize_config(cfg, redact_keys=redact_keys)
+            try:
+                body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
+            except Exception:  # pragma: no cover - defensive
+                body = ""
+
         return PlainTextResponse(body, media_type="application/x-yaml")
 
     @app.get("/config/raw", dependencies=[Depends(auth_dep)])
@@ -1495,11 +1611,26 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             "password",
             "secret",
         ]
-        clean = sanitize_config(cfg, redact_keys=redact_keys)
-        try:
-            body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
-        except Exception:  # pragma: no cover - defensive
-            body = ""
+
+        cfg_path = getattr(self._server(), "config_path", None)
+        if cfg_path:
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    raw_text = f.read()
+                body = _redact_yaml_text_preserving_layout(raw_text, redact_keys)
+            except Exception:  # pragma: no cover - defensive / I/O specific
+                clean = sanitize_config(cfg, redact_keys=redact_keys)
+                try:
+                    body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
+                except Exception:
+                    body = ""
+        else:
+            clean = sanitize_config(cfg, redact_keys=redact_keys)
+            try:
+                body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
+            except Exception:  # pragma: no cover - defensive
+                body = ""
+
         self._send_text(200, body)
 
     def _handle_config_json(self) -> None:
