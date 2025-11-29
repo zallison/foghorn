@@ -47,7 +47,7 @@ env-dev:
 tests: test
 test: env build
 	@echo "=== Running tests (short) ==="
-	source ${VENV}/bin/activate
+	. ${VENV}/bin/activate
 	${VENV}/bin/pytest --cov=foghorn --disable-warnings tests
 
 
