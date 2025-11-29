@@ -408,6 +408,14 @@
 				var heading = document.createElement('h3');
 				heading.className = 'fh-stats-group-title';
 				heading.textContent = title;
+				// Provide a helpful tooltip for any "*Subdomain*" style list so it
+				// is clear that the entries are full subdomain qnames.
+				if (
+					typeof title === 'string' &&
+					(title.indexOf('Subdomain') !== -1 || title.indexOf('Sub Domains') !== -1)
+				) {
+					heading.title = 'Entries are subdomain names (full qnames, for example "www.example.com").';
+				}
 				group.appendChild(heading);
 
 				var dl = document.createElement('dl');
