@@ -528,6 +528,36 @@ def test_config_json_endpoint_returns_sanitized_config() -> None:
     assert upstream_out["token"] == "***"
 
 
+def test_config_raw_fastapi_returns_json_with_raw_yaml(tmp_path) -> None:
+    """Brief: /config/raw FastAPI endpoint must return JSON with raw_yaml string.
+
+    Inputs:
+      - Temporary YAML config file with a simple mapping.
+
+    Outputs:
+      - /config/raw returns application/json, includes server_time, config mapping,
+        and raw_yaml matching the on-disk file contents.
+    """
+
+    cfg_text = "webserver:\n  enabled: true\nanswer: 42\n"
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(cfg_text, encoding="utf-8")
+
+    cfg = {"webserver": {"enabled": True}}
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer(), config_path=str(cfg_file))
+    client = TestClient(app)
+
+    resp = client.get("/config/raw")
+    assert resp.status_code == 200
+    assert resp.headers.get("content-type", "").startswith("application/json")
+
+    data = resp.json()
+    assert "server_time" in data
+    assert data["raw_yaml"] == cfg_text
+    assert isinstance(data.get("config"), dict)
+    assert data["config"].get("answer") == 42
+
+
 def test_logs_endpoint_returns_entries_from_ringbuffer() -> None:
     """Brief: /logs must return entries that were pushed into the RingBuffer.
 
@@ -911,13 +941,14 @@ def test_static_www_serves_files_and_blocks_traversal(monkeypatch, tmp_path) -> 
 
 
 def test_config_raw_endpoint_reads_from_disk(tmp_path) -> None:
-    """Brief: /config/raw must return raw YAML text and parsed mapping.
+    """Brief: /config/raw must return JSON with raw_yaml and parsed mapping.
 
     Inputs:
       - Temporary YAML config file with known contents.
 
     Outputs:
-      - Response body contains the original YAML text and can be parsed back.
+      - JSON body contains the original YAML text in raw_yaml and a parsed
+        config mapping reconstructed from that YAML.
     """
 
     cfg_path = tmp_path / "config.yaml"
@@ -934,9 +965,11 @@ def test_config_raw_endpoint_reads_from_disk(tmp_path) -> None:
 
     resp = client.get("/config/raw")
     assert resp.status_code == 200
-    data_text = resp.text
-    assert data_text == yaml_text
-    parsed = yaml.safe_load(data_text) or {}
+    assert resp.headers.get("content-type", "").startswith("application/json")
+
+    data = resp.json()
+    assert data["raw_yaml"] == yaml_text
+    parsed = data["config"] or {}
     assert parsed["webserver"]["enabled"] is True
     assert parsed["answer"] == 42
 
