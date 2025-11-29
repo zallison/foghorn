@@ -174,7 +174,7 @@ class EtcHosts(BasePlugin):
         mapping: Dict[str, str] = {}
 
         for fp in self.file_paths:
-            logging.info(f"reading hostfile: {fp}")
+            logging.debug(f"reading hostfile: {fp}")
             hosts_path = pathlib.Path(fp)
             with hosts_path.open("r", encoding="utf-8") as f:
                 for raw_line in f:
@@ -397,7 +397,7 @@ class EtcHosts(BasePlugin):
         for directory in directories:
             try:
                 observer.schedule(handler, str(directory), recursive=False)
-                logger.info("Watching %s", directory)
+                logger.debug("Watching %s", directory)
             except Exception as exc:  # pragma: no cover - log and continue
                 logger.warning("Failed to watch directory %s: %s", directory, exc)
 
