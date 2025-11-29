@@ -785,6 +785,13 @@ def main(argv: List[str] | None = None) -> int:
             daemon=True,
         )
         udp_thread.start()
+    else:
+        # When no UDP listener is configured, the main thread still enters the
+        # keepalive loop below so that TCP/DoT/DoH listeners (or tests that
+        # disable UDP entirely) can drive shutdown via signals or KeyboardInterrupt.
+        logger.info(
+            "Starting Foghorn without UDP listener; main thread will use keepalive loop",
+        )
 
     # Optionally start TCP/DoT listeners based on listen config
 
