@@ -266,7 +266,7 @@ def sanitize_config(
     return redacted
 
 
-@cached(cache=TTLCache(maxsize=1024, ttl=300))
+@cached(cache=TTLCache(maxsize=1024, ttl=300), key=lambda value: id(value))
 def _json_safe(value: Any) -> Any:
     """Brief: Return a JSON-serializable representation of value.
 
