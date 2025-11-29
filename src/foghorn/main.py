@@ -314,10 +314,12 @@ def main(argv: List[str] | None = None) -> int:
     stats_collector: Optional[StatsCollector]
     stats_reporter: Optional[StatsReporter]
     stats_persistence_store: Optional[StatsSQLiteStore]
+
     # web_handle is the admin HTTP/web UI handle returned by start_webserver().
     # It is allowed to be None when the webserver is disabled but is treated as
     # fatal when webserver.enabled is true.
     web_handle = None
+
     # Shared in-memory log buffer passed into the FastAPI admin app; this is
     # also used when starting the threaded admin HTTP fallback.
     web_log_buffer: Optional[RingBuffer] = None
@@ -325,24 +327,28 @@ def main(argv: List[str] | None = None) -> int:
     # Normalize listen configuration with backward compatibility.
     # If listen.udp is present, prefer it; otherwise fall back to legacy listen.host/port.
     listen_cfg = cfg.get("listen", {}) or {}
-    legacy_host = str(listen_cfg.get("host", "127.0.0.1"))
-    # Default legacy port is 5333 to match the recommended example config.
-    legacy_port = int(listen_cfg.get("port", 5333))
+    default_host = str(listen_cfg.get("host", "127.0.0.1"))
+    default_port = int(listen_cfg.get("port", 5333))
 
     def _sub(key, defaults):
         d = listen_cfg.get(key, {}) or {}
         out = {**defaults, **d} if isinstance(d, dict) else defaults
         return out
 
-    udp_cfg = _sub("udp", {"enabled": True, "host": legacy_host, "port": legacy_port})
-    # Default TCP port now matches the UDP listener (5333) when not explicitly set.
-    tcp_cfg = _sub("tcp", {"enabled": False, "host": legacy_host, "port": legacy_port})
-    dot_cfg = _sub("dot", {"enabled": False, "host": legacy_host, "port": 853})
-    # Default DoH listener port is 1443 (non-privileged HTTPS-like port) when not explicitly set.
-    doh_cfg = _sub("doh", {"enabled": False, "host": legacy_host, "port": 1443})
+    # Get listeners configs
+    udp_cfg = _sub(
+        "udp", {"enabled": True, "host": default_host, "port": default_port or 5333}
+    )
+    tcp_cfg = _sub(
+        "tcp", {"enabled": False, "host": default_host, "port": default_port or 5333}
+    )
+    dot_cfg = _sub("dot", {"enabled": False, "host": default_host, "port": 853})
+    doh_cfg = _sub("doh", {"enabled": False, "host": default_host, "port": 1443})
 
     # Normalize upstream configuration
     upstreams, timeout_ms = normalize_upstream_config(cfg)
+
+    # Hold responses this long, even if the actual ttl is lower.
     min_cache_ttl = _get_min_cache_ttl(cfg)
 
     plugins = load_plugins(cfg.get("plugins", []))
@@ -641,6 +647,7 @@ def main(argv: List[str] | None = None) -> int:
         # shutdown cannot leave the process running indefinitely. The timer is
         # cancelled implicitly when shutdown_complete is set before it fires.
         if reason in {"SIGTERM", "SIGINT"} and hard_kill_timer is None:
+
             def _force_exit() -> None:
                 # If shutdown has completed in the meantime, do nothing.
                 if shutdown_complete.is_set():
@@ -718,9 +725,11 @@ def main(argv: List[str] | None = None) -> int:
     edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
 
     server = None
+    udp_thread: threading.Thread | None = None
+    udp_error: Exception | None = None
     if bool(udp_cfg.get("enabled", True)):
-        uhost = str(udp_cfg.get("host", legacy_host))
-        uport = int(udp_cfg.get("port", legacy_port))
+        uhost = str(udp_cfg.get("host", default_host))
+        uport = int(udp_cfg.get("port", default_port))
         server = DNSServer(
             uhost,
             uport,
@@ -747,6 +756,12 @@ def main(argv: List[str] | None = None) -> int:
     upstream_info = ", ".join(
         [f"{u['url']}" if "url" in u else f"{u['host']}:{u['port']}" for u in upstreams]
     )
+    logger.info(
+        "Upstreams: [%s], timeout: %dms",
+        upstream_info,
+        timeout_ms,
+    )
+
     if server is not None:
         logger.info(
             "Starting Foghorn on %s:%d, upstreams: [%s], timeout: %dms\n",
@@ -837,7 +852,7 @@ def main(argv: List[str] | None = None) -> int:
             )
 
     if bool(doh_cfg.get("enabled", False)):
-        h = str(doh_cfg.get("host", legacy_host))
+        h = str(doh_cfg.get("host", default_host))
         p = int(doh_cfg.get("port", 8153))
         cert_file = doh_cfg.get("cert_file")
         key_file = doh_cfg.get("key_file")
