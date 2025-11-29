@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from jsonschema import Draft202012Validator, ValidationError
+from jsonschema.exceptions import SchemaError
 
 
 def get_default_schema_path() -> Path:
@@ -91,10 +92,14 @@ def validate_config(cfg: Dict[str, Any], *, schema_path: Optional[Path] = None, 
 
     try:
         schema = _load_schema(schema_path)
-        validator = Draft202012Validator(schema)
-        errors = sorted(validator.iter_errors(cfg), key=lambda e: list(e.path))
-        if errors:
-            message = _format_errors(errors, config_path=config_path)
-            raise ValueError(message)
-    except Exception:
-        pass
+    except (OSError, json.JSONDecodeError, SchemaError) as exc:
+        # Surface schema/IO issues as a clear ValueError so callers see a
+        # consistent exception type from this function.
+        effective_schema_path = schema_path or get_default_schema_path()
+        raise ValueError(f"Failed to load or parse configuration schema at {effective_schema_path}: {exc}") from exc
+
+    validator = Draft202012Validator(schema)
+    errors = sorted(validator.iter_errors(cfg), key=lambda e: list(e.path))
+    if errors:
+        message = _format_errors(errors, config_path=config_path)
+        raise ValueError(message)
