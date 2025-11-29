@@ -296,8 +296,9 @@ def test_stats_collector_persists_to_store():
     # Cache domain aggregates
     assert ("cache_hit_domains", "example.com") in keys
     assert ("cache_miss_domains", "example.com") in keys
-    assert ("cache_hit_subdomains", "example.com") in keys
-    assert ("cache_miss_subdomains", "example.com") in keys
+    # Subdomain-only aggregates are keyed by full qname.
+    assert ("cache_hit_subdomains", "www.example.com") in keys
+    assert ("cache_miss_subdomains", "www.example.com") in keys
 
     # Plugin decision totals
     assert ("totals", "allowed") in keys
@@ -311,7 +312,8 @@ def test_stats_collector_persists_to_store():
     # Rcode aggregates
     assert ("rcodes", "NXDOMAIN") in keys
     assert ("rcode_domains", "NXDOMAIN|example.com") in keys
-    assert ("rcode_subdomains", "NXDOMAIN|example.com") in keys
+    # Subdomain-only rcode aggregates are keyed by full qname.
+    assert ("rcode_subdomains", "NXDOMAIN|www.example.com") in keys
 
     # Query log insert
     assert len(store.query_logs) == 1
