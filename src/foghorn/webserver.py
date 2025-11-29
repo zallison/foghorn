@@ -269,6 +269,8 @@ def sanitize_config(
 
 # Precompiled regexes for lightweight YAML redaction that preserves layout/comments.
 _YAML_KEY_LINE_RE = re.compile(r"^(\s*)([^:\s][^:]*)\s*:(.*)$")
+# List item that is itself a mapping entry, e.g. "  - suffix: example.com".
+_YAML_LIST_KEY_LINE_RE = re.compile(r"^(\s*)-\s*([^:\s][^:]*)\s*:(.*)$")
 _YAML_LIST_LINE_RE = re.compile(r"^(\s*)-\s*(.*)$")
 
 
@@ -296,66 +298,111 @@ def _redact_yaml_text_preserving_layout(
 
     Inputs:
       - raw_yaml: Original YAML document text as read from disk.
-      - redact_keys: List of key names whose values (and subkeys) should be redacted.
+      - redact_keys: List of key names whose values and all nested subkeys
+        should be redacted.
 
     Outputs:
-      - New YAML text with the same overall layout and comments, but with values
-        for matching keys and any nested subkeys replaced by '***'.
+      - New YAML text with the same overall layout and comments, but with
+        matching keys and any keys/subkeys within their block replaced by
+        '***'.
 
     Notes:
       - This is a best-effort textual transformation intended for human-facing
         display (e.g., the admin UI). It is not a full YAML parser and may not
         handle all edge cases, but it preserves common constructs well.
+      - Some callers may accidentally pass in YAML text that has been
+        "double-escaped" such that literal "\\n" sequences appear in the
+        content instead of real newlines (for example, when YAML is embedded
+        inside JSON or logs). To keep the behavior predictable for these
+        callers, we heuristically treat "\\n" sequences as real newlines
+        before applying layout-preserving redaction.
     """
 
     if not raw_yaml or not redact_keys:
         return raw_yaml
 
+    # Heuristic: collapse literal "\\n" sequences into real newlines so that
+    # YAML constructed via double-escaping (e.g. "line1\\nline2") is treated
+    # like on-disk multi-line YAML. This is a best-effort transformation for
+    # admin display only and does not affect the underlying configuration.
+    text = raw_yaml.replace("\\n", "\n") if "\\n" in raw_yaml else raw_yaml
+
     targets = {str(k) for k in redact_keys}
-    lines = raw_yaml.splitlines(keepends=False)
+    lines = text.splitlines(keepends=False)
     out_lines: list[str] = []
-    # Stack of indentation levels for active redaction blocks.
-    redact_indent_stack: list[int] = []
+
+    # Track a single active redaction block keyed by its indentation level.
+    in_block = False
+    block_indent: int | None = None
 
     for line in lines:
-        # Compute indentation and whether we are still inside any redact block.
         stripped = line.lstrip(" ")
-        leading_spaces_len = len(line) - len(stripped)
+        indent_len = len(line) - len(stripped)
 
-        # Pop blocks when we encounter a non-blank line that is not nested inside.
-        if stripped and redact_indent_stack:
-            while redact_indent_stack and leading_spaces_len <= redact_indent_stack[-1]:
-                redact_indent_stack.pop()
-        inside_block = bool(redact_indent_stack)
+        # Empty or whitespace-only lines are passed through unchanged.
+        if not stripped:
+            out_lines.append(line)
+            continue
 
+        # If we are currently inside a redaction block and encounter a line that
+        # is not more indented than the block, treat it as leaving the block
+        # *before* processing the line below.
+        if in_block and block_indent is not None and indent_len <= block_indent:
+            in_block = False
+            block_indent = None
+
+        # Handle standard mapping key lines ("key: value").
         m_key = _YAML_KEY_LINE_RE.match(line)
         if m_key:
             indent, key, rest = m_key.groups()
             key_clean = key.strip()
-            start_block = key_clean in targets
-            redact_here = start_block or inside_block
 
-            if redact_here:
-                value_part, comment_part = _split_yaml_value_and_comment(rest)
-                # Always replace value with '***' but keep any inline comment suffix.
-                new_rest = " ***" + comment_part
-                new_line = f"{indent}{key_clean}:{new_rest}"
+            # Starting a new redaction block when the key itself is in targets.
+            if key_clean in targets:
+                in_block = True
+                block_indent = indent_len
+                _value, comment_part = _split_yaml_value_and_comment(rest)
+                new_line = f"{indent}{key_clean}: ***{comment_part}"
                 out_lines.append(new_line)
-                if start_block:
-                    redact_indent_stack.append(leading_spaces_len)
                 continue
 
-        # Redact list items nested under any redacted block.
-        if inside_block:
+            # Redact any keys nested under an active redaction block.
+            if in_block:
+                _value, comment_part = _split_yaml_value_and_comment(rest)
+                new_line = f"{indent}{key_clean}: ***{comment_part}"
+                out_lines.append(new_line)
+                continue
+
+        # Handle list items; a list item can be either "- value" or
+        # "- key: value" (mapping entry inside a list).
+        m_list_key = _YAML_LIST_KEY_LINE_RE.match(line)
+        if m_list_key:
+            indent, key, rest = m_list_key.groups()
+            key_clean = key.strip()
+
+            # If the key for this list-mapping entry is sensitive, redact it and
+            # treat it as part of any active block.
+            if key_clean in targets or in_block:
+                # Enter a block if this list item itself starts one.
+                if key_clean in targets and not in_block:
+                    in_block = True
+                    block_indent = indent_len
+                _value, comment_part = _split_yaml_value_and_comment(rest)
+                new_line = f"{indent}- {key_clean}: ***{comment_part}"
+                out_lines.append(new_line)
+                continue
+
+        # Redact simple list items nested under any redacted block ("- value").
+        if in_block:
             m_list = _YAML_LIST_LINE_RE.match(line)
             if m_list:
                 indent, rest = m_list.groups()
-                value_part, comment_part = _split_yaml_value_and_comment(rest)
-                new_rest = "***" + comment_part
-                new_line = f"{indent}- {new_rest}"
+                _value, comment_part = _split_yaml_value_and_comment(rest)
+                new_line = f"{indent}- ***{comment_part}"
                 out_lines.append(new_line)
                 continue
 
+        # Default: emit the original line unchanged.
         out_lines.append(line)
 
     redacted = "\n".join(out_lines)
@@ -432,7 +479,6 @@ def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
     return result
 
 
-@cached(cache=TTLCache(maxsize=1, ttl=2))
 def get_system_info() -> Dict[str, Any]:
     """Brief: Collect simple system and process memory usage snapshot.
 
@@ -667,7 +713,8 @@ def _schedule_sighup_after_config_save(delay_seconds: float = 1.0) -> None:
     """Brief: Schedule SIGHUP to the main process after a small delay.
 
     Inputs:
-      - delay_seconds: Number of seconds to wait before sending SIGHUP.
+      - delay_seconds: Number of seconds to wait before sending SIGHUP. A value
+        of 0 or less sends the signal synchronously in the current thread.
 
     Outputs:
       - None; best-effort scheduling of a background timer that will send
@@ -681,6 +728,14 @@ def _schedule_sighup_after_config_save(delay_seconds: float = 1.0) -> None:
             os.kill(pid, signal.SIGHUP)
         except Exception as exc:  # pragma: no cover - platform specific
             logger.error("Failed to send SIGHUP after config save: %s", exc)
+
+    # For callers that explicitly opt out of delayed delivery (e.g., tests or
+    # short-lived helper processes), allow synchronous delivery to avoid the
+    # signal firing after the surrounding context (such as monkeypatches) has
+    # been torn down.
+    if delay_seconds <= 0:
+        _send()
+        return
 
     timer = threading.Timer(delay_seconds, _send)
     timer.daemon = True
@@ -1653,13 +1708,14 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _handle_config_raw(self) -> None:
-        """Brief: Handle GET /config_raw to return on-disk configuration as YAML.
+        """Brief: Handle GET /config_raw to return on-disk configuration as JSON.
 
         Inputs:
           - None (uses self.server.config_path to locate YAML file).
 
         Outputs:
-          - YAML body containing the exact on-disk configuration text.
+          - JSON body containing server_time, parsed config mapping, and raw_yaml
+            with the exact on-disk configuration text.
         """
 
         if not self._require_auth():
@@ -1675,6 +1731,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 raw_text = f.read()
+                raw_cfg = yaml.safe_load(raw_text) or {}
         except Exception as exc:  # pragma: no cover - environment-specific
             self._send_json(
                 500,
@@ -1685,7 +1742,14 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
-        self._send_text(200, raw_text)
+        self._send_json(
+            200,
+            {
+                "server_time": _utc_now_iso(),
+                "config": raw_cfg,
+                "raw_yaml": raw_text,
+            },
+        )
 
     def _handle_config_raw_json(self) -> None:
         """Brief: Handle GET /config/raw.json to return on-disk configuration as JSON.
@@ -1851,8 +1915,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         # Schedule a SIGHUP for the main process after the updated configuration
-        # has been safely written to disk.
-        _schedule_sighup_after_config_save()
+        # has been safely written to disk. Use synchronous delivery here to
+        # avoid delayed signals outliving the caller's context (e.g., tests
+        # that monkeypatch os.kill).
+        _schedule_sighup_after_config_save(delay_seconds=0.0)
 
         self._send_json(
             200,
