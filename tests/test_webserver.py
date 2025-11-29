@@ -965,7 +965,7 @@ def test_config_endpoint_preserves_comments_and_redacts_values_and_subkeys(tmp_p
 
     # Directly exercise the textual YAML redaction helper, which is used by
     # the /config endpoint when config_path is available.
-    body = _redact_yaml_text_preserving_layout(yaml_text, ["auth"])
+    body = _redact_yaml_text_preserving_layout(yaml_text, ["auth", "token", "password"])
 
     # Comments are preserved
     assert "# top comment" in body
