@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from .stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
@@ -823,11 +823,67 @@ def create_app(
         }
 
     @app.get("/config", dependencies=[Depends(auth_dep)])
-    async def get_config() -> Dict[str, Any]:
-        """Return sanitized configuration for inspection.
+    async def get_config() -> PlainTextResponse:
+        """Return sanitized configuration as YAML for inspection.
 
         Inputs: none
-        Outputs: dict with sanitized configuration and server_time.
+        Outputs: YAML string representing sanitized configuration.
+        """
+
+        cfg = app.state.config or {}
+        web_cfg_inner = (cfg.get("webserver") or {}) if isinstance(cfg, dict) else {}
+        redact_keys = web_cfg_inner.get("redact_keys") or [
+            "token",
+            "password",
+            "secret",
+        ]
+        clean = sanitize_config(cfg, redact_keys=redact_keys)
+        try:
+            body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
+        except Exception:  # pragma: no cover - defensive
+            body = ""
+        return PlainTextResponse(body, media_type="application/x-yaml")
+
+    @app.get("/config/raw", dependencies=[Depends(auth_dep)])
+    async def get_config_raw() -> PlainTextResponse:
+        """Return raw on-disk YAML configuration without sanitization.
+
+        Inputs:
+          - None (uses app.state.config_path to locate YAML file).
+
+        Outputs:
+          - Plain text body containing the exact YAML file contents.
+
+        Example:
+          >>> # With app created via create_app(..., config_path="config.yaml")
+          >>> # a GET /config/raw will return {"server_time": "...", "config": {...}, "raw_yaml": "..."}
+        """
+
+        cfg_path = getattr(app.state, "config_path", None)
+        if not cfg_path:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="config_path not configured",
+            )
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                raw_text = f.read()
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - I/O errors are environment-specific
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"failed to read config from {cfg_path}: {exc}",
+            ) from exc
+        return PlainTextResponse(raw_text, media_type="application/x-yaml")
+
+    @app.get("/config.json", dependencies=[Depends(auth_dep)])
+    async def get_config_json() -> Dict[str, Any]:
+        """Return sanitized configuration as JSON for API clients.
+
+        Inputs: none
+        Outputs:
+          - Dict with server_time and sanitized config mapping.
         """
 
         cfg = app.state.config or {}
@@ -840,21 +896,13 @@ def create_app(
         clean = sanitize_config(cfg, redact_keys=redact_keys)
         return {"server_time": _utc_now_iso(), "config": clean}
 
-    @app.get("/config/raw", dependencies=[Depends(auth_dep)])
-    async def get_config_raw() -> Dict[str, Any]:
-        """Return raw on-disk configuration without sanitization.
+    @app.get("/config/raw.json", dependencies=[Depends(auth_dep)])
+    async def get_config_raw_json() -> Dict[str, Any]:
+        """Return raw on-disk configuration as JSON plus raw YAML text.
 
-        Inputs:
-          - None (uses app.state.config_path to locate YAML file).
-
+        Inputs: none (uses app.state.config_path to locate YAML file).
         Outputs:
-          - Dict containing server_time, raw_yaml (string with the exact file
-            contents), and config keys, where config is the configuration
-            mapping loaded from the YAML file on disk.
-
-        Example:
-          >>> # With app created via create_app(..., config_path="config.yaml")
-          >>> # a GET /config/raw will return {"server_time": "...", "config": {...}, "raw_yaml": "..."}
+          - Dict with server_time, parsed config mapping, and raw_yaml string.
         """
 
         cfg_path = getattr(app.state, "config_path", None)
@@ -874,7 +922,12 @@ def create_app(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"failed to read config from {cfg_path}: {exc}",
             ) from exc
-        return {"server_time": _utc_now_iso(), "config": raw_cfg, "raw_yaml": raw_text}
+
+        return {
+            "server_time": _utc_now_iso(),
+            "config": raw_cfg,
+            "raw_yaml": raw_text,
+        }
 
     @app.post("/config/save", dependencies=[Depends(auth_dep)])
     async def save_config(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -1429,8 +1482,28 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """Brief: Handle GET /config.
 
         Inputs: none
-        Outputs: None
+        Outputs: None (sends YAML body).
         """
+
+        if not self._require_auth():
+            return
+
+        cfg = getattr(self._server(), "config", {}) or {}
+        web_cfg_inner = (cfg.get("webserver") or {}) if isinstance(cfg, dict) else {}
+        redact_keys = web_cfg_inner.get("redact_keys") or [
+            "token",
+            "password",
+            "secret",
+        ]
+        clean = sanitize_config(cfg, redact_keys=redact_keys)
+        try:
+            body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
+        except Exception:  # pragma: no cover - defensive
+            body = ""
+        self._send_text(200, body)
+
+    def _handle_config_json(self) -> None:
+        """Brief: Handle GET /config.json (sanitized JSON config)."""
 
         if not self._require_auth():
             return
@@ -1449,14 +1522,48 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _handle_config_raw(self) -> None:
-        """Brief: Handle GET /config_raw to return on-disk configuration.
+        """Brief: Handle GET /config_raw to return on-disk configuration as YAML.
 
         Inputs:
           - None (uses self.server.config_path to locate YAML file).
 
         Outputs:
-          - JSON with server_time, raw_yaml (exact file contents), and config
-            mapping loaded from disk.
+          - YAML body containing the exact on-disk configuration text.
+        """
+
+        if not self._require_auth():
+            return
+
+        cfg_path = getattr(self._server(), "config_path", None)
+        if not cfg_path:
+            self._send_json(
+                500,
+                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
+            )
+            return
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                raw_text = f.read()
+        except Exception as exc:  # pragma: no cover - environment-specific
+            self._send_json(
+                500,
+                {
+                    "detail": f"failed to read config from {cfg_path}: {exc}",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        self._send_text(200, raw_text)
+
+    def _handle_config_raw_json(self) -> None:
+        """Brief: Handle GET /config/raw.json to return on-disk configuration as JSON.
+
+        Inputs:
+          - None (uses self.server.config_path to locate YAML file).
+
+        Outputs:
+          - JSON with server_time, raw_yaml (exact file contents), and parsed config mapping.
         """
 
         if not self._require_auth():
@@ -1485,7 +1592,11 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         self._send_json(
             200,
-            {"server_time": _utc_now_iso(), "config": raw_cfg, "raw_yaml": raw_text},
+            {
+                "server_time": _utc_now_iso(),
+                "config": raw_cfg,
+                "raw_yaml": raw_text,
+            },
         )
 
     def _handle_logs(self, params: Dict[str, list[str]]) -> None:
@@ -1756,8 +1867,12 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_traffic()
         elif path == "/config":
             self._handle_config()
+        elif path == "/config.json":
+            self._handle_config_json()
         elif path in {"/config/raw", "/config_raw"}:
             self._handle_config_raw()
+        elif path in {"/config/raw.json", "/config_raw.json"}:
+            self._handle_config_raw_json()
         elif path == "/logs":
             self._handle_logs(params)
         elif path in {"/", "/index.html"}:
