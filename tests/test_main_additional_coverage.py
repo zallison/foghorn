@@ -547,6 +547,74 @@ def test_sigusr2_registration_failure_logs_warning(monkeypatch, caplog):
     assert any("Could not install SIGUSR2 handler" in r.message for r in caplog.records)
 
 
+def test_sighup_with_udp_enabled_exits_cleanly(monkeypatch, caplog):
+    """Brief: SIGHUP triggers coordinated shutdown when UDP is enabled.
+
+    Inputs:
+      - monkeypatch/caplog fixtures; we capture the SIGHUP handler via a
+        fake signal.signal implementation and invoke it from the UDP
+        server's serve_forever method.
+
+    Outputs:
+      - None: asserts main() returns 0 and logs the SIGHUP shutdown message.
+    """
+
+    yaml_data = (
+        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
+        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+    )
+
+    captured: Dict[str, Any] = {"sighup": None}
+
+    def fake_signal(sig, handler):
+        import signal as _signal
+
+        if sig == _signal.SIGHUP:
+            captured["sighup"] = handler
+        return None
+
+    class DummyServer:
+        """Brief: UDP server stub that invokes SIGHUP handler then exits.
+
+        Inputs:
+          - Same signature as DNSServer; extra kwargs are ignored.
+
+        Outputs:
+          - serve_forever calls the captured SIGHUP handler once and returns.
+        """
+
+        def __init__(self, *a: Any, **kw: Any) -> None:
+            # Expose .server with shutdown/server_close so main()'s teardown
+            # path can call them without error.
+            self.server = SimpleNamespace(
+                shutdown=lambda: None,
+                server_close=lambda: None,
+            )
+
+        def serve_forever(self) -> None:
+            handler = captured["sighup"]
+            assert handler is not None
+            # Invoke the handler to trigger coordinated shutdown; do not
+            # raise so that udp_error remains None and exit_code stays 0.
+            handler(None, None)
+
+    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
+    monkeypatch.setattr(
+        main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
+    )
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        with caplog.at_level(logging.INFO, logger="foghorn.main"):
+            rc = main_mod.main(["--config", "cfg.yaml"])
+
+    assert rc == 0
+    assert any(
+        "Received SIGHUP, initiating shutdown" in r.message for r in caplog.records
+    )
+
+
 def test_start_without_udp_uses_keepalive_loop(monkeypatch, caplog):
     """Brief: main() logs when starting without UDP listener and enters keepalive loop.
 
