@@ -387,15 +387,15 @@ class StatsSnapshot:
     # Mapping of rcode -> list of (base_domain, count) tuples representing the
     # most frequently seen base domains per response code.
     rcode_domains: Optional[Dict[str, List[Tuple[str, int]]]] = None
-    # Mapping of rcode -> list of (base_domain, count) tuples representing
-    # base domains where subdomain queries (qname != base) produced the
-    # response code.
+    # Mapping of rcode -> list of (subdomain, count) tuples representing
+    # subdomain names (full qnames) where subdomain queries (qname != base)
+    # produced the response code.
     rcode_subdomains: Optional[Dict[str, List[Tuple[str, int]]]] = None
     # Top base domains by cache outcome, derived from cache hit/miss tracking.
     cache_hit_domains: Optional[List[Tuple[str, int]]] = None
     cache_miss_domains: Optional[List[Tuple[str, int]]] = None
-    # Top base domains where cache hits/misses were produced by subdomain
-    # queries only (qname != base).
+    # Top subdomain names (full qnames) where cache hits/misses were produced
+    # by subdomain queries only (qname != base).
     cache_hit_subdomains: Optional[List[Tuple[str, int]]] = None
     cache_miss_subdomains: Optional[List[Tuple[str, int]]] = None
 
@@ -791,6 +791,11 @@ class StatsSQLiteStore:
               incrementing totals, qtypes, clients, domains/subdomains,
               rcodes, upstreams, and upstream_qtypes based on each
               query_log row.
+            - Cache-domain aggregates include both base-domain views
+              (cache_*_domains) and subdomain views (cache_*_subdomains)
+              where subdomain names are full qnames.
+            - Per-rcode aggregates include both base-domain views
+              (rcode_domains) and subdomain views (rcode_subdomains).
             - Upstream aggregates include both outcome and rcode in the stored
               key so that rcodes can be associated with upstream outcomes when
               warm-loading from the persistent store.
@@ -841,7 +846,8 @@ class StatsSQLiteStore:
 
                 # Per-outcome cache-domain aggregates using base domains when
                 # available so that warm-loaded top lists align with the
-                # in-process StatsCollector tracking.
+                # in-process StatsCollector tracking. Subdomain-oriented views
+                # retain the full qname for *_subdomains scopes.
                 if base:
                     if status == "cache_hit":
                         self.increment_count("cache_hit_domains", base, 1)
@@ -849,6 +855,13 @@ class StatsSQLiteStore:
                         # Treat all non-cache_hit, non-cache_null rows as
                         # cache misses for domain-level aggregates.
                         self.increment_count("cache_miss_domains", base, 1)
+
+                # Subdomain-only cache aggregates keyed by full qname.
+                if domain and base and _is_subdomain(domain):
+                    if status == "cache_hit":
+                        self.increment_count("cache_hit_subdomains", domain, 1)
+                    elif status not in ("deny_pre", "override_pre"):
+                        self.increment_count("cache_miss_subdomains", domain, 1)
 
                 # Qtype breakdown
                 if qtype:
@@ -877,6 +890,9 @@ class StatsSQLiteStore:
                     if base:
                         rkey = f"{rcode}|{base}"
                         self.increment_count("rcode_domains", rkey, 1)
+                    if domain and base and _is_subdomain(domain):
+                        sub_rkey = f"{rcode}|{domain}"
+                        self.increment_count("rcode_subdomains", sub_rkey, 1)
 
                 # Upstreams
                 if upstream_id:
@@ -1250,7 +1266,8 @@ class StatsCollector:
             >>> collector.record_cache_hit("example.com")
         """
         # Normalize to base domain so cache statistics align with other
-        # domain-oriented top lists.
+        # domain-oriented top lists. Subdomain-oriented views retain the full
+        # qname while still using the derived base for grouping where needed.
         domain = _normalize_domain(qname)
         parts = domain.split(".") if domain else []
         base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
@@ -1261,14 +1278,14 @@ class StatsCollector:
             if self._top_cache_hit_domains is not None and base:
                 self._top_cache_hit_domains.add(base)
             # Track cache hits attributed specifically to subdomain queries
-            # (qname != base) at the base-domain level.
+            # (qname != base) at the subdomain (full qname) level.
             if (
                 self._top_cache_hit_subdomains is not None
                 and domain
                 and base
                 and domain != base
             ):
-                self._top_cache_hit_subdomains.add(base)
+                self._top_cache_hit_subdomains.add(domain)
 
             if self._store is not None:
                 try:
@@ -1276,7 +1293,7 @@ class StatsCollector:
                     if base:
                         self._store.increment_count("cache_hit_domains", base)
                         if domain and domain != base:
-                            self._store.increment_count("cache_hit_subdomains", base)
+                            self._store.increment_count("cache_hit_subdomains", domain)
                 except Exception:  # pragma: no cover - defensive
                     logger.debug(
                         "StatsCollector: failed to persist cache_hit", exc_info=True
@@ -1305,14 +1322,14 @@ class StatsCollector:
             if self._top_cache_miss_domains is not None and base:
                 self._top_cache_miss_domains.add(base)
             # Track cache misses attributed specifically to subdomain queries
-            # (qname != base) at the base-domain level.
+            # (qname != base) at the subdomain (full qname) level.
             if (
                 self._top_cache_miss_subdomains is not None
                 and domain
                 and base
                 and domain != base
             ):
-                self._top_cache_miss_subdomains.add(base)
+                self._top_cache_miss_subdomains.add(domain)
 
             if self._store is not None:
                 try:
@@ -1320,7 +1337,7 @@ class StatsCollector:
                     if base:
                         self._store.increment_count("cache_miss_domains", base)
                         if domain and domain != base:
-                            self._store.increment_count("cache_miss_subdomains", base)
+                            self._store.increment_count("cache_miss_subdomains", domain)
                 except Exception:  # pragma: no cover - defensive
                     logger.debug(
                         "StatsCollector: failed to persist cache_miss", exc_info=True
@@ -1561,8 +1578,8 @@ class StatsCollector:
 
         Inputs:
             rcode: Response code ("NOERROR", "NXDOMAIN", "SERVFAIL", etc.)
-            qname: Optional query name used to attribute rcodes to base domains
-                for per-rcode top-domain statistics.
+            qname: Optional query name used to attribute rcodes to domains and
+                subdomains for per-rcode top-domain statistics.
 
         Outputs:
             None
@@ -1591,14 +1608,14 @@ class StatsCollector:
                     self._top_rcode_domains[rcode] = tracker
                 tracker.add(base)
 
-                # Additionally track per-rcode base domains where only
+                # Additionally track per-rcode subdomain names where only
                 # subdomain queries (qname != base) are counted.
                 if domain and domain != base:
                     sub_tracker = self._top_rcode_subdomains.get(rcode)
                     if sub_tracker is None:
                         sub_tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
                         self._top_rcode_subdomains[rcode] = sub_tracker
-                    sub_tracker.add(base)
+                    sub_tracker.add(domain)
 
             if self._store is not None:
                 try:
@@ -1607,7 +1624,7 @@ class StatsCollector:
                         key = f"{rcode}|{base}"
                         self._store.increment_count("rcode_domains", key)
                         if domain and domain != base:
-                            sub_key = f"{rcode}|{base}"
+                            sub_key = f"{rcode}|{domain}"
                             self._store.increment_count("rcode_subdomains", sub_key)
                 except Exception:  # pragma: no cover - defensive
                     logger.debug(
@@ -1943,8 +1960,9 @@ class StatsCollector:
                 if not rcode_domains:
                     rcode_domains = None
 
-            # Per-rcode top base domains restricted to subdomain queries only
-            # (qname != base), with the same domain ignore filters applied.
+            # Per-rcode top subdomain names (full qnames) restricted to
+            # subdomain queries only (qname != base), with the same domain
+            # ignore filters applied.
             rcode_subdomains: Optional[Dict[str, List[Tuple[str, int]]]] = None
             if self._top_rcode_subdomains:
                 rcode_subdomains = {}
@@ -2031,8 +2049,8 @@ class StatsCollector:
                     if filtered_entries:
                         cache_miss_domains = filtered_entries[: self.top_n]
 
-            # Top base domains for cache outcome restricted to subdomain
-            # queries only (qname != base).
+            # Top subdomain names (full qnames) for cache outcome restricted to
+            # subdomain queries only (qname != base).
             cache_hit_subdomains: Optional[List[Tuple[str, int]]] = None
             if self._top_cache_hit_subdomains is not None:
                 entries = self._top_cache_hit_subdomains.export(
@@ -2387,8 +2405,9 @@ class StatsCollector:
                 inner = rcode_domain_counts.setdefault(rcode_name, {})
                 inner[str(dname)] = int_value
 
-            # Per-rcode base-domain counters for subdomain-only traffic: keys
-            # are stored as "rcode|domain" as well.
+            # Per-rcode subdomain counters for subdomain-only traffic: keys
+            # are stored as "rcode|subdomain" where subdomain is the full
+            # qname (e.g. "www.example.com").
             rcode_subdomain_counts: Dict[str, Dict[str, int]] = {}
             for key, value in counts.get("rcode_subdomains", {}).items():
                 try:
@@ -2508,7 +2527,7 @@ class StatsCollector:
                 limited = dict(items[: self._top_cache_miss_domains.capacity])
                 self._top_cache_miss_domains.counts = limited
 
-            # Top cache hit/miss base domains for subdomain-only traffic.
+            # Top cache hit/miss subdomain names for subdomain-only traffic.
             if (
                 self._top_cache_hit_subdomains is not None
                 and cache_hit_subdomain_counts
