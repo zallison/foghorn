@@ -87,7 +87,7 @@ def normalize_upstream_config(
         # DoH entries using URL
         if str(u.get("transport", "")).lower() == "doh":
             logger = logging.getLogger("foghorn.main.setup")
-            logger.warning(f"doh: {u}")
+            logger.debug(f"doh: {u}")
             rec: Dict[str, Union[str, int, dict]] = {
                 "transport": "doh",
                 "url": str(u["url"]),
@@ -687,7 +687,7 @@ def main(argv: List[str] | None = None) -> int:
     # Register handlers (Unix only)
     try:
         signal.signal(signal.SIGUSR1, _sigusr1_handler)
-        logger.info(
+        logger.debug(
             "Installed SIGUSR1 handler to notify plugins and optionally reset statistics"
         )
     except Exception:
@@ -695,7 +695,7 @@ def main(argv: List[str] | None = None) -> int:
 
     try:
         signal.signal(signal.SIGUSR2, _sigusr2_handler)
-        logger.info(
+        logger.debug(
             "Installed SIGUSR2 handler to notify plugins and optionally reset statistics"
         )
     except Exception:
@@ -703,19 +703,19 @@ def main(argv: List[str] | None = None) -> int:
 
     try:
         signal.signal(signal.SIGHUP, _sighup_handler)
-        logger.info("Installed SIGHUP handler for clean shutdown (exit code 0)")
+        logger.debug("Installed SIGHUP handler for clean shutdown (exit code 0)")
     except Exception:  # pragma: no cover - defensive
         logger.warning("Could not install SIGHUP handler on this platform")
 
     try:
         signal.signal(signal.SIGTERM, _sigterm_handler)
-        logger.info("Installed SIGTERM handler for immediate shutdown (exit code 2)")
+        logger.debug("Installed SIGTERM handler for immediate shutdown (exit code 2)")
     except Exception:  # pragma: no cover - defensive
         logger.warning("Could not install SIGTERM handler on this platform")
 
     try:
         signal.signal(signal.SIGINT, _sigint_handler)
-        logger.info("Installed SIGINT handler for immediate shutdown (exit code 2)")
+        logger.debug("Installed SIGINT handler for immediate shutdown (exit code 2)")
     except Exception:  # pragma: no cover - defensive
         logger.warning("Could not install SIGINT handler on this platform")
 
@@ -763,19 +763,28 @@ def main(argv: List[str] | None = None) -> int:
     )
 
     if server is not None:
+        # Run UDP server in a background thread so the main thread can manage
+        # coordinated shutdown alongside TCP/DoT/DoH listeners. Capture
+        # unexpected exceptions so main() can reflect them in its exit code.
+        def _run_udp() -> None:
+            nonlocal udp_error
+            try:
+                server.serve_forever()
+            except Exception as e:  # pragma: no cover - propagated via udp_error
+                udp_error = e
+
         logger.info(
-            "Starting Foghorn on %s:%d, upstreams: [%s], timeout: %dms\n",
+            "Starting UDP listener on %s:%d",
             uhost,
             uport,
-            upstream_info,
-            timeout_ms,
         )
-    else:
-        logger.info(
-            "Starting Foghorn without UDP listener; upstreams: [%s], timeout: %dms\n",
-            upstream_info,
-            timeout_ms,
+
+        udp_thread = threading.Thread(
+            target=_run_udp,
+            name="foghorn-udp",
+            daemon=True,
         )
+        udp_thread.start()
 
     # Optionally start TCP/DoT listeners based on listen config
 
@@ -816,7 +825,7 @@ def main(argv: List[str] | None = None) -> int:
     if bool(tcp_cfg.get("enabled", False)):
         from .tcp_server import serve_tcp, serve_tcp_threaded
 
-        thost = str(tcp_cfg.get("host", legacy_host))
+        thost = str(tcp_cfg.get("host", default_host))
         tport = int(tcp_cfg.get("port", 53))
         logger.info("Starting TCP listener on %s:%d", thost, tport)
         _start_asyncio_server(
@@ -830,7 +839,7 @@ def main(argv: List[str] | None = None) -> int:
     if bool(dot_cfg.get("enabled", False)):
         from .dot_server import serve_dot
 
-        dhost = str(dot_cfg.get("host", legacy_host))
+        dhost = str(dot_cfg.get("host", default_host))
         dport = int(dot_cfg.get("port", 853))
         cert_file = dot_cfg.get("cert_file")
         key_file = dot_cfg.get("key_file")
@@ -890,21 +899,34 @@ def main(argv: List[str] | None = None) -> int:
         logger.error("Fatal: webserver.enabled=true but start_webserver returned None")
         return 1
 
-    try:
-        if server is not None:
-            # UDP listener path: serve_forever() blocks until shutdown() is
-            # called (from _request_shutdown) or a KeyboardInterrupt occurs.
-            server.serve_forever()
-        else:
-            # keep main thread alive while async listeners run, but allow
-            # termination signals to request shutdown via shutdown_event.
-            import time as _time
+    logger.info(f"Startup Completed\n")
 
-            # Use a short sleep interval so that termination-style signals
-            # (SIGHUP/SIGTERM/SIGINT), which set shutdown_event, are honored
-            # promptly even when no UDP listener is active.
-            while not shutdown_event.is_set():
-                _time.sleep(1.0)
+    try:
+        # Keep the main thread in a lightweight keepalive loop while UDP/TCP/DoT
+        # listeners run in the background. This ensures all transports are
+        # treated consistently and that shutdown is always driven by
+        # shutdown_event/termination signals rather than a blocking
+        # serve_forever() call.
+        import time as _time
+        while not shutdown_event.is_set():
+            # If the UDP server thread has reported an unhandled exception,
+            # mirror the legacy behaviour by logging it and treating it as a
+            # server-level failure for main()'s exit code.
+            if udp_error is not None:
+                logger.exception(
+                    "Unhandled exception during UDP server operation %s", udp_error
+                )
+                if exit_code == 0:
+                    exit_code = 1
+                break
+
+            # If a UDP server thread was started and it has exited (for example
+            # because a test's DummyServer.serve_forever() raised
+            # KeyboardInterrupt or another exception), break out of the loop so
+            # coordinated shutdown can proceed.
+            if udp_thread is not None and not udp_thread.is_alive():
+                break
+            _time.sleep(1.0)
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down")
         if not shutdown_event.is_set():
@@ -921,11 +943,35 @@ def main(argv: List[str] | None = None) -> int:
         if exit_code == 0:
             exit_code = 1
     finally:
+        # Request UDP server shutdown and close sockets before tearing down
+        # statistics and web components so that no new requests are processed
+        # during shutdown.
+        if server is not None:
+            try:
+                if getattr(server, "server", None) is not None:
+                    try:
+                        server.server.shutdown()
+                    except Exception:
+                        logger.exception("Error while shutting down UDP server")
+                    try:
+                        server.server.server_close()
+                    except Exception:
+                        logger.exception("Error while closing UDP server socket")
+            except Exception:
+                logger.exception("Unexpected error during UDP server teardown")
+
+        if udp_thread is not None:
+            try:
+                udp_thread.join(timeout=5.0)
+            except Exception:
+                logger.exception("Error while waiting for UDP server thread to exit")
+
         # Stop statistics reporter on shutdown so background reporting threads
         # never outlive the main process and do not keep it alive.
         if stats_reporter is not None:
             logger.info("Stopping statistics reporter")
             stats_reporter.stop()
+
         if stats_persistence_store is not None:
             logger.info("Closing statistics persistence store")
             stats_persistence_store.close()
