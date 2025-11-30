@@ -5,7 +5,7 @@ import os
 import pathlib
 import threading
 import time
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from dnslib import QTYPE, RR, DNSHeader, DNSRecord
 

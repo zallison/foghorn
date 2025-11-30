@@ -2326,7 +2326,9 @@ def start_webserver(
             logger.warning(
                 "Possible container permission issues. Update, check seccomp settings, or run with --privileged "
             )
-            logger.warning("Now enjoy this exception and wait for the threaded server to start: \n")
+            logger.warning(
+                "Now enjoy this exception and wait for the threaded server to start: \n"
+            )
     except Exception:
         can_use_asyncio = True
 
