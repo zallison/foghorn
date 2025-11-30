@@ -9,6 +9,8 @@ import signal
 import threading
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from .cache import TTLCache
+
 import yaml
 
 from .config_schema import validate_config
@@ -17,7 +19,7 @@ from .logging_config import init_logging
 from .plugins.base import BasePlugin
 from .plugins.registry import discover_plugins, get_plugin_class
 from .server import DNSServer
-from .stats import StatsCollector, StatsReporter, StatsSQLiteStore, format_snapshot_json
+from .stats import StatsCollector, StatsReporter, StatsSQLiteStore
 from .webserver import RingBuffer, start_webserver
 
 
@@ -906,7 +908,7 @@ def main(argv: List[str] | None = None) -> int:
         logger.error("Fatal: webserver.enabled=true but start_webserver returned None")
         return 1
 
-    logger.info(f"Startup Completed\n")
+    logger.info("Startup Completed")
 
     try:
         # Keep the main thread in a lightweight keepalive loop while UDP/TCP/DoT
