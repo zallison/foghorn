@@ -528,15 +528,15 @@ def test_config_json_endpoint_returns_sanitized_config() -> None:
     assert upstream_out["token"] == "***"
 
 
-def test_config_raw_fastapi_returns_json_with_raw_yaml(tmp_path) -> None:
-    """Brief: /config/raw FastAPI endpoint must return JSON with raw_yaml string.
+def test_config_raw_fastapi_returns_plain_yaml(tmp_path) -> None:
+    """Brief: /config/raw FastAPI endpoint must return plain YAML text.
 
     Inputs:
       - Temporary YAML config file with a simple mapping.
 
     Outputs:
-      - /config/raw returns application/json, includes server_time, config mapping,
-        and raw_yaml matching the on-disk file contents.
+      - /config/raw returns application/x-yaml and the body parses back to the
+        same mapping as the on-disk YAML.
     """
 
     cfg_text = "webserver:\n  enabled: true\nanswer: 42\n"
@@ -544,18 +544,22 @@ def test_config_raw_fastapi_returns_json_with_raw_yaml(tmp_path) -> None:
     cfg_file.write_text(cfg_text, encoding="utf-8")
 
     cfg = {"webserver": {"enabled": True}}
-    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer(), config_path=str(cfg_file))
+    app = create_app(
+        stats=None, config=cfg, log_buffer=RingBuffer(), config_path=str(cfg_file)
+    )
     client = TestClient(app)
 
     resp = client.get("/config/raw")
     assert resp.status_code == 200
-    assert resp.headers.get("content-type", "").startswith("application/json")
+    assert resp.headers.get("content-type", "").startswith("application/x-yaml")
 
-    data = resp.json()
-    assert "server_time" in data
-    assert data["raw_yaml"] == cfg_text
-    assert isinstance(data.get("config"), dict)
-    assert data["config"].get("answer") == 42
+    body = resp.text
+    assert body == cfg_text
+
+    # Sanity-check that the YAML still parses to the same mapping.
+    parsed = yaml.safe_load(body) or {}
+    assert parsed["webserver"]["enabled"] is True
+    assert parsed["answer"] == 42
 
 
 def test_logs_endpoint_returns_entries_from_ringbuffer() -> None:
@@ -941,14 +945,14 @@ def test_static_www_serves_files_and_blocks_traversal(monkeypatch, tmp_path) -> 
 
 
 def test_config_raw_endpoint_reads_from_disk(tmp_path) -> None:
-    """Brief: /config/raw must return JSON with raw_yaml and parsed mapping.
+    """Brief: /config/raw must return the raw YAML config body.
 
     Inputs:
       - Temporary YAML config file with known contents.
 
     Outputs:
-      - JSON body contains the original YAML text in raw_yaml and a parsed
-        config mapping reconstructed from that YAML.
+      - Response body is exactly the original YAML text and is served with a
+        YAML-appropriate content type.
     """
 
     cfg_path = tmp_path / "config.yaml"
@@ -965,16 +969,16 @@ def test_config_raw_endpoint_reads_from_disk(tmp_path) -> None:
 
     resp = client.get("/config/raw")
     assert resp.status_code == 200
-    assert resp.headers.get("content-type", "").startswith("application/json")
+    # FastAPI should advertise a YAML-appropriate content type.
+    assert resp.headers.get("content-type", "").startswith("application/x-yaml")
 
-    data = resp.json()
-    assert data["raw_yaml"] == yaml_text
-    parsed = data["config"] or {}
-    assert parsed["webserver"]["enabled"] is True
-    assert parsed["answer"] == 42
+    # Body should match the on-disk YAML exactly.
+    assert resp.text == yaml_text
 
 
-def test_config_endpoint_preserves_comments_and_redacts_values_and_subkeys(tmp_path) -> None:
+def test_config_endpoint_preserves_comments_and_redacts_values_and_subkeys(
+    tmp_path,
+) -> None:
     """Brief: YAML redaction should preserve comments while redacting values and subkeys.
 
     Inputs:
@@ -1122,6 +1126,65 @@ def test_config_json_fastapi_and_threaded_payloads_match() -> None:
     norm_thread = _normalize(threaded_data)
 
     assert norm_fast == norm_thread
+
+
+def test_config_raw_threaded_endpoint_returns_plain_yaml(tmp_path) -> None:
+    """Brief: Threaded /config/raw must return plain YAML text.
+
+    Inputs:
+      - Temporary YAML config file with known contents.
+
+    Outputs:
+      - Response has a YAML content type and the body matches the on-disk YAML
+        and parses back to the same mapping.
+    """
+
+    import http.client
+
+    import foghorn.webserver as web_mod
+
+    cfg_path = tmp_path / "config.yaml"
+    yaml_text = "webserver:\n  enabled: true\nanswer: 42\n"
+    cfg_path.write_text(yaml_text, encoding="utf-8")
+
+    cfg = {"webserver": {"enabled": True, "auth": {"mode": "none"}}}
+
+    httpd = web_mod._AdminHTTPServer(
+        ("127.0.0.1", 0),
+        web_mod._ThreadedAdminRequestHandler,
+        stats=None,
+        config=cfg,
+        log_buffer=RingBuffer(),
+        config_path=str(cfg_path),
+    )
+
+    host, port = httpd.server_address
+
+    def _serve_once() -> None:
+        try:
+            httpd.handle_request()
+        finally:
+            httpd.server_close()
+
+    t = threading.Thread(target=_serve_once, daemon=True)
+    t.start()
+
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    try:
+        conn.request("GET", "/config/raw")
+        resp = conn.getresponse()
+        assert resp.status == 200
+        content_type = resp.getheader("Content-Type") or ""
+        assert content_type.startswith("application/x-yaml")
+        body = resp.read().decode("utf-8")
+    finally:
+        conn.close()
+        t.join(timeout=1.0)
+
+    assert body == yaml_text
+    parsed = yaml.safe_load(body) or {}
+    assert parsed["webserver"]["enabled"] is True
+    assert parsed["answer"] == 42
 
 
 def test_config_raw_json_threaded_endpoint_reads_from_disk(tmp_path) -> None:

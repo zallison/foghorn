@@ -1962,7 +1962,9 @@ class StatsCollector:
 
             # Per-rcode top subdomain names (full qnames) restricted to
             # subdomain queries only (qname != base), with the same domain
-            # ignore filters applied.
+            # ignore filters applied. Only true subdomains (as defined by
+            # _is_subdomain) are included to keep these lists consistent with
+            # other subdomain-oriented views.
             rcode_subdomains: Optional[Dict[str, List[Tuple[str, int]]]] = None
             if self._top_rcode_subdomains:
                 rcode_subdomains = {}
@@ -1974,6 +1976,12 @@ class StatsCollector:
                     filtered_entries: List[Tuple[str, int]] = []
                     for domain, count in entries:
                         norm = _normalize_domain(str(domain))
+                        # Only include true subdomains: names with at least
+                        # three labels (e.g., "www.example.com") or the
+                        # equivalent under public-suffix-style bases such as
+                        # "co.uk".
+                        if not _is_subdomain(norm):
+                            continue
                         if self.ignore_single_host and "." not in norm:
                             continue
                         if self._ignore_top_domains:
@@ -2050,7 +2058,8 @@ class StatsCollector:
                         cache_miss_domains = filtered_entries[: self.top_n]
 
             # Top subdomain names (full qnames) for cache outcome restricted to
-            # subdomain queries only (qname != base).
+            # subdomain queries only (qname != base). Only true subdomains are
+            # included to keep naming aligned with the "Top Subdomains" list.
             cache_hit_subdomains: Optional[List[Tuple[str, int]]] = None
             if self._top_cache_hit_subdomains is not None:
                 entries = self._top_cache_hit_subdomains.export(
@@ -2060,6 +2069,11 @@ class StatsCollector:
                     filtered_entries = []
                     for domain, count in entries:
                         norm = _normalize_domain(str(domain))
+                        # Enforce subdomain semantics consistently with
+                        # _is_subdomain so that base domains are not exposed
+                        # under subdomain-oriented views.
+                        if not _is_subdomain(norm):
+                            continue
                         if self.ignore_single_host and "." not in norm:
                             continue
                         if self._ignore_top_domains:
@@ -2085,6 +2099,8 @@ class StatsCollector:
                     filtered_entries = []
                     for domain, count in entries:
                         norm = _normalize_domain(str(domain))
+                        if not _is_subdomain(norm):
+                            continue
                         if self.ignore_single_host and "." not in norm:
                             continue
                         if self._ignore_top_domains:
@@ -2782,7 +2798,7 @@ class StatsReporter(threading.Thread):
             try:
                 snapshot = self.collector.snapshot(reset=self.reset_on_log)
                 json_line = format_snapshot_json(snapshot)
-                self.logger.log(self.log_level, json_line)
+                self.logger.debug(json_line)
 
                 # Always reset recent latency window after emission
                 self.collector.reset_latency_recent()
