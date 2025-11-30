@@ -411,8 +411,6 @@ def _redact_yaml_text_preserving_layout(
         redacted += "\n"
     return redacted
 
-
-@cached(cache=TTLCache(maxsize=1024, ttl=300), key=lambda value: id(value))
 def _json_safe(value: Any) -> Any:
     """Brief: Return a JSON-serializable representation of value.
 
