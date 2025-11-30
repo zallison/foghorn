@@ -73,7 +73,7 @@ docker: clean env docker-build docker-run docker-logs
 
 .PHONY: docker-build
 docker-build: build env
-	rsync -qr --exclude='*/__pycache__/*' --delete-during ./entrypoint.sh ./*md ./src ./html ./Makefile ./pyproject.toml ./Dockerfile ./docker-compose.yaml docker-build
+	rsync -qr --exclude='*/__pycache__/*' --delete-during ./entrypoint.sh ./*md ./src ./html ./Makefile ./pyproject.toml ./Dockerfile ./docker-compose.yaml ./assets docker-build/
 	docker build ./docker-build -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-clean

@@ -21,12 +21,23 @@ def get_default_schema_path() -> Path:
       - None.
 
     Outputs:
-      - Path to ``assets/config-yaml.schema`` located at the project root.
+      - Path to a readable ``assets/config-yaml.schema`` file.
     """
 
-    # ``config_schema.py`` lives at ``src/foghorn/config_schema.py``.
-    # The repository root is two levels up from this file.
     here = Path(__file__).resolve()
+
+    # 1) Look for assets/config-yaml.schema in ancestors (source checkout).
+    for ancestor in here.parents:
+        candidate = ancestor / "assets" / "config-yaml.schema"
+        if candidate.is_file():
+            return candidate
+
+    # 2) Docker image fallback: COPY . /foghorn puts assets here.
+    docker_candidate = Path("/foghorn/assets/config-yaml.schema")
+    if docker_candidate.is_file():
+        return docker_candidate
+
+    # 3) Last resort: previous behavior (keeps error message shape consistent).
     project_root = here.parents[2]
     return project_root / "assets" / "config-yaml.schema"
 
@@ -57,7 +68,11 @@ def _format_errors(errors: List[ValidationError], *, config_path: Optional[str])
       - String suitable for display in logs or CLI output.
     """
 
-    header = f"Invalid configuration in {config_path or '<config dict>'}:" if errors else "Invalid configuration:"
+    header = (
+        f"Invalid configuration in {config_path or '<config dict>'}:"
+        if errors
+        else "Invalid configuration:"
+    )
     lines: List[str] = [header]
     for err in errors:
         instance_path = "/".join(str(p) for p in err.path) or "<root>"
@@ -66,7 +81,12 @@ def _format_errors(errors: List[ValidationError], *, config_path: Optional[str])
     return "\n".join(lines)
 
 
-def validate_config(cfg: Dict[str, Any], *, schema_path: Optional[Path] = None, config_path: Optional[str] = "./config/config.yaml") -> None:
+def validate_config(
+    cfg: Dict[str, Any],
+    *,
+    schema_path: Optional[Path] = None,
+    config_path: Optional[str] = "./config/config.yaml",
+) -> None:
     """Brief: Validate a parsed YAML configuration mapping against JSON Schema.
 
     Inputs:
@@ -89,17 +109,22 @@ def validate_config(cfg: Dict[str, Any], *, schema_path: Optional[Path] = None, 
       >>> data = yaml.safe_load("listen: {host: 127.0.0.1, port: 5353}\nupstream: [{host: 1.1.1.1, port: 53}]")
       >>> validate_config(data)  # does not raise for valid config
     """
-    return None
+    # Resolve the effective schema path so that error messages clearly state
+    # which file failed to load when something goes wrong.
+    effective_schema_path = schema_path or get_default_schema_path()
+
     try:
-        schema = _load_schema(schema_path)
+        schema = _load_schema(effective_schema_path)
     except (OSError, json.JSONDecodeError, SchemaError) as exc:
-        # Surface schema/IO issues as a clear ValueError so callers see a
-        # consistent exception type from this function.
-        effective_schema_path = schema_path or get_default_schema_path()
-        #raise ValueError(f"Failed to load or parse configuration schema at {effective_schema_path}: {exc}") from exc
+        raise ValueError(
+            f"Failed to load or parse configuration schema at {effective_schema_path}: {exc}"
+        ) from exc
 
     validator = Draft202012Validator(schema)
     errors = sorted(validator.iter_errors(cfg), key=lambda e: list(e.path))
     if errors:
         message = _format_errors(errors, config_path=config_path)
         raise ValueError(message)
+
+    # No validation errors; configuration is considered valid.
+    return None
