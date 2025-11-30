@@ -712,3 +712,301 @@ def test_setup_calls_maybe_run_and_returns_none(monkeypatch, tmp_path):
     result = dl.setup()
     assert result is None
     assert called["force"] is True
+
+
+def test_init_invalid_interval_days_disables_periodic_refresh(tmp_path, caplog):
+    """Brief: Invalid interval_days value logs a warning and disables refresh.
+
+    Inputs:
+      - tmp_path: Temporary directory for download_path.
+      - caplog: Pytest logging capture fixture.
+
+    Outputs:
+      - None; asserts interval_seconds is None and warning mentions interval_days.
+    """
+
+    caplog.set_level("WARNING")
+    dl = ListDownloader(
+        download_path=str(tmp_path),
+        urls=[],
+        url_files=[],
+        interval_days="not-a-number",
+    )
+
+    assert dl.interval_seconds is None
+    assert any(
+        "interval_days" in rec.getMessage() for rec in caplog.records
+    )
+
+
+def test_init_invalid_legacy_interval_seconds_disables_periodic_refresh(tmp_path, caplog):
+    """Brief: Invalid legacy interval_seconds logs a warning and disables refresh.
+
+    Inputs:
+      - tmp_path: Temporary directory for download_path.
+      - caplog: Pytest logging capture fixture.
+
+    Outputs:
+      - None; asserts interval_seconds is None and warning mentions interval_seconds.
+    """
+
+    caplog.set_level("WARNING")
+    dl = ListDownloader(
+        download_path=str(tmp_path),
+        urls=[],
+        url_files=[],
+        interval_days=None,
+        interval_seconds="bad",
+    )
+
+    assert dl.interval_seconds is None
+    assert any(
+        "interval_seconds" in rec.getMessage() for rec in caplog.records
+    )
+
+
+def test_merge_urls_from_files_returns_early_when_no_urls(tmp_path, monkeypatch):
+    """Brief: _merge_urls_from_files returns early when url_files produce no URLs.
+
+    Inputs:
+      - tmp_path: Temporary directory for download_path.
+      - monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts _read_url_files is called and urls remain unchanged.
+    """
+
+    called = {"paths": None}
+
+    def fake_read_url_files(self, paths):  # noqa: D401
+        """Stub that records paths and returns an empty set."""
+
+        called["paths"] = list(paths)
+        return set()
+
+    monkeypatch.setattr(ListDownloader, "_read_url_files", fake_read_url_files, raising=False)
+
+    dl = ListDownloader(
+        download_path=str(tmp_path),
+        urls=["https://existing.example"],
+        url_files=["ignored.txt"],
+    )
+
+    assert called["paths"] == ["ignored.txt"]
+    assert dl.urls == ["https://existing.example"]
+
+
+def test_setup_merges_url_files_and_logs_debug(monkeypatch, tmp_path, caplog):
+    """Brief: setup merges url_files into urls and logs a debug message.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Temporary directory for download_path.
+      - caplog: Pytest logging capture fixture.
+
+    Outputs:
+      - None; asserts _read_url_files is invoked and merged URLs are logged.
+    """
+
+    # Avoid real network calls by stubbing _maybe_run and requests.get.
+    class DummyResp:
+        text = ""
+
+        def raise_for_status(self) -> None:  # pragma: no cover - trivial
+            return None
+
+    def fake_get(url, timeout):
+        return DummyResp()
+
+    monkeypatch.setattr(list_downloader_mod.requests, "get", fake_get)
+
+    dl = ListDownloader(
+        download_path=str(tmp_path), urls=["https://base.example"], url_files=[]
+    )
+    dl.url_files = ["urls1.txt"]
+
+    read_calls = {"paths": None}
+
+    def fake_read_url_files(paths):
+        read_calls["paths"] = list(paths)
+        return {"https://fromfile.example"}
+
+    monkeypatch.setattr(dl, "_read_url_files", fake_read_url_files)
+
+    called_maybe = {"force": None}
+
+    def fake_maybe_run(force: bool) -> None:
+        called_maybe["force"] = force
+
+    monkeypatch.setattr(dl, "_maybe_run", fake_maybe_run)
+
+    caplog.set_level("DEBUG")
+    dl.setup()
+
+    assert read_calls["paths"] == ["urls1.txt"]
+    assert "https://fromfile.example" in dl.urls
+    assert called_maybe["force"] is True
+    assert any("ListDownloader added" in rec.getMessage() for rec in caplog.records)
+
+
+def test_setup_invalid_interval_configuration_disables_refresh(monkeypatch, tmp_path, caplog):
+    """Brief: setup logs a warning and skips refresh thread for bad interval_seconds.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Temporary directory for download_path.
+      - caplog: Pytest logging capture fixture.
+
+    Outputs:
+      - None; asserts warning logged and no background thread created.
+    """
+
+    class DummyResp:
+        text = ""
+
+        def raise_for_status(self) -> None:  # pragma: no cover - trivial
+            return None
+
+    def fake_get(url, timeout):
+        return DummyResp()
+
+    monkeypatch.setattr(list_downloader_mod.requests, "get", fake_get)
+
+    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+
+    called_maybe = {"force": None}
+
+    def fake_maybe_run(force: bool) -> None:
+        called_maybe["force"] = force
+
+    monkeypatch.setattr(dl, "_maybe_run", fake_maybe_run)
+
+    dl.interval_seconds = "n/a"  # triggers invalid interval branch
+
+    caplog.set_level("WARNING")
+    dl.setup()
+
+    assert called_maybe["force"] is True
+    assert dl._stop_event is None
+    assert dl._background_thread is None
+    assert any("interval configuration" in rec.getMessage() for rec in caplog.records)
+
+
+def test_setup_starts_background_thread_with_valid_interval(monkeypatch, tmp_path):
+    """Brief: setup creates stop event and background thread when interval is valid.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Temporary directory for download_path.
+
+    Outputs:
+      - None; asserts _stop_event and _background_thread are set and loop runs once.
+    """
+
+    class DummyResp:
+        text = ""
+
+        def raise_for_status(self) -> None:  # pragma: no cover - trivial
+            return None
+
+    def fake_get(url, timeout):
+        return DummyResp()
+
+    monkeypatch.setattr(list_downloader_mod.requests, "get", fake_get)
+
+    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+
+    call_count = {"maybe_run": 0, "forces": []}
+
+    def fake_maybe_run(force: bool) -> None:
+        call_count["maybe_run"] += 1
+        call_count["forces"].append(force)
+
+    monkeypatch.setattr(dl, "_maybe_run", fake_maybe_run)
+
+    class DummyEvent:
+        """Brief: Event stub that allows a single loop iteration then stops.
+
+        Inputs:
+          - None
+
+        Outputs:
+          - None; is_set() is False initially and True after wait().
+        """
+
+        def __init__(self) -> None:
+            self._set = False
+
+        def is_set(self) -> bool:
+            return self._set
+
+        def set(self) -> None:
+            self._set = True
+
+        def wait(self, timeout: float) -> None:  # noqa: ARG002
+            self._set = True
+
+    class DummyThread:
+        """Brief: Thread stub that runs the target synchronously once.
+
+        Inputs:
+          - target: Callable to run.
+
+        Outputs:
+          - None; start() invokes target() immediately.
+        """
+
+        def __init__(self, target=None, name=None, daemon=None) -> None:
+            self._target = target
+            self.name = name
+            self.daemon = daemon
+            self.started = False
+
+        def start(self) -> None:
+            self.started = True
+            if self._target is not None:
+                self._target()
+
+    monkeypatch.setattr(list_downloader_mod.threading, "Event", DummyEvent)
+    monkeypatch.setattr(list_downloader_mod.threading, "Thread", DummyThread)
+
+    dl.interval_seconds = 60
+    dl.setup()
+
+    assert isinstance(dl._stop_event, DummyEvent)
+    assert isinstance(dl._background_thread, DummyThread)
+    assert dl._background_thread.name == "ListDownloader-refresh"
+    assert dl._background_thread.daemon is True
+    # One call from the initial forced update, one from the background loop.
+    assert call_count["maybe_run"] == 2
+    assert call_count["forces"] == [True, False]
+
+
+def test_needs_update_ignores_stat_oserror_and_uses_remote(monkeypatch, tmp_path):
+    """Brief: _needs_update falls back to remote checks when stat raises OSError.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Temporary directory for local file.
+
+    Outputs:
+      - None; asserts True is returned when getmtime raises OSError.
+    """
+
+    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    f = tmp_path / "list.txt"
+    f.write_text("# header\n")
+
+    def fake_getmtime(path):  # noqa: ARG001
+        raise OSError("stat-fail")
+
+    class DummyResp:
+        headers = {}
+
+    def fake_head(url, timeout):  # noqa: ARG001
+        return DummyResp()
+
+    monkeypatch.setattr(list_downloader_mod.os.path, "getmtime", fake_getmtime)
+    monkeypatch.setattr(list_downloader_mod.requests, "head", fake_head)
+
+    assert dl._needs_update("https://example.com/a.txt", str(f)) is True

@@ -7,6 +7,7 @@ while true; do
 	  echo "$(date)""  Foghorn. Stopped."
 	  echo "==================================="
 	  echo
+	  sleep 1
 done
 
 echo "Foghorn ended"

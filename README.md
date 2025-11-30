@@ -19,12 +19,12 @@ For developer documentation (architecture, transports, plugin internals, testing
   - [`listen`](#listen)
   - [`upstream`](#upstream)
   - [`plugins`](#plugins)
-    - [AccessControlPlugin](#accesscontrolplugin)
-    - [NewDomainFilterPlugin](#newdomainfilterplugin)
-    - [UpstreamRouterPlugin](#upstreamrouterplugin)
-    - [FilterPlugin](#filterplugin)
-    - [ListDownloader plugin](#listdownloader-plugin)
-    - [CustomRecords plugin](#customrecords-plugin)
+	- [AccessControlPlugin](#accesscontrolplugin)
+	- [NewDomainFilterPlugin](#newdomainfilterplugin)
+	- [UpstreamRouterPlugin](#upstreamrouterplugin)
+	- [FilterPlugin](#filterplugin)
+	- [ListDownloader plugin](#listdownloader-plugin)
+	- [CustomRecords plugin](#customrecords-plugin)
   - [Complete `config.yaml` Example](#complete-configyaml-example)
 - [Logging](#logging)
 - [License](#license)
@@ -35,14 +35,14 @@ For developer documentation (architecture, transports, plugin internals, testing
 *   **Extensible Plugin System:** Easily add custom logic to control DNS resolution.
 *   **Flexible Configuration:** Configure listeners, upstream resolvers (UDP/TCP/DoT/DoH), and plugins using YAML.
 *   **Built-in Plugins:**
-*   **Access Control:** CIDR-based allow/deny (allowlist/blocklist terminology in docs).
-*   **EtcHosts:** Answer queries based on host file(s).
-*   **Greylist:** Temporarily block newly seen domains.
-*   **New Domain Filter:** Block recently registered domains.
-*   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
-*   **Filter:** Filter by domain patterns/keywords IPs.
-*   **CustomRecords:** Serve static DNS records from one or more files, with optional live reload on change.
-*   **Examples:** Showcase of simple policies and rewrites.
+  *   **Access Control:** CIDR-based allow/deny (allowlist/blocklist terminology in docs).
+  *   **EtcHosts:** Answer queries based on host file(s).
+  *   **Greylist:** Temporarily block newly seen domains.
+  *   **New Domain Filter:** Block recently registered domains.
+  *   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
+  *   **Filter:** Filter by domain patterns/keywords IPs.
+  *   **CustomRecords:** Serve static DNS records from one or more files, with optional live reload on change.
+  *   **Examples:** Showcase of simple policies and rewrites.
 
 ## Installation
 
@@ -120,13 +120,15 @@ dnssec:
   - upstream_ad: require upstream AD bit (recommended for now)
   - local (experimental): perform local DNSSEC validation.
 
-## Configuration
+# Configuration
 
 Configuration is handled through a `config.yaml` file. The file has three main sections: `listen`, `upstream`, and `plugins`.
 
-### `listen`
+------
 
-You can enable one or more listeners. UDP is enabled by default; TCP, DoT, and DoH are optional and supported.
+## `listen`
+
+You can enable one or more `listener`s. `UDP` is enabled by default; `TCP`, `DoT`, and `DoH` are optional and supported.
 
 ```yaml
 listen:
@@ -158,7 +160,9 @@ RFC 8484â€‘compatible and unchanged from previous releases; only the runtime
 implementation has changed.
 ```
 
-### `upstream`
+----
+
+## `upstream`
 
 You can mix transports per upstream. If `transport` is omitted it defaults to UDP.
 
@@ -189,7 +193,9 @@ upstream:
 	  # ca_file: /etc/ssl/certs/ca-certificates.crt
 ```
 
-### `plugins`
+----
+
+## `plugins`
 
 This section is a list of plugins to load. Each plugin has a `module` and a `config` section. You can also specify a plugin as a short string alias.
 
@@ -219,7 +225,9 @@ Plugins support three priority knobs in their config (all optional, integers 1â€
 
 This lets you, for example, have a ListDownloader plugin run its setup early (to download lists) and a Filter plugin run slightly later to load those lists from disk.
 
-#### AccessControlPlugin
+------
+
+### AccessControlPlugin
 
 This plugin provides access control based on the client's IP address.
 
@@ -254,7 +262,9 @@ plugins:
 		- "192.168.0.0/16"
 ```
 
-#### NewDomainFilterPlugin
+------
+
+### NewDomainFilterPlugin
 
 This plugin blocks domains that were registered recently by checking the domain's creation date using `whois`.
 
@@ -282,7 +292,9 @@ plugins:
 	  threshold_days: 14
 ```
 
-#### UpstreamRouterPlugin
+------
+
+### UpstreamRouterPlugin
 
 This plugin routes queries to different upstream DNS servers based on the queried domain.
 
@@ -320,7 +332,9 @@ plugins:
 			  port: 53
 ```
 
-#### FilterPlugin
+------
+
+### FilterPlugin
 
 This plugin provides flexible filtering of DNS queries based on domain names, patterns, keywords, and response IPs.
 
@@ -393,7 +407,7 @@ plugins:
 		- config/ips.d/*.csv
 ```
 
-##### JSON Lines examples for files
+#### JSON Lines examples for files
 
 - Domains (allowed_domains_files or blocked_domains_files):
 
@@ -429,7 +443,9 @@ Notes:
 - Plain-text lines continue to work alongside JSON Lines within the same file.
 - Unknown actions default to deny (logged). Invalid JSON/regex/IP lines are logged and skipped.
 
-#### ListDownloader plugin
+------
+
+### ListDownloader plugin
 
 Download domain-only blocklists from well-known sources to local files so the Filter plugin can load them.
 
@@ -472,7 +488,9 @@ plugins:
 		- ./config/var/lists/Prigent-Malware-*.txt
 ```
 
-#### CustomRecords plugin
+------
+
+### CustomRecords plugin
 
 The `CustomRecords` plugin answers selected queries directly from one or more
 local files, bypassing upstream resolvers and the cache for those names.
@@ -527,6 +545,8 @@ files and reloads them when changed. When
 `watchdog_poll_interval_seconds > 0`, a lightweight polling loop supplements
 filesystem events, which is useful in some container or network filesystem
 setups where file change notifications are unreliable.
+
+------
 
 ## Complete `config.yaml` Example
 
@@ -748,6 +768,8 @@ plugins:
 
 ```
 
+------
+
 ## Logging
 
 Foghorn includes configurable logging with bracketed level tags and UTC timestamps. Example output:
@@ -762,4 +784,4 @@ See README-DEV.md for advanced logging and statistics options.
 
 ## License
 
-MIT
+MIT, see LICENSE file.

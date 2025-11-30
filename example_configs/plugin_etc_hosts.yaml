@@ -28,7 +28,8 @@ logging:
 
 plugins:
   - module: etc-hosts  # EtcHosts plugin alias
-    files:
-      - /etc/hosts
-    watchdog_enabled: true
-    ttl: 900 # 15 minutes, default is 300
+    config:
+      files:
+        - /etc/hosts
+      watchdog_enabled: true
+      ttl: 900 # 15 minutes, default is 300

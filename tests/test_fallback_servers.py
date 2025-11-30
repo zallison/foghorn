@@ -278,10 +278,10 @@ def test_admin_fallback_config_raw_and_save(monkeypatch: Any, tmp_path) -> None:
 
     time.sleep(0.05)
 
-    # Test GET /config/raw returns the on-disk YAML.
+    # Test GET /config/raw.json returns the on-disk YAML and parsed config.
     conn = http.client.HTTPConnection(host, port, timeout=1)
     try:
-        conn.request("GET", "/config/raw")
+        conn.request("GET", "/config/raw.json")
         resp = conn.getresponse()
         body = resp.read()
         assert resp.status == 200

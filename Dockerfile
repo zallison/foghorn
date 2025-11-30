@@ -14,12 +14,14 @@ RUN DEBIAN_FRONTEND=noninteractive apt update && \
 COPY . /foghorn
 
 # Ensure dependencies
-RUN pip install --root-user-action=ignore ".[dev]"
+RUN pip install --root-user-action=ignore -e ".[dev]"
 
 # To prevent or tell which cuda device to use for fastapu
-ENV CUDA_VISIBLE_DEVICES=""
+# ENV CUDA_VISIBLE_DEVICES=""
 
-#  Internal Port   # Normal Port to map from # Comment
+
+# Normal Port # Comment
+# Expose: Internal Port
 
 # 53 # Standard UDP/TCP
 EXPOSE 5333

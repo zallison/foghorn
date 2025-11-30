@@ -5,7 +5,7 @@ import os
 import pathlib
 import threading
 import time
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from dnslib import QTYPE, RR, DNSHeader, DNSRecord
 
@@ -168,7 +168,7 @@ class CustomRecords(BasePlugin):
         mapping: Dict[Tuple[str, int], Tuple[int, List[str]]] = {}
 
         for fp in self.file_paths:
-            logger.info("reading recordfile: %s", fp)
+            logger.debug("reading recordfile: %s", fp)
             records_path = pathlib.Path(fp)
             with records_path.open("r", encoding="utf-8") as f:
                 for lineno, raw_line in enumerate(f, start=1):
@@ -291,7 +291,8 @@ class CustomRecords(BasePlugin):
             return None
 
         ttl, values = entry
-        logging.warning(f"got entry for {name} {type_name} -> {values}")
+        logging.info(f"got entry for {name} {type_name} -> {values}")
+
         try:
             request = DNSRecord.parse(req)
         except Exception as e:  # pragma: no cover - defensive parsing
@@ -415,7 +416,7 @@ class CustomRecords(BasePlugin):
         for directory in directories:
             try:
                 observer.schedule(handler, str(directory), recursive=False)
-                logger.info("Watching %s", directory)
+                logger.debug("Watching %s", directory)
             except Exception as exc:  # pragma: no cover - log and continue
                 logger.warning("Failed to watch directory %s: %s", directory, exc)
 

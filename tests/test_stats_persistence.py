@@ -274,16 +274,20 @@ def test_stats_collector_warm_load_from_store_uses_counts(tmp_path: Path) -> Non
         # Per-qtype qname counts should warm-load into qtype_qnames.
         assert snap.qtype_qnames is not None
         assert "A" in snap.qtype_qnames
-        # Per-rcode base-domain aggregates hydrated into rcode_domains/subdomains.
+        # Per-rcode base-domain aggregates hydrated into rcode_domains.
+        # Subdomain lists now strictly enforce subdomain semantics via
+        # _is_subdomain, so warm-loaded base-only entries do not appear in
+        # rcode_subdomains.
         assert snap.rcode_domains is not None
         assert "NOERROR" in snap.rcode_domains
-        assert snap.rcode_subdomains is not None
-        assert "NOERROR" in snap.rcode_subdomains
-        # Cache hit/miss domain and subdomain lists reconstructed.
+        assert snap.rcode_subdomains is None
+        # Cache hit/miss domain lists are reconstructed; subdomain lists only
+        # surface true subdomains and are therefore empty/None when the store
+        # contains base domains only.
         assert snap.cache_hit_domains is not None
         assert snap.cache_miss_domains is not None
-        assert snap.cache_hit_subdomains is not None
-        assert snap.cache_miss_subdomains is not None
+        assert snap.cache_hit_subdomains is None
+        assert snap.cache_miss_subdomains is None
     finally:
         store.close()
 

@@ -31,8 +31,7 @@ plugins:
 
 logging:
   level: debug
-  enabled: true
-  port: 8080
+  stderr: true
 
 # Optional: enable statistics
 # statistics:
