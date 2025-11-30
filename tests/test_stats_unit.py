@@ -330,7 +330,7 @@ def test_stats_reporter_logs_and_stops(caplog):
         c,
         interval_seconds=1,
         reset_on_log=True,
-        log_level="info",
+        log_level="debug",
         logger_name="foghorn.stats.test",
     )
     rep.daemon = True
@@ -338,7 +338,7 @@ def test_stats_reporter_logs_and_stops(caplog):
     # reads interval_seconds on each loop iteration.
     rep.interval_seconds = 0.01
 
-    with caplog.at_level("INFO", logger="foghorn.stats.test"):
+    with caplog.at_level("DEBUG", logger="foghorn.stats.test"):
         rep.start()
         # Allow at least one cycle with the shorter interval
         time.sleep(0.05)
