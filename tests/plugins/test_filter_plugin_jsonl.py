@@ -8,8 +8,9 @@ Outputs:
   - None
 """
 
-from dnslib import QTYPE
 from contextlib import closing
+
+from dnslib import QTYPE
 
 from foghorn.plugins.base import PluginContext
 from foghorn.plugins.filter import FilterPlugin

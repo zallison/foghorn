@@ -10,13 +10,9 @@ Outputs:
 
 import logging
 
-from dnslib import DNSRecord, QTYPE
+from dnslib import QTYPE, DNSRecord
 
-from foghorn.plugins.base import (
-    BasePlugin,
-    PluginContext,
-    PluginDecision,
-)
+from foghorn.plugins.base import BasePlugin, PluginContext, PluginDecision
 from foghorn.plugins.base import logger as base_logger
 from foghorn.plugins.base import plugin_aliases
 
@@ -293,6 +289,7 @@ def test_parse_priority_value_valid_and_clamped(caplog):
     # Above range clamps to 255
     assert BasePlugin._parse_priority_value(300, "pre_priority", base_logger) == 255
     assert any("pre_priority above 255" in r.message for r in caplog.records)
+
 
 def test_base_plugin_handle_sigusr2_default_noop():
     """Brief: Default handle_sigusr2 implementation is a no-op that returns None.

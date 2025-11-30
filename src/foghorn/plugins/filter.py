@@ -17,7 +17,7 @@ from dnslib import QTYPE
 from dnslib import A as RDATA_A
 from dnslib import DNSRecord
 
-from foghorn.cache import TTLCache
+from foghorn.cache import FoghornTTLCache
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
@@ -79,7 +79,7 @@ class FilterPlugin(BasePlugin):
         Initializes the FilterPlugin.  Config has been read.
         """
         # super().__init__(**config)
-        self._domain_cache = TTLCache()
+        self._domain_cache = FoghornTTLCache()
         # Serialize SQLite access across ThreadingUDPServer handler threads to
         # avoid "InterfaceError: bad parameter or other API misuse" from
         # concurrent use of a single connection.

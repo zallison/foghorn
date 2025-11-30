@@ -5,7 +5,7 @@ from typing import Callable, Dict, List, Optional
 
 from dnslib import QTYPE, RCODE, DNSRecord
 
-from .cache import TTLCache
+from .cache import FoghornTTLCache
 from .plugins.base import BasePlugin, PluginContext, PluginDecision
 
 logger = logging.getLogger("foghorn.server")
@@ -56,7 +56,6 @@ def _set_response_id_cached(wire: bytes, req_id: int) -> bytes:
         return wire
 
 
-
 class DNSUDPHandler(socketserver.BaseRequestHandler):
     """
     Handles UDP DNS requests.
@@ -67,7 +66,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         typically instantiated directly by users.
     """
 
-    cache = TTLCache()
+    cache = FoghornTTLCache()
     upstream_addrs: List[Dict] = []
     plugins: List[BasePlugin] = []
     timeout = 2.0
@@ -154,8 +153,8 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 cache_obj = getattr(self, "cache", None)
                 if cache_obj is None:
                     return
-                # Support both foghorn.cache.TTLCache (set(key, ttl, data)) and
-                # mapping-style caches used in some tests (e.g., cachetools.TTLCache
+                # Support both foghorn.cache.FoghornTTLCache (set(key, ttl, data)) and
+                # mapping-style caches used in some tests (e.g., cachetools.FoghornTTLCache
                 # where TTL is provided at construction time).
                 if hasattr(cache_obj, "set"):
                     cache_obj.set(cache_key, effective_ttl, response_wire)
@@ -832,8 +831,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         == "local"
                     ):
                         try:
-                            from .dnssec_validate import \
-                                validate_response_local
+                            from .dnssec_validate import validate_response_local
 
                             valid = bool(
                                 validate_response_local(
