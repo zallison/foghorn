@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from foghorn.config_schema import validate_config
+import foghorn.config_schema as config_schema_mod
+from foghorn.config_schema import validate_config, get_default_schema_path
 
 
 EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "example_configs"
@@ -48,9 +49,9 @@ def test_invalid_config_raises_value_error() -> None:
     """
 
     cfg = {
-      "listen": {"host": "127.0.0.1", "port": 5353},
-      "upstream": [{"host": "1.1.1.1", "port": 53}],
-      "extra": 42,
+        "listen": {"host": "127.0.0.1", "port": 5353},
+        "upstream": [{"host": "1.1.1.1", "port": 53}],
+        "extra": 42,
     }
 
     with pytest.raises(ValueError) as excinfo:
@@ -59,3 +60,84 @@ def test_invalid_config_raises_value_error() -> None:
     msg = str(excinfo.value)
     assert "Invalid configuration" in msg
     assert "extra" in msg
+
+
+def test_get_default_schema_path_docker_fallback(monkeypatch) -> None:
+    """Brief: get_default_schema_path uses the Docker fallback when image path exists.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture used to stub Path.is_file.
+
+    Outputs:
+      - None; asserts returned path points to /foghorn/assets/config-yaml.schema.
+    """
+
+    real_path_cls = config_schema_mod.Path
+
+    def fake_is_file(self) -> bool:  # noqa: D401
+        """Return True only for the Docker candidate, False otherwise."""
+
+        s = str(self)
+        if s == "/foghorn/assets/config-yaml.schema":
+            return True
+        return False
+
+    monkeypatch.setattr(real_path_cls, "is_file", fake_is_file, raising=False)
+
+    p = get_default_schema_path()
+    assert str(p) == "/foghorn/assets/config-yaml.schema"
+
+
+def test_get_default_schema_path_last_resort_uses_project_root(monkeypatch) -> None:
+    """Brief: get_default_schema_path falls back to project_root/assets when no schema files exist.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture used to force is_file() to False.
+
+    Outputs:
+      - None; asserts the returned path matches the computed project_root/assets path.
+    """
+
+    real_path_cls = config_schema_mod.Path
+
+    def always_false_is_file(self) -> bool:  # noqa: D401
+        """Stub is_file that always reports paths as missing."""
+
+        return False
+
+    monkeypatch.setattr(real_path_cls, "is_file", always_false_is_file, raising=False)
+
+    # Mirror the logic inside get_default_schema_path() by resolving the
+    # config_schema module's file, not this test file.
+    here = real_path_cls(config_schema_mod.__file__).resolve()
+    expected = here.parents[2] / "assets" / "config-yaml.schema"
+
+    p = get_default_schema_path()
+    assert p == expected
+
+
+def test_validate_config_wraps_schema_loading_errors(monkeypatch) -> None:
+    """Brief: validate_config wraps schema loading failures in a ValueError.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture used to make _load_schema raise.
+
+    Outputs:
+      - None; asserts a ValueError message referencing the failing schema path.
+    """
+
+    def boom_load(_schema_path):  # noqa: D401, ARG001
+        """Raise OSError to simulate I/O failure while reading schema."""
+
+        raise OSError("disk failure")
+
+    monkeypatch.setattr(config_schema_mod, "_load_schema", boom_load)
+
+    fake_schema_path = config_schema_mod.Path("/nonexistent/schema.json")
+
+    with pytest.raises(ValueError) as excinfo:
+        validate_config({}, schema_path=fake_schema_path, config_path="cfg.yaml")
+
+    msg = str(excinfo.value)
+    assert "Failed to load or parse configuration schema" in msg
+    assert "disk failure" in msg
