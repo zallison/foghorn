@@ -9,6 +9,7 @@ Outputs:
 """
 
 from unittest.mock import mock_open, patch
+
 import foghorn.main as main_mod
 
 
@@ -58,7 +59,8 @@ def test_main_doh_listener_starts(monkeypatch):
         def join(self, timeout=None):
             return
 
-    import sys, types
+    import sys
+    import types
 
     fake_threading = types.SimpleNamespace(Thread=DummyThread)
 

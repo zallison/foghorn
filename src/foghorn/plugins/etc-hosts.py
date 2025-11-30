@@ -1,14 +1,27 @@
 from __future__ import annotations
-import time
-from dnslib import DNSRecord, QTYPE, A, AAAA, QR, RR, DNSHeader
-import os
+
 import logging
+import os
 import pathlib
 import threading
-from typing import Dict, Optional, Iterable, List
+import time
+from typing import Dict, Iterable, List, Optional
 
-from foghorn.plugins.base import PluginDecision, PluginContext
-from foghorn.plugins.base import BasePlugin, plugin_aliases
+from dnslib import AAAA, QTYPE, RR, A, DNSHeader, DNSRecord
+
+try:  # watchdog is used for cross-platform file watching
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+except Exception:  # pragma: no cover - defensive fallback when watchdog is unavailable
+    FileSystemEventHandler = object  # type: ignore[assignment]
+    Observer = None  # type: ignore[assignment]
+
+from foghorn.plugins.base import (
+    BasePlugin,
+    PluginContext,
+    PluginDecision,
+    plugin_aliases,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +38,19 @@ class EtcHosts(BasePlugin):
 
     def setup(self) -> None:
         """
-        Brief: Initialize the plugin and load host mappings.
+        Brief: Initialize the plugin, load host mappings, and configure watchers.
 
         Inputs:
           - file_path (str, optional): Single hosts file path (legacy, preserved)
           - file_paths (list[str], optional): List of hosts file paths
             to load and merge in order (later overrides earlier)
+          - watchdog_enabled (bool, optional): When True (default), start a
+            watchdog-based observer to reload files automatically on change.
+            The legacy option inotify_enabled is still accepted as an alias.
+          - watchdog_poll_interval_seconds (float, optional): When greater than
+            zero, enable a stat-based polling loop to detect changes even when
+            filesystem events are not delivered (for example in some container
+            or read-only bind-mount setups).
 
         Outputs:
           - None
@@ -40,7 +60,7 @@ class EtcHosts(BasePlugin):
             EtcHosts(file_path="/custom/hosts")
 
           Multiple files (preferred):
-            EtcHosts(file_paths=["/etc/hosts", "/etc/hosts.d/extra"])
+            EtcHosts(file_paths=["/etc/hosts", "/etc/hosts.d/extra"], inotify_enabled=True)
         """
 
         # Normalize configuration into a list of paths. Default to /etc/hosts
@@ -48,7 +68,59 @@ class EtcHosts(BasePlugin):
         provided = self.config.get("file_paths")
         self.file_paths: List[str] = self._normalize_paths(provided, legacy)
 
+        # Internal synchronization and state
+        self._hosts_lock = threading.RLock()
+        self.hosts: Dict[str, str] = {}
+        self._observer = None
+
+        # Watchdog reload debouncing: avoid tight reload loops when a single
+        # change event causes additional filesystem notifications (e.g. from
+        # our own reload reads).
+        self._watchdog_min_interval = float(
+            self.config.get("watchdog_min_interval_seconds", 1.0)
+        )
+        self._last_watchdog_reload_ts = 0.0
+        # Timer used to coalesce multiple rapid watchdog events into a single
+        # deferred reload while still guaranteeing that no change is lost.
+        self._reload_debounce_timer = None
+        self._reload_timer_lock = threading.Lock()
+
+        # Polling-based fallback reload behaviour (useful when filesystem
+        # events are not delivered, such as in certain container or bind-mount
+        # environments).
+        self._poll_interval = float(
+            self.config.get("watchdog_poll_interval_seconds", 0.0)
+        )
+        self._last_stat_snapshot = None
+        self._poll_stop = None
+        self._poll_thread = None
+
+        # Initial load
         self._load_hosts()
+
+        self._ttl = self.config.get("ttl", 300)
+
+        # Optionally start watchdog-based reloads
+        watchdog_cfg = self.config.get("watchdog_enabled")
+        if watchdog_cfg is not None:
+            watchdog_enabled = bool(watchdog_cfg)
+        else:
+            watchdog_enabled = True
+
+        if watchdog_enabled:
+            self._start_watchdog()
+
+        # Optional polling-based fallback for environments where filesystem
+        # events are not reliably delivered (for example some Docker or
+        # network filesystems). When enabled, this runs alongside watchdog and
+        # is further rate-limited by the reload debouncing in
+        # _reload_hosts_from_watchdog.
+        if self._poll_interval > 0.0:
+            logger.warning(
+                "Watchdog falling back to polling every {self._poll_interval}"
+            )
+            self._poll_stop = threading.Event()
+            self._start_polling()
 
     def _normalize_paths(
         self, file_paths: Optional[Iterable[str]], legacy: Optional[str]
@@ -102,6 +174,7 @@ class EtcHosts(BasePlugin):
         mapping: Dict[str, str] = {}
 
         for fp in self.file_paths:
+            logging.debug(f"reading hostfile: {fp}")
             hosts_path = pathlib.Path(fp)
             with hosts_path.open("r", encoding="utf-8") as f:
                 for raw_line in f:
@@ -117,10 +190,34 @@ class EtcHosts(BasePlugin):
                         )
 
                     ip = parts[0]
+
+                    # When adding an IPv4 address, also create the corresponding
+                    # in-addr.arpa reverse mapping so reverse lookups can be
+                    # resolved from the same hosts data.
+                    reverse_name: Optional[str] = None
+                    if ":" not in ip and "." in ip:
+                        octets = ip.split(".")
+                        if len(octets) == 4 and all(o.isdigit() for o in octets):
+                            try:
+                                if all(0 <= int(o) <= 255 for o in octets):
+                                    reverse_name = (
+                                        ".".join(reversed(octets)) + ".in-addr.arpa"
+                                    )
+                            except ValueError:
+                                reverse_name = None
+
                     for domain in parts[1:]:
-                        # Later files override earlier ones by assignment
+                        # Later entries override earlier ones by assignment
                         mapping[domain] = ip
-        self.hosts = mapping
+                        if reverse_name:
+                            mapping[reverse_name] = domain
+
+        lock = getattr(self, "_hosts_lock", None)
+        if lock is None:
+            self.hosts = mapping
+        else:
+            with lock:
+                self.hosts = mapping
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
@@ -142,7 +239,15 @@ class EtcHosts(BasePlugin):
             return None
 
         qname = qname.rstrip(".")
-        ip = self.hosts.get(qname)
+
+        # Safe concurrent read from the hosts mapping when a watcher may be
+        # reloading it in the background.
+        lock = getattr(self, "_hosts_lock", None)
+        if lock is None:
+            ip = self.hosts.get(qname)
+        else:
+            with lock:
+                ip = self.hosts.get(qname)
 
         if not ip:
             return None
@@ -175,7 +280,7 @@ class EtcHosts(BasePlugin):
             return None
 
         # Normalize domain
-        qname = str(request.q.qname).rstrip(".")
+        # qname = str(request.q.qname).rstrip(".")
 
         ip = ipaddr
         reply = DNSRecord(
@@ -184,7 +289,13 @@ class EtcHosts(BasePlugin):
 
         if query_type == QTYPE.A:
             reply.add_answer(
-                RR(rname=request.q.qname, rtype=QTYPE.A, rclass=1, ttl=60, rdata=A(ip))
+                RR(
+                    rname=request.q.qname,
+                    rtype=QTYPE.A,
+                    rclass=1,
+                    ttl=self._ttl,
+                    rdata=A(ip),
+                )
             )
         elif query_type == QTYPE.AAAA:
             reply.add_answer(
@@ -199,6 +310,271 @@ class EtcHosts(BasePlugin):
 
         return reply.pack()
 
+    class _WatchdogHandler(FileSystemEventHandler):
+        """Brief: Internal watchdog handler that reloads hosts on file changes.
+
+        Inputs:
+          - plugin: EtcHosts instance to notify on changes.
+          - watched_files: Iterable of concrete hosts file paths to track.
+
+        Outputs:
+          - None (invokes plugin._reload_hosts_from_watchdog when a watched path changes).
+        """
+
+        def __init__(
+            self,
+            plugin: "EtcHosts",
+            watched_files: Iterable[pathlib.Path],
+        ) -> None:
+            super().__init__()
+            self._plugin = plugin
+            self._watched = {p.resolve() for p in watched_files}
+
+        def _should_reload(
+            self, src_path: Optional[str], dest_path: Optional[str] = None
+        ) -> bool:
+            if not src_path and not dest_path:
+                return False
+
+            candidates = []
+            if src_path:
+                candidates.append(src_path)
+            if dest_path:
+                candidates.append(dest_path)
+
+            for raw in candidates:
+                try:
+                    p = pathlib.Path(raw).resolve()
+                except Exception:  # pragma: no cover - extremely defensive
+                    continue
+                if p in self._watched:
+                    return True
+            return False
+
+        def on_any_event(self, event) -> None:  # type: ignore[override]
+            # Ignore directory-level events; we only care about concrete file writes.
+            if getattr(event, "is_directory", False):
+                return
+
+            # Treat these event types as "writes". Many editors perform atomic
+            # saves via create+move rather than in-place modification, so we
+            # include "created" and "moved" in addition to "modified".
+            event_type = getattr(event, "event_type", None)
+            if event_type not in {"modified", "created", "moved"}:
+                return
+
+            src = getattr(event, "src_path", None)
+            dest = getattr(event, "dest_path", None)
+            if self._should_reload(src, dest):
+                self._plugin._reload_hosts_from_watchdog()
+
+    def _start_watchdog(self) -> None:
+        """Brief: Start a watchdog observer to reload hosts files on change.
+
+        Inputs:
+          - None (uses self.file_paths)
+        Outputs:
+          - None
+        """
+
+        if Observer is None:
+            logger.warning(
+                "watchdog is not available; automatic /etc/hosts reload disabled",
+            )
+            self._observer = None
+            return
+
+        host_paths = [pathlib.Path(p).expanduser() for p in self.file_paths]
+        watched_files = [p.resolve() for p in host_paths]
+        directories = {p.parent.resolve() for p in host_paths}
+
+        if not directories:
+            self._observer = None
+            return
+
+        handler = self._WatchdogHandler(self, watched_files)
+        observer = Observer()
+        for directory in directories:
+            try:
+                observer.schedule(handler, str(directory), recursive=False)
+                logger.debug("Watching %s", directory)
+            except Exception as exc:  # pragma: no cover - log and continue
+                logger.warning("Failed to watch directory %s: %s", directory, exc)
+
+        observer.daemon = True
+        observer.start()
+        self._observer = observer
+
+    def _start_polling(self) -> None:
+        """Brief: Start a stat-based polling loop to detect hosts file changes.
+
+        Inputs:
+          - None (uses self.file_paths and self._poll_interval)
+        Outputs:
+          - None
+
+        Example:
+          Called from setup() when ``watchdog_poll_interval_seconds`` is > 0.
+        """
+        if self._poll_interval <= 0.0:
+            return
+
+        stop_event = getattr(self, "_poll_stop", None)
+        if stop_event is None:
+            # If no stop event is configured, do not start polling to avoid
+            # leaking an unmanaged thread.
+            return
+
+        thread = threading.Thread(target=self._poll_loop, name="EtcHostsPoller")
+        thread.daemon = True
+        thread.start()
+        self._poll_thread = thread
+
+    def _poll_loop(self) -> None:
+        """Brief: Background loop that periodically checks for file changes.
+
+        Inputs:
+          - None
+        Outputs:
+          - None
+        """
+        stop_event = getattr(self, "_poll_stop", None)
+        interval = getattr(self, "_poll_interval", 0.0)
+        if stop_event is None or interval <= 0.0:
+            return
+
+        while not stop_event.is_set():
+            try:
+                if self._have_files_changed():
+                    self._reload_hosts_from_watchdog()
+            except Exception:  # pragma: no cover - defensive logging
+                logger.warning("Error during hosts polling loop", exc_info=True)
+
+            # Wait with wakeup on stop event or timeout.
+            stop_event.wait(interval)
+
+    def _have_files_changed(self) -> bool:
+        """Brief: Detect whether any configured hosts files have changed on disk.
+
+        Inputs:
+          - None (uses self.file_paths)
+        Outputs:
+          - bool: True if the current stat snapshot differs from the last one.
+
+        Example:
+          First invocation after setup() returns True and records baseline
+          snapshot; subsequent calls only return True when a file's inode,
+          size, or mtime changes.
+        """
+        snapshot = []
+        for fp in self.file_paths:
+            try:
+                st = os.stat(fp)
+            except FileNotFoundError:
+                snapshot.append((fp, None))
+            except OSError:
+                # Other OS-level errors are logged but do not crash the poller.
+                logger.warning("Failed to stat hosts file %s", fp, exc_info=True)
+                snapshot.append((fp, None))
+            else:
+                snapshot.append((fp, (st.st_ino, st.st_size, st.st_mtime)))
+
+        last = getattr(self, "_last_stat_snapshot", None)
+        if last is None or snapshot != last:
+            self._last_stat_snapshot = snapshot
+            return True
+        return False
+
+    def _schedule_debounced_reload(self, delay: float) -> None:
+        """Brief: Schedule a one-shot deferred reload after a minimum interval.
+
+        Inputs:
+          - delay: Seconds to wait before attempting the reload.
+
+        Outputs:
+          - None
+
+        Example:
+          Called internally when multiple watchdog events arrive within
+          ``watchdog_min_interval_seconds``; coalesces them into a single
+          reload instead of dropping later changes.
+        """
+        if delay <= 0.0:
+            # If there is effectively no delay, fall back to an immediate
+            # reload attempt.
+            self._reload_hosts_from_watchdog()
+            return
+
+        lock = getattr(self, "_reload_timer_lock", None)
+        if lock is None:
+            # During teardown ``close()`` may have removed timer state;
+            # in that case we simply avoid scheduling new work.
+            return
+
+        with lock:
+            timer = getattr(self, "_reload_debounce_timer", None)
+            if timer is not None and getattr(timer, "is_alive", lambda: False)():
+                # A timer is already scheduled; let it perform the reload.
+                return
+
+            def _timer_cb() -> None:
+                # Re-enter the normal reload path; by the time this fires the
+                # minimum interval will have elapsed, so the reload will be
+                # performed.
+                try:
+                    self._reload_hosts_from_watchdog()
+                except Exception:  # pragma: no cover - defensive logging
+                    logger.warning(
+                        "Error during deferred hosts reload from watchdog",
+                        exc_info=True,
+                    )
+
+            timer = threading.Timer(delay, _timer_cb)
+            timer.daemon = True
+            self._reload_debounce_timer = timer
+            timer.start()
+
+    def _reload_hosts_from_watchdog(self) -> None:
+        """Brief: Safely reload hosts mapping in response to watchdog events.
+
+        Inputs:
+          - None
+        Outputs:
+          - None
+
+        Notes:
+          - Applies a minimum interval between reloads (configurable via
+            ``watchdog_min_interval_seconds``) to avoid continuous reload
+            loops when the act of reading the hosts file itself generates
+            further filesystem events.
+          - When multiple events arrive within the minimum interval, schedules
+            a single deferred reload instead of dropping the later events.
+        """
+        now = time.time()
+        last_ts = getattr(self, "_last_watchdog_reload_ts", 0.0)
+        min_interval = getattr(self, "_watchdog_min_interval", 1.0)
+        elapsed = now - last_ts
+
+        # Fast path: if we reloaded very recently, schedule a deferred reload
+        # instead of skipping outright. This coalesces rapid events while still
+        # ensuring that at least one reload happens after the interval.
+        if elapsed < min_interval:
+            remaining = max(min_interval - elapsed, 0.0)
+            logger.debug(
+                "Deferring hosts reload for %.3fs; last reload was %.3fs ago",
+                remaining,
+                elapsed,
+            )
+            self._schedule_debounced_reload(remaining)
+            return
+
+        self._last_watchdog_reload_ts = now
+        logger.info("Reloading hosts mapping due to filesystem change")
+        try:
+            self._load_hosts()
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Failed to reload hosts from watchdog event: %s", exc)
+
     def close(self) -> None:
         """
         Brief: Stop any background watchers and release resources.
@@ -208,9 +584,37 @@ class EtcHosts(BasePlugin):
         Outputs:
           - None
         """
-        try:
-            if self._notifier is not None:
-                self._notifier.stop()
-        except Exception:  # pragma: no cover
-            pass
-        self._notifier = None
+        observer = getattr(self, "_observer", None)
+        if observer is not None:
+            try:
+                observer.stop()
+                observer.join(timeout=2.0)
+            except Exception:  # pragma: no cover
+                pass
+            self._observer = None
+
+        # Stop polling loop, if configured.
+        stop_event = getattr(self, "_poll_stop", None)
+        if stop_event is not None:
+            try:
+                stop_event.set()
+            except Exception:  # pragma: no cover
+                pass
+
+        poll_thread = getattr(self, "_poll_thread", None)
+        if poll_thread is not None:
+            try:
+                poll_thread.join(timeout=2.0)
+            except Exception:  # pragma: no cover
+                pass
+            self._poll_thread = None
+
+        # Cancel any outstanding deferred reload timer so it does not fire
+        # after resources have been torn down.
+        timer = getattr(self, "_reload_debounce_timer", None)
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:  # pragma: no cover
+                pass
+            self._reload_debounce_timer = None

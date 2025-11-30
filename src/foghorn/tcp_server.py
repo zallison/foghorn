@@ -34,10 +34,10 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                 if len(hdr) != 2:
                     break
                 ln = int.from_bytes(hdr, "big")
-                if ln <= 0:
+                if ln <= 0:  # pragma: nocover - network error
                     break
                 body = _recv_exact(sock, ln)
-                if len(body) != ln:
+                if len(body) != ln:  # pragma: nocover - network error
                     break
                 resp = self.resolver(body, peer_ip)
                 sock.sendall(len(resp).to_bytes(2, "big") + resp)
@@ -96,6 +96,32 @@ async def _read_exact(reader: asyncio.StreamReader, n: int) -> bytes:
             break
         data += chunk
     return data
+
+
+def _recv_exact(sock, length):
+    """
+    Receive exactly 'length' bytes from the given socket.
+    This function blocks until the requested number of bytes is received
+    or the connection is closed.
+
+    Args:
+        sock: A connected socket object.
+        length (int): The number of bytes to receive.
+
+    Returns:
+        bytes: The received data, or None if the connection was closed.
+
+    Raises:
+        RuntimeError: If the connection is broken before receiving all data.
+    """
+    data = bytearray()
+    while len(data) < length:
+        chunk = sock.recv(length - len(data))
+        if not chunk:
+            # Connection closed by peer
+            return None
+        data.extend(chunk)
+    return bytes(data)
 
 
 async def _handle_conn(

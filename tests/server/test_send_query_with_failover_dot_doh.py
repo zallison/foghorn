@@ -16,7 +16,6 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
-
 from dnslib import DNSRecord
 
 import foghorn.server as srv

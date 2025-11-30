@@ -1,6 +1,6 @@
 # Foghorn
 
-![Foghorn Logo](html/logo.png)
+![Foghorn Logo](html/transparent-logo.png)
 
 Foghorn is a lightweight, caching DNS server built with Python (3.10+). It's designed to be fast and extensible, featuring a pluggable policy system that allows you to customize its behavior to fit your needs.
 
@@ -8,19 +8,41 @@ With special thanks to Fiona Weatherwax for their contributions and inspiration.
 
 For developer documentation (architecture, transports, plugin internals, testing), see README-DEV.md.
 
+## Index
+
+- [Features](#features)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [Docker](#docker)
+  - [DNSSEC modes](#dnssec-modes)
+- [Configuration](#configuration)
+  - [`listen`](#listen)
+  - [`upstream`](#upstream)
+  - [`plugins`](#plugins)
+	- [AccessControlPlugin](#accesscontrolplugin)
+	- [NewDomainFilterPlugin](#newdomainfilterplugin)
+	- [UpstreamRouterPlugin](#upstreamrouterplugin)
+	- [FilterPlugin](#filterplugin)
+	- [ListDownloader plugin](#listdownloader-plugin)
+	- [CustomRecords plugin](#customrecords-plugin)
+  - [Complete `config.yaml` Example](#complete-configyaml-example)
+- [Logging](#logging)
+- [License](#license)
+
 ## Features
 
 *   **DNS Caching:** Speeds up DNS resolution by caching responses from upstream servers.
 *   **Extensible Plugin System:** Easily add custom logic to control DNS resolution.
 *   **Flexible Configuration:** Configure listeners, upstream resolvers (UDP/TCP/DoT/DoH), and plugins using YAML.
 *   **Built-in Plugins:**
-    *   **Access Control:** CIDR-based allow/deny (allowlist/blocklist terminology in docs).
-    *   **EtcHosts:** Answer queries based on host file(s).
-    *   **Greylist:** Temporarily block newly seen domains.
-    *   **New Domain Filter:** Block recently registered domains.
-    *   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
-    *   **Filter:** Filter by domain patterns/keywords IPs.
-    *   **Examples:** Showcase of simple policies and rewrites.
+  *   **Access Control:** CIDR-based allow/deny (allowlist/blocklist terminology in docs).
+  *   **EtcHosts:** Answer queries based on host file(s).
+  *   **Greylist:** Temporarily block newly seen domains.
+  *   **New Domain Filter:** Block recently registered domains.
+  *   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
+  *   **Filter:** Filter by domain patterns/keywords IPs.
+  *   **CustomRecords:** Serve static DNS records from one or more files, with optional live reload on change.
+  *   **Examples:** Showcase of simple policies and rewrites.
 
 ## Installation
 
@@ -58,19 +80,19 @@ Foghorn is available on Docker Hub at `zallison/foghorn:latest`.
 
 ```bash
 docker run -d -p 5353:5353/udp \
-  -v /path/to/your/config.yaml:/foghorn/config.yaml \
+  -v /path/to/your/config/:/foghorn/config/ \
   zallison/foghorn:latest
 ```
 
 **Building locally:**
 
 ```bash
-[cp /path/to/your/config.yaml .] # Optional
+[cp /path/to/your/config.yaml ./config/config.yaml] # Optional
 docker build -t my/foghorn .
 docker run -d -p 5353:5353/udp my/foghorn
 ```
 
-**Important:** Mount your `config.yaml` to `/foghorn/config.yaml` inside the container unless you've built your own image that contains your config.
+**Important:** Mount your `config.yaml` to `/foghorn/config/config.yaml` inside the container unless you've built your own image that contains your config.
 
 If you need to expose additional listeners (TCP/DoT/DoH), add the corresponding port mappings:
 
@@ -98,37 +120,39 @@ dnssec:
   - upstream_ad: require upstream AD bit (recommended for now)
   - local (experimental): perform local DNSSEC validation.
 
-## Configuration
+# Configuration
 
 Configuration is handled through a `config.yaml` file. The file has three main sections: `listen`, `upstream`, and `plugins`.
 
-### `listen`
+------
 
-You can enable one or more listeners. UDP is enabled by default; TCP, DoT, and DoH are optional and supported.
+## `listen`
+
+You can enable one or more `listener`s. `UDP` is enabled by default; `TCP`, `DoT`, and `DoH` are optional and supported.
 
 ```yaml
 listen:
   udp:
-    enabled: true
-    host: 127.0.0.1
-    port: 5353
+	enabled: true
+	host: 127.0.0.1
+	port: 5353
   tcp:
-    enabled: false
-    host: 127.0.0.1
-    port: 5353
+	enabled: false
+	host: 127.0.0.1
+	port: 5353
   dot:
-    enabled: false
-    host: 127.0.0.1
-    port: 8853
-    cert_file: /path/to/cert.pem
-    key_file: /path/to/key.pem
+	enabled: false
+	host: 127.0.0.1
+	port: 8853
+	cert_file: /path/to/cert.pem
+	key_file: /path/to/key.pem
   doh:
-    enabled: false
-    host: 127.0.0.1
-    port: 8053
-    # Optional TLS
-    # cert_file: /path/to/cert.pem
-    # key_file: /path/to/key.pem
+	enabled: false
+	host: 127.0.0.1
+	port: 8053
+	# Optional TLS
+	# cert_file: /path/to/cert.pem
+	# key_file: /path/to/key.pem
 
 Note: The DoH listener is served by a dedicated FastAPI app using uvicorn in a
 single background thread. TLS is applied via `cert_file`/`key_file`. Behavior is
@@ -136,38 +160,42 @@ RFC 8484â€‘compatible and unchanged from previous releases; only the runtime
 implementation has changed.
 ```
 
-### `upstream`
+----
+
+## `upstream`
 
 You can mix transports per upstream. If `transport` is omitted it defaults to UDP.
 
 ```yaml
 upstream:
   - host: 1.1.1.1
-    port: 853
-    transport: dot
-    tls:
-      server_name: cloudflare-dns.com
-      verify: true
-    pool:
-      max_connections: 64
-      idle_timeout_ms: 30000
+	port: 853
+	transport: dot
+	tls:
+	  server_name: cloudflare-dns.com
+	  verify: true
+	pool:
+	  max_connections: 64
+	  idle_timeout_ms: 30000
   - host: 8.8.8.8
-    port: 53
-    # transport: udp (default)
-    pool:
-      max_connections: 32
-      idle_timeout_ms: 15000
+	port: 53
+	# transport: udp (default)
+	pool:
+	  max_connections: 32
+	  idle_timeout_ms: 15000
   - transport: doh
-    url: https://dns.google/dns-query
-    method: POST   # or GET
-    headers:
-      user-agent: foghorn
-    tls:
-      verify: true
-      # ca_file: /etc/ssl/certs/ca-certificates.crt
+	url: https://dns.google/dns-query
+	method: POST   # or GET
+	headers:
+	  user-agent: foghorn
+	tls:
+	  verify: true
+	  # ca_file: /etc/ssl/certs/ca-certificates.crt
 ```
 
-### `plugins`
+----
+
+## `plugins`
 
 This section is a list of plugins to load. Each plugin has a `module` and a `config` section. You can also specify a plugin as a short string alias.
 
@@ -197,7 +225,9 @@ Plugins support three priority knobs in their config (all optional, integers 1â€
 
 This lets you, for example, have a ListDownloader plugin run its setup early (to download lists) and a Filter plugin run slightly later to load those lists from disk.
 
-#### AccessControlPlugin
+------
+
+### AccessControlPlugin
 
 This plugin provides access control based on the client's IP address.
 
@@ -212,13 +242,13 @@ This plugin provides access control based on the client's IP address.
 ```yaml
 plugins:
   - module: foghorn.plugins.access_control.AccessControlPlugin
-    config:
-      default: allow
-      allow:
-        - "192.168.0.0/16"
-        - "10.0.0.0/8"
-      deny:
-        - "203.0.113.0/24"
+	config:
+	  default: allow
+	  allow:
+		- "192.168.0.0/16"
+		- "10.0.0.0/8"
+	  deny:
+		- "203.0.113.0/24"
 ```
 
 **Example (short alias):**
@@ -226,13 +256,15 @@ plugins:
 ```yaml
 plugins:
   - module: acl
-    config:
-      default: allow
-      allow:
-        - "192.168.0.0/16"
+	config:
+	  default: allow
+	  allow:
+		- "192.168.0.0/16"
 ```
 
-#### NewDomainFilterPlugin
+------
+
+### NewDomainFilterPlugin
 
 This plugin blocks domains that were registered recently by checking the domain's creation date using `whois`.
 
@@ -246,9 +278,9 @@ This plugin blocks domains that were registered recently by checking the domain'
 ```yaml
 plugins:
   - module: foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
-    config:
-      threshold_days: 7
-      timeout_ms: 2000
+	config:
+	  threshold_days: 7
+	  timeout_ms: 2000
 ```
 
 **Example (short alias):**
@@ -256,11 +288,13 @@ plugins:
 ```yaml
 plugins:
   - module: new_domain
-    config:
-      threshold_days: 14
+	config:
+	  threshold_days: 14
 ```
 
-#### UpstreamRouterPlugin
+------
+
+### UpstreamRouterPlugin
 
 This plugin routes queries to different upstream DNS servers based on the queried domain.
 
@@ -273,16 +307,16 @@ This plugin routes queries to different upstream DNS servers based on the querie
 ```yaml
 plugins:
   - module: foghorn.plugins.upstream_router.UpstreamRouterPlugin
-    config:
-      routes:
-        - domain: "internal.corp.com"
-          upstreams:
-            - host: 10.0.0.1
-              port: 53
-        - suffix: ".dev.example.com"
-          upstreams:
-            - host: 192.168.1.1
-              port: 53
+	config:
+	  routes:
+		- domain: "internal.corp.com"
+		  upstreams:
+			- host: 10.0.0.1
+			  port: 53
+		- suffix: ".dev.example.com"
+		  upstreams:
+			- host: 192.168.1.1
+			  port: 53
 ```
 
 **Example (short alias):**
@@ -290,15 +324,17 @@ plugins:
 ```yaml
 plugins:
   - module: router
-    config:
-      routes:
-        - suffix: "corp"
-          upstreams:
-            - host: 10.0.0.53
-              port: 53
+	config:
+	  routes:
+		- suffix: "corp"
+		  upstreams:
+			- host: 10.0.0.53
+			  port: 53
 ```
 
-#### FilterPlugin
+------
+
+### FilterPlugin
 
 This plugin provides flexible filtering of DNS queries based on domain names, patterns, keywords, and response IPs.
 
@@ -336,42 +372,42 @@ Load order and precedence for domains (last write wins):
 ```yaml
 plugins:
   - module: filter
-    config:
-      # Pre-resolve (domain) filtering
-      blocked_domains:
-        - "malware.com"
-        - "phishing-site.org"
+	config:
+	  # Pre-resolve (domain) filtering
+	  blocked_domains:
+		- "malware.com"
+		- "phishing-site.org"
 
-      blocked_patterns:
-        - ".*\\.porn\\..*"
+	  blocked_patterns:
+		- ".*\\.porn\\..*"
 
-      blocked_keywords:
-        - "gambling"
+	  blocked_keywords:
+		- "gambling"
 
-      # Post-resolve (IP) filtering
-      blocked_ips:
-        - ip: "1.2.3.4"
-          action: "deny" # Deny the whole response
-        - ip: "8.8.8.0/24"
-          action: "remove" # Remove just this A/AAAA record
+	  # Post-resolve (IP) filtering
+	  blocked_ips:
+		- ip: "1.2.3.4"
+		  action: "deny" # Deny the whole response
+		- ip: "8.8.8.0/24"
+		  action: "remove" # Remove just this A/AAAA record
 
-      # File-backed examples (globs allowed)
-      allowed_domains_files:
-        - config/allow.txt
-        - config/allow.d/*.list
-      blocked_domains_files:
-        - config/block.txt
-        - config/block.d/*.txt
-      blocked_patterns_files:
-        - config/patterns/*.re
-      blocked_keywords_files:
-        - config/keywords.txt
-      blocked_ips_files:
-        - config/ips.txt
-        - config/ips.d/*.csv
+	  # File-backed examples (globs allowed)
+	  allowed_domains_files:
+		- config/allow.txt
+		- config/allow.d/*.list
+	  blocked_domains_files:
+		- config/block.txt
+		- config/block.d/*.txt
+	  blocked_patterns_files:
+		- config/patterns/*.re
+	  blocked_keywords_files:
+		- config/keywords.txt
+	  blocked_ips_files:
+		- config/ips.txt
+		- config/ips.d/*.csv
 ```
 
-##### JSON Lines examples for files
+#### JSON Lines examples for files
 
 - Domains (allowed_domains_files or blocked_domains_files):
 
@@ -407,7 +443,9 @@ Notes:
 - Plain-text lines continue to work alongside JSON Lines within the same file.
 - Unknown actions default to deny (logged). Invalid JSON/regex/IP lines are logged and skipped.
 
-#### ListDownloader plugin
+------
+
+### ListDownloader plugin
 
 Download domain-only blocklists from well-known sources to local files so the Filter plugin can load them.
 
@@ -419,7 +457,7 @@ Notes:
 
 * `urls`: List of HTTP(S) URLs to domain-only lists (comments with `#` allowed).
 * `url_files`: List of file paths, each containing one URL per line (supports `#` comments and blank lines).
-* `download_path`: Directory to write files (default `./var/lists`).
+* `download_path`: Directory to write files (default `./config/var/lists`).
 * `interval_days`: Optional periodic refresh interval (in days) while the server runs.
 
 Filenames are unique and stable per-URL: `{base}-{sha1(url)[:12]}{ext}`. If the URL has no extension, none is added (`{base}-{hash}`). Each file begins with a header line: `# YYYY-MM-DD HH:MM - URL`.
@@ -429,26 +467,86 @@ Filenames are unique and stable per-URL: `{base}-{sha1(url)[:12]}{ext}`. If the 
 ```yaml
 plugins:
   - module: list_downloader
-    pre_priority: 15
-    config:
-      download_path: ./var/lists
-      interval_days: 1
-      urls:
-        - https://v.firebog.net/hosts/AdguardDNS.txt
-        - https://v.firebog.net/hosts/Easylist.txt
-        - https://v.firebog.net/hosts/Prigent-Ads.txt
-        - https://v.firebog.net/hosts/Prigent-Malware.txt
+	pre_priority: 15
+	config:
+	  download_path: ./config/var/lists
+	  interval_days: 1
+	  urls:
+		- https://v.firebog.net/hosts/AdguardDNS.txt
+		- https://v.firebog.net/hosts/Easylist.txt
+		- https://v.firebog.net/hosts/Prigent-Ads.txt
+		- https://v.firebog.net/hosts/Prigent-Malware.txt
 
   - module: filter
-    pre_priority: 20
-    config:
-      default: deny
-      blocklist_files:
-        - ./var/lists/AdguardDNS-*.txt
-        - ./var/lists/Easylist-*.txt
-        - ./var/lists/Prigent-Ads-*.txt
-        - ./var/lists/Prigent-Malware-*.txt
+	pre_priority: 20
+	config:
+	  default: deny
+	  blocklist_files:
+		- ./config/var/lists/AdguardDNS-*.txt
+		- ./config/var/lists/Easylist-*.txt
+		- ./config/var/lists/Prigent-Ads-*.txt
+		- ./config/var/lists/Prigent-Malware-*.txt
 ```
+
+------
+
+### CustomRecords plugin
+
+The `CustomRecords` plugin answers selected queries directly from one or more
+local files, bypassing upstream resolvers and the cache for those names.
+
+**Record file format**
+
+Each non-empty, non-comment line in a records file must be:
+
+`<domain>|<qtype>|<ttl>|<value>`
+
+- `domain`: hostname (with or without trailing dot); stored and matched case-insensitively.
+- `qtype`: mnemonic (for example `A`, `AAAA`, `TXT`, `CNAME`) or numeric type code.
+- `ttl`: non-negative integer TTL in seconds.
+- `value`: RDATA for the given type (for example an IP for `A`/`AAAA`, a target
+  name for `CNAME`, the text for `TXT`, and so on).
+
+Lines beginning with `#` (after stripping leading whitespace), or that are
+empty after removing inline `#` comments, are ignored.
+
+When the same `(domain, qtype)` appears multiple times (even across multiple
+files), the first TTL is kept and values are de-duplicated while preserving
+first-seen ordering. This ordering is reflected in the final DNS answer.
+
+**Configuration keys**
+
+```yaml
+plugins:
+  - module: custom
+	config:
+	  # Use either a single file_path (legacy) or a list of file_paths
+	  # (preferred). When both are given, the legacy path is added to
+	  # the list; later files extend earlier ones.
+	  file_path: ./config/custom-records.txt        # optional
+	  file_paths:                                   # optional
+		- ./config/custom-records.txt
+		- ./config/custom-records-extra.txt
+
+	  # Optional: control how filesystem changes are detected
+	  watchdog_enabled: true                        # default true when omitted
+	  watchdog_min_interval_seconds: 1.0            # minimum time between reloads
+	  watchdog_poll_interval_seconds: 0.0           # >0 enables stat-based polling
+```
+
+`module` may be any of:
+
+- Full dotted path: `foghorn.plugins.custom-records.CustomRecords`
+- Alias: `custom` or `records`
+
+When `watchdog_enabled` is true and the optional `watchdog` dependency is
+installed, the plugin watches the parent directories of all configured records
+files and reloads them when changed. When
+`watchdog_poll_interval_seconds > 0`, a lightweight polling loop supplements
+filesystem events, which is useful in some container or network filesystem
+setups where file change notifications are unreliable.
+
+------
 
 ## Complete `config.yaml` Example
 
@@ -459,47 +557,47 @@ Here is a complete `config.yaml` file that uses the modern configuration format 
 listen:
   # Modern listener config; UDP is enabled by default.
   udp:
-    enabled: true
-    host: 127.0.0.1
-    port: 5333
+	enabled: true
+	host: 127.0.0.1
+	port: 5333
   tcp:
-    enabled: false
-    host: 127.0.0.1
-    port: 5333
+	enabled: false
+	host: 127.0.0.1
+	port: 5333
   dot:
-    enabled: false
-    host: 127.0.0.1
-    port: 8853
-    # cert_file: /path/to/cert.pem
-    # key_file: /path/to/key.pem
+	enabled: false
+	host: 127.0.0.1
+	port: 8853
+	# cert_file: /path/to/cert.pem
+	# key_file: /path/to/key.pem
   doh:
-    enabled: false
-    host: 127.0.0.1
-    port: 8053
-    # Optional TLS for DoH
-    # cert_file: /path/to/cert.pem
-    # key_file: /path/to/key.pem
+	enabled: false
+	host: 127.0.0.1
+	port: 8053
+	# Optional TLS for DoH
+	# cert_file: /path/to/cert.pem
+	# key_file: /path/to/key.pem
 
 # Multiple upstream DNS servers with automatic failover.
 # All upstreams share a single timeout (timeout_ms) per attempt.
 upstream:
   - host: 8.8.8.8
-    port: 53
-    transport: udp
+	port: 53
+	transport: udp
   - host: 1.1.1.1
-    port: 853
-    transport: dot
-    tls:
-      server_name: cloudflare-dns.com
-      verify: true
-      # ca_file: /etc/ssl/certs/ca-certificates.crt
+	port: 853
+	transport: dot
+	tls:
+	  server_name: cloudflare-dns.com
+	  verify: true
+	  # ca_file: /etc/ssl/certs/ca-certificates.crt
   - transport: doh
-    url: https://dns.google/dns-query
-    method: POST
-    headers:
-      user-agent: foghorn
-    tls:
-      verify: true
+	url: https://dns.google/dns-query
+	method: POST
+	headers:
+	  user-agent: foghorn
+	tls:
+	  verify: true
 
 # Global timeout applies to each upstream attempt
 timeout_ms: 2000
@@ -533,115 +631,144 @@ statistics:
   include_top_domains: true
   top_n: 10
   track_latency: true
-  # reset_on_sigusr1: true
+  # When true, either SIGUSR1 or SIGUSR2 will reset in-memory statistics before
+  # notifying plugins.
   # sigusr2_resets_stats: true
+  # Optional display-only ignore filters for top lists. These do not affect
+  # totals or persisted aggregates; they only hide entries from the
+  # top_clients/top_domains/top_subdomains sections exposed via /stats.
+  # ignore:
+  #   # IPs/CIDRs to hide from top_clients only.
+  #   top_clients:
+  #     - 192.168.0.0/16
+  #     - 10.0.0.0/8
+  #
+  #   # Base domains to hide from top_domains and, when subdomains list is
+  #   # empty, from top_subdomains as well. Matching is exact by default.
+  #   top_domains:
+  #     - example.internal
+  #   # Matching mode for top_domains: "exact" (default) or "suffix".
+  #   # In suffix mode, a base domain D is ignored when D == value or
+  #   # D ends with "." + value.
+  #   top_domains_mode: suffix
+  #
+  #   # Full qnames to hide from top_subdomains. When this list is empty,
+  #   # the values from top_domains are reused as the ignore set.
+  #   top_subdomains:
+  #     - dev.example.internal
+  #   # Matching mode for top_subdomains: "exact" (default) or "suffix".
+  #   # In suffix mode, a subdomain name N is ignored when N == value or
+  #   # N ends with "." + value.
+  #   top_subdomains_mode: suffix
 
 plugins:
   # New-domain filter: simple pre-resolve policy plugin.
   - module: new_domain
-    config:
-      threshold_days: 14
+	config:
+	  threshold_days: 14
 
   # Greylist plugin.
   - module: greylist
-    config:
-      duration_seconds: 60
-      # duration_hours: 1  # Only if duration_seconds isn't provided
-      # db_path: ./greylist.db
+	config:
+	  duration_seconds: 60
+	  # duration_hours: 1  # Only if duration_seconds isn't provided
+	  # db_path: ./greylist.db
 
   # Upstream router: route queries to specific upstreams by suffix.
   # Uses the modern "upstreams" list format only.
   - module: router
-    config:
-      routes:
-        - suffix: ".mylan"
-          upstreams:
-            - host: 192.168.1.1
-              port: 53
-        - suffix: "corp.internal"
-          upstreams:
-            - host: 10.0.0.1
-              port: 53
-            - host: 10.0.0.2
-              port: 53
+	config:
+	  routes:
+		- suffix: ".mylan"
+		  upstreams:
+			- host: 192.168.1.1
+			  port: 53
+		- suffix: "corp.internal"
+		  upstreams:
+			- host: 10.0.0.1
+			  port: 53
+			- host: 10.0.0.2
+			  port: 53
 
   # ListDownloader: runs early in the setup phase to download blocklists
   # that the Filter plugin will read from disk.
   - module: list_downloader
-    config:
-      # setup_priority controls when setup() runs relative to other plugins.
-      # Lower numbers run earlier. ListDownloader defaults to 15.
-      setup_priority: 15
-      download_path: ./var/lists
-      interval_seconds: 3600
-      urls:
-        - https://v.firebog.net/hosts/AdguardDNS.txt
-        - https://v.firebog.net/hosts/Easylist.txt
+	config:
+	  # setup_priority controls when setup() runs relative to other plugins.
+	  # Lower numbers run earlier. ListDownloader defaults to 15.
+	  setup_priority: 15
+	  download_path: ./config/var/lists
+	  interval_seconds: 3600
+	  urls:
+		- https://v.firebog.net/hosts/AdguardDNS.txt
+		- https://v.firebog.net/hosts/Easylist.txt
 
   # Filter plugin: loads allowlists/blocklists and applies domain/IP filtering.
   - module: filter
-    config:
-      # setup_priority controls when setup() runs. When omitted, it falls back to
-      # pre_priority for setupable plugins, or to the class default (50).
-      setup_priority: 20
+	config:
+	  # setup_priority controls when setup() runs. When omitted, it falls back to
+	  # pre_priority for setupable plugins, or to the class default (50).
+	  setup_priority: 20
 
-      # Pre-resolve (domain) filtering
-      blocked_domains:
-        - "malware.com"
-        - "phishing-site.org"
-        - "spam.example"
+	  # Pre-resolve (domain) filtering
+	  blocked_domains:
+		- "malware.com"
+		- "phishing-site.org"
+		- "spam.example"
 
-      blocked_patterns:
-        - ".*\\.porn\\..*"      # Block any domain with "porn" in subdomain
-        - "casino[0-9]+\\..*"   # Block casino1.com, casino2.net, etc.
-        - ".*adult.*"           # Block domains containing "adult"
+	  blocked_patterns:
+		- ".*\\.porn\\..*"      # Block any domain with "porn" in subdomain
+		- "casino[0-9]+\\..*"   # Block casino1.com, casino2.net, etc.
+		- ".*adult.*"           # Block domains containing "adult"
 
-      blocked_keywords:
-        - "porn"
-        - "gambling"
-        - "casino"
-        - "malware"
-        - "phishing"
+	  blocked_keywords:
+		- "porn"
+		- "gambling"
+		- "casino"
+		- "malware"
+		- "phishing"
 
-      # Optional: file-backed allowlist/blocklist inputs (globs allowed)
-      # allowlist_files:
-      #   - config/allow.txt
-      #   - config/allow.d/*.list
-      # blocklist_files:
-      #   - config/block.txt
-      #   - config/block.d/*.txt
-      # blocked_patterns_files:
-      #   - config/patterns/*.re
-      # blocked_keywords_files:
-      #   - config/keywords.txt
-      # blocked_ips_files:
-      #   - config/ips.txt
+	  # Optional: file-backed allowlist/blocklist inputs (globs allowed)
+	  # allowlist_files:
+	  #   - config/allow.txt
+	  #   - config/allow.d/*.list
+	  # blocklist_files:
+	  #   - config/block.txt
+	  #   - config/block.d/*.txt
+	  # blocked_patterns_files:
+	  #   - config/patterns/*.re
+	  # blocked_keywords_files:
+	  #   - config/keywords.txt
+	  # blocked_ips_files:
+	  #   - config/ips.txt
 
-      # Post-resolve (IP) filtering with per-IP actions
-      blocked_ips:
-        # Remove just the matching IP(s)
-        - ip: "23.220.75.245/16"
-          action: "remove"
-        # Deny entire response if any returned IPs are found
-        - ip: "1.2.3.4"
-          action: "deny"
+	  # Post-resolve (IP) filtering with per-IP actions
+	  blocked_ips:
+		# Remove just the matching IP(s)
+		- ip: "23.220.75.245/16"
+		  action: "remove"
+		# Deny entire response if any returned IPs are found
+		- ip: "1.2.3.4"
+		  action: "deny"
 
   # Examples plugin: demonstrates additional policies and rewrites.
   - module: foghorn.plugins.examples.ExamplesPlugin
-    config:
-      # Pre-resolve policy
-      max_subdomains: 5
-      max_length_no_dots: 50
-      base_labels: 2
+	config:
+	  # Pre-resolve policy
+	  max_subdomains: 5
+	  max_length_no_dots: 50
+	  base_labels: 2
 
-      # Post-resolve IP rewrite rules
-      rewrite_first_ipv4:
-        - apply_to_qtypes: ["A"]
-          ip_override: 127.0.0.1
-        - apply_to_qtypes: ["AAAA"]
-          ip_override: ::1
+	  # Post-resolve IP rewrite rules
+	  rewrite_first_ipv4:
+		- apply_to_qtypes: ["A"]
+		  ip_override: 127.0.0.1
+		- apply_to_qtypes: ["AAAA"]
+		  ip_override: ::1
 
 ```
+
+------
 
 ## Logging
 
@@ -657,4 +784,4 @@ See README-DEV.md for advanced logging and statistics options.
 
 ## License
 
-MIT
+MIT, see LICENSE file.

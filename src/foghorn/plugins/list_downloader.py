@@ -1,12 +1,13 @@
 from __future__ import annotations
+
+import hashlib
 import logging
 import os
+import threading
 import time
-import hashlib
 from datetime import datetime
 from typing import Iterable, List, Set
 from urllib.parse import urlparse
-import threading
 
 import requests
 
@@ -24,7 +25,7 @@ class ListDownloader(BasePlugin):
     Inputs (config):
       - urls (List[str]): HTTP(S) URLs to domain-per-line lists (comments with '#').
       - url_files (List[str], optional): File paths containing one URL per line ('#' comments allowed).
-      - download_path (str): Directory to store downloaded files (default: './var/lists').
+      - download_path (str): Directory to store downloaded files (default: './config/var/lists').
       - interval_days (float|int|None): If set, re-check and update no more often than
         this many days (legacy 'interval_seconds' is still accepted as a deprecated
         alias).
@@ -39,7 +40,7 @@ class ListDownloader(BasePlugin):
           - module: list_downloader
             pre_priority: 15
             config:
-              download_path: ./var/lists
+              download_path: ./config/var/lists
               cache_days: 7
               urls:
                 - https://v.firebog.net/hosts/AdguardDNS.txt
@@ -63,7 +64,9 @@ class ListDownloader(BasePlugin):
         """
 
         super().__init__(**config)
-        self.download_path: str = str(self.config.get("download_path", "./var/lists"))
+        self.download_path: str = str(
+            self.config.get("download_path", "./config/var/lists")
+        )
         self.urls: List[str] = list(self.config.get("urls", []) or [])
         self.url_files: List[str] = list(self.config.get("url_files", []) or [])
         # interval_days is the primary public setting; interval_seconds remains an
@@ -111,7 +114,7 @@ class ListDownloader(BasePlugin):
           - None; updates self.urls in-place to a sorted list of unique URLs.
 
         Example:
-          >>> dl = ListDownloader(download_path="./var/lists", urls=["https://one"], url_files=[])
+          >>> dl = ListDownloader(download_path="./config/var/lists", urls=["https://one"], url_files=[])
           >>> dl.urls  # doctest: +ELLIPSIS
           ['https://one']
         """
@@ -151,7 +154,7 @@ class ListDownloader(BasePlugin):
 
         Example use:
           >>> from foghorn.plugins.list_downloader import ListDownloader
-          >>> dl = ListDownloader(download_path="./var/lists", urls=[], url_files=[])
+          >>> dl = ListDownloader(download_path="./config/var/lists", urls=[], url_files=[])
           >>> dl.setup()  # doctest: +SKIP
         """
 
@@ -238,7 +241,7 @@ class ListDownloader(BasePlugin):
         for url in urls:
             fname = self._make_hashed_filename(url)
             fpath = os.path.join(self.download_path, fname)
-            logger.info("ListDownloader updating: %s", url)
+            logger.debug("ListDownloader checking: %s", url)
             # Try HEAD for last-modified; fall back to GET
             if self._needs_update(url, fpath):
                 logger.info(f"Downloading list {url} to {fpath}")
@@ -261,7 +264,10 @@ class ListDownloader(BasePlugin):
 
         Behavior:
           - If the file is missing, always returns True.
-          - If the file is younger than one day, returns False without a network call.
+          - If the file is younger than the configured interval (``interval_days``
+            converted to seconds) when set, returns False without a network call.
+          - If no interval is configured, files younger than one day are treated
+            as fresh and also return False.
           - Otherwise, consults the remote Last-Modified header when available and
             returns True only when the remote copy is newer, falling back to True
             on parsing or network errors.
@@ -269,12 +275,19 @@ class ListDownloader(BasePlugin):
         if not os.path.exists(filepath):
             return True
 
-        # Do not update files that are younger than one day; during setup this
+        # Do not update files that are younger than the configured interval_days
+        # (when present) or younger than one day by default; during setup this
         # prevents recently-created list files from being rewritten unnecessarily.
         try:
             now = time.time()
             local_mtime = os.path.getmtime(filepath)
-            if (now - local_mtime) < ONE_DAY_SECONDS:
+            min_age = ONE_DAY_SECONDS
+            if self.interval_seconds is not None:
+                try:
+                    min_age = max(0, int(self.interval_seconds))
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    min_age = ONE_DAY_SECONDS
+            if (now - local_mtime) < min_age:
                 return False
         except OSError:
             # If we cannot stat the file, fall back to remote checks.

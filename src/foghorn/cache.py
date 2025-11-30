@@ -1,7 +1,8 @@
 from __future__ import annotations
-import time
+
 import threading
-from typing import Any, Dict, Tuple, Optional
+import time
+from typing import Dict, Tuple
 
 
 class TTLCache:

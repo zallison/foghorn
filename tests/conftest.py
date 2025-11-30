@@ -8,9 +8,10 @@ Outputs:
   - None
 """
 
-import signal
 import os
+import signal
 import sys
+
 import pytest
 
 # Ensure 'src' is on sys.path so 'foghorn' package is importable in tests

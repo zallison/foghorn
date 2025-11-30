@@ -1,28 +1,29 @@
 from __future__ import annotations
+
 import argparse
+import functools
 import gc
-import importlib
 import logging
 import os
 import signal
-import sys
 import threading
-import functools
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+from .cache import TTLCache
+
 import yaml
 
-from typing import List, Tuple, Dict, Union, Any, Optional
-from unittest.mock import patch, mock_open
-
+from .config_schema import validate_config
+from .doh_api import start_doh_server
 from .logging_config import init_logging
 from .plugins.base import BasePlugin
 from .plugins.registry import discover_plugins, get_plugin_class
 from .server import DNSServer
-from .stats import StatsCollector, StatsReporter, StatsSQLiteStore, format_snapshot_json
+from .stats import StatsCollector, StatsReporter, StatsSQLiteStore
 from .webserver import RingBuffer, start_webserver
-from .doh_api import start_doh_server
 
 
-def _clear_lru_caches(wrappers: Optional[List[Object]]):
+def _clear_lru_caches(wrappers: Optional[List[object]]):
     # Collect all cached function wrappers
     gc.collect()
     if not wrappers:
@@ -86,7 +87,9 @@ def normalize_upstream_config(
             raise ValueError("each upstream entry must be a mapping")
 
         # DoH entries using URL
-        if str(u.get("transport", "")).lower() == "doh" and "url" in u:
+        if str(u.get("transport", "")).lower() == "doh":
+            logger = logging.getLogger("foghorn.main.setup")
+            logger.debug(f"doh: {u}")
             rec: Dict[str, Union[str, int, dict]] = {
                 "transport": "doh",
                 "url": str(u["url"]),
@@ -293,6 +296,13 @@ def main(argv: List[str] | None = None) -> int:
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f) or {}
 
+    # Validate configuration against JSON Schema before proceeding.
+    try:
+        validate_config(cfg, config_path=args.config)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+
     # Initialize logging before any other operations
     init_logging(cfg.get("logging"))
     logger = logging.getLogger("foghorn.main")
@@ -306,10 +316,12 @@ def main(argv: List[str] | None = None) -> int:
     stats_collector: Optional[StatsCollector]
     stats_reporter: Optional[StatsReporter]
     stats_persistence_store: Optional[StatsSQLiteStore]
+
     # web_handle is the admin HTTP/web UI handle returned by start_webserver().
     # It is allowed to be None when the webserver is disabled but is treated as
     # fatal when webserver.enabled is true.
     web_handle = None
+
     # Shared in-memory log buffer passed into the FastAPI admin app; this is
     # also used when starting the threaded admin HTTP fallback.
     web_log_buffer: Optional[RingBuffer] = None
@@ -317,21 +329,28 @@ def main(argv: List[str] | None = None) -> int:
     # Normalize listen configuration with backward compatibility.
     # If listen.udp is present, prefer it; otherwise fall back to legacy listen.host/port.
     listen_cfg = cfg.get("listen", {}) or {}
-    legacy_host = str(listen_cfg.get("host", "127.0.0.1"))
-    legacy_port = int(listen_cfg.get("port", 5353))
+    default_host = str(listen_cfg.get("host", "127.0.0.1"))
+    default_port = int(listen_cfg.get("port", 5333))
 
     def _sub(key, defaults):
         d = listen_cfg.get(key, {}) or {}
         out = {**defaults, **d} if isinstance(d, dict) else defaults
         return out
 
-    udp_cfg = _sub("udp", {"enabled": True, "host": legacy_host, "port": legacy_port})
-    tcp_cfg = _sub("tcp", {"enabled": False, "host": legacy_host, "port": 53})
-    dot_cfg = _sub("dot", {"enabled": False, "host": legacy_host, "port": 853})
-    doh_cfg = _sub("doh", {"enabled": False, "host": legacy_host, "port": 8053})
+    # Get listeners configs
+    udp_cfg = _sub(
+        "udp", {"enabled": True, "host": default_host, "port": default_port or 5333}
+    )
+    tcp_cfg = _sub(
+        "tcp", {"enabled": False, "host": default_host, "port": default_port or 5333}
+    )
+    dot_cfg = _sub("dot", {"enabled": False, "host": default_host, "port": 853})
+    doh_cfg = _sub("doh", {"enabled": False, "host": default_host, "port": 1443})
 
     # Normalize upstream configuration
     upstreams, timeout_ms = normalize_upstream_config(cfg)
+
+    # Hold responses this long, even if the actual ttl is lower.
     min_cache_ttl = _get_min_cache_ttl(cfg)
 
     plugins = load_plugins(cfg.get("plugins", []))
@@ -363,8 +382,8 @@ def main(argv: List[str] | None = None) -> int:
         stats_persistence_store = None
 
         if persistence_enabled:
-            db_path = str(persistence_cfg.get("db_path", "./var/stats.db"))
-            batch_writes = bool(persistence_cfg.get("batch_writes", False))
+            db_path = str(persistence_cfg.get("db_path", "./config/var/stats.db"))
+            batch_writes = bool(persistence_cfg.get("batch_writes", True))
             batch_time_sec = float(persistence_cfg.get("batch_time_sec", 15.0))
             batch_max_size = int(persistence_cfg.get("batch_max_size", 1000))
 
@@ -380,7 +399,14 @@ def main(argv: List[str] | None = None) -> int:
                 """
                 if val is None:
                     return False
-                return str(val).strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+                return str(val).strip().lower() in {
+                    "1",
+                    "true",
+                    "t",
+                    "yes",
+                    "y",
+                    "on",
+                }  # pragma: nocover - best effort
 
             force_rebuild_cfg = bool(persistence_cfg.get("force_rebuild", False))
             force_rebuild_env = _is_truthy_env(os.getenv("FOGHORN_FORCE_REBUILD"))
@@ -416,6 +442,16 @@ def main(argv: List[str] | None = None) -> int:
                 stats_persistence_store = None
 
         # Initialize in-memory collector, wiring in the persistence store when present.
+        ignore_cfg = stats_cfg.get("ignore", {}) or {}
+        ignore_top_clients = list(ignore_cfg.get("top_clients", []) or [])
+        ignore_top_domains = list(ignore_cfg.get("top_domains", []) or [])
+        ignore_top_subdomains = list(ignore_cfg.get("top_subdomains", []) or [])
+        domains_mode = str(ignore_cfg.get("top_domains_mode", "exact")).lower()
+        subdomains_mode = str(ignore_cfg.get("top_subdomains_mode", "exact")).lower()
+        ignore_domains_as_suffix = domains_mode == "suffix"
+        ignore_subdomains_as_suffix = subdomains_mode == "suffix"
+        ignore_single_host = bool(ignore_cfg.get("ignore_single_host", False))
+
         stats_collector = StatsCollector(
             track_uniques=stats_cfg.get("track_uniques", True),
             include_qtype_breakdown=stats_cfg.get("include_qtype_breakdown", True),
@@ -427,6 +463,12 @@ def main(argv: List[str] | None = None) -> int:
             top_n=int(stats_cfg.get("top_n", 10)),
             track_latency=bool(stats_cfg.get("track_latency", True)),
             stats_store=stats_persistence_store,
+            ignore_top_clients=ignore_top_clients,
+            ignore_top_domains=ignore_top_domains,
+            ignore_top_subdomains=ignore_top_subdomains,
+            ignore_domains_as_suffix=ignore_domains_as_suffix,
+            ignore_subdomains_as_suffix=ignore_subdomains_as_suffix,
+            ignore_single_host=ignore_single_host,
         )
 
         # Best-effort warm-load of persisted aggregate counters on startup.
@@ -442,7 +484,8 @@ def main(argv: List[str] | None = None) -> int:
 
         stats_reporter = StatsReporter(
             collector=stats_collector,
-            interval_seconds=int(stats_cfg.get("interval_seconds", 10)),
+            # Default statistics interval is 300s (5 minutes) when not overridden in config.
+            interval_seconds=int(stats_cfg.get("interval_seconds", 300)),
             reset_on_log=stats_cfg.get("reset_on_log", False),
             log_level=stats_cfg.get("log_level", "info"),
             persistence_store=stats_persistence_store,
@@ -459,182 +502,40 @@ def main(argv: List[str] | None = None) -> int:
         buffer_size = int((web_cfg.get("logs") or {}).get("buffer_size", 500))
         web_log_buffer = RingBuffer(capacity=buffer_size)
 
+    # --- Coordinated shutdown state ---
+    # shutdown_event is set when a termination-like signal (KeyboardInterrupt,
+    # SIGHUP, SIGTERM) requests the process to exit. exit_code communicates the
+    # desired process exit status back to the main() return value.
+    shutdown_event = threading.Event()
+    shutdown_complete = threading.Event()
+    exit_code = 0
+    hard_kill_timer: threading.Timer | None = None
+
     # --- Signal handling (SIGUSR1/SIGUSR2) ---
-    # Use Events to coalesce multiple signals so that expensive work (config
-    # reload, stats reset, plugin notifications) is never running concurrently
-    # for the same signal type.
+    # Use Events to coalesce multiple signals so that expensive work (statistics
+    # reset and plugin notifications) is never running concurrently for the same
+    # signal type.
     _sigusr1_pending = threading.Event()
     _sigusr2_pending = threading.Event()
 
-    def _apply_runtime_config(new_cfg: dict) -> None:
-        """Apply runtime-safe settings from a freshly-loaded config mapping.
+    def _process_usr_signal(sig_label: str) -> None:
+        """Brief: Handle SIGUSR1/SIGUSR2 by optionally resetting statistics and
+        notifying plugins.
 
         Inputs:
-          - new_cfg: dict configuration just loaded
+          - sig_label: Human-readable signal label used in log messages (e.g.,
+            "SIGUSR1" or "SIGUSR2").
+
         Outputs:
           - None
 
         Notes:
-          - Reinitializes logging and DNSSEC knobs
-          - Manages StatsReporter per configuration changes without touching listeners
+          - Both SIGUSR1 and SIGUSR2 share the same behavior: when statistics
+            are enabled and the configuration flag sigusr2_resets_stats is
+            true, the in-memory statistics are reset. In all cases, active
+            plugins that implement handle_sigusr2() are notified.
         """
-        nonlocal stats_collector, stats_reporter, stats_persistence_store
-        # Re-init logging
-        init_logging(new_cfg.get("logging"))
-        # Apply DNSSEC/EDNS knobs to UDP handler
-        dnssec_cfg = new_cfg.get("dnssec", {}) or {}
-        try:
-            from . import server as _server_mod
 
-            _server_mod.DNSUDPHandler.dnssec_mode = str(
-                dnssec_cfg.get("mode", "ignore")
-            ).lower()
-            _server_mod.DNSUDPHandler.edns_udp_payload = max(
-                512, int(dnssec_cfg.get("udp_payload_size", 1232))
-            )
-            _server_mod.DNSUDPHandler.dnssec_validation = str(
-                dnssec_cfg.get("validation", "upstream_ad")
-            ).lower()
-        except Exception:
-            pass
-
-        # Stats management: we intentionally avoid touching the DNS listeners
-        # here. Only logging and StatsCollector/StatsReporter wiring are
-        # updated so that long-lived sockets are unaffected by reloads.
-        s_cfg = new_cfg.get("statistics", {}) or {}
-        s_enabled = bool(s_cfg.get("enabled", False))
-        # Start/stop reporter based on enabled flag
-        if not s_enabled:
-            if stats_reporter is not None:
-                logging.getLogger("foghorn.main").info(
-                    "Disabling statistics reporter per reload"
-                )
-                try:
-                    stats_reporter.stop()
-                finally:
-                    stats_reporter = None
-            # keep collector instance to allow later re-enable, but it will be unused
-        else:
-            # Ensure we have a collector
-            if stats_collector is None:
-                stats_collector = StatsCollector(
-                    track_uniques=s_cfg.get("track_uniques", True),
-                    include_qtype_breakdown=s_cfg.get("include_qtype_breakdown", True),
-                    include_top_clients=bool(s_cfg.get("include_top_clients", True)),
-                    include_top_domains=bool(s_cfg.get("include_top_domains", True)),
-                    top_n=int(s_cfg.get("top_n", 10)),
-                    track_latency=bool(s_cfg.get("track_latency", True)),
-                )
-            # Recreate reporter if settings changed or reporter missing
-            need_restart = False
-            if stats_reporter is None:
-                need_restart = True
-            else:
-                # If interval/reset_on_log/log_level differ, restart
-                try:
-                    interval_seconds = int(s_cfg.get("interval_seconds", 10))
-                    reset_on_log = bool(s_cfg.get("reset_on_log", False))
-                    log_level = str(s_cfg.get("log_level", "info"))
-                    if (
-                        stats_reporter.interval_seconds != max(1, interval_seconds)
-                        or stats_reporter.log_level
-                        != logging.getLogger().getEffectiveLevel()  # rough check
-                        or reset_on_log != stats_reporter.reset_on_log
-                    ):
-                        need_restart = True
-                except Exception:
-                    need_restart = True
-            if need_restart:
-                if stats_reporter is not None:
-                    try:
-                        stats_reporter.stop()
-                    except Exception:
-                        pass
-                stats_reporter = StatsReporter(
-                    collector=stats_collector,
-                    interval_seconds=int(s_cfg.get("interval_seconds", 10)),
-                    reset_on_log=bool(s_cfg.get("reset_on_log", False)),
-                    log_level=str(s_cfg.get("log_level", "info")),
-                    persistence_store=stats_persistence_store,
-                )
-                stats_reporter.start()
-
-    def _process_sigusr1() -> None:
-        """
-        Brief: Handle SIGUSR1 by reloading config, re-applying runtime settings, and optionally logging and resetting statistics.
-
-        Inputs: none
-        Outputs: none
-
-        Example:
-            >>> # Internal use; invoked by signal handler thread
-        """
-        nonlocal cfg, stats_collector, stats_reporter
-        logger = logging.getLogger("foghorn.main")
-        try:
-            with open(cfg_path, "r") as f:
-                new_cfg = yaml.safe_load(f) or {}
-        except Exception as e:
-            logger.error("SIGUSR1: failed to read config %s: %s", cfg_path, e)
-            return
-        # Apply runtime config (logging, DNSSEC, reporter)
-        _apply_runtime_config(new_cfg)
-        # Handle statistics reset if enabled and configured. This is only
-        # invoked on successful reload and only when explicitly requested via
-        # statistics.reset_on_sigusr1.
-        s_cfg = new_cfg.get("statistics", {}) or {}
-        if bool(s_cfg.get("enabled", False)) and bool(
-            s_cfg.get("reset_on_sigusr1", False)
-        ):
-            if stats_collector is not None:
-                try:
-                    # Log snapshot then reset
-                    snap = stats_collector.snapshot(reset=False)
-                    json_line = format_snapshot_json(snap)
-                    logging.getLogger("foghorn.stats").info(json_line)
-                    # Now reset
-                    stats_collector.snapshot(reset=True)
-                    logger.info("SIGUSR1: statistics reset completed")
-                except Exception as e:
-                    logger.error(
-                        "SIGUSR1: error during statistics snapshot/reset: %s", e
-                    )
-        else:
-            logger.info(
-                "SIGUSR1: statistics reset skipped (disabled or reset_on_sigusr1 not set)"
-            )
-        # Replace current cfg
-        cfg = new_cfg
-
-    def _sigusr1_handler(_signum, _frame):
-        # coalesce multiple signals
-        if _sigusr1_pending.is_set():
-            return
-        _sigusr1_pending.set()
-        try:
-            _process_sigusr1()
-        finally:
-            _sigusr1_pending.clear()
-
-    # Register handlers (Unix only)
-    try:
-        signal.signal(signal.SIGUSR1, _sigusr1_handler)
-        logger.info(
-            "Installed SIGUSR1 handler for config reload and optional stats reset"
-        )
-    except Exception:
-        logger.warning("Could not install SIGUSR1 handler on this platform")
-
-    def _process_sigusr2() -> None:
-        """
-        Brief: Handle SIGUSR2 by optionally resetting statistics and invoking handle_sigusr2() on all active plugins.
-
-        Inputs: none
-        Outputs: none
-
-        Example:
-            >>> # Internal use; invoked by signal handler thread
-        """
         nonlocal cfg, stats_collector
         log = logging.getLogger("foghorn.main")
 
@@ -642,24 +543,38 @@ def main(argv: List[str] | None = None) -> int:
         # never prevent plugin notifications from running.
         try:
             s_cfg = (cfg.get("statistics") or {}) if isinstance(cfg, dict) else {}
-            if bool(s_cfg.get("enabled", False)) and bool(
-                s_cfg.get("sigusr2_resets_stats", False)
-            ):
+            enabled = bool(s_cfg.get("enabled", False))
+            # reset_on_sigusr1 is treated as a backwards-compatible alias for
+            # sigusr2_resets_stats so existing configs continue to work.
+            reset_flag = bool(
+                s_cfg.get(
+                    "sigusr2_resets_stats",
+                    s_cfg.get("reset_on_sigusr1", False),
+                )
+            )
+            if enabled and reset_flag:
                 if stats_collector is not None:
                     try:
                         stats_collector.snapshot(reset=True)
-                        log.info("SIGUSR2: statistics reset completed")
-                    except Exception as e:
-                        log.error("SIGUSR2: error during statistics reset: %s", e)
+                        log.info("%s: statistics reset completed", sig_label)
+                    except Exception as e:  # pragma: no cover - defensive
+                        log.error("%s: error during statistics reset: %s", sig_label, e)
                 else:
-                    log.info("SIGUSR2: no statistics collector active, skipping reset")
+                    log.info(
+                        "%s: no statistics collector active, skipping reset", sig_label
+                    )
             else:
                 log.info(
-                    "SIGUSR2: statistics reset skipped (disabled or sigusr2_resets_stats not set)"
+                    "%s: statistics reset skipped (disabled or sigusr2_resets_stats not set)",
+                    sig_label,
                 )
-        except Exception as e:  # defensive: do not block plugin notifications
+        except (
+            Exception
+        ) as e:  # pragma: nocover - defensive: do not block plugin notifications
             log.error(
-                "SIGUSR2: unexpected error checking statistics reset config: %s", e
+                "%s: unexpected error checking statistics reset config: %s",
+                sig_label,
+                e,
             )
 
         # Invoke plugin handlers. Each plugin can optionally expose
@@ -673,26 +588,138 @@ def main(argv: List[str] | None = None) -> int:
                 if callable(handler):
                     handler()
                     count += 1
-            except Exception as e:
+            except Exception as e:  # pragma: no cover - defensive
                 log.error(
-                    "SIGUSR2: plugin %s handler error: %s", p.__class__.__name__, e
+                    "%s: plugin %s handler error: %s",
+                    sig_label,
+                    p.__class__.__name__,
+                    e,
                 )
-        log.info("SIGUSR2: invoked handle_sigusr2 on %d plugins", count)
+        log.info("%s: invoked handle_sigusr2 on %d plugins", sig_label, count)
+
+    def _sigusr1_handler(_signum, _frame):
+        # coalesce multiple signals
+        if _sigusr1_pending.is_set():
+            return
+        _sigusr1_pending.set()
+        try:
+            _process_usr_signal("SIGUSR1")
+        finally:
+            _sigusr1_pending.clear()
 
     def _sigusr2_handler(_signum, _frame):
         if _sigusr2_pending.is_set():
             return
         _sigusr2_pending.set()
         try:
-            _process_sigusr2()
+            _process_usr_signal("SIGUSR2")
         finally:
             _sigusr2_pending.clear()
 
+    # --- Termination-oriented signals (SIGHUP/SIGTERM) ---
+    def _request_shutdown(reason: str, code: int) -> None:
+        """Brief: Request coordinated shutdown and set desired exit code.
+
+        Inputs:
+          - reason: Human-readable signal/reason name (e.g., 'SIGHUP', 'SIGTERM').
+          - code: Desired process exit code to return from main().
+
+        Outputs:
+          - None. Sets shutdown_event/exit_code and triggers server shutdown
+            when running with a UDP listener.
+
+        Notes:
+          - For SIGTERM and SIGINT, a best-effort hard-kill timer is started.
+            If the process has not completed its shutdown sequence within
+            ~10 seconds, a last-resort SIGKILL (or os._exit fallback) is
+            issued to avoid hanging indefinitely.
+        """
+
+        nonlocal exit_code, server, hard_kill_timer
+        log = logging.getLogger("foghorn.main")
+
+        if shutdown_event.is_set():
+            return
+
+        exit_code = code
+        shutdown_event.set()
+        log.info("Received %s, initiating shutdown (exit code=%d)", reason, code)
+
+        # For termination-style signals, arm a hard-kill timer so that a stuck
+        # shutdown cannot leave the process running indefinitely. The timer is
+        # cancelled implicitly when shutdown_complete is set before it fires.
+        if reason in {"SIGTERM", "SIGINT"} and hard_kill_timer is None:
+
+            def _force_exit() -> None:
+                # If shutdown has completed in the meantime, do nothing.
+                if shutdown_complete.is_set():
+                    return
+                try:
+                    log.error(
+                        "Hard-kill timeout exceeded after %s; sending SIGKILL to self",
+                        reason,
+                    )
+                    os.kill(os.getpid(), signal.SIGKILL)
+                except Exception:
+                    # As a last resort, force immediate exit with the best
+                    # available exit code.
+                    os._exit(code or 2)
+
+            hard_kill_timer = threading.Timer(10.0, _force_exit)
+            hard_kill_timer.daemon = True
+            hard_kill_timer.start()
+
+        # When a UDP server is active, ask socketserver to stop its loop so the
+        # main thread can proceed to the coordinated shutdown logic.
+        try:
+            if server is not None and getattr(server, "server", None) is not None:
+                server.server.shutdown()
+        except Exception:  # pragma: no cover - defensive
+            log.exception("Error while requesting UDP server shutdown for %s", reason)
+
+    def _sighup_handler(_signum, _frame):
+        _request_shutdown("SIGHUP", 0)
+
+    def _sigterm_handler(_signum, _frame):
+        _request_shutdown("SIGTERM", 2)
+
+    def _sigint_handler(_signum, _frame):
+        _request_shutdown("SIGINT", 2)
+
+    # Register handlers (Unix only)
+    try:
+        signal.signal(signal.SIGUSR1, _sigusr1_handler)
+        logger.debug(
+            "Installed SIGUSR1 handler to notify plugins and optionally reset statistics"
+        )
+    except Exception:
+        logger.warning("Could not install SIGUSR1 handler on this platform")
+
     try:
         signal.signal(signal.SIGUSR2, _sigusr2_handler)
-        logger.info("Installed SIGUSR2 handler to notify plugins")
+        logger.debug(
+            "Installed SIGUSR2 handler to notify plugins and optionally reset statistics"
+        )
     except Exception:
         logger.warning("Could not install SIGUSR2 handler on this platform")
+
+    try:
+        signal.signal(signal.SIGHUP, _sighup_handler)
+        logger.debug("Installed SIGHUP handler for clean shutdown (exit code 0)")
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("Could not install SIGHUP handler on this platform")
+
+    try:
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+        logger.debug("Installed SIGTERM handler for immediate shutdown (exit code 2)")
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("Could not install SIGTERM handler on this platform")
+
+    try:
+        signal.signal(signal.SIGINT, _sigint_handler)
+        logger.debug("Installed SIGINT handler for immediate shutdown (exit code 2)")
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("Could not install SIGINT handler on this platform")
 
     # DNSSEC config (ignore|passthrough|validate)
     dnssec_cfg = cfg.get("dnssec", {}) or {}
@@ -700,9 +727,11 @@ def main(argv: List[str] | None = None) -> int:
     edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
 
     server = None
+    udp_thread: threading.Thread | None = None
+    udp_error: Exception | None = None
     if bool(udp_cfg.get("enabled", True)):
-        uhost = str(udp_cfg.get("host", legacy_host))
-        uport = int(udp_cfg.get("port", legacy_port))
+        uhost = str(udp_cfg.get("host", default_host))
+        uport = int(udp_cfg.get("port", default_port))
         server = DNSServer(
             uhost,
             uport,
@@ -726,27 +755,52 @@ def main(argv: List[str] | None = None) -> int:
             pass
 
     # Log startup info
-    upstream_info = ", ".join([f"{u['host']}:{u['port']}" for u in upstreams])
+    upstream_info = ", ".join(
+        [f"{u['url']}" if "url" in u else f"{u['host']}:{u['port']}" for u in upstreams]
+    )
+    logger.info(
+        "Upstreams: [%s], timeout: %dms",
+        upstream_info,
+        timeout_ms,
+    )
+
     if server is not None:
+        # Run UDP server in a background thread so the main thread can manage
+        # coordinated shutdown alongside TCP/DoT/DoH listeners. Capture
+        # unexpected exceptions so main() can reflect them in its exit code.
+        def _run_udp() -> None:
+            nonlocal udp_error
+            try:
+                server.serve_forever()
+            except Exception as e:  # pragma: no cover - propagated via udp_error
+                udp_error = e
+
         logger.info(
-            "Starting Foghorn on %s:%d, upstreams: [%s], timeout: %dms\n",
+            "Starting UDP listener on %s:%d",
             uhost,
             uport,
-            upstream_info,
-            timeout_ms,
         )
+
+        udp_thread = threading.Thread(
+            target=_run_udp,
+            name="foghorn-udp",
+            daemon=True,
+        )
+        udp_thread.start()
     else:
+        # When no UDP listener is configured, the main thread still enters the
+        # keepalive loop below so that TCP/DoT/DoH listeners (or tests that
+        # disable UDP entirely) can drive shutdown via signals or KeyboardInterrupt.
         logger.info(
-            "Starting Foghorn without UDP listener; upstreams: [%s], timeout: %dms\n",
-            upstream_info,
-            timeout_ms,
+            "Starting Foghorn without UDP listener; main thread will use keepalive loop",
         )
 
     # Optionally start TCP/DoT listeners based on listen config
 
     # Resolver adapter for TCP/DoT servers
-    from .server import resolve_query_bytes
     import asyncio
+
+    from .server import resolve_query_bytes
 
     loop_threads = []
 
@@ -780,7 +834,7 @@ def main(argv: List[str] | None = None) -> int:
     if bool(tcp_cfg.get("enabled", False)):
         from .tcp_server import serve_tcp, serve_tcp_threaded
 
-        thost = str(tcp_cfg.get("host", legacy_host))
+        thost = str(tcp_cfg.get("host", default_host))
         tport = int(tcp_cfg.get("port", 53))
         logger.info("Starting TCP listener on %s:%d", thost, tport)
         _start_asyncio_server(
@@ -794,7 +848,7 @@ def main(argv: List[str] | None = None) -> int:
     if bool(dot_cfg.get("enabled", False)):
         from .dot_server import serve_dot
 
-        dhost = str(dot_cfg.get("host", legacy_host))
+        dhost = str(dot_cfg.get("host", default_host))
         dport = int(dot_cfg.get("port", 853))
         cert_file = dot_cfg.get("cert_file")
         key_file = dot_cfg.get("key_file")
@@ -816,8 +870,8 @@ def main(argv: List[str] | None = None) -> int:
             )
 
     if bool(doh_cfg.get("enabled", False)):
-        h = str(doh_cfg.get("host", legacy_host))
-        p = int(doh_cfg.get("port", 8053))
+        h = str(doh_cfg.get("host", default_host))
+        p = int(doh_cfg.get("port", 8153))
         cert_file = doh_cfg.get("cert_file")
         key_file = doh_cfg.get("key_file")
         logger.info("Starting DoH listener on %s:%d", h, p)
@@ -854,28 +908,79 @@ def main(argv: List[str] | None = None) -> int:
         logger.error("Fatal: webserver.enabled=true but start_webserver returned None")
         return 1
 
-    try:
-        if server is not None:
-            server.serve_forever()
-        else:
-            #  keep main thread alive while async listeners run
-            import time as _time
+    logger.info("Startup Completed")
 
-            while True:
-                _time.sleep(3600)
+    try:
+        # Keep the main thread in a lightweight keepalive loop while UDP/TCP/DoT
+        # listeners run in the background. This ensures all transports are
+        # treated consistently and that shutdown is always driven by
+        # shutdown_event/termination signals rather than a blocking
+        # serve_forever() call.
+        import time as _time
+        while not shutdown_event.is_set():
+            # If the UDP server thread has reported an unhandled exception,
+            # mirror the legacy behaviour by logging it and treating it as a
+            # server-level failure for main()'s exit code.
+            if udp_error is not None:
+                logger.exception(
+                    "Unhandled exception during UDP server operation %s", udp_error
+                )
+                if exit_code == 0:
+                    exit_code = 1
+                break
+
+            # If a UDP server thread was started and it has exited (for example
+            # because a test's DummyServer.serve_forever() raised
+            # KeyboardInterrupt or another exception), break out of the loop so
+            # coordinated shutdown can proceed.
+            if udp_thread is not None and not udp_thread.is_alive():
+                break
+            _time.sleep(1.0)
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down")
+        if not shutdown_event.is_set():
+            # KeyboardInterrupt maps to a clean shutdown and exit code 0 unless
+            # an explicit termination-like signal has already set a code.
+            shutdown_event.set()
+            exit_code = 0
     except Exception as e:  # pragma: no cover
         logger.exception(
             f"Unhandled exception during server operation {e}"
         )  # pragma: no cover
-        return 1  # pragma: no cover
+        # Preserve a non-zero exit when an unhandled exception occurs unless a
+        # stronger exit code (e.g., from SIGTERM) is already in place.
+        if exit_code == 0:
+            exit_code = 1
     finally:
+        # Request UDP server shutdown and close sockets before tearing down
+        # statistics and web components so that no new requests are processed
+        # during shutdown.
+        if server is not None:
+            try:
+                if getattr(server, "server", None) is not None:
+                    try:
+                        server.server.shutdown()
+                    except Exception:
+                        logger.exception("Error while shutting down UDP server")
+                    try:
+                        server.server.server_close()
+                    except Exception:
+                        logger.exception("Error while closing UDP server socket")
+            except Exception:
+                logger.exception("Unexpected error during UDP server teardown")
+
+        if udp_thread is not None:
+            try:
+                udp_thread.join(timeout=5.0)
+            except Exception:
+                logger.exception("Error while waiting for UDP server thread to exit")
+
         # Stop statistics reporter on shutdown so background reporting threads
         # never outlive the main process and do not keep it alive.
         if stats_reporter is not None:
             logger.info("Stopping statistics reporter")
             stats_reporter.stop()
+
         if stats_persistence_store is not None:
             logger.info("Closing statistics persistence store")
             stats_persistence_store.close()
@@ -886,7 +991,11 @@ def main(argv: List[str] | None = None) -> int:
             logger.info("Stopping webserver")
             web_handle.stop()
 
-    return 0
+        # Mark shutdown as complete so any pending hard-kill timers can detect
+        # successful termination and avoid forcing an unnecessary SIGKILL.
+        shutdown_complete.set()
+
+    return exit_code
 
 
 if __name__ == "__main__":

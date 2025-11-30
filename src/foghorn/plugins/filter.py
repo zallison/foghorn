@@ -1,18 +1,25 @@
 from __future__ import annotations
+
 import csv
 import glob
 import ipaddress
 import json
 import logging
+import os
 import re
 import sqlite3
-import os
+import threading
 import time
-from typing import Optional, List, Set, Union, Dict, Iterator, Tuple
-from dnslib import DNSRecord, QTYPE, RCODE, A as RDATA_A, AAAA as RDATA_AAAA
+from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
+
+from dnslib import AAAA as RDATA_AAAA
+from dnslib import QTYPE
+from dnslib import A as RDATA_A
+from dnslib import DNSRecord
+
 from foghorn.cache import TTLCache
 
-from .base import BasePlugin, PluginDecision, PluginContext, plugin_aliases
+from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +80,13 @@ class FilterPlugin(BasePlugin):
         """
         # super().__init__(**config)
         self._domain_cache = TTLCache()
+        # Serialize SQLite access across ThreadingUDPServer handler threads to
+        # avoid "InterfaceError: bad parameter or other API misuse" from
+        # concurrent use of a single connection.
+        self._db_lock = threading.Lock()
 
         self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 600)  # 10 minutes
-        self.db_path: str = self.config.get("db_path", "./var/blocklist.db")
+        self.db_path: str = self.config.get("db_path", "./config/var/blocklist.db")
         self.default = self.config.get("default", "deny")
 
         # Back-compat keep existing keys, add new *_domains_files keys
@@ -799,7 +810,7 @@ class FilterPlugin(BasePlugin):
                 t = t[2:-1]
             return t
 
-        logger.info("Opening %s for %s", filename, mode)
+        logger.debug("Opening %s for %s", filename, mode)
         # Use a single transaction per file for performance on very large lists.
         with self.conn:
             with open(filename, "r", encoding="utf-8") as fh:
@@ -845,13 +856,23 @@ class FilterPlugin(BasePlugin):
         Inputs:
             domain: Domain name to check.
         Outputs:
-            True when mode is "allow" or not blocked and the default is allow
+            True when mode is "allow" or not blocked and the default is allow.
         """
-        cur = self.conn.execute(
-            "SELECT mode FROM blocked_domains WHERE domain = ?",
-            (domain,),
-        )
-        row = cur.fetchone()
+        # Normalize to a plain string to avoid sqlite InterfaceError when callers
+        # pass dnslib labels or other non-str objects.
+        normalized = str(domain).rstrip(".")
+
+        # SQLite connections are not safe for concurrent use from multiple
+        # threads without external locking, even with check_same_thread=False.
+        # The DNS server uses ThreadingUDPServer, so guard DB access with a
+        # per-plugin lock to prevent "bad parameter or other API misuse".
+        with self._db_lock:
+            cur = self.conn.execute(
+                "SELECT mode FROM blocked_domains WHERE domain = ?",
+                (normalized,),
+            )
+            row = cur.fetchone()
+
         allowed: bool = self.default == "allow"
         if row:
             allowed = row[0] == "allow"

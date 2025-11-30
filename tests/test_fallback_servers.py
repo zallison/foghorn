@@ -25,7 +25,6 @@ from foghorn import webserver as web_mod
 from foghorn.doh_api import DoHServerHandle, start_doh_server
 from foghorn.webserver import RingBuffer, WebServerHandle, start_webserver
 
-
 pytestmark = pytest.mark.slow
 
 
@@ -279,10 +278,10 @@ def test_admin_fallback_config_raw_and_save(monkeypatch: Any, tmp_path) -> None:
 
     time.sleep(0.05)
 
-    # Test GET /config/raw returns the on-disk YAML.
+    # Test GET /config/raw.json returns the on-disk YAML and parsed config.
     conn = http.client.HTTPConnection(host, port, timeout=1)
     try:
-        conn.request("GET", "/config/raw")
+        conn.request("GET", "/config/raw.json")
         resp = conn.getresponse()
         body = resp.read()
         assert resp.status == 200
@@ -294,9 +293,12 @@ def test_admin_fallback_config_raw_and_save(monkeypatch: Any, tmp_path) -> None:
 
     # Test POST /config/save overwrites the config file.
     new_cfg = {"answer": 42, "webserver": {"enabled": True}}
+    import yaml
+
+    new_yaml = yaml.safe_dump(new_cfg)
     conn2 = http.client.HTTPConnection(host, port, timeout=1)
     try:
-        body_data = json.dumps(new_cfg).encode("utf-8")
+        body_data = json.dumps({"raw_yaml": new_yaml}).encode("utf-8")
         conn2.request(
             "POST",
             "/config/save",

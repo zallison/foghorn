@@ -1,10 +1,11 @@
 from __future__ import annotations
+
 import datetime as dt
 import logging
 import sqlite3
 import threading
 import time
-from typing import Optional, Any
+from typing import Any, Optional
 
 from foghorn.cache import TTLCache
 
@@ -19,7 +20,7 @@ try:  # optional fallback library
 except Exception:  # pragma: no cover - import best effort
     _pythonwhois_mod = None
 
-from .base import BasePlugin, PluginDecision, PluginContext, plugin_aliases
+from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ class NewDomainFilterPlugin(BasePlugin):
 
         # Caching configuration
         self.whois_db_path: str = self.config.get(
-            "whois_db_path", "./var/whois_cache.db"
+            "whois_db_path", "./config/var/whois_cache.db"
         )
         self.whois_cache_ttl_seconds: int = int(
             self.config.get("whois_cache_ttl_seconds", 3600)

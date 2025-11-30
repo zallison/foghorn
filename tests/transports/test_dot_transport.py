@@ -8,11 +8,9 @@ Outputs:
   - None
 """
 
-import os
 import socket
 import ssl
 import subprocess
-import tempfile
 import threading
 import time
 

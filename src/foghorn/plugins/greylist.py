@@ -1,14 +1,14 @@
 from __future__ import annotations
+
 import functools
 import logging
 import sqlite3
 import threading
 import time
-
 from typing import Optional
 
-from foghorn.plugins.base import BasePlugin, PluginDecision, PluginContext
 from foghorn.cache import TTLCache
+from foghorn.plugins.base import BasePlugin, PluginContext, PluginDecision
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class GreylistPlugin(BasePlugin):
         self.duration_seconds = self.config.get(
             "duration_seconds", self.config.get("duration_hours", 24) * 3600
         )
-        self.db_path = self.config.get("db_path", "./var/greylist.db")
+        self.db_path = self.config.get("db_path", "./config/var/greylist.db")
         self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 300)
         self.cache_max_entries = self.config.get("cache_max_entries", 100000)
 

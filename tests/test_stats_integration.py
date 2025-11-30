@@ -1,7 +1,8 @@
 """Integration tests for statistics collection in server."""
 
 from unittest.mock import Mock, patch
-from dnslib import DNSRecord, QTYPE, RCODE
+
+from dnslib import QTYPE, DNSRecord
 
 from foghorn.server import DNSUDPHandler
 from foghorn.stats import StatsCollector
@@ -37,7 +38,7 @@ def test_stats_collected_on_query():
     with patch.object(DNSRecord, "send", return_value=response_wire):
         try:
             handler.handle()
-        except Exception as e:  # pragma: no cover
+        except Exception:  # pragma: no cover
             # Socket operations may fail in test, that's OK
             pass  # pragma: no cover
 
@@ -55,6 +56,13 @@ def test_stats_collected_on_query():
     # Verify latency was recorded
     if snapshot.latency_stats:
         assert snapshot.latency_stats["count"] >= 1, "Should have recorded latency"
+
+    # Verify upstream statistics were populated for the configured upstream.
+    assert snapshot.upstreams is not None
+    assert "8.8.8.8:53" in snapshot.upstreams
+    assert snapshot.upstream_rcodes is not None
+    # At least one NOERROR from the single upstream should be recorded.
+    assert snapshot.upstream_rcodes["8.8.8.8:53"]["NOERROR"] >= 1
 
 
 def test_stats_cache_hit():

@@ -8,9 +8,8 @@ Outputs:
   - None
 """
 
-import pytest
 from foghorn.plugins.access_control import AccessControlPlugin
-from foghorn.plugins.base import PluginContext, PluginDecision
+from foghorn.plugins.base import PluginContext
 
 
 def test_access_control_init_default_allow(tmp_path):

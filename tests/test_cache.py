@@ -8,9 +8,8 @@ Outputs:
   - None
 """
 
-import time
 import threading
-import pytest
+
 from foghorn.cache import TTLCache
 
 

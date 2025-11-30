@@ -38,7 +38,7 @@ The Makefile supports building and running directly, or via docker. The highligh
   docker         – Clean image, build it, run container, then follow logs
   docker-build   – Build docker image zack/foghorn:latest
   docker-clean   – Remove docker image zack/foghorn:latest
-  docker-run     – Run docker container (ports 53/udp, 53/tcp, 8053/tcp)
+  docker-run     – Run docker container (ports 53, 8053/tcp, 8153/tcp )
   docker-logs    – Follow docker container logs
   docker-dev-ship       – Clean, build, and push docker image to docker hub
 ```
