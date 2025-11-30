@@ -734,12 +734,12 @@ def test_init_invalid_interval_days_disables_periodic_refresh(tmp_path, caplog):
     )
 
     assert dl.interval_seconds is None
-    assert any(
-        "interval_days" in rec.getMessage() for rec in caplog.records
-    )
+    assert any("interval_days" in rec.getMessage() for rec in caplog.records)
 
 
-def test_init_invalid_legacy_interval_seconds_disables_periodic_refresh(tmp_path, caplog):
+def test_init_invalid_legacy_interval_seconds_disables_periodic_refresh(
+    tmp_path, caplog
+):
     """Brief: Invalid legacy interval_seconds logs a warning and disables refresh.
 
     Inputs:
@@ -760,9 +760,7 @@ def test_init_invalid_legacy_interval_seconds_disables_periodic_refresh(tmp_path
     )
 
     assert dl.interval_seconds is None
-    assert any(
-        "interval_seconds" in rec.getMessage() for rec in caplog.records
-    )
+    assert any("interval_seconds" in rec.getMessage() for rec in caplog.records)
 
 
 def test_merge_urls_from_files_returns_early_when_no_urls(tmp_path, monkeypatch):
@@ -784,7 +782,9 @@ def test_merge_urls_from_files_returns_early_when_no_urls(tmp_path, monkeypatch)
         called["paths"] = list(paths)
         return set()
 
-    monkeypatch.setattr(ListDownloader, "_read_url_files", fake_read_url_files, raising=False)
+    monkeypatch.setattr(
+        ListDownloader, "_read_url_files", fake_read_url_files, raising=False
+    )
 
     dl = ListDownloader(
         download_path=str(tmp_path),
@@ -849,7 +849,9 @@ def test_setup_merges_url_files_and_logs_debug(monkeypatch, tmp_path, caplog):
     assert any("ListDownloader added" in rec.getMessage() for rec in caplog.records)
 
 
-def test_setup_invalid_interval_configuration_disables_refresh(monkeypatch, tmp_path, caplog):
+def test_setup_invalid_interval_configuration_disables_refresh(
+    monkeypatch, tmp_path, caplog
+):
     """Brief: setup logs a warning and skips refresh thread for bad interval_seconds.
 
     Inputs:

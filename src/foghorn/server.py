@@ -5,10 +5,10 @@ from typing import Dict, List, Optional, Tuple
 
 from dnslib import EDNS0, QTYPE, RCODE, RR, DNSRecord
 
-from .cache import TTLCache
 from .plugins.base import BasePlugin, PluginContext, PluginDecision
 from .transports.dot import DoTError, get_dot_pool
 from .transports.tcp import TCPError, get_tcp_pool, tcp_query
+from .udp_server import DNSUDPHandler
 
 logger = logging.getLogger("foghorn.server")
 
@@ -200,7 +200,8 @@ def send_query_with_failover(
                 )
                 verify = bool(tls_cfg.get("verify", True))
                 ca_file = tls_cfg.get("ca_file")
-                from .transports.doh import doh_query  # local import to avoid overhead
+                from .transports.doh import \
+                    doh_query  # local import to avoid overhead
 
                 body, resp_headers = doh_query(
                     doh_url,
@@ -679,12 +680,6 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                 stats.record_latency(t1 - t0)
             except Exception:  # pragma: no cover
                 pass
-
-
-from .udp_server import (
-    DNSUDPHandler,
-    DNSServer,
-)  # re-export for backwards compatibility
 
 
 class DNSServer:

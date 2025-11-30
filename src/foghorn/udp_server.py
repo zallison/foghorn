@@ -6,7 +6,7 @@ from dnslib import QTYPE, RCODE, DNSRecord
 
 from .cache import TTLCache
 from .plugins.base import BasePlugin, PluginContext, PluginDecision
-from .server import compute_effective_ttl, _set_response_id
+from .server import _set_response_id, compute_effective_ttl
 
 logger = logging.getLogger("foghorn.server")
 
@@ -769,7 +769,8 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         == "local"
                     ):
                         try:
-                            from .dnssec_validate import validate_response_local
+                            from .dnssec_validate import \
+                                validate_response_local
 
                             valid = bool(
                                 validate_response_local(

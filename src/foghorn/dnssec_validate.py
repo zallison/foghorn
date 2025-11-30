@@ -5,7 +5,6 @@ from typing import Optional
 import dns.dnssec
 import dns.flags
 import dns.message
-
 # dnspython imports
 import dns.name
 import dns.rdatatype
