@@ -1,11 +1,10 @@
 import importlib
+import os
 import pathlib
 import threading
-import os
 
 import pytest
-
-from dnslib import DNSRecord, QTYPE
+from dnslib import QTYPE, DNSRecord
 
 from foghorn.plugins.base import PluginContext
 

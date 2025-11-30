@@ -390,7 +390,7 @@ def test_add_to_cache_error_logs(tmp_path, monkeypatch, caplog):
     Brief: add_to_cache logs a warning when cache set raises.
 
     Inputs:
-      - monkeypatch: patch TTLCache.set to raise
+      - monkeypatch: patch FoghornTTLCache.set to raise
 
     Outputs:
       - None: Asserts warning logged

@@ -11,7 +11,8 @@ Outputs:
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 import foghorn.server as srv
-from foghorn.cache import TTLCache
+from foghorn.cache import FoghornTTLCache
+
 
 def test_compute_effective_ttl_variants():
     """
@@ -193,7 +194,7 @@ def test__cache_and_send_response_parse_error_still_sends():
             self.sent.append((data, addr))
 
     sock = _Sock()
-    h.cache = TTLCache()
+    h.cache = FoghornTTLCache()
     req = DNSRecord.question("bad.example", "A")
     h._cache_and_send_response(
         b"\x00\x01garbage",
@@ -256,7 +257,7 @@ def test_dnssec_validate_mode_upstream_ad_and_local_paths(monkeypatch):
     """
     # Ensure clean slate
     srv.DNSUDPHandler.plugins = []
-    srv.DNSUDPHandler.cache = TTLCache()
+    srv.DNSUDPHandler.cache = FoghornTTLCache()
 
     name = "dnssec.example"
     q = DNSRecord.question(name, "A")
@@ -339,7 +340,7 @@ def test_resolve_query_bytes_post_hooks(monkeypatch):
         return r_ok.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
 
     monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
-    srv.DNSUDPHandler.cache = TTLCache()
+    srv.DNSUDPHandler.cache = FoghornTTLCache()
     srv.DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
 
     class _PostDeny:

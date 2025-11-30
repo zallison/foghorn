@@ -11,8 +11,8 @@ Outputs:
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 import foghorn.server as srv
+from foghorn.cache import FoghornTTLCache
 from foghorn.udp_server import _set_response_id
-from foghorn.cache import TTLCache
 
 
 def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
@@ -40,8 +40,8 @@ def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
     # Reset shared state to avoid leakage between tests
     srv.DNSUDPHandler.plugins = []
     srv.DNSUDPHandler.upstream_addrs = []
-    # Reset cache by swapping the instance (TTLCache has no clear())
-    srv.DNSUDPHandler.cache = TTLCache()
+    # Reset cache by swapping the instance (FoghornTTLCache has no clear())
+    srv.DNSUDPHandler.cache = FoghornTTLCache()
     return h, sock
 
 
@@ -218,7 +218,7 @@ def test_resolve_query_bytes_end_to_end_paths(monkeypatch):
     q = DNSRecord.question("no-up.example", "A")
     srv.DNSUDPHandler.upstream_addrs = []
     srv.DNSUDPHandler.plugins = []
-    srv.DNSUDPHandler.cache = TTLCache()
+    srv.DNSUDPHandler.cache = FoghornTTLCache()
     wire = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
     assert DNSRecord.parse(wire).header.rcode == RCODE.SERVFAIL
 

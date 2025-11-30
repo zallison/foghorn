@@ -8,9 +8,10 @@ Outputs:
   - None
 """
 
+from contextlib import closing
+
 import pytest
 from dnslib import AAAA, QTYPE, RR, A, DNSRecord
-from contextlib import closing
 
 from foghorn.plugins.base import PluginContext, PluginDecision
 from foghorn.plugins.filter import FilterPlugin

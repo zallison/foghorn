@@ -16,8 +16,12 @@ except Exception:  # pragma: no cover - defensive fallback when watchdog is unav
     FileSystemEventHandler = object  # type: ignore[assignment]
     Observer = None  # type: ignore[assignment]
 
-from foghorn.plugins.base import (BasePlugin, PluginContext, PluginDecision,
-                                  plugin_aliases)
+from foghorn.plugins.base import (
+    BasePlugin,
+    PluginContext,
+    PluginDecision,
+    plugin_aliases,
+)
 
 logger = logging.getLogger(__name__)
 

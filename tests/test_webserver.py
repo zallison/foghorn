@@ -18,17 +18,17 @@ import json
 import logging
 import threading
 
-from fastapi.testclient import TestClient
 import yaml
+from fastapi.testclient import TestClient
 
 from foghorn.stats import StatsCollector
 from foghorn.webserver import (
     RingBuffer,
     WebServerHandle,
     _read_proc_meminfo,
+    _redact_yaml_text_preserving_layout,
     _Suppress2xxAccessFilter,
     _utc_now_iso,
-    _redact_yaml_text_preserving_layout,
     create_app,
     get_system_info,
     install_uvicorn_2xx_suppression,

@@ -9,8 +9,8 @@ Outputs:
 """
 
 import importlib
-import threading
 import os
+import threading
 
 from dnslib import QTYPE, DNSRecord
 
