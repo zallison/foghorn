@@ -1170,7 +1170,7 @@ def create_app(
         # Schedule a SIGHUP for the main process after a short delay so that
         # supervisors can observe a clean shutdown and restart with the new
         # configuration applied.
-        _schedule_sighup_after_config_save()
+        _schedule_sighup_after_config_save(delay_seconds=0.1)
 
         return {
             "status": "ok",
