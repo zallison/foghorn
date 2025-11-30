@@ -23,14 +23,13 @@ import socket
 import threading
 import time
 import urllib.parse
-
-from cachetools import cached, TTLCache
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
+from cachetools import TTLCache, cached
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
@@ -411,6 +410,7 @@ def _redact_yaml_text_preserving_layout(
         redacted += "\n"
     return redacted
 
+
 def _json_safe(value: Any) -> Any:
     """Brief: Return a JSON-serializable representation of value.
 
@@ -438,6 +438,7 @@ def _json_safe(value: Any) -> Any:
 
     # Fallback: string representation for anything else (e.g., datetime, Path).
     return str(value)
+
 
 @cached(cache=TTLCache(maxsize=1024, ttl=2))
 def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
@@ -1034,7 +1035,9 @@ def create_app(
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 raw_text = f.read()
-        except Exception as exc:  # pragma: no cover - I/O errors are environment-specific
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - I/O errors are environment-specific
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"failed to read config from {cfg_path}: {exc}",

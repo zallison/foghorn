@@ -3,23 +3,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from functools import wraps
-from typing import ClassVar, Dict, List, Optional, Sequence, Tuple, Union, final
+from typing import (ClassVar, Dict, List, Optional, Sequence, Tuple, Union,
+                    final)
 
 from cachetools import TTLCache
 from dnslib import (  # noqa: F401 - imports are for implementations of this class
-    AAAA,
-    CNAME,
-    MX,
-    NAPTR,
-    PTR,
-    QTYPE,
-    RR,
-    SRV,
-    TXT,
-    A,
-    DNSHeader,
-    DNSRecord,
-)
+    AAAA, CNAME, MX, NAPTR, PTR, QTYPE, RR, SRV, TXT, A, DNSHeader, DNSRecord)
 
 logger = logging.getLogger(__name__)
 

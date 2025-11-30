@@ -9,8 +9,6 @@ import signal
 import threading
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from .cache import TTLCache
-
 import yaml
 
 from .config_schema import validate_config
@@ -917,6 +915,7 @@ def main(argv: List[str] | None = None) -> int:
         # shutdown_event/termination signals rather than a blocking
         # serve_forever() call.
         import time as _time
+
         while not shutdown_event.is_set():
             # If the UDP server thread has reported an unhandled exception,
             # mirror the legacy behaviour by logging it and treating it as a
