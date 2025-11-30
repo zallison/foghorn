@@ -1,6 +1,6 @@
 # Foghorn
 
-![Foghorn Logo](html/transparent-logo.png)
+<img src="html/logo.png" alt="FogHorn Logo" width="300" />
 
 Foghorn is a lightweight, caching DNS server built with Python (3.10+). It's designed to be fast and extensible, featuring a pluggable policy system that allows you to customize its behavior to fit your needs.
 
