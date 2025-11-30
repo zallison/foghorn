@@ -5,6 +5,10 @@
 	<meta charset="utf-8" />
 	<title>Foghorn</title>
 	<link rel="stylesheet" href="/styles.css" />
+	<!-- Ajv JSON Schema validator for client-side config checks -->
+	<script src="https://cdn.jsdelivr.net/npm/ajv@8.12.0/dist/ajv7.min.js"></script>
+	<!-- js-yaml for parsing YAML config in the browser -->
+	<script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
 	<script>
 		(function () {
 			'use strict';
@@ -99,9 +103,9 @@
 				</div>
 			</div>
 			<div class="fh-warning" id="config-warning" style="display:hidden;">
-				<strong>Warning:</strong> Saving will overwrite <code>config.yaml</code>. Changes take effect
-				after the server is restarted; sending SIGUSR1/SIGUSR2 only notifies plugins and may reset
-				statistics when configured.
+				<strong>Warning:</strong> Saving will overwrite <code>config.yaml</code>, then after a brief
+				delay send SIGHUP to the main process. Changes take effect after the server restarts;
+				SIGUSR1/SIGUSR2 only notify plugins and may reset statistics when configured.
 			</div>
 
 			<div id="config-messages" class="fh-messages" aria-live="polite"></div>
@@ -162,6 +166,13 @@
 			var lastDiskRawYaml = null;
 			var isEditing = false;
 
+			// Client-side JSON Schema validation (Ajv from CDN). We prefer window.ajv7.Ajv
+			// when available, falling back to window.Ajv when present. When Ajv is
+			// missing, validation becomes a no-op and server-side validation still
+			// enforces correctness on save/startup.
+			var AjvCtor = (window.ajv7 && window.ajv7.Ajv) || window.Ajv || null;
+			var configSchemaValidator = null;
+
 			var STATS_TOOLTIPS = {
 				total_queries: 'Total DNS queries handled since the collector started or was last reset.',
 				cache_hits: 'Queries answered directly from the cache.',
@@ -212,6 +223,48 @@
 						throw new Error('HTTP ' + resp.status + ' from ' + path);
 					}
 					return resp.json();
+				});
+			}
+
+			function ensureConfigValidator() {
+				if (!AjvCtor) {
+					// Ajv not available; skip client-side schema validation.
+					return Promise.resolve(null);
+				}
+				if (configSchemaValidator) {
+					return Promise.resolve(configSchemaValidator);
+				}
+				return fetch('/config-yaml.schema', { cache: 'no-store' })
+					.then(function (resp) {
+						if (!resp.ok) {
+							throw new Error('HTTP ' + resp.status + ' from /config-yaml.schema');
+						}
+						return resp.json();
+					})
+					.then(function (schema) {
+						var ajv = new AjvCtor({ allErrors: true, strict: false, allowUnionTypes: true });
+						configSchemaValidator = ajv.compile(schema);
+						return configSchemaValidator;
+					});
+			}
+
+			function validateConfigObjectForEdit(cfg) {
+				return ensureConfigValidator().then(function (validator) {
+					if (!validator) {
+						return;
+					}
+					var ok = validator(cfg);
+					if (ok) {
+						return;
+					}
+					var errors = validator.errors || [];
+					var lines = errors.map(function (e) {
+						var instPath = e.instancePath || '<root>';
+						var msg = e.message || 'validation error';
+						var schemaLoc = e.schemaPath || '';
+						return instPath + ': ' + msg + (schemaLoc ? ' (schema: ' + schemaLoc + ')' : '');
+					});
+					throw new Error('Invalid configuration:\n' + lines.join('\n'));
 				});
 			}
 
@@ -408,6 +461,14 @@
 				var heading = document.createElement('h3');
 				heading.className = 'fh-stats-group-title';
 				heading.textContent = title;
+				// Provide a helpful tooltip for any "*Subdomain*" style list so it
+				// is clear that the entries are full subdomain qnames.
+				if (
+					typeof title === 'string' &&
+					(title.indexOf('Subdomain') !== -1 || title.indexOf('Sub Domains') !== -1)
+				) {
+					heading.title = 'Entries are subdomain names (full qnames, for example "www.example.com").';
+				}
 				group.appendChild(heading);
 
 				var dl = document.createElement('dl');
@@ -885,7 +946,7 @@
 					}
 					// All qtype-based "Top <qt> Domains" lists go to the right-hand pane when available.
 					var target = statsGroupsRightEl || statsGroupsEl;
-					appendTopListGroup('Top ' + qt + ' Domains', entries, target);
+					appendTopListGroup('Top ' + qt + ' Requests', entries, target);
 				});
 			}
 
@@ -977,8 +1038,8 @@
 				appendDictGroup('Latency', data.latency || {});
 
 				appendTopListGroup('Top Client', data.top_clients || []);
-				appendTopListGroup('Top Domains', data.top_domains || []);
-				appendTopListGroup('Top Sub Domains', data.top_subdomains || []);
+				appendTopListGroup('Top Domains', data.top_domains || [], statsGroupsRightEl || statsGroupsEl);
+				appendTopListGroup('Top Sub Domains', data.top_subdomains || [], statsGroupsRightEl || statsGroupsEl);
 				// Cache hit/miss lists live in the right-hand pane when available.
 				appendTopListGroup('Top Cache Hit Domains', data.cache_hit_domains || [], statsGroupsRightEl || statsGroupsEl);
 				appendTopListGroup('Top Cache Miss Domains', data.cache_miss_domains || [], statsGroupsRightEl || statsGroupsEl);
@@ -1010,21 +1071,36 @@
 					});
 			}
 
-			function loadDiskConfig() {
-				fetchJson('/config/raw')
-					.then(function (data) {
-						var cfg = data && data.config ? data.config : {};
-						lastDiskConfigObj = cfg;
-						var rawYaml = data && typeof data.raw_yaml === 'string' ? data.raw_yaml : null;
-						if (rawYaml != null) {
-							lastDiskRawYaml = rawYaml;
+			function loadDiskConfig(raw) {
+				if (raw === undefined) {
+					raw = 0;
+				}
+				var url = '/config';
+				if (raw !== 0 || isEditing) {
+					url += '/raw';
+				}
+				return fetch(url, { cache: 'no-store' })
+					.then(function (resp) {
+						if (!resp.ok) {
+							throw new Error('HTTP ' + resp.status + ' from ' + url);
 						}
-						if (!isEditing) {
-							configOutputEl.textContent = rawYaml != null ? rawYaml : pretty(cfg);
+						return resp.text();
+					})
+					.then(function (text) {
+						if (raw !== 0 || isEditing) {
+							// Raw on-disk YAML for edit mode.
+							lastDiskRawYaml = text;
+							return { raw_yaml: text };
 						}
+						// View mode: text is already redacted YAML from /config.
+						configOutputEl.textContent = text;
+						return { raw_yaml: text };
 					})
 					.catch(function (err) {
-						configOutputEl.textContent = 'Failed to load on-disk config: ' + err.message;
+						if (!isEditing) {
+							configOutputEl.textContent = 'Failed to load on-disk config: ' + err.message;
+						}
+						throw err;
 					});
 			}
 
@@ -1049,9 +1125,34 @@
 				}
 				configViewContainer.hidden = true;
 				configEditContainer.hidden = false;
-				var text = lastDiskRawYaml != null ? lastDiskRawYaml : configOutputEl.textContent;
-				configEditorEl.value = text;
-				setMessage('Editing on-disk config, save will overwrite!');
+				setMessage('Validating configuration before editing...', 'info');
+
+				loadDiskConfig(1)
+					.then(function (data) {
+						var rawYaml = data && data.raw_yaml ? data.raw_yaml : (lastDiskRawYaml || '');
+						var cfgObj = {};
+						try {
+							if (window.jsyaml && typeof window.jsyaml.load === 'function') {
+								cfgObj = window.jsyaml.load(rawYaml) || {};
+							} else {
+								cfgObj = {};
+							}
+						} catch (e) {
+							throw new Error('Failed to parse YAML: ' + e.message);
+						}
+						lastDiskConfigObj = cfgObj;
+						return validateConfigObjectForEdit(cfgObj).then(function () {
+							return rawYaml;
+						});
+					})
+					.then(function (rawYaml) {
+						configEditorEl.value = rawYaml || '';
+						setMessage('Editing on-disk config, save will overwrite!', 'info');
+					})
+					.catch(function (err) {
+						setMessage('Cannot enter edit mode: ' + err.message, 'error');
+						exitEditMode(false);
+					});
 			}
 
 			function exitEditMode(refresh) {
@@ -1076,7 +1177,7 @@
 					return;
 				}
 
-				if (!window.confirm('Are you sure you want to overwrite config.yaml and trigger a reload?')) {
+				if (!window.confirm('Are you sure you want to overwrite config.yaml and request a restart via SIGHUP?')) {
 					return;
 				}
 
@@ -1096,7 +1197,7 @@
 						});
 					})
 					.then(function (data) {
-						setMessage('Configuration saved and reload signalled. Path: ' + (data.path || ''), 'success');
+						setMessage('Configuration saved; restart requested via SIGHUP. Path: ' + (data.path || ''), 'success');
 						exitEditMode(true);
 						loadDiskConfig();
 						loadMemoryConfig();

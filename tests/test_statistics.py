@@ -214,7 +214,7 @@ class TestStatsCollector:
         assert snapshot.rcodes["NXDOMAIN"] == 1
 
     def test_cache_and_rcode_subdomain_metrics(self):
-        """Cache and rcode *_sub metrics count only subdomain queries per base domain."""
+        """Cache and rcode *_sub metrics count only subdomain queries per subdomain name."""
         collector = StatsCollector(include_top_domains=True, top_n=5)
 
         # Cache hits/misses: one base-only and one subdomain-only per base.
@@ -239,8 +239,8 @@ class TestStatsCollector:
 
         assert snapshot.cache_hit_subdomains is not None
         hit_sub = dict(snapshot.cache_hit_subdomains)
-        # Only the subdomain query contributes here.
-        assert hit_sub["example.com"] == 1
+        # Only the subdomain query contributes here, keyed by full qname.
+        assert hit_sub["www.example.com"] == 1
 
         # Cache miss domains vs cache_miss_subdomains
         assert snapshot.cache_miss_domains is not None
@@ -249,7 +249,7 @@ class TestStatsCollector:
 
         assert snapshot.cache_miss_subdomains is not None
         miss_sub = dict(snapshot.cache_miss_subdomains)
-        assert miss_sub["other.com"] == 1
+        assert miss_sub["api.other.com"] == 1
 
         # Rcode domains vs rcode_subdomains
         assert snapshot.rcode_domains is not None
@@ -259,15 +259,15 @@ class TestStatsCollector:
         noerror_sub = dict(snapshot.rcode_subdomains.get("NOERROR", []))
         # Two NOERROR responses for example.com (base + subdomain).
         assert noerror_domains["example.com"] == 2
-        # Only the subdomain query shows up in the *_sub view.
-        assert noerror_sub["example.com"] == 1
+        # Only the subdomain query shows up in the *_sub view, keyed by full qname.
+        assert noerror_sub["www.example.com"] == 1
 
         nx_domains = dict(snapshot.rcode_domains.get("NXDOMAIN", []))
         nx_sub = dict(snapshot.rcode_subdomains.get("NXDOMAIN", []))
         # Both base and subdomain NXDOMAIN queries count at the base domain.
         assert nx_domains["example.com"] == 2
         # Only the subdomain query contributes to the *_sub view.
-        assert nx_sub["example.com"] == 1
+        assert nx_sub["nx.example.com"] == 1
 
     def test_latency_tracking(self):
         """Latency tracking when enabled."""
@@ -363,6 +363,54 @@ class TestStatsCollector:
         snapshot = collector.snapshot()
         # Both should be normalized to "example.com"
         assert snapshot.uniques["domains"] == 1
+
+
+from foghorn.stats import _is_subdomain
+
+
+class TestSubdomainMetrics:
+    def test_subdomain_lists_only_contain_true_subdomains(self) -> None:
+        """Subdomain-oriented metrics must only contain true subdomain names.
+
+        Inputs:
+          - StatsCollector configured with include_top_domains=True.
+
+        Outputs:
+          - Asserts that top_subdomains, cache_*_subdomains, and rcode_subdomains
+            only contain names where _is_subdomain(name) is True.
+        """
+
+        collector = StatsCollector(include_top_domains=True, top_n=10)
+
+        # Mix of base and subdomain queries for cache and rcodes.
+        collector.record_query("192.0.2.1", "www.example.com", "A")
+        collector.record_query("192.0.2.2", "api.other.com", "A")
+
+        collector.record_cache_hit("www.example.com")
+        collector.record_cache_miss("api.other.com")
+
+        collector.record_response_rcode("NOERROR", qname="www.example.com")
+        collector.record_response_rcode("NXDOMAIN", qname="nx.example.com")
+
+        snapshot = collector.snapshot(reset=False)
+
+        # Top subdomains (full qnames) should all be true subdomains.
+        assert snapshot.top_subdomains is not None
+        for name, _count in snapshot.top_subdomains:
+            assert _is_subdomain(name)
+
+        # Cache hit/miss subdomain lists should also be pure subdomains.
+        for sub_list in (snapshot.cache_hit_subdomains, snapshot.cache_miss_subdomains):
+            if not sub_list:
+                continue
+            for name, _count in sub_list:
+                assert _is_subdomain(name)
+
+        # Rcode subdomain lists are keyed by full subdomain qnames per rcode.
+        if snapshot.rcode_subdomains:
+            for entries in snapshot.rcode_subdomains.values():
+                for name, _count in entries:
+                    assert _is_subdomain(name)
 
 
 class TestConcurrency:

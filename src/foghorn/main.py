@@ -9,14 +9,17 @@ import signal
 import threading
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from .cache import TTLCache
+
 import yaml
 
+from .config_schema import validate_config
 from .doh_api import start_doh_server
 from .logging_config import init_logging
 from .plugins.base import BasePlugin
 from .plugins.registry import discover_plugins, get_plugin_class
 from .server import DNSServer
-from .stats import StatsCollector, StatsReporter, StatsSQLiteStore, format_snapshot_json
+from .stats import StatsCollector, StatsReporter, StatsSQLiteStore
 from .webserver import RingBuffer, start_webserver
 
 
@@ -86,7 +89,7 @@ def normalize_upstream_config(
         # DoH entries using URL
         if str(u.get("transport", "")).lower() == "doh":
             logger = logging.getLogger("foghorn.main.setup")
-            logger.warning(f"doh: {u}")
+            logger.debug(f"doh: {u}")
             rec: Dict[str, Union[str, int, dict]] = {
                 "transport": "doh",
                 "url": str(u["url"]),
@@ -293,6 +296,13 @@ def main(argv: List[str] | None = None) -> int:
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f) or {}
 
+    # Validate configuration against JSON Schema before proceeding.
+    try:
+        validate_config(cfg, config_path=args.config)
+    except ValueError as exc:
+        print(str(exc))
+        return 1
+
     # Initialize logging before any other operations
     init_logging(cfg.get("logging"))
     logger = logging.getLogger("foghorn.main")
@@ -306,10 +316,12 @@ def main(argv: List[str] | None = None) -> int:
     stats_collector: Optional[StatsCollector]
     stats_reporter: Optional[StatsReporter]
     stats_persistence_store: Optional[StatsSQLiteStore]
+
     # web_handle is the admin HTTP/web UI handle returned by start_webserver().
     # It is allowed to be None when the webserver is disabled but is treated as
     # fatal when webserver.enabled is true.
     web_handle = None
+
     # Shared in-memory log buffer passed into the FastAPI admin app; this is
     # also used when starting the threaded admin HTTP fallback.
     web_log_buffer: Optional[RingBuffer] = None
@@ -317,24 +329,28 @@ def main(argv: List[str] | None = None) -> int:
     # Normalize listen configuration with backward compatibility.
     # If listen.udp is present, prefer it; otherwise fall back to legacy listen.host/port.
     listen_cfg = cfg.get("listen", {}) or {}
-    legacy_host = str(listen_cfg.get("host", "127.0.0.1"))
-    # Default legacy port is 5333 to match the recommended example config.
-    legacy_port = int(listen_cfg.get("port", 5333))
+    default_host = str(listen_cfg.get("host", "127.0.0.1"))
+    default_port = int(listen_cfg.get("port", 5333))
 
     def _sub(key, defaults):
         d = listen_cfg.get(key, {}) or {}
         out = {**defaults, **d} if isinstance(d, dict) else defaults
         return out
 
-    udp_cfg = _sub("udp", {"enabled": True, "host": legacy_host, "port": legacy_port})
-    # Default TCP port now matches the UDP listener (5333) when not explicitly set.
-    tcp_cfg = _sub("tcp", {"enabled": False, "host": legacy_host, "port": legacy_port})
-    dot_cfg = _sub("dot", {"enabled": False, "host": legacy_host, "port": 853})
-    # Default DoH listener port is 1443 (non-privileged HTTPS-like port) when not explicitly set.
-    doh_cfg = _sub("doh", {"enabled": False, "host": legacy_host, "port": 1443})
+    # Get listeners configs
+    udp_cfg = _sub(
+        "udp", {"enabled": True, "host": default_host, "port": default_port or 5333}
+    )
+    tcp_cfg = _sub(
+        "tcp", {"enabled": False, "host": default_host, "port": default_port or 5333}
+    )
+    dot_cfg = _sub("dot", {"enabled": False, "host": default_host, "port": 853})
+    doh_cfg = _sub("doh", {"enabled": False, "host": default_host, "port": 1443})
 
     # Normalize upstream configuration
     upstreams, timeout_ms = normalize_upstream_config(cfg)
+
+    # Hold responses this long, even if the actual ttl is lower.
     min_cache_ttl = _get_min_cache_ttl(cfg)
 
     plugins = load_plugins(cfg.get("plugins", []))
@@ -486,6 +502,15 @@ def main(argv: List[str] | None = None) -> int:
         buffer_size = int((web_cfg.get("logs") or {}).get("buffer_size", 500))
         web_log_buffer = RingBuffer(capacity=buffer_size)
 
+    # --- Coordinated shutdown state ---
+    # shutdown_event is set when a termination-like signal (KeyboardInterrupt,
+    # SIGHUP, SIGTERM) requests the process to exit. exit_code communicates the
+    # desired process exit status back to the main() return value.
+    shutdown_event = threading.Event()
+    shutdown_complete = threading.Event()
+    exit_code = 0
+    hard_kill_timer: threading.Timer | None = None
+
     # --- Signal handling (SIGUSR1/SIGUSR2) ---
     # Use Events to coalesce multiple signals so that expensive work (statistics
     # reset and plugin notifications) is never running concurrently for the same
@@ -591,10 +616,80 @@ def main(argv: List[str] | None = None) -> int:
         finally:
             _sigusr2_pending.clear()
 
+    # --- Termination-oriented signals (SIGHUP/SIGTERM) ---
+    def _request_shutdown(reason: str, code: int) -> None:
+        """Brief: Request coordinated shutdown and set desired exit code.
+
+        Inputs:
+          - reason: Human-readable signal/reason name (e.g., 'SIGHUP', 'SIGTERM').
+          - code: Desired process exit code to return from main().
+
+        Outputs:
+          - None. Sets shutdown_event/exit_code and triggers server shutdown
+            when running with a UDP listener.
+
+        Notes:
+          - For SIGTERM and SIGINT, a best-effort hard-kill timer is started.
+            If the process has not completed its shutdown sequence within
+            ~10 seconds, a last-resort SIGKILL (or os._exit fallback) is
+            issued to avoid hanging indefinitely.
+        """
+
+        nonlocal exit_code, server, hard_kill_timer
+        log = logging.getLogger("foghorn.main")
+
+        if shutdown_event.is_set():
+            return
+
+        exit_code = code
+        shutdown_event.set()
+        log.info("Received %s, initiating shutdown (exit code=%d)", reason, code)
+
+        # For termination-style signals, arm a hard-kill timer so that a stuck
+        # shutdown cannot leave the process running indefinitely. The timer is
+        # cancelled implicitly when shutdown_complete is set before it fires.
+        if reason in {"SIGTERM", "SIGINT"} and hard_kill_timer is None:
+
+            def _force_exit() -> None:
+                # If shutdown has completed in the meantime, do nothing.
+                if shutdown_complete.is_set():
+                    return
+                try:
+                    log.error(
+                        "Hard-kill timeout exceeded after %s; sending SIGKILL to self",
+                        reason,
+                    )
+                    os.kill(os.getpid(), signal.SIGKILL)
+                except Exception:
+                    # As a last resort, force immediate exit with the best
+                    # available exit code.
+                    os._exit(code or 2)
+
+            hard_kill_timer = threading.Timer(10.0, _force_exit)
+            hard_kill_timer.daemon = True
+            hard_kill_timer.start()
+
+        # When a UDP server is active, ask socketserver to stop its loop so the
+        # main thread can proceed to the coordinated shutdown logic.
+        try:
+            if server is not None and getattr(server, "server", None) is not None:
+                server.server.shutdown()
+        except Exception:  # pragma: no cover - defensive
+            log.exception("Error while requesting UDP server shutdown for %s", reason)
+
+    def _sighup_handler(_signum, _frame):
+        _request_shutdown("SIGHUP", 0)
+
+    def _sigterm_handler(_signum, _frame):
+        _request_shutdown("SIGTERM", 2)
+
+    def _sigint_handler(_signum, _frame):
+        _request_shutdown("SIGINT", 2)
+
     # Register handlers (Unix only)
     try:
         signal.signal(signal.SIGUSR1, _sigusr1_handler)
-        logger.info(
+        logger.debug(
             "Installed SIGUSR1 handler to notify plugins and optionally reset statistics"
         )
     except Exception:
@@ -602,11 +697,29 @@ def main(argv: List[str] | None = None) -> int:
 
     try:
         signal.signal(signal.SIGUSR2, _sigusr2_handler)
-        logger.info(
+        logger.debug(
             "Installed SIGUSR2 handler to notify plugins and optionally reset statistics"
         )
     except Exception:
         logger.warning("Could not install SIGUSR2 handler on this platform")
+
+    try:
+        signal.signal(signal.SIGHUP, _sighup_handler)
+        logger.debug("Installed SIGHUP handler for clean shutdown (exit code 0)")
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("Could not install SIGHUP handler on this platform")
+
+    try:
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+        logger.debug("Installed SIGTERM handler for immediate shutdown (exit code 2)")
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("Could not install SIGTERM handler on this platform")
+
+    try:
+        signal.signal(signal.SIGINT, _sigint_handler)
+        logger.debug("Installed SIGINT handler for immediate shutdown (exit code 2)")
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("Could not install SIGINT handler on this platform")
 
     # DNSSEC config (ignore|passthrough|validate)
     dnssec_cfg = cfg.get("dnssec", {}) or {}
@@ -614,9 +727,11 @@ def main(argv: List[str] | None = None) -> int:
     edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
 
     server = None
+    udp_thread: threading.Thread | None = None
+    udp_error: Exception | None = None
     if bool(udp_cfg.get("enabled", True)):
-        uhost = str(udp_cfg.get("host", legacy_host))
-        uport = int(udp_cfg.get("port", legacy_port))
+        uhost = str(udp_cfg.get("host", default_host))
+        uport = int(udp_cfg.get("port", default_port))
         server = DNSServer(
             uhost,
             uport,
@@ -643,19 +758,41 @@ def main(argv: List[str] | None = None) -> int:
     upstream_info = ", ".join(
         [f"{u['url']}" if "url" in u else f"{u['host']}:{u['port']}" for u in upstreams]
     )
+    logger.info(
+        "Upstreams: [%s], timeout: %dms",
+        upstream_info,
+        timeout_ms,
+    )
+
     if server is not None:
+        # Run UDP server in a background thread so the main thread can manage
+        # coordinated shutdown alongside TCP/DoT/DoH listeners. Capture
+        # unexpected exceptions so main() can reflect them in its exit code.
+        def _run_udp() -> None:
+            nonlocal udp_error
+            try:
+                server.serve_forever()
+            except Exception as e:  # pragma: no cover - propagated via udp_error
+                udp_error = e
+
         logger.info(
-            "Starting Foghorn on %s:%d, upstreams: [%s], timeout: %dms\n",
+            "Starting UDP listener on %s:%d",
             uhost,
             uport,
-            upstream_info,
-            timeout_ms,
         )
+
+        udp_thread = threading.Thread(
+            target=_run_udp,
+            name="foghorn-udp",
+            daemon=True,
+        )
+        udp_thread.start()
     else:
+        # When no UDP listener is configured, the main thread still enters the
+        # keepalive loop below so that TCP/DoT/DoH listeners (or tests that
+        # disable UDP entirely) can drive shutdown via signals or KeyboardInterrupt.
         logger.info(
-            "Starting Foghorn without UDP listener; upstreams: [%s], timeout: %dms\n",
-            upstream_info,
-            timeout_ms,
+            "Starting Foghorn without UDP listener; main thread will use keepalive loop",
         )
 
     # Optionally start TCP/DoT listeners based on listen config
@@ -697,7 +834,7 @@ def main(argv: List[str] | None = None) -> int:
     if bool(tcp_cfg.get("enabled", False)):
         from .tcp_server import serve_tcp, serve_tcp_threaded
 
-        thost = str(tcp_cfg.get("host", legacy_host))
+        thost = str(tcp_cfg.get("host", default_host))
         tport = int(tcp_cfg.get("port", 53))
         logger.info("Starting TCP listener on %s:%d", thost, tport)
         _start_asyncio_server(
@@ -711,7 +848,7 @@ def main(argv: List[str] | None = None) -> int:
     if bool(dot_cfg.get("enabled", False)):
         from .dot_server import serve_dot
 
-        dhost = str(dot_cfg.get("host", legacy_host))
+        dhost = str(dot_cfg.get("host", default_host))
         dport = int(dot_cfg.get("port", 853))
         cert_file = dot_cfg.get("cert_file")
         key_file = dot_cfg.get("key_file")
@@ -733,7 +870,7 @@ def main(argv: List[str] | None = None) -> int:
             )
 
     if bool(doh_cfg.get("enabled", False)):
-        h = str(doh_cfg.get("host", legacy_host))
+        h = str(doh_cfg.get("host", default_host))
         p = int(doh_cfg.get("port", 8153))
         cert_file = doh_cfg.get("cert_file")
         key_file = doh_cfg.get("key_file")
@@ -771,28 +908,79 @@ def main(argv: List[str] | None = None) -> int:
         logger.error("Fatal: webserver.enabled=true but start_webserver returned None")
         return 1
 
-    try:
-        if server is not None:
-            server.serve_forever()
-        else:
-            #  keep main thread alive while async listeners run
-            import time as _time
+    logger.info("Startup Completed")
 
-            while True:
-                _time.sleep(3600)
+    try:
+        # Keep the main thread in a lightweight keepalive loop while UDP/TCP/DoT
+        # listeners run in the background. This ensures all transports are
+        # treated consistently and that shutdown is always driven by
+        # shutdown_event/termination signals rather than a blocking
+        # serve_forever() call.
+        import time as _time
+        while not shutdown_event.is_set():
+            # If the UDP server thread has reported an unhandled exception,
+            # mirror the legacy behaviour by logging it and treating it as a
+            # server-level failure for main()'s exit code.
+            if udp_error is not None:
+                logger.exception(
+                    "Unhandled exception during UDP server operation %s", udp_error
+                )
+                if exit_code == 0:
+                    exit_code = 1
+                break
+
+            # If a UDP server thread was started and it has exited (for example
+            # because a test's DummyServer.serve_forever() raised
+            # KeyboardInterrupt or another exception), break out of the loop so
+            # coordinated shutdown can proceed.
+            if udp_thread is not None and not udp_thread.is_alive():
+                break
+            _time.sleep(1.0)
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down")
+        if not shutdown_event.is_set():
+            # KeyboardInterrupt maps to a clean shutdown and exit code 0 unless
+            # an explicit termination-like signal has already set a code.
+            shutdown_event.set()
+            exit_code = 0
     except Exception as e:  # pragma: no cover
         logger.exception(
             f"Unhandled exception during server operation {e}"
         )  # pragma: no cover
-        return 1  # pragma: no cover
+        # Preserve a non-zero exit when an unhandled exception occurs unless a
+        # stronger exit code (e.g., from SIGTERM) is already in place.
+        if exit_code == 0:
+            exit_code = 1
     finally:
+        # Request UDP server shutdown and close sockets before tearing down
+        # statistics and web components so that no new requests are processed
+        # during shutdown.
+        if server is not None:
+            try:
+                if getattr(server, "server", None) is not None:
+                    try:
+                        server.server.shutdown()
+                    except Exception:
+                        logger.exception("Error while shutting down UDP server")
+                    try:
+                        server.server.server_close()
+                    except Exception:
+                        logger.exception("Error while closing UDP server socket")
+            except Exception:
+                logger.exception("Unexpected error during UDP server teardown")
+
+        if udp_thread is not None:
+            try:
+                udp_thread.join(timeout=5.0)
+            except Exception:
+                logger.exception("Error while waiting for UDP server thread to exit")
+
         # Stop statistics reporter on shutdown so background reporting threads
         # never outlive the main process and do not keep it alive.
         if stats_reporter is not None:
             logger.info("Stopping statistics reporter")
             stats_reporter.stop()
+
         if stats_persistence_store is not None:
             logger.info("Closing statistics persistence store")
             stats_persistence_store.close()
@@ -803,7 +991,11 @@ def main(argv: List[str] | None = None) -> int:
             logger.info("Stopping webserver")
             web_handle.stop()
 
-    return 0
+        # Mark shutdown as complete so any pending hard-kill timers can detect
+        # successful termination and avoid forcing an unnecessary SIGKILL.
+        shutdown_complete.set()
+
+    return exit_code
 
 
 if __name__ == "__main__":

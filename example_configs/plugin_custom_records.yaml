@@ -1,0 +1,33 @@
+# Foghorn example: CustomRecords plugin
+# Demonstrates serving static DNS records from a local file.
+
+listen:
+  udp:
+    enabled: true
+    host: 127.0.0.1
+    port: 5353
+
+upstream:
+  # Upstream is still required for names not covered by CustomRecords.
+  - host: 1.1.1.1
+    port: 53
+
+logging:
+  level: info
+
+timeout_ms: 2000
+
+plugins:
+  - module: custom  # CustomRecords alias
+    config:
+      # Provide one or more records files; lines use:
+      #   <domain>|<qtype>|<ttl>|<value>
+      # example.com|A|300|192.0.2.10
+      file_paths:
+        - ./config/custom-records.txt
+
+      # Optional: enable live reloads when the records file changes.
+      watchdog_enabled: true
+      watchdog_min_interval_seconds: 1.0
+      # polling can help in container / network FS setups where events are flaky
+      watchdog_poll_interval_seconds: 0.0

@@ -16,12 +16,15 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import shutil
 import signal
 import socket
 import threading
 import time
 import urllib.parse
+
+from cachetools import cached, TTLCache
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,7 +33,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from .stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
@@ -182,6 +185,7 @@ class RingBuffer:
                 if overflow > 0:
                     self._items = self._items[overflow:]
 
+    @cached(cache=TTLCache(maxsize=10, ttl=2))
     def snapshot(self, limit: Optional[int] = None) -> List[Any]:
         """Return a copy of buffered items, optionally truncated to newest N.
 
@@ -263,6 +267,150 @@ def sanitize_config(
     return redacted
 
 
+# Precompiled regexes for lightweight YAML redaction that preserves layout/comments.
+_YAML_KEY_LINE_RE = re.compile(r"^(\s*)([^:\s][^:]*)\s*:(.*)$")
+# List item that is itself a mapping entry, e.g. "  - suffix: example.com".
+_YAML_LIST_KEY_LINE_RE = re.compile(r"^(\s*)-\s*([^:\s][^:]*)\s*:(.*)$")
+_YAML_LIST_LINE_RE = re.compile(r"^(\s*)-\s*(.*)$")
+
+
+def _split_yaml_value_and_comment(rest: str) -> tuple[str, str]:
+    """Split the portion of a YAML line after ':' or '-' into value and comment.
+
+    Inputs:
+      - rest: Substring after the ':' or '-' token, including any value and comment.
+
+    Outputs:
+      - Tuple (value, comment_suffix) where comment_suffix includes leading ' #'
+        when a comment is present, otherwise an empty string.
+    """
+
+    if "#" not in rest:
+        return rest.rstrip(), ""
+    before, comment = rest.split("#", 1)
+    return before.rstrip(), " #" + comment
+
+
+def _redact_yaml_text_preserving_layout(
+    raw_yaml: str, redact_keys: List[str] | None
+) -> str:
+    """Redact sensitive keys in raw YAML text while preserving comments/spacing.
+
+    Inputs:
+      - raw_yaml: Original YAML document text as read from disk.
+      - redact_keys: List of key names whose values and all nested subkeys
+        should be redacted.
+
+    Outputs:
+      - New YAML text with the same overall layout and comments, but with
+        matching keys and any keys/subkeys within their block replaced by
+        '***'.
+
+    Notes:
+      - This is a best-effort textual transformation intended for human-facing
+        display (e.g., the admin UI). It is not a full YAML parser and may not
+        handle all edge cases, but it preserves common constructs well.
+      - Some callers may accidentally pass in YAML text that has been
+        "double-escaped" such that literal "\\n" sequences appear in the
+        content instead of real newlines (for example, when YAML is embedded
+        inside JSON or logs). To keep the behavior predictable for these
+        callers, we heuristically treat "\\n" sequences as real newlines
+        before applying layout-preserving redaction.
+    """
+
+    if not raw_yaml or not redact_keys:
+        return raw_yaml
+
+    # Heuristic: collapse literal "\\n" sequences into real newlines so that
+    # YAML constructed via double-escaping (e.g. "line1\\nline2") is treated
+    # like on-disk multi-line YAML. This is a best-effort transformation for
+    # admin display only and does not affect the underlying configuration.
+    text = raw_yaml.replace("\\n", "\n") if "\\n" in raw_yaml else raw_yaml
+
+    targets = {str(k) for k in redact_keys}
+    lines = text.splitlines(keepends=False)
+    out_lines: list[str] = []
+
+    # Track a single active redaction block keyed by its indentation level.
+    in_block = False
+    block_indent: int | None = None
+
+    for line in lines:
+        stripped = line.lstrip(" ")
+        indent_len = len(line) - len(stripped)
+
+        # Empty or whitespace-only lines are passed through unchanged.
+        if not stripped:
+            out_lines.append(line)
+            continue
+
+        # If we are currently inside a redaction block and encounter a line that
+        # is not more indented than the block, treat it as leaving the block
+        # *before* processing the line below.
+        if in_block and block_indent is not None and indent_len <= block_indent:
+            in_block = False
+            block_indent = None
+
+        # Handle standard mapping key lines ("key: value").
+        m_key = _YAML_KEY_LINE_RE.match(line)
+        if m_key:
+            indent, key, rest = m_key.groups()
+            key_clean = key.strip()
+
+            # Starting a new redaction block when the key itself is in targets.
+            if key_clean in targets:
+                in_block = True
+                block_indent = indent_len
+                _value, comment_part = _split_yaml_value_and_comment(rest)
+                new_line = f"{indent}{key_clean}: ***{comment_part}"
+                out_lines.append(new_line)
+                continue
+
+            # Redact any keys nested under an active redaction block.
+            if in_block:
+                _value, comment_part = _split_yaml_value_and_comment(rest)
+                new_line = f"{indent}{key_clean}: ***{comment_part}"
+                out_lines.append(new_line)
+                continue
+
+        # Handle list items; a list item can be either "- value" or
+        # "- key: value" (mapping entry inside a list).
+        m_list_key = _YAML_LIST_KEY_LINE_RE.match(line)
+        if m_list_key:
+            indent, key, rest = m_list_key.groups()
+            key_clean = key.strip()
+
+            # If the key for this list-mapping entry is sensitive, redact it and
+            # treat it as part of any active block.
+            if key_clean in targets or in_block:
+                # Enter a block if this list item itself starts one.
+                if key_clean in targets and not in_block:
+                    in_block = True
+                    block_indent = indent_len
+                _value, comment_part = _split_yaml_value_and_comment(rest)
+                new_line = f"{indent}- {key_clean}: ***{comment_part}"
+                out_lines.append(new_line)
+                continue
+
+        # Redact simple list items nested under any redacted block ("- value").
+        if in_block:
+            m_list = _YAML_LIST_LINE_RE.match(line)
+            if m_list:
+                indent, rest = m_list.groups()
+                _value, comment_part = _split_yaml_value_and_comment(rest)
+                new_line = f"{indent}- ***{comment_part}"
+                out_lines.append(new_line)
+                continue
+
+        # Default: emit the original line unchanged.
+        out_lines.append(line)
+
+    redacted = "\n".join(out_lines)
+    # Preserve a trailing newline if the original had one.
+    if raw_yaml.endswith("\n") and not redacted.endswith("\n"):
+        redacted += "\n"
+    return redacted
+
 def _json_safe(value: Any) -> Any:
     """Brief: Return a JSON-serializable representation of value.
 
@@ -291,7 +439,7 @@ def _json_safe(value: Any) -> Any:
     # Fallback: string representation for anything else (e.g., datetime, Path).
     return str(value)
 
-
+@cached(cache=TTLCache(maxsize=1024, ttl=2))
 def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
     """Brief: Parse a /proc/meminfo-style file into byte counts.
 
@@ -559,6 +707,39 @@ def _build_auth_dependency(web_cfg: Dict[str, Any]):
     return _no_auth
 
 
+def _schedule_sighup_after_config_save(delay_seconds: float = 1.0) -> None:
+    """Brief: Schedule SIGHUP to the main process after a small delay.
+
+    Inputs:
+      - delay_seconds: Number of seconds to wait before sending SIGHUP. A value
+        of 0 or less sends the signal synchronously in the current thread.
+
+    Outputs:
+      - None; best-effort scheduling of a background timer that will send
+        signal.SIGHUP to the current process ID. Failures are logged.
+    """
+
+    pid = os.getpid()
+
+    def _send() -> None:
+        try:
+            os.kill(pid, signal.SIGHUP)
+        except Exception as exc:  # pragma: no cover - platform specific
+            logger.error("Failed to send SIGHUP after config save: %s", exc)
+
+    # For callers that explicitly opt out of delayed delivery (e.g., tests or
+    # short-lived helper processes), allow synchronous delivery to avoid the
+    # signal firing after the surrounding context (such as monkeypatches) has
+    # been torn down.
+    if delay_seconds <= 0:
+        _send()
+        return
+
+    timer = threading.Timer(delay_seconds, _send)
+    timer.daemon = True
+    timer.start()
+
+
 def create_app(
     stats: Optional[StatsCollector],
     config: Dict[str, Any],
@@ -794,11 +975,79 @@ def create_app(
         }
 
     @app.get("/config", dependencies=[Depends(auth_dep)])
-    async def get_config() -> Dict[str, Any]:
-        """Return sanitized configuration for inspection.
+    async def get_config() -> PlainTextResponse:
+        """Return sanitized configuration as YAML for inspection.
 
         Inputs: none
-        Outputs: dict with sanitized configuration and server_time.
+        Outputs: YAML string representing sanitized configuration.
+        """
+
+        cfg = app.state.config or {}
+        web_cfg_inner = (cfg.get("webserver") or {}) if isinstance(cfg, dict) else {}
+        redact_keys = web_cfg_inner.get("redact_keys") or [
+            "token",
+            "password",
+            "secret",
+        ]
+
+        # Prefer to redact directly over the on-disk YAML so comments/spacing are preserved.
+        cfg_path = getattr(app.state, "config_path", None)
+        if cfg_path:
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    raw_text = f.read()
+                body = _redact_yaml_text_preserving_layout(raw_text, redact_keys)
+            except Exception:  # pragma: no cover - defensive / I/O specific
+                # Fall back to structure-based redaction when disk read fails.
+                clean = sanitize_config(cfg, redact_keys=redact_keys)
+                try:
+                    body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
+                except Exception:
+                    body = ""
+        else:
+            clean = sanitize_config(cfg, redact_keys=redact_keys)
+            try:
+                body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
+            except Exception:  # pragma: no cover - defensive
+                body = ""
+
+        return PlainTextResponse(body, media_type="application/x-yaml")
+
+    @app.get("/config/raw", dependencies=[Depends(auth_dep)])
+    async def get_config_raw() -> PlainTextResponse:
+        """Return the raw on-disk configuration YAML as plain text.
+
+        Inputs:
+          - None (uses app.state.config_path to locate YAML file).
+
+        Outputs:
+          - PlainTextResponse containing the exact contents of the YAML config
+            file on disk.
+        """
+
+        cfg_path = getattr(app.state, "config_path", None)
+        if not cfg_path:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="config_path not configured",
+            )
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                raw_text = f.read()
+        except Exception as exc:  # pragma: no cover - I/O errors are environment-specific
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"failed to read config from {cfg_path}: {exc}",
+            ) from exc
+        return PlainTextResponse(raw_text, media_type="application/x-yaml")
+
+    @app.get("/config.json", dependencies=[Depends(auth_dep)])
+    async def get_config_json() -> Dict[str, Any]:
+        """Return sanitized configuration as JSON for API clients.
+
+        Inputs: none
+        Outputs:
+          - Dict with server_time and sanitized config mapping.
         """
 
         cfg = app.state.config or {}
@@ -811,21 +1060,13 @@ def create_app(
         clean = sanitize_config(cfg, redact_keys=redact_keys)
         return {"server_time": _utc_now_iso(), "config": clean}
 
-    @app.get("/config/raw", dependencies=[Depends(auth_dep)])
-    async def get_config_raw() -> Dict[str, Any]:
-        """Return raw on-disk configuration without sanitization.
+    @app.get("/config/raw.json", dependencies=[Depends(auth_dep)])
+    async def get_config_raw_json() -> Dict[str, Any]:
+        """Return raw on-disk configuration as JSON plus raw YAML text.
 
-        Inputs:
-          - None (uses app.state.config_path to locate YAML file).
-
+        Inputs: none (uses app.state.config_path to locate YAML file).
         Outputs:
-          - Dict containing server_time, raw_yaml (string with the exact file
-            contents), and config keys, where config is the configuration
-            mapping loaded from the YAML file on disk.
-
-        Example:
-          >>> # With app created via create_app(..., config_path="config.yaml")
-          >>> # a GET /config/raw will return {"server_time": "...", "config": {...}, "raw_yaml": "..."}
+          - Dict with server_time, parsed config mapping, and raw_yaml string.
         """
 
         cfg_path = getattr(app.state, "config_path", None)
@@ -845,11 +1086,16 @@ def create_app(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"failed to read config from {cfg_path}: {exc}",
             ) from exc
-        return {"server_time": _utc_now_iso(), "config": raw_cfg, "raw_yaml": raw_text}
+
+        return {
+            "server_time": _utc_now_iso(),
+            "config": raw_cfg,
+            "raw_yaml": raw_text,
+        }
 
     @app.post("/config/save", dependencies=[Depends(auth_dep)])
     async def save_config(body: Dict[str, Any]) -> Dict[str, Any]:
-        """Persist new configuration to disk and signal SIGUSR1 for plugin notification.
+        """Persist new configuration to disk and schedule SIGHUP for the main process.
 
         Inputs:
           - body: JSON object representing the full configuration mapping to
@@ -919,11 +1165,10 @@ def create_app(
                 detail=f"failed to write config to {cfg_path_abs}: {exc}",
             ) from exc
 
-        # Signal main process so plugins can react to the updated configuration
-        try:
-            os.kill(os.getpid(), signal.SIGUSR1)
-        except Exception as exc:  # pragma: no cover - platform specific
-            logger.error("Failed to send SIGUSR1 after config save: %s", exc)
+        # Schedule a SIGHUP for the main process after a short delay so that
+        # supervisors can observe a clean shutdown and restart with the new
+        # configuration applied.
+        _schedule_sighup_after_config_save(delay_seconds=0.1)
 
         return {
             "status": "ok",
@@ -1207,6 +1452,33 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
+    def _send_yaml(self, status_code: int, text: str) -> None:
+        """Brief: Send YAML response with application/x-yaml content type.
+
+        Inputs:
+          - status_code: HTTP status code
+          - text: YAML response body
+        Outputs:
+          - None
+        """
+
+        body = text.encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/x-yaml; charset=utf-8")
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(len(body)))
+        self._apply_cors_headers()
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            logger.warning(
+                "Client disconnected while sending YAML response for %s %s",
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return
+
     def _send_html(self, status_code: int, html_body: str) -> None:
         """Brief: Send HTML response.
 
@@ -1401,8 +1673,43 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """Brief: Handle GET /config.
 
         Inputs: none
-        Outputs: None
+        Outputs: None (sends YAML body).
         """
+
+        if not self._require_auth():
+            return
+
+        cfg = getattr(self._server(), "config", {}) or {}
+        web_cfg_inner = (cfg.get("webserver") or {}) if isinstance(cfg, dict) else {}
+        redact_keys = web_cfg_inner.get("redact_keys") or [
+            "token",
+            "password",
+            "secret",
+        ]
+
+        cfg_path = getattr(self._server(), "config_path", None)
+        if cfg_path:
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    raw_text = f.read()
+                body = _redact_yaml_text_preserving_layout(raw_text, redact_keys)
+            except Exception:  # pragma: no cover - defensive / I/O specific
+                clean = sanitize_config(cfg, redact_keys=redact_keys)
+                try:
+                    body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
+                except Exception:
+                    body = ""
+        else:
+            clean = sanitize_config(cfg, redact_keys=redact_keys)
+            try:
+                body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
+            except Exception:  # pragma: no cover - defensive
+                body = ""
+
+        self._send_text(200, body)
+
+    def _handle_config_json(self) -> None:
+        """Brief: Handle GET /config.json (sanitized JSON config)."""
 
         if not self._require_auth():
             return
@@ -1421,14 +1728,48 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _handle_config_raw(self) -> None:
-        """Brief: Handle GET /config_raw to return on-disk configuration.
+        """Brief: Handle GET /config_raw to return on-disk configuration as raw YAML.
 
         Inputs:
           - None (uses self.server.config_path to locate YAML file).
 
         Outputs:
-          - JSON with server_time, raw_yaml (exact file contents), and config
-            mapping loaded from disk.
+          - YAML body containing the exact on-disk configuration text.
+        """
+
+        if not self._require_auth():
+            return
+
+        cfg_path = getattr(self._server(), "config_path", None)
+        if not cfg_path:
+            self._send_json(
+                500,
+                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
+            )
+            return
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                raw_text = f.read()
+        except Exception as exc:  # pragma: no cover - environment-specific
+            self._send_json(
+                500,
+                {
+                    "detail": f"failed to read config from {cfg_path}: {exc}",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        self._send_yaml(200, raw_text)
+
+    def _handle_config_raw_json(self) -> None:
+        """Brief: Handle GET /config/raw.json to return on-disk configuration as JSON.
+
+        Inputs:
+          - None (uses self.server.config_path to locate YAML file).
+
+        Outputs:
+          - JSON with server_time, raw_yaml (exact file contents), and parsed config mapping.
         """
 
         if not self._require_auth():
@@ -1457,7 +1798,11 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         self._send_json(
             200,
-            {"server_time": _utc_now_iso(), "config": raw_cfg, "raw_yaml": raw_text},
+            {
+                "server_time": _utc_now_iso(),
+                "config": raw_cfg,
+                "raw_yaml": raw_text,
+            },
         )
 
     def _handle_logs(self, params: Dict[str, list[str]]) -> None:
@@ -1489,7 +1834,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _handle_config_save(self, body: Dict[str, Any]) -> None:
-        """Brief: Handle POST /config/save to persist config and signal SIGUSR1 for plugins.
+        """Brief: Handle POST /config/save to persist config and schedule SIGHUP.
 
         Inputs:
           - body: Parsed JSON object representing full configuration mapping.
@@ -1580,13 +1925,11 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
-        try:
-            os.kill(os.getpid(), signal.SIGUSR1)
-        except Exception as exc:  # pragma: no cover
-            logger.error(
-                "Failed to send SIGUSR1 after config save (threaded) for plugin notification: %s",
-                exc,
-            )
+        # Schedule a SIGHUP for the main process after the updated configuration
+        # has been safely written to disk. Use synchronous delivery here to
+        # avoid delayed signals outliving the caller's context (e.g., tests
+        # that monkeypatch os.kill).
+        _schedule_sighup_after_config_save(delay_seconds=0.0)
 
         self._send_json(
             200,
@@ -1732,8 +2075,12 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_traffic()
         elif path == "/config":
             self._handle_config()
+        elif path == "/config.json":
+            self._handle_config_json()
         elif path in {"/config/raw", "/config_raw"}:
             self._handle_config_raw()
+        elif path in {"/config/raw.json", "/config_raw.json"}:
+            self._handle_config_raw_json()
         elif path == "/logs":
             self._handle_logs(params)
         elif path in {"/", "/index.html"}:
@@ -1977,7 +2324,9 @@ def start_webserver(
             logger.warning(
                 "Possible container permission issues. Update, check seccomp settings, or run with --privileged "
             )
-            logger.warning("Now enjoy this exception I can do nothing about: \n")
+            logger.warning(
+                "Now enjoy this exception and wait for the threaded server to start: \n"
+            )
     except Exception:
         can_use_asyncio = True
 

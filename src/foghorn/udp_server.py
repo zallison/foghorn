@@ -1,12 +1,12 @@
 import logging
 import socketserver
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
 
-from dnslib import EDNS0, QTYPE, RCODE, RR, DNSRecord
+from dnslib import QTYPE, RCODE, DNSRecord
 
 from .cache import TTLCache
 from .plugins.base import BasePlugin, PluginContext, PluginDecision
-from .server import compute_effective_ttl, send_query_with_failover, _set_response_id
+from .server import compute_effective_ttl, _set_response_id
 
 logger = logging.getLogger("foghorn.server")
 
