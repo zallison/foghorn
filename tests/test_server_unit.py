@@ -11,9 +11,9 @@ Outputs:
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 from foghorn.cache import TTLCache
+from foghorn.udp_server import _set_response_id
 from foghorn.server import (
     DNSUDPHandler,
-    _set_response_id,
     compute_effective_ttl,
     send_query_with_failover,
 )
@@ -248,8 +248,8 @@ def test_cache_and_send_response_uses_effective_ttl(monkeypatch):
     # Build a NOERROR response with two answers (30 and 120 second TTL)
     q = DNSRecord.question("example.com", "A")
     resp = q.reply()
-    resp.add_answer(RR("example.com", QTYPE.A, rdata=A("1.2.3.4"), ttl=30))
-    resp.add_answer(RR("example.com", QTYPE.A, rdata=A("2.3.4.5"), ttl=120))
+    resp.add_answer(RR("domain1.example.com", QTYPE.A, rdata=A("1.2.3.4"), ttl=30))
+    resp.add_answer(RR("domain2.example.com", QTYPE.A, rdata=A("2.3.4.5"), ttl=120))
     wire = resp.pack()
 
     cache_calls = {"ttl": None, "key": None}

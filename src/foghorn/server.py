@@ -49,10 +49,11 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
     """Ensure the response DNS ID matches the request ID.
 
     Inputs:
-      - wire: bytes-like DNS response (bytes, bytearray, or memoryview)
-      - req_id: int request ID to set in the first two bytes
+      - wire: bytes-like DNS response (bytes, bytearray, or memoryview).
+      - req_id: int request ID to set in the first two bytes.
+
     Outputs:
-      - bytes: response with corrected ID
+      - bytes: response with corrected ID.
 
     Fast path: DNS ID is the first 2 bytes (big-endian). We rewrite them
     without parsing to avoid any packing differences.
@@ -78,14 +79,22 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
 
 @functools.lru_cache(maxsize=1024)
 def _set_response_id_cached(wire: bytes, req_id: int) -> bytes:
-    """Cached helper for setting DNS ID on an immutable bytes payload."""
+    """Cached helper for setting DNS ID on an immutable bytes payload.
+
+    Inputs:
+      - wire: Immutable bytes payload containing DNS message.
+      - req_id: int request ID to embed in the first two bytes.
+
+    Outputs:
+      - bytes: DNS message with first two bytes rewritten when possible.
+    """
     try:
         if len(wire) >= 2:
             hi = (req_id >> 8) & 0xFF
             lo = req_id & 0xFF
             return bytes([hi, lo]) + wire[2:]
         return wire
-    except Exception as e:
+    except Exception as e:  # pragma: no cover
         logger.error("Failed to set response id (cached): %s", e)
         return wire
 

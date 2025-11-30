@@ -1,14 +1,60 @@
 import logging
 import socketserver
+from functools import lru_cache
 from typing import Callable, Dict, List, Optional
 
 from dnslib import QTYPE, RCODE, DNSRecord
 
 from .cache import TTLCache
 from .plugins.base import BasePlugin, PluginContext, PluginDecision
-from .server import _set_response_id, compute_effective_ttl
 
 logger = logging.getLogger("foghorn.server")
+
+
+def _set_response_id(wire: bytes, req_id: int) -> bytes:
+    """Ensure the response DNS ID matches the request ID.
+
+    Inputs:
+      - wire: bytes-like DNS response (bytes, bytearray, or memoryview)
+      - req_id: int request ID to set in the first two bytes
+    Outputs:
+      - bytes: response with corrected ID
+
+    Fast path: DNS ID is the first 2 bytes (big-endian). We rewrite them
+    without parsing to avoid any packing differences.
+
+    Note: We normalize to bytes before delegating to a cached helper so that
+    unhashable types (e.g., bytearray) do not break caching.
+    """
+    try:
+        # Normalize to bytes to ensure hashability and immutability
+        try:
+            bwire = bytes(wire)
+        except Exception:
+            bwire = wire  # fallback; will likely still be bytes
+        return _set_response_id_cached(bwire, int(req_id))
+    except Exception as e:  # pragma: no cover - defensive
+        logger.error("Failed to set response id: %s", e)
+        return (
+            bytes(wire)
+            if not isinstance(wire, (bytes, bytearray))
+            else (bytes(wire) if isinstance(wire, bytearray) else wire)
+        )
+
+
+@lru_cache(maxsize=1024)
+def _set_response_id_cached(wire: bytes, req_id: int) -> bytes:
+    """Cached helper for setting DNS ID on an immutable bytes payload."""
+    try:
+        if len(wire) >= 2:
+            hi = (req_id >> 8) & 0xFF
+            lo = req_id & 0xFF
+            return bytes([hi, lo]) + wire[2:]
+        return wire
+    except Exception as e:
+        logger.error("Failed to set response id (cached): %s", e)
+        return wire
+
 
 
 class DNSUDPHandler(socketserver.BaseRequestHandler):
@@ -100,10 +146,25 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
             # For positive TTLs, still apply the configured floor for
             # consistency with the main caching path.
-            effective_ttl = compute_effective_ttl(r, self.min_cache_ttl)
+            from .server import compute_effective_ttl as _compute_effective_ttl
+
+            effective_ttl = _compute_effective_ttl(r, getattr(self, "min_cache_ttl", 0))
             if effective_ttl > 0:
                 cache_key = (str(qname).lower(), int(qtype))
-                self.cache.set(cache_key, effective_ttl, response_wire)
+                cache_obj = getattr(self, "cache", None)
+                if cache_obj is None:
+                    return
+                # Support both foghorn.cache.TTLCache (set(key, ttl, data)) and
+                # mapping-style caches used in some tests (e.g., cachetools.TTLCache
+                # where TTL is provided at construction time).
+                if hasattr(cache_obj, "set"):
+                    cache_obj.set(cache_key, effective_ttl, response_wire)
+                else:
+                    try:
+                        cache_obj[cache_key] = response_wire
+                    except Exception:
+                        # Best-effort only; callers depend on side effects.
+                        return
         except Exception:  # pragma: no cover
             # Best-effort; callers rely only on side effects.
             return
@@ -148,7 +209,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     qtype,
                 )
             else:
-                effective_ttl = compute_effective_ttl(r, self.min_cache_ttl)
+                from .server import compute_effective_ttl as _compute_effective_ttl
+
+                effective_ttl = _compute_effective_ttl(r, self.min_cache_ttl)
                 if effective_ttl > 0:
                     rcode_name = RCODE.get(r.header.rcode, f"rcode{r.header.rcode}")
                     logger.debug(

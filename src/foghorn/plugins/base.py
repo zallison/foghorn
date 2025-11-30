@@ -6,7 +6,7 @@ from functools import wraps
 from typing import (ClassVar, Dict, List, Optional, Sequence, Tuple, Union,
                     final)
 
-from cachetools import TTLCache
+
 from dnslib import (  # noqa: F401 - imports are for implementations of this class
     AAAA, CNAME, MX, NAPTR, PTR, QTYPE, RR, SRV, TXT, A, DNSHeader, DNSRecord)
 
@@ -28,64 +28,6 @@ class PluginDecision:
 
     action: str
     response: Optional[bytes] = None
-
-
-def inheritable_ttl_cache(keyfunc=None):
-    """Brief: Create an inheritable per-subclass TTL cache decorator for instance methods.
-
-    Inputs:
-      - keyfunc: Optional callable used to build the cache key. When provided it
-        is called as ``keyfunc(self, *args, **kwargs)`` and must return a
-        hashable object. When omitted, the key defaults to
-        ``(args, tuple(sorted(kwargs.items())))``.
-
-    Outputs:
-      - Callable decorator that wraps an instance method so that each plugin
-        subclass gets its own ``cachetools.TTLCache`` instance, using
-        ``cache_ttl`` and ``cache_maxsize`` attributes on the subclass
-        (defaults: 60 seconds, 128 entries).
-
-    Example:
-        >>> from foghorn.plugins.base import BasePlugin, inheritable_ttl_cache
-        >>> class MyPlugin(BasePlugin):
-        ...     cache_ttl = 120
-        ...
-        ...     @inheritable_ttl_cache(lambda self, qname, qtype, req, ctx: (qname, qtype))
-        ...     def pre_resolve(self, qname, qtype, req, ctx):
-        ...         return None
-    """
-
-    def decorator(method):
-        caches: Dict[type, TTLCache] = {}
-
-        @wraps(method)
-        def wrapper(self, *args, **kwargs):
-            cls = type(self)
-            ttl = int(getattr(cls, "cache_ttl", 60))
-            maxsize = int(getattr(cls, "cache_maxsize", 128))
-
-            cache = caches.get(cls)
-            if cache is None or cache.ttl != ttl or cache.maxsize != maxsize:
-                cache = TTLCache(maxsize=maxsize, ttl=ttl)
-                caches[cls] = cache
-
-            if keyfunc is not None:
-                key = keyfunc(self, *args, **kwargs)
-            else:
-                key = (args, tuple(sorted(kwargs.items())))
-
-            try:
-                return cache[key]
-            except KeyError:
-                result = method(self, *args, **kwargs)
-                cache[key] = result
-                return result
-
-        # Expose caches for inspection/testing if needed
-        wrapper._caches = caches  # type: ignore[attr-defined]
-        return wrapper
-
-    return decorator
 
 
 class PluginContext:
@@ -176,29 +118,6 @@ class BasePlugin:
         """
         return tuple(getattr(cls, "aliases", ()))
 
-    @classmethod
-    def cache(cls, keyfunc=None):
-        """Brief: Convenience wrapper around :func:`inheritable_ttl_cache`.
-
-        Inputs:
-          - keyfunc: Optional callable used to build cache keys, passed through
-            to :func:`inheritable_ttl_cache`.
-
-        Outputs:
-          - Callable decorator that applies an inheritable TTL cache to an
-            instance method.
-
-        Example:
-            >>> from foghorn.plugins.base import BasePlugin
-            >>> class MyPlugin(BasePlugin):
-            ...     cache_ttl = 120
-            ...
-            ...     @BasePlugin.cache(lambda self, qname, qtype, req, ctx: (qname, qtype))
-            ...     def pre_resolve(self, qname, qtype, req, ctx):
-            ...         return None
-        """
-        return inheritable_ttl_cache(keyfunc)
-
     @final
     def __init__(self, **config: object) -> None:
         """Initialize the BasePlugin with configuration and priorities.
@@ -281,7 +200,6 @@ class BasePlugin:
             return 255
         return val
 
-    @inheritable_ttl_cache(lambda self, qname, qtype, req, ctx: (qname, int(qtype)))
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
@@ -306,13 +224,6 @@ class BasePlugin:
         """
         return None
 
-    @inheritable_ttl_cache(
-        lambda self, qname, qtype, response_wire, ctx: (
-            qname,
-            int(qtype),
-            response_wire,
-        )
-    )
     def post_resolve(
         self, qname: str, qtype: int, response_wire: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
