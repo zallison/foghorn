@@ -1017,17 +1017,14 @@ def create_app(
 
     @app.get("/config/raw", dependencies=[Depends(auth_dep)])
     async def get_config_raw() -> PlainTextResponse:
-        """Return raw on-disk YAML configuration without sanitization.
+        """Return the raw on-disk configuration YAML as plain text.
 
         Inputs:
           - None (uses app.state.config_path to locate YAML file).
 
         Outputs:
-          - Plain text body containing the exact YAML file contents.
-
-        Example:
-          >>> # With app created via create_app(..., config_path="config.yaml")
-          >>> # a GET /config/raw will return {"server_time": "...", "config": {...}, "raw_yaml": "..."}
+          - PlainTextResponse containing the exact contents of the YAML config
+            file on disk.
         """
 
         cfg_path = getattr(app.state, "config_path", None)
@@ -1039,9 +1036,7 @@ def create_app(
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 raw_text = f.read()
-        except (
-            Exception
-        ) as exc:  # pragma: no cover - I/O errors are environment-specific
+        except Exception as exc:  # pragma: no cover - I/O errors are environment-specific
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"failed to read config from {cfg_path}: {exc}",
@@ -1459,6 +1454,33 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
+    def _send_yaml(self, status_code: int, text: str) -> None:
+        """Brief: Send YAML response with application/x-yaml content type.
+
+        Inputs:
+          - status_code: HTTP status code
+          - text: YAML response body
+        Outputs:
+          - None
+        """
+
+        body = text.encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/x-yaml; charset=utf-8")
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(len(body)))
+        self._apply_cors_headers()
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            logger.warning(
+                "Client disconnected while sending YAML response for %s %s",
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return
+
     def _send_html(self, status_code: int, html_body: str) -> None:
         """Brief: Send HTML response.
 
@@ -1708,14 +1730,13 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _handle_config_raw(self) -> None:
-        """Brief: Handle GET /config_raw to return on-disk configuration as JSON.
+        """Brief: Handle GET /config_raw to return on-disk configuration as raw YAML.
 
         Inputs:
           - None (uses self.server.config_path to locate YAML file).
 
         Outputs:
-          - JSON body containing server_time, parsed config mapping, and raw_yaml
-            with the exact on-disk configuration text.
+          - YAML body containing the exact on-disk configuration text.
         """
 
         if not self._require_auth():
@@ -1731,7 +1752,6 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 raw_text = f.read()
-                raw_cfg = yaml.safe_load(raw_text) or {}
         except Exception as exc:  # pragma: no cover - environment-specific
             self._send_json(
                 500,
@@ -1742,14 +1762,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
-        self._send_json(
-            200,
-            {
-                "server_time": _utc_now_iso(),
-                "config": raw_cfg,
-                "raw_yaml": raw_text,
-            },
-        )
+        self._send_yaml(200, raw_text)
 
     def _handle_config_raw_json(self) -> None:
         """Brief: Handle GET /config/raw.json to return on-disk configuration as JSON.

@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import signal as _signal
 from types import SimpleNamespace
-from typing import Any, Dict, List
+from typing import Any, Dict
 from unittest.mock import mock_open, patch
 
 import pytest
@@ -1067,3 +1067,298 @@ def test_webserver_stop_called_on_shutdown(monkeypatch, caplog):
     assert rc == 0
     assert handle.stopped is True
     assert any("Stopping webserver" in r.message for r in caplog.records)
+
+
+def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
+    """Brief: main() returns 1 and prints the validation error when config is invalid.
+
+    Inputs:
+      - monkeypatch/capsys fixtures; validate_config patched to raise ValueError.
+
+    Outputs:
+      - None: asserts exit code 1 and that the error message is printed to stdout.
+    """
+
+    yaml_data = (
+        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
+        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+    )
+
+    def boom_validate(_cfg: Dict[str, Any], config_path: str | None = None) -> None:  # noqa: ARG001
+        raise ValueError("bad config value")
+
+    monkeypatch.setattr(main_mod, "validate_config", boom_validate)
+    # init_logging should not be called, but keep it harmless if it is.
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        rc = main_mod.main(["--config", "invalid.yaml"])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "bad config value" in out
+
+
+def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):
+    """Brief: SIGTERM/SIGINT trigger coordinated shutdown, hard-kill timer, and early-return path.
+
+    Inputs:
+      - monkeypatch/caplog fixtures; signal.signal and threading.Timer patched.
+
+    Outputs:
+      - None: asserts exit code 2, hard-kill error log, and that the shutdown
+        request is only processed once when called repeatedly.
+    """
+
+    yaml_data = (
+        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
+        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+    )
+
+    captured: Dict[str, Any] = {"sigterm": None, "sigint": None, "force_exit": None}
+
+    def fake_signal(sig, handler):
+        if sig == _signal.SIGTERM:
+            captured["sigterm"] = handler
+        elif sig == _signal.SIGINT:
+            captured["sigint"] = handler
+        return None
+
+    class DummyTimer:
+        """Brief: Timer stub that captures the _force_exit callback without running it.
+
+        Inputs:
+          - interval: float timeout in seconds (ignored).
+          - func: callback to invoke on timeout.
+
+        Outputs:
+          - None directly; stores callback in captured["force_exit"].
+        """
+
+        def __init__(self, interval: float, func, *a, **kw) -> None:  # noqa: ARG002
+            captured["force_exit"] = func
+            self.daemon = False
+
+        def start(self) -> None:
+            # Do not invoke the callback automatically; tests call it explicitly.
+            return None
+
+    class DummyServer:
+        """Brief: UDP server stub that drives SIGTERM/SIGINT handlers and exits.
+
+        Inputs:
+          - Same signature as DNSServer; extra args are ignored.
+
+        Outputs:
+          - serve_forever orchestrates signal handlers and then raises KeyboardInterrupt
+            so main() can proceed to its shutdown sequence.
+        """
+
+        def __init__(self, *a: Any, **kw: Any) -> None:  # noqa: ARG002
+            self.server = SimpleNamespace(
+                shutdown=lambda: None,
+                server_close=lambda: None,
+            )
+
+        def serve_forever(self) -> None:
+            # First call: normal SIGTERM path to request shutdown and arm timer.
+            sigterm = captured["sigterm"]
+            assert sigterm is not None
+            sigterm(None, None)
+
+            # Second call: exercise early-return path when shutdown already requested.
+            sigterm(None, None)
+
+            # Also ensure SIGINT handler delegates correctly to _request_shutdown.
+            sigint = captured["sigint"]
+            assert sigint is not None
+            sigint(None, None)
+
+            # Invoke hard-kill callback while shutdown_complete is still False to
+            # exercise the error/logging path inside _force_exit.
+            force_exit = captured["force_exit"]
+            assert force_exit is not None
+            force_exit()
+
+            raise KeyboardInterrupt
+
+    kills: Dict[str, Any] = {"calls": []}
+    exits: Dict[str, Any] = {"code": None}
+
+    def fake_kill(pid: int, sig: int) -> None:  # noqa: ARG001
+        kills["calls"].append((pid, sig))
+        # Simulate failure so _force_exit falls back to os._exit.
+        raise RuntimeError("kill failed")
+
+    def fake_os_exit(code: int) -> None:
+        exits["code"] = code
+        # Do not actually exit the process in tests.
+        return None
+
+    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
+    monkeypatch.setattr(main_mod.threading, "Timer", DummyTimer)
+    monkeypatch.setattr(main_mod.os, "kill", fake_kill)
+    monkeypatch.setattr(main_mod.os, "_exit", fake_os_exit)
+    monkeypatch.setattr(
+        main_mod,
+        "start_webserver",
+        lambda *a, **k: SimpleNamespace(stop=lambda: None),
+    )
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        with caplog.at_level(logging.ERROR, logger="foghorn.main"):
+            rc = main_mod.main(["--config", "sigterm.yaml"])
+
+    # Exit code 2 corresponds to SIGTERM/SIGINT initiated shutdown.
+    assert rc == 2
+    assert exits["code"] in (2, None)
+    assert kills["calls"]
+    assert any(
+        "Hard-kill timeout exceeded after SIGTERM" in r.message for r in caplog.records
+    )
+
+    # After main() completes, calling the hard-kill callback again should take
+    # the fast path where shutdown_complete.is_set() is already True.
+    force_exit = captured["force_exit"]
+    assert force_exit is not None
+    force_exit()
+
+
+def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
+    """Brief: main() logs errors when UDP server shutdown/close/join raise during teardown.
+
+    Inputs:
+      - monkeypatch/caplog fixtures; DNSServer and threading.Thread patched.
+
+    Outputs:
+      - None: asserts that shutdown, close, and join error messages are logged.
+    """
+
+    yaml_data = (
+        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
+        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+    )
+
+    class FailingSocketServer:
+        def shutdown(self) -> None:
+            raise RuntimeError("shutdown-fail")
+
+        def server_close(self) -> None:
+            raise RuntimeError("close-fail")
+
+    class DummyServer:
+        def __init__(self, *a: Any, **kw: Any) -> None:  # noqa: ARG002
+            self.server = FailingSocketServer()
+
+        def serve_forever(self) -> None:
+            # UDP loop is never actually started; keepalive loop exits because
+            # the thread reports not alive.
+            return None
+
+    class DummyThread:
+        def __init__(self, target=None, name=None, daemon=None) -> None:  # noqa: D401
+            """Thread stub that never starts a real background thread."""
+
+            self._target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self) -> None:
+            # Do not invoke target; keepalive loop observes is_alive() == False.
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
+            raise RuntimeError("join-fail")
+
+    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
+    monkeypatch.setattr(
+        main_mod,
+        "start_webserver",
+        lambda *a, **k: SimpleNamespace(stop=lambda: None),
+    )
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        with caplog.at_level(logging.ERROR, logger="foghorn.main"):
+            rc = main_mod.main(["--config", "teardown.yaml"])
+
+    assert rc == 0
+    messages = [r.message for r in caplog.records]
+    assert any("Error while shutting down UDP server" in m for m in messages)
+    assert any("Error while closing UDP server socket" in m for m in messages)
+    assert any("Error while waiting for UDP server thread to exit" in m for m in messages)
+
+
+def test_udp_teardown_outer_exception_logs_unexpected_error(monkeypatch, caplog):
+    """Brief: main() logs an unexpected error when UDP server.server attribute access fails.
+
+    Inputs:
+      - monkeypatch/caplog fixtures; DNSServer.server property patched to raise.
+
+    Outputs:
+      - None: asserts outer teardown except block logs the unexpected error message.
+    """
+
+    yaml_data = (
+        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
+        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+    )
+
+    class BrokenServerAttr:
+        @property
+        def server(self):  # type: ignore[override]
+            raise RuntimeError("broken-server-attr")
+
+    class DummyServer:
+        def __init__(self, *a: Any, **kw: Any) -> None:  # noqa: ARG002
+            self._inner = BrokenServerAttr()
+
+        @property
+        def server(self):  # type: ignore[override]
+            # Delegate to inner property which raises during getattr in teardown.
+            return self._inner.server
+
+        def serve_forever(self) -> None:
+            return None
+
+    class DummyThread:
+        def __init__(self, target=None, name=None, daemon=None) -> None:  # noqa: D401
+            """Thread stub that keeps UDP thread inactive for shutdown tests."""
+
+            self._target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self) -> None:
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
+            return None
+
+    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
+    monkeypatch.setattr(
+        main_mod,
+        "start_webserver",
+        lambda *a, **k: SimpleNamespace(stop=lambda: None),
+    )
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        with caplog.at_level(logging.ERROR, logger="foghorn.main"):
+            rc = main_mod.main(["--config", "teardown_outer.yaml"])
+
+    assert rc == 0
+    assert any(
+        "Unexpected error during UDP server teardown" in r.message
+        for r in caplog.records
+    )
