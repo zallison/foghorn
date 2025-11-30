@@ -946,7 +946,7 @@
 					}
 					// All qtype-based "Top <qt> Domains" lists go to the right-hand pane when available.
 					var target = statsGroupsRightEl || statsGroupsEl;
-					appendTopListGroup('Top ' + qt + ' Domains', entries, target);
+					appendTopListGroup('Top ' + qt + ' Requests', entries, target);
 				});
 			}
 
@@ -1038,8 +1038,8 @@
 				appendDictGroup('Latency', data.latency || {});
 
 				appendTopListGroup('Top Client', data.top_clients || []);
-				appendTopListGroup('Top Domains', data.top_domains || []);
-				appendTopListGroup('Top Sub Domains', data.top_subdomains || []);
+				appendTopListGroup('Top Domains', data.top_domains || [], statsGroupsRightEl || statsGroupsEl);
+				appendTopListGroup('Top Sub Domains', data.top_subdomains || [], statsGroupsRightEl || statsGroupsEl);
 				// Cache hit/miss lists live in the right-hand pane when available.
 				appendTopListGroup('Top Cache Hit Domains', data.cache_hit_domains || [], statsGroupsRightEl || statsGroupsEl);
 				appendTopListGroup('Top Cache Miss Domains', data.cache_miss_domains || [], statsGroupsRightEl || statsGroupsEl);
