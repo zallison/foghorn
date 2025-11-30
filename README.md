@@ -8,6 +8,103 @@ With special thanks to Fiona Weatherwax for their contributions and inspiration.
 
 For developer documentation (architecture, transports, plugin internals, testing), see README-DEV.md.
 
+----
+
+[Jump to Documentation Index](#index)
+
+----
+
+# Release Notes - v0.4.2
+
+Foghorn 0.4.2 adds a new file‑backed CustomRecords plugin, refactors the UDP server and signal/statistics pipelines, and significantly improves the web UI, configuration handling, and Docker/tooling. The 0.4.2 release then layers on schema‑based config validation, better stats and cache behavior, cleaner shutdown and logging, and a round of security, reliability, and test hardening.
+
+Core server & signal handling
+
+• Unified signal behavior (v0.4.1)
+◦ Centralizes SIGUSR1/SIGUSR2 handling with clearer responsibilities.
+◦ Decouples configuration reload from SIGUSR1 and introduces explicit flags governing statistics reset behavior.
+◦ Web API and UI messaging updated so /config/save and the config editor accurately describe when changes actually take effect.
+• Improved shutdown and process control (v0.4.2)
+◦ Fixes clean termination paths and aligns SIGHUP behavior with common service managers (systemd, Docker, etc.).
+◦ Adds small timing delays between launches to avoid transient startup issues.
+◦ Cleans up main and lowers some log messages from info to debug to reduce noise.
+
+UDP server & DNS forwarding
+
+• UDP server extraction and refactor (v0.4.1)
+◦ Moves UDP handler/server logic into a dedicated module to better separate responsibilities and improve testability.
+◦ Clarifies forwarding behavior, including EDNS/DNSSEC handling and how upstreams are invoked.
+◦ Updates helper tests to match the new structure and expectations for upstream configuration.
+
+Statistics pipeline & /stats UI
+
+• Aggregation semantics and persistence (v0.4.1)
+◦ Refines how statistics are aggregated, especially around cache behavior vs. pre‑deny/override paths.
+◦ Updates the stats persistence tests and query‑log rebuild tooling so on‑disk data matches the revised semantics.
+• UI improvements and alignment (v0.4.1–v0.4.2)
+◦ Expands the /stats dashboard with richer panels (totals, upstreams, qtypes, rcodes, cache hit/miss lists, system/process metrics).
+◦ Reorders and cleans up sections to surface process/system information more prominently.
+◦ Adds tooltips and formatting tweaks so the UI more accurately reflects the underlying counters.
+◦ Further 0.4.2 fixes ensure the displayed metrics semantically match the internal stats.
+
+Configuration, schema & web UI
+
+• Signals vs. config semantics (v0.4.1)
+◦ Clarifies that saving config writes the file but does not implicitly reload it; signals notify plugins and may reset statistics depending on configuration.
+◦ Updates config editor warning text and related documentation accordingly.
+• Schema‑based config validation (v0.4.2)
+◦ Introduces a dedicated config schema (and ships it with the Docker image).
+◦ Adds server‑side schema checking around config endpoints, wrapped in safe try/except handling so validation failures don’t crash the daemon.
+◦ Integrates client‑side JSON/YAML validation in the web UI, including better warning messages when config is invalid.
+◦ Switches certain responses to a plain‑text style more appropriate for JSON/YAML payloads.
+◦ Ensures redaction keeps YAML comments and structure intact when showing redacted config.
+◦ Fixes YAML output correctness and validates /config vs /config/raw behavior via tests.
+◦ On config load errors, the server avoids hard failure, preferring to surface a clear error instead.
+
+Plugins
+
+• New CustomRecords plugin (v0.4.1)
+◦ Adds a CustomRecords plugin capable of serving records from files, with examples and tests to verify parsing, reloads, and merge semantics.
+◦ Documents how to configure and use the plugin and wires it into example configs.
+• Filter & JSONL semantics (v0.4.1)
+◦ Clarifies documentation around FilterPlugin’s JSON Lines and other file‑backed input formats (globs, CSV, plain-text).
+◦ Expands tests to better cover precedence, error handling, and the mapping between examples and actual behavior.
+• Plugin robustness & tests (v0.4.1)
+◦ Adds and refines tests for BasePlugin, EtcHosts, Greylist, and NewDomainFilter to improve coverage, cleanup behavior, and edge‑case handling.
+
+Caching, performance & behavior fixes
+
+• Caching changes (v0.4.1–v0.4.2)
+◦ Adjusts stats to separately track different cache‑related outcomes (cache null vs. pre‑deny/override) and records them accurately.
+◦ Introduces additional caching for expensive calls, while also removing an inefficient cache that was not providing value.
+◦ Includes a small project cleanup pass and targeted regression fixes verified by tests.
+
+Docker, Makefile & tooling
+
+• Docker runtime and packaging (v0.4.1)
+◦ Switches the container entrypoint to a dedicated script and adjusts how configuration is mounted into the container.
+◦ Updates Makefile Docker targets for more predictable local workflows.
+• Refined image contents & deps (v0.4.2)
+◦ Ensures the Docker image installs runtime dependencies instead of dev extras.
+◦ Adds the assets (including schema) into the image to support in‑container validation and examples.
+• Makefile and repo tooling (v0.4.2)
+◦ Improves Makefile rules to cut down on unnecessary rebuilds and fixes minor shell usage (e.g., using . instead of source under certain shells).
+◦ Adds a maintenance script to keep the repo tidy and consistent.
+
+Testing, docs & security
+
+• Test coverage expansion (v0.4.1–v0.4.2)
+◦ Significantly expands test coverage across plugins, stats persistence, signal handling, main process logic, webserver endpoints, and the config/schema integration.
+◦ Adds targeted regression tests for previously problematic behaviors (e.g., web redaction, config endpoints, signal flows).
+• Documentation updates (v0.4.1–v0.4.2)
+◦ Updates README and developer docs with a clearer index, improved Docker instructions, detailed plugin and stats descriptions, and examples that match the current behavior.
+◦ Aligns example configs with the implemented plugins and new configuration options.
+• Security hardening (v0.4.2)
+◦ Addresses a code‑scanning alert related to incomplete URL substring sanitization, tightening how potentially unsafe URLs are handled.
+
+
+----
+
 ## Index
 
 - [Features](#features)
