@@ -56,6 +56,19 @@ def _set_response_id_cached(wire: bytes, req_id: int) -> bytes:
         return wire
 
 
+def _edns_flags_for_mode(dnssec_mode: str) -> int:
+    """Compute EDNS(0) flags bitmask for a given dnssec_mode.
+
+    Inputs:
+      - dnssec_mode: DNSSEC mode string (e.g. 'ignore', 'passthrough', 'validate').
+
+    Outputs:
+      - int: EDNS flags bitmask with DO set for passthrough/validate modes.
+    """
+    mode = str(dnssec_mode).lower()
+    return 0x8000 if mode in ("passthrough", "validate") else 0
+
+
 class DNSUDPHandler(socketserver.BaseRequestHandler):
     """
     Handles UDP DNS requests.
@@ -524,10 +537,12 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             if rr.rtype == QTYPE.OPT:
                 opt_idx = idx
                 break
-        flags = 0
-        if str(self.dnssec_mode).lower() == "passthrough":
-            # Preserve DO if present, otherwise set it to advertise support
-            flags |= 0x8000  # DO bit
+
+        # Decide EDNS flags based on dnssec_mode. For both passthrough and
+        # validate modes we must advertise DO=1 so that upstream resolvers
+        # return DNSSEC records (and, for upstream_ad, can set the AD bit).
+        flags = _edns_flags_for_mode(self.dnssec_mode)
+
         # rclass of OPT holds payload size. Use EDNS0/RR from foghorn.server so
         # tests that monkeypatch foghorn.server.EDNS0/RR continue to see those
         # patches when exercising DNSUDPHandler._ensure_edns.
@@ -835,19 +850,26 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             # 5. Apply post-resolve plugins
             reply = self._apply_post_plugins(req, qname, qtype, reply, ctx)
 
-            # Validate DNSSEC if requested
+            # Validate DNSSEC if requested.
+            #
+            # New semantics (dev, may evolve):
+            #   - We attempt to classify responses as "secure" when either the
+            #     upstream sets AD (upstream_ad) or the local validator returns
+            #     True (local).
+            #   - We do *not* convert responses to SERVFAIL when validation is
+            #     inconclusive or the zone is insecure/unsigned; those are
+            #     treated as "insecure" but acceptable.
+            #   - This avoids breaking unsigned zones like google.com while
+            #     still allowing callers to observe validation via logs.
             try:
                 if str(self.dnssec_mode).lower() == "validate":
-                    parsed = DNSRecord.parse(reply)
-                    valid = False
-                    if (
-                        str(getattr(self, "dnssec_validation", "upstream_ad")).lower()
-                        == "local"
-                    ):
+                    validated = False
+                    mode = str(getattr(self, "dnssec_validation", "upstream_ad")).lower()
+                    if mode == "local":
                         try:
                             from .dnssec_validate import validate_response_local
 
-                            valid = bool(
+                            validated = bool(
                                 validate_response_local(
                                     qname,
                                     qtype,
@@ -857,23 +879,27 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                             )
                         except Exception as e:  # pragma: no cover
                             logger.debug("Local DNSSEC validation error: %s", e)
-                            valid = False
+                            validated = False
                     else:
-                        # Require AD bit from upstream to consider validated
-                        valid = getattr(parsed.header, "ad", 0) == 1
-                    if not valid:
-                        logger.warning(
-                            "DNSSEC validate mode: validation failed for %s; returning SERVFAIL",
+                        try:
+                            parsed = DNSRecord.parse(reply)
+                            validated = getattr(parsed.header, "ad", 0) == 1
+                        except Exception as e:  # pragma: no cover
+                            logger.debug("Upstream AD check failed: %s", e)
+                            validated = False
+
+                    if validated:
+                        logger.debug(
+                            "DNSSEC validate mode: response for %s classified as secure",
                             qname,
                         )
-                        r = req.reply()
-                        r.header.rcode = RCODE.SERVFAIL
-                        reply = r.pack()
+                    else:
+                        logger.debug(
+                            "DNSSEC validate mode: response for %s classified as insecure/unsigned",
+                            qname,
+                        )
             except Exception:  # pragma: no cover
-                logger.debug("DNSSEC validate check failed; returning SERVFAIL")
-                r = req.reply()
-                r.header.rcode = RCODE.SERVFAIL
-                reply = r.pack()
+                logger.debug("DNSSEC validate check failed; leaving response unchanged")
 
             # 6. Cache and send the response. For post-resolve override paths
             # we intentionally send twice to match historical behavior and

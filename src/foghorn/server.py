@@ -8,7 +8,7 @@ from dnslib import EDNS0, QTYPE, RCODE, RR, DNSRecord
 from .plugins.base import BasePlugin, PluginContext, PluginDecision
 from .transports.dot import DoTError, get_dot_pool
 from .transports.tcp import TCPError, get_tcp_pool, tcp_query
-from .udp_server import DNSUDPHandler
+from .udp_server import DNSUDPHandler, _edns_flags_for_mode
 
 logger = logging.getLogger("foghorn.server")
 
@@ -560,7 +560,7 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
         # EDNS/DNSSEC adjustments (mirror DNSUDPHandler behavior)
         try:
             mode = str(DNSUDPHandler.dnssec_mode).lower()
-            if mode in ("ignore", "passthrough"):
+            if mode in ("ignore", "passthrough", "validate"):
                 # Use instance-like helper by constructing a temp handler
                 dummy = type("_H", (), {})()
                 dummy.dnssec_mode = DNSUDPHandler.dnssec_mode
@@ -573,9 +573,7 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                         if rr.rtype == QTYPE.OPT:
                             opt_idx = idx
                             break
-                    flags = (
-                        0x8000 if str(dummy.dnssec_mode).lower() == "passthrough" else 0
-                    )
+                    flags = _edns_flags_for_mode(dummy.dnssec_mode)
                     opt_rr = RR(
                         rname=".",
                         rtype=QTYPE.OPT,
