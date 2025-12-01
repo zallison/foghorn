@@ -9,8 +9,8 @@ Outputs:
 """
 
 import importlib
-import threading
 import os
+import threading
 
 from dnslib import QTYPE, DNSRecord
 
@@ -143,6 +143,9 @@ def test_pre_resolve_without_lock_uses_plain_hosts_lookup():
     EtcHosts = mod.EtcHosts
 
     plugin = EtcHosts.__new__(EtcHosts)  # type: ignore[call-arg]
+    # Mimic BasePlugin.__init__ targeting defaults so targets() fast-path works.
+    plugin._target_networks = []  # type: ignore[attr-defined]
+    plugin._ignore_networks = []  # type: ignore[attr-defined]
     plugin.hosts = {"known.local": "10.0.0.1"}
     ctx = PluginContext(client_ip="127.0.0.1")
 

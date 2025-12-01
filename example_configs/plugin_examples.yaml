@@ -31,6 +31,11 @@ plugins:
     # pre_priority: 60
     # post_priority: 90  # optional: perform rewrites late
     config:
+      # Optional BasePlugin-level targeting knobs (apply to all hooks for this plugin)
+      # targets: ["192.0.2.0/24", "2001:db8::/32"]
+      # targets_ignore: ["192.0.2.128/25"]
+      # targets_cache_ttl_seconds: 300  # cache per-client targeting decisions
+
       # Pre-filtering knobs
       max_subdomains: 5
       max_length_no_dots: 50

@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Optional
 
-from foghorn.cache import TTLCache
+from foghorn.cache import FoghornTTLCache
 from foghorn.plugins.base import BasePlugin, PluginContext, PluginDecision
 
 log = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ class GreylistPlugin(BasePlugin):
 
         self._lock = threading.Lock()
         self._db_init()
-        self._cache = TTLCache()
+        self._cache = FoghornTTLCache()
 
     def _db_init(self):
         """
@@ -150,6 +150,9 @@ class GreylistPlugin(BasePlugin):
         Returns:
             A PluginDecision, or None to allow the query to proceed.
         """
+        if not self.targets(ctx):
+            return None
+
         now = int(time.time())
         base_domain = self._to_base_domain(qname)
         first_seen = self._cache_get_or_db_load(base_domain)

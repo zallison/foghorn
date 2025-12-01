@@ -8,8 +8,9 @@ Outputs:
   - None (assertions on decisions, DB state, and cache behavior)
 """
 
-from dnslib import QTYPE
 from contextlib import closing
+
+from dnslib import QTYPE
 
 from foghorn.plugins.base import PluginContext
 from foghorn.plugins.greylist import GreylistPlugin

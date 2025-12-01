@@ -11,9 +11,10 @@ Outputs:
 from dnslib import QTYPE, RCODE, DNSRecord
 
 import foghorn.server as server_mod
-from foghorn.cache import TTLCache
+from foghorn.cache import FoghornTTLCache
 from foghorn.plugins.base import BasePlugin, PluginDecision
-from foghorn.server import DNSUDPHandler, _set_response_id, compute_effective_ttl
+from foghorn.server import DNSUDPHandler, compute_effective_ttl
+from foghorn.udp_server import _set_response_id
 
 
 def test_compute_effective_ttl_exception_returns_floor():
@@ -234,7 +235,7 @@ def test_cache_store_if_applicable_no_answer_ttls_branch(monkeypatch):
     )
 
     h = object.__new__(DNSUDPHandler)
-    h.cache = TTLCache()
+    h.cache = FoghornTTLCache()
     h.min_cache_ttl = 60
 
     DNSUDPHandler._cache_store_if_applicable(h, "example.com", 1, b"wire")

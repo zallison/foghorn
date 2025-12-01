@@ -121,7 +121,7 @@ Testing, docs & security
 	- [UpstreamRouterPlugin](#upstreamrouterplugin)
 	- [FilterPlugin](#filterplugin)
 	- [ListDownloader plugin](#listdownloader-plugin)
-	- [CustomRecords plugin](#customrecords-plugin)
+- [ZoneRecords plugin](#zonerecords-plugin)
   - [Complete `config.yaml` Example](#complete-configyaml-example)
 - [Logging](#logging)
 - [License](#license)
@@ -138,7 +138,7 @@ Testing, docs & security
   *   **New Domain Filter:** Block recently registered domains.
   *   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
   *   **Filter:** Filter by domain patterns/keywords IPs.
-  *   **CustomRecords:** Serve static DNS records from one or more files, with optional live reload on change.
+  *   **ZoneRecords (formerly CustomRecords):** Serve static DNS records and authoritative zones from one or more files, with optional live reload on change.
   *   **Examples:** Showcase of simple policies and rewrites.
 
 ## Installation
@@ -305,6 +305,35 @@ You can use short aliases instead of full dotted paths:
 Examples of plugin entries:
 - As a dict with module/config: `{ module: acl, config: {...} }`
 - As a plain alias string: `acl` (no config)
+
+#### Base plugin targeting (targets / targets_ignore)
+
+All plugins that inherit from `BasePlugin` support optional, shared client‑targeting
+knobs in their `config` block:
+
+- `targets` (optional): list of CIDR/IP strings (or a single string) specifying
+  which client networks this plugin should apply to.
+- `targets_ignore` (optional): list of CIDR/IP strings to exclude from
+  targeting, even when they match `targets`.
+- `targets_cache_ttl_seconds` (optional, default 300): TTL in seconds for an
+  in‑memory cache of per‑client targeting decisions; longer values reduce CPU
+  when many queries arrive from the same clients.
+
+Semantics:
+
+- When **neither** `targets` nor `targets_ignore` is set, the plugin applies to
+  **all** clients (default behavior).
+- When **only** `targets` is set, the plugin applies **only** to clients whose
+  IP is contained in at least one listed CIDR/IP.
+- When **only** `targets_ignore` is set, the plugin applies to **all clients
+  except** those in `targets_ignore` (inverted logic).
+- When **both** are set, `targets_ignore` wins: clients in that list are
+  skipped even if they match an entry in `targets`.
+
+These knobs are honored by core plugins such as AccessControl, Filter,
+Greylist, NewDomainFilter, UpstreamRouter, FlakyServer, Examples, and
+EtcHosts. See `example_configs/` (for example `kitchen_sink.yaml`) for usage
+patterns.
 
 #### Plugin priorities and `setup_priority`
 
@@ -587,10 +616,11 @@ plugins:
 
 ------
 
-### CustomRecords plugin
+### ZoneRecords plugin
 
-The `CustomRecords` plugin answers selected queries directly from one or more
-local files, bypassing upstream resolvers and the cache for those names.
+The `ZoneRecords` plugin answers selected queries directly from one or more
+local files, and can act as an authoritative server for configured zones while
+still bypassing upstream resolvers and the cache for those names.
 
 **Record file format**
 
@@ -615,7 +645,7 @@ first-seen ordering. This ordering is reflected in the final DNS answer.
 
 ```yaml
 plugins:
-  - module: custom
+  - module: zone
 	config:
 	  # Use either a single file_path (legacy) or a list of file_paths
 	  # (preferred). When both are given, the legacy path is added to
@@ -633,8 +663,8 @@ plugins:
 
 `module` may be any of:
 
-- Full dotted path: `foghorn.plugins.custom-records.CustomRecords`
-- Alias: `custom` or `records`
+- Full dotted path: `foghorn.plugins.zone-records.ZoneRecords`
+- Alias: `zone`, `zone_records`, `custom`, or `records`
 
 When `watchdog_enabled` is true and the optional `watchdog` dependency is
 installed, the plugin watches the parent directories of all configured records

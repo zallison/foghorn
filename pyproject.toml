@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Foghorn"
-version = "0.4.2"
-description = "Caching DNS server with plugin-based controls. DoT, DoH, ACL, query filters, etc."
+version = "0.4.3"
+description = "Swiss army knife Caching DNS server with plugin-based controls. DoT, DoH, ACL, query filters, etc."
 authors = [ { name = "Zack Allison", email = "zack@zackallison.com" } ]
 license = { text = "MIT" }
 readme = "README.md"
@@ -31,7 +31,6 @@ dependencies = [
 [optional-dependencies]
 dev = [
    "black",
-   "ipython",
    "ruff",
    "isort",
 ]
@@ -54,3 +53,6 @@ markers = [
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E402"]
 "**/{tests,docs,tools}/*" = ["E402"]
+
+[tool.isort]
+profile = "black"

@@ -70,6 +70,9 @@ class AccessControlPlugin(BasePlugin):
             >>> decision.action
             'deny'
         """
+        if not self.targets(ctx):
+            return None
+
         ip = ipaddress.ip_address(ctx.client_ip)
         # Deny takes precedence
         for n in self.deny_nets:

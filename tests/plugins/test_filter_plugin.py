@@ -92,7 +92,9 @@ def test_pre_resolve_allow_keyword_and_pattern(tmp_path, caplog):
     ctx = PluginContext(client_ip="1.2.3.4")
 
     with closing(p.conn):
-        assert p.pre_resolve("good.com", QTYPE.A, b"", ctx) is None
+        dec_good = p.pre_resolve("good.com", QTYPE.A, b"", ctx)
+        assert isinstance(dec_good, PluginDecision)
+        assert dec_good.action == "skip"
         assert p.pre_resolve("verybad.com", QTYPE.A, b"", ctx).action == "deny"
         assert p.pre_resolve("x.ads.example", QTYPE.A, b"", ctx).action == "deny"
 
@@ -209,8 +211,9 @@ def test_post_resolve_replace_version_mismatch_and_invalid_runtime(tmp_path):
         }
         resp2 = _mk_response_with_ips("ex.com", [("A", "10.0.0.1", 60)])
         dec2 = p.post_resolve("ex.com", QTYPE.A, resp2, ctx)
-        # Invalid replacement at runtime leads to no change and records_changed remains False => None
-        assert dec2 is None
+        # Invalid replacement at runtime leads to no change and records_changed remains False => skip
+        assert isinstance(dec2, PluginDecision)
+        assert dec2.action == "skip"
 
 
 def test_post_resolve_non_a_aaaa_and_parse_error(tmp_path):
@@ -382,7 +385,9 @@ def test_post_resolve_none_when_no_rules(tmp_path):
     resp = _mk_response_with_ips("ex.com", [("A", "8.8.8.8", 60)])
 
     with closing(plugin.conn):
-        assert plugin.post_resolve("ex.com", QTYPE.A, resp, ctx) is None
+        dec = plugin.post_resolve("ex.com", QTYPE.A, resp, ctx)
+        assert isinstance(dec, PluginDecision)
+        assert dec.action == "skip"
 
 
 def test_add_to_cache_error_logs(tmp_path, monkeypatch, caplog):
@@ -390,7 +395,7 @@ def test_add_to_cache_error_logs(tmp_path, monkeypatch, caplog):
     Brief: add_to_cache logs a warning when cache set raises.
 
     Inputs:
-      - monkeypatch: patch TTLCache.set to raise
+      - monkeypatch: patch FoghornTTLCache.set to raise
 
     Outputs:
       - None: Asserts warning logged
@@ -429,7 +434,9 @@ def test_pre_resolve_cached_allow_returns_none(tmp_path):
 
     with closing(plugin.conn):
         plugin.add_to_cache(("cached.com", 0), True)
-        assert plugin.pre_resolve("cached.com", QTYPE.A, b"", ctx) is None
+        dec = plugin.pre_resolve("cached.com", QTYPE.A, b"", ctx)
+        assert isinstance(dec, PluginDecision)
+        assert dec.action == "skip"
 
 
 def test_post_resolve_pack_failure_returns_deny(tmp_path, monkeypatch):
@@ -488,7 +495,9 @@ def test_post_resolve_unknown_action_runtime_returns_none(tmp_path):
     resp = _mk_response_with_ips("ex.com", [("A", "11.22.33.44", 60)])
 
     with closing(plugin.conn):
-        assert plugin.post_resolve("ex.com", QTYPE.A, resp, ctx) is None
+        dec = plugin.post_resolve("ex.com", QTYPE.A, resp, ctx)
+        assert isinstance(dec, PluginDecision)
+        assert dec.action == "skip"
 
 
 def test_post_resolve_unmatched_and_non_ip_records(tmp_path):
@@ -511,7 +520,8 @@ def test_post_resolve_unmatched_and_non_ip_records(tmp_path):
         # "no action_config" branch, appending to modified_records without changes.
         resp1 = _mk_response_with_ips("ex.com", [("A", "8.8.8.8", 60)])
         dec1 = plugin.post_resolve("ex.com", QTYPE.A, resp1, ctx)
-        assert dec1 is None
+        assert isinstance(dec1, PluginDecision)
+        assert dec1.action == "skip"
 
         # Case 2: Malformed A record rdata that cannot be parsed as an IP exercises
         # the ValueError handler and keeps the record.
@@ -519,7 +529,8 @@ def test_post_resolve_unmatched_and_non_ip_records(tmp_path):
         r = q.reply()
         r.add_answer(RR("weird.com", QTYPE.A, rdata=TXT("not-an-ip"), ttl=60))
         dec2 = plugin.post_resolve("weird.com", QTYPE.A, r.pack(), ctx)
-        assert dec2 is None
+        assert isinstance(dec2, PluginDecision)
+        assert dec2.action == "skip"
 
 
 def test_glob_expansion_for_blocklist_and_allowlist_files(tmp_path):

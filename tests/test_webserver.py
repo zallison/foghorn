@@ -18,24 +18,17 @@ import json
 import logging
 import threading
 
-from fastapi.testclient import TestClient
 import yaml
+from fastapi.testclient import TestClient
 
 from foghorn.stats import StatsCollector
-from foghorn.webserver import (
-    RingBuffer,
-    WebServerHandle,
-    _read_proc_meminfo,
-    _Suppress2xxAccessFilter,
-    _utc_now_iso,
-    _redact_yaml_text_preserving_layout,
-    create_app,
-    get_system_info,
-    install_uvicorn_2xx_suppression,
-    resolve_www_root,
-    sanitize_config,
-    start_webserver,
-)
+from foghorn.webserver import (RingBuffer, WebServerHandle, _read_proc_meminfo,
+                               _redact_yaml_text_preserving_layout,
+                               _Suppress2xxAccessFilter, _utc_now_iso,
+                               create_app, get_system_info,
+                               install_uvicorn_2xx_suppression,
+                               resolve_www_root, sanitize_config,
+                               start_webserver)
 
 
 def test_sanitize_config_redacts_simple_keys() -> None:
@@ -420,6 +413,73 @@ def test_stats_debug_timings_emit_log_when_enabled(caplog) -> None:
     assert any("/stats timings:" in msg for msg in messages)
 
 
+def test_stats_snapshot_cache_avoids_multiple_snapshot_calls(monkeypatch) -> None:
+    """Brief: /stats should reuse a cached StatsSnapshot within the cache TTL.
+
+    Inputs:
+      - StatsCollector with a wrapped snapshot method counting invocations.
+
+    Outputs:
+      - Two /stats requests within the TTL result in a single underlying
+        StatsCollector.snapshot() call; a reset=True request forces another.
+    """
+
+    import foghorn.webserver as web_mod
+
+    collector = StatsCollector(
+        track_uniques=False,
+        include_qtype_breakdown=False,
+        track_latency=False,
+    )
+    collector.record_query("192.0.2.1", "example.com", "A")
+
+    calls = {"n": 0}
+    orig_snapshot = collector.snapshot
+
+    def wrapped_snapshot(reset: bool = False):  # noqa: D401
+        """Increment call counter and delegate to original snapshot."""
+
+        calls["n"] += 1
+        return orig_snapshot(reset=reset)
+
+    monkeypatch.setattr(collector, "snapshot", wrapped_snapshot)
+
+    # Ensure TTL is long enough and cache is empty for this collector.
+    orig_ttl = web_mod._STATS_SNAPSHOT_CACHE_TTL_SECONDS
+    try:
+        web_mod._STATS_SNAPSHOT_CACHE_TTL_SECONDS = 10.0
+        with web_mod._STATS_SNAPSHOT_CACHE_LOCK:
+            web_mod._last_stats_snapshots.clear()
+
+        app = create_app(
+            stats=collector,
+            config={
+                "webserver": {
+                    "enabled": True,
+                    "stats_snapshot_ttl_seconds": 10.0,
+                }
+            },
+            log_buffer=RingBuffer(),
+        )
+        client = TestClient(app)
+
+        resp1 = client.get("/stats")
+        resp2 = client.get("/stats")
+        assert resp1.status_code == 200
+        assert resp2.status_code == 200
+        # Within TTL, snapshot() should only have been invoked once.
+        assert calls["n"] == 1
+
+        # A reset=True request must force an additional snapshot() call.
+        resp3 = client.get("/stats", params={"reset": "true"})
+        assert resp3.status_code == 200
+        assert calls["n"] == 2
+    finally:
+        web_mod._STATS_SNAPSHOT_CACHE_TTL_SECONDS = orig_ttl
+        with web_mod._STATS_SNAPSHOT_CACHE_LOCK:
+            web_mod._last_stats_snapshots.clear()
+
+
 def test_stats_reset_endpoint_clears_counters() -> None:
     """Brief: POST /stats/reset must clear StatsCollector counters.
 
@@ -488,6 +548,63 @@ def test_config_endpoint_returns_sanitized_config() -> None:
 
     upstream_out = config_out["upstream"][0]
     assert upstream_out["token"] == "***"
+
+
+def test_config_yaml_cache_reuses_body_within_ttl(monkeypatch) -> None:
+    """Brief: _get_sanitized_config_yaml_cached should reuse YAML text within TTL.
+
+    Inputs:
+      - In-memory config without a config_path and a mocked yaml.safe_dump.
+
+    Outputs:
+      - Repeated calls with the same (cfg_path, redact_keys) key invoke
+        yaml.safe_dump only once; changing redact_keys causes a new dump.
+    """
+
+    import foghorn.webserver as web_mod
+
+    cfg = {"webserver": {"enabled": True}}
+    calls = {"dump": 0}
+
+    def fake_safe_dump(data, sort_keys=False):  # noqa: ARG001
+        calls["dump"] += 1
+        # Include the call count so we can distinguish outputs if needed.
+        return f"yaml-dump-{calls['dump']}"
+
+    monkeypatch.setattr(web_mod.yaml, "safe_dump", fake_safe_dump)
+
+    orig_ttl = web_mod._CONFIG_TEXT_CACHE_TTL_SECONDS
+    try:
+        web_mod._CONFIG_TEXT_CACHE_TTL_SECONDS = 10.0
+        with web_mod._CONFIG_TEXT_CACHE_LOCK:
+            web_mod._last_config_text_key = None
+            web_mod._last_config_text = None
+            web_mod._last_config_text_ts = 0.0
+
+        body1 = web_mod._get_sanitized_config_yaml_cached(
+            cfg, cfg_path=None, redact_keys=["token"]
+        )
+        body2 = web_mod._get_sanitized_config_yaml_cached(
+            cfg, cfg_path=None, redact_keys=["token"]
+        )
+
+        # Within TTL and with the same cache key, safe_dump should run once and
+        # the returned body should be reused.
+        assert calls["dump"] == 1
+        assert body1 == body2
+
+        # Changing redact_keys changes the cache key and forces another dump.
+        body3 = web_mod._get_sanitized_config_yaml_cached(
+            cfg, cfg_path=None, redact_keys=["password"]
+        )
+        assert calls["dump"] == 2
+        assert body3.startswith("yaml-dump-")
+    finally:
+        web_mod._CONFIG_TEXT_CACHE_TTL_SECONDS = orig_ttl
+        with web_mod._CONFIG_TEXT_CACHE_LOCK:
+            web_mod._last_config_text_key = None
+            web_mod._last_config_text = None
+            web_mod._last_config_text_ts = 0.0
 
 
 def test_config_json_endpoint_returns_sanitized_config() -> None:

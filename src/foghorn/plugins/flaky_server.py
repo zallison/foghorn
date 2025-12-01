@@ -235,7 +235,10 @@ class FlakyServer(BasePlugin):
           >>> # For a targeted client, force 1-in-1 SERVFAIL
           >>> p = FlakyServer(client_ip="192.0.2.55", servfail_one_in=1, nxdomain_one_in=10, seed=1)  # doctest: +SKIP
           >>> # decision = p.pre_resolve("example.com", QTYPE.A, wire, PluginContext("192.0.2.55"))
-        """
+          >>>"""
+        if not self.targets(ctx):
+            return None
+
         # Quick exits
         if not self._is_target_client(getattr(ctx, "client_ip", "")):
             return None

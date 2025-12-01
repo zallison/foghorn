@@ -205,6 +205,32 @@ def test_etc_hosts_pre_resolve_ignores_non_a_aaaa(tmp_path):
     assert decision is None
 
 
+def test_etc_hosts_respects_baseplugin_targets(tmp_path):
+    """Brief: EtcHosts pre_resolve returns None when client not targeted.
+
+    Inputs:
+      - targets: ["10.0.0.0/8"]
+      - client_ip: 192.0.2.1 (outside targets)
+
+    Outputs:
+      - None; asserts pre_resolve returns None even when qname matches hosts
+        entry.
+    """
+    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    EtcHosts = mod.EtcHosts
+
+    hosts_file = tmp_path / "hosts"
+    hosts_file.write_text("127.0.0.1 localhost\n", encoding="utf-8")
+
+    plugin = EtcHosts(file_path=str(hosts_file), targets=["10.0.0.0/8"])
+    plugin.setup()
+    ctx = PluginContext(client_ip="192.0.2.1")
+
+    query = DNSRecord.question("localhost", "A")
+    decision = plugin.pre_resolve("localhost", QTYPE.A, query.pack(), ctx)
+    assert decision is None
+
+
 def test_etc_hosts_pre_resolve_strips_trailing_dot(tmp_path):
     """
     Brief: Verify trailing dot is stripped from qname.

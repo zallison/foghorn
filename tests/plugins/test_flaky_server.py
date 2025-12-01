@@ -9,7 +9,6 @@ Outputs:
 """
 
 import importlib.util
-
 # Load the plugin class directly from source without relying on package discovery
 import os
 import sys

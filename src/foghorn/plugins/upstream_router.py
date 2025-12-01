@@ -56,6 +56,9 @@ class UpstreamRouterPlugin(BasePlugin):
               ctx.upstream_candidates = [{'host': '10.0.0.2', 'port': 53}, {'host': '10.0.0.3', 'port': 53}]
               return None
         """
+        if not self.targets(ctx):
+            return None
+
         q = qname.rstrip(".").lower()
         upstream_candidates = self._match_upstream_candidates(q)
         if upstream_candidates:

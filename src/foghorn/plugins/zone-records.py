@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from dnslib import QTYPE, RR, DNSHeader, DNSRecord
+from dnslib import QTYPE, RCODE, RR, DNSHeader, DNSRecord
 
 try:  # watchdog is used for cross-platform file watching
     from watchdog.events import FileSystemEventHandler
@@ -26,8 +26,8 @@ from foghorn.plugins.base import (
 logger = logging.getLogger(__name__)
 
 
-@plugin_aliases("custom", "records")
-class CustomRecords(BasePlugin):
+@plugin_aliases("zone", "zone_records", "custom", "records")
+class ZoneRecords(BasePlugin):
 
     def setup(self) -> None:
         """
@@ -111,7 +111,7 @@ class CustomRecords(BasePlugin):
         # _reload_records_from_watchdog.
         if self._poll_interval > 0.0:
             logger.warning(
-                "CustomRecords Watchdog falling back to polling every {self._poll_interval}"
+                "ZoneRecords Watchdog falling back to polling every {self._poll_interval}"
             )
             self._poll_stop = threading.Event()
             self._start_polling()
@@ -149,16 +149,19 @@ class CustomRecords(BasePlugin):
         return paths
 
     def _load_records(self) -> None:
-        """
-        Brief: Read custom records files and build a mapping of (domain, qtype) -> (ttl, values).
+        """Brief: Read custom records files and build lookup structures.
 
         Inputs:
           - None (uses self.file_paths)
 
         Outputs:
-          - None (populates self.records: Dict[Tuple[str, int], Tuple[int, List[str]]])
+          - None (populates:
+              - self.records: Dict[(domain, qtype), (ttl, [values])]
+              - self._name_index: Dict[domain, Dict[qtype, (ttl, [values])]]
+              - self._zone_soa: Dict[zone_apex, (ttl, [soa_values])]
+            )
         """
-        # Build a fresh mapping so that reloads are atomic when swapped in.
+        # Build fresh mappings so that reloads are atomic when swapped in.
         #
         # For each (domain, qtype) key we:
         #   - preserve the order in which values appear across files
@@ -166,6 +169,25 @@ class CustomRecords(BasePlugin):
         #   - keep the TTL from the first occurrence (later duplicates are
         #     ignored entirely)
         mapping: Dict[Tuple[str, int], Tuple[int, List[str]]] = {}
+        name_index: Dict[str, Dict[int, Tuple[int, List[str]]]] = {}
+        zone_soa: Dict[str, Tuple[int, List[str]]] = {}
+
+        # Resolve the SOA type code using getattr with a safe default and fall
+        # back to QTYPE.get so that tests which monkeypatch QTYPE continue to
+        # work as expected, without relying on QTYPE.SOA being present.
+        try:
+            raw = getattr(QTYPE, "SOA", None)
+        except Exception:  # pragma: no cover - defensive
+            raw = None
+        if raw is None:
+            try:
+                raw = QTYPE.get("SOA", None)
+            except Exception:  # pragma: no cover - defensive
+                raw = None
+        try:
+            soa_code: Optional[int] = int(raw) if raw is not None else None
+        except Exception:  # pragma: no cover - defensive
+            soa_code = None
 
         for fp in self.file_paths:
             logger.debug("reading recordfile: %s", fp)
@@ -244,30 +266,80 @@ class CustomRecords(BasePlugin):
 
                     mapping[key] = (stored_ttl, values)
 
+                    # Populate per-name index for authoritative semantics.
+                    per_name = name_index.setdefault(domain, {})
+                    per_name[int(qtype_code)] = (stored_ttl, values)
+
+                    # Track SOA records as zone apexes for authoritative zones.
+                    if (
+                        soa_code is not None
+                        and int(qtype_code) == int(soa_code)
+                        and domain not in zone_soa
+                    ):
+                        zone_soa[domain] = (stored_ttl, values)
+
         lock = getattr(self, "_records_lock", None)
 
         if lock is None:
             self.records = mapping
+            self._name_index = name_index
+            self._zone_soa = zone_soa
         else:
             with lock:
                 self.records = mapping
+                self._name_index = name_index
+                self._zone_soa = zone_soa
+
+    def _find_zone_for_name(self, name: str) -> Optional[str]:
+        """Brief: Find the longest-matching authoritative zone apex for a name.
+
+        Inputs:
+          - name: Lowercased domain name without trailing dot.
+
+        Outputs:
+          - The matching zone apex string, or None when no authoritative zone
+            covers this name.
+
+        Example:
+          Given zones {"example.com", "sub.example.com"}:
+            _find_zone_for_name("www.sub.example.com") -> "sub.example.com"
+            _find_zone_for_name("other.example.com") -> "example.com"
+            _find_zone_for_name("example.org") -> None
+        """
+        zones = getattr(self, "_zone_soa", None) or {}
+        best: Optional[str] = None
+        for apex in zones.keys():
+            if name == apex or name.endswith("." + apex):
+                if best is None or len(apex) > len(best):
+                    best = apex
+        return best
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
-        """
-        Brief: Return an override decision when a (domain, qtype) key exists in loaded records.
+        """Brief: Decide whether to override resolution for a query.
 
         Inputs:
-            qname: Queried domain name.
-            qtype: DNS record type.
-            req: Raw DNS request bytes.
-            ctx: Plugin context.
+          - qname: Queried domain name.
+          - qtype: DNS record type (numeric code).
+          - req: Raw DNS request bytes.
+          - ctx: Plugin context.
 
         Outputs:
-            PluginDecision("override") with all matching RRs when present, otherwise None.
+          - PluginDecision("override") with an authoritative DNS response when
+            this plugin should answer the query, or None to allow normal cache
+            and upstream processing.
+
+        Behaviour:
+          - For names inside an authoritative zone (identified by SOA records
+            in the records files), act as an authoritative server: apply
+            correct CNAME and QTYPE.ANY semantics and synthesize NODATA and
+            NXDOMAIN responses with SOA in the authority section.
+          - For names outside any authoritative zone, preserve the historical
+            behaviour and only answer when there is an exact (name, qtype)
+            entry, falling through to upstreams otherwise.
         """
-        # Normalize domain to a consistent cache key.
+        # Normalize domain to a consistent lookup key.
         try:
             name = str(qname).rstrip(".").lower()
         except Exception:  # pragma: no cover
@@ -275,57 +347,173 @@ class CustomRecords(BasePlugin):
 
         qtype_int = int(qtype)
         type_name = QTYPE.get(qtype_int, str(qtype_int))
-        logging.debug(f"pre-resolve custom {name} {type_name}")
+        logger.debug("pre-resolve zone-records %s %s", name, type_name)
 
-        key = (name, qtype_int)
-        # Safe concurrent read from the records mapping when a watcher may be
-        # reloading it in the background.
+        # Safe concurrent read from mappings when a watcher may be reloading.
         lock = getattr(self, "_records_lock", None)
         if lock is None:
-            entry = self.records.get(key)
+            records = getattr(self, "records", {})
+            name_index = getattr(self, "_name_index", {})
+            zone_soa = getattr(self, "_zone_soa", {})
         else:
             with lock:
-                entry = self.records.get(key)
+                records = dict(getattr(self, "records", {}))
+                name_index = dict(getattr(self, "_name_index", {}))
+                zone_soa = dict(getattr(self, "_zone_soa", {}))
 
-        if not entry:
-            return None
+        zone_apex = self._find_zone_for_name(name)
 
-        ttl, values = entry
-        logging.info(f"got entry for {name} {type_name} -> {values}")
+        # Helper to build RRs from a single RRset.
+        def _add_rrset(
+            reply: DNSRecord,
+            owner_name: str,
+            rr_qtype: int,
+            ttl: int,
+            values: List[str],
+        ) -> bool:
+            added_any = False
+            rr_type_name = QTYPE.get(rr_qtype, str(rr_qtype))
+            for value in values:
+                zone_line = f"{owner_name} {ttl} IN {rr_type_name} {value}"
+                try:
+                    rrs = RR.fromZone(zone_line)
+                except Exception as exc:  # pragma: no cover - invalid record value
+                    logger.warning(
+                        "ZoneRecords invalid value %r for qtype %s: %s",
+                        value,
+                        rr_type_name,
+                        exc,
+                    )
+                    continue
+                for rr in rrs:
+                    reply.add_answer(rr)
+                    added_any = True
+            return added_any
 
+        # If this name is not covered by any authoritative zone, preserve the
+        # legacy exact-match override behaviour keyed by (name, qtype).
+        if zone_apex is None:
+            key = (name, qtype_int)
+            entry = records.get(key)
+            if not entry:
+                return None
+
+            ttl, values = entry
+            logger.info(
+                "ZoneRecords got entry for %s %s -> %s", name, type_name, values
+            )
+
+            try:
+                request = DNSRecord.parse(req)
+            except Exception as e:  # pragma: no cover - defensive parsing
+                logger.warning("ZoneRecords parse failure: %s", e)
+                return None
+
+            reply = DNSRecord(
+                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+            )
+            owner = str(request.q.qname).rstrip(".") + "."
+
+            added = _add_rrset(reply, owner, qtype_int, ttl, list(values))
+            if not added:
+                return None
+
+            return PluginDecision(action="override", response=reply.pack())
+
+        # Authoritative path: name is inside a zone managed by this plugin.
         try:
             request = DNSRecord.parse(req)
         except Exception as e:  # pragma: no cover - defensive parsing
-            logger.warning("CustomRecords parse failure: %s", e)
+            logger.warning("ZoneRecords parse failure (authoritative path): %s", e)
             return None
 
+        owner = str(request.q.qname).rstrip(".") + "."
         reply = DNSRecord(
             DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
         )
 
-        added = False
-        owner = str(request.q.qname).rstrip(".") + "."
-        # Preserve the order of values as they were defined in the records
-        # files; do not sort here so that answers follow configuration order.
-        for value in values:
-            zone_line = f"{owner} {ttl} IN {type_name} {value}"
-            try:
-                rrs = RR.fromZone(zone_line)
-            except Exception as exc:  # pragma: no cover - invalid record value
+        rrsets = name_index.get(name, {})
+        cname_code = int(QTYPE.CNAME)
+
+        # CNAME at owner name: always answer with CNAME regardless of qtype.
+        if cname_code in rrsets:
+            ttl_cname, cname_values = rrsets[cname_code]
+            # Ignore any other RRsets at this name to avoid illegal CNAME
+            # coexistence; log once if there are extras.
+            if len(rrsets) > 1:
                 logger.warning(
-                    "CustomRecords invalid value %r for qtype %s: %s",
-                    value,
-                    type_name,
-                    exc,
+                    "CustomRecords zone %s has CNAME and other RRsets at %s; "
+                    "answering with CNAME only",
+                    zone_apex,
+                    name,
                 )
-                continue
+            added = _add_rrset(reply, owner, cname_code, ttl_cname, list(cname_values))
+            if not added:
+                return None
+            return PluginDecision(action="override", response=reply.pack())
 
-            for rr in rrs:
-                reply.add_answer(rr)
-                added = True
+        # No CNAME at this owner; distinguish positive, NODATA, and NXDOMAIN.
+        if rrsets:
+            # Positive answers for specific qtypes.
+            if qtype_int == int(QTYPE.ANY):
+                added_any = False
+                for rr_qtype, (ttl_rr, values_rr) in rrsets.items():
+                    if _add_rrset(reply, owner, rr_qtype, ttl_rr, list(values_rr)):
+                        added_any = True
+                if not added_any:
+                    return None
+                return PluginDecision(action="override", response=reply.pack())
 
-        if not added:
-            return None
+            if qtype_int in rrsets:
+                ttl_rr, values_rr = rrsets[qtype_int]
+                if not _add_rrset(reply, owner, qtype_int, ttl_rr, list(values_rr)):
+                    return None
+                return PluginDecision(action="override", response=reply.pack())
+
+            # NODATA: name exists in zone but requested type is absent.
+            reply.header.rcode = RCODE.NOERROR
+            # Add SOA from the authoritative zone, when available.
+            soa_entry = zone_soa.get(zone_apex)
+            if soa_entry is not None:
+                soa_ttl, soa_values = soa_entry
+                soa_owner = zone_apex.rstrip(".") + "."
+                for value in list(soa_values):
+                    zone_line = f"{soa_owner} {soa_ttl} IN SOA {value}"
+                    try:
+                        rrs = RR.fromZone(zone_line)
+                    except Exception as exc:  # pragma: no cover
+                        logger.warning(
+                            "ZoneRecords invalid SOA value %r for zone %s: %s",
+                            value,
+                            zone_apex,
+                            exc,
+                        )
+                        continue
+                    for rr in rrs:
+                        reply.add_auth(rr)
+
+            return PluginDecision(action="override", response=reply.pack())
+
+        # NXDOMAIN: no RRsets at this owner name within the authoritative zone.
+        reply.header.rcode = RCODE.NXDOMAIN
+        soa_entry = zone_soa.get(zone_apex)
+        if soa_entry is not None:
+            soa_ttl, soa_values = soa_entry
+            soa_owner = zone_apex.rstrip(".") + "."
+            for value in list(soa_values):
+                zone_line = f"{soa_owner} {soa_ttl} IN SOA {value}"
+                try:
+                    rrs = RR.fromZone(zone_line)
+                except Exception as exc:  # pragma: no cover
+                    logger.warning(
+                        "ZoneRecords invalid SOA value %r for zone %s: %s",
+                        value,
+                        zone_apex,
+                        exc,
+                    )
+                    continue
+                for rr in rrs:
+                    reply.add_auth(rr)
 
         return PluginDecision(action="override", response=reply.pack())
 
@@ -342,7 +530,7 @@ class CustomRecords(BasePlugin):
 
         def __init__(
             self,
-            plugin: "CustomRecords",
+            plugin: "ZoneRecords",
             watched_files: Iterable[pathlib.Path],
         ) -> None:
             super().__init__()
@@ -398,7 +586,7 @@ class CustomRecords(BasePlugin):
 
         if Observer is None:
             logger.warning(
-                "watchdog is not available; automatic CustomRecords reload disabled",
+                "watchdog is not available; automatic ZoneRecords reload disabled",
             )
             self._observer = None
             return

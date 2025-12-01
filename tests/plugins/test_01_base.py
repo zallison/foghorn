@@ -10,14 +10,9 @@ Outputs:
 
 import logging
 
-from dnslib import DNSRecord, QTYPE
+from dnslib import QTYPE, DNSRecord
 
-from foghorn.plugins.base import (
-    BasePlugin,
-    PluginContext,
-    PluginDecision,
-    inheritable_ttl_cache,
-)
+from foghorn.plugins.base import BasePlugin, PluginContext, PluginDecision
 from foghorn.plugins.base import logger as base_logger
 from foghorn.plugins.base import plugin_aliases
 
@@ -296,107 +291,6 @@ def test_parse_priority_value_valid_and_clamped(caplog):
     assert any("pre_priority above 255" in r.message for r in caplog.records)
 
 
-def test_inheritable_ttl_cache_per_class_and_ttl(monkeypatch):
-    """Brief: inheritable_ttl_cache caches per class and recreates on TTL change.
-
-    Inputs:
-      - monkeypatch fixture (unused but kept for symmetry).
-
-    Outputs:
-      - None; asserts underlying method called once per key until TTL config changes.
-    """
-
-    class Dummy:
-        cache_ttl = 60
-        cache_maxsize = 8
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        @inheritable_ttl_cache(lambda self, x: x)
-        def compute(self, x: int) -> int:
-            self.calls += 1
-            return x * 2
-
-    a = Dummy()
-    b = Dummy()
-
-    # First call populates cache.
-    assert a.compute(1) == 2
-    assert a.calls == 1
-
-    # Same key and class uses cache; no extra calls.
-    assert a.compute(1) == 2
-    assert a.calls == 1
-
-    # Different instance, same class/key also uses same per-class cache.
-    assert b.compute(1) == 2
-    assert a.calls == 1
-    assert b.calls == 0
-
-    # Change TTL on class; next call should rebuild cache and invoke method again.
-    Dummy.cache_ttl = 120
-    assert a.compute(1) == 2
-    assert a.calls == 2
-
-
-def test_inheritable_ttl_cache_default_key_uses_args_and_kwargs():
-    """Brief: inheritable_ttl_cache without keyfunc uses (args, sorted kwargs) as key.
-
-    Inputs:
-      - None; defines a dummy class with a cached method using kwargs.
-
-    Outputs:
-      - None; asserts method is only invoked once for identical args/kwargs.
-    """
-
-    class Dummy:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        @inheritable_ttl_cache()
-        def compute(self, x: int, scale: int = 1) -> int:
-            self.calls += 1
-            return x * scale
-
-    d = Dummy()
-    # First call populates cache and executes underlying method.
-    assert d.compute(2, scale=3) == 6
-    assert d.calls == 1
-
-    # Second call with same args/kwargs reuses cached value (hits default key path).
-    assert d.compute(2, scale=3) == 6
-    assert d.calls == 1
-
-
-def test_baseplugin_cache_wrapper_uses_inheritable_ttl_cache():
-    """Brief: BasePlugin.cache decorator applies inheritable_ttl_cache to methods.
-
-    Inputs:
-      - None; defines a simple plugin class with a cached method.
-
-    Outputs:
-      - None; asserts method result is cached across calls with same arguments.
-    """
-
-    class CachingPlugin(BasePlugin):
-        def __init__(self) -> None:
-            super().__init__()
-            self.calls = 0
-
-        @BasePlugin.cache(lambda self, x: x)
-        def compute(self, x: int) -> int:
-            self.calls += 1
-            return x * 3
-
-    p = CachingPlugin()
-    assert p.compute(2) == 6
-    assert p.calls == 1
-    # Second call with same arg hits cache
-    assert p.compute(2) == 6
-    assert p.calls == 1
-
-
 def test_base_plugin_handle_sigusr2_default_noop():
     """Brief: Default handle_sigusr2 implementation is a no-op that returns None.
 
@@ -421,6 +315,112 @@ def test_base_plugin_setup_default_noop():
     """
     plugin = BasePlugin()
     assert plugin.setup() is None
+
+
+def test_base_plugin_targets_default_all_clients():
+    """Brief: When no targets are configured, all clients are targeted.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts targets() returns True for arbitrary client IPs.
+    """
+    plugin = BasePlugin()
+    ctx1 = PluginContext(client_ip="192.0.2.1")
+    ctx2 = PluginContext(client_ip="10.0.0.1")
+    assert plugin.targets(ctx1) is True
+    assert plugin.targets(ctx2) is True
+
+
+def test_base_plugin_targets_cidr_includes_only_matches():
+    """Brief: targets() restricts matches to configured CIDR ranges.
+
+    Inputs:
+      - targets: ["10.0.0.0/8"]
+
+    Outputs:
+      - None; asserts only clients in the CIDR are targeted.
+    """
+    plugin = BasePlugin(targets=["10.0.0.0/8"])
+    ctx_match = PluginContext(client_ip="10.1.2.3")
+    ctx_miss = PluginContext(client_ip="192.0.2.1")
+    assert plugin.targets(ctx_match) is True
+    assert plugin.targets(ctx_miss) is False
+
+
+def test_base_plugin_targets_ignore_inverts_logic_when_no_targets():
+    """Brief: With only targets_ignore configured, all but ignored clients are targeted.
+
+    Inputs:
+      - targets_ignore: ["10.0.0.0/8"]
+
+    Outputs:
+      - None; asserts ignored client is not targeted while others are.
+    """
+    plugin = BasePlugin(targets_ignore=["10.0.0.0/8"])
+    ctx_ignored = PluginContext(client_ip="10.1.2.3")
+    ctx_other = PluginContext(client_ip="192.0.2.1")
+    assert plugin.targets(ctx_ignored) is False
+    assert plugin.targets(ctx_other) is True
+
+
+def test_base_plugin_targets_and_ignore_combined():
+    """Brief: targets_ignore overrides targets for specific subranges.
+
+    Inputs:
+      - targets: ["10.0.0.0/8"]
+      - targets_ignore: ["10.0.0.0/16"]
+
+    Outputs:
+      - None; asserts clients in ignore range are skipped while others in
+        targets are included.
+    """
+    plugin = BasePlugin(targets=["10.0.0.0/8"], targets_ignore=["10.0.0.0/16"])
+    ctx_ignored = PluginContext(client_ip="10.0.1.1")
+    ctx_allowed = PluginContext(client_ip="10.1.2.3")
+    ctx_outside = PluginContext(client_ip="192.0.2.1")
+    assert plugin.targets(ctx_ignored) is False
+    assert plugin.targets(ctx_allowed) is True
+    assert plugin.targets(ctx_outside) is False
+
+
+def test_base_plugin_targets_uses_cache_for_repeated_client(monkeypatch):
+    """Brief: targets() caches per-client decisions to avoid repeated IP parsing.
+
+    Inputs:
+      - monkeypatch: pytest fixture to wrap ipaddress.ip_address.
+
+    Outputs:
+      - None; asserts that the underlying ipaddress.ip_address helper is only
+        invoked once for repeated targets() calls with the same client_ip.
+    """
+    # Configure a simple targets-only plugin so explicit CIDRs are in effect.
+    plugin = BasePlugin(targets=["10.0.0.0/8"], targets_cache_ttl_seconds=300)
+    ctx = PluginContext(client_ip="10.1.2.3")
+
+    # Wrap the module-level ipaddress.ip_address used inside BasePlugin so we
+    # can observe how many times it is called for the same client.
+    import foghorn.plugins.base as base_mod  # type: ignore[import]
+
+    calls = {"count": 0}
+    original_ip_address = base_mod.ipaddress.ip_address
+
+    def _wrapped_ip_address(addr):  # type: ignore[no-untyped-def]
+        calls["count"] += 1
+        return original_ip_address(addr)
+
+    monkeypatch.setattr(base_mod.ipaddress, "ip_address", _wrapped_ip_address)
+
+    # First call should compute and cache the result.
+    first = plugin.targets(ctx)
+    # Second call with the same client_ip should hit the TTL cache and not
+    # invoke ipaddress.ip_address again.
+    second = plugin.targets(ctx)
+
+    assert first is True
+    assert second is True
+    assert calls["count"] == 1
 
 
 def _make_raw_query(name: str, qtype: int) -> bytes:

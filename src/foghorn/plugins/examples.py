@@ -147,6 +147,9 @@ class ExamplesPlugin(BasePlugin):
             >>> decision.action
             'deny'
         """
+        if not self.targets(ctx):
+            return None
+
         try:
             name = str(qname).rstrip(".")
         except Exception:  # pragma: no cover
@@ -197,6 +200,9 @@ class ExamplesPlugin(BasePlugin):
             If upstream returns A answers [93.184.216.34, 93.184.216.35] and there's a
             matching rewrite rule, this writes the rule's ip_override into the first A RR only.
         """
+        if not self.targets(ctx):
+            return None
+
         if not self.rewrite_rules:
             return None
 
