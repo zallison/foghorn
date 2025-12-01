@@ -82,6 +82,12 @@ statistics:
   include_top_domains: true
   top_n: 10
   track_latency: true
+  # When true, force rebuilding aggregate statistics from the persistent
+  # query_log on startup even when counts already exist.
+  # This is a root-level shortcut for statistics.persistence.force_rebuild
+  # and is overridden by the FOGHORN_FORCE_REBUILD environment variable
+  # and the --rebuild CLI flag when those are present.
+  force_rebuild: false
 
   persistence:
     enabled: true

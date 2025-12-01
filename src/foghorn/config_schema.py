@@ -7,11 +7,15 @@ an external JSON Schema document stored under ``assets/config-yaml.schema``.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from jsonschema import Draft202012Validator, ValidationError
 from jsonschema.exceptions import SchemaError
+
+
+logger = logging.getLogger(__name__)
 
 
 def get_default_schema_path() -> Path:
@@ -113,12 +117,27 @@ def validate_config(
     # which file failed to load when something goes wrong.
     effective_schema_path = schema_path or get_default_schema_path()
 
+    # If the base schema file cannot be found, log a warning and skip
+    # validation rather than aborting startup. This keeps behaviour resilient
+    # in environments where assets are missing or relocated while still
+    # surfacing the problem clearly in logs.
+    if not effective_schema_path.is_file():
+        logger.warning(
+            "Configuration schema file %s not found; skipping JSON Schema validation",
+            effective_schema_path,
+        )
+        return None
+
     try:
         schema = _load_schema(effective_schema_path)
     except (OSError, json.JSONDecodeError, SchemaError) as exc:
-        raise ValueError(
-            f"Failed to load or parse configuration schema at {effective_schema_path}: {exc}"
-        ) from exc
+        logger.warning(
+            "Failed to load or parse configuration schema at %s: %s; "
+            "skipping JSON Schema validation",
+            effective_schema_path,
+            exc,
+        )
+        return None
 
     validator = Draft202012Validator(schema)
     errors = sorted(validator.iter_errors(cfg), key=lambda e: list(e.path))
