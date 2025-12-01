@@ -486,7 +486,10 @@ def main(argv: List[str] | None = None) -> int:
             force_rebuild_cfg = bool(persistence_cfg.get("force_rebuild", False))
             force_rebuild_env = _is_truthy_env(os.getenv("FOGHORN_FORCE_REBUILD"))
             force_rebuild = bool(
-                args.rebuild or force_rebuild_env or force_rebuild_cfg or force_rebuild_root
+                args.rebuild
+                or force_rebuild_env
+                or force_rebuild_cfg
+                or force_rebuild_root
             )
 
             try:
