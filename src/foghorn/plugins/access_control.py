@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class AccessControlConfig(BaseModel):
-    """Brief: Typed configuration model for AccessControlPlugin.
+    """Brief: Typed configuration model for AccessControlPlugin used for startup validation.
 
     Inputs:
       - default: Default policy ("allow" or "deny").
