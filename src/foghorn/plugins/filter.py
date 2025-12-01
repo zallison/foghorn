@@ -13,7 +13,7 @@ import time
 from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
 
 from dnslib import AAAA as RDATA_AAAA
-from dnslib import QTYPE
+from dnslib import QTYPE, RCODE
 from dnslib import A as RDATA_A
 from dnslib import DNSRecord
 
@@ -88,6 +88,37 @@ class FilterPlugin(BasePlugin):
         self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 600)  # 10 minutes
         self.db_path: str = self.config.get("db_path", "./config/var/blocklist.db")
         self.default = self.config.get("default", "deny")
+
+        # TTL used when synthesizing A/AAAA responses (e.g., when deny_response="ip")
+        self._ttl = int(self.config.get("ttl", 300))
+
+        # Policy for what DNS response to send when this plugin "denies" a query.
+        # Supported values (case-insensitive):
+        #   - "nxdomain" (default): core server synthesizes NXDOMAIN
+        #   - "refused": override with REFUSED
+        #   - "servfail": override with SERVFAIL
+        #   - "noerror_empty"/"nodata": NOERROR with no answer records
+        #   - "ip": synthesize an A/AAAA answer using deny_response_ip4/deny_response_ip6
+        self.deny_response: str = str(
+            self.config.get("deny_response", "nxdomain")
+        ).lower()
+        self.deny_response_ip4: Optional[str] = self.config.get("deny_response_ip4")
+        self.deny_response_ip6: Optional[str] = self.config.get("deny_response_ip6")
+
+        valid_deny_responses = {
+            "nxdomain",
+            "refused",
+            "servfail",
+            "noerror_empty",
+            "nodata",
+            "ip",
+        }
+        if self.deny_response not in valid_deny_responses:
+            logger.warning(
+                "FilterPlugin: unknown deny_response %r; defaulting to 'nxdomain'",
+                self.deny_response,
+            )
+            self.deny_response = "nxdomain"
 
         # Back-compat keep existing keys, add new *_domains_files keys
         self.blocklist_files: List[str] = self._expand_globs(
@@ -258,8 +289,10 @@ class FilterPlugin(BasePlugin):
             ctx: The plugin context.
 
         Returns:
-            A PluginDecision with action "deny" for blocked domains or
-            action "skip" when no pre-resolve filtering applies.
+            A PluginDecision signalling a deny for blocked domains (mapped to
+            NXDOMAIN, REFUSED, SERVFAIL, NOERROR, or a synthetic IP answer
+            depending on configuration) or a PluginDecision with action "skip"
+            when no pre-resolve filtering applies.
         """
         if not self.targets(ctx):
             return None
@@ -273,14 +306,14 @@ class FilterPlugin(BasePlugin):
                 if cached == b"1":
                     return PluginDecision(action="skip")
                 else:
-                    return PluginDecision(action="deny")
+                    return self._build_deny_decision_pre(qname, qtype, req, ctx)
             except Exception:  # pragma: no cover
                 pass  # pragma: no cover
 
         if not self.is_allowed(str(domain).rstrip(".")):
             logger.debug("Domain '%s' blocked (exact match)", qname)
             self.add_to_cache(key, False)
-            return PluginDecision(action="deny")
+            return self._build_deny_decision_pre(qname, qtype, req, ctx)
 
         # Check keyword filtering
         for keyword in self.blocked_keywords:
@@ -289,7 +322,7 @@ class FilterPlugin(BasePlugin):
                     "Domain '%s' blocked (contains keyword '%s')", qname, keyword
                 )
                 self.add_to_cache(key, False)
-                return PluginDecision(action="deny")
+                return self._build_deny_decision_pre(qname, qtype, req, ctx)
 
         # Check regex patterns
         for pattern in self.blocked_patterns:
@@ -298,7 +331,7 @@ class FilterPlugin(BasePlugin):
                     "Domain '%s' blocked (matches pattern '%s')", qname, pattern.pattern
                 )
                 self.add_to_cache(key, False)
-                return PluginDecision(action="deny")
+                return self._build_deny_decision_pre(qname, qtype, req, ctx)
 
         logger.debug("Domain '%s' allowed", qname)
         self.add_to_cache(key, True)
@@ -317,8 +350,10 @@ class FilterPlugin(BasePlugin):
             ctx: PluginContext with request metadata.
 
         Outputs:
-            PluginDecision to modify or deny responses containing blocked IPs,
-            or a PluginDecision with action "skip" when no changes are required.
+            PluginDecision to modify or deny responses containing blocked IPs.
+            Deny decisions are mapped to NXDOMAIN, REFUSED, SERVFAIL, or other
+            policy responses depending on configuration, or a PluginDecision
+            with action "skip" when no changes are required.
 
         Example:
             >>> # Only A/AAAA queries are supported; others raise TypeError
@@ -413,24 +448,25 @@ class FilterPlugin(BasePlugin):
             else:
                 modified_records.append(rr)  # Keep non-A/AAAA records
 
-        # If any IP has "deny" action, return NXDOMAIN for entire response
+        # If any IP has "deny" action, return a policy deny for the entire response
         if blocked_ips_deny:
             logger.debug(
                 "Denying %s due to blocked IPs with deny action: %s",
                 qname,
                 ", ".join(blocked_ips_deny),
             )
-            return PluginDecision(action="deny")
+            return self._build_deny_decision_post(qname, qtype, response)
 
         # If records were changed (removed or replaced), create a new response
         if records_changed:
             if not modified_records:
-                # If all IPs were removed or failed to be replaced, return NXDOMAIN
+                # If all IPs were removed or failed to be replaced, return a
+                # policy deny for the entire response.
                 logger.warning(
-                    "All IPs removed or failed to replace for %s, returning NXDOMAIN",
+                    "All IPs removed or failed to replace for %s, returning deny response",
                     qname,
                 )
-                return PluginDecision(action="deny")
+                return self._build_deny_decision_post(qname, qtype, response)
 
             # Create modified response with the updated records
             modified_response = response
@@ -442,9 +478,158 @@ class FilterPlugin(BasePlugin):
                 return PluginDecision(action="override", response=modified_wire)
             except Exception as e:
                 logger.error("Failed to create modified response: %s", e)
-                return PluginDecision(action="deny")
+                return self._build_deny_decision_post(qname, qtype, response)
 
         return PluginDecision(action="skip")
+
+    def _build_deny_decision_pre(
+        self,
+        qname: str,
+        qtype: int,
+        raw_req: bytes,
+        ctx: PluginContext,
+    ) -> PluginDecision:
+        """
+        Brief: Build a PluginDecision for a pre-resolve deny using configured policy.
+
+        Inputs:
+            qname: Queried domain name.
+            qtype: DNS query type integer.
+            raw_req: Original DNS request wire bytes.
+            ctx: PluginContext for the current request.
+
+        Outputs:
+            PluginDecision whose action is either "deny" (for NXDOMAIN) or
+            "override" when a synthetic DNS reply is built (REFUSED, SERVFAIL,
+            NOERROR/NODATA, or an A/AAAA answer pointed at a configured IP).
+
+        Example:
+            >>> # path=null start=null
+            >>> # plugin = FilterPlugin(deny_response='refused')  # doctest: +SKIP
+        """
+        mode = (getattr(self, "deny_response", "nxdomain") or "nxdomain").lower()
+        if mode == "nxdomain":
+            return PluginDecision(action="deny")
+
+        if mode in {"refused", "servfail", "noerror_empty", "nodata"}:
+            try:
+                request = DNSRecord.parse(raw_req)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(
+                    "FilterPlugin: failed to parse request while building deny response: %s",
+                    e,
+                )
+                return PluginDecision(action="deny")
+
+            reply = request.reply()
+            if mode == "refused":
+                reply.header.rcode = RCODE.REFUSED
+            elif mode == "servfail":
+                reply.header.rcode = RCODE.SERVFAIL
+            else:
+                reply.header.rcode = RCODE.NOERROR
+                # Produce NOERROR with no answers (NODATA-style response)
+                reply.rr = []
+            return PluginDecision(action="override", response=reply.pack())
+
+        if mode == "ip":
+            ipaddr: Optional[str] = None
+            if qtype == QTYPE.A and self.deny_response_ip4:
+                ipaddr = str(self.deny_response_ip4)
+            elif qtype == QTYPE.AAAA and self.deny_response_ip6:
+                ipaddr = str(self.deny_response_ip6)
+            elif self.deny_response_ip4 or self.deny_response_ip6:
+                ipaddr = str(self.deny_response_ip4 or self.deny_response_ip6)
+
+            if ipaddr:
+                try:
+                    ipaddress.ip_address(ipaddr)
+                except ValueError:  # pragma: no cover
+                    logger.error(
+                        "FilterPlugin: invalid deny_response IP %r for %s",
+                        ipaddr,
+                        qname,
+                    )
+                else:
+                    response_wire = self._make_a_response(
+                        qname=qname,
+                        query_type=qtype,
+                        raw_req=raw_req,
+                        ctx=ctx,
+                        ipaddr=ipaddr,
+                    )
+                    if response_wire is not None:
+                        return PluginDecision(action="override", response=response_wire)
+
+        if mode not in {
+            "nxdomain",
+            "refused",
+            "servfail",
+            "noerror_empty",
+            "nodata",
+            "ip",
+        }:
+            logger.warning(
+                "FilterPlugin: unknown deny_response %r; defaulting to NXDOMAIN", mode
+            )
+        else:
+            logger.debug(
+                "FilterPlugin: falling back to NXDOMAIN deny for %s (mode=%s)",
+                qname,
+                mode,
+            )
+        return PluginDecision(action="deny")
+
+    def _build_deny_decision_post(
+        self,
+        qname: str,
+        qtype: int,
+        response: DNSRecord,
+    ) -> PluginDecision:
+        """
+        Brief: Build a PluginDecision for a post-resolve deny using configured policy.
+
+        Inputs:
+            qname: Queried domain name.
+            qtype: DNS query type integer.
+            response: Parsed DNSRecord from the upstream response.
+
+        Outputs:
+            PluginDecision mirroring _build_deny_decision_pre but using the
+            already-parsed response as the response template.
+        """
+        mode = (getattr(self, "deny_response", "nxdomain") or "nxdomain").lower()
+
+        # For NXDOMAIN and IP modes in the post-resolve path, preserve the
+        # historical behaviour by signalling a generic deny and letting the
+        # core server synthesize the NXDOMAIN reply from the original query.
+        if mode in {"nxdomain", "ip"}:
+            return PluginDecision(action="deny")
+
+        try:
+            if mode == "refused":
+                response.header.rcode = RCODE.REFUSED
+            elif mode == "servfail":
+                response.header.rcode = RCODE.SERVFAIL
+            elif mode in {"noerror_empty", "nodata"}:
+                response.header.rcode = RCODE.NOERROR
+                response.rr = []
+            else:
+                logger.warning(
+                    "FilterPlugin: unknown deny_response %r in post path; defaulting to NXDOMAIN",
+                    mode,
+                )
+                return PluginDecision(action="deny")
+
+            return PluginDecision(action="override", response=response.pack())
+        except Exception as e:  # pragma: no cover
+            logger.warning(
+                "FilterPlugin: failed to pack deny response for %s (%s): %s",
+                qname,
+                mode,
+                e,
+            )
+            return PluginDecision(action="deny")
 
     def _get_ip_action(
         self, ip_addr: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
