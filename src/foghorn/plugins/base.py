@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
 from dataclasses import dataclass
 from typing import ClassVar, Dict, List, Optional, Sequence, Tuple, Union, final
@@ -129,7 +130,7 @@ class BasePlugin:
 
     @final
     def __init__(self, **config: object) -> None:
-        """Initialize the BasePlugin with configuration and priorities.
+        """Initialize the BasePlugin with configuration, priorities, and targets.
 
         Inputs:
           - **config: Plugin configuration including (optional):
@@ -138,9 +139,16 @@ class BasePlugin:
             - setup_priority (int | str): Priority for setup() (1-255, default from class).
               If setup_priority is not provided, pre_priority from config is used as a
               fallback for setup plugins.
+            - targets (list[str] | str | None): List of CIDR/IP strings (or a single
+              string) specifying clients this plugin should target. When omitted or
+              empty, all clients are targeted.
+            - targets_ignore (list[str] | str | None): List of CIDR/IP strings
+              specifying clients to ignore. When targets is empty and
+              targets_ignore is non-empty, targeting is inverted so that all
+              clients are targeted except those in targets_ignore.
 
         Outputs:
-          - None (sets self.config, self.pre_priority, self.post_priority, self.setup_priority).
+          - None (sets self.config, priority attributes, and target networks).
 
         Priority values are clamped to [1, 255]. Invalid types use class defaults.
 
@@ -176,6 +184,11 @@ class BasePlugin:
             logger,
         )
 
+        # Optional client targeting: normalize targets/targets_ignore into
+        # ipaddress network lists for use by plugins.
+        self._target_networks = self._parse_network_list(config.get("targets"))
+        self._ignore_networks = self._parse_network_list(config.get("targets_ignore"))
+
     @staticmethod
     def _parse_priority_value(value: object, key: str, logger: logging.Logger) -> int:
         """Brief: Parse and clamp a priority value to the inclusive range [1, 255].
@@ -208,6 +221,101 @@ class BasePlugin:
             logger.warning("%s above 255; clamping to 255", key)
             return 255
         return val
+
+    @staticmethod
+    def _parse_network_list(raw: object) -> List[ipaddress._BaseNetwork]:
+        """Brief: Normalize a raw targets/targets_ignore value into IP networks.
+
+        Inputs:
+          - raw: Configuration value for targets or targets_ignore. May be
+            None, a single string, or a list/tuple of strings or string-like
+            objects representing IP addresses or CIDR ranges.
+
+        Outputs:
+          - list[ipaddress._BaseNetwork]: Parsed networks; empty on None or
+            when no valid entries are provided.
+
+        Example:
+            >>> nets = BasePlugin._parse_network_list(["10.0.0.0/8", "192.0.2.1"])
+            >>> bool(nets)
+            True
+        """
+        networks: List[ipaddress._BaseNetwork] = []
+        if raw is None:
+            return networks
+
+        if isinstance(raw, str):
+            entries = [raw]
+        elif isinstance(raw, (list, tuple)):
+            entries = [str(x) for x in raw]
+        else:
+            logger.warning(
+                "BasePlugin: ignoring invalid targets value %r (expected str or list)",
+                raw,
+            )
+            return networks
+
+        for entry in entries:
+            text = str(entry).strip()
+            if not text:
+                continue
+            try:
+                net = ipaddress.ip_network(text, strict=False)
+            except Exception:
+                logger.warning("BasePlugin: skipping invalid target entry %r", text)
+                continue
+            networks.append(net)
+
+        return networks
+
+    def targets(self, ctx: PluginContext) -> bool:
+        """Brief: Determine whether this plugin targets the given client IP.
+
+        Inputs:
+          - ctx: PluginContext providing client_ip for the request.
+
+        Outputs:
+          - bool: True if the client should be targeted by this plugin based on
+            targets/targets_ignore configuration; False otherwise.
+
+        Behavior:
+          - When "targets" is omitted or empty, all clients are targeted by
+            default.
+          - When "targets_ignore" is provided without "targets", all clients
+            are targeted except those matching any ignore CIDR (inverted
+            logic).
+          - When both are provided, "targets_ignore" acts as an override to
+            exclude specific clients from the targeted set.
+
+        Example use:
+            >>> ctx = PluginContext(client_ip="192.0.2.1")
+            >>> p = BasePlugin(targets=["192.0.2.0/24"])
+            >>> p.targets(ctx)
+            True
+        """
+        client_ip = getattr(ctx, "client_ip", "")
+        if not client_ip:
+            # With no usable client IP, treat as targeted only when there are no
+            # explicit targets/ignores configured.
+            return not self._target_networks and not self._ignore_networks
+
+        try:
+            addr = ipaddress.ip_address(client_ip)
+        except Exception:
+            # Invalid client IP: treat as targeted only when there are no
+            # explicit targets/ignores configured.
+            return not self._target_networks and not self._ignore_networks
+
+        # Ignore list takes precedence regardless of targets configuration.
+        if any(addr in net for net in self._ignore_networks):
+            return False
+
+        # Empty targets means "everyone" (subject to ignore list above).
+        if not self._target_networks:
+            return True
+
+        # Non-empty targets restrict to matching networks.
+        return any(addr in net for net in self._target_networks)
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
