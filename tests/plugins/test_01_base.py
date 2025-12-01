@@ -385,6 +385,44 @@ def test_base_plugin_targets_and_ignore_combined():
     assert plugin.targets(ctx_outside) is False
 
 
+def test_base_plugin_targets_uses_cache_for_repeated_client(monkeypatch):
+    """Brief: targets() caches per-client decisions to avoid repeated IP parsing.
+
+    Inputs:
+      - monkeypatch: pytest fixture to wrap ipaddress.ip_address.
+
+    Outputs:
+      - None; asserts that the underlying ipaddress.ip_address helper is only
+        invoked once for repeated targets() calls with the same client_ip.
+    """
+    # Configure a simple targets-only plugin so explicit CIDRs are in effect.
+    plugin = BasePlugin(targets=["10.0.0.0/8"], targets_cache_ttl_seconds=300)
+    ctx = PluginContext(client_ip="10.1.2.3")
+
+    # Wrap the module-level ipaddress.ip_address used inside BasePlugin so we
+    # can observe how many times it is called for the same client.
+    import foghorn.plugins.base as base_mod  # type: ignore[import]
+
+    calls = {"count": 0}
+    original_ip_address = base_mod.ipaddress.ip_address
+
+    def _wrapped_ip_address(addr):  # type: ignore[no-untyped-def]
+        calls["count"] += 1
+        return original_ip_address(addr)
+
+    monkeypatch.setattr(base_mod.ipaddress, "ip_address", _wrapped_ip_address)
+
+    # First call should compute and cache the result.
+    first = plugin.targets(ctx)
+    # Second call with the same client_ip should hit the TTL cache and not
+    # invoke ipaddress.ip_address again.
+    second = plugin.targets(ctx)
+
+    assert first is True
+    assert second is True
+    assert calls["count"] == 1
+
+
 def _make_raw_query(name: str, qtype: int) -> bytes:
     """Brief: Helper to construct a minimal DNS query wire for BasePlugin tests.
 
