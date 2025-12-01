@@ -148,13 +148,14 @@ Project-specific notes
 - The core YAML config does not accept JSONL; it only references which files to load
 - Statistics snapshots are logged as single-line JSON objects (conceptually JSONL when collected)
 
-## CustomRecords plugin internals
+## ZoneRecords plugin internals
 
-`CustomRecords` is a pre-resolve plugin that answers selected queries directly
-from configured records files.
+`ZoneRecords` (formerly `CustomRecords`) is a pre-resolve plugin that answers
+selected queries directly from configured records files and can act as an
+authoritative server for zones defined in those files.
 
-- Location: `src/foghorn/plugins/custom-records.py`
-- Aliases: `custom`, `records`
+- Location: `src/foghorn/plugins/zone-records.py`
+- Aliases: `zone`, `zone_records`, `custom`, `records`
 - Hooks: implements `setup()` and `pre_resolve()`; no post-resolve hook
 
 Records files are parsed line-by-line; each non-empty, non-comment line must
