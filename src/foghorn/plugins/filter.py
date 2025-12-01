@@ -1149,9 +1149,11 @@ class FilterPlugin(BasePlugin):
 
         # Prepare candidate suffixes from most specific to least specific.
         labels = normalized.split(".") if normalized else []
-        candidates = [
-            ".".join(labels[i:]) for i in range(len(labels))
-        ] if labels else [normalized]
+        candidates = (
+            [".".join(labels[i:]) for i in range(len(labels))]
+            if labels
+            else [normalized]
+        )
 
         # SQLite connections are not safe for concurrent use from multiple
         # threads without external locking, even with check_same_thread=False.

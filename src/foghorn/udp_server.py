@@ -864,7 +864,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             try:
                 if str(self.dnssec_mode).lower() == "validate":
                     validated = False
-                    mode = str(getattr(self, "dnssec_validation", "upstream_ad")).lower()
+                    mode = str(
+                        getattr(self, "dnssec_validation", "upstream_ad")
+                    ).lower()
                     if mode == "local":
                         try:
                             from .dnssec_validate import validate_response_local
