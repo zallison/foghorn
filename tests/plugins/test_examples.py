@@ -11,11 +11,8 @@ Outputs:
 from dnslib import QTYPE, A, DNSRecord
 
 from foghorn.plugins.base import PluginContext
-from foghorn.plugins.examples import (
-    ExamplesPlugin,
-    _count_subdomains,
-    _length_without_dots,
-)
+from foghorn.plugins.examples import (ExamplesPlugin, _count_subdomains,
+                                      _length_without_dots)
 
 
 def test_count_subdomains_simple():

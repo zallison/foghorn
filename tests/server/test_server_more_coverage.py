@@ -8,7 +8,7 @@ Outputs:
   - None (pytest assertions)
 """
 
-from dnslib import QTYPE, RCODE, RR, A, DNSRecord
+from dnslib import NS, QTYPE, RCODE, RR, SOA, A, DNSRecord
 
 import foghorn.server as srv
 from foghorn.cache import FoghornTTLCache
@@ -148,8 +148,7 @@ def test_send_query_with_failover_parse_error_then_success(monkeypatch, caplog):
 
 
 def test_send_query_with_failover_udp_legacy_send_path(monkeypatch):
-    """
-    Brief: UDP legacy path uses query.send() when .pack is not callable.
+    """Brief: UDP legacy path uses query.send() when .pack is not callable.
 
     Inputs:
       - Query object with .send() only.
@@ -247,13 +246,15 @@ def test_handle_pre_deny_sends_nxdomain_and_returns(monkeypatch):
 
 
 def test_dnssec_validate_mode_upstream_ad_and_local_paths(monkeypatch):
-    """
-    Brief: dnssec_mode=validate enforces AD bit unless local validator returns True; exceptions yield SERVFAIL.
+    """Brief: dnssec_mode=validate enforces AD bit with upstream/local validation.
 
     Inputs:
-      - Upstream reply without AD -> SERVFAIL; with local validator True -> NOERROR; with validator raising -> SERVFAIL.
+      - dnssec_mode=validate with dnssec_validation set to upstream_ad and
+        local.
+
     Outputs:
-      - Corresponding rcodes observed.
+      - Upstream path without AD bit yields SERVFAIL.
+      - Local path with validator raising yields SERVFAIL.
     """
     # Ensure clean slate
     srv.DNSUDPHandler.plugins = []
