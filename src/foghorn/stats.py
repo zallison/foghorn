@@ -1728,6 +1728,12 @@ class StatsCollector:
         When reset=True, all counters are zeroed for interval-based reporting.
         The snapshot is created under lock but can be formatted outside the lock.
 
+        Notes:
+            - The ``totals`` mapping in the returned snapshot always contains
+              ``cache_deny_pre`` and ``cache_override_pre`` keys. These may be
+              zero when no pre-plugin deny/override events have occurred, or
+              populated from a warm-loaded SQLite store / rebuild pipeline.
+
         Example:
             >>> collector = StatsCollector()
             >>> collector.record_query("1.2.3.4", "example.com", "A")
@@ -1738,6 +1744,12 @@ class StatsCollector:
         with self._lock:
             # Copy all data structures
             totals = dict(self._totals)
+            # Ensure cache_deny_pre and cache_override_pre are always present
+            # in snapshots so that callers can rely on these counters even
+            # when they are zero or only present in persistent aggregates.
+            totals.setdefault("cache_deny_pre", 0)
+            totals.setdefault("cache_override_pre", 0)
+
             rcodes = dict(self._rcodes)
             qtypes = dict(self._qtypes)
 
@@ -2604,6 +2616,11 @@ def format_snapshot_json(snapshot: StatsSnapshot) -> str:
     The output is a compact JSON object suitable for structured logging.
     Empty sections are omitted to minimize log size. A top-level "meta"
     object includes a timestamp, hostname, version, and process uptime.
+
+    Notes:
+      - The ``totals`` object always includes ``cache_deny_pre`` and
+        ``cache_override_pre`` fields so downstream dashboards can safely
+        rely on their presence even when zero.
 
     Example:
         >>> collector = StatsCollector()
