@@ -12,8 +12,14 @@ import time
 
 import pytest
 
-from foghorn.stats import (LatencyHistogram, StatsCollector, StatsReporter,
-                           TopK, _normalize_domain, format_snapshot_json)
+from foghorn.stats import (
+    LatencyHistogram,
+    StatsCollector,
+    StatsReporter,
+    TopK,
+    _normalize_domain,
+    format_snapshot_json,
+)
 
 
 def test_normalize_domain_cases():
