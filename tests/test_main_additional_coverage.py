@@ -19,7 +19,8 @@ from unittest.mock import mock_open, patch
 import pytest
 
 import foghorn.main as main_mod
-from foghorn.main import _clear_lru_caches, normalize_upstream_config, run_setup_plugins
+from foghorn.main import (_clear_lru_caches, normalize_upstream_config,
+                          run_setup_plugins)
 from foghorn.plugins.base import BasePlugin
 
 
@@ -1084,7 +1085,9 @@ def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
         "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
-    def boom_validate(_cfg: Dict[str, Any], config_path: str | None = None) -> None:  # noqa: ARG001
+    def boom_validate(
+        _cfg: Dict[str, Any], config_path: str | None = None
+    ) -> None:  # noqa: ARG001
         raise ValueError("bad config value")
 
     monkeypatch.setattr(main_mod, "validate_config", boom_validate)
@@ -1292,7 +1295,9 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
     messages = [r.message for r in caplog.records]
     assert any("Error while shutting down UDP server" in m for m in messages)
     assert any("Error while closing UDP server socket" in m for m in messages)
-    assert any("Error while waiting for UDP server thread to exit" in m for m in messages)
+    assert any(
+        "Error while waiting for UDP server thread to exit" in m for m in messages
+    )
 
 
 def test_udp_teardown_outer_exception_logs_unexpected_error(monkeypatch, caplog):

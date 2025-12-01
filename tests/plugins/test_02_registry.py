@@ -11,13 +11,9 @@ Outputs:
 import pytest
 
 from foghorn.plugins.base import BasePlugin
-from foghorn.plugins.registry import (
-    _camel_to_snake,
-    _default_alias_for,
-    _normalize,
-    discover_plugins,
-    get_plugin_class,
-)
+from foghorn.plugins.registry import (_camel_to_snake, _default_alias_for,
+                                      _normalize, discover_plugins,
+                                      get_plugin_class)
 
 
 def test_camel_to_snake_simple():

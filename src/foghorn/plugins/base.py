@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
 from dataclasses import dataclass
-from functools import wraps
 from typing import ClassVar, Dict, List, Optional, Sequence, Tuple, Union, final
 
-from cachetools import TTLCache
 from dnslib import (  # noqa: F401 - imports are for implementations of this class
     AAAA,
     CNAME,
@@ -20,6 +19,8 @@ from dnslib import (  # noqa: F401 - imports are for implementations of this cla
     DNSHeader,
     DNSRecord,
 )
+
+from foghorn.cache import FoghornTTLCache
 
 logger = logging.getLogger(__name__)
 
@@ -39,64 +40,6 @@ class PluginDecision:
 
     action: str
     response: Optional[bytes] = None
-
-
-def inheritable_ttl_cache(keyfunc=None):
-    """Brief: Create an inheritable per-subclass TTL cache decorator for instance methods.
-
-    Inputs:
-      - keyfunc: Optional callable used to build the cache key. When provided it
-        is called as ``keyfunc(self, *args, **kwargs)`` and must return a
-        hashable object. When omitted, the key defaults to
-        ``(args, tuple(sorted(kwargs.items())))``.
-
-    Outputs:
-      - Callable decorator that wraps an instance method so that each plugin
-        subclass gets its own ``cachetools.TTLCache`` instance, using
-        ``cache_ttl`` and ``cache_maxsize`` attributes on the subclass
-        (defaults: 60 seconds, 128 entries).
-
-    Example:
-        >>> from foghorn.plugins.base import BasePlugin, inheritable_ttl_cache
-        >>> class MyPlugin(BasePlugin):
-        ...     cache_ttl = 120
-        ...
-        ...     @inheritable_ttl_cache(lambda self, qname, qtype, req, ctx: (qname, qtype))
-        ...     def pre_resolve(self, qname, qtype, req, ctx):
-        ...         return None
-    """
-
-    def decorator(method):
-        caches: Dict[type, TTLCache] = {}
-
-        @wraps(method)
-        def wrapper(self, *args, **kwargs):
-            cls = type(self)
-            ttl = int(getattr(cls, "cache_ttl", 60))
-            maxsize = int(getattr(cls, "cache_maxsize", 128))
-
-            cache = caches.get(cls)
-            if cache is None or cache.ttl != ttl or cache.maxsize != maxsize:
-                cache = TTLCache(maxsize=maxsize, ttl=ttl)
-                caches[cls] = cache
-
-            if keyfunc is not None:
-                key = keyfunc(self, *args, **kwargs)
-            else:
-                key = (args, tuple(sorted(kwargs.items())))
-
-            try:
-                return cache[key]
-            except KeyError:
-                result = method(self, *args, **kwargs)
-                cache[key] = result
-                return result
-
-        # Expose caches for inspection/testing if needed
-        wrapper._caches = caches  # type: ignore[attr-defined]
-        return wrapper
-
-    return decorator
 
 
 class PluginContext:
@@ -187,32 +130,9 @@ class BasePlugin:
         """
         return tuple(getattr(cls, "aliases", ()))
 
-    @classmethod
-    def cache(cls, keyfunc=None):
-        """Brief: Convenience wrapper around :func:`inheritable_ttl_cache`.
-
-        Inputs:
-          - keyfunc: Optional callable used to build cache keys, passed through
-            to :func:`inheritable_ttl_cache`.
-
-        Outputs:
-          - Callable decorator that applies an inheritable TTL cache to an
-            instance method.
-
-        Example:
-            >>> from foghorn.plugins.base import BasePlugin
-            >>> class MyPlugin(BasePlugin):
-            ...     cache_ttl = 120
-            ...
-            ...     @BasePlugin.cache(lambda self, qname, qtype, req, ctx: (qname, qtype))
-            ...     def pre_resolve(self, qname, qtype, req, ctx):
-            ...         return None
-        """
-        return inheritable_ttl_cache(keyfunc)
-
     @final
     def __init__(self, **config: object) -> None:
-        """Initialize the BasePlugin with configuration and priorities.
+        """Initialize the BasePlugin with configuration, priorities, and targets.
 
         Inputs:
           - **config: Plugin configuration including (optional):
@@ -221,9 +141,16 @@ class BasePlugin:
             - setup_priority (int | str): Priority for setup() (1-255, default from class).
               If setup_priority is not provided, pre_priority from config is used as a
               fallback for setup plugins.
+            - targets (list[str] | str | None): List of CIDR/IP strings (or a single
+              string) specifying clients this plugin should target. When omitted or
+              empty, all clients are targeted.
+            - targets_ignore (list[str] | str | None): List of CIDR/IP strings
+              specifying clients to ignore. When targets is empty and
+              targets_ignore is non-empty, targeting is inverted so that all
+              clients are targeted except those in targets_ignore.
 
         Outputs:
-          - None (sets self.config, self.pre_priority, self.post_priority, self.setup_priority).
+          - None (sets self.config, priority attributes, and target networks).
 
         Priority values are clamped to [1, 255]. Invalid types use class defaults.
 
@@ -259,6 +186,17 @@ class BasePlugin:
             logger,
         )
 
+        # Optional client targeting: normalize targets/targets_ignore into
+        # ipaddress network lists for use by plugins.
+        self._target_networks = self._parse_network_list(config.get("targets"))
+        self._ignore_networks = self._parse_network_list(config.get("targets_ignore"))
+
+        # Per-client targeting decisions are cached in-memory to avoid
+        # repeatedly parsing IP addresses and scanning CIDR lists under load.
+        # The TTL is configurable via targets_cache_ttl_seconds (default 300s).
+        self._targets_cache_ttl: int = int(config.get("targets_cache_ttl_seconds", 300))
+        self._targets_cache: FoghornTTLCache = FoghornTTLCache()
+
     @staticmethod
     def _parse_priority_value(value: object, key: str, logger: logging.Logger) -> int:
         """Brief: Parse and clamp a priority value to the inclusive range [1, 255].
@@ -292,7 +230,133 @@ class BasePlugin:
             return 255
         return val
 
-    @inheritable_ttl_cache(lambda self, qname, qtype, req, ctx: (qname, int(qtype)))
+    @staticmethod
+    def _parse_network_list(raw: object) -> List[ipaddress._BaseNetwork]:
+        """Brief: Normalize a raw targets/targets_ignore value into IP networks.
+
+        Inputs:
+          - raw: Configuration value for targets or targets_ignore. May be
+            None, a single string, or a list/tuple of strings or string-like
+            objects representing IP addresses or CIDR ranges.
+
+        Outputs:
+          - list[ipaddress._BaseNetwork]: Parsed networks; empty on None or
+            when no valid entries are provided.
+
+        Example:
+            >>> nets = BasePlugin._parse_network_list(["10.0.0.0/8", "192.0.2.1"])
+            >>> bool(nets)
+            True
+        """
+        networks: List[ipaddress._BaseNetwork] = []
+        if raw is None:
+            return networks
+
+        if isinstance(raw, str):
+            entries = [raw]
+        elif isinstance(raw, (list, tuple)):
+            entries = [str(x) for x in raw]
+        else:
+            logger.warning(
+                "BasePlugin: ignoring invalid targets value %r (expected str or list)",
+                raw,
+            )
+            return networks
+
+        for entry in entries:
+            text = str(entry).strip()
+            if not text:
+                continue
+            try:
+                net = ipaddress.ip_network(text, strict=False)
+            except Exception:
+                logger.warning("BasePlugin: skipping invalid target entry %r", text)
+                continue
+            networks.append(net)
+
+        return networks
+
+    def targets(self, ctx: PluginContext) -> bool:
+        """Brief: Determine whether this plugin targets the given client IP.
+
+        Inputs:
+          - ctx: PluginContext providing client_ip for the request.
+
+        Outputs:
+          - bool: True if the client should be targeted by this plugin based on
+            targets/targets_ignore configuration; False otherwise.
+
+        Behavior:
+          - When "targets" is omitted or empty, all clients are targeted by
+            default.
+          - When "targets_ignore" is provided without "targets", all clients
+            are targeted except those matching any ignore CIDR (inverted
+            logic).
+          - When both are provided, "targets_ignore" acts as an override to
+            exclude specific clients from the targeted set.
+
+        Example use:
+            >>> ctx = PluginContext(client_ip="192.0.2.1")
+            >>> p = BasePlugin(targets=["192.0.2.0/24"])
+            >>> p.targets(ctx)
+            True
+        """
+        # Fast path: when no explicit targets or ignores are configured, all
+        # clients are targeted and no cache lookups are performed.
+        if not self._target_networks and not self._ignore_networks:
+            return True
+
+        client_ip = getattr(ctx, "client_ip", "")
+        if not client_ip:
+            # With explicit targets/ignores but no usable client IP, treat as
+            # not targeted.
+            return False
+
+        cache_key = (str(client_ip), 0)
+
+        # Consult per-client TTL cache first to avoid repeated IP parsing and
+        # CIDR scans under sustained load.
+        try:
+            cached = self._targets_cache.get(cache_key)
+        except Exception:  # pragma: no cover - defensive
+            cached = None
+
+        if cached is not None:
+            try:
+                return bool(int(cached.decode()))
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        # Cache miss or decode failure: compute targeting decision.
+        try:
+            addr = ipaddress.ip_address(client_ip)
+        except Exception:
+            # Invalid client IP with explicit targets/ignores -> not targeted.
+            result = False
+        else:
+            # Ignore list takes precedence regardless of targets configuration.
+            if any(addr in net for net in self._ignore_networks):
+                result = False
+            # Empty targets means "everyone" (subject to ignore list above).
+            elif not self._target_networks:
+                result = True
+            else:
+                # Non-empty targets restrict to matching networks.
+                result = any(addr in net for net in self._target_networks)
+
+        # Store decision in TTL cache for subsequent queries from the same
+        # client_ip.
+        try:
+            self._targets_cache.set(
+                cache_key,
+                int(self._targets_cache_ttl),
+                b"1" if result else b"0",
+            )
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+        return result
+
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
@@ -317,13 +381,6 @@ class BasePlugin:
         """
         return None
 
-    @inheritable_ttl_cache(
-        lambda self, qname, qtype, response_wire, ctx: (
-            qname,
-            int(qtype),
-            response_wire,
-        )
-    )
     def post_resolve(
         self, qname: str, qtype: int, response_wire: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:

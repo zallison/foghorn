@@ -5,10 +5,10 @@ from typing import Dict, List, Optional, Tuple
 
 from dnslib import EDNS0, QTYPE, RCODE, RR, DNSRecord
 
-from .cache import TTLCache
 from .plugins.base import BasePlugin, PluginContext, PluginDecision
 from .transports.dot import DoTError, get_dot_pool
 from .transports.tcp import TCPError, get_tcp_pool, tcp_query
+from .udp_server import DNSUDPHandler
 
 logger = logging.getLogger("foghorn.server")
 
@@ -45,14 +45,73 @@ def compute_effective_ttl(resp: DNSRecord, min_cache_ttl: int) -> int:
         return max(0, int(min_cache_ttl))
 
 
+def _compute_negative_ttl(resp: DNSRecord, fallback_ttl: int) -> int:
+    """Compute TTL for negative or referral caching using SOA/NS where possible.
+
+    Inputs:
+      - resp: Parsed DNSRecord from upstream.
+      - fallback_ttl: Fallback TTL (seconds) when no suitable SOA/NS TTL exists.
+
+    Outputs:
+      - int TTL in seconds (>= 0) to use for negative/referral cache entries.
+
+    Notes:
+      - For NXDOMAIN/NODATA with an SOA in the authority section, we use the
+        minimum of the SOA RR TTL and the SOA minimum TTL field when present.
+      - For delegation/referral responses without SOA but with NS records, we
+        fall back to the minimum NS TTL.
+      - If neither SOA nor NS TTLs are available, fallback_ttl is used.
+    """
+    try:
+        auth_rrs = getattr(resp, "auth", None) or []
+        soa_ttls = []
+        ns_ttls = []
+        for rr in auth_rrs:
+            if rr.rtype == QTYPE.SOA:
+                try:
+                    ttl_val = getattr(rr, "ttl", None)
+                    if isinstance(ttl_val, (int, float)):
+                        soa_ttls.append(int(ttl_val))
+                    rdata = getattr(rr, "rdata", None)
+                    minimum = getattr(rdata, "minttl", None) or getattr(
+                        rdata, "minimum", None
+                    )
+                    if isinstance(minimum, (int, float)):
+                        soa_ttls.append(int(minimum))
+                except Exception:
+                    continue
+            elif rr.rtype == QTYPE.NS:
+                try:
+                    ttl_val = getattr(rr, "ttl", None)
+                    if isinstance(ttl_val, (int, float)):
+                        ns_ttls.append(int(ttl_val))
+                except Exception:
+                    continue
+
+        # Prefer SOA-derived TTLs for true negative caching per RFC 2308.
+        candidates = [t for t in soa_ttls if t >= 0]
+        if candidates:
+            return max(0, min(candidates))
+
+        # Fall back to NS TTLs for delegation / referral caching.
+        candidates = [t for t in ns_ttls if t >= 0]
+        if candidates:
+            return max(0, min(candidates))
+
+        return max(0, int(fallback_ttl))
+    except Exception:
+        return max(0, int(fallback_ttl))
+
+
 def _set_response_id(wire: bytes, req_id: int) -> bytes:
     """Ensure the response DNS ID matches the request ID.
 
     Inputs:
-      - wire: bytes-like DNS response (bytes, bytearray, or memoryview)
-      - req_id: int request ID to set in the first two bytes
+      - wire: bytes-like DNS response (bytes, bytearray, or memoryview).
+      - req_id: int request ID to set in the first two bytes.
+
     Outputs:
-      - bytes: response with corrected ID
+      - bytes: response with corrected ID.
 
     Fast path: DNS ID is the first 2 bytes (big-endian). We rewrite them
     without parsing to avoid any packing differences.
@@ -78,14 +137,22 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
 
 @functools.lru_cache(maxsize=1024)
 def _set_response_id_cached(wire: bytes, req_id: int) -> bytes:
-    """Cached helper for setting DNS ID on an immutable bytes payload."""
+    """Cached helper for setting DNS ID on an immutable bytes payload.
+
+    Inputs:
+      - wire: Immutable bytes payload containing DNS message.
+      - req_id: int request ID to embed in the first two bytes.
+
+    Outputs:
+      - bytes: DNS message with first two bytes rewritten when possible.
+    """
     try:
         if len(wire) >= 2:
             hi = (req_id >> 8) & 0xFF
             lo = req_id & 0xFF
             return bytes([hi, lo]) + wire[2:]
         return wire
-    except Exception as e:
+    except Exception as e:  # pragma: no cover
         logger.error("Failed to set response id (cached): %s", e)
         return wire
 
@@ -413,6 +480,10 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                         except Exception:  # pragma: no cover
                             pass
                     return wire
+                if decision.action == "allow":
+                    # Explicit allow: stop evaluating further pre plugins but
+                    # continue normal resolution (cache/upstream).
+                    break
 
         # Cache lookup
         cached = DNSUDPHandler.cache.get(cache_key)
@@ -587,15 +658,49 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                 if decision.action == "override" and decision.response is not None:
                     out = decision.response
                     break
+                if decision.action == "allow":
+                    # Explicit allow: stop evaluating further post plugins but
+                    # leave the upstream response unchanged.
+                    break
 
-        # Cache store minimal (NOERROR+answers) like original _cache_store_if_applicable
+        # Cache store positive answers, negative responses (NXDOMAIN/NODATA), and
+        # delegations/referrals using TTLs derived from SOA/NS records where
+        # possible, following RFC 2308 guidance.
         try:
             r = DNSRecord.parse(out)
-            if r.header.rcode == RCODE.NOERROR and r.rr:
-                ttls = [rr.ttl for rr in r.rr]
+            rcode = r.header.rcode
+            ttl: Optional[int] = None
+
+            # Positive answers: cache when we have an answer RRset.
+            if rcode == RCODE.NOERROR and r.rr:
+                ttls = [
+                    int(getattr(rr, "ttl", 0))
+                    for rr in r.rr
+                    if isinstance(getattr(rr, "ttl", None), (int, float))
+                ]
                 ttl = min(ttls) if ttls else 300
-                if ttl > 0:
-                    DNSUDPHandler.cache.set(cache_key, ttl, out)
+            else:
+                auth_rrs = getattr(r, "auth", None) or []
+                has_soa = any(rr.rtype == QTYPE.SOA for rr in auth_rrs)
+                has_ns = any(rr.rtype == QTYPE.NS for rr in auth_rrs)
+
+                # Negative caching per RFC 2308: NXDOMAIN or NODATA responses
+                # with an SOA in the authority section.
+                if has_soa and (
+                    rcode == RCODE.NXDOMAIN or (rcode == RCODE.NOERROR and not r.rr)
+                ):
+                    ttl = _compute_negative_ttl(
+                        r, getattr(DNSUDPHandler, "min_cache_ttl", 0)
+                    )
+                # Delegation / referral caching: NOERROR with no answers but NS
+                # in the authority section.
+                elif has_ns and rcode == RCODE.NOERROR and not r.rr:
+                    ttl = _compute_negative_ttl(
+                        r, getattr(DNSUDPHandler, "min_cache_ttl", 0)
+                    )
+
+            if ttl is not None and ttl > 0:
+                DNSUDPHandler.cache.set(cache_key, int(ttl), out)
         except Exception:  # pragma: no cover
             pass  # pragma: no cover
 
@@ -679,12 +784,6 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                 stats.record_latency(t1 - t0)
             except Exception:  # pragma: no cover
                 pass
-
-
-from .udp_server import (
-    DNSUDPHandler,
-    DNSServer,
-)  # re-export for backwards compatibility
 
 
 class DNSServer:

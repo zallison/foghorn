@@ -9,8 +9,8 @@ Outputs:
 """
 
 import datetime as dt
-from unittest.mock import patch
 from contextlib import closing
+from unittest.mock import patch
 
 from foghorn.plugins.base import PluginContext
 from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin

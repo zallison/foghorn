@@ -153,6 +153,15 @@ plugins:
     config:
       setup_priority: 20
       default: deny
+
+      # Optional BasePlugin targeting for this plugin: restrict evaluation to
+      # certain client networks. When omitted, all clients are targeted.
+      # targets:
+      #   - "192.0.2.0/24"    # documentation subnet
+      #   - "2001:db8::/32"   # example IPv6 subnet
+      # targets_ignore:
+      #   - "192.0.2.128/25"  # invert/override targeting for a subrange
+      # targets_cache_ttl_seconds: 300
       db_path: ./config/var/blocklist.db
       cache_ttl_seconds: 600
       blocked_domains: ["tracker.example"]
@@ -168,10 +177,9 @@ plugins:
         - ./config/var/lists/Easylist-*.txt
         - ./config/var/lists/Prigent-Ads-*.txt
         - ./config/var/lists/Prigent-Malware-*.txt
+        - ./config/block.txt
       allowlist_files:
         - ./config/allow.txt
-      blocklist_files:
-        - ./config/block.txt
       allowed_domains_files: []
       blocked_domains_files: []
 

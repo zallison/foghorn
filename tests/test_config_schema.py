@@ -16,8 +16,7 @@ import pytest
 import yaml
 
 import foghorn.config_schema as config_schema_mod
-from foghorn.config_schema import validate_config, get_default_schema_path
-
+from foghorn.config_schema import get_default_schema_path, validate_config
 
 EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "example_configs"
 

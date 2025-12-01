@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Any, Optional
 
-from foghorn.cache import TTLCache
+from foghorn.cache import FoghornTTLCache
 
 # Try to import popular whois libraries in a robust way
 try:
@@ -75,7 +75,7 @@ class NewDomainFilterPlugin(BasePlugin):
         )
 
         # In-memory cache and persistent DB for WHOIS results
-        self._whois_cache = TTLCache()
+        self._whois_cache = FoghornTTLCache()
         self._db_lock = threading.Lock()
         self._db_init()
 
@@ -91,6 +91,11 @@ class NewDomainFilterPlugin(BasePlugin):
             ctx: The plugin context.
         Returns:
             A PluginDecision to deny the request if the domain is too new, otherwise None.
+        """
+        if not self.targets(ctx):
+            return None
+
+        """
 
         Example use:
             (Note: This is a simplified example that doesn't actually make a network request)
@@ -156,7 +161,7 @@ class NewDomainFilterPlugin(BasePlugin):
     def _fetch_creation_date(self, domain: str) -> Optional[dt.datetime]:
         """
         Fetches the domain creation date with caching.
-        Uses an in-memory TTL cache (foghorn.cache.TTLCache) and a persistent
+        Uses an in-memory TTL cache (foghorn.cache.FoghornTTLCache) and a persistent
         sqlite3 database for long-term cache.
 
         Inputs:

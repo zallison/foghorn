@@ -1,15 +1,13 @@
-import functools
 import logging
 from typing import Optional
 
 import dns.dnssec
 import dns.flags
 import dns.message
-
-# dnspython imports
 import dns.name
 import dns.rdatatype
 import dns.resolver
+from cachetools import TTLCache, cached
 
 logger = logging.getLogger("foghorn.dnssec")
 
@@ -32,7 +30,7 @@ def _fetch(r: dns.resolver.Resolver, name: dns.name.Name, rdtype: str):
     return r.resolve(name, rdtype, raise_on_no_answer=True)
 
 
-@functools.lru_cache(maxsize=1024)
+@cached(cache=TTLCache(maxsize=1024, ttl=30))
 def _root_dnskey_rrset() -> Optional[dns.rrset.RRset]:
     try:
         # Parse constant DNSKEY line into an rrset
@@ -51,7 +49,15 @@ def _root_dnskey_rrset() -> Optional[dns.rrset.RRset]:
 def _find_zone_apex(
     r: dns.resolver.Resolver, qname: dns.name.Name
 ) -> Optional[dns.name.Name]:
-    # Walk labels upwards until DNSKEY exists
+    """Return the closest zone apex that publishes a DNSKEY for qname.
+
+    Inputs:
+      - r: Resolver configured with DO and appropriate EDNS payload size.
+      - qname: dns.name.Name to locate the apex for.
+
+    Outputs:
+      - dns.name.Name representing the apex (may be "."), or None on error.
+    """
     n = qname
     while True:
         try:
@@ -152,6 +158,48 @@ def _validate_chain(
         return None
 
 
+@cached(cache=TTLCache(maxsize=1024, ttl=120))
+def _find_zone_apex_cached(
+    qname_text: str, udp_payload_size: int
+) -> Optional[dns.name.Name]:
+    """Resolve and cache the DNSSEC apex for a given qname/UDP payload size.
+
+    Inputs:
+      - qname_text: Query name as text.
+      - udp_payload_size: EDNS payload size used when probing for DNSKEY.
+
+    Outputs:
+      - dns.name.Name apex when a DNSKEY RRset is found, or None on error.
+    """
+    try:
+        r = _resolver(payload_size=udp_payload_size)
+        qname = dns.name.from_text(qname_text)
+        return _find_zone_apex(r, qname)
+    except Exception:
+        return None
+
+
+@cached(cache=TTLCache(maxsize=1024, ttl=120))
+def _validate_chain_cached(
+    apex_text: str, udp_payload_size: int
+) -> Optional[dns.rrset.RRset]:
+    """Validate and cache the DNSKEY rrset at apex back to the root anchor.
+
+    Inputs:
+      - apex_text: Apex name in text form (e.g. "example.com.").
+      - udp_payload_size: EDNS payload size for validation fetches.
+
+    Outputs:
+      - dns.rrset.RRset when the chain validates, or None on error.
+    """
+    try:
+        r = _resolver(payload_size=udp_payload_size)
+        apex = dns.name.from_text(apex_text)
+        return _validate_chain(r, apex)
+    except Exception:
+        return None
+
+
 def validate_response_local(
     qname_text: str,
     qtype_num: int,
@@ -192,13 +240,19 @@ def validate_response_local(
         if answer_rrset is None or rrsig_rrset is None:
             # No signatures to validate
             return False
-        r = _resolver(payload_size=udp_payload_size)
-        apex = _find_zone_apex(r, qname)
+
+        # Resolve the DNSSEC apex using a cached helper so repeated validations
+        # for the same name and payload size avoid re-walking the hierarchy.
+        apex = _find_zone_apex_cached(qname_text, udp_payload_size)
         if apex is None:
             return False
-        zone_dnskey = _validate_chain(r, apex)
+
+        # Validate the key chain for the apex via a cached helper; this avoids
+        # repeated DNSKEY/DS fetches and signature checks for popular zones.
+        zone_dnskey = _validate_chain_cached(apex.to_text(), udp_payload_size)
         if zone_dnskey is None:
             return False
+
         # Validate answer with zone's DNSKEY
         try:
             dns.dnssec.validate(answer_rrset, rrsig_rrset, {apex: zone_dnskey})

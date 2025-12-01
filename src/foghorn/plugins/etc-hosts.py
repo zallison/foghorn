@@ -235,6 +235,9 @@ class EtcHosts(BasePlugin):
             otherwise None.
 
         """
+        if not self.targets(ctx):
+            return None
+
         if qtype not in (QTYPE.A, QTYPE.AAAA):
             return None
 

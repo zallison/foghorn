@@ -238,3 +238,21 @@ def test_access_control_no_rules_default_deny(tmp_path):
     ctx = PluginContext(client_ip="203.0.113.1")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
     assert decision.action == "deny"
+
+
+def test_access_control_respects_baseplugin_targets(tmp_path):
+    """Brief: AccessControlPlugin returns None when client is not targeted.
+
+    Inputs:
+      - targets: ["10.0.0.0/8"]
+      - default: deny
+
+    Outputs:
+      - None; asserts pre_resolve returns None instead of deny when the
+        client_ip is outside the targets set.
+    """
+    plugin = AccessControlPlugin(default="deny", targets=["10.0.0.0/8"])
+    plugin.setup()
+    ctx = PluginContext(client_ip="192.0.2.1")
+    decision = plugin.pre_resolve("example.com", 1, b"", ctx)
+    assert decision is None

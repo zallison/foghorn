@@ -5,14 +5,14 @@ import time
 from typing import Dict, Tuple
 
 
-class TTLCache:
+class FoghornTTLCache:
     """
     Thread-safe in-memory cache with Time-To-Live (TTL) support.
 
     Inputs:
         None (constructor)
     Outputs:
-        TTLCache instance
+        FoghornTTLCache instance
 
     Notes:
         All dictionary operations are synchronized with an RLock.
@@ -20,8 +20,8 @@ class TTLCache:
 
     Example use:
         >>> import time
-        >>> from foghorn.cache import TTLCache
-        >>> cache = TTLCache()
+        >>> from foghorn.cache import FoghornTTLCache
+        >>> cache = FoghornTTLCache()
         >>> key = ("example.com", 1) # QNAME, QTYPE
         >>> cache.set(key, 60, b"dns-response-data")
         >>> cache.get(key)
@@ -33,7 +33,7 @@ class TTLCache:
 
     def __init__(self) -> None:
         """
-        Initializes the TTLCache.
+        Initializes the FoghornTTLCache.
 
         Inputs:
             None
@@ -41,7 +41,7 @@ class TTLCache:
             None
 
         Example use:
-            >>> cache = TTLCache()
+            >>> cache = FoghornTTLCache()
             >>> cache._store
             {}
         """
@@ -60,7 +60,7 @@ class TTLCache:
             The cached data, or None if the key is not found or has expired.
 
         Example use:
-            >>> cache = TTLCache()
+            >>> cache = FoghornTTLCache()
             >>> cache.set(("example.com", 1), 60, b"data")
             >>> cache.get(("example.com", 1))
             b'data'
@@ -89,7 +89,7 @@ class TTLCache:
             None
 
         Example use:
-            >>> cache = TTLCache()
+            >>> cache = FoghornTTLCache()
             >>> cache.set(("example.com", 1), 60, b"data")
             >>> cache.get(("example.com", 1))
             b'data'
@@ -110,7 +110,7 @@ class TTLCache:
             Number of entries removed.
 
         Example use:
-            >>> cache = TTLCache()
+            >>> cache = FoghornTTLCache()
             >>> removed = cache.purge_expired()
         """
         with self._lock:
