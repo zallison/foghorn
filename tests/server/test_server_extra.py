@@ -91,6 +91,26 @@ def test__ensure_edns_does_not_crash_in_all_modes(monkeypatch):
         assert len(sock.sent) >= 1
 
 
+def test__ensure_edns_sets_do_bit_for_validate_mode():
+    """Brief: EDNS flags helper sets DO only for passthrough/validate modes.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None; asserts DO bit mapping for dnssec_mode values.
+    """
+    from foghorn.udp_server import _edns_flags_for_mode
+
+    flags_ignore = _edns_flags_for_mode("ignore")
+    flags_passthrough = _edns_flags_for_mode("passthrough")
+    flags_validate = _edns_flags_for_mode("validate")
+
+    assert flags_ignore & 0x8000 == 0
+    assert flags_passthrough & 0x8000 == 0x8000
+    assert flags_validate & 0x8000 == 0x8000
+
+
 def test__cache_store_if_applicable_variants():
     """
     Brief: Cover NOERROR/answers with TTL>0, TTL=0, SERVFAIL not cached, other rcodes no-answers.

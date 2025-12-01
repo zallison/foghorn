@@ -13,7 +13,7 @@ Brief:
   will be tightened as the iterative algorithm is implemented.
 """
 
-from dnslib import NS, QTYPE, RCODE, RR, A, DNSRecord
+from dnslib import NS, QTYPE, RCODE, RR, A, DNSRecord, SOA
 
 from foghorn import recursive_resolver as rr
 
@@ -614,3 +614,510 @@ def test_resolve_iterative_ignores_expired_negative_and_queries_root(
     assert resp.header.rcode == RCODE.NOERROR
     # We must have contacted the root authority once.
     assert len(transport.calls) == 1
+
+
+def test_get_root_servers_returns_copy() -> None:
+    """Brief: get_root_servers returns a list copy of ROOT_HINTS.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - Ensures modifications to the returned list do not affect ROOT_HINTS.
+    """
+
+    roots1 = rr.get_root_servers()
+    roots2 = rr.get_root_servers()
+
+    assert isinstance(roots1, list)
+    assert roots1 is not roots2
+    assert tuple(roots1) == rr.ROOT_HINTS
+
+    # Mutate the returned list and confirm ROOT_HINTS is unchanged.
+    popped = roots1.pop()
+    assert popped in rr.ROOT_HINTS
+    assert tuple(roots2) == rr.ROOT_HINTS
+
+
+def test_lookup_cached_authorities_single_label_qname(monkeypatch) -> None:
+    """Brief: single-label qname yields no cached authorities.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that _lookup_cached_authorities_for_qname returns an empty list
+        for names like 'com' and that root hints are consulted instead.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config()
+
+    # Transport that answers successfully so that resolution can complete.
+    q = DNSRecord.question("com", "A")
+    r = q.reply()
+    r.header.rcode = RCODE.NOERROR
+    answer_wire = r.pack()
+
+    class _AnsweringTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return answer_wire, None
+
+    transport = _AnsweringTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.60", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "com",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+    # Only the root authority should have been contacted.
+    assert {call[0].host for call in transport.calls} == {"192.0.2.60"}
+
+
+def test_lookup_cached_authorities_ignores_unparsable_rrset(monkeypatch) -> None:
+    """Brief: unparsable cached NS RRset is ignored when picking authorities.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that a cached RRset whose wire cannot be parsed is skipped and
+        that the resolver falls back to root hints.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config(now_ms=1_000_000)
+
+    # Store an RRsetEntry with invalid DNS wire so DNSRecord.parse raises.
+    key = rr.RRsetKey(name="example.com", rrtype=QTYPE.NS)
+    cache.store_rrset(
+        key,
+        rr.RRsetEntry(rrset_wire=b"not-a-dns-rrset", expires_at_ms=2_000_000),
+    )
+
+    # Upstream root authority will still answer successfully.
+    q = DNSRecord.question("www.example.com", "A")
+    r = q.reply()
+    r.header.rcode = RCODE.NOERROR
+    answer_wire = r.pack()
+
+    class _AnsweringTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return answer_wire, None
+
+    transport = _AnsweringTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.61", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "www.example.com",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+    # The bad RRset must not prevent use of the root authority.
+    assert {call[0].host for call in transport.calls} == {"192.0.2.61"}
+
+
+def test_lookup_cached_authorities_ignores_rrset_without_ns(monkeypatch) -> None:
+    """Brief: cached RRset without any NS records is ignored.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that an RRset containing only non-NS records is skipped and
+        that root hints are used instead.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config(now_ms=1_000_000)
+
+    # Build an RRset containing only a SOA record in the authority section.
+    rrset = DNSRecord()
+    soa_rdata = SOA(
+        mname="ns.example.com.",
+        rname="hostmaster.example.com.",
+        times=(1, 2, 3, 4, 5),
+    )
+    rrset.add_auth(
+        RR("example.com", QTYPE.SOA, rdata=soa_rdata, ttl=300),
+    )
+    rrset_wire = rrset.pack()
+
+    key = rr.RRsetKey(name="example.com", rrtype=QTYPE.NS)
+    cache.store_rrset(
+        key,
+        rr.RRsetEntry(rrset_wire=rrset_wire, expires_at_ms=2_000_000),
+    )
+
+    # Upstream root authority will still answer successfully.
+    q = DNSRecord.question("www.example.com", "A")
+    r = q.reply()
+    r.header.rcode = RCODE.NOERROR
+    answer_wire = r.pack()
+
+    class _AnsweringTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return answer_wire, None
+
+    transport = _AnsweringTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.62", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "www.example.com",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+    assert {call[0].host for call in transport.calls} == {"192.0.2.62"}
+
+
+def test_lookup_cached_authorities_falls_back_to_ns_hostname(monkeypatch) -> None:
+    """Brief: cached NS RRset without usable glue falls back to NS hostname.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that when there is NS data but no in-bailiwick A/AAAA glue, the
+        resolver constructs an AuthorityEndpoint using the NS hostname.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config(now_ms=1_000_000)
+
+    # RRset with NS in authority section but only non-address records in
+    # additional section, so glue_by_name remains empty.
+    rrset = DNSRecord()
+    rrset.add_auth(
+        RR("example.com", QTYPE.NS, rdata=NS("ns.example.com."), ttl=300),
+    )
+    # Use an NS record in additional to ensure the glue filter skips it.
+    rrset.add_ar(
+        RR("ns.example.com", QTYPE.NS, rdata=NS("other.example.net."), ttl=300),
+    )
+    rrset_wire = rrset.pack()
+
+    key = rr.RRsetKey(name="example.com", rrtype=QTYPE.NS)
+    cache.store_rrset(
+        key,
+        rr.RRsetEntry(rrset_wire=rrset_wire, expires_at_ms=2_000_000),
+    )
+
+    # Upstream authority reached via the NS hostname returns a simple NOERROR
+    # answer.
+    q = DNSRecord.question("www.example.com", "A")
+    r = q.reply()
+    r.header.rcode = RCODE.NOERROR
+    answer_wire = r.pack()
+
+    class _AnsweringTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            assert authority.host == "ns.example.com"
+            return answer_wire, None
+
+    transport = _AnsweringTransport()
+
+    # Root hints should not be consulted because cached authorities are usable.
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [])
+
+    wire, trace = rr.resolve_iterative(
+        "www.example.com",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+    assert len(transport.calls) == 1
+
+
+def test_negative_cache_string_qtype_builds_cached_response() -> None:
+    """Brief: negative cache fast path works when qtype is a string.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - Ensures the NegativeEntry path builds a response using the cached
+        rcode and never invokes the transport.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config(now_ms=1_000_000)
+    transport = _FakeTransport()
+
+    cache.store_negative(
+        "neg-string-qtype.example",
+        "A",
+        rr.NegativeEntry(
+            rcode=RCODE.NXDOMAIN,
+            soa_owner="example.com.",
+            expires_at_ms=2_000_000,
+        ),
+    )
+
+    wire, trace = rr.resolve_iterative(
+        "neg-string-qtype.example",
+        "A",
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NXDOMAIN
+    assert trace.from_cache is True
+    assert trace.final_rcode == RCODE.NXDOMAIN
+    assert any(h.step == "cache_hit" and h.detail == "negative_cache" for h in trace.hops)
+    assert transport.calls == []
+
+
+def test_global_timeout_budget_exhausted_before_query(monkeypatch) -> None:
+    """Brief: overall timeout budget exhaustion yields SERVFAIL.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that when the global timeout budget is already exhausted before
+        the first authority query, the resolver reports
+        'timeout_budget_exhausted'.
+    """
+
+    cache = _FakeCache()
+    transport = _FakeTransport()
+
+    tick = 0
+
+    def _fake_now() -> int:
+        nonlocal tick
+        return tick
+
+    cfg = rr.ResolverConfig(
+        dnssec_mode="ignore",
+        edns_udp_payload=1232,
+        timeout_ms=1000,
+        per_try_timeout_ms=500,
+        max_depth=4,
+        now_ms=_fake_now,
+    )
+
+    # Advance the clock after the initial cache lookup so that by the time the
+    # main loop runs, the budget is exhausted.
+    def _lookup_answer_and_advance(qname: str, qtype: int) -> rr.AnswerEntry | None:
+        nonlocal tick
+        tick = 2_000
+        return None
+
+    cache.lookup_answer = _lookup_answer_and_advance  # type: ignore[assignment]
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.63", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "timeout-budget.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.SERVFAIL
+    assert trace.exceeded_budget is True
+    assert trace.error == "timeout_budget_exhausted"
+    assert transport.calls == []
+
+
+def test_per_try_timeout_budget_exhausted_without_global_timeout(monkeypatch) -> None:
+    """Brief: per-try timeout exhaustion with disabled global timeout.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that when timeout_ms is zero and per_try_timeout_ms is also
+        zero, the resolver reports 'timeout_budget_exhausted' before issuing a
+        transport query.
+    """
+
+    cache = _FakeCache()
+    transport = _FakeTransport()
+
+    cfg = rr.ResolverConfig(
+        dnssec_mode="ignore",
+        edns_udp_payload=1232,
+        timeout_ms=0,
+        per_try_timeout_ms=0,
+        max_depth=4,
+        now_ms=lambda: 0,
+    )
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.64", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "timeout-per-try.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.SERVFAIL
+    assert trace.exceeded_budget is True
+    assert trace.error == "timeout_budget_exhausted"
+    assert transport.calls == []
+
+
+def test_referral_ignores_non_address_glue_records(monkeypatch) -> None:
+    """Brief: referral path skips non-A/AAAA records in the additional section.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that glue filtering in referral handling ignores non-address
+        records and still uses any A glue that is present.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config()
+
+    q = DNSRecord.question("www.glue-filter.example", "A")
+
+    # Root reply: NOERROR, no answers, NS in authority, both non-address and
+    # address records in additional.
+    root_reply = q.reply()
+    root_reply.header.rcode = RCODE.NOERROR
+    root_reply.add_auth(
+        RR("example.com", QTYPE.NS, rdata=NS("ns.example.com."), ttl=300)
+    )
+    # First additional record is an NS (non-address) that should be ignored.
+    root_reply.add_ar(
+        RR("ns.example.com", QTYPE.NS, rdata=NS("ignored.example.net."), ttl=300),
+    )
+    # Second additional record is the actual A glue that should be used.
+    root_reply.add_ar(RR("ns.example.com", QTYPE.A, rdata=A("198.51.100.200"), ttl=300))
+    root_wire = root_reply.pack()
+
+    # Child authority reply: final NOERROR answer.
+    child_reply = q.reply()
+    child_reply.header.rcode = RCODE.NOERROR
+    child_reply.add_answer(
+        RR("www.glue-filter.example", QTYPE.A, rdata=A("203.0.113.200"), ttl=300)
+    )
+    child_wire = child_reply.pack()
+
+    class _ReferralTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            if authority.host == "192.0.2.65":
+                return root_wire, None
+            assert authority.host == "198.51.100.200"
+            return child_wire, None
+
+    transport = _ReferralTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.65", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "www.glue-filter.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+    steps = [h.step for h in trace.hops]
+    assert "referral" in steps
+    assert "answer" in steps
+
+
+def test_negative_caching_for_nxdomain_with_soa(monkeypatch) -> None:
+    """Brief: NXDOMAIN with SOA in authority populates the negative cache.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that a final NXDOMAIN answer carrying an SOA results in a
+        NegativeEntry with an expiry derived from the TTL.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config(now_ms=1_000_000)
+
+    q = DNSRecord.question("nx.example", "A")
+    root_reply = q.reply()
+    root_reply.header.rcode = RCODE.NXDOMAIN
+    soa_rdata = SOA(
+        mname="ns.example.com.",
+        rname="hostmaster.example.com.",
+        times=(1, 2, 3, 4, 300),
+    )
+    root_reply.add_auth(
+        RR("example.com", QTYPE.SOA, rdata=soa_rdata, ttl=300),
+    )
+    root_wire = root_reply.pack()
+
+    class _NXTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return root_wire, None
+
+    transport = _NXTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.66", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "nx.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NXDOMAIN
+    assert trace.final_rcode == RCODE.NXDOMAIN
+
+    # The negative cache should now contain an entry for (qname, qtype).
+    key = ("nx.example", QTYPE.A)
+    assert key in cache.negatives
+    neg_entry = cache.negatives[key]
+    assert neg_entry.rcode == RCODE.NXDOMAIN
+    assert neg_entry.soa_owner == "example.com"
+    assert neg_entry.expires_at_ms == 1_000_000 + 300 * 1000
