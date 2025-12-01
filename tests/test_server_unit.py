@@ -11,11 +11,8 @@ Outputs:
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 from foghorn.cache import FoghornTTLCache
-from foghorn.server import (
-    DNSUDPHandler,
-    compute_effective_ttl,
-    send_query_with_failover,
-)
+from foghorn.server import (DNSUDPHandler, compute_effective_ttl,
+                            send_query_with_failover)
 from foghorn.udp_server import _set_response_id
 
 
