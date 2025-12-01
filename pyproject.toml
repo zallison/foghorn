@@ -31,7 +31,6 @@ dependencies = [
 [optional-dependencies]
 dev = [
    "black",
-   "ipython",
    "ruff",
    "isort",
 ]
