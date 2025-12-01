@@ -19,7 +19,8 @@ from unittest.mock import mock_open, patch
 import pytest
 
 import foghorn.main as main_mod
-from foghorn.main import _clear_lru_caches, normalize_upstream_config, run_setup_plugins
+from foghorn.main import (_clear_lru_caches, normalize_upstream_config,
+                          run_setup_plugins)
 from foghorn.plugins.base import BasePlugin
 
 
