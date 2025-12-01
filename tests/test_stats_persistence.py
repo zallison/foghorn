@@ -67,7 +67,11 @@ def test_stats_collector_load_from_snapshot_restores_core_counters() -> None:
         track_latency=False,
     )
     snap_before = target.snapshot(reset=False)
-    assert snap_before.totals == {}
+    # New snapshots always include baseline pre-plugin cache counters at 0.
+    assert snap_before.totals == {
+        'cache_deny_pre': 0,
+        'cache_override_pre': 0,
+    }
     assert snap_before.rcodes == {}
     assert snap_before.qtypes == {}
     assert snap_before.upstreams == {}
