@@ -5,8 +5,14 @@ import logging
 import threading
 import time
 
-from foghorn.stats import (LatencyHistogram, StatsCollector, StatsReporter,
-                           TopK, _normalize_domain, format_snapshot_json)
+from foghorn.stats import (
+    LatencyHistogram,
+    StatsCollector,
+    StatsReporter,
+    TopK,
+    _normalize_domain,
+    format_snapshot_json,
+)
 
 
 class TestDomainNormalization:
