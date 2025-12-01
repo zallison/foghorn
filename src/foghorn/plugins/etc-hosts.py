@@ -7,6 +7,8 @@ import threading
 import time
 from typing import Dict, Iterable, List, Optional
 
+from pydantic import BaseModel, Field
+
 from dnslib import AAAA, QTYPE, RR, A, DNSHeader, DNSRecord
 
 try:  # watchdog is used for cross-platform file watching
@@ -26,6 +28,32 @@ from foghorn.plugins.base import (
 logger = logging.getLogger(__name__)
 
 
+class EtcHostsConfig(BaseModel):
+    """Brief: Typed configuration model for EtcHosts.
+
+    Inputs:
+      - file_path: Legacy single hosts file path.
+      - file_paths: Preferred list of hosts file paths.
+      - watchdog_enabled: Enable watchdog-based reloads.
+      - watchdog_min_interval_seconds: Minimum seconds between reloads.
+      - watchdog_poll_interval_seconds: Optional polling interval.
+      - ttl: Response TTL in seconds.
+
+    Outputs:
+      - EtcHostsConfig instance with normalized field types.
+    """
+
+    file_path: Optional[str] = None
+    file_paths: Optional[List[str]] = None
+    watchdog_enabled: Optional[bool] = None
+    watchdog_min_interval_seconds: float = Field(default=1.0, ge=0)
+    watchdog_poll_interval_seconds: float = Field(default=0.0, ge=0)
+    ttl: int = Field(default=300, ge=0)
+
+    class Config:
+        extra = "allow"
+
+
 @plugin_aliases("hosts", "etc-hosts", "/etc/hosts")
 class EtcHosts(BasePlugin):
     """
@@ -35,6 +63,19 @@ class EtcHosts(BasePlugin):
     multiple files; when the same hostname appears in more than one file, entries
     from later files override earlier ones.
     """
+
+    @classmethod
+    def get_config_model(cls):
+        """Brief: Return the Pydantic model used to validate plugin configuration.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - EtcHostsConfig class for use by the core config loader.
+        """
+
+        return EtcHostsConfig
 
     def setup(self) -> None:
         """

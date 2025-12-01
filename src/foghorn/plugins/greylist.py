@@ -7,10 +7,36 @@ import threading
 import time
 from typing import Optional
 
+from pydantic import BaseModel, Field
+
 from foghorn.cache import FoghornTTLCache
 from foghorn.plugins.base import BasePlugin, PluginContext, PluginDecision
 
 log = logging.getLogger(__name__)
+
+
+class GreylistConfig(BaseModel):
+    """Brief: Typed configuration model for GreylistPlugin.
+
+    Inputs:
+      - duration_seconds: Greylist window in seconds.
+      - duration_hours: Legacy hours-based window.
+      - db_path: Path to sqlite DB.
+      - cache_ttl_seconds: TTL for in-memory cache.
+      - cache_max_entries: Max entries in cache.
+
+    Outputs:
+      - GreylistConfig instance with normalized field types.
+    """
+
+    duration_seconds: Optional[int] = Field(default=None, ge=0)
+    duration_hours: int = Field(default=24, ge=0)
+    db_path: str = Field(default="./config/var/greylist.db")
+    cache_ttl_seconds: int = Field(default=300, ge=0)
+    cache_max_entries: int = Field(default=100000, ge=0)
+
+    class Config:
+        extra = "allow"
 
 
 class GreylistPlugin(BasePlugin):
@@ -32,6 +58,19 @@ class GreylistPlugin(BasePlugin):
     - Once allowed after window: permanently allowed (until data is purged externally)
     - No schema changes: uses existing first_seen timestamp without updates
     """
+
+    @classmethod
+    def get_config_model(cls):
+        """Brief: Return the Pydantic model used to validate plugin configuration.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - GreylistConfig class for use by the core config loader.
+        """
+
+        return GreylistConfig
 
     def start(self, **config):
         """

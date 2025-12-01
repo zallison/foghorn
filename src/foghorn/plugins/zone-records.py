@@ -8,6 +8,7 @@ import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from dnslib import QTYPE, RCODE, RR, DNSHeader, DNSRecord
+from pydantic import BaseModel, Field
 
 try:  # watchdog is used for cross-platform file watching
     from watchdog.events import FileSystemEventHandler
@@ -26,8 +27,47 @@ from foghorn.plugins.base import (
 logger = logging.getLogger(__name__)
 
 
+class ZoneRecordsConfig(BaseModel):
+    """Brief: Typed configuration model for ZoneRecords.
+
+    Inputs:
+      - file_path: Legacy single records file path.
+      - file_paths: Preferred list of records file paths.
+      - watchdog_enabled: Enable watchdog-based reloads.
+      - watchdog_min_interval_seconds: Minimum seconds between reloads.
+      - watchdog_poll_interval_seconds: Optional polling interval.
+      - ttl: Default TTL in seconds.
+
+    Outputs:
+      - ZoneRecordsConfig instance with normalized field types.
+    """
+
+    file_path: Optional[str] = None
+    file_paths: Optional[List[str]] = None
+    watchdog_enabled: Optional[bool] = None
+    watchdog_min_interval_seconds: float = Field(default=1.0, ge=0)
+    watchdog_poll_interval_seconds: float = Field(default=0.0, ge=0)
+    ttl: int = Field(default=300, ge=0)
+
+    class Config:
+        extra = "allow"
+
+
 @plugin_aliases("zone", "zone_records", "custom", "records")
 class ZoneRecords(BasePlugin):
+
+    @classmethod
+    def get_config_model(cls):
+        """Brief: Return the Pydantic model used to validate plugin configuration.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - ZoneRecordsConfig class for use by the core config loader.
+        """
+
+        return ZoneRecordsConfig
 
     def setup(self) -> None:
         """

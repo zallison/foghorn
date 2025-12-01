@@ -4,15 +4,80 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from dnslib import RCODE, DNSRecord
+from pydantic import BaseModel, Field
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
 logger = logging.getLogger(__name__)
 
 
+class UpstreamRouteTarget(BaseModel):
+    """Brief: Single upstream target host/port pair.
+
+    Inputs:
+      - host: Upstream DNS host.
+      - port: Upstream DNS port.
+
+    Outputs:
+      - UpstreamRouteTarget instance with normalized types.
+    """
+
+    host: str
+    port: int = Field(ge=1, le=65535)
+
+
+class UpstreamRoute(BaseModel):
+    """Brief: Route definition for UpstreamRouterPlugin.
+
+    Inputs:
+      - domain: Exact domain to match.
+      - suffix: Suffix to match (without leading dot).
+      - upstreams: List of upstream targets.
+
+    Outputs:
+      - UpstreamRoute instance with normalized types.
+    """
+
+    domain: Optional[str] = None
+    suffix: Optional[str] = None
+    upstreams: List[UpstreamRouteTarget] = Field(default_factory=list)
+
+    class Config:
+        extra = "allow"
+
+
+class UpstreamRouterConfig(BaseModel):
+    """Brief: Typed configuration model for UpstreamRouterPlugin.
+
+    Inputs:
+      - routes: List of UpstreamRoute definitions.
+
+    Outputs:
+      - UpstreamRouterConfig instance with normalized field types.
+    """
+
+    routes: List[UpstreamRoute] = Field(default_factory=list)
+
+    class Config:
+        extra = "allow"
+
+
 @plugin_aliases("upstream_router", "router", "upstream")
 class UpstreamRouterPlugin(BasePlugin):
     """Routes queries to different upstream DNS servers based on the queried domain, with failover."""
+
+    @classmethod
+    def get_config_model(cls):
+        """Brief: Return the Pydantic model used to validate plugin configuration.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - UpstreamRouterConfig class for use by the core config loader.
+        """
+
+        return UpstreamRouterConfig
 
     def __init__(self, **config):
         """

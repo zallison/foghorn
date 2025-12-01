@@ -12,6 +12,8 @@ import threading
 import time
 from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
 
+from pydantic import BaseModel, Field
+
 from dnslib import AAAA as RDATA_AAAA
 from dnslib import QTYPE, RCODE
 from dnslib import A as RDATA_A
@@ -22,6 +24,57 @@ from foghorn.cache import FoghornTTLCache
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
 logger = logging.getLogger(__name__)
+
+
+class FilterConfig(BaseModel):
+    """Brief: Typed configuration model for FilterPlugin.
+
+    Inputs:
+      - cache_ttl_seconds: TTL for domain cache.
+      - db_path: Path to blocklist SQLite DB.
+      - default: Default policy ("allow" or "deny").
+      - ttl: TTL for synthesized responses.
+      - deny_response: Policy for deny responses.
+      - deny_response_ip4 / deny_response_ip6: Optional IPs for IP-mode denies.
+      - blocklist_files / allowlist_files / *_domains_files: List paths.
+      - blocked_domains / allowed_domains: Inline domain lists.
+      - blocked_patterns / blocked_patterns_files: Regexes.
+      - blocked_keywords / blocked_keywords_files: Keywords.
+      - blocked_ips / blocked_ips_files: IP rules.
+
+    Outputs:
+      - FilterConfig instance with normalized field types.
+    """
+
+    cache_ttl_seconds: int = Field(default=600, ge=0)
+    db_path: str = Field(default="./config/var/blocklist.db")
+    default: str = Field(default="deny")
+    ttl: int = Field(default=300, ge=0)
+    deny_response: str = Field(default="nxdomain")
+    deny_response_ip4: Optional[str] = None
+    deny_response_ip6: Optional[str] = None
+
+    blocklist_files: List[str] = Field(default_factory=list)
+    allowlist_files: List[str] = Field(default_factory=list)
+    blocked_domains_files: List[str] = Field(default_factory=list)
+    allowed_domains_files: List[str] = Field(default_factory=list)
+
+    blocked_domains: List[str] = Field(default_factory=list)
+    allowed_domains: List[str] = Field(default_factory=list)
+
+    blocked_patterns: List[str] = Field(default_factory=list)
+    blocked_patterns_files: List[str] = Field(default_factory=list)
+
+    blocked_keywords: List[str] = Field(default_factory=list)
+    blocked_keywords_files: List[str] = Field(default_factory=list)
+
+    blocked_ips: List[Union[str, Dict[str, object]]] = Field(default_factory=list)
+    blocked_ips_files: List[str] = Field(default_factory=list)
+
+    clear: int = Field(default=1, ge=0)
+
+    class Config:
+        extra = "allow"
 
 
 @plugin_aliases("filter", "block", "allow")
@@ -73,6 +126,19 @@ class FilterPlugin(BasePlugin):
               #   - "192.0.2.1"
               #   - "198.51.100.0/24"
     """
+
+    @classmethod
+    def get_config_model(cls):
+        """Brief: Return the Pydantic model used to validate plugin configuration.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - FilterConfig class for use by the core config loader.
+        """
+
+        return FilterConfig
 
     def setup(self):
         """
@@ -709,6 +775,10 @@ class FilterPlugin(BasePlugin):
         Returns:
             Iterator of (line_number, text) for each meaningful line.
 
+        Notes:
+            Lines starting with either '#' or '!' are treated as comments so
+            that AdGuard/Adblock-style list files are parsed correctly.
+
         Example:
             >>> # doctest: +SKIP
             >>> for ln, text in FilterPlugin._iter_noncomment_lines('file.txt'):
@@ -717,7 +787,7 @@ class FilterPlugin(BasePlugin):
         with open(path, "r", encoding="utf-8") as fh:
             for idx, raw in enumerate(fh, start=1):
                 line = raw.strip()
-                if not line or line.startswith("#"):
+                if not line or line.startswith("#") or line.startswith("!"):
                     continue
                 yield idx, line
 
@@ -992,13 +1062,27 @@ class FilterPlugin(BasePlugin):
             Inputs:
               - token: raw domain token
             Outputs:
-              - normalized token with Adblock-style wrappers removed
+              - normalized token with AdGuard/Adblock-style wrappers removed.
 
-            If the token starts with '||' and ends with '^', those wrappers are stripped.
+            Behaviour:
+              - If the token starts with '||', the prefix is removed.
+              - If a caret ('^') is present, the caret must be the last
+                non-whitespace character on the line; otherwise the token is
+                ignored. For a valid AdGuard-style token like '||domain.com^',
+                the resulting domain is 'domain.com'.
             """
             t = token.strip()
-            if t.startswith("||") and t.endswith("^"):
-                t = t[2:-1]
+            if t.startswith("||"):
+                # Drop the leading '||'.
+                t = t[2:]
+                caret_idx = t.find("^")
+                if caret_idx != -1:
+                    # Anything non-whitespace after the caret means we ignore
+                    # this token entirely (e.g. '||domain.com^$third-party').
+                    rest = t[caret_idx + 1 :]
+                    if rest.strip():
+                        return ""
+                    t = t[:caret_idx]
             return t
 
         logger.debug("Opening %s for %s", filename, mode)
@@ -1007,7 +1091,9 @@ class FilterPlugin(BasePlugin):
             with open(filename, "r", encoding="utf-8") as fh:
                 for raw in fh:
                     line = raw.strip()
-                    if not line or line.startswith("#"):
+                    # Treat both '#' and '!' as comment prefixes so that
+                    # AdGuard-style list comments are ignored.
+                    if not line or line.startswith("#") or line.startswith("!"):
                         continue
                     eff_mode = mode
                     domain_val = None
@@ -1042,27 +1128,45 @@ class FilterPlugin(BasePlugin):
 
     def is_allowed(self, domain: str) -> bool:
         """
-        Return True if the domain is allowed by exact match.
+        Return True if the domain is allowed by exact or suffix match.
 
         Inputs:
             domain: Domain name to check.
         Outputs:
             True when mode is "allow" or not blocked and the default is allow.
+
+        Behaviour:
+            - Looks up the exact domain first.
+            - If no exact match is found, progressively checks parent-domain
+              suffixes (e.g., 'sub.example.com' -> 'example.com' -> 'com').
+            - The most specific matching suffix determines allow/deny, enabling
+              list entries like 'example.com' to apply to all subdomains while
+              still allowing overrides such as 'allow.example.com'.
         """
         # Normalize to a plain string to avoid sqlite InterfaceError when callers
         # pass dnslib labels or other non-str objects.
         normalized = str(domain).rstrip(".")
 
+        # Prepare candidate suffixes from most specific to least specific.
+        labels = normalized.split(".") if normalized else []
+        candidates = [
+            ".".join(labels[i:]) for i in range(len(labels))
+        ] if labels else [normalized]
+
         # SQLite connections are not safe for concurrent use from multiple
         # threads without external locking, even with check_same_thread=False.
         # The DNS server uses ThreadingUDPServer, so guard DB access with a
         # per-plugin lock to prevent "bad parameter or other API misuse".
+        row = None
         with self._db_lock:
-            cur = self.conn.execute(
-                "SELECT mode FROM blocked_domains WHERE domain = ?",
-                (normalized,),
-            )
-            row = cur.fetchone()
+            for cand in candidates:
+                cur = self.conn.execute(
+                    "SELECT mode FROM blocked_domains WHERE domain = ?",
+                    (cand,),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    break
 
         allowed: bool = self.default == "allow"
         if row:
