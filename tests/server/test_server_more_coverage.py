@@ -259,6 +259,110 @@ def test_dnssec_validate_mode_upstream_ad_and_local_paths(monkeypatch):
     srv.DNSUDPHandler.plugins = []
     srv.DNSUDPHandler.cache = FoghornTTLCache()
 
+
+def test_resolve_query_bytes_negative_caches_nxdomain_with_soa(monkeypatch):
+    """Brief: resolve_query_bytes should cache NXDOMAIN with SOA authority.
+
+    Inputs:
+      - Fake upstream that always returns NXDOMAIN with an SOA in the
+        authority section.
+
+    Outputs:
+      - Two resolve_query_bytes() calls for the same question trigger exactly
+        one send_query_with_failover() call and both responses are NXDOMAIN.
+    """
+
+    q = DNSRecord.question("neg-cache-nx.example", "A")
+    r = q.reply()
+    r.header.rcode = RCODE.NXDOMAIN
+    # Authority SOA with TTL>0 so that _compute_negative_ttl can derive a TTL.
+    r.add_auth(
+        RR(
+            "neg-cache-nx.example",
+            QTYPE.SOA,
+            rdata=SOA(
+                "ns.neg-cache-nx.example.",
+                "hostmaster.neg-cache-nx.example.",
+                (1, 60, 60, 60, 60),
+            ),
+            ttl=42,
+        )
+    )
+    wire = r.pack()
+
+    calls = {"n": 0}
+
+    def fake_failover(req, upstreams, timeout_ms, qname, qtype):  # noqa: ANN001
+        calls["n"] += 1
+        return wire, upstreams[0], "ok"
+
+    monkeypatch.setattr(srv, "send_query_with_failover", fake_failover)
+
+    srv.DNSUDPHandler.cache = FoghornTTLCache()
+    srv.DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
+    srv.DNSUDPHandler.plugins = []
+    srv.DNSUDPHandler.min_cache_ttl = 5
+
+    resp1 = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
+    resp2 = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
+
+    assert DNSRecord.parse(resp1).header.rcode == RCODE.NXDOMAIN
+    assert DNSRecord.parse(resp2).header.rcode == RCODE.NXDOMAIN
+    # Only the first call should have reached the fake upstream.
+    assert calls["n"] == 1
+
+
+def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
+    """Brief: resolve_query_bytes should cache referrals with NS in authority.
+
+    Inputs:
+      - Fake upstream that returns NOERROR with no answers but an NS RR in the
+        authority section (delegation/referral).
+
+    Outputs:
+      - Two resolve_query_bytes() calls for the same question trigger exactly
+        one send_query_with_failover() call and both responses are NOERROR.
+    """
+
+    q = DNSRecord.question("deleg-cache.example", "A")
+    r = q.reply()  # NOERROR by default, no answers
+    r.add_auth(
+        RR(
+            "deleg-cache.example",
+            QTYPE.NS,
+            rdata=NS("ns1.deleg-cache.example."),
+            ttl=300,
+        )
+    )
+    wire = r.pack()
+
+    calls = {"n": 0}
+
+    def fake_failover(req, upstreams, timeout_ms, qname, qtype):  # noqa: ANN001
+        calls["n"] += 1
+        return wire, upstreams[0], "ok"
+
+    monkeypatch.setattr(srv, "send_query_with_failover", fake_failover)
+
+    srv.DNSUDPHandler.cache = FoghornTTLCache()
+    srv.DNSUDPHandler.upstream_addrs = [{"host": "2.2.2.2", "port": 53}]
+    srv.DNSUDPHandler.plugins = []
+    srv.DNSUDPHandler.min_cache_ttl = 5
+
+    resp1 = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
+    resp2 = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
+
+    assert DNSRecord.parse(resp1).header.rcode == RCODE.NOERROR
+    assert DNSRecord.parse(resp2).header.rcode == RCODE.NOERROR
+    # Only the first call should have reached the fake upstream.
+    assert calls["n"] == 1
+
+
+    # The remainder of this file continues with dnssec validation tests.
+    # Ensure clean slate for those tests.
+    srv.DNSUDPHandler.plugins = []
+    srv.DNSUDPHandler.cache = FoghornTTLCache()
+
     name = "dnssec.example"
     q = DNSRecord.question(name, "A")
 
