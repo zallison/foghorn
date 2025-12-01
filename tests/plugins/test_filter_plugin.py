@@ -12,7 +12,7 @@ import ipaddress
 from contextlib import closing
 
 import pytest
-from dnslib import AAAA, QTYPE, RR, TXT, A, DNSRecord
+from dnslib import AAAA, QTYPE, RR, TXT, A, DNSRecord, RCODE
 
 from foghorn.plugins.base import PluginContext, PluginDecision
 from foghorn.plugins.filter import FilterPlugin
@@ -67,6 +67,72 @@ def test_pre_resolve_block_exact_and_cache(tmp_path):
         # Second call hits cache
         dec2 = p.pre_resolve("blocked.com", QTYPE.A, b"", ctx)
         assert isinstance(dec2, PluginDecision) and dec2.action == "deny"
+
+
+def test_pre_resolve_deny_response_refused(tmp_path):
+    """
+    Brief: deny_response='refused' builds REFUSED override for blocked pre-resolve domain.
+
+    Inputs:
+      - blocked_domains: ['blocked.com']
+      - deny_response: 'refused'
+
+    Outputs:
+      - None: Asserts override decision and REFUSED rcode.
+    """
+    db = tmp_path / "bl.db"
+    p = FilterPlugin(
+        db_path=str(db),
+        blocked_domains=["blocked.com"],
+        default="allow",
+        deny_response="refused",
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+    q, wire = _mk_query("blocked.com", "A")
+
+    with closing(p.conn):
+        dec = p.pre_resolve("blocked.com", QTYPE.A, wire, ctx)
+        assert isinstance(dec, PluginDecision)
+        assert dec.action == "override"
+        assert dec.response is not None
+        reply = DNSRecord.parse(dec.response)
+        assert reply.header.rcode == RCODE.REFUSED
+
+
+def test_pre_resolve_deny_response_ip_override(tmp_path):
+    """
+    Brief: deny_response='ip' returns synthetic A answer pointing at configured IP.
+
+    Inputs:
+      - blocked_domains: ['blocked.com']
+      - deny_response: 'ip'
+      - deny_response_ip4: '192.0.2.55'
+
+    Outputs:
+      - None: Asserts override with A answer equal to deny_response_ip4.
+    """
+    db = tmp_path / "bl.db"
+    p = FilterPlugin(
+        db_path=str(db),
+        blocked_domains=["blocked.com"],
+        default="allow",
+        deny_response="ip",
+        deny_response_ip4="192.0.2.55",
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+    q, wire = _mk_query("blocked.com", "A")
+
+    with closing(p.conn):
+        dec = p.pre_resolve("blocked.com", QTYPE.A, wire, ctx)
+        assert isinstance(dec, PluginDecision)
+        assert dec.action == "override"
+        assert dec.response is not None
+        reply = DNSRecord.parse(dec.response)
+        assert reply.header.rcode == RCODE.NOERROR
+        assert reply.rr
+        assert str(reply.rr[0].rdata) == "192.0.2.55"
 
 
 def test_pre_resolve_allow_keyword_and_pattern(tmp_path, caplog):
@@ -174,6 +240,36 @@ def test_post_resolve_deny_overrides_remove_and_replace_paths(tmp_path):
         assert dec3.action == "override"
         mod = DNSRecord.parse(dec3.response)
         assert str(mod.rr[0].rdata) == "127.0.0.1"
+
+
+def test_post_resolve_deny_response_servfail_for_blocked_ip(tmp_path):
+    """
+    Brief: deny_response='servfail' maps IP-level deny to a SERVFAIL override.
+
+    Inputs:
+      - blocked_ips: [{"ip": "1.2.3.4", "action": "deny"}]
+      - deny_response: 'servfail'
+
+    Outputs:
+      - None: Asserts override response with SERVFAIL rcode.
+    """
+    db = tmp_path / "bl.db"
+    p = FilterPlugin(
+        db_path=str(db),
+        blocked_ips=[{"ip": "1.2.3.4", "action": "deny"}],
+        deny_response="servfail",
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+
+    with closing(p.conn):
+        resp = _mk_response_with_ips("ex.com", [("A", "1.2.3.4", 60)])
+        dec = p.post_resolve("ex.com", QTYPE.A, resp, ctx)
+        assert isinstance(dec, PluginDecision)
+        assert dec.action == "override"
+        assert dec.response is not None
+        reply = DNSRecord.parse(dec.response)
+        assert reply.header.rcode == RCODE.SERVFAIL
 
 
 def test_post_resolve_replace_version_mismatch_and_invalid_runtime(tmp_path):
