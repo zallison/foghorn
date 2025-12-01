@@ -53,6 +53,23 @@ _last_system_info: Dict[str, Any] | None = None
 _last_system_info_ts: float = 0.0
 _SYSTEM_INFO_DETAIL_MODE = "full"  # "full" or "basic"
 
+# Short-lived cache for expensive statistics snapshots shared by /stats and
+# /traffic handlers. This keeps repeated polls from re-snapshotting the
+# StatsCollector multiple times per second.
+_STATS_SNAPSHOT_CACHE_TTL_SECONDS = 1.0
+_STATS_SNAPSHOT_CACHE_LOCK = threading.Lock()
+# Map id(StatsCollector) -> (StatsSnapshot, timestamp)
+_last_stats_snapshots: Dict[int, tuple[StatsSnapshot, float]] = {}
+
+# Short-lived cache for sanitized YAML configuration text returned by /config.
+# The underlying on-disk config rarely changes, so a small TTL avoids repeated
+# disk I/O and redaction work under frequent polling.
+_CONFIG_TEXT_CACHE_TTL_SECONDS = 2.0
+_CONFIG_TEXT_CACHE_LOCK = threading.Lock()
+_last_config_text_key: tuple[str, tuple[str, ...]] | None = None
+_last_config_text: str | None = None
+_last_config_text_ts: float = 0.0
+
 
 class _Suppress2xxAccessFilter(logging.Filter):
     """Logging filter that drops uvicorn access records for HTTP 2xx responses.
@@ -273,6 +290,7 @@ _YAML_LIST_KEY_LINE_RE = re.compile(r"^(\s*)-\s*([^:\s][^:]*)\s*:(.*)$")
 _YAML_LIST_LINE_RE = re.compile(r"^(\s*)-\s*(.*)$")
 
 
+@cached(cache=TTLCache(maxsize=1024, ttl=30))
 def _split_yaml_value_and_comment(rest: str) -> tuple[str, str]:
     """Split the portion of a YAML line after ':' or '-' into value and comment.
 
@@ -411,6 +429,58 @@ def _redact_yaml_text_preserving_layout(
     return redacted
 
 
+def _get_sanitized_config_yaml_cached(
+    cfg: Dict[str, Any], cfg_path: str | None, redact_keys: List[str] | None
+) -> str:
+    """Return sanitized configuration YAML text with a short-lived cache.
+
+    Inputs:
+      - cfg: In-memory configuration mapping.
+      - cfg_path: Optional filesystem path to the active YAML config file.
+      - redact_keys: List of key names whose values should be redacted.
+
+    Outputs:
+      - YAML string with sensitive values redacted.
+    """
+
+    global _last_config_text_key, _last_config_text, _last_config_text_ts
+
+    key = (str(cfg_path or ""), tuple(sorted(str(k) for k in (redact_keys or []))))
+    now = time.time()
+    with _CONFIG_TEXT_CACHE_LOCK:
+        if (
+            _last_config_text is not None
+            and _last_config_text_key == key
+            and now - _last_config_text_ts < _CONFIG_TEXT_CACHE_TTL_SECONDS
+        ):
+            return _last_config_text
+
+    # Cache miss: compute sanitized YAML text.
+    if cfg_path:
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                raw_text = f.read()
+            body = _redact_yaml_text_preserving_layout(raw_text, redact_keys or [])
+        except Exception:  # pragma: no cover - I/O specific
+            clean = sanitize_config(cfg, redact_keys=redact_keys or [])
+            try:
+                body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
+            except Exception:
+                body = ""
+    else:
+        clean = sanitize_config(cfg, redact_keys=redact_keys or [])
+        try:
+            body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
+        except Exception:  # pragma: no cover - defensive
+            body = ""
+
+    with _CONFIG_TEXT_CACHE_LOCK:
+        _last_config_text_key = key
+        _last_config_text = body
+        _last_config_text_ts = time.time()
+    return body
+
+
 def _json_safe(value: Any) -> Any:
     """Brief: Return a JSON-serializable representation of value.
 
@@ -440,7 +510,7 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-@cached(cache=TTLCache(maxsize=1024, ttl=2))
+@cached(cache=TTLCache(maxsize=1, ttl=2))
 def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
     """Brief: Parse a /proc/meminfo-style file into byte counts.
 
@@ -476,6 +546,46 @@ def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
     except Exception:  # pragma: no cover - depends on host environment
         return {}
     return result
+
+
+def _get_stats_snapshot_cached(collector: StatsCollector, reset: bool) -> StatsSnapshot:
+    """Return StatsSnapshot using a short-lived cache when reset is False.
+
+    Inputs:
+      - collector: Active StatsCollector instance.
+      - reset: When True, force a fresh snapshot and update the cache.
+
+    Outputs:
+      - StatsSnapshot representing the current statistics view.
+
+    Notes:
+      - When reset is True, the underlying StatsCollector state is cleared and
+        the freshly-reset snapshot is stored into the cache so subsequent
+        non-reset callers see the new baseline.
+    """
+
+    global _last_stats_snapshots
+
+    collector_id = id(collector)
+
+    if reset:
+        snap = collector.snapshot(reset=True)
+        with _STATS_SNAPSHOT_CACHE_LOCK:
+            _last_stats_snapshots[collector_id] = (snap, time.time())
+        return snap
+
+    now = time.time()
+    with _STATS_SNAPSHOT_CACHE_LOCK:
+        entry = _last_stats_snapshots.get(collector_id)
+    if entry is not None:
+        cached, cached_ts = entry
+        if now - cached_ts < _STATS_SNAPSHOT_CACHE_TTL_SECONDS:
+            return cached
+
+    snap = collector.snapshot(reset=False)
+    with _STATS_SNAPSHOT_CACHE_LOCK:
+        _last_stats_snapshots[collector_id] = (snap, time.time())
+    return snap
 
 
 def get_system_info() -> Dict[str, Any]:
@@ -786,11 +896,24 @@ def create_app(
 
     # Allow configuration to tune the system info cache TTL used by
     # get_system_info(), while keeping a conservative default.
-    global _SYSTEM_INFO_CACHE_TTL_SECONDS, _SYSTEM_INFO_DETAIL_MODE
+    global _SYSTEM_INFO_CACHE_TTL_SECONDS, _SYSTEM_INFO_DETAIL_MODE, _STATS_SNAPSHOT_CACHE_TTL_SECONDS, _CONFIG_TEXT_CACHE_TTL_SECONDS
+
+    # Optional tuning for system metrics cache TTL.
     ttl_raw = web_cfg.get("system_info_ttl_seconds")
     if isinstance(ttl_raw, (int, float)) and ttl_raw > 0:
         _SYSTEM_INFO_CACHE_TTL_SECONDS = float(ttl_raw)
 
+    # Optional tuning for how often StatsCollector.snapshot() is recomputed.
+    stats_ttl_raw = web_cfg.get("stats_snapshot_ttl_seconds")
+    if isinstance(stats_ttl_raw, (int, float)) and stats_ttl_raw > 0:
+        _STATS_SNAPSHOT_CACHE_TTL_SECONDS = float(stats_ttl_raw)
+
+    # Optional tuning for how often sanitized YAML text is recomputed for /config.
+    cfg_ttl_raw = web_cfg.get("config_cache_ttl_seconds")
+    if isinstance(cfg_ttl_raw, (int, float)) and cfg_ttl_raw > 0:
+        _CONFIG_TEXT_CACHE_TTL_SECONDS = float(cfg_ttl_raw)
+
+    # Optional control over how heavy the system metrics collection is.
     detail_raw = str(web_cfg.get("system_metrics_detail", "full")).lower()
     if detail_raw in {"full", "basic"}:
         _SYSTEM_INFO_DETAIL_MODE = detail_raw
@@ -852,7 +975,7 @@ def create_app(
 
         # Measure timings for optional debug logging.
         t_start = time.time()
-        snap: StatsSnapshot = collector.snapshot(reset=bool(reset))
+        snap: StatsSnapshot = _get_stats_snapshot_cached(collector, bool(reset))
         t_after_snapshot = time.time()
 
         try:
@@ -944,7 +1067,7 @@ def create_app(
         collector: Optional[StatsCollector] = app.state.stats_collector
         if collector is None:
             return {"status": "disabled", "server_time": _utc_now_iso()}
-        snap: StatsSnapshot = collector.snapshot(reset=False)
+        snap: StatsSnapshot = _get_stats_snapshot_cached(collector, reset=False)
 
         try:
             hostname = socket.gethostname()
@@ -991,26 +1114,8 @@ def create_app(
             "secret",
         ]
 
-        # Prefer to redact directly over the on-disk YAML so comments/spacing are preserved.
         cfg_path = getattr(app.state, "config_path", None)
-        if cfg_path:
-            try:
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    raw_text = f.read()
-                body = _redact_yaml_text_preserving_layout(raw_text, redact_keys)
-            except Exception:  # pragma: no cover - defensive / I/O specific
-                # Fall back to structure-based redaction when disk read fails.
-                clean = sanitize_config(cfg, redact_keys=redact_keys)
-                try:
-                    body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
-                except Exception:
-                    body = ""
-        else:
-            clean = sanitize_config(cfg, redact_keys=redact_keys)
-            try:
-                body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
-            except Exception:  # pragma: no cover - defensive
-                body = ""
+        body = _get_sanitized_config_yaml_cached(cfg, cfg_path, redact_keys)
 
         return PlainTextResponse(body, media_type="application/x-yaml")
 
@@ -1672,6 +1777,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         }
         self._send_json(200, payload)
 
+    #    @cached(cache=TTLCache(maxsize=1, ttl=2))
     def _handle_config(self) -> None:
         """Brief: Handle GET /config.
 
@@ -1711,6 +1817,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         self._send_text(200, body)
 
+    #    @cached(cache=TTLCache(maxsize=1, ttl=2))
     def _handle_config_json(self) -> None:
         """Brief: Handle GET /config.json (sanitized JSON config)."""
 
@@ -1730,6 +1837,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             {"server_time": _utc_now_iso(), "config": clean},
         )
 
+    #    @cached(cache=TTLCache(maxsize=1, ttl=2))
     def _handle_config_raw(self) -> None:
         """Brief: Handle GET /config_raw to return on-disk configuration as raw YAML.
 
@@ -1765,6 +1873,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         self._send_yaml(200, raw_text)
 
+    #    @cached(cache=TTLCache(maxsize=1, ttl=2))
     def _handle_config_raw_json(self) -> None:
         """Brief: Handle GET /config/raw.json to return on-disk configuration as JSON.
 
@@ -1944,6 +2053,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
+    #    @cached(cache=TTLCache(maxsize=2, ttl=300))
     def _handle_index(self) -> None:
         """Brief: Handle GET / and /index.html by serving html/index.html.
 
@@ -1986,6 +2096,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
+    #    @cached(cache=TTLCache(maxsize=1, ttl=300))
     def _www_root(self) -> str:
         """Brief: Resolve absolute path to the html directory for static assets.
 
