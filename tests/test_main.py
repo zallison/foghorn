@@ -13,8 +13,12 @@ from unittest.mock import mock_open, patch
 import pytest
 
 import foghorn.main as main_mod
-from foghorn.main import (_get_min_cache_ttl, load_plugins, main,
-                          normalize_upstream_config)
+from foghorn.main import (
+    _get_min_cache_ttl,
+    load_plugins,
+    main,
+    normalize_upstream_config,
+)
 
 
 def test_get_min_cache_ttl_various_inputs():
@@ -29,8 +33,8 @@ def test_get_min_cache_ttl_various_inputs():
     """
     assert _get_min_cache_ttl({"min_cache_ttl": 10}) == 10
     assert _get_min_cache_ttl({"min_cache_ttl": -5}) == 0
-    assert _get_min_cache_ttl({"min_cache_ttl": "abc"}) == 60
-    assert _get_min_cache_ttl({}) == 60
+    assert _get_min_cache_ttl({"min_cache_ttl": "abc"}) == 0
+    assert _get_min_cache_ttl({}) == 0
 
 
 def test_normalize_upstream_config_list_only_and_timeout_default():

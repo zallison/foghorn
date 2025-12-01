@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol
 
-
 """Iterative recursive resolver core for Foghorn.
 
 Inputs:
@@ -22,6 +21,7 @@ Brief:
   import; the main resolution loop will be filled in incrementally under
   tests.
 """
+
 
 @dataclass(frozen=True)
 class AuthorityEndpoint:
