@@ -1467,11 +1467,11 @@ class StatsCollector:
         client_ip: Optional[str] = None,
     ) -> None:
         """
-        Record a plugin decision (allow, block, modify, pass).
+        Record a plugin decision (allow, block, modify, skip).
 
         Inputs:
             plugin_name: Name of the plugin making the decision
-            action: Decision action ("allow", "block", "modify", "pass")
+            action: Decision action ("allow", "block", "modify", "skip")
             reason: Optional reason code or description
             domain: Optional domain name affected
             client_ip: Optional client IP

@@ -209,6 +209,35 @@ Examples of plugin entries:
 - As a dict with module/config: `{ module: acl, config: {...} }`
 - As a plain alias string: `acl` (no config)
 
+#### Base plugin targeting (targets / targets_ignore)
+
+All plugins that inherit from `BasePlugin` support optional, shared client‑targeting
+knobs in their `config` block:
+
+- `targets` (optional): list of CIDR/IP strings (or a single string) specifying
+  which client networks this plugin should apply to.
+- `targets_ignore` (optional): list of CIDR/IP strings to exclude from
+  targeting, even when they match `targets`.
+- `targets_cache_ttl_seconds` (optional, default 300): TTL in seconds for an
+  in‑memory cache of per‑client targeting decisions; longer values reduce CPU
+  when many queries arrive from the same clients.
+
+Semantics:
+
+- When **neither** `targets` nor `targets_ignore` is set, the plugin applies to
+  **all** clients (default behavior).
+- When **only** `targets` is set, the plugin applies **only** to clients whose
+  IP is contained in at least one listed CIDR/IP.
+- When **only** `targets_ignore` is set, the plugin applies to **all clients
+  except** those in `targets_ignore` (inverted logic).
+- When **both** are set, `targets_ignore` wins: clients in that list are
+  skipped even if they match an entry in `targets`.
+
+These knobs are honored by core plugins such as AccessControl, Filter,
+Greylist, NewDomainFilter, UpstreamRouter, FlakyServer, Examples, and
+EtcHosts. See `example_configs/` (for example `kitchen_sink.yaml`) for usage
+patterns.
+
 #### Plugin priorities and `setup_priority`
 
 Plugins support three priority knobs in their config (all optional, integers 1–255):

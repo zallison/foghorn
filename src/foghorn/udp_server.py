@@ -298,8 +298,14 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         "Override %s type %s by %s", qname, qtype, p.__class__.__name__
                     )
                     return decision
-                else:
-                    pass
+                elif decision.action == "allow":
+                    logger.debug(
+                        "Allow %s %s by %s (skipping remaining pre plugins)",
+                        qname,
+                        qtype,
+                        p.__class__.__name__,
+                    )
+                    break
 
                 logger.debug("Plugin %s: %s", p.__class__.__name__, decision.action)
         return None
@@ -455,6 +461,14 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                             setattr(ctx, "_post_override", True)
                         except Exception:  # pragma: no cover
                             pass
+                    break
+                if decision.action == "allow":
+                    logger.info(
+                        "Post-resolve allow %s type %s by %s (skipping remaining post plugins)",
+                        qname,
+                        qtype,
+                        p.__class__.__name__,
+                    )
                     break
         return reply
 

@@ -1,0 +1,34 @@
+# Zone apex SOA: defines example.com as an authoritative zone
+example.com|SOA|300|ns1.example.com. hostmaster.example.com. ( 1 3600 600 604800 300 )
+
+# NS records for the zone
+example.com|NS|300|ns1.example.com.
+example.com|NS|300|ns2.example.com.
+
+# Apex A/AAAA
+example.com|A|300|192.0.2.10
+example.com|AAAA|300|2001:db8::10
+
+# www host
+www.example.com|A|300|192.0.2.20
+www.example.com|AAAA|300|2001:db8::20
+
+# CNAME: app.example.com points to www.example.com
+app.example.com|CNAME|300|www.example.com.
+
+# MX records for mail
+example.com|MX|300|10 mail1.example.com.
+example.com|MX|300|20 mail2.example.com.
+
+# Mail hosts
+mail1.example.com|A|300|192.0.2.30
+mail2.example.com|A|300|192.0.2.40
+
+# TXT at apex (SPF / general text)
+example.com|TXT|300|"v=spf1 mx -all"
+example.com|TXT|300|"Some other arbitrary text"
+
+# Subdomain with multiple RRsets to exercise ANY responses
+multi.example.com|A|300|192.0.2.50
+multi.example.com|AAAA|300|2001:db8::50
+multi.example.com|TXT|300|"hello from multi"

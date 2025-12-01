@@ -317,6 +317,112 @@ def test_base_plugin_setup_default_noop():
     assert plugin.setup() is None
 
 
+def test_base_plugin_targets_default_all_clients():
+    """Brief: When no targets are configured, all clients are targeted.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts targets() returns True for arbitrary client IPs.
+    """
+    plugin = BasePlugin()
+    ctx1 = PluginContext(client_ip="192.0.2.1")
+    ctx2 = PluginContext(client_ip="10.0.0.1")
+    assert plugin.targets(ctx1) is True
+    assert plugin.targets(ctx2) is True
+
+
+def test_base_plugin_targets_cidr_includes_only_matches():
+    """Brief: targets() restricts matches to configured CIDR ranges.
+
+    Inputs:
+      - targets: ["10.0.0.0/8"]
+
+    Outputs:
+      - None; asserts only clients in the CIDR are targeted.
+    """
+    plugin = BasePlugin(targets=["10.0.0.0/8"])
+    ctx_match = PluginContext(client_ip="10.1.2.3")
+    ctx_miss = PluginContext(client_ip="192.0.2.1")
+    assert plugin.targets(ctx_match) is True
+    assert plugin.targets(ctx_miss) is False
+
+
+def test_base_plugin_targets_ignore_inverts_logic_when_no_targets():
+    """Brief: With only targets_ignore configured, all but ignored clients are targeted.
+
+    Inputs:
+      - targets_ignore: ["10.0.0.0/8"]
+
+    Outputs:
+      - None; asserts ignored client is not targeted while others are.
+    """
+    plugin = BasePlugin(targets_ignore=["10.0.0.0/8"])
+    ctx_ignored = PluginContext(client_ip="10.1.2.3")
+    ctx_other = PluginContext(client_ip="192.0.2.1")
+    assert plugin.targets(ctx_ignored) is False
+    assert plugin.targets(ctx_other) is True
+
+
+def test_base_plugin_targets_and_ignore_combined():
+    """Brief: targets_ignore overrides targets for specific subranges.
+
+    Inputs:
+      - targets: ["10.0.0.0/8"]
+      - targets_ignore: ["10.0.0.0/16"]
+
+    Outputs:
+      - None; asserts clients in ignore range are skipped while others in
+        targets are included.
+    """
+    plugin = BasePlugin(targets=["10.0.0.0/8"], targets_ignore=["10.0.0.0/16"])
+    ctx_ignored = PluginContext(client_ip="10.0.1.1")
+    ctx_allowed = PluginContext(client_ip="10.1.2.3")
+    ctx_outside = PluginContext(client_ip="192.0.2.1")
+    assert plugin.targets(ctx_ignored) is False
+    assert plugin.targets(ctx_allowed) is True
+    assert plugin.targets(ctx_outside) is False
+
+
+def test_base_plugin_targets_uses_cache_for_repeated_client(monkeypatch):
+    """Brief: targets() caches per-client decisions to avoid repeated IP parsing.
+
+    Inputs:
+      - monkeypatch: pytest fixture to wrap ipaddress.ip_address.
+
+    Outputs:
+      - None; asserts that the underlying ipaddress.ip_address helper is only
+        invoked once for repeated targets() calls with the same client_ip.
+    """
+    # Configure a simple targets-only plugin so explicit CIDRs are in effect.
+    plugin = BasePlugin(targets=["10.0.0.0/8"], targets_cache_ttl_seconds=300)
+    ctx = PluginContext(client_ip="10.1.2.3")
+
+    # Wrap the module-level ipaddress.ip_address used inside BasePlugin so we
+    # can observe how many times it is called for the same client.
+    import foghorn.plugins.base as base_mod  # type: ignore[import]
+
+    calls = {"count": 0}
+    original_ip_address = base_mod.ipaddress.ip_address
+
+    def _wrapped_ip_address(addr):  # type: ignore[no-untyped-def]
+        calls["count"] += 1
+        return original_ip_address(addr)
+
+    monkeypatch.setattr(base_mod.ipaddress, "ip_address", _wrapped_ip_address)
+
+    # First call should compute and cache the result.
+    first = plugin.targets(ctx)
+    # Second call with the same client_ip should hit the TTL cache and not
+    # invoke ipaddress.ip_address again.
+    second = plugin.targets(ctx)
+
+    assert first is True
+    assert second is True
+    assert calls["count"] == 1
+
+
 def _make_raw_query(name: str, qtype: int) -> bytes:
     """Brief: Helper to construct a minimal DNS query wire for BasePlugin tests.
 
