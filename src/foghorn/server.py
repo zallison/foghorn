@@ -480,6 +480,10 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                         except Exception:  # pragma: no cover
                             pass
                     return wire
+                if decision.action == "allow":
+                    # Explicit allow: stop evaluating further pre plugins but
+                    # continue normal resolution (cache/upstream).
+                    break
 
         # Cache lookup
         cached = DNSUDPHandler.cache.get(cache_key)
@@ -653,6 +657,10 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                     break
                 if decision.action == "override" and decision.response is not None:
                     out = decision.response
+                    break
+                if decision.action == "allow":
+                    # Explicit allow: stop evaluating further post plugins but
+                    # leave the upstream response unchanged.
                     break
 
         # Cache store positive answers, negative responses (NXDOMAIN/NODATA), and
