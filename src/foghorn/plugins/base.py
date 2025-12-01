@@ -20,6 +20,8 @@ from dnslib import (  # noqa: F401 - imports are for implementations of this cla
     DNSRecord,
 )
 
+from foghorn.cache import FoghornTTLCache
+
 logger = logging.getLogger(__name__)
 
 
@@ -189,6 +191,12 @@ class BasePlugin:
         self._target_networks = self._parse_network_list(config.get("targets"))
         self._ignore_networks = self._parse_network_list(config.get("targets_ignore"))
 
+        # Per-client targeting decisions are cached in-memory to avoid
+        # repeatedly parsing IP addresses and scanning CIDR lists under load.
+        # The TTL is configurable via targets_cache_ttl_seconds (default 300s).
+        self._targets_cache_ttl: int = int(config.get("targets_cache_ttl_seconds", 300))
+        self._targets_cache: FoghornTTLCache = FoghornTTLCache()
+
     @staticmethod
     def _parse_priority_value(value: object, key: str, logger: logging.Logger) -> int:
         """Brief: Parse and clamp a priority value to the inclusive range [1, 255].
@@ -293,29 +301,61 @@ class BasePlugin:
             >>> p.targets(ctx)
             True
         """
+        # Fast path: when no explicit targets or ignores are configured, all
+        # clients are targeted and no cache lookups are performed.
+        if not self._target_networks and not self._ignore_networks:
+            return True
+
         client_ip = getattr(ctx, "client_ip", "")
         if not client_ip:
-            # With no usable client IP, treat as targeted only when there are no
-            # explicit targets/ignores configured.
-            return not self._target_networks and not self._ignore_networks
+            # With explicit targets/ignores but no usable client IP, treat as
+            # not targeted.
+            return False
 
+        cache_key = (str(client_ip), 0)
+
+        # Consult per-client TTL cache first to avoid repeated IP parsing and
+        # CIDR scans under sustained load.
+        try:
+            cached = self._targets_cache.get(cache_key)
+        except Exception:  # pragma: no cover - defensive
+            cached = None
+
+        if cached is not None:
+            try:
+                return bool(int(cached.decode()))
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        # Cache miss or decode failure: compute targeting decision.
         try:
             addr = ipaddress.ip_address(client_ip)
         except Exception:
-            # Invalid client IP: treat as targeted only when there are no
-            # explicit targets/ignores configured.
-            return not self._target_networks and not self._ignore_networks
+            # Invalid client IP with explicit targets/ignores -> not targeted.
+            result = False
+        else:
+            # Ignore list takes precedence regardless of targets configuration.
+            if any(addr in net for net in self._ignore_networks):
+                result = False
+            # Empty targets means "everyone" (subject to ignore list above).
+            elif not self._target_networks:
+                result = True
+            else:
+                # Non-empty targets restrict to matching networks.
+                result = any(addr in net for net in self._target_networks)
 
-        # Ignore list takes precedence regardless of targets configuration.
-        if any(addr in net for net in self._ignore_networks):
-            return False
+        # Store decision in TTL cache for subsequent queries from the same
+        # client_ip.
+        try:
+            self._targets_cache.set(
+                cache_key,
+                int(self._targets_cache_ttl),
+                b"1" if result else b"0",
+            )
+        except Exception:  # pragma: no cover - defensive
+            pass
 
-        # Empty targets means "everyone" (subject to ignore list above).
-        if not self._target_networks:
-            return True
-
-        # Non-empty targets restrict to matching networks.
-        return any(addr in net for net in self._target_networks)
+        return result
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
