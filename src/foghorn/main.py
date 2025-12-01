@@ -43,15 +43,16 @@ def _get_min_cache_ttl(cfg: dict) -> int:
     Inputs:
       - cfg: dict loaded from YAML
     Outputs:
-      - int: non-negative min_cache_ttl in seconds (default 60)
+      - int: non-negative min_cache_ttl in seconds (default 0 when omitted)
 
     Returns a sanitized min_cache_ttl value. Negative values are clamped to 0.
     """
-    val = cfg.get("min_cache_ttl", 60)
+    # Treat missing or None as 0 to avoid unintentionally extending cache TTLs
+    val = cfg.get("min_cache_ttl", 0)
     try:
         ival = int(val)
     except (TypeError, ValueError):
-        ival = 60
+        ival = 0
     return max(0, ival)
 
 
