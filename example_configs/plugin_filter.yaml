@@ -31,6 +31,17 @@ plugins:
       # Default policy when no rule matches.
       default: deny
 
+      # Policy for what DNS response to send when this plugin "denies" a query
+      # (blocked domain or IP). Supported values:
+      #   - nxdomain (default): core server synthesizes NXDOMAIN
+      #   - refused: REFUSED response code
+      #   - servfail: SERVFAIL response code
+      #   - noerror_empty / nodata: NOERROR with an empty answer section
+      #   - ip: synthesize an A/AAAA answer using deny_response_ip4/deny_response_ip6
+      # deny_response: nxdomain
+      # deny_response_ip4: 192.0.2.55
+      # deny_response_ip6: 2001:db8::55
+
       # Persistent on-disk DB (SQLite) for stats/cache if enabled by plugin.
       db_path: ./config/var/blocklist.db
 
@@ -53,8 +64,8 @@ plugins:
         - gambling
 
       # IP-level actions applied to A/AAAA answers.
-      # - action: remove -> strip matching IPs from the answer set
-      # - action: deny   -> convert to NXDOMAIN or policy denial
+      # - action: remove  -> strip matching IPs from the answer set
+      # - action: deny    -> apply the configured deny_response policy
       # - action: replace -> substitute with `replace_with`
       blocked_ips:
         - ip: "198.51.100.0/24"
