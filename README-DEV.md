@@ -76,6 +76,40 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
   - `FilterPlugin` typically uses a higher `setup_priority` (for example 20), so it runs after ListDownloader and can safely load the downloaded files.
   - User config may override `setup_priority` on a per-plugin basis when composing plugin chains.
 
+## BasePlugin targeting and TTL cache
+
+`BasePlugin` implements optional, shared client‑targeting semantics for all
+plugin subclasses via three configuration keys:
+
+- `targets`: list of CIDR/IP strings (or a single string) defining an allow‑set
+  of client networks for this plugin.
+- `targets_ignore`: list of CIDR/IP strings to exclude from targeting even when
+  they match `targets`.
+- `targets_cache_ttl_seconds`: integer TTL (seconds) for an internal
+  `FoghornTTLCache` that memoizes per‑client decisions.
+
+Runtime behavior (`BasePlugin.targets(ctx) -> bool`):
+
+- When both `_target_networks` and `_ignore_networks` are empty (no config
+  provided), the method returns `True` and bypasses the cache; the plugin
+  applies to all clients.
+- When `targets` and/or `targets_ignore` are configured, the method first
+  checks `_ignore_networks` (deny‑list wins), then `_target_networks`:
+  - `targets` only: client is targeted iff its IP is in at least one target
+    network.
+  - `targets_ignore` only: client is targeted iff its IP is **not** in any
+    ignore network (inverted logic).
+  - both: client is targeted iff it is **not** in any ignore network and is in
+    at least one target network.
+- Decisions are cached per `(client_ip, 0)` key as `'1'`/`'0'` bytes for the
+  configured TTL; cache lookups are a fast path on hot clients under load.
+
+Core plugins that currently respect `targets()` include AccessControl,
+Filter, Greylist, NewDomainFilter, UpstreamRouter, FlakyServer, Examples,
+and EtcHosts. Implementers of new plugins are encouraged to call
+`self.targets(ctx)` early in their `pre_resolve`/`post_resolve` hooks when
+client‑scoped behavior is desired.
+
 ## Logging and Statistics
 
 - Logging is configured via the YAML `logging` section (see README.md for a quickstart). Format uses bracketed levels and UTC timestamps.
