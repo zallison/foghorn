@@ -258,8 +258,12 @@ class FilterPlugin(BasePlugin):
             ctx: The plugin context.
 
         Returns:
-            A PluginDecision to deny blocked domains, otherwise None.
+            A PluginDecision with action "deny" for blocked domains or
+            action "skip" when no pre-resolve filtering applies.
         """
+        if not self.targets(ctx):
+            return None
+
         domain = qname.lower()
         key = (str(domain).rstrip(".").lower(), 0)
 
@@ -267,7 +271,7 @@ class FilterPlugin(BasePlugin):
         if cached is not None:
             try:
                 if cached == b"1":
-                    return None
+                    return PluginDecision(action="skip")
                 else:
                     return PluginDecision(action="deny")
             except Exception:  # pragma: no cover
@@ -299,7 +303,7 @@ class FilterPlugin(BasePlugin):
         logger.debug("Domain '%s' allowed", qname)
         self.add_to_cache(key, True)
 
-        return None
+        return PluginDecision(action="skip")
 
     def post_resolve(
         self, qname: str, qtype: int, response_wire: bytes, ctx: PluginContext
@@ -314,12 +318,14 @@ class FilterPlugin(BasePlugin):
 
         Outputs:
             PluginDecision to modify or deny responses containing blocked IPs,
-            or None when no changes are required.
+            or a PluginDecision with action "skip" when no changes are required.
 
         Example:
             >>> # Only A/AAAA queries are supported; others raise TypeError
             >>> # plugin.post_resolve("ex.com", QTYPE.MX, b"", ctx)  # doctest: +SKIP
         """
+        if not self.targets(ctx):
+            return None
 
         # Only process A and AAAA records; other qtypes are considered a
         # programming error for this plugin and raise TypeError so callers can
@@ -328,7 +334,7 @@ class FilterPlugin(BasePlugin):
             return
 
         if not self.blocked_ips and not self.blocked_networks:
-            return None
+            return PluginDecision(action="skip")
 
         try:
             response = DNSRecord.parse(response_wire)
@@ -438,7 +444,7 @@ class FilterPlugin(BasePlugin):
                 logger.error("Failed to create modified response: %s", e)
                 return PluginDecision(action="deny")
 
-        return None
+        return PluginDecision(action="skip")
 
     def _get_ip_action(
         self, ip_addr: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]

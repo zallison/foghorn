@@ -150,6 +150,9 @@ class GreylistPlugin(BasePlugin):
         Returns:
             A PluginDecision, or None to allow the query to proceed.
         """
+        if not self.targets(ctx):
+            return None
+
         now = int(time.time())
         base_domain = self._to_base_domain(qname)
         first_seen = self._cache_get_or_db_load(base_domain)
