@@ -208,8 +208,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     qtype,
                 )
             else:
-                from .server import \
-                    compute_effective_ttl as _compute_effective_ttl
+                from .server import compute_effective_ttl as _compute_effective_ttl
 
                 effective_ttl = _compute_effective_ttl(r, self.min_cache_ttl)
                 if effective_ttl > 0:
@@ -832,8 +831,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         == "local"
                     ):
                         try:
-                            from .dnssec_validate import \
-                                validate_response_local
+                            from .dnssec_validate import validate_response_local
 
                             valid = bool(
                                 validate_response_local(

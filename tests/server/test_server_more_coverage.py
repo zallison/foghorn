@@ -358,7 +358,6 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
     # Only the first call should have reached the fake upstream.
     assert calls["n"] == 1
 
-
     # The remainder of this file continues with dnssec validation tests.
     # Ensure clean slate for those tests.
     srv.DNSUDPHandler.plugins = []

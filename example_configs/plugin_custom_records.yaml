@@ -1,5 +1,5 @@
-# Foghorn example: CustomRecords plugin
-# Demonstrates serving static DNS records from a local file.
+# Foghorn example: ZoneRecords plugin (formerly CustomRecords)
+# Demonstrates serving static DNS records and authoritative zones from a local file.
 
 listen:
   udp:
@@ -18,7 +18,7 @@ logging:
 timeout_ms: 2000
 
 plugins:
-  - module: custom  # CustomRecords alias
+  - module: zone  # ZoneRecords alias (custom/records still supported)
     config:
       # Provide one or more records files; lines use:
       #   <domain>|<qtype>|<ttl>|<value>

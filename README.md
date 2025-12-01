@@ -24,7 +24,7 @@ For developer documentation (architecture, transports, plugin internals, testing
 	- [UpstreamRouterPlugin](#upstreamrouterplugin)
 	- [FilterPlugin](#filterplugin)
 	- [ListDownloader plugin](#listdownloader-plugin)
-	- [CustomRecords plugin](#customrecords-plugin)
+- [ZoneRecords plugin](#zonerecords-plugin)
   - [Complete `config.yaml` Example](#complete-configyaml-example)
 - [Logging](#logging)
 - [License](#license)
@@ -41,7 +41,7 @@ For developer documentation (architecture, transports, plugin internals, testing
   *   **New Domain Filter:** Block recently registered domains.
   *   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
   *   **Filter:** Filter by domain patterns/keywords IPs.
-  *   **CustomRecords:** Serve static DNS records from one or more files, with optional live reload on change.
+  *   **ZoneRecords (formerly CustomRecords):** Serve static DNS records and authoritative zones from one or more files, with optional live reload on change.
   *   **Examples:** Showcase of simple policies and rewrites.
 
 ## Installation
@@ -490,10 +490,11 @@ plugins:
 
 ------
 
-### CustomRecords plugin
+### ZoneRecords plugin
 
-The `CustomRecords` plugin answers selected queries directly from one or more
-local files, bypassing upstream resolvers and the cache for those names.
+The `ZoneRecords` plugin answers selected queries directly from one or more
+local files, and can act as an authoritative server for configured zones while
+still bypassing upstream resolvers and the cache for those names.
 
 **Record file format**
 
@@ -518,7 +519,7 @@ first-seen ordering. This ordering is reflected in the final DNS answer.
 
 ```yaml
 plugins:
-  - module: custom
+  - module: zone
 	config:
 	  # Use either a single file_path (legacy) or a list of file_paths
 	  # (preferred). When both are given, the legacy path is added to
@@ -536,8 +537,8 @@ plugins:
 
 `module` may be any of:
 
-- Full dotted path: `foghorn.plugins.custom-records.CustomRecords`
-- Alias: `custom` or `records`
+- Full dotted path: `foghorn.plugins.zone-records.ZoneRecords`
+- Alias: `zone`, `zone_records`, `custom`, or `records`
 
 When `watchdog_enabled` is true and the optional `watchdog` dependency is
 installed, the plugin watches the parent directories of all configured records
