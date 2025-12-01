@@ -91,6 +91,11 @@ class NewDomainFilterPlugin(BasePlugin):
             ctx: The plugin context.
         Returns:
             A PluginDecision to deny the request if the domain is too new, otherwise None.
+        """
+        if not self.targets(ctx):
+            return None
+
+        """
 
         Example use:
             (Note: This is a simplified example that doesn't actually make a network request)

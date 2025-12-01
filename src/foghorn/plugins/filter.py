@@ -261,6 +261,9 @@ class FilterPlugin(BasePlugin):
             A PluginDecision with action "deny" for blocked domains or
             action "skip" when no pre-resolve filtering applies.
         """
+        if not self.targets(ctx):
+            return None
+
         domain = qname.lower()
         key = (str(domain).rstrip(".").lower(), 0)
 
@@ -321,6 +324,8 @@ class FilterPlugin(BasePlugin):
             >>> # Only A/AAAA queries are supported; others raise TypeError
             >>> # plugin.post_resolve("ex.com", QTYPE.MX, b"", ctx)  # doctest: +SKIP
         """
+        if not self.targets(ctx):
+            return None
 
         # Only process A and AAAA records; other qtypes are considered a
         # programming error for this plugin and raise TypeError so callers can
