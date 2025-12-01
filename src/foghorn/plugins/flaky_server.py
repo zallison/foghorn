@@ -6,11 +6,39 @@ import random
 import secrets
 from typing import List, Optional, Union
 
+from pydantic import BaseModel, Field
+
 from dnslib import QTYPE, RCODE, DNSRecord
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
 logger = logging.getLogger(__name__)
+
+
+class FlakyServerConfig(BaseModel):
+    """Brief: Typed configuration model for FlakyServer.
+
+    Inputs:
+      - allow: CIDR/IP strings to target.
+      - client_ip: Single client to target.
+      - servfail_one_in: 1-in-N probability for SERVFAIL.
+      - nxdomain_one_in: 1-in-N probability for NXDOMAIN.
+      - apply_to_qtypes: Qtypes this plugin applies to.
+      - seed: Optional RNG seed.
+
+    Outputs:
+      - FlakyServerConfig instance with normalized field types.
+    """
+
+    allow: Optional[Union[str, List[str]]] = None
+    client_ip: Optional[str] = None
+    servfail_one_in: int = Field(default=4, ge=1)
+    nxdomain_one_in: int = Field(default=10, ge=1)
+    apply_to_qtypes: List[str] = Field(default_factory=lambda: ["*"])
+    seed: Optional[int] = None
+
+    class Config:
+        extra = "allow"
 
 
 @plugin_aliases("flaky_server", "flaky", "buggy")
@@ -50,6 +78,19 @@ class FlakyServer(BasePlugin):
 
     # Default: run relatively early in pre chain
     pre_priority: int = 15
+
+    @classmethod
+    def get_config_model(cls):
+        """Brief: Return the Pydantic model used to validate plugin configuration.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - FlakyServerConfig class for use by the core config loader.
+        """
+
+        return FlakyServerConfig
 
     def __init__(self, **config) -> None:
         """

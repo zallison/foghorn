@@ -6,16 +6,41 @@ import os
 import threading
 import time
 from datetime import datetime
-from typing import Iterable, List, Set
+from typing import Iterable, List, Optional, Set
 from urllib.parse import urlparse
 
 import requests
+from pydantic import BaseModel, Field
 
 from .base import BasePlugin
 
 logger = logging.getLogger(__name__)
 
 ONE_DAY_SECONDS = 24 * 60 * 60
+
+
+class ListDownloaderConfig(BaseModel):
+    """Brief: Typed configuration model for ListDownloader.
+
+    Inputs:
+      - download_path: Directory where list files are written.
+      - urls: Explicit list of HTTP(S) URLs to download.
+      - url_files: Paths to files containing one URL per line.
+      - interval_days: Optional number of days between refreshes (>= 0).
+      - interval_seconds: Optional legacy seconds-based interval (>= 0).
+
+    Outputs:
+      - ListDownloaderConfig instance with normalized field types.
+    """
+
+    download_path: str = Field(default="./config/var/lists")
+    urls: List[str] = Field(default_factory=list)
+    url_files: List[str] = Field(default_factory=list)
+    interval_days: Optional[float] = Field(default=None, ge=0)
+    interval_seconds: Optional[int] = Field(default=None, ge=0)
+
+    class Config:
+        extra = "allow"
 
 
 class ListDownloader(BasePlugin):
@@ -50,6 +75,19 @@ class ListDownloader(BasePlugin):
     """
 
     aliases = ("list_downloader", "lists")
+
+    @classmethod
+    def get_config_model(cls):
+        """Brief: Return the Pydantic model used to validate plugin configuration.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - ListDownloaderConfig class for use by the core config loader.
+        """
+
+        return ListDownloaderConfig
 
     def __init__(self, **config):
         """Brief: Initialize ListDownloader configuration and merge URL sources.
@@ -436,10 +474,18 @@ class ListDownloader(BasePlugin):
             seen = 0
             with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                 for raw in f:
-                    line = raw.strip().split("#")[0]
-                    if not line or line.startswith("#"):
+                    line = raw.strip()
+                    # Treat both '#' and '!' as comment prefixes to support
+                    # AdGuard/Adblock-style lists where '!' starts a comment.
+                    if not line or line.startswith("#") or line.startswith("!"):
                         continue
-                    # Reject typical hosts-format entries (start with an IP)
+                    # Strip any trailing comment introduced by '#' or '!' on
+                    # the same line, then re-trim.
+                    line = line.split("#", 1)[0].split("!", 1)[0].strip()
+                    if not line:
+                        continue
+                    # Reject typical hosts-format entries (start with an IP) or
+                    # lines lacking a dot or containing whitespace.
                     if " " in line or "\t" in line or "." not in line:
                         return False
                     seen += 1
