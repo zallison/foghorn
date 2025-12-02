@@ -91,14 +91,13 @@ current_branch=$(git rev-parse --abbrev-ref HEAD)
 # - any branch named main
 # - any branch starting with dev/ or release/
 is_protected_branch() {
-  local name="$1"
-  [[ "$name" == "$default_branch" ]] && return 0
-  [[ "$name" == main ]] && return 0
-  [[ "$name" == dev ]] && return 0
-  [[ "$name" == release ]] && return 0
-  [[ "$name" == dev/* ]] && return 0
-  [[ "$name" == release/* ]] && return 0
-  return 1
+	local name="$1"
+	[[ "$name" == "$default_branch" ]] && return 0
+	[[ "$name" == main ]] && return 0
+	[[ "$name" == dev ]] && return 0
+	[[ "$name" == testing ]] && return 0
+	[[ "$name" == dev/* ]] && return 0
+	return 1
 }
 
 declare -A local_to_delete=()
@@ -109,81 +108,81 @@ declare -A local_merged=()
 
 # Collect local branches that are fully merged into the default branch
 while IFS= read -r branch; do
-  [[ -z "$branch" ]] && continue
-  local_merged["$branch"]=1
+	[[ -z "$branch" ]] && continue
+	local_merged["$branch"]=1
 done < <(git for-each-ref --format='%(refname:short)' --merged="$default_branch" refs/heads)
 
 # Add local branches that are old enough based on merged/unmerged status
 while IFS= read -r branch; do
-  [[ -z "$branch" ]] && continue
-  [[ "$branch" == "$current_branch" ]] && continue
-  if is_protected_branch "$branch"; then
-    continue
-  fi
+	[[ -z "$branch" ]] && continue
+	[[ "$branch" == "$current_branch" ]] && continue
+	if is_protected_branch "$branch"; then
+		continue
+	fi
 
-  last_commit_ts=$(git log -1 --format=%ct "$branch")
-  if [[ -n "${local_merged[$branch]:-}" ]]; then
-    # Merged branch: use merged_days cutoff
-    if (( last_commit_ts < merged_cutoff_ts )); then
-      local_to_delete["$branch"]=1
-    fi
-  else
-    # Unmerged branch: use unmerged_days cutoff
-    if (( last_commit_ts < unmerged_cutoff_ts )); then
-      local_to_delete["$branch"]=1
-    fi
-  fi
+	last_commit_ts=$(git log -1 --format=%ct "$branch")
+	if [[ -n "${local_merged[$branch]:-}" ]]; then
+		# Merged branch: use merged_days cutoff
+		if (( last_commit_ts < merged_cutoff_ts )); then
+			local_to_delete["$branch"]=1
+		fi
+	else
+		# Unmerged branch: use unmerged_days cutoff
+		if (( last_commit_ts < unmerged_cutoff_ts )); then
+			local_to_delete["$branch"]=1
+		fi
+	fi
 done < <(git for-each-ref --format='%(refname:short)' refs/heads)
 
 # Collect remote branches for all remotes
 declare -A remote_to_delete=()  # key: "<remote> <branch>"
 
 for remote in $(git remote); do
-  # Determine this remote's default branch, if configured
-  remote_default_ref=$(git symbolic-ref --quiet --short "refs/remotes/${remote}/HEAD" 2>/dev/null || true)
-  if [[ -n "$remote_default_ref" ]]; then
-    remote_default_branch="${remote_default_ref#${remote}/}"
-  else
-    remote_default_branch="$default_branch"
-  fi
+	# Determine this remote's default branch, if configured
+	remote_default_ref=$(git symbolic-ref --quiet --short "refs/remotes/${remote}/HEAD" 2>/dev/null || true)
+	if [[ -n "$remote_default_ref" ]]; then
+		remote_default_branch="${remote_default_ref#${remote}/}"
+	else
+		remote_default_branch="$default_branch"
+	fi
 
-  # Track which remote branches are merged into this remote's default branch
-  declare -A remote_merged=()
-  merged_remote_branches=$(git for-each-ref --format='%(refname:short)' --merged="${remote}/${remote_default_branch}" "refs/remotes/${remote}" 2>/dev/null || true)
+	# Track which remote branches are merged into this remote's default branch
+	declare -A remote_merged=()
+	merged_remote_branches=$(git for-each-ref --format='%(refname:short)' --merged="${remote}/${remote_default_branch}" "refs/remotes/${remote}" 2>/dev/null || true)
 
-  while IFS= read -r ref; do
-    [[ -z "$ref" ]] && continue
-    [[ "$ref" == "${remote}/HEAD" ]] && continue
-    branch="${ref#${remote}/}"
-    remote_merged["$branch"]=1
-  done <<< "$merged_remote_branches"
+	while IFS= read -r ref; do
+		[[ -z "$ref" ]] && continue
+		[[ "$ref" == "${remote}/HEAD" ]] && continue
+		branch="${ref#${remote}/}"
+		remote_merged["$branch"]=1
+	done <<< "$merged_remote_branches"
 
-# Branches that are old enough based on merged/unmerged status on this remote
-while IFS= read -r ref; do
-    [[ -z "$ref" ]] && continue
-    [[ "$ref" == "${remote}/HEAD" ]] && continue
+	# Branches that are old enough based on merged/unmerged status on this remote
+	while IFS= read -r ref; do
+		[[ -z "$ref" ]] && continue
+		[[ "$ref" == "${remote}/HEAD" ]] && continue
 
-    branch="${ref#${remote}/}"
-    if is_protected_branch "$branch"; then
-      continue
-    fi
+		branch="${ref#${remote}/}"
+		if is_protected_branch "$branch"; then
+			continue
+		fi
 
-    last_commit_ts=$(git log -1 --format=%ct "$ref")
-    if [[ -n "${remote_merged[$branch]:-}" ]]; then
-      # Merged remote branch: use merged_days cutoff
-      if (( last_commit_ts < merged_cutoff_ts )); then
-        remote_to_delete["${remote} ${branch}"]=1
-      fi
-    else
-      # Unmerged remote branch: use unmerged_days cutoff
-      if (( last_commit_ts < unmerged_cutoff_ts )); then
-        remote_to_delete["${remote} ${branch}"]=1
-      fi
-    fi
-  done < <(git for-each-ref --format='%(refname:short)' "refs/remotes/${remote}")
+		last_commit_ts=$(git log -1 --format=%ct "$ref")
+		if [[ -n "${remote_merged[$branch]:-}" ]]; then
+			# Merged remote branch: use merged_days cutoff
+			if (( last_commit_ts < merged_cutoff_ts )); then
+				remote_to_delete["${remote} ${branch}"]=1
+			fi
+		else
+			# Unmerged remote branch: use unmerged_days cutoff
+			if (( last_commit_ts < unmerged_cutoff_ts )); then
+				remote_to_delete["${remote} ${branch}"]=1
+			fi
+		fi
+	done < <(git for-each-ref --format='%(refname:short)' "refs/remotes/${remote}")
 
-  # Clear per-remote merged map before next remote
-  unset remote_merged
+	# Clear per-remote merged map before next remote
+	unset remote_merged
 
 done
 
