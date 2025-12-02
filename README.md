@@ -1,6 +1,6 @@
 # Foghorn
 
-<img src="html/logo.png" width="300px" alt="Foghorn Logo, a stylized alarm horn"" />
+<img src="html/logo.png" width="300px" alt="Foghorn Logo, a stylized alarm horn" />
 
 Foghorn is a caching DNS server built with Python (3.10+).
 
