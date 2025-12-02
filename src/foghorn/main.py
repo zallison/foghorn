@@ -419,6 +419,26 @@ def main(argv: List[str] | None = None) -> int:
     # Normalize upstream configuration
     upstreams, timeout_ms = normalize_upstream_config(cfg)
 
+    # Resolver configuration (forward vs recursive) with conservative defaults.
+    resolver_cfg = cfg.get("resolver", {}) or {}
+    resolver_mode = str(resolver_cfg.get("mode", "forward")).lower()
+    if resolver_mode not in ("forward", "recursive"):
+        resolver_mode = "forward"
+    try:
+        resolver_timeout_ms = int(resolver_cfg.get("timeout_ms", timeout_ms))
+    except Exception:
+        resolver_timeout_ms = timeout_ms
+    try:
+        resolver_per_try_timeout_ms = int(
+            resolver_cfg.get("per_try_timeout_ms", max(1, resolver_timeout_ms // 2))
+        )
+    except Exception:
+        resolver_per_try_timeout_ms = max(1, resolver_timeout_ms // 2)
+    try:
+        resolver_max_depth = int(resolver_cfg.get("max_depth", 8))
+    except Exception:
+        resolver_max_depth = 8
+
     # Hold responses this long, even if the actual ttl is lower.
     min_cache_ttl = _get_min_cache_ttl(cfg)
 
@@ -822,8 +842,11 @@ def main(argv: List[str] | None = None) -> int:
             min_cache_ttl=min_cache_ttl,
             stats_collector=stats_collector,
         )
-        # Set DNSSEC/EDNS knobs on handler class (keeps DNSServer signature stable)
+        # Set DNSSEC/EDNS and recursive resolver knobs on handler class (keeps
+        # DNSServer signature stable).
         try:
+            from . import recursive_cache as _recursive_cache_mod
+            from . import recursive_transport as _recursive_transport_mod
             from . import server as _server_mod
 
             _server_mod.DNSUDPHandler.dnssec_mode = dnssec_mode
@@ -831,6 +854,24 @@ def main(argv: List[str] | None = None) -> int:
             _server_mod.DNSUDPHandler.dnssec_validation = str(
                 dnssec_cfg.get("validation", "upstream_ad")
             ).lower()
+
+            # Recursive resolver configuration (used when resolver.mode == 'recursive').
+            _server_mod.DNSUDPHandler.recursive_mode = resolver_mode
+            _server_mod.DNSUDPHandler.recursive_timeout_ms = int(resolver_timeout_ms)
+            _server_mod.DNSUDPHandler.recursive_per_try_timeout_ms = int(
+                resolver_per_try_timeout_ms
+            )
+            _server_mod.DNSUDPHandler.recursive_max_depth = int(resolver_max_depth)
+
+            # Lazily initialize shared recursive cache and transport facade if missing.
+            if getattr(_server_mod.DNSUDPHandler, "recursive_cache", None) is None:
+                _server_mod.DNSUDPHandler.recursive_cache = (
+                    _recursive_cache_mod.InMemoryRecursiveCache()
+                )
+            if getattr(_server_mod.DNSUDPHandler, "recursive_transports", None) is None:
+                _server_mod.DNSUDPHandler.recursive_transports = (
+                    _recursive_transport_mod.DefaultTransportFacade()
+                )
         except Exception:  # pragma: no cover
             pass
 

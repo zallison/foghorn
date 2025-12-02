@@ -90,6 +90,15 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     dnssec_validation = "upstream_ad"  # upstream_ad | local
     edns_udp_payload = 1232
 
+    # Recursive resolver configuration (used when resolver.mode == 'recursive').
+    # These are class-level knobs populated by foghorn.main during startup.
+    recursive_mode = "forward"  # 'forward' (default) or 'recursive'
+    recursive_timeout_ms = 2000
+    recursive_per_try_timeout_ms = 500
+    recursive_max_depth = 8
+    recursive_cache = None
+    recursive_transports = None
+
     def _cache_store_if_applicable(
         self,
         qname: str,

@@ -159,6 +159,20 @@
         "udp_payload_size": { "type": "integer", "minimum": 512 }
       }
     },
+    "resolver": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["forward", "recursive"],
+          "default": "forward"
+        },
+        "timeout_ms": { "type": "integer", "minimum": 1 },
+        "per_try_timeout_ms": { "type": "integer", "minimum": 1 },
+        "max_depth": { "type": "integer", "minimum": 1 }
+      }
+    },
     "logging": {
       "type": "object",
       "additionalProperties": false,
