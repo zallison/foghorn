@@ -115,14 +115,15 @@ def test_get_default_schema_path_last_resort_uses_project_root(monkeypatch) -> N
     assert p == expected
 
 
-def test_validate_config_wraps_schema_loading_errors(monkeypatch) -> None:
-    """Brief: validate_config wraps schema loading failures in a ValueError.
+def test_validate_config_schema_loading_errors_are_best_effort(monkeypatch, caplog) -> None:
+    """Brief: validate_config logs schema loading failures and skips validation.
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture used to make _load_schema raise.
+      - caplog: Pytest caplog fixture used to capture warning logs.
 
     Outputs:
-      - None; asserts a ValueError message referencing the failing schema path.
+      - None; asserts that a warning is logged and no exception is raised.
     """
 
     def boom_load(_schema_path):  # noqa: D401, ARG001
@@ -130,13 +131,25 @@ def test_validate_config_wraps_schema_loading_errors(monkeypatch) -> None:
 
         raise OSError("disk failure")
 
+    # Ensure path existence check passes so validate_config calls _load_schema.
+    real_path_cls = config_schema_mod.Path
+
+    def fake_is_file(self) -> bool:  # noqa: D401
+        """Pretend the schema path exists so loading can fail later."""
+
+        return str(self) == "/nonexistent/schema.json"
+
+    monkeypatch.setattr(real_path_cls, "is_file", fake_is_file, raising=False)
     monkeypatch.setattr(config_schema_mod, "_load_schema", boom_load)
 
     fake_schema_path = config_schema_mod.Path("/nonexistent/schema.json")
 
-    with pytest.raises(ValueError) as excinfo:
+    with caplog.at_level("WARNING", logger="foghorn.config_schema"):
+        # Should not raise despite schema loading failure; behaviour is
+        # best-effort with a warning and skipped validation.
         validate_config({}, schema_path=fake_schema_path, config_path="cfg.yaml")
 
-    msg = str(excinfo.value)
-    assert "Failed to load or parse configuration schema" in msg
-    assert "disk failure" in msg
+    joined = "\n".join(r.getMessage() for r in caplog.records)
+    assert "Failed to load or parse configuration schema" in joined
+    assert "skipping JSON Schema validation" in joined
+    assert "disk failure" in joined

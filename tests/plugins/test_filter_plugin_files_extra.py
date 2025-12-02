@@ -77,7 +77,7 @@ def test_load_list_from_file_json_error_and_missing_domain(tmp_path, caplog):
       - tmp_path/caplog fixtures.
 
     Outputs:
-      - None: Asserts Adblock-style wrappers removed and bad JSON lines skipped.
+      - None: Asserts Adblock/AdGuard wrappers removed and bad JSON lines skipped.
     """
     db = tmp_path / "bl.db"
     p = FilterPlugin(db_path=str(db), default="deny")
@@ -87,7 +87,9 @@ def test_load_list_from_file_json_error_and_missing_domain(tmp_path, caplog):
     f.write_text(
         "\n".join(
             [
+                "! adguard style comment",  # should be ignored
                 "||ads.example^",  # Adblock-style token -> normalized
+                "||ads2.example^$third-party",  # rejected: content after '^'
                 "{",  # invalid JSON
                 '["not-object"]',  # JSON that is not a dict
                 '{"domain": ""}',  # missing/empty domain
@@ -98,8 +100,10 @@ def test_load_list_from_file_json_error_and_missing_domain(tmp_path, caplog):
     caplog.set_level("ERROR")
     with closing(p.conn):
         p.load_list_from_file(str(f), mode="allow")
-        # Normalized domain should be allowed despite noisy lines.
+        # Normalized domains should be allowed despite noisy lines.
         assert p.is_allowed("ads.example") is True
+        # Token with extra content after '^' is ignored, so default deny applies.
+        assert p.is_allowed("ads2.example") is False
 
 
 def test_patterns_and_keywords_files(tmp_path, caplog):
@@ -158,6 +162,53 @@ def test_load_keywords_from_file_json_error_and_missing_keyword(tmp_path, caplog
     with closing(p.conn):
         kws = p._load_keywords_from_file(str(f))
     assert "good" in kws
+
+
+def test_load_list_from_file_treats_bang_as_comment(tmp_path):
+    """Brief: load_list_from_file skips lines starting with '!' as comments.
+
+    Inputs:
+      - tmp_path: temporary directory.
+
+    Outputs:
+      - None: Asserts that only real domains are stored in the DB.
+    """
+    db = tmp_path / "bl.db"
+    p = FilterPlugin(db_path=str(db), default="deny")
+    p.setup()
+
+    f = tmp_path / "domains_bang.txt"
+    f.write_text("\n".join(["! adguard comment", "ok.com"]))
+
+    with closing(p.conn):
+        p.load_list_from_file(str(f), mode="allow")
+        rows = list(p.conn.execute("SELECT domain FROM blocked_domains").fetchall())
+        assert ("ok.com",) in rows
+        assert not any(row[0].startswith("!") for row in rows)
+
+
+def test_load_list_from_file_adguard_token_blocks_subdomains(tmp_path):
+    """Brief: AdGuard-style tokens with '^' apply to domain and all subdomains.
+
+    Inputs:
+      - tmp_path: temporary directory.
+
+    Outputs:
+      - None: Asserts deny decisions for domain and its subdomains.
+    """
+    db = tmp_path / "bl.db"
+    p = FilterPlugin(db_path=str(db), default="allow")
+    p.setup()
+
+    f = tmp_path / "adguard_domains.txt"
+    f.write_text("||bad.example^\n")
+
+    with closing(p.conn):
+        p.load_list_from_file(str(f), mode="deny")
+        assert p.is_allowed("bad.example") is False
+        assert p.is_allowed("sub.bad.example") is False
+        # Unrelated domains fall back to default allow.
+        assert p.is_allowed("other.com") is True
 
 
 def test_blocked_ips_files_csv_simple_and_jsonl(tmp_path):

@@ -12,8 +12,14 @@ import time
 
 import pytest
 
-from foghorn.stats import (LatencyHistogram, StatsCollector, StatsReporter,
-                           TopK, _normalize_domain, format_snapshot_json)
+from foghorn.stats import (
+    LatencyHistogram,
+    StatsCollector,
+    StatsReporter,
+    TopK,
+    _normalize_domain,
+    format_snapshot_json,
+)
 
 
 def test_normalize_domain_cases():
@@ -94,7 +100,13 @@ def test_stats_collector_full_flow_and_reset():
     # Reset and verify cleared
     c.snapshot(reset=True)
     snap3 = c.snapshot(reset=False)
-    assert snap3.totals == {} and snap3.rcodes == {} and snap3.qtypes == {}
+    # After reset, only baseline pre-plugin cache counters remain at 0.
+    assert snap3.totals == {
+        "cache_deny_pre": 0,
+        "cache_override_pre": 0,
+    }
+    assert snap3.rcodes == {}
+    assert snap3.qtypes == {}
 
 
 def test_format_snapshot_json_compact_and_fields():

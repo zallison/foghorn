@@ -43,15 +43,16 @@ def _get_min_cache_ttl(cfg: dict) -> int:
     Inputs:
       - cfg: dict loaded from YAML
     Outputs:
-      - int: non-negative min_cache_ttl in seconds (default 60)
+      - int: non-negative min_cache_ttl in seconds (default 0 when omitted)
 
     Returns a sanitized min_cache_ttl value. Negative values are clamped to 0.
     """
-    val = cfg.get("min_cache_ttl", 60)
+    # Treat missing or None as 0 to avoid unintentionally extending cache TTLs
+    val = cfg.get("min_cache_ttl", 0)
     try:
         ival = int(val)
     except (TypeError, ValueError):
-        ival = 60
+        ival = 0
     return max(0, ival)
 
 
@@ -120,6 +121,75 @@ def normalize_upstream_config(
     return upstreams, timeout_ms
 
 
+def _validate_plugin_config(plugin_cls: type[BasePlugin], config: dict | None) -> dict:
+    """Brief: Validate and normalize plugin configuration via optional schema hooks.
+
+    Inputs:
+      - plugin_cls: Plugin class (subclass of BasePlugin).
+      - config: Raw config mapping for this plugin (may be None).
+
+    Outputs:
+      - dict: Validated/normalized config mapping to be passed into plugin_cls.
+
+    Behavior:
+      - If plugin_cls exposes get_config_model() and it returns a model class,
+        the config is validated by instantiating the model; the resulting
+        mapping (model.dict() when available) is returned.
+      - If get_config_model() returns None, the config is accepted as-is.
+      - Otherwise, if plugin_cls exposes get_config_schema() and it returns a
+        JSON Schema dict, the config is validated using jsonschema; on success
+        the original config mapping is returned.
+      - If get_config_schema() returns None or no hooks are present, the config
+        is returned unchanged.
+    """
+
+    cfg = config or {}
+
+    # Prefer typed config models (e.g., Pydantic) when provided.
+    get_model = getattr(plugin_cls, "get_config_model", None)
+    if callable(get_model):  # pragma: no cover - exercised via plugin tests
+        model_cls = get_model()
+        if model_cls is None:
+            return cfg
+        try:
+            model_instance = model_cls(**cfg)
+        except Exception as exc:  # pragma: no cover - defensive, surfaced in tests
+            raise ValueError(
+                f"Invalid configuration for plugin {plugin_cls.__name__}: {exc}"
+            ) from exc
+
+        # Best-effort conversion back to a plain mapping so existing plugins
+        # that expect dict-like config continue to work.
+        for attr in ("dict", "model_dump"):
+            method = getattr(model_instance, attr, None)
+            if callable(method):
+                try:
+                    return dict(method())
+                except Exception:  # pragma: no cover - defensive
+                    break
+        try:
+            return dict(model_instance)
+        except Exception:  # pragma: no cover - defensive
+            return cfg
+
+    # Fallback: JSON Schema-based per-plugin validation.
+    get_schema = getattr(plugin_cls, "get_config_schema", None)
+    if callable(get_schema):  # pragma: no cover - exercised via plugin tests
+        schema = get_schema()
+        if schema is None:
+            return cfg
+        try:
+            from jsonschema import validate as _js_validate  # type: ignore
+
+            _js_validate(instance=cfg, schema=schema)
+        except Exception as exc:  # pragma: no cover - defensive, surfaced in tests
+            raise ValueError(
+                f"Invalid configuration for plugin {plugin_cls.__name__}: {exc}"
+            ) from exc
+
+    return cfg
+
+
 def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
     """
     Loads and initializes plugins from a list of plugin specifications.
@@ -161,7 +231,8 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
             continue
 
         plugin_cls = get_plugin_class(module_path, alias_registry)
-        plugin = plugin_cls(**config)
+        validated_config = _validate_plugin_config(plugin_cls, config)
+        plugin = plugin_cls(**validated_config)
         plugins.append(plugin)
     return plugins
 
@@ -406,9 +477,20 @@ def main(argv: List[str] | None = None) -> int:
                     "on",
                 }  # pragma: nocover - best effort
 
+            # Allow force_rebuild to be controlled from three sources, in
+            # increasing precedence order:
+            #   1) statistics.force_rebuild (root-level flag)
+            #   2) statistics.persistence.force_rebuild (legacy location)
+            #   3) FOGHORN_FORCE_REBUILD / --rebuild (highest precedence)
+            force_rebuild_root = bool(stats_cfg.get("force_rebuild", False))
             force_rebuild_cfg = bool(persistence_cfg.get("force_rebuild", False))
             force_rebuild_env = _is_truthy_env(os.getenv("FOGHORN_FORCE_REBUILD"))
-            force_rebuild = bool(args.rebuild or force_rebuild_cfg or force_rebuild_env)
+            force_rebuild = bool(
+                args.rebuild
+                or force_rebuild_env
+                or force_rebuild_cfg
+                or force_rebuild_root
+            )
 
             try:
                 stats_persistence_store = StatsSQLiteStore(
