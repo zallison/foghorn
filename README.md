@@ -1,8 +1,13 @@
 # Foghorn
 
-![Foghorn Logo](html/transparent-logo.png)
+<figure>
+  <img src="logo.png" width="300px" alt="Foghorn Logo"">
+  <figcaption>The Foghorn logo, a stylized alarm horn with two "sound waves" coming out of it. Below that is the text "FOGHORN: CACHING PLUGGABLE DNS SERVER'.</figcaption>
+</figure>
 
-Foghorn is a lightweight, caching DNS server built with Python (3.10+). It's designed to be fast and extensible, featuring a pluggable policy system that allows you to customize its behavior to fit your needs.
+Foghorn is a caching DNS server built with Python (3.10+).
+
+It's designed to be fast and extensible, featuring a pluggable policy system that allows you to customize its behavior to fit your needs.  Everything from a single user proxy to use secure uplinks, to a local lan server answering from your /etc/hosts file and using blockfiles, to a full authoritative DNS server.  It can even be used as a test server failing randomly or seeded.
 
 With special thanks to Fiona Weatherwax for their contributions and inspiration.
 
