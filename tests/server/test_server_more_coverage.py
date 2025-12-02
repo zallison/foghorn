@@ -382,7 +382,7 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
     def fake_forward_ok(self, request, upstreams, qname, qtype):
         return wire_ok, upstreams[0], "ok"
 
-    # Case 1: validate with upstream_ad -> no AD -> SERVFAIL
+    # Case 1: validate with upstream_ad -> no AD -> treated as insecure but not SERVFAIL
     h1 = srv.DNSUDPHandler.__new__(srv.DNSUDPHandler)
 
     class _Sock:
@@ -401,9 +401,11 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
         srv.DNSUDPHandler, "_forward_with_failover_helper", fake_forward_noad
     )
     h1.handle()
-    assert DNSRecord.parse(sock1.sent[-1][0]).header.rcode == RCODE.SERVFAIL
+    # Upstream path without AD should now be treated as insecure/unsigned,
+    # not forced to SERVFAIL.
+    assert DNSRecord.parse(sock1.sent[-1][0]).header.rcode == RCODE.NOERROR
 
-    # Case 3: local validator raises -> SERVFAIL (exercise exception path)
+    # Case 3: local validator raises -> treated as insecure (exercise exception path)
     h3 = srv.DNSUDPHandler.__new__(srv.DNSUDPHandler)
     sock3 = _Sock()
     h3.request = (q.pack(), sock3)
@@ -425,7 +427,9 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
         srv.DNSUDPHandler, "_forward_with_failover_helper", fake_forward_noad
     )
     h3.handle()
-    assert DNSRecord.parse(sock3.sent[-1][0]).header.rcode == RCODE.SERVFAIL
+    # Local validator exceptions should no longer force SERVFAIL; the
+    # response should flow through unchanged.
+    assert DNSRecord.parse(sock3.sent[-1][0]).header.rcode == RCODE.NOERROR
 
 
 def test_resolve_query_bytes_post_hooks(monkeypatch):

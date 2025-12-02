@@ -406,6 +406,32 @@ def test_validate_domain_list_accepts_good_domain_only_list(tmp_path):
     assert dl._validate_domain_list(str(f)) is True
 
 
+def test_validate_domain_list_ignores_bang_comment_lines(tmp_path):
+    """Brief: _validate_domain_list skips lines starting with '!' as comments.
+
+    Inputs:
+      - tmp_path: Temporary directory for domain list file.
+
+    Outputs:
+      - None; asserts AdGuard-style '!' comments do not cause rejection.
+    """
+
+    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    f = tmp_path / "adguard.txt"
+    lines = [
+        "# header",
+        "! AdGuard comment line",
+        "one.example",
+        "two.example",
+        "three.example",
+        "four.example",
+        "five.example",
+    ]
+    f.write_text("\n".join(lines))
+
+    assert dl._validate_domain_list(str(f)) is True
+
+
 def test_validate_domain_list_rejects_hosts_and_bad_lines(tmp_path):
     """Brief: _validate_domain_list rejects hosts-format and malformed lines.
 
