@@ -179,6 +179,7 @@ good.com
 
 Project-specific notes
 - FilterPlugin is the only component that reads JSONL from external files; specifically the file-backed input fields: allowed_domains_files, allowlist_files, blocked_domains_files, blocklist_files, blocked_patterns_files, blocked_keywords_files, blocked_ips_files
+- Each FilterPlugin instance uses its own in-memory SQLite DB by default; a shared on-disk DB is only used when a non-empty db_path is explicitly configured for that instance.
 - The core YAML config does not accept JSONL; it only references which files to load
 - Statistics snapshots are logged as single-line JSON objects (conceptually JSONL when collected)
 

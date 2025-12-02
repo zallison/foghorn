@@ -31,7 +31,9 @@ class FilterConfig(BaseModel):
 
     Inputs:
       - cache_ttl_seconds: TTL for domain cache.
-      - db_path: Path to blocklist SQLite DB.
+      - db_path: Optional path to blocklist SQLite DB. When omitted or empty,
+        the plugin uses a per-instance in-memory database so that multiple
+        FilterPlugin instances do not share state by default.
       - default: Default policy ("allow" or "deny").
       - ttl: TTL for synthesized responses.
       - deny_response: Policy for deny responses.
@@ -47,7 +49,7 @@ class FilterConfig(BaseModel):
     """
 
     cache_ttl_seconds: int = Field(default=600, ge=0)
-    db_path: str = Field(default="./config/var/blocklist.db")
+    db_path: Optional[str] = Field(default=None)
     default: str = Field(default="deny")
     ttl: int = Field(default=300, ge=0)
     deny_response: str = Field(default="nxdomain")
@@ -143,6 +145,14 @@ class FilterPlugin(BasePlugin):
     def setup(self):
         """
         Initializes the FilterPlugin.  Config has been read.
+
+        Notes:
+            - When ``db_path`` is omitted or empty, this plugin uses an
+              in-memory SQLite database so each FilterPlugin instance has its
+              own isolated allow/deny state by default.
+            - When multiple instances explicitly share the same non-empty
+              ``db_path``, they also share the same underlying table and
+              last-writer-wins semantics apply.
         """
         # super().__init__(**config)
         self._domain_cache = FoghornTTLCache()
@@ -152,7 +162,9 @@ class FilterPlugin(BasePlugin):
         self._db_lock = threading.Lock()
 
         self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 600)  # 10 minutes
-        self.db_path: str = self.config.get("db_path", "./config/var/blocklist.db")
+        raw_db_path = self.config.get("db_path")
+        # None/empty db_path => per-instance in-memory database.
+        self.db_path: str = raw_db_path or ":memory:"
         self.default = self.config.get("default", "deny")
 
         # TTL used when synthesizing A/AAAA responses (e.g., when deny_response="ip")

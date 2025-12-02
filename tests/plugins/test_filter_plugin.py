@@ -674,3 +674,34 @@ def test_glob_expansion_for_blocklist_and_allowlist_files(tmp_path):
 
         # Check default deny for unknown domains
         assert plugin.is_allowed("unknown.com") is False
+
+
+def test_multiple_filter_instances_use_isolated_dbs_by_default(tmp_path):
+    """Brief: Default db_path uses per-instance in-memory DB, so instances do not share state.
+
+    Inputs:
+      - tmp_path: temporary directory (unused, kept for symmetry with other tests).
+
+    Outputs:
+      - None: Asserts that two FilterPlugin instances block only their own domains.
+    """
+    # First plugin blocks p1-block.com only.
+    p1 = FilterPlugin(default="allow", blocked_domains=["p1-block.com"])
+    p1.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+
+    # Second plugin blocks p2-block.com only.
+    p2 = FilterPlugin(default="allow", blocked_domains=["p2-block.com"])
+    p2.setup()
+
+    # p1 sees its own blocked domain but not p2's.
+    dec1 = p1.pre_resolve("p1-block.com", QTYPE.A, b"", ctx)
+    assert isinstance(dec1, PluginDecision)
+    assert dec1.action == "deny"
+    assert p1.pre_resolve("p2-block.com", QTYPE.A, b"", ctx).action == "skip"
+
+    # p2 sees its own blocked domain but not p1's.
+    dec2 = p2.pre_resolve("p2-block.com", QTYPE.A, b"", ctx)
+    assert isinstance(dec2, PluginDecision)
+    assert dec2.action == "deny"
+    assert p2.pre_resolve("p1-block.com", QTYPE.A, b"", ctx).action == "skip"
