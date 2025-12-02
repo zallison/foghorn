@@ -493,6 +493,12 @@ def resolve_iterative(
         Outputs:
           - List of AuthorityEndpoint entries built from the most specific
             cached NS RRsets, or an empty list if no suitable entries exist.
+
+        Notes:
+          - Only in-bailiwick NS names and glue (A/AAAA) are used when
+            constructing AuthorityEndpoint entries. Out-of-bailiwick data is
+            ignored to reduce the impact of malicious or misconfigured
+            authority sections.
         """
 
         now = _now_ms()
@@ -504,6 +510,7 @@ def resolve_iterative(
         # www.example.com -> example.com, com.
         for i in range(1, len(labels)):
             zone = ".".join(labels[i:])
+            # zone_fqdn = f"{zone}." if not zone.endswith(".") else zone
             key = RRsetKey(name=zone, rrtype=QTYPE.NS)
             entry = cache.lookup_rrset(key)
             if entry is None or entry.expires_at_ms <= now:
@@ -526,6 +533,9 @@ def resolve_iterative(
                 if rr.rtype not in (QTYPE.A, QTYPE.AAAA):
                     continue
                 name_str = str(rr.rname).rstrip(".")
+                # Only accept glue that is in-bailiwick for the delegated zone.
+                if not name_str.endswith(zone):
+                    continue
                 glue_by_name.setdefault(name_str, []).append(str(rr.rdata))
 
             authorities: list[AuthorityEndpoint] = []
@@ -537,12 +547,12 @@ def resolve_iterative(
                 except Exception:
                     child_name = str(ns_rr.rdata).rstrip(".")
 
+                # Only use NS names that are in-bailiwick for the zone.
+                if not child_name.endswith(zone):
+                    continue
+
                 hosts = glue_by_name.get(child_name)
 
-                # For now, avoid recursive NS address lookups when glue is
-                # missing. Falling back to the NS hostname directly keeps the
-                # resolver from recursing indefinitely when every reply is a
-                # referral with no glue.
                 if hosts:
                     for host_ip in hosts:
                         authorities.append(
@@ -766,12 +776,17 @@ def resolve_iterative(
                     except Exception:
                         child_name = str(ns_rr.rdata).rstrip(".")
 
+                    # Only consider NS names that are in-bailiwick for the
+                    # delegation owner (ns_rr.rname).
+                    try:
+                        owner_name = str(ns_rr.rname).rstrip(".")
+                    except Exception:
+                        owner_name = ""
+                    if owner_name and not child_name.endswith(owner_name):
+                        continue
+
                     hosts = glue_by_name.get(child_name)
 
-                    # Avoid recursive NS address lookups when there is no glue.
-                    # This keeps purely-referral loops from recursing via
-                    # _resolve_ns_addresses and ensures depth/time budgets are
-                    # enforced in the main resolution loop instead.
                     if hosts:
                         for host_ip in hosts:
                             child_authorities.append(
@@ -783,16 +798,33 @@ def resolve_iterative(
                                 )
                             )
                     else:
-                        # As a last resort, retain the NS hostname as the
-                        # authority host and rely on the underlying stack.
-                        child_authorities.append(
-                            AuthorityEndpoint(
-                                name=str(ns_rr.rname),
-                                host=child_name,
-                                port=authority.port,
-                                transport=authority.transport,
+                        # When no in-bailiwick A/AAAA glue is available, attempt
+                        # to resolve the NS hostname's addresses via the
+                        # recursive engine itself using a reduced budget.
+                        resolved_addrs = _resolve_ns_addresses(child_name)
+                        for addr in resolved_addrs:
+                            child_authorities.append(
+                                AuthorityEndpoint(
+                                    name=str(ns_rr.rname),
+                                    host=addr,
+                                    port=authority.port,
+                                    transport=authority.transport,
+                                )
                             )
-                        )
+
+                        # As a conservative fallback when address lookups fail,
+                        # retain the NS hostname itself so that environments
+                        # with working system resolvers can still make
+                        # progress.
+                        if not resolved_addrs:
+                            child_authorities.append(
+                                AuthorityEndpoint(
+                                    name=str(ns_rr.rname),
+                                    host=child_name,
+                                    port=authority.port,
+                                    transport=authority.transport,
+                                )
+                            )
 
                 if not child_authorities:
                     failed_authorities.add(authority)
