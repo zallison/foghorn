@@ -532,69 +532,140 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
             except Exception:  # pragma: no cover
                 pass
 
-        # Upstreams
-        upstreams = ctx.upstream_candidates or DNSUDPHandler.upstream_addrs
-        if not upstreams:
-            r = req.reply()
-            r.header.rcode = RCODE.SERVFAIL
-            wire = _set_response_id(r.pack(), req.header.id)
-            if stats is not None:
-                try:
-                    stats.record_response_rcode("SERVFAIL", qname)
-                    qtype_name = QTYPE.get(qtype, str(qtype))
-                    stats.record_query_result(
-                        client_ip=client_ip,
-                        qname=qname,
-                        qtype=qtype_name,
-                        rcode="SERVFAIL",
-                        upstream_id=None,
-                        status="no_upstreams",
-                        error="no upstreams configured",
-                        first=None,
-                        result={"source": "server", "error": "no_upstreams"},
+        # Decide between recursive resolver mode and classic forwarding.
+        resolver_mode = str(getattr(DNSUDPHandler, "recursive_mode", "forward")).lower()
+        reply: Optional[bytes] = None
+        used_upstream: Optional[Dict] = None
+        reason: Optional[str] = None
+
+        if resolver_mode == "recursive":
+            # Build a ResolverConfig snapshot for this query.
+            try:
+                from .recursive_resolver import ResolverConfig, resolve_iterative
+
+                # Shared recursive cache and transports are attached to the
+                # handler class by foghorn.main during startup.
+                cache_obj = getattr(DNSUDPHandler, "recursive_cache", None)
+                transports = getattr(DNSUDPHandler, "recursive_transports", None)
+
+                if cache_obj is None or transports is None:
+                    # Safety net: fall back to forward mode when recursive
+                    # support is not fully initialized.
+                    resolver_mode = "forward"
+                else:
+                    # Derive recursive time/depth budgets from handler knobs.
+                    try:
+                        r_timeout = int(
+                            getattr(
+                                DNSUDPHandler,
+                                "recursive_timeout_ms",
+                                DNSUDPHandler.timeout_ms,
+                            )
+                        )
+                    except Exception:
+                        r_timeout = DNSUDPHandler.timeout_ms
+                    try:
+                        r_per_try = int(
+                            getattr(
+                                DNSUDPHandler,
+                                "recursive_per_try_timeout_ms",
+                                max(1, r_timeout // 2),
+                            )
+                        )
+                    except Exception:
+                        r_per_try = max(1, r_timeout // 2)
+                    try:
+                        r_max_depth = int(
+                            getattr(DNSUDPHandler, "recursive_max_depth", 8)
+                        )
+                    except Exception:
+                        r_max_depth = 8
+
+                    r_cfg = ResolverConfig(
+                        dnssec_mode=str(DNSUDPHandler.dnssec_mode),
+                        edns_udp_payload=int(DNSUDPHandler.edns_udp_payload),
+                        timeout_ms=int(r_timeout),
+                        per_try_timeout_ms=int(r_per_try),
+                        max_depth=int(r_max_depth),
+                        now_ms=None,
                     )
-                except Exception:  # pragma: no cover
-                    pass
-            return wire
 
-        # EDNS/DNSSEC adjustments (mirror DNSUDPHandler behavior)
-        try:
-            mode = str(DNSUDPHandler.dnssec_mode).lower()
-            if mode in ("ignore", "passthrough", "validate"):
-                # Use instance-like helper by constructing a temp handler
-                dummy = type("_H", (), {})()
-                dummy.dnssec_mode = DNSUDPHandler.dnssec_mode
-                dummy.edns_udp_payload = DNSUDPHandler.edns_udp_payload
-
-                def _ensure(req):
-                    # Inline simplified ensure to avoid method binding
-                    opt_idx = None
-                    for idx, rr in enumerate(getattr(req, "ar", []) or []):
-                        if rr.rtype == QTYPE.OPT:
-                            opt_idx = idx
-                            break
-                    flags = _edns_flags_for_mode(dummy.dnssec_mode)
-                    opt_rr = RR(
-                        rname=".",
-                        rtype=QTYPE.OPT,
-                        rclass=int(dummy.edns_udp_payload),
-                        ttl=0,
-                        rdata=EDNS0(flags=flags),
+                    reply, _trace = resolve_iterative(
+                        qname,
+                        qtype,
+                        cfg=r_cfg,
+                        cache=cache_obj,
+                        transports=transports,
                     )
-                    if opt_idx is None:
-                        req.add_ar(opt_rr)
-                    else:
-                        req.ar[opt_idx] = opt_rr
+                    reason = "ok"
+            except Exception:  # pragma: no cover - defensive fallback
+                resolver_mode = "forward"
 
-                _ensure(req)
-        except Exception:  # pragma: no cover
-            pass  # pragma: no cover
+        if resolver_mode != "recursive":
+            # Forward via upstreams when recursive mode is disabled or
+            # unavailable. Existing behaviour is preserved.
+            upstreams = ctx.upstream_candidates or DNSUDPHandler.upstream_addrs
+            if not upstreams:
+                r = req.reply()
+                r.header.rcode = RCODE.SERVFAIL
+                wire = _set_response_id(r.pack(), req.header.id)
+                if stats is not None:
+                    try:
+                        stats.record_response_rcode("SERVFAIL", qname)
+                        qtype_name = QTYPE.get(qtype, str(qtype))
+                        stats.record_query_result(
+                            client_ip=client_ip,
+                            qname=qname,
+                            qtype=qtype_name,
+                            rcode="SERVFAIL",
+                            upstream_id=None,
+                            status="no_upstreams",
+                            error="no upstreams configured",
+                            first=None,
+                            result={"source": "server", "error": "no_upstreams"},
+                        )
+                    except Exception:  # pragma: no cover
+                        pass
+                return wire
 
-        # Forward with failover
-        upstream_id: Optional[str] = None
-        reply, used_upstream, reason = send_query_with_failover(
-            req, upstreams, DNSUDPHandler.timeout_ms, qname, qtype
-        )
+            # EDNS/DNSSEC adjustments (mirror DNSUDPHandler behavior)
+            try:
+                mode = str(DNSUDPHandler.dnssec_mode).lower()
+                if mode in ("ignore", "passthrough", "validate"):
+                    # Use instance-like helper by constructing a temp handler
+                    dummy = type("_H", (), {})()
+                    dummy.dnssec_mode = DNSUDPHandler.dnssec_mode
+                    dummy.edns_udp_payload = DNSUDPHandler.edns_udp_payload
+
+                    def _ensure(req):
+                        # Inline simplified ensure to avoid method binding
+                        opt_idx = None
+                        for idx, rr in enumerate(getattr(req, "ar", []) or []):
+                            if rr.rtype == QTYPE.OPT:
+                                opt_idx = idx
+                                break
+                        flags = _edns_flags_for_mode(dummy.dnssec_mode)
+                        opt_rr = RR(
+                            rname=".",
+                            rtype=QTYPE.OPT,
+                            rclass=int(dummy.edns_udp_payload),
+                            ttl=0,
+                            rdata=EDNS0(flags=flags),
+                        )
+                        if opt_idx is None:
+                            req.add_ar(opt_rr)
+                        else:
+                            req.ar[opt_idx] = opt_rr
+
+                    _ensure(req)
+            except Exception:  # pragma: no cover
+                pass  # pragma: no cover
+
+            # Forward with failover
+            upstream_id: Optional[str] = None
+            reply, used_upstream, reason = send_query_with_failover(
+                req, upstreams, DNSUDPHandler.timeout_ms, qname, qtype
+            )
 
         # Record upstream result
         if stats is not None and used_upstream:
