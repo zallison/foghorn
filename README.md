@@ -1,7 +1,7 @@
 # Foghorn
 
 <figure>
-  <img src="logo.png" width="300px" alt="Foghorn Logo"">
+  <img src="html/logo.png" width="300px" alt="Foghorn Logo"">
   <figcaption>The Foghorn logo, a stylized alarm horn with two "sound waves" coming out of it. Below that is the text "FOGHORN: CACHING PLUGGABLE DNS SERVER'.</figcaption>
 </figure>
 
