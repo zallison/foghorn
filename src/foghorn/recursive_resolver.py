@@ -359,8 +359,18 @@ def resolve_iterative(
     cfg: ResolverConfig,
     cache: RecursiveCache,
     transports: TransportFacade,
+    _resolving_ns: Optional[set[str]] = None,
 ) -> tuple[bytes, RecursiveTrace]:
     """Resolve a DNS query iteratively starting from root hints.
+
+    Inputs:
+      - qname: Query name as a presentation-format string.
+      - qtype: Numeric query type (e.g. 1=A, 28=AAAA).
+      - cfg: ResolverConfig instance controlling timeouts and DNSSEC/EDNS.
+      - cache: RecursiveCache implementation used for RRset and answer reuse.
+      - transports: TransportFacade used to contact authorities.
+      - _resolving_ns: Internal set of NS hostnames currently being resolved
+        as infrastructure lookups; callers should not pass this explicitly.
 
     Inputs:
       - qname: Query name as a presentation-format string.
@@ -388,6 +398,13 @@ def resolve_iterative(
     from dnslib import QTYPE, RCODE, DNSRecord
 
     trace = RecursiveTrace(hops=[])
+
+    # Shared set guarding against re-entrant NS address resolution across nested
+    # resolve_iterative calls within a single top-level query.
+    if _resolving_ns is None:
+        resolving_ns: set[str] = set()
+    else:
+        resolving_ns = _resolving_ns
 
     # Helper to obtain a wall clock in milliseconds; allows tests to inject
     # a deterministic clock via cfg.now_ms.
@@ -445,44 +462,83 @@ def resolve_iterative(
           - This issues recursive lookups using the same engine with a reduced
             depth and timeout budget so that infrastructure lookups cannot
             exhaust the entire client query budget.
+          - A small in-function guard prevents re-entrant resolution of the same
+            NS name from causing unbounded recursion when every reply is a
+            glue-less referral to that name.
         """
 
-        # Derive a smaller budget for infrastructure lookups so they cannot
-        # consume the entire query time; fall back to at least 1 ms.
-        nested_timeout = max(1, int(cfg.timeout_ms // 4 or cfg.timeout_ms))
-        nested_per_try = (
-            cfg.per_try_timeout_ms if cfg.per_try_timeout_ms > 0 else nested_timeout
-        )
-        nested_cfg = ResolverConfig(
-            dnssec_mode=cfg.dnssec_mode,
-            edns_udp_payload=cfg.edns_udp_payload,
-            timeout_ms=nested_timeout,
-            per_try_timeout_ms=min(nested_per_try, nested_timeout),
-            max_depth=max(1, cfg.max_depth // 2),
-            now_ms=cfg.now_ms,
-        )
+        ns_key = ns_name.rstrip(".").lower()
+        if ns_key in resolving_ns:
+            # Already resolving this NS name higher in the stack; avoid
+            # recursing again and rely on depth/timeout limits in the main
+            # resolution loop instead.
+            return []
 
-        addrs: list[str] = []
-        for addr_qtype in (QTYPE.A, QTYPE.AAAA):
-            try:
-                wire, _trace = resolve_iterative(
-                    ns_name,
-                    addr_qtype,
-                    cfg=nested_cfg,
-                    cache=cache,
-                    transports=transports,
-                )
-            except RecursionError:
-                continue
-            try:
-                msg = DNSRecord.parse(wire)
-            except Exception:
-                continue
-            for rr in msg.rr or []:
-                if rr.rtype == addr_qtype:
-                    addrs.append(str(rr.rdata))
+        # Impose a small per-query cap on the number of distinct NS hostnames
+        # being resolved to guard against pathological glue-less delegation
+        # trees. Once this soft budget is exceeded, further NS address lookups
+        # are skipped and the main resolution loop's depth/timeout budgets are
+        # relied upon instead.
+        if len(resolving_ns) >= 16:
+            return []
 
-        return addrs
+        resolving_ns.add(ns_key)
+        try:
+            # Derive a smaller budget for infrastructure lookups so they cannot
+            # consume the entire query time; fall back to at least 1 ms and
+            # respect the remaining top-level budget when one is configured.
+            remaining_ms: int
+            if cfg.timeout_ms > 0:
+                # Use the remaining top-level budget as an upper bound.
+                elapsed = _now_ms() - start_ms
+                remaining_ms = max(1, cfg.timeout_ms - max(0, elapsed))
+            else:
+                # When no global timeout is configured, bound infra lookups by
+                # the per-try timeout or a small default window.
+                base = cfg.per_try_timeout_ms if cfg.per_try_timeout_ms > 0 else 1000
+                remaining_ms = max(1, int(base))
+
+            # Cap infra lookups to at most one quarter of the original timeout,
+            # while never exceeding the remaining top-level budget.
+            base_cap = cfg.timeout_ms // 4 or cfg.timeout_ms or remaining_ms
+            nested_timeout = max(1, min(int(base_cap), int(remaining_ms)))
+
+            nested_per_try = (
+                cfg.per_try_timeout_ms if cfg.per_try_timeout_ms > 0 else nested_timeout
+            )
+            nested_cfg = ResolverConfig(
+                dnssec_mode=cfg.dnssec_mode,
+                edns_udp_payload=cfg.edns_udp_payload,
+                timeout_ms=nested_timeout,
+                per_try_timeout_ms=min(nested_per_try, nested_timeout),
+                max_depth=max(1, cfg.max_depth // 2),
+                now_ms=cfg.now_ms,
+            )
+
+            addrs: list[str] = []
+            for addr_qtype in (QTYPE.A, QTYPE.AAAA):
+                try:
+                    wire, _trace = resolve_iterative(
+                        ns_name,
+                        addr_qtype,
+                        cfg=nested_cfg,
+                        cache=cache,
+                        transports=transports,
+                        _resolving_ns=resolving_ns,
+                    )
+                except RecursionError:
+                    continue
+                try:
+                    msg = DNSRecord.parse(wire)
+                except Exception:
+                    continue
+                for rr in msg.rr or []:
+                    if rr.rtype == addr_qtype:
+                        addrs.append(str(rr.rdata))
+
+            return addrs
+        finally:
+            resolving_ns.discard(ns_key)
 
     def _lookup_cached_authorities_for_qname(qname_str: str) -> list[AuthorityEndpoint]:
         """Brief: Return authorities derived from cached NS RRsets, if any.
@@ -510,7 +566,6 @@ def resolve_iterative(
         # www.example.com -> example.com, com.
         for i in range(1, len(labels)):
             zone = ".".join(labels[i:])
-            # zone_fqdn = f"{zone}." if not zone.endswith(".") else zone
             key = RRsetKey(name=zone, rrtype=QTYPE.NS)
             entry = cache.lookup_rrset(key)
             if entry is None or entry.expires_at_ms <= now:
@@ -736,6 +791,31 @@ def resolve_iterative(
             if rcode == RCODE.NOERROR and not parsed.rr and has_ns:
                 ns_rrs = [rr for rr in auth_rrs if rr.rtype == QTYPE.NS]
                 ns_rr0 = ns_rrs[0]
+
+                # Bailiwick check for the delegated owner name: only follow
+                # referrals whose owner name is a suffix of the current qname.
+                # This guards against misdirected referrals that attempt to
+                # delegate queries for one subtree (e.g. example.com) to an
+                # unrelated zone (e.g. attacker.net).
+                try:
+                    delegated_owner = str(ns_rr0.rname).rstrip(".")
+                except Exception:
+                    delegated_owner = ""
+                if delegated_owner and not current_qname.rstrip(".").endswith(
+                    delegated_owner
+                ):
+                    failed_authorities.add(authority)
+                    trace.hops.append(
+                        TraceHop(
+                            qname=current_qname,
+                            qtype=qtype,
+                            authority=authority,
+                            rcode=rcode,
+                            step="error",
+                            detail="referral_out_of_bailiwick",
+                        )
+                    )
+                    continue
 
                 # Store NS RRset (with glue in additional section) into the
                 # RecursiveCache so that subsequent queries can skip earlier

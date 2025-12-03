@@ -135,3 +135,109 @@ def test_resolver_mode_recursive_uses_iterative_core(monkeypatch) -> None:
     hosts = [call[0].host for call in transports.calls]
     assert "192.0.2.1" in hosts
     assert "198.51.100.1" in hosts
+
+
+def test_recursive_acl_denies_client_and_uses_forwarding(monkeypatch) -> None:
+    """Brief: allow_recursive_from prevents recursion for disallowed clients.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures resolve_query_bytes falls back to forwarding when the client IP
+        is not in resolver.allow_recursive_from and that resolve_iterative is
+        never invoked.
+    """
+
+    # Configure handler for recursive mode but restrict recursion to 192.0.2.0/24.
+    monkeypatch.setattr(DNSUDPHandler, "recursive_mode", "recursive", raising=False)
+    monkeypatch.setattr(
+        DNSUDPHandler,
+        "recursive_allow_nets",
+        [
+            __import__("ipaddress").ip_network("192.0.2.0/24", strict=False),
+        ],
+        raising=False,
+    )
+
+    # Provide upstreams so the forwarding path can succeed.
+    monkeypatch.setattr(
+        DNSUDPHandler,
+        "upstream_addrs",
+        [{"host": "192.0.2.200", "port": 53, "transport": "udp"}],
+        raising=False,
+    )
+
+    # Ensure recursive path is never entered by making it raise if called.
+    def _boom(*args, **kwargs):  # type: ignore[override]
+        raise AssertionError(
+            "resolve_iterative should not be called for disallowed client"
+        )
+
+    monkeypatch.setattr(rr, "resolve_iterative", _boom, raising=False)
+
+    # Forwarding path: return a trivial NOERROR answer.
+    def _fake_forward(query, upstreams, timeout_ms, qname, qtype):  # type: ignore[override]
+        resp = query.reply()
+        resp.header.rcode = RCODE.NOERROR
+        return resp.pack(), upstreams[0], "ok"
+
+    monkeypatch.setattr(
+        "foghorn.server.send_query_with_failover", _fake_forward, raising=False
+    )
+
+    # Disallowed client IP (not in 192.0.2.0/24) should be served via forwarding.
+    q = DNSRecord.question("acl-forward.example", "A")
+    wire = resolve_query_bytes(q.pack(), "203.0.113.1")
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+
+
+def test_recursive_max_inflight_falls_back_to_forward(monkeypatch) -> None:
+    """Brief: when recursive_max_inflight is reached, query uses forward path.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that once recursive_inflight reaches recursive_max_inflight,
+        additional queries skip resolve_iterative and go through forwarding.
+    """
+
+    # Enable recursive mode and set a small inflight cap that is already
+    # saturated before the call.
+    monkeypatch.setattr(DNSUDPHandler, "recursive_mode", "recursive", raising=False)
+    monkeypatch.setattr(DNSUDPHandler, "recursive_max_inflight", 1, raising=False)
+    monkeypatch.setattr(DNSUDPHandler, "recursive_inflight", 1, raising=False)
+
+    # No ACL restrictions for this test.
+    monkeypatch.setattr(DNSUDPHandler, "recursive_allow_nets", None, raising=False)
+
+    # Any attempt to use resolve_iterative should fail the test.
+    def _boom(*args, **kwargs):  # type: ignore[override]
+        raise AssertionError(
+            "resolve_iterative should not be called when at inflight cap"
+        )
+
+    monkeypatch.setattr(rr, "resolve_iterative", _boom, raising=False)
+
+    # Forwarding path returns a simple NOERROR answer.
+    def _fake_forward(query, upstreams, timeout_ms, qname, qtype):  # type: ignore[override]
+        resp = query.reply()
+        resp.header.rcode = RCODE.NOERROR
+        return resp.pack(), upstreams[0], "ok"
+
+    monkeypatch.setattr(
+        "foghorn.server.send_query_with_failover", _fake_forward, raising=False
+    )
+    monkeypatch.setattr(
+        DNSUDPHandler,
+        "upstream_addrs",
+        [{"host": "192.0.2.201", "port": 53, "transport": "udp"}],
+        raising=False,
+    )
+
+    q = DNSRecord.question("limit-forward.example", "A")
+    wire = resolve_query_bytes(q.pack(), "192.0.2.55")
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR

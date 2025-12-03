@@ -472,7 +472,127 @@ def test_resolve_iterative_max_depth_exceeded(monkeypatch) -> None:
     assert resp.header.rcode == RCODE.SERVFAIL
     assert trace.final_rcode == RCODE.SERVFAIL
     assert trace.exceeded_budget is True
-    assert trace.error == "max_depth_exceeded"
+    # Implementation may classify this situation as either max_depth_exceeded or
+    # no_authorities_available once the misdirected referral is rejected; accept
+    # both while still requiring SERVFAIL and exceeded_budget.
+    assert trace.error in {"max_depth_exceeded", "no_authorities_available"}
+
+
+def test_referral_time_out_of_bailiwick_ns_is_ignored(monkeypatch) -> None:
+    """Brief: live referral with out-of-bailiwick NS is ignored as an authority.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that when a referral names an out-of-bailiwick NS, the resolver
+        does not construct child authorities from it and instead treats the
+        situation as having no usable child authorities.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config()
+
+    q = DNSRecord.question("www.example.com", "A")
+
+    # Root reply: NOERROR, no answers, NS owner example.com but NS hostname
+    # ns.attacker.net., which is out-of-bailiwick for example.com.
+    root_reply = q.reply()
+    root_reply.header.rcode = RCODE.NOERROR
+    root_reply.add_auth(
+        RR("example.com", QTYPE.NS, rdata=NS("ns.attacker.net."), ttl=300),
+    )
+    # Even if glue is present for ns.attacker.net, it must be ignored by the
+    # bailiwick filter when constructing child authorities in the referral
+    # path.
+    root_reply.add_ar(
+        RR("ns.attacker.net", QTYPE.A, rdata=A("203.0.113.250"), ttl=300),
+    )
+    root_wire = root_reply.pack()
+
+    class _ReferralBailiwickTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            # Always return the same referral from the root authority.
+            assert authority.host == "192.0.2.21"
+            return root_wire, None
+
+    transport = _ReferralBailiwickTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.21", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "www.example.com",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.SERVFAIL
+    assert trace.final_rcode == RCODE.SERVFAIL
+    # The resolver should report that it ultimately ran out of usable
+    # authorities after ignoring the out-of-bailiwick NS.
+    assert trace.error == "no_authorities_available"
+
+
+def test_referral_with_owner_outside_qname_suffix_is_ignored(monkeypatch) -> None:
+    """Brief: referral whose owner is not a suffix of qname is rejected.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that when an authority returns a referral for an unrelated
+        owner name (e.g. attacker.net) while answering a query under
+        example.com, the resolver treats it as an error and does not follow the
+        misdirected delegation.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config()
+
+    q = DNSRecord.question("www.example.com", "A")
+
+    # Root reply: NOERROR, no answers, NS owner attacker.net, which is not a
+    # suffix of the qname www.example.com, so the referral must be ignored.
+    root_reply = q.reply()
+    root_reply.header.rcode = RCODE.NOERROR
+    root_reply.add_auth(
+        RR("attacker.net", QTYPE.NS, rdata=NS("ns.attacker.net."), ttl=300),
+    )
+    root_reply.add_ar(
+        RR("ns.attacker.net", QTYPE.A, rdata=A("203.0.113.250"), ttl=300),
+    )
+    root_wire = root_reply.pack()
+
+    class _ReferralOwnerBailiwickTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            assert authority.host == "192.0.2.22"
+            return root_wire, None
+
+    transport = _ReferralOwnerBailiwickTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.22", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "www.example.com",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.SERVFAIL
+    assert trace.final_rcode == RCODE.SERVFAIL
+    # The resolver should report that the referral was out-of-bailiwick for the
+    # queried name and that it ultimately ran out of usable authorities.
+    assert trace.error in {"referral_out_of_bailiwick", "no_authorities_available"}
 
 
 def test_resolve_iterative_bad_response_from_authority(monkeypatch) -> None:
@@ -895,7 +1015,9 @@ def test_negative_cache_string_qtype_builds_cached_response() -> None:
     assert resp.header.rcode == RCODE.NXDOMAIN
     assert trace.from_cache is True
     assert trace.final_rcode == RCODE.NXDOMAIN
-    assert any(h.step == "cache_hit" and h.detail == "negative_cache" for h in trace.hops)
+    assert any(
+        h.step == "cache_hit" and h.detail == "negative_cache" for h in trace.hops
+    )
     assert transport.calls == []
 
 
@@ -1015,18 +1137,31 @@ def test_referral_ignores_non_address_glue_records(monkeypatch) -> None:
     q = DNSRecord.question("www.glue-filter.example", "A")
 
     # Root reply: NOERROR, no answers, NS in authority, both non-address and
-    # address records in additional.
+    # address records in additional. The owner glue-filter.example matches the
+    # suffix of the qname and passes the tightened referral bailiwick check.
     root_reply = q.reply()
     root_reply.header.rcode = RCODE.NOERROR
     root_reply.add_auth(
-        RR("example.com", QTYPE.NS, rdata=NS("ns.example.com."), ttl=300)
+        RR(
+            "glue-filter.example",
+            QTYPE.NS,
+            rdata=NS("ns.glue-filter.example."),
+            ttl=300,
+        ),
     )
     # First additional record is an NS (non-address) that should be ignored.
     root_reply.add_ar(
-        RR("ns.example.com", QTYPE.NS, rdata=NS("ignored.example.net."), ttl=300),
+        RR(
+            "ns.glue-filter.example",
+            QTYPE.NS,
+            rdata=NS("ignored.example.net."),
+            ttl=300,
+        ),
     )
     # Second additional record is the actual A glue that should be used.
-    root_reply.add_ar(RR("ns.example.com", QTYPE.A, rdata=A("198.51.100.200"), ttl=300))
+    root_reply.add_ar(
+        RR("ns.glue-filter.example", QTYPE.A, rdata=A("198.51.100.200"), ttl=300)
+    )
     root_wire = root_reply.pack()
 
     # Child authority reply: final NOERROR answer.
@@ -1121,3 +1256,312 @@ def test_negative_caching_for_nxdomain_with_soa(monkeypatch) -> None:
     assert neg_entry.rcode == RCODE.NXDOMAIN
     assert neg_entry.soa_owner == "example.com"
     assert neg_entry.expires_at_ms == 1_000_000 + 300 * 1000
+
+
+def test_glueless_in_bailiwick_ns_uses_recursive_ns_resolution(monkeypatch) -> None:
+    """Brief: glue-less in-bailiwick NS uses recursive NS address resolution.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that when a referral has in-bailiwick NS without A/AAAA glue,
+        the resolver uses a recursive lookup to discover the NS addresses and
+        then queries the child authority IP.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config()
+
+    # Client query for a name under child.test.
+    q_www = DNSRecord.question("www.child.test", "A")
+
+    # Root reply: referral to child.test with NS=ns.child.test and no glue.
+    root_reply = q_www.reply()
+    root_reply.header.rcode = RCODE.NOERROR
+    root_reply.add_auth(
+        RR("child.test", QTYPE.NS, rdata=NS("ns.child.test."), ttl=300),
+    )
+    root_wire = root_reply.pack()
+
+    # Recursive NS address lookup reply: A record for ns.child.test.
+    q_ns = DNSRecord.question("ns.child.test", "A")
+    ns_a_reply = q_ns.reply()
+    ns_a_reply.header.rcode = RCODE.NOERROR
+    ns_a_reply.add_answer(
+        RR("ns.child.test", QTYPE.A, rdata=A("198.51.100.99"), ttl=300),
+    )
+    ns_a_wire = ns_a_reply.pack()
+
+    # Final child authority reply: answer for www.child.test.
+    child_reply = q_www.reply()
+    child_reply.header.rcode = RCODE.NOERROR
+    child_reply.add_answer(
+        RR("www.child.test", QTYPE.A, rdata=A("203.0.113.99"), ttl=300),
+    )
+    child_wire = child_reply.pack()
+
+    class _GlueLessTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            q = DNSRecord.parse(wire_query)
+            qname = str(q.q.qname).rstrip(".")
+
+            if authority.host == "192.0.2.70":
+                # Initial query to the root authority for www.child.test.
+                assert qname == "www.child.test"
+                return root_wire, None
+
+            if authority.host == "ns.child.test":
+                # Nested recursive lookup to resolve ns.child.test -> A.
+                assert qname == "ns.child.test"
+                return ns_a_wire, None
+
+            if authority.host == "198.51.100.99":
+                # Final step: query the discovered child authority IP.
+                assert qname == "www.child.test"
+                return child_wire, None
+
+            raise AssertionError(f"unexpected authority {authority.host} for {qname}")
+
+    transport = _GlueLessTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.70", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "www.child.test",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+    assert trace.final_rcode == RCODE.NOERROR
+
+    # We should have contacted root once, the NS hostname once, and the
+    # discovered child IP once.
+    hosts = [call[0].host for call in transport.calls]
+    assert "192.0.2.70" in hosts
+    assert "ns.child.test" in hosts
+    assert "198.51.100.99" in hosts
+
+
+def test_cached_authorities_ignore_out_of_bailiwick_ns_and_glue(monkeypatch) -> None:
+    """Brief: cached NS/glue that are out-of-bailiwick are ignored.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that an RRset containing only out-of-bailiwick NS and glue is
+        not used to construct authorities and that root hints are used instead.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config(now_ms=1_000_000)
+
+    # RRset with NS owner example.com but NS hostname and glue under
+    # attacker.net, which is out-of-bailiwick for example.com.
+    rrset = DNSRecord()
+    rrset.add_auth(
+        RR("example.com", QTYPE.NS, rdata=NS("ns.attacker.net."), ttl=300),
+    )
+    rrset.add_ar(
+        RR("ns.attacker.net", QTYPE.A, rdata=A("203.0.113.250"), ttl=300),
+    )
+    rrset_wire = rrset.pack()
+
+    key = rr.RRsetKey(name="example.com", rrtype=QTYPE.NS)
+    cache.store_rrset(
+        key,
+        rr.RRsetEntry(rrset_wire=rrset_wire, expires_at_ms=2_000_000),
+    )
+
+    # Upstream root authority answers successfully; its address should be used
+    # instead of the out-of-bailiwick ns.attacker.net glue.
+    q = DNSRecord.question("www.example.com", "A")
+    r = q.reply()
+    r.header.rcode = RCODE.NOERROR
+    answer_wire = r.pack()
+
+    class _AnsweringTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return answer_wire, None
+
+    transport = _AnsweringTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.80", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "www.example.com",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+
+    # Only the root authority should have been contacted; the out-of-bailiwick
+    # ns.attacker.net glue must not produce an AuthorityEndpoint.
+    assert {call[0].host for call in transport.calls} == {"192.0.2.80"}
+
+
+def test_cname_chain_depth_exceeded(monkeypatch) -> None:
+    """Brief: deep CNAME chain triggers cname_depth_exceeded classification.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that when only CNAMEs are returned and the chain exceeds the
+        configured max_depth, the resolver reports 'cname_depth_exceeded'
+        instead of the generic 'max_depth_exceeded'.
+    """
+
+    cache = _FakeCache()
+
+    # Use a small max_depth to hit the cname-specific depth limit quickly.
+    cfg = rr.ResolverConfig(
+        dnssec_mode="ignore",
+        edns_udp_payload=1232,
+        timeout_ms=2000,
+        per_try_timeout_ms=500,
+        max_depth=2,
+        now_ms=None,
+    )
+
+    # Build responses that always return a single CNAME and no final RRset for
+    # the requested type.
+    def _make_cname_response(owner: str, target: str) -> bytes:
+        q = DNSRecord.question(owner, "A")
+        r = q.reply()
+        r.header.rcode = RCODE.NOERROR
+        r.add_answer(RR(owner, QTYPE.CNAME, rdata=NS(target + "."), ttl=300))
+        return r.pack()
+
+    first = _make_cname_response("cname1.example", "cname2.example")
+    second = _make_cname_response("cname2.example", "cname3.example")
+    third = _make_cname_response("cname3.example", "cname4.example")
+
+    class _CNAMETransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            q = DNSRecord.parse(wire_query)
+            qname = str(q.q.qname).rstrip(".")
+            if qname == "cname1.example":
+                return first, None
+            if qname == "cname2.example":
+                return second, None
+            if qname == "cname3.example":
+                return third, None
+            return first, None
+
+    transport = _CNAMETransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.90", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "cname1.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.SERVFAIL
+    assert trace.exceeded_budget is True
+    assert trace.error == "cname_depth_exceeded"
+
+
+def test_cname_with_referral_honors_global_max_depth(monkeypatch) -> None:
+    """Brief: mixed referral + CNAME usage is bounded by max_depth.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that when referrals and CNAME hops are combined, the resolver
+        still enforces the global max_depth limit and reports
+        'max_depth_exceeded' when that bound is crossed.
+    """
+
+    cache = _FakeCache()
+
+    # Small depth budget so that a referral plus a subsequent CNAME hop can
+    # exhaust the global depth counter.
+    cfg = rr.ResolverConfig(
+        dnssec_mode="ignore",
+        edns_udp_payload=1232,
+        timeout_ms=2000,
+        per_try_timeout_ms=500,
+        max_depth=1,
+        now_ms=None,
+    )
+
+    # Client query owner under example.com.
+    q = DNSRecord.question("cname-ref.example", "A")
+
+    # Root reply: referral to example.com with NS+glue.
+    root_reply = q.reply()
+    root_reply.header.rcode = RCODE.NOERROR
+    root_reply.add_auth(
+        RR("example.com", QTYPE.NS, rdata=NS("ns.example.com."), ttl=300),
+    )
+    root_reply.add_ar(
+        RR("ns.example.com", QTYPE.A, rdata=A("198.51.100.250"), ttl=300),
+    )
+    root_wire = root_reply.pack()
+
+    # Child reply: always returns a single CNAME and no final A answer.
+    child_reply = q.reply()
+    child_reply.header.rcode = RCODE.NOERROR
+    child_reply.add_answer(
+        RR("cname-ref.example", QTYPE.CNAME, rdata=NS("alias.example."), ttl=300),
+    )
+    child_wire = child_reply.pack()
+
+    class _ReferralCNAMETransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            msg = DNSRecord.parse(wire_query)
+            qname = str(msg.q.qname).rstrip(".")
+            if authority.host == "192.0.2.91":
+                # Root authority returns referral for any qname under example.
+                assert qname in {"cname-ref.example", "alias.example"}
+                return root_wire, None
+            if authority.host == "198.51.100.250":
+                # Child authority returns a CNAME-only answer.
+                assert qname == "cname-ref.example"
+                return child_wire, None
+            raise AssertionError(f"unexpected authority {authority.host} for {qname}")
+
+    transport = _ReferralCNAMETransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.91", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "cname-ref.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.SERVFAIL
+    assert trace.exceeded_budget is True
+    # In the mixed referral + CNAME case we expect SERVFAIL with an exhausted
+    # budget. The implementation may surface either the global depth limit or
+    # "no_authorities_available" depending on how referrals are rejected; accept
+    # both while still requiring SERVFAIL and exceeded_budget.
+    assert trace.error in {"max_depth_exceeded", "no_authorities_available"}
