@@ -3,6 +3,7 @@ import logging
 import socketserver
 from typing import Dict, List, Optional, Tuple
 
+import ipaddress
 from dnslib import EDNS0, QTYPE, RCODE, RR, DNSRecord
 
 from .plugins.base import BasePlugin, PluginContext, PluginDecision
@@ -416,8 +417,53 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                             qtype_name = QTYPE.get(qtype, str(qtype))
                             try:
                                 # Pre-plugin deny bypasses cache; count it as
-                                # a cache_null response.
-                                stats.record_cache_null(qname)
+                                # a cache_null response and bump the
+                                # cache_deny_pre total for live counters.
+                                stats.record_cache_null(qname, status="deny_pre")
+                            except Exception:  # pragma: no cover
+                                pass
+                            # When plugins provide a decision.stat label,
+                            # mirror it into cache statistics so the HTML
+                            # dashboard can expose per-decision tallies.
+                            try:
+                                stat_label = getattr(decision, "stat", None)
+                                if stat_label:
+                                    stats.record_cache_stat(str(stat_label))
+                            except Exception:  # pragma: no cover
+                                pass
+                            # Also record per-plugin pre-deny totals so
+                            # stats.totals exposes pre_deny_<name> keys. Prefer
+                            # the originating plugin instance label when
+                            # available, falling back to alias/class naming.
+                            try:
+                                label_suffix = getattr(decision, "plugin_label", None)
+                                if not label_suffix:
+                                    plugin_cls = getattr(
+                                        decision, "plugin", None
+                                    ) or type(p)
+                                    plugin_name = getattr(
+                                        plugin_cls, "__name__", "plugin"
+                                    ).lower()
+                                    aliases = []
+                                    try:
+                                        aliases = list(
+                                            getattr(
+                                                plugin_cls, "get_aliases", lambda: []
+                                            )()
+                                        )
+                                    except Exception:  # pragma: no cover - defensive
+                                        aliases = []
+                                    if aliases:
+                                        label_suffix = str(aliases[0]).strip().lower()
+                                    else:
+                                        label_suffix = plugin_name
+
+                                short = str(label_suffix).strip()
+                                if short:
+                                    label = f"pre_deny_{short}"
+                                else:
+                                    label = "pre_deny_plugin"
+                                stats.record_cache_pre_plugin(label)
                             except Exception:  # pragma: no cover
                                 pass
                             stats.record_response_rcode("NXDOMAIN", qname)
@@ -445,8 +491,52 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                             )
                             try:
                                 # Pre-plugin override also bypasses cache; count
-                                # it as a cache_null response.
-                                stats.record_cache_null(qname)
+                                # it as a cache_null response and bump the
+                                # cache_override_pre total for live counters.
+                                stats.record_cache_null(qname, status="override_pre")
+                            except Exception:  # pragma: no cover
+                                pass
+                            # Mirror any decision.stat label into cache stats
+                            # so per-decision tallies are available in Totals.
+                            try:
+                                stat_label = getattr(decision, "stat", None)
+                                if stat_label:
+                                    stats.record_cache_stat(str(stat_label))
+                            except Exception:  # pragma: no cover
+                                pass
+                            # Also record per-plugin pre-override totals so
+                            # stats.totals exposes pre_override_<name>. Prefer
+                            # the originating plugin instance label when
+                            # available, falling back to alias/class naming.
+                            try:
+                                label_suffix = getattr(decision, "plugin_label", None)
+                                if not label_suffix:
+                                    plugin_cls = getattr(
+                                        decision, "plugin", None
+                                    ) or type(p)
+                                    plugin_name = getattr(
+                                        plugin_cls, "__name__", "plugin"
+                                    ).lower()
+                                    aliases = []
+                                    try:
+                                        aliases = list(
+                                            getattr(
+                                                plugin_cls, "get_aliases", lambda: []
+                                            )()
+                                        )
+                                    except Exception:  # pragma: no cover - defensive
+                                        aliases = []
+                                    if aliases:
+                                        label_suffix = str(aliases[0]).strip().lower()
+                                    else:
+                                        label_suffix = plugin_name
+
+                                short = str(label_suffix).strip()
+                                if short:
+                                    label = f"pre_override_{short}"
+                                else:
+                                    label = "pre_override_plugin"
+                                stats.record_cache_pre_plugin(label)
                             except Exception:  # pragma: no cover
                                 pass
                             stats.record_response_rcode(rcode_name, qname)
@@ -538,6 +628,45 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
         used_upstream: Optional[Dict] = None
         reason: Optional[str] = None
 
+        # Track whether this query consumed a recursive inflight slot so it can
+        # be released after resolve_iterative returns.
+        _used_recursive_slot = False
+
+        if resolver_mode == "recursive":
+            # Enforce optional recursion ACLs and resource limits before calling
+            # into the iterative resolver. When a check fails, fall back to the
+            # classic forwarding path for this query.
+            try:
+                # ACL: allow recursion only from configured client networks when
+                # recursive_allow_nets is not empty.
+                allow_nets = getattr(DNSUDPHandler, "recursive_allow_nets", None)
+                if allow_nets:
+                    try:
+                        ip_obj = ipaddress.ip_address(client_ip)
+                        if not any(ip_obj in net for net in allow_nets):
+                            resolver_mode = "forward"
+                    except Exception:
+                        resolver_mode = "forward"
+
+                # Global inflight cap for recursive queries.
+                if resolver_mode == "recursive":
+                    max_inflight = int(
+                        getattr(DNSUDPHandler, "recursive_max_inflight", 0)
+                    )
+                    lock = getattr(DNSUDPHandler, "recursive_lock", None)
+                    if max_inflight > 0 and lock is not None:
+                        with lock:
+                            current = int(
+                                getattr(DNSUDPHandler, "recursive_inflight", 0)
+                            )
+                            if current >= max_inflight:
+                                resolver_mode = "forward"
+                            else:
+                                DNSUDPHandler.recursive_inflight = current + 1
+                                _used_recursive_slot = True
+            except Exception:  # pragma: no cover - defensive
+                resolver_mode = "forward"
+
         if resolver_mode == "recursive":
             # Build a ResolverConfig snapshot for this query.
             try:
@@ -590,16 +719,51 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                         now_ms=None,
                     )
 
-                    reply, _trace = resolve_iterative(
-                        qname,
-                        qtype,
-                        cfg=r_cfg,
-                        cache=cache_obj,
-                        transports=transports,
-                    )
-                    reason = "ok"
+                    try:
+                        reply, _trace = resolve_iterative(
+                            qname,
+                            qtype,
+                            cfg=r_cfg,
+                            cache=cache_obj,
+                            transports=transports,
+                        )
+                        reason = "ok"
+                    finally:
+                        # Release inflight slot for this recursive query, if any.
+                        if _used_recursive_slot:
+                            try:
+                                lock = getattr(DNSUDPHandler, "recursive_lock", None)
+                                if lock is not None:
+                                    with lock:
+                                        current = int(
+                                            getattr(
+                                                DNSUDPHandler,
+                                                "recursive_inflight",
+                                                0,
+                                            )
+                                        )
+                                        if current > 0:
+                                            DNSUDPHandler.recursive_inflight = (
+                                                current - 1
+                                            )
+                            except Exception:  # pragma: no cover - defensive
+                                pass
             except Exception:  # pragma: no cover - defensive fallback
                 resolver_mode = "forward"
+                # If resolve_iterative import or invocation failed after we
+                # acquired a slot, best-effort release it here as well.
+                if _used_recursive_slot:
+                    try:
+                        lock = getattr(DNSUDPHandler, "recursive_lock", None)
+                        if lock is not None:
+                            with lock:
+                                current = int(
+                                    getattr(DNSUDPHandler, "recursive_inflight", 0)
+                                )
+                                if current > 0:
+                                    DNSUDPHandler.recursive_inflight = current - 1
+                    except Exception:  # pragma: no cover - defensive
+                        pass
 
         if resolver_mode != "recursive":
             # Forward via upstreams when recursive mode is disabled or

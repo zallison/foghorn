@@ -329,6 +329,39 @@ def test_stats_collector_persists_to_store():
     assert log_row["qtype"] == "A"
 
 
+def test_record_cache_null_pre_plugin_status_counters() -> None:
+    """Brief: record_cache_null tracks per-status pre-plugin totals when requested.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts cache_deny_pre/cache_override_pre are incremented alongside
+        cache_null in both in-memory counters and the attached store.
+    """
+
+    # In-memory only: ensure per-status keys are bumped when status is provided.
+    c = StatsCollector()
+    c.record_cache_null("deny.example", status="deny_pre")
+    c.record_cache_null("override.example", status="override_pre")
+
+    snap = c.snapshot(reset=False)
+    assert snap.totals["cache_null"] == 2
+    assert snap.totals["cache_deny_pre"] == 1
+    assert snap.totals["cache_override_pre"] == 1
+
+    # With store attached: verify corresponding totals.* counters are persisted.
+    store = _FakeStore()
+    c2 = StatsCollector(stats_store=store)
+    c2.record_cache_null("deny.example", status="deny_pre")
+    c2.record_cache_null("override.example", status="override_pre")
+
+    keys = {(s, k) for (s, k, _d) in store.increment_calls}
+    assert ("totals", "cache_null") in keys
+    assert ("totals", "cache_deny_pre") in keys
+    assert ("totals", "cache_override_pre") in keys
+
+
 @pytest.mark.flaky(reruns=1)
 def test_stats_reporter_logs_and_stops(caplog):
     c = StatsCollector()

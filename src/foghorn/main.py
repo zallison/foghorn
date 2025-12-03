@@ -201,8 +201,10 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
 
     Args:
         plugin_specs: A list where each item is either a dict with keys
-                      {"module": <path-or-alias>, "config": {...}} or a string
-                      alias/dotted path.
+                      {"module": <path-or-alias>, "config": {...}, "name": "..."}
+                      or a string alias/dotted path. When provided, "name" is a
+                      human-friendly label used in place of the plugin class
+                      name when logging statistics or other plugin data.
 
     Returns:
         A list of initialized plugin instances.
@@ -211,10 +213,12 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         >>> from foghorn.plugins.base import BasePlugin
         >>> class MyTestPlugin(BasePlugin):
         ...     pass
-        >>> specs = [{"module": "__main__.MyTestPlugin"}]
+        >>> specs = [{"module": "__main__.MyTestPlugin", "name": "my_test"}]
         >>> plugins = load_plugins(specs)
         >>> isinstance(plugins[0], MyTestPlugin)
         True
+        >>> plugins[0].name
+        'my_test'
         >>> # Using aliases
         >>> plugins = load_plugins(["acl", {"module": "router", "config": {}}])
     """
@@ -224,15 +228,20 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         if isinstance(spec, str):
             module_path = spec
             config = {}
+            plugin_name = None
         else:
             module_path = spec.get("module")
             config = spec.get("config", {})
+            plugin_name = spec.get("name")
         if not module_path:
             continue
 
         plugin_cls = get_plugin_class(module_path, alias_registry)
         validated_config = _validate_plugin_config(plugin_cls, config)
-        plugin = plugin_cls(**validated_config)
+        if plugin_name is not None:
+            plugin = plugin_cls(name=str(plugin_name), **validated_config)
+        else:
+            plugin = plugin_cls(**validated_config)
         plugins.append(plugin)
     return plugins
 
@@ -438,6 +447,13 @@ def main(argv: List[str] | None = None) -> int:
         resolver_max_depth = int(resolver_cfg.get("max_depth", 8))
     except Exception:
         resolver_max_depth = 8
+    try:
+        resolver_max_inflight = int(resolver_cfg.get("max_inflight", 0))
+    except Exception:
+        resolver_max_inflight = 0
+    # allow_recursive_from may be a single CIDR/IP string or a list; it is
+    # normalized later when wiring DNSUDPHandler attributes.
+    allow_recursive_from = resolver_cfg.get("allow_recursive_from", [])
 
     # Hold responses this long, even if the actual ttl is lower.
     min_cache_ttl = _get_min_cache_ttl(cfg)
@@ -862,6 +878,29 @@ def main(argv: List[str] | None = None) -> int:
                 resolver_per_try_timeout_ms
             )
             _server_mod.DNSUDPHandler.recursive_max_depth = int(resolver_max_depth)
+            _server_mod.DNSUDPHandler.recursive_max_inflight = int(
+                resolver_max_inflight
+            )
+
+            # Normalize allow_recursive_from into a list of ip_network objects on
+            # first startup so resolve_query_bytes can perform fast ACL checks.
+            try:
+                import ipaddress as _ipaddress
+
+                raw_allow = allow_recursive_from
+                if isinstance(raw_allow, (str, bytes)):
+                    raw_items = [raw_allow]
+                else:
+                    raw_items = list(raw_allow or [])
+                nets = []
+                for item in raw_items:
+                    try:
+                        nets.append(_ipaddress.ip_network(str(item), strict=False))
+                    except Exception:
+                        continue
+                _server_mod.DNSUDPHandler.recursive_allow_nets = nets or None
+            except Exception:  # pragma: no cover - defensive
+                _server_mod.DNSUDPHandler.recursive_allow_nets = None
 
             # Lazily initialize shared recursive cache and transport facade if missing.
             if getattr(_server_mod.DNSUDPHandler, "recursive_cache", None) is None:
