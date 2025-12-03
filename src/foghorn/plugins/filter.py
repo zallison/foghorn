@@ -787,7 +787,12 @@ class FilterPlugin(BasePlugin):
         with open(path, "r", encoding="utf-8") as fh:
             for idx, raw in enumerate(fh, start=1):
                 line = raw.strip()
-                if not line or line.startswith("#") or line.startswith("!"):
+                if (
+                    not line
+                    or line.startswith("#")
+                    or line.startswith("!")
+                    or line.startswith("[")
+                ):
                     continue
                 yield idx, line
 
