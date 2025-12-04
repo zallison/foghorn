@@ -83,6 +83,11 @@ def test_stats_collector_full_flow_and_reset():
     c.record_response_rcode("NOERROR")
     c.record_latency(0.005)
 
+    # Exercise recursion-specific counters on the in-memory collector.
+    c.record_recursive_query()
+    c.record_recursive_fallback("acl")
+    c.record_recursive_outcome("NOERROR")
+
     snap = c.snapshot(reset=False)
     assert snap.totals["total_queries"] == 1
     assert snap.totals["cache_hits"] == 1
@@ -96,6 +101,10 @@ def test_stats_collector_full_flow_and_reset():
     assert snap.top_clients and len(snap.top_clients) >= 1
     assert snap.top_domains and len(snap.top_domains) >= 1
     assert snap.latency_stats and snap.latency_stats["count"] == 1
+    # Recursion counters should be visible in the totals mapping.
+    assert snap.totals["recursive_queries"] == 1
+    assert snap.totals["recursive_fallback_acl"] == 1
+    assert snap.totals["recursive_rcode_NOERROR"] == 1
 
     # Reset and verify cleared
     c.snapshot(reset=True)
@@ -291,6 +300,14 @@ def test_stats_collector_persists_to_store():
         result={"answers": ["93.184.216.34"]},
     )
 
+    # Recursion counters should be mirrored into the underlying store as totals.
+    c.record_recursive_query()
+    c.record_recursive_fallback("inflight")
+    c.record_recursive_outcome("SERVFAIL")
+    # DNSSEC counters should also be mirrored.
+    c.record_dnssec_query()
+    c.record_dnssec_ad_upstream()
+
     keys = {(s, k) for (s, k, _d) in store.increment_calls}
 
     # Core counters
@@ -320,6 +337,14 @@ def test_stats_collector_persists_to_store():
     assert ("rcode_domains", "NXDOMAIN|example.com") in keys
     # Subdomain-only rcode aggregates are keyed by full qname.
     assert ("rcode_subdomains", "NXDOMAIN|www.example.com") in keys
+
+    # Recursion totals persisted to the store
+    assert ("totals", "recursive_queries") in keys
+    assert ("totals", "recursive_fallback_inflight") in keys
+    assert ("totals", "recursive_rcode_SERVFAIL") in keys
+    # DNSSEC totals persisted to the store
+    assert ("totals", "dnssec_queries") in keys
+    assert ("totals", "dnssec_ad_upstream") in keys
 
     # Query log insert
     assert len(store.query_logs) == 1
