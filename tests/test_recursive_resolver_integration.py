@@ -154,6 +154,9 @@ def test_recursive_acl_denies_client_and_uses_forwarding(monkeypatch) -> None:
 
     # Configure handler for recursive mode but restrict recursion to 192.0.2.0/24.
     monkeypatch.setattr(DNSUDPHandler, "recursive_mode", "recursive", raising=False)
+    # Disable plugins so they cannot override the forwarding result in this ACL
+    # behavior test.
+    monkeypatch.setattr(DNSUDPHandler, "plugins", [], raising=False)
     monkeypatch.setattr(
         DNSUDPHandler,
         "recursive_allow_nets",
@@ -210,6 +213,9 @@ def test_recursive_max_inflight_falls_back_to_forward(monkeypatch) -> None:
     # Enable recursive mode and set a small inflight cap that is already
     # saturated before the call.
     monkeypatch.setattr(DNSUDPHandler, "recursive_mode", "recursive", raising=False)
+    # Disable plugins so post/pre decisions do not change the forwarding answer
+    # when recursion is skipped due to the inflight cap.
+    monkeypatch.setattr(DNSUDPHandler, "plugins", [], raising=False)
     monkeypatch.setattr(DNSUDPHandler, "recursive_max_inflight", 1, raising=False)
     monkeypatch.setattr(DNSUDPHandler, "recursive_inflight", 1, raising=False)
 
