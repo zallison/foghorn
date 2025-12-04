@@ -1258,6 +1258,166 @@ def test_negative_caching_for_nxdomain_with_soa(monkeypatch) -> None:
     assert neg_entry.expires_at_ms == 1_000_000 + 300 * 1000
 
 
+def test_negative_caching_for_nodata_with_soa(monkeypatch) -> None:
+    """Brief: NODATA with SOA in authority populates the negative cache.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that a NOERROR response with no answers but carrying an SOA in
+        the authority section is treated as NODATA for negative caching
+        purposes.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config(now_ms=2_000_000)
+
+    q = DNSRecord.question("nodata.example", "A")
+    root_reply = q.reply()
+    root_reply.header.rcode = RCODE.NOERROR
+    soa_rdata = SOA(
+        mname="ns.example.com.",
+        rname="hostmaster.example.com.",
+        times=(1, 2, 3, 4, 180),
+    )
+    root_reply.add_auth(
+        RR("example.com", QTYPE.SOA, rdata=soa_rdata, ttl=180),
+    )
+    # No answers; this is a NODATA-style response.
+    root_wire = root_reply.pack()
+
+    class _NODATATransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return root_wire, None
+
+    transport = _NODATATransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.67", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "nodata.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+    assert trace.final_rcode == RCODE.NOERROR
+
+    key = ("nodata.example", QTYPE.A)
+    assert key in cache.negatives
+    neg_entry = cache.negatives[key]
+    assert neg_entry.rcode == RCODE.NOERROR
+    assert neg_entry.soa_owner == "example.com"
+    assert neg_entry.expires_at_ms == 2_000_000 + 180 * 1000
+
+
+def test_servfail_with_soa_is_not_negative_cached(monkeypatch) -> None:
+    """Brief: SERVFAIL responses do not populate the negative cache.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that even when an SOA is present, SERVFAIL is not converted into
+        a NegativeEntry; subsequent lookups must not see a cached negative.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config(now_ms=3_000_000)
+
+    q = DNSRecord.question("servfail.example", "A")
+    root_reply = q.reply()
+    root_reply.header.rcode = RCODE.SERVFAIL
+    soa_rdata = SOA(
+        mname="ns.example.com.",
+        rname="hostmaster.example.com.",
+        times=(1, 2, 3, 4, 60),
+    )
+    root_reply.add_auth(
+        RR("example.com", QTYPE.SOA, rdata=soa_rdata, ttl=60),
+    )
+    root_wire = root_reply.pack()
+
+    class _ServfailTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return root_wire, None
+
+    transport = _ServfailTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.68", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "servfail.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.SERVFAIL
+    assert trace.final_rcode == RCODE.SERVFAIL
+
+    key = ("servfail.example", QTYPE.A)
+    assert key not in cache.negatives
+
+
+def test_referral_without_soa_is_not_negative_cached(monkeypatch) -> None:
+    """Brief: pure referrals (NS only, no SOA) do not populate the negative cache.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that delegation-only responses, even when repeatedly seen, are
+        not stored as NegativeEntry values.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config(now_ms=4_000_000)
+
+    q = DNSRecord.question("referral-only.example", "A")
+    root_reply = q.reply()
+    root_reply.header.rcode = RCODE.NOERROR
+    root_reply.add_auth(
+        RR("example.com", QTYPE.NS, rdata=NS("ns.example.com."), ttl=300),
+    )
+    root_wire = root_reply.pack()
+
+    class _ReferralOnlyTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return root_wire, None
+
+    transport = _ReferralOnlyTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.69", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "referral-only.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.SERVFAIL
+    assert trace.final_rcode == RCODE.SERVFAIL
+
+    key = ("referral-only.example", QTYPE.A)
+    assert key not in cache.negatives
+
+
 def test_glueless_in_bailiwick_ns_uses_recursive_ns_resolution(monkeypatch) -> None:
     """Brief: glue-less in-bailiwick NS uses recursive NS address resolution.
 

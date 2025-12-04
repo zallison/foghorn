@@ -78,6 +78,8 @@ class RecursiveTrace:
       - from_cache: True if the answer was entirely satisfied from cache.
       - exceeded_budget: True if time or depth budget was exhausted.
       - error: Optional internal error string (for diagnostics only).
+      - security: Optional DNSSEC classification string ('secure', 'insecure',
+        'indeterminate', or 'bogus').
 
     Outputs:
       - Mutable structure that callers and tests can inspect.
@@ -88,6 +90,7 @@ class RecursiveTrace:
     from_cache: bool = False
     exceeded_budget: bool = False
     error: Optional[str] = None
+    security: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -187,6 +190,50 @@ class RRsetEntry:
 
     rrset_wire: bytes
     expires_at_ms: int
+
+
+@dataclass(frozen=True)
+class TrustAnchor:
+    """DNSSEC trust anchor describing a single key or DS.
+
+    Inputs:
+      - owner: Owner name of the anchor (typically '.' for the root).
+      - key_tag: Numeric key tag for the DNSKEY this anchor refers to.
+      - algorithm: DNSKEY algorithm number.
+      - digest_type: DS digest type (for DS-based anchors), or 0 if unused.
+      - digest: Raw digest bytes for DS-based anchors, or b'' if unused.
+
+    Outputs:
+      - Immutable description of a single configured trust anchor.
+    """
+
+    owner: str
+    key_tag: int
+    algorithm: int
+    digest_type: int
+    digest: bytes
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    """Final DNSSEC classification for one recursive response.
+
+    Inputs:
+      - status: 'secure', 'insecure', 'indeterminate', or 'bogus'.
+      - reason: Short human-readable reason for diagnostics and tests.
+
+    Outputs:
+      - Lightweight decision used to set AD or map to SERVFAIL.
+    """
+
+    status: str
+    reason: str = ""
+
+
+# Snapshot of configured trust anchors. The initial implementation leaves this
+# empty; concrete root KSK/DS values will be wired in alongside the validation
+# pipeline.
+DEFAULT_TRUST_ANCHORS: tuple[TrustAnchor, ...] = ()
 
 
 class RecursiveCache(Protocol):
@@ -641,6 +688,126 @@ def resolve_iterative(
         cname_depth = 0
         start_ms = _now_ms()
 
+        # Normalize DNSSEC mode once per query for EDNS/DO handling.
+        dnssec_mode = str(cfg.dnssec_mode).lower()
+
+        def _maybe_cache_dnssec_rrsets(parsed: "DNSRecord", now_ms: int) -> None:
+            """Best-effort caching of DNSSEC-related RRsets for validation.
+
+            Inputs:
+              - parsed: Upstream DNSRecord response.
+              - now_ms: Current wall clock in milliseconds.
+
+            Outputs:
+              - None; stores DNSKEY/DS RRsets in the RecursiveCache when TTLs
+                are positive, using validated=None to indicate unvalidated data.
+            """
+
+            from dnslib import QTYPE as _QTYPE  # local import
+
+            auth_rrs = getattr(parsed, "auth", []) or []
+            answer_rrs = getattr(parsed, "rr", []) or []
+
+            def _store_rrset(owner: str, rrtype: int, rrs: list) -> None:
+                ttl_candidates: list[int] = []
+                for rr in rrs:
+                    ttl_val = getattr(rr, "ttl", None)
+                    if isinstance(ttl_val, (int, float)):
+                        ttl_candidates.append(int(ttl_val))
+                ttl = min(ttl_candidates) if ttl_candidates else 0
+                if ttl <= 0:
+                    return
+                entry = RRsetEntry(
+                    rrset_wire=parsed.pack(),
+                    expires_at_ms=now_ms + ttl * 1000,
+                )
+                key = RRsetKey(
+                    name=str(owner).rstrip("."),
+                    rrtype=rrtype,
+                    validated=None,
+                )
+                cache.store_rrset(key, entry)
+
+            dnskey_rrs = [
+                rr for rr in (answer_rrs + auth_rrs) if rr.rtype == _QTYPE.DNSKEY
+            ]
+            if dnskey_rrs:
+                owner = str(dnskey_rrs[0].rname)
+                _store_rrset(owner, _QTYPE.DNSKEY, dnskey_rrs)
+
+            ds_rrs = [rr for rr in auth_rrs if rr.rtype == _QTYPE.DS]
+            if ds_rrs:
+                owner = str(ds_rrs[0].rname)
+                _store_rrset(owner, _QTYPE.DS, ds_rrs)
+
+        def _dnssec_validate_final_response(
+            parsed: "DNSRecord",
+        ) -> ValidationResult:
+            """Minimal DNSSEC validation for dnssec_mode='validate'.
+
+            Inputs:
+              - parsed: Final upstream DNSRecord chosen as the answer.
+
+            Outputs:
+              - ValidationResult describing the DNSSEC classification.
+
+            Notes:
+              - This initial implementation only marks DNSKEY RRsets as
+                validated=True in the RecursiveCache when a TrustAnchor exists
+                for the same owner name. It does not yet perform DS/DNSKEY
+                digest checks or RRSIG verification and never reports 'bogus'.
+              - When no trust anchors are configured, the result is always
+                'indeterminate' so behavior matches 'passthrough'.
+            """
+
+            # Avoid unused-argument warnings until parsed is inspected by the
+            # full validation pipeline.
+            _ = parsed
+
+            if not DEFAULT_TRUST_ANCHORS:
+                return ValidationResult(
+                    status="indeterminate",
+                    reason="no_trust_anchors",
+                )
+
+            validated_any = False
+
+            for anchor in DEFAULT_TRUST_ANCHORS:
+                zone = anchor.owner.rstrip(".")
+                if not zone:
+                    continue
+
+                base_key = RRsetKey(name=zone, rrtype=QTYPE.DNSKEY)
+                base_entry = cache.lookup_rrset(base_key)
+                if base_entry is None:
+                    continue
+
+                validated_key = RRsetKey(
+                    name=zone,
+                    rrtype=QTYPE.DNSKEY,
+                    validated=True,
+                )
+                if cache.lookup_rrset(validated_key) is None:
+                    cache.store_rrset(
+                        validated_key,
+                        RRsetEntry(
+                            rrset_wire=base_entry.rrset_wire,
+                            expires_at_ms=base_entry.expires_at_ms,
+                        ),
+                    )
+                validated_any = True
+
+            if validated_any:
+                return ValidationResult(
+                    status="secure",
+                    reason="validated_trust_anchors",
+                )
+
+            return ValidationResult(
+                status="indeterminate",
+                reason="no_matching_dnskeys_for_trust_anchors",
+            )
+
         # 1. Cache fast path for positive answers.
         cached_answer = cache.lookup_answer(original_qname, qtype)
         # The initial implementation treats any present AnswerEntry as valid.
@@ -723,9 +890,38 @@ def resolve_iterative(
 
             authority = candidate_authorities[0]
 
-            # Build the current query. EDNS/DO handling will be added when the
-            # resolver is wired into DNSUDPHandler's EDNS helpers.
+            # Build the current query and attach an EDNS(0) OPT record that
+            # reflects the configured DNSSEC mode. When dnssec_mode is
+            # 'passthrough' or 'validate', the DO bit (0x8000) is set so that
+            # upstream authorities may return DNSSEC records and/or AD=1.
             q = DNSRecord.question(current_qname, QTYPE.get(qtype, qtype))
+            try:
+                mode = dnssec_mode
+                if mode in ("ignore", "passthrough", "validate"):
+                    from dnslib import EDNS0, RR as _RR  # local import
+
+                    flags = 0x8000 if mode in ("passthrough", "validate") else 0
+                    opt_idx = None
+                    for idx, rr in enumerate(getattr(q, "ar", []) or []):
+                        if rr.rtype == QTYPE.OPT:
+                            opt_idx = idx
+                            break
+                    opt_rr = _RR(
+                        rname=".",
+                        rtype=QTYPE.OPT,
+                        rclass=int(cfg.edns_udp_payload or 1232),
+                        ttl=0,
+                        rdata=EDNS0(flags=flags),
+                    )
+                    if opt_idx is None:
+                        q.add_ar(opt_rr)
+                    else:
+                        q.ar[opt_idx] = opt_rr
+            except Exception:  # pragma: no cover - defensive
+                # EDNS is a best-effort enhancement; failures must not break
+                # query processing.
+                pass
+
             wire_query = q.pack()
 
             # Derive a per-attempt timeout from the remaining budget.
@@ -769,6 +965,11 @@ def resolve_iterative(
             try:
                 parsed = DNSRecord.parse(response_wire)
                 rcode = parsed.header.rcode
+                # Opportunistically cache DNSSEC RRsets when validation is
+                # enabled. This does not change the answer behavior and simply
+                # prepares data for a future validation pipeline.
+                if dnssec_mode == "validate":
+                    _maybe_cache_dnssec_rrsets(parsed, now_ms=_now_ms())
             except Exception:
                 failed_authorities.add(authority)
                 trace.hops.append(
@@ -994,6 +1195,26 @@ def resolve_iterative(
                 )
             )
 
+            # Optional DNSSEC validation hook for dnssec_mode='validate'. The
+            # initial implementation is a stub which classifies all responses
+            # as 'indeterminate' so that behavior matches 'passthrough'.
+            if dnssec_mode == "validate":
+                validation = _dnssec_validate_final_response(parsed)
+                trace.security = validation.status
+
+                if validation.status == "bogus":
+                    # Do not cache bogus data; surface SERVFAIL instead.
+                    return _make_servfail(
+                        f"dnssec_bogus: {validation.reason or ''}".rstrip(),
+                        authority=authority,
+                    )
+
+                if validation.status == "secure":
+                    # For secure responses, AD will eventually be set here once
+                    # the validation pipeline is implemented. The stub keeps
+                    # behavior identical for now.
+                    pass
+
             # Cache final positive and negative answers for (original_qname, qtype)
             # so subsequent queries can be satisfied from the recursive cache.
             try:
@@ -1025,32 +1246,45 @@ def resolve_iterative(
                         rcode == RCODE.NXDOMAIN
                         or (rcode == RCODE.NOERROR and not parsed.rr)
                     ):
-                        ttl_candidates: list[int] = []
-                        for rr in soa_rrs:
-                            try:
-                                ttl_val = getattr(rr, "ttl", None)
-                                if isinstance(ttl_val, (int, float)):
-                                    ttl_candidates.append(int(ttl_val))
-                                rdata = getattr(rr, "rdata", None)
-                                minimum = getattr(rdata, "minttl", None) or getattr(
-                                    rdata, "minimum", None
-                                )
-                                if isinstance(minimum, (int, float)):
-                                    ttl_candidates.append(int(minimum))
-                            except Exception:
-                                continue
-                        neg_ttl = min(ttl_candidates) if ttl_candidates else 0
-                        if neg_ttl > 0:
+                        # Only trust SOA owners that are in-bailiwick for the
+                        # original query name. This prevents NXDOMAIN/NODATA
+                        # responses that carry an SOA for an unrelated zone
+                        # (e.g. attacker.net while answering under example.com)
+                        # from poisoning the negative cache.
+                        try:
                             soa_owner = str(soa_rrs[0].rname).rstrip(".")
-                            cache.store_negative(
-                                original_qname,
-                                qtype,
-                                NegativeEntry(
-                                    rcode=rcode,
-                                    soa_owner=soa_owner,
-                                    expires_at_ms=now_store + neg_ttl * 1000,
-                                ),
-                            )
+                        except Exception:
+                            soa_owner = ""
+                        qname_owner = original_qname.rstrip(".")
+                        if soa_owner and not qname_owner.endswith(soa_owner):
+                            # Skip negative caching for out-of-bailiwick SOA.
+                            pass
+                        else:
+                            ttl_candidates: list[int] = []
+                            for rr in soa_rrs:
+                                try:
+                                    ttl_val = getattr(rr, "ttl", None)
+                                    if isinstance(ttl_val, (int, float)):
+                                        ttl_candidates.append(int(ttl_val))
+                                    rdata = getattr(rr, "rdata", None)
+                                    minimum = getattr(rdata, "minttl", None) or getattr(
+                                        rdata, "minimum", None
+                                    )
+                                    if isinstance(minimum, (int, float)):
+                                        ttl_candidates.append(int(minimum))
+                                except Exception:
+                                    continue
+                            neg_ttl = min(ttl_candidates) if ttl_candidates else 0
+                            if neg_ttl > 0:
+                                cache.store_negative(
+                                    original_qname,
+                                    qtype,
+                                    NegativeEntry(
+                                        rcode=rcode,
+                                        soa_owner=soa_owner,
+                                        expires_at_ms=now_store + neg_ttl * 1000,
+                                    ),
+                                )
             except Exception:
                 # Cache population is best-effort; failures must not break query
                 # processing.

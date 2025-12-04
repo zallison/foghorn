@@ -1442,6 +1442,139 @@ class StatsCollector:
                         exc_info=True,
                     )
 
+    def record_recursive_query(self) -> None:
+        """Record that a query was handled via the recursive resolver core.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None; increments ``totals['recursive_queries']`` in-memory and, when
+            a StatsSQLiteStore is attached, mirrors the counter into the
+            persistent ``totals`` scope so that warm-loaded aggregates expose
+            the same value.
+        """
+
+        with self._lock:
+            self._totals["recursive_queries"] += 1
+
+            if self._store is not None:
+                try:
+                    self._store.increment_count("totals", "recursive_queries")
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "StatsCollector: failed to persist recursive_queries",
+                        exc_info=True,
+                    )
+
+    def record_recursive_fallback(self, reason: str) -> None:
+        """Record that recursive mode fell back to forwarding for a reason.
+
+        Inputs:
+            reason: Short classifier such as ``"acl"``, ``"inflight"``,
+                ``"not_ready"``, or ``"error"`` describing why recursion was
+                skipped for the current query.
+
+        Outputs:
+            None; increments a ``totals['recursive_fallback_<reason>']`` counter
+            in-memory and, when a StatsSQLiteStore is attached, mirrors the same
+            key into the persistent ``totals`` scope.
+        """
+
+        if not reason:
+            return
+
+        key = f"recursive_fallback_{str(reason)}"
+        with self._lock:
+            self._totals[key] += 1
+
+            if self._store is not None:
+                try:
+                    self._store.increment_count("totals", key)
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "StatsCollector: failed to persist recursive_fallback",
+                        exc_info=True,
+                    )
+
+    def record_recursive_outcome(self, rcode: str) -> None:
+        """Record terminal outcome for a recursive query by response code.
+
+        Inputs:
+            rcode: Response code name such as ``"NOERROR"``, ``"NXDOMAIN"``, or
+                ``"SERVFAIL"``.
+
+        Outputs:
+            None; increments a ``totals['recursive_rcode_<rcode>']`` counter
+            in-memory and, when a StatsSQLiteStore is attached, mirrors the same
+            key into the persistent ``totals`` scope.
+        """
+
+        if not rcode:
+            return
+
+        key = f"recursive_rcode_{str(rcode)}"
+        with self._lock:
+            self._totals[key] += 1
+
+            if self._store is not None:
+                try:
+                    self._store.increment_count("totals", key)
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "StatsCollector: failed to persist recursive_outcome",
+                        exc_info=True,
+                    )
+
+    def record_dnssec_query(self) -> None:
+        """Record that a client query was processed with DNSSEC enabled.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None; increments ``totals['dnssec_queries']`` in-memory and, when a
+            StatsSQLiteStore is attached, mirrors the counter into the
+            persistent ``totals`` scope so that warm-loaded aggregates expose
+            the same value.
+        """
+
+        with self._lock:
+            self._totals["dnssec_queries"] += 1
+
+            if self._store is not None:
+                try:
+                    self._store.increment_count("totals", "dnssec_queries")
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "StatsCollector: failed to persist dnssec_queries",
+                        exc_info=True,
+                    )
+
+    def record_dnssec_ad_upstream(self) -> None:
+        """Record that an upstream response carried the AD (Authenticated Data) bit.
+
+        Inputs:
+            None.
+
+        Outputs:
+            None; increments ``totals['dnssec_ad_upstream']`` in-memory and, when
+            a StatsSQLiteStore is attached, mirrors the counter into the
+            persistent ``totals`` scope.
+        """
+
+        with self._lock:
+            self._totals["dnssec_ad_upstream"] += 1
+
+            if self._store is not None:
+                try:
+                    self._store.increment_count("totals", "dnssec_ad_upstream")
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "StatsCollector: failed to persist dnssec_ad_upstream",
+                        exc_info=True,
+                    )
+
     def set_ignore_filters(
         self,
         clients: Optional[List[str]] = None,
