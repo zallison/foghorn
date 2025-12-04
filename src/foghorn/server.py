@@ -416,8 +416,53 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                             qtype_name = QTYPE.get(qtype, str(qtype))
                             try:
                                 # Pre-plugin deny bypasses cache; count it as
-                                # a cache_null response.
-                                stats.record_cache_null(qname)
+                                # a cache_null response and bump the
+                                # cache_deny_pre total for live counters.
+                                stats.record_cache_null(qname, status="deny_pre")
+                            except Exception:  # pragma: no cover
+                                pass
+                            # When plugins provide a decision.stat label,
+                            # mirror it into cache statistics so the HTML
+                            # dashboard can expose per-decision tallies.
+                            try:
+                                stat_label = getattr(decision, "stat", None)
+                                if stat_label:
+                                    stats.record_cache_stat(str(stat_label))
+                            except Exception:  # pragma: no cover
+                                pass
+                            # Also record per-plugin pre-deny totals so
+                            # stats.totals exposes pre_deny_<name> keys. Prefer
+                            # the originating plugin instance label when
+                            # available, falling back to alias/class naming.
+                            try:
+                                label_suffix = getattr(decision, "plugin_label", None)
+                                if not label_suffix:
+                                    plugin_cls = getattr(
+                                        decision, "plugin", None
+                                    ) or type(p)
+                                    plugin_name = getattr(
+                                        plugin_cls, "__name__", "plugin"
+                                    ).lower()
+                                    aliases = []
+                                    try:
+                                        aliases = list(
+                                            getattr(
+                                                plugin_cls, "get_aliases", lambda: []
+                                            )()
+                                        )
+                                    except Exception:  # pragma: no cover - defensive
+                                        aliases = []
+                                    if aliases:
+                                        label_suffix = str(aliases[0]).strip().lower()
+                                    else:
+                                        label_suffix = plugin_name
+
+                                short = str(label_suffix).strip()
+                                if short:
+                                    label = f"pre_deny_{short}"
+                                else:
+                                    label = "pre_deny_plugin"
+                                stats.record_cache_pre_plugin(label)
                             except Exception:  # pragma: no cover
                                 pass
                             stats.record_response_rcode("NXDOMAIN", qname)
@@ -445,8 +490,52 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                             )
                             try:
                                 # Pre-plugin override also bypasses cache; count
-                                # it as a cache_null response.
-                                stats.record_cache_null(qname)
+                                # it as a cache_null response and bump the
+                                # cache_override_pre total for live counters.
+                                stats.record_cache_null(qname, status="override_pre")
+                            except Exception:  # pragma: no cover
+                                pass
+                            # Mirror any decision.stat label into cache stats
+                            # so per-decision tallies are available in Totals.
+                            try:
+                                stat_label = getattr(decision, "stat", None)
+                                if stat_label:
+                                    stats.record_cache_stat(str(stat_label))
+                            except Exception:  # pragma: no cover
+                                pass
+                            # Also record per-plugin pre-override totals so
+                            # stats.totals exposes pre_override_<name>. Prefer
+                            # the originating plugin instance label when
+                            # available, falling back to alias/class naming.
+                            try:
+                                label_suffix = getattr(decision, "plugin_label", None)
+                                if not label_suffix:
+                                    plugin_cls = getattr(
+                                        decision, "plugin", None
+                                    ) or type(p)
+                                    plugin_name = getattr(
+                                        plugin_cls, "__name__", "plugin"
+                                    ).lower()
+                                    aliases = []
+                                    try:
+                                        aliases = list(
+                                            getattr(
+                                                plugin_cls, "get_aliases", lambda: []
+                                            )()
+                                        )
+                                    except Exception:  # pragma: no cover - defensive
+                                        aliases = []
+                                    if aliases:
+                                        label_suffix = str(aliases[0]).strip().lower()
+                                    else:
+                                        label_suffix = plugin_name
+
+                                short = str(label_suffix).strip()
+                                if short:
+                                    label = f"pre_override_{short}"
+                                else:
+                                    label = "pre_override_plugin"
+                                stats.record_cache_pre_plugin(label)
                             except Exception:  # pragma: no cover
                                 pass
                             stats.record_response_rcode(rcode_name, qname)

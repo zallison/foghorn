@@ -178,6 +178,8 @@
 				cache_hits: 'Queries answered directly from the cache.',
 				cache_misses: 'Queries that required contacting upstream servers.',
 				cache_null: 'Responses generated directly by plugins before cache or upstream lookup.',
+				cache_deny_pre: 'Pre-plugin deny decisions that bypassed cache (e.g., filtering plugins).',
+				cache_override_pre: 'Pre-plugin overrides that bypassed cache (e.g., synthetic responses from plugins).',
 				min_ms: 'Fastest observed query latency in milliseconds.',
 				max_ms: 'Slowest observed query latency in milliseconds.',
 				avg_ms: 'Average (mean) query latency in milliseconds.',
@@ -1027,8 +1029,24 @@
 				if (Object.keys(meta).length) {
 					appendDictGroup('Meta', meta);
 				}
-				appendProcessGroup(data.system)
-				appendDictGroup('Totals', data.totals || {});
+				appendProcessGroup(data.system);
+
+				// For Totals, hide certain internal-pre cache counters from the UI.
+				var totalsForDisplay = {};
+				if (data.totals && typeof data.totals === 'object') {
+					Object.keys(data.totals).forEach(function (key) {
+						if (
+							key === 'cache_deny_pre' ||
+							key === 'cache_override_pre' ||
+							key === 'cache_null'
+						) {
+							return;
+						}
+						totalsForDisplay[key] = data.totals[key];
+					});
+				}
+
+				appendDictGroup('Totals', totalsForDisplay);
 				appendUpstreamsGroup(data.upstreams || {}, data.upstream_rcodes || {});
 				appendUpstreamQtypesGroup(data.upstream_qtypes || {});
 				appendDictGroup('Query types', data.qtypes || {});

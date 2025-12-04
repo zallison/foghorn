@@ -4,9 +4,8 @@ import functools
 import logging
 from typing import List, Optional, Union
 
-from pydantic import BaseModel, Field
-
 from dnslib import AAAA, QTYPE, A, DNSRecord
+from pydantic import BaseModel, Field
 
 from foghorn.plugins.base import plugin_aliases
 

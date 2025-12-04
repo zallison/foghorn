@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import functools
 import importlib.metadata as importlib_metadata
+import ipaddress
 import json
 import logging
 import os
@@ -1059,8 +1060,6 @@ class StatsCollector:
         Outputs:
             None
         """
-        import ipaddress
-
         self._lock = threading.RLock()
 
         # Config flags
@@ -1343,11 +1342,15 @@ class StatsCollector:
                         "StatsCollector: failed to persist cache_miss", exc_info=True
                     )
 
-    def record_cache_null(self, qname: str) -> None:
+    def record_cache_null(self, qname: str, status: Optional[str] = None) -> None:
         """Record a response served directly by plugins without cache usage.
 
         Inputs:
             qname: Query domain name associated with the plugin-handled response.
+            status: Optional high-level status classification for the cache-null
+                event (for example, "deny_pre" or "override_pre"). When
+                provided and recognized, additional per-status counters are
+                incremented alongside the generic ``cache_null`` total.
 
         Outputs:
             None
@@ -1361,12 +1364,81 @@ class StatsCollector:
         with self._lock:
             self._totals["cache_null"] += 1
 
+            # When the cache-null event is caused by a pre-plugin deny/override
+            # decision, also track per-status totals so live in-memory counters
+            # mirror the aggregates produced by rebuild_counts_from_query_log.
+            if status in ("deny_pre", "override_pre"):
+                key = f"cache_{status}"
+                self._totals[key] += 1
+
             if self._store is not None:
                 try:
                     self._store.increment_count("totals", "cache_null")
+                    if status in ("deny_pre", "override_pre"):
+                        self._store.increment_count("totals", f"cache_{status}")
                 except Exception:  # pragma: no cover - defensive
                     logger.debug(
                         "StatsCollector: failed to persist cache_null", exc_info=True
+                    )
+
+    def record_cache_stat(self, label: str) -> None:
+        """Record a cache-related classification label derived from PluginDecision.stat.
+
+        Inputs:
+            label: Non-empty string identifying the decision source or reason
+                (for example, "filter", "skip", or plugin-specific tags).
+
+        Outputs:
+            None; updates in-memory totals (under a ``cache_stat_<label>`` key)
+            and, when a StatsSQLiteStore is attached, increments the persistent
+            ``counts`` row for scope ``"cache"`` and key equal to ``label``.
+        """
+        if not label:
+            return
+
+        key = f"cache_stat_{label}"
+        with self._lock:
+            try:
+                self._totals[key] += 1
+            except Exception:  # pragma: no cover - defensive
+                return
+
+            if self._store is not None:
+                try:
+                    # Use a dedicated "cache" scope so per-label aggregates can
+                    # be inspected or warm-loaded separately from core totals.
+                    self._store.increment_count("cache", label)
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "StatsCollector: failed to persist cache_stat", exc_info=True
+                    )
+
+    def record_cache_pre_plugin(self, label: str) -> None:
+        """Record per-plugin pre_resolve deny/override cache classifications.
+
+        Inputs:
+            label: Non-empty string key to store under ``totals`` (for example,
+                ``"pre_deny_filter"`` or ``"pre_override_greylist"``).
+
+        Outputs:
+            None; increments ``totals[label]`` in-memory and, when a
+            StatsSQLiteStore is attached, mirrors the counter into the
+            persistent ``totals`` scope so that snapshot.totals reflects the
+            same values as warm-loaded aggregates.
+        """
+        if not label:
+            return
+
+        with self._lock:
+            self._totals[label] += 1
+
+            if self._store is not None:
+                try:
+                    self._store.increment_count("totals", label)
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "StatsCollector: failed to persist cache_pre_plugin",
+                        exc_info=True,
                     )
 
     def set_ignore_filters(
@@ -1420,8 +1492,6 @@ class StatsCollector:
             >>> # top_clients/top_domains/top_subdomains will omit matching
             >>> # entries, but totals["total_queries"] counts all queries.
         """
-        import ipaddress
-
         clients = clients or []
         domains = domains or []
         subdomains = subdomains or []
@@ -2352,6 +2422,18 @@ class StatsCollector:
                     self._totals[key] = int(value)
                 except (TypeError, ValueError):
                     continue
+
+            # Optional per-label cache statistics persisted under "cache" scope.
+            # These are exposed in snapshots via totals keys of the form
+            # "cache_stat_<label>" so the HTML dashboard can render them
+            # alongside other cache metrics without schema changes.
+            for label, value in counts.get("cache", {}).items():
+                try:
+                    int_value = int(value)
+                except (TypeError, ValueError):
+                    continue
+                stat_key = f"cache_stat_{label}"
+                self._totals[stat_key] = int_value
 
             for key, value in counts.get("rcodes", {}).items():
                 try:

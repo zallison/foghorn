@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import ipaddress
 import logging
 from dataclasses import dataclass
@@ -33,13 +34,58 @@ class PluginDecision:
     Inputs:
       - action: str indicating the decision (e.g., "allow", "deny", "override").
       - response: Optional[bytes] DNS response to use when action == "override".
+      - plugin: Optional[type[BasePlugin]] set to the originating plugin class when
+        instantiated from within a plugin hook (best-effort).
+      - plugin_label: Optional[str] best-effort label derived from the originating
+        plugin instance (typically BasePlugin.name) for use in statistics and
+        logging when available.
 
     Outputs:
       - PluginDecision instance with attributes populated.
     """
 
     action: str
+    stat: Optional[str] = None
     response: Optional[bytes] = None
+    plugin: Optional[type["BasePlugin"]] = None
+    plugin_label: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        """Brief: Infer originating plugin metadata when not explicitly provided.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None; sets self.plugin to the BasePlugin subclass that created this
+            decision when called from within a plugin method, and populates
+            plugin_label with the instance's name when available.
+        """
+
+        if self.plugin is not None and self.plugin_label is not None:
+            return
+
+        # Best-effort: walk the call stack and look for a "self" bound to a
+        # BasePlugin instance, which indicates a plugin hook constructed this
+        # decision. Any failures here must not affect normal query handling.
+        try:
+            from foghorn.plugins.base import BasePlugin  # type: ignore[import]
+
+            for frame_info in inspect.stack():
+                self_obj = frame_info.frame.f_locals.get("self")
+                if isinstance(self_obj, BasePlugin):
+                    if self.plugin is None:
+                        self.plugin = type(self_obj)
+                    if self.plugin_label is None:
+                        try:
+                            label = getattr(self_obj, "name", None)
+                        except Exception:  # pragma: no cover - defensive
+                            label = None
+                        if label is not None:
+                            self.plugin_label = str(label)
+                    break
+        except Exception:  # pragma: no cover - defensive best-effort only
+            return
 
 
 class PluginContext:
@@ -92,13 +138,17 @@ class BasePlugin:
       - setup_priority (for setup() hooks; lower runs first)
 
     Inputs:
+      - name: Optional human-friendly identifier used when logging statistics
+        and other plugin-related data. When omitted, a default derived from the
+        plugin's aliases or class name is used.
       - **config: Plugin configuration including optional
         pre_priority, post_priority, and setup_priority. Plugins may also
         use an `abort_on_failure` boolean in their config to control
         whether setup() failures abort startup (default True).
 
     Outputs:
-      - Initialized plugin instance with priority attributes.
+      - Initialized plugin instance with priority attributes and targeting
+        helpers.
 
     Example use:
         >>> from foghorn.plugins.base import BasePlugin
@@ -106,9 +156,11 @@ class BasePlugin:
         ...     pre_priority = 10
         ...     def pre_resolve(self, qname, qtype, req, ctx):
         ...         return None
-        >>> plugin = MyPlugin(pre_priority=25)
+        >>> plugin = MyPlugin(name="my_filter", pre_priority=25)
         >>> plugin.pre_priority
         25
+        >>> plugin.name
+        'my_filter'
     """
 
     ttl: ClassVar[int] = 300
@@ -131,10 +183,12 @@ class BasePlugin:
         return tuple(getattr(cls, "aliases", ()))
 
     @final
-    def __init__(self, **config: object) -> None:
+    def __init__(self, name: Optional[str] = None, **config: object) -> None:
         """Initialize the BasePlugin with configuration, priorities, and targets.
 
         Inputs:
+          - name: Optional friendly identifier used in place of the plugin class
+            name when logging statistics or other plugin-related data.
           - **config: Plugin configuration including (optional):
             - pre_priority (int | str): Priority for pre_resolve (1-255, default from class).
             - post_priority (int | str): Priority for post_resolve (1-255, default from class).
@@ -150,7 +204,8 @@ class BasePlugin:
               clients are targeted except those in targets_ignore.
 
         Outputs:
-          - None (sets self.config, priority attributes, and target networks).
+          - None (sets self.name, self.config, priority attributes, and target
+            networks).
 
         Priority values are clamped to [1, 255]. Invalid types use class defaults.
 
@@ -160,6 +215,21 @@ class BasePlugin:
             >>> plugin.pre_priority
             10
         """
+        # Determine a stable, human-friendly name for logging and statistics.
+        if name is not None:
+            self.name = str(name)
+        else:
+            # Prefer the first alias when available, falling back to the class name.
+            try:
+                aliases = list(getattr(self.__class__, "get_aliases", lambda: [])())
+            except Exception:  # pragma: no cover - defensive
+                aliases = []
+            if aliases:
+                default_name = str(aliases[0])
+            else:
+                default_name = self.__class__.__name__
+            self.name = default_name
+
         self.config = config
         logger.debug("loading %s", self)
 

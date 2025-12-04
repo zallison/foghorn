@@ -201,8 +201,10 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
 
     Args:
         plugin_specs: A list where each item is either a dict with keys
-                      {"module": <path-or-alias>, "config": {...}} or a string
-                      alias/dotted path.
+                      {"module": <path-or-alias>, "config": {...}, "name": "..."}
+                      or a string alias/dotted path. When provided, "name" is a
+                      human-friendly label used in place of the plugin class
+                      name when logging statistics or other plugin data.
 
     Returns:
         A list of initialized plugin instances.
@@ -211,10 +213,12 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         >>> from foghorn.plugins.base import BasePlugin
         >>> class MyTestPlugin(BasePlugin):
         ...     pass
-        >>> specs = [{"module": "__main__.MyTestPlugin"}]
+        >>> specs = [{"module": "__main__.MyTestPlugin", "name": "my_test"}]
         >>> plugins = load_plugins(specs)
         >>> isinstance(plugins[0], MyTestPlugin)
         True
+        >>> plugins[0].name
+        'my_test'
         >>> # Using aliases
         >>> plugins = load_plugins(["acl", {"module": "router", "config": {}}])
     """
@@ -224,15 +228,20 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         if isinstance(spec, str):
             module_path = spec
             config = {}
+            plugin_name = None
         else:
             module_path = spec.get("module")
             config = spec.get("config", {})
+            plugin_name = spec.get("name")
         if not module_path:
             continue
 
         plugin_cls = get_plugin_class(module_path, alias_registry)
         validated_config = _validate_plugin_config(plugin_cls, config)
-        plugin = plugin_cls(**validated_config)
+        if plugin_name is not None:
+            plugin = plugin_cls(name=str(plugin_name), **validated_config)
+        else:
+            plugin = plugin_cls(**validated_config)
         plugins.append(plugin)
     return plugins
 
