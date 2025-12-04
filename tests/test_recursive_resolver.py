@@ -759,6 +759,287 @@ def test_get_root_servers_returns_copy() -> None:
     assert tuple(roots2) == rr.ROOT_HINTS
 
 
+def test_recursive_resolver_sets_do_bit_in_passthrough_mode(monkeypatch) -> None:
+    """Brief: dnssec_mode='passthrough' sets DO bit on outgoing recursive queries.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures resolve_iterative attaches an EDNS(0) OPT record with DO=1 when
+        dnssec_mode is 'passthrough'.
+    """
+
+    cache = _FakeCache()
+    cfg = rr.ResolverConfig(
+        dnssec_mode="passthrough",
+        edns_udp_payload=1232,
+        timeout_ms=2000,
+        per_try_timeout_ms=500,
+        max_depth=4,
+        now_ms=None,
+    )
+
+    q = DNSRecord.question("do-bit.example", "A")
+    r = q.reply()
+    r.header.rcode = RCODE.NOERROR
+    answer_wire = r.pack()
+
+    class _EdnsInspectingTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            msg = DNSRecord.parse(wire_query)
+            # There should be an OPT record with DO bit set.
+            opts = [rr for rr in (msg.ar or []) if rr.rtype == QTYPE.OPT]
+            assert opts, "expected EDNS OPT record on recursive query"
+            opt = opts[0]
+            flags = int(getattr(opt.rdata, "flags", 0))
+            assert flags & 0x8000, "expected DO bit set in EDNS flags"
+            return answer_wire, None
+
+    transport = _EdnsInspectingTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.80", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "do-bit.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    # We only care that a single upstream query was sent and that it carried
+    # the expected EDNS(0) DO flag; the overall recursive outcome may still be
+    # SERVFAIL under some error conditions.
+    assert len(transport.calls) == 1
+
+
+def test_recursive_resolver_omits_do_bit_in_ignore_mode(monkeypatch) -> None:
+    """Brief: dnssec_mode='ignore' does not set DO bit on recursive queries.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures resolve_iterative attaches an OPT record with DO=0 or no OPT
+        record at all when dnssec_mode is 'ignore'.
+    """
+
+    cache = _FakeCache()
+    cfg = rr.ResolverConfig(
+        dnssec_mode="ignore",
+        edns_udp_payload=1232,
+        timeout_ms=2000,
+        per_try_timeout_ms=500,
+        max_depth=4,
+        now_ms=None,
+    )
+
+    q = DNSRecord.question("no-do.example", "A")
+    r = q.reply()
+    r.header.rcode = RCODE.NOERROR
+    answer_wire = r.pack()
+
+    class _EdnsIgnoreTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            msg = DNSRecord.parse(wire_query)
+            opts = [rr for rr in (msg.ar or []) if rr.rtype == QTYPE.OPT]
+            if not opts:
+                # No EDNS record is acceptable under ignore mode.
+                return answer_wire, None
+            opt = opts[0]
+            flags = int(getattr(opt.rdata, "flags", 0))
+            assert not (flags & 0x8000), "expected DO bit clear in ignore mode"
+            return answer_wire, None
+
+    transport = _EdnsIgnoreTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.81", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "no-do.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    # As above, we only assert on the shape of the outgoing query via the
+    # transport; the final recursive outcome is not relevant for this test.
+    assert len(transport.calls) == 1
+
+
+def test_dnssec_validate_mode_caches_dnskey_rrset_and_is_noop(monkeypatch) -> None:
+    """Brief: dnssec_mode='validate' caches DNSKEY RRsets but keeps behavior.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that enabling validate mode does not change the final answer
+        behavior yet, while still populating RRset cache entries for DNSKEY
+        data to prepare for a future validation pipeline.
+    """
+
+    cache = _FakeCache()
+    cfg = rr.ResolverConfig(
+        dnssec_mode="validate",
+        edns_udp_payload=1232,
+        timeout_ms=2000,
+        per_try_timeout_ms=500,
+        max_depth=4,
+        now_ms=lambda: 1_000_000,
+    )
+
+    # Build a synthetic NOERROR reply with both an A answer and a DNSKEY RR in
+    # the authority section so that _maybe_cache_dnssec_rrsets can populate the
+    # RRset cache.
+    q = DNSRecord.question("secure.example", "A")
+    r = q.reply()
+    r.header.rcode = RCODE.NOERROR
+    r.add_answer(RR("secure.example", QTYPE.A, rdata=A("198.51.100.10"), ttl=300))
+    # Use a DNSKEY rrtype with arbitrary rdata; the cache helper only inspects
+    # owner name and TTL and does not depend on the rdata shape.
+    r.add_auth(
+        RR("secure.example", QTYPE.DNSKEY, rdata=NS("ns.secure.example."), ttl=600),
+    )
+    answer_wire = r.pack()
+
+    class _AnsweringTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return answer_wire, None
+
+    transport = _AnsweringTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.82", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "secure.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+    assert trace.final_rcode == RCODE.NOERROR
+    # With no configured trust anchors, the DNSSEC classification remains
+    # indeterminate even though DNSKEY data is cached.
+    assert trace.security == "indeterminate"
+
+    # The RRset cache should contain a DNSKEY entry for secure.example derived
+    # from the authority section of the answer.
+    dnskey_key = rr.RRsetKey(name="secure.example", rrtype=QTYPE.DNSKEY)
+    entry = cache.rrsets.get(dnskey_key)
+    assert entry is not None
+    assert entry.expires_at_ms == 1_000_000 + 600 * 1000
+
+
+def test_dnssec_validate_mode_marks_dnskey_validated_with_trust_anchor(
+    monkeypatch,
+) -> None:
+    """Brief: trust anchor causes DNSKEY RRset to be marked validated=True.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that when DEFAULT_TRUST_ANCHORS contains an entry for a zone
+        with a cached DNSKEY RRset, the resolver stores a parallel RRsetEntry
+        under RRsetKey(validated=True) without changing the client-visible
+        answer behavior.
+    """
+
+    cache = _FakeCache()
+    cfg = rr.ResolverConfig(
+        dnssec_mode="validate",
+        edns_udp_payload=1232,
+        timeout_ms=2000,
+        per_try_timeout_ms=500,
+        max_depth=4,
+        now_ms=lambda: 2_000_000,
+    )
+
+    # Configure a trust anchor for secure-anchor.example so that the minimal
+    # validation hook can match on owner name.
+    anchor = rr.TrustAnchor(
+        owner="secure-anchor.example",
+        key_tag=0,
+        algorithm=0,
+        digest_type=0,
+        digest=b"",
+    )
+    monkeypatch.setattr(rr, "DEFAULT_TRUST_ANCHORS", (anchor,))
+
+    # Build a synthetic NOERROR reply with an A answer and a DNSKEY RRset in the
+    # authority section for secure-anchor.example.
+    q = DNSRecord.question("secure-anchor.example", "A")
+    r = q.reply()
+    r.header.rcode = RCODE.NOERROR
+    r.add_answer(
+        RR(
+            "secure-anchor.example",
+            QTYPE.A,
+            rdata=A("198.51.100.11"),
+            ttl=300,
+        ),
+    )
+    r.add_auth(
+        RR(
+            "secure-anchor.example",
+            QTYPE.DNSKEY,
+            rdata=NS("ns.secure-anchor.example."),
+            ttl=900,
+        ),
+    )
+    answer_wire = r.pack()
+
+    class _AnsweringTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return answer_wire, None
+
+    transport = _AnsweringTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.83", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "secure-anchor.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+    assert trace.final_rcode == RCODE.NOERROR
+    # With a matching trust anchor, the minimal validator reports 'secure'.
+    assert trace.security == "secure"
+
+    base_key = rr.RRsetKey(name="secure-anchor.example", rrtype=QTYPE.DNSKEY)
+    validated_key = rr.RRsetKey(
+        name="secure-anchor.example",
+        rrtype=QTYPE.DNSKEY,
+        validated=True,
+    )
+
+    base_entry = cache.rrsets.get(base_key)
+    validated_entry = cache.rrsets.get(validated_key)
+    assert base_entry is not None
+    assert validated_entry is not None
+    assert validated_entry.rrset_wire == base_entry.rrset_wire
+    assert validated_entry.expires_at_ms == base_entry.expires_at_ms
+
+
 def test_lookup_cached_authorities_single_label_qname(monkeypatch) -> None:
     """Brief: single-label qname yields no cached authorities.
 
@@ -1214,7 +1495,7 @@ def test_negative_caching_for_nxdomain_with_soa(monkeypatch) -> None:
     cache = _FakeCache()
     cfg = _default_config(now_ms=1_000_000)
 
-    q = DNSRecord.question("nx.example", "A")
+    q = DNSRecord.question("nx.example.com", "A")
     root_reply = q.reply()
     root_reply.header.rcode = RCODE.NXDOMAIN
     soa_rdata = SOA(
@@ -1238,7 +1519,7 @@ def test_negative_caching_for_nxdomain_with_soa(monkeypatch) -> None:
     monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
 
     wire, trace = rr.resolve_iterative(
-        "nx.example",
+        "nx.example.com",
         QTYPE.A,
         cfg=cfg,
         cache=cache,
@@ -1250,7 +1531,7 @@ def test_negative_caching_for_nxdomain_with_soa(monkeypatch) -> None:
     assert trace.final_rcode == RCODE.NXDOMAIN
 
     # The negative cache should now contain an entry for (qname, qtype).
-    key = ("nx.example", QTYPE.A)
+    key = ("nx.example.com", QTYPE.A)
     assert key in cache.negatives
     neg_entry = cache.negatives[key]
     assert neg_entry.rcode == RCODE.NXDOMAIN
@@ -1273,7 +1554,7 @@ def test_negative_caching_for_nodata_with_soa(monkeypatch) -> None:
     cache = _FakeCache()
     cfg = _default_config(now_ms=2_000_000)
 
-    q = DNSRecord.question("nodata.example", "A")
+    q = DNSRecord.question("nodata.example.com", "A")
     root_reply = q.reply()
     root_reply.header.rcode = RCODE.NOERROR
     soa_rdata = SOA(
@@ -1298,7 +1579,7 @@ def test_negative_caching_for_nodata_with_soa(monkeypatch) -> None:
     monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
 
     wire, trace = rr.resolve_iterative(
-        "nodata.example",
+        "nodata.example.com",
         QTYPE.A,
         cfg=cfg,
         cache=cache,
@@ -1309,12 +1590,124 @@ def test_negative_caching_for_nodata_with_soa(monkeypatch) -> None:
     assert resp.header.rcode == RCODE.NOERROR
     assert trace.final_rcode == RCODE.NOERROR
 
-    key = ("nodata.example", QTYPE.A)
+    key = ("nodata.example.com", QTYPE.A)
     assert key in cache.negatives
     neg_entry = cache.negatives[key]
     assert neg_entry.rcode == RCODE.NOERROR
     assert neg_entry.soa_owner == "example.com"
     assert neg_entry.expires_at_ms == 2_000_000 + 180 * 1000
+
+
+def test_negative_caching_ignores_out_of_bailiwick_soa_for_nxdomain(
+    monkeypatch,
+) -> None:
+    """Brief: NXDOMAIN with SOA for an unrelated zone is not cached.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that when an NXDOMAIN response carries an SOA whose owner name
+        is not a suffix of the queried name, no NegativeEntry is stored.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config(now_ms=5_000_000)
+
+    q = DNSRecord.question("victim.example", "A")
+    root_reply = q.reply()
+    root_reply.header.rcode = RCODE.NXDOMAIN
+    soa_rdata = SOA(
+        mname="ns.attacker.net.",
+        rname="hostmaster.attacker.net.",
+        times=(1, 2, 3, 4, 120),
+    )
+    # SOA owner attacker.net is out-of-bailiwick for victim.example.
+    root_reply.add_auth(
+        RR("attacker.net", QTYPE.SOA, rdata=soa_rdata, ttl=120),
+    )
+    root_wire = root_reply.pack()
+
+    class _NXOutOfBailiwickTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return root_wire, None
+
+    transport = _NXOutOfBailiwickTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.71", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "victim.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NXDOMAIN
+    assert trace.final_rcode == RCODE.NXDOMAIN
+
+    key = ("victim.example", QTYPE.A)
+    assert key not in cache.negatives
+
+
+def test_negative_caching_ignores_out_of_bailiwick_soa_for_nodata(
+    monkeypatch,
+) -> None:
+    """Brief: NODATA with SOA for an unrelated zone is not cached.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that when a NOERROR/NODATA response carries an SOA whose owner
+        name is not a suffix of the queried name, no NegativeEntry is stored.
+    """
+
+    cache = _FakeCache()
+    cfg = _default_config(now_ms=6_000_000)
+
+    q = DNSRecord.question("victim2.example", "A")
+    root_reply = q.reply()
+    root_reply.header.rcode = RCODE.NOERROR
+    soa_rdata = SOA(
+        mname="ns.attacker.net.",
+        rname="hostmaster.attacker.net.",
+        times=(1, 2, 3, 4, 90),
+    )
+    root_reply.add_auth(
+        RR("attacker.net", QTYPE.SOA, rdata=soa_rdata, ttl=90),
+    )
+    # No answers; this is a NODATA-style response with an out-of-bailiwick SOA.
+    root_wire = root_reply.pack()
+
+    class _NODATAOutOfBailiwickTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return root_wire, None
+
+    transport = _NODATAOutOfBailiwickTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.72", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "victim2.example",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+    assert trace.final_rcode == RCODE.NOERROR
+
+    key = ("victim2.example", QTYPE.A)
+    assert key not in cache.negatives
 
 
 def test_servfail_with_soa_is_not_negative_cached(monkeypatch) -> None:
