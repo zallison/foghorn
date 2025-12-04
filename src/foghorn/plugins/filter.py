@@ -12,12 +12,11 @@ import threading
 import time
 from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
 
-from pydantic import BaseModel, Field
-
 from dnslib import AAAA as RDATA_AAAA
 from dnslib import QTYPE, RCODE
 from dnslib import A as RDATA_A
 from dnslib import DNSRecord
+from pydantic import BaseModel, Field
 
 from foghorn.cache import FoghornTTLCache
 
@@ -799,7 +798,12 @@ class FilterPlugin(BasePlugin):
         with open(path, "r", encoding="utf-8") as fh:
             for idx, raw in enumerate(fh, start=1):
                 line = raw.strip()
-                if not line or line.startswith("#") or line.startswith("!"):
+                if (
+                    not line
+                    or line.startswith("#")
+                    or line.startswith("!")
+                    or line.startswith("[")
+                ):
                     continue
                 yield idx, line
 

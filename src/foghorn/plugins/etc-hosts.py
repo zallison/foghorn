@@ -7,9 +7,8 @@ import threading
 import time
 from typing import Dict, Iterable, List, Optional
 
-from pydantic import BaseModel, Field
-
 from dnslib import AAAA, QTYPE, RR, A, DNSHeader, DNSRecord
+from pydantic import BaseModel, Field
 
 try:  # watchdog is used for cross-platform file watching
     from watchdog.events import FileSystemEventHandler

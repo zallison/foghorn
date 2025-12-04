@@ -605,8 +605,53 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         qtype_name = QTYPE.get(qtype_for_log, str(qtype_for_log))
                         try:
                             # Count this as a cache_null response because no
-                            # cache lookup occurs when pre-plugins short-circuit.
-                            self.stats_collector.record_cache_null(qname_for_log)
+                            # cache lookup occurs when pre-plugins short-circuit,
+                            # and bump the cache_deny_pre total.
+                            self.stats_collector.record_cache_null(
+                                qname_for_log, status="deny_pre"
+                            )
+                        except Exception:  # pragma: no cover
+                            pass
+                        # Mirror any decision.stat label into cache stats so
+                        # the web UI can display per-decision tallies.
+                        try:
+                            stat_label = getattr(pre_decision, "stat", None)
+                            if stat_label:
+                                self.stats_collector.record_cache_stat(str(stat_label))
+                        except Exception:  # pragma: no cover
+                            pass
+                        # Also record per-plugin pre-deny totals so stats.totals
+                        # exposes pre_deny_<name> keys. Prefer the originating
+                        # plugin instance label when available, falling back to
+                        # alias/class naming.
+                        try:
+                            label_suffix = getattr(pre_decision, "plugin_label", None)
+                            if not label_suffix:
+                                plugin_cls = getattr(pre_decision, "plugin", None)
+                                if plugin_cls is not None:
+                                    plugin_name = getattr(
+                                        plugin_cls, "__name__", "plugin"
+                                    ).lower()
+                                    aliases = []
+                                    try:
+                                        aliases = list(
+                                            getattr(
+                                                plugin_cls, "get_aliases", lambda: []
+                                            )()
+                                        )
+                                    except Exception:  # pragma: no cover - defensive
+                                        aliases = []
+                                    if aliases:
+                                        label_suffix = str(aliases[0]).strip().lower()
+                                    else:
+                                        label_suffix = plugin_name
+
+                            if label_suffix:
+                                short = str(label_suffix).strip()
+                                label = (
+                                    f"pre_deny_{short}" if short else "pre_deny_plugin"
+                                )
+                                self.stats_collector.record_cache_pre_plugin(label)
                         except Exception:  # pragma: no cover
                             pass
                         self.stats_collector.record_response_rcode(
@@ -644,9 +689,66 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                             )
                             try:
                                 # Pre-override also bypasses cache, so count as
-                                # a cache_null response.
+                                # a cache_null response and bump the
+                                # cache_override_pre total.
                                 qname_for_log = qname_for_stats or qname
-                                self.stats_collector.record_cache_null(qname_for_log)
+                                self.stats_collector.record_cache_null(
+                                    qname_for_log, status="override_pre"
+                                )
+                            except Exception:  # pragma: no cover
+                                pass
+                            # Mirror any decision.stat label into cache stats
+                            # so the web UI can display per-decision tallies.
+                            try:
+                                stat_label = getattr(pre_decision, "stat", None)
+                                if stat_label:
+                                    self.stats_collector.record_cache_stat(
+                                        str(stat_label)
+                                    )
+                            except Exception:  # pragma: no cover
+                                pass
+                            # Also record per-plugin pre-override totals so
+                            # stats.totals exposes pre_override_<name>. Prefer
+                            # the originating plugin instance label when
+                            # available, falling back to alias/class naming.
+                            try:
+                                label_suffix = getattr(
+                                    pre_decision, "plugin_label", None
+                                )
+                                if not label_suffix:
+                                    plugin_cls = getattr(pre_decision, "plugin", None)
+                                    if plugin_cls is not None:
+                                        plugin_name = getattr(
+                                            plugin_cls, "__name__", "plugin"
+                                        ).lower()
+                                        aliases = []
+                                        try:
+                                            aliases = list(
+                                                getattr(
+                                                    plugin_cls,
+                                                    "get_aliases",
+                                                    lambda: [],
+                                                )()
+                                            )
+                                        except (
+                                            Exception
+                                        ):  # pragma: no cover - defensive
+                                            aliases = []
+                                        if aliases:
+                                            label_suffix = (
+                                                str(aliases[0]).strip().lower()
+                                            )
+                                        else:
+                                            label_suffix = plugin_name
+
+                                if label_suffix:
+                                    short = str(label_suffix).strip()
+                                    label = (
+                                        f"pre_override_{short}"
+                                        if short
+                                        else "pre_override_plugin"
+                                    )
+                                    self.stats_collector.record_cache_pre_plugin(label)
                             except Exception:  # pragma: no cover
                                 pass
                             self.stats_collector.record_response_rcode(

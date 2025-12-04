@@ -477,7 +477,12 @@ class ListDownloader(BasePlugin):
                     line = raw.strip()
                     # Treat both '#' and '!' as comment prefixes to support
                     # AdGuard/Adblock-style lists where '!' starts a comment.
-                    if not line or line.startswith("#") or line.startswith("!"):
+                    if (
+                        not line
+                        or line.startswith("#")
+                        or line.startswith("!")
+                        or line.startswith("[")
+                    ):
                         continue
                     # Strip any trailing comment introduced by '#' or '!' on
                     # the same line, then re-trim.

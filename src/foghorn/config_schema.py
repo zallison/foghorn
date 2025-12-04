@@ -14,7 +14,6 @@ from typing import Any, Dict, List, Optional
 from jsonschema import Draft202012Validator, ValidationError
 from jsonschema.exceptions import SchemaError
 
-
 logger = logging.getLogger(__name__)
 
 

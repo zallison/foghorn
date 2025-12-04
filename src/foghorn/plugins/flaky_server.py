@@ -6,9 +6,8 @@ import random
 import secrets
 from typing import List, Optional, Union
 
-from pydantic import BaseModel, Field
-
 from dnslib import QTYPE, RCODE, DNSRecord
+from pydantic import BaseModel, Field
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
