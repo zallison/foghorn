@@ -494,6 +494,12 @@
 					var count = pair[1];
 
 					var dt = document.createElement('dt');
+					// Empty keys represent the root (".") or an unnamed bucket.
+					// Show these as "<root>" for clarity across all top lists
+					// (e.g., Top Domains, Top DNSKEY Requests, Top Client).
+					if (typeof key === 'string' && key.length === 0) {
+						key = '<root>';
+					}
 					dt.textContent = key;
 
 					var dd = document.createElement('dd');
@@ -906,7 +912,7 @@
 				statsGroupsEl.appendChild(group);
 			}
 
-			function appendProcessGroup(system) {
+			function appendProcessGroup(system, uniques) {
 				if (!system || typeof system !== 'object') {
 					return;
 				}
@@ -927,6 +933,9 @@
 				var processConnections = system.process_connections_count;
 
 				function addProcessRow(label, value) {
+					if (value === undefined || value === null) {
+						return;
+					}
 					var dt = document.createElement('dt');
 					dt.textContent = label;
 					var dd = document.createElement('dd');
@@ -939,6 +948,14 @@
 				addProcessRow('Process CPU %', processCpuPercent + " %");
 				addProcessRow('Process open files', processOpenFiles);
 				addProcessRow('Process connections', processConnections);
+
+				// Show uniques counters here so they are grouped with other
+				// per-process-ish metrics instead of the Totals section.
+				if (uniques && typeof uniques === 'object') {
+					Object.keys(uniques).sort().forEach(function (key) {
+						addProcessRow(key, uniques[key]);
+					});
+				}
 
 				group.appendChild(dl);
 
@@ -1026,7 +1043,10 @@
 
 				var meta = {};
 				if (data.meta && typeof data.meta === 'object') {
-					meta = data.meta;
+					// Shallow copy so we do not mutate the original payload.
+					Object.keys(data.meta).forEach(function (key) {
+						meta[key] = data.meta[key];
+					});
 					delete meta.server_time;
 					if (createdFormatted !== null) {
 						meta.created_at = createdFormatted;
@@ -1034,12 +1054,15 @@
 					if (meta.uptime !== undefined && meta.uptime !== null) {
 						meta.uptime = formatDurationSeconds(meta.uptime);
 					}
+					// Drop high-cardinality meta summaries from the Meta table.
+					delete meta.clients;
+					delete meta.domains;
 				}
 
 				if (Object.keys(meta).length) {
 					appendDictGroup('Meta', meta);
 				}
-				appendProcessGroup(data.system);
+				appendProcessGroup(data.system, data.uniques || {});
 
 				// For Totals, hide certain internal-pre cache counters from the UI.
 				var totalsForDisplay = {};
