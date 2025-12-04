@@ -22,6 +22,7 @@ from foghorn.server import resolve_query_bytes
 from foghorn.udp_server import DNSUDPHandler
 from foghorn import recursive_resolver as rr
 from foghorn.recursive_cache import InMemoryRecursiveCache
+from foghorn.stats import StatsCollector
 
 
 class _FakeRecursiveTransport:
@@ -78,6 +79,8 @@ class _FakeRecursiveTransport:
         if authority.host == "198.51.100.1" and qname == "www.example.test":
             child_reply = msg.reply()
             child_reply.header.rcode = RCODE.NOERROR
+            # Pretend the upstream validated this response so AD is set.
+            child_reply.header.ad = 1
             child_reply.add_answer(
                 RR("www.example.test", QTYPE.A, rdata=A("203.0.113.5"), ttl=300)
             )
@@ -241,3 +244,58 @@ def test_recursive_max_inflight_falls_back_to_forward(monkeypatch) -> None:
     wire = resolve_query_bytes(q.pack(), "192.0.2.55")
     resp = DNSRecord.parse(wire)
     assert resp.header.rcode == RCODE.NOERROR
+
+
+def test_recursive_stats_counters_for_recursive_query(monkeypatch) -> None:
+    """Brief: recursive mode updates recursion-specific statistics.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures resolve_query_bytes in recursive mode increments recursive
+        counters in the attached StatsCollector.
+    """
+
+    # Fresh stats collector attached to the handler.
+    stats = StatsCollector(
+        track_uniques=False,
+        include_qtype_breakdown=False,
+        include_top_clients=False,
+        include_top_domains=False,
+        track_latency=False,
+    )
+    monkeypatch.setattr(DNSUDPHandler, "stats_collector", stats, raising=False)
+
+    # Configure recursive mode with fake cache/transport as in the core test.
+    monkeypatch.setattr(DNSUDPHandler, "recursive_mode", "recursive", raising=False)
+    monkeypatch.setattr(DNSUDPHandler, "plugins", [], raising=False)
+    # Enable DNSSEC passthrough so that dnssec_queries and AD stats are updated.
+    monkeypatch.setattr(DNSUDPHandler, "dnssec_mode", "passthrough", raising=False)
+
+    cache = InMemoryRecursiveCache()
+    transports = _FakeRecursiveTransport()
+    monkeypatch.setattr(DNSUDPHandler, "recursive_cache", cache, raising=False)
+    monkeypatch.setattr(
+        DNSUDPHandler, "recursive_transports", transports, raising=False
+    )
+
+    # Disable forwarding path so any accidental fallback would fail the test.
+    monkeypatch.setattr(DNSUDPHandler, "upstream_addrs", [], raising=False)
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.1", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    q = DNSRecord.question("www.example.test", "A")
+    wire = resolve_query_bytes(q.pack(), "127.0.0.1")
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+
+    snap = stats.snapshot(reset=False)
+    assert snap.totals["recursive_queries"] == 1
+    assert snap.totals["recursive_rcode_NOERROR"] == 1
+    # Successful recursion should not record fallback counters.
+    assert snap.totals.get("recursive_fallback_acl", 0) == 0
+    # DNSSEC stats should reflect the recursive query and AD=1 on the upstream
+    # reply from the fake transport.
+    assert snap.totals["dnssec_queries"] == 1
+    assert snap.totals["dnssec_ad_upstream"] == 1
