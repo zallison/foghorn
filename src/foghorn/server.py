@@ -397,6 +397,14 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
             try:
                 qtype_name = QTYPE.get(qtype, str(qtype))
                 stats.record_query(client_ip, qname, qtype_name)
+                # Track DNSSEC-enabled queries when dnssec_mode is passthrough
+                # or validate so that Totals exposes how often DNSSEC is in use.
+                mode = str(getattr(DNSUDPHandler, "dnssec_mode", "ignore")).lower()
+                if mode in ("passthrough", "validate"):
+                    try:
+                        stats.record_dnssec_query()
+                    except Exception:  # pragma: no cover - defensive
+                        pass
             except Exception:  # pragma: no cover
                 pass
 
@@ -631,6 +639,10 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
         # Track whether this query consumed a recursive inflight slot so it can
         # be released after resolve_iterative returns.
         _used_recursive_slot = False
+        # Track whether this query ultimately used the recursive resolver core
+        # to obtain its final answer (as opposed to forwarding or cache-only
+        # paths). This flag is used when updating recursion-specific statistics.
+        used_recursive_engine = False
 
         if resolver_mode == "recursive":
             # Enforce optional recursion ACLs and resource limits before calling
@@ -644,8 +656,18 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                     try:
                         ip_obj = ipaddress.ip_address(client_ip)
                         if not any(ip_obj in net for net in allow_nets):
+                            if stats is not None:
+                                try:
+                                    stats.record_recursive_fallback("acl")
+                                except Exception:  # pragma: no cover - defensive
+                                    pass
                             resolver_mode = "forward"
                     except Exception:
+                        if stats is not None:
+                            try:
+                                stats.record_recursive_fallback("acl")
+                            except Exception:  # pragma: no cover - defensive
+                                pass
                         resolver_mode = "forward"
 
                 # Global inflight cap for recursive queries.
@@ -660,6 +682,11 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                                 getattr(DNSUDPHandler, "recursive_inflight", 0)
                             )
                             if current >= max_inflight:
+                                if stats is not None:
+                                    try:
+                                        stats.record_recursive_fallback("inflight")
+                                    except Exception:  # pragma: no cover - defensive
+                                        pass
                                 resolver_mode = "forward"
                             else:
                                 DNSUDPHandler.recursive_inflight = current + 1
@@ -680,6 +707,11 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                 if cache_obj is None or transports is None:
                     # Safety net: fall back to forward mode when recursive
                     # support is not fully initialized.
+                    if stats is not None:
+                        try:
+                            stats.record_recursive_fallback("not_ready")
+                        except Exception:  # pragma: no cover - defensive
+                            pass
                     resolver_mode = "forward"
                 else:
                     # Derive recursive time/depth budgets from handler knobs.
@@ -719,6 +751,13 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                         now_ms=None,
                     )
 
+                    if stats is not None:
+                        try:
+                            stats.record_recursive_query()
+                        except Exception:  # pragma: no cover - defensive
+                            pass
+                    used_recursive_engine = True
+
                     try:
                         reply, _trace = resolve_iterative(
                             qname,
@@ -749,6 +788,12 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                             except Exception:  # pragma: no cover - defensive
                                 pass
             except Exception:  # pragma: no cover - defensive fallback
+                if stats is not None:
+                    try:
+                        stats.record_recursive_fallback("error")
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+                used_recursive_engine = False
                 resolver_mode = "forward"
                 # If resolve_iterative import or invocation failed after we
                 # acquired a slot, best-effort release it here as well.
@@ -945,6 +990,22 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                 parsed = DNSRecord.parse(wire)
                 rcode_name = RCODE.get(parsed.header.rcode, str(parsed.header.rcode))
                 stats.record_response_rcode(rcode_name, qname)
+                # When DNSSEC is enabled and the upstream marks the response as
+                # authenticated (AD=1), track this so operators can see how
+                # often upstream validation is in effect.
+                try:
+                    mode = str(getattr(DNSUDPHandler, "dnssec_mode", "ignore")).lower()
+                    if mode in ("passthrough", "validate") and getattr(
+                        parsed.header, "ad", 0
+                    ):
+                        stats.record_dnssec_ad_upstream()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+                if used_recursive_engine:
+                    try:
+                        stats.record_recursive_outcome(rcode_name)
+                    except Exception:  # pragma: no cover - defensive
+                        pass
                 if upstream_id:
                     try:
                         stats.record_upstream_rcode(upstream_id, rcode_name)
