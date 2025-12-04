@@ -287,7 +287,9 @@ def _dnskey_to_ds_digest(dnskey_rr, digest_type: int) -> tuple[int, bytes] | Non
 
     # Key tag calculation from RFC 4034 Appendix B.
     try:
-        rdata_wire = bytes([flags >> 8 & 0xFF, flags & 0xFF, protocol, algorithm]) + key_bytes
+        rdata_wire = (
+            bytes([flags >> 8 & 0xFF, flags & 0xFF, protocol, algorithm]) + key_bytes
+        )
     except Exception:
         return None
 
