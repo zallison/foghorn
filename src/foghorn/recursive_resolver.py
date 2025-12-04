@@ -236,6 +236,298 @@ class ValidationResult:
 DEFAULT_TRUST_ANCHORS: tuple[TrustAnchor, ...] = ()
 
 
+def _decode_rrset(entry: RRsetEntry) -> "DNSRecord":
+    """Brief: Parse an RRsetEntry.rrset_wire into a DNSRecord.
+
+    Inputs:
+      - entry: RRsetEntry instance whose rrset_wire contains a DNS message.
+
+    Outputs:
+      - DNSRecord parsed from rrset_wire; callers are expected to filter RRsets
+        of interest (DNSKEY, DS, etc.) from its sections.
+    """
+
+    from dnslib import DNSRecord  # local import
+
+    return DNSRecord.parse(entry.rrset_wire)
+
+
+def _dnskey_to_ds_digest(dnskey_rr, digest_type: int) -> tuple[int, bytes] | None:
+    """Brief: Compute key tag and DS digest for a DNSKEY RR.
+
+    Inputs:
+      - dnskey_rr: DNSKEY RR object (dnslib RR with rtype=DNSKEY).
+      - digest_type: DS digest type (1=SHA1, 2=SHA256, others ignored for now).
+
+    Outputs:
+      - (key_tag, digest_bytes) when the digest_type is supported; otherwise
+        None.
+
+    Notes:
+      - This helper does not validate algorithms beyond basic digest support;
+        callers must ensure the DNSKEY algorithm is acceptable for their
+        security policy.
+    """
+
+    import hashlib
+    from dnslib import QTYPE
+
+    if getattr(dnskey_rr, "rtype", None) != QTYPE.DNSKEY:
+        return None
+
+    try:
+        owner_name = dnskey_rr.rname
+        rdata = dnskey_rr.rdata
+        flags = int(getattr(rdata, "flags", 0))
+        protocol = int(getattr(rdata, "protocol", 0))
+        algorithm = int(getattr(rdata, "algorithm", 0))
+        key_bytes = bytes(getattr(rdata, "key", b""))
+    except Exception:
+        return None
+
+    # Key tag calculation from RFC 4034 Appendix B.
+    try:
+        rdata_wire = bytes([flags >> 8 & 0xFF, flags & 0xFF, protocol, algorithm]) + key_bytes
+    except Exception:
+        return None
+
+    acc = 0
+    for i, byte in enumerate(rdata_wire):
+        if i & 1:
+            acc += byte
+        else:
+            acc += byte << 8
+    acc += (acc >> 16) & 0xFFFF
+    key_tag = acc & 0xFFFF
+
+    # Digest over canonical owner name + DNSKEY RDATA, per RFC 4034 §5.1.4.
+    try:
+        # owner_name.label is a tuple of raw label bytes; convert to wire format
+        # with length prefixes and a root terminator.
+        labels = list(getattr(owner_name, "label", []) or [])
+        owner_wire = b"".join(bytes([len(l)]) + bytes(l) for l in labels) + b"\x00"
+        data = owner_wire + rdata_wire
+    except Exception:
+        return None
+
+    if digest_type == 1:
+        digest = hashlib.sha1(data).digest()
+    elif digest_type == 2:
+        digest = hashlib.sha256(data).digest()
+    else:
+        return None
+
+    return key_tag, digest
+
+
+def _match_ds_to_dnskey(ds_rrs: list, dnskey_rrs: list) -> list:
+    """Brief: Return DNSKEY RRs that are consistent with at least one DS.
+
+    Inputs:
+      - ds_rrs: List of DS RRs from a parent zone.
+      - dnskey_rrs: List of DNSKEY RRs from the child zone.
+
+    Outputs:
+      - List of DNSKEY RRs whose key_tag/algorithm/digest match at least one DS
+        record when digests can be computed. DS entries with unsupported
+        digest_type are ignored.
+    """
+
+    from dnslib import QTYPE
+
+    matches: list = []
+    if not ds_rrs or not dnskey_rrs:
+        return matches
+
+    for ds in ds_rrs:
+        if getattr(ds, "rtype", None) != QTYPE.DS:
+            continue
+        try:
+            ds_rdata = ds.rdata
+            ds_key_tag = int(getattr(ds_rdata, "key_tag", 0))
+            ds_alg = int(getattr(ds_rdata, "algorithm", 0))
+            ds_digest_type = int(getattr(ds_rdata, "digest_type", 0))
+            ds_digest = bytes(getattr(ds_rdata, "digest", b""))
+        except Exception:
+            continue
+
+        for dnskey in dnskey_rrs:
+            try:
+                dnskey_rdata = dnskey.rdata
+                alg = int(getattr(dnskey_rdata, "algorithm", 0))
+            except Exception:
+                continue
+
+            if alg != ds_alg:
+                continue
+
+            computed = _dnskey_to_ds_digest(dnskey, ds_digest_type)
+            if computed is None:
+                continue
+            key_tag, digest = computed
+            if key_tag == ds_key_tag and digest == ds_digest:
+                matches.append(dnskey)
+
+    return matches
+
+
+def _get_dnskey_rrs_from_cache(cache: RecursiveCache, zone: str) -> list:
+    """Brief: Return DNSKEY RRs for a zone from the recursive RRset cache.
+
+    Inputs:
+      - cache: RecursiveCache instance.
+      - zone: Owner name whose DNSKEY RRset should be retrieved.
+
+    Outputs:
+      - List of DNSKEY RR objects (may be empty when the RRset is absent).
+    """
+
+    from dnslib import QTYPE
+
+    name = zone.rstrip(".")
+    if not name:
+        name = ""
+    key = RRsetKey(name=name, rrtype=QTYPE.DNSKEY)
+    entry = cache.lookup_rrset(key)
+    if entry is None:
+        return []
+    try:
+        rec = _decode_rrset(entry)
+    except Exception:
+        return []
+
+    rrs = list(getattr(rec, "rr", []) or [])
+    rrs.extend(getattr(rec, "auth", []) or [])
+    return [rr for rr in rrs if getattr(rr, "rtype", None) == QTYPE.DNSKEY]
+
+
+def _get_ds_rrs_from_cache(cache: RecursiveCache, zone: str) -> list:
+    """Brief: Return DS RRs for a parent zone from the recursive RRset cache.
+
+    Inputs:
+      - cache: RecursiveCache instance.
+      - zone: Owner name whose DS RRset should be retrieved.
+
+    Outputs:
+      - List of DS RR objects (may be empty when the RRset is absent).
+    """
+
+    from dnslib import QTYPE
+
+    name = zone.rstrip(".")
+    if not name:
+        name = ""
+    key = RRsetKey(name=name, rrtype=QTYPE.DS)
+    entry = cache.lookup_rrset(key)
+    if entry is None:
+        return []
+    try:
+        rec = _decode_rrset(entry)
+    except Exception:
+        return []
+
+    rrs = list(getattr(rec, "rr", []) or [])
+    rrs.extend(getattr(rec, "auth", []) or [])
+    return [rr for rr in rrs if getattr(rr, "rtype", None) == QTYPE.DS]
+
+
+def _get_rrset_and_rrsigs_from_cache(
+    cache: RecursiveCache, name: str, rrtype: int
+) -> tuple[list, list]:
+    """Brief: Return an RRset and its covering RRSIGs from the RRset cache.
+
+    Inputs:
+      - cache: RecursiveCache instance.
+      - name: Owner name of the RRset.
+      - rrtype: Numeric RR type of the RRset being requested.
+
+    Outputs:
+      - Tuple (rrs, rrsigs):
+        * rrs: List of RRs with rtype == rrtype for the given owner.
+        * rrsigs: List of RRSIG RRs whose owner matches and whose
+          type_covered field equals rrtype.
+
+    Notes:
+      - This helper relies on the existing RRsetEntry layout that stores a full
+        DNS message; RRSIGs are cached alongside their covered RRsets and are
+        filtered out here for validation use.
+    """
+
+    from dnslib import QTYPE
+
+    owner = name.rstrip(".")
+    if not owner:
+        owner = ""
+    key = RRsetKey(name=owner, rrtype=rrtype)
+    entry = cache.lookup_rrset(key)
+    if entry is None:
+        return [], []
+    try:
+        rec = _decode_rrset(entry)
+    except Exception:
+        return [], []
+
+    all_rrs = list(getattr(rec, "rr", []) or [])
+    all_rrs.extend(getattr(rec, "auth", []) or [])
+
+    rr_owner = owner
+    rrs = [
+        rr
+        for rr in all_rrs
+        if getattr(rr, "rtype", None) == rrtype
+        and str(getattr(rr, "rname", "")).rstrip(".") == rr_owner
+    ]
+
+    rrsigs: list = []
+    for rr in all_rrs:
+        if getattr(rr, "rtype", None) != QTYPE.RRSIG:
+            continue
+        try:
+            # dnslib.RRSIG stores the covered type in the 'covered' attribute.
+            covered = int(getattr(rr.rdata, "covered", 0))
+        except Exception:
+            continue
+        if covered != rrtype:
+            continue
+        if str(getattr(rr, "rname", "")).rstrip(".") != rr_owner:
+            continue
+        rrsigs.append(rr)
+
+    return rrs, rrsigs
+
+
+def _build_validation_chain(zone: str, cache: RecursiveCache) -> list[tuple[str, list]]:
+    """Brief: Build a simple DNSSEC validation chain from cached DNSKEY RRsets.
+
+    Inputs:
+      - zone: Answer zone name (presentation format).
+      - cache: RecursiveCache containing RRsetEntry values.
+
+    Outputs:
+      - List of (zone_name, dnskey_rrs) tuples ordered from closest ancestor to
+        furthest (e.g. child.example.com, example.com, com), including only
+        zones for which a DNSKEY RRset is present in the cache.
+
+    Notes:
+      - This helper currently ignores DS records and does not perform any
+        cryptographic checks; it is intended as a structural building block for
+        the full validation pipeline.
+    """
+
+    chain: list[tuple[str, list]] = []
+    name = zone.rstrip(".")
+    if not name:
+        return chain
+
+    labels = name.split(".")
+    for i in range(len(labels)):
+        candidate = ".".join(labels[i:])
+        dnskeys = _get_dnskey_rrs_from_cache(cache, candidate)
+        if dnskeys:
+            chain.append((candidate, dnskeys))
+    return chain
+
+
 class RecursiveCache(Protocol):
     """Protocol for the recursive resolver's internal cache.
 
@@ -743,7 +1035,7 @@ def resolve_iterative(
         def _dnssec_validate_final_response(
             parsed: "DNSRecord",
         ) -> ValidationResult:
-            """Minimal DNSSEC validation for dnssec_mode='validate'.
+            """Minimal structural DNSSEC validation for dnssec_mode='validate'.
 
             Inputs:
               - parsed: Final upstream DNSRecord chosen as the answer.
@@ -752,17 +1044,14 @@ def resolve_iterative(
               - ValidationResult describing the DNSSEC classification.
 
             Notes:
-              - This initial implementation only marks DNSKEY RRsets as
-                validated=True in the RecursiveCache when a TrustAnchor exists
-                for the same owner name. It does not yet perform DS/DNSKEY
-                digest checks or RRSIG verification and never reports 'bogus'.
-              - When no trust anchors are configured, the result is always
-                'indeterminate' so behavior matches 'passthrough'.
+              - This implementation performs a lightweight DS/DNSKEY chain
+                inspection using cached RRsets and configured trust anchors but
+                does not yet verify RRSIGs or set AD on the wire.
+              - Results are exposed via RecursiveTrace.security only; bogus
+                classifications are *not* enforced as SERVFAIL at this stage.
             """
 
-            # Avoid unused-argument warnings until parsed is inspected by the
-            # full validation pipeline.
-            _ = parsed
+            del parsed  # currently unused; reserved for future RRSIG checks
 
             if not DEFAULT_TRUST_ANCHORS:
                 return ValidationResult(
@@ -770,11 +1059,24 @@ def resolve_iterative(
                     reason="no_trust_anchors",
                 )
 
+            # Approximate the answer zone using the original qname and the
+            # cached DNSKEY RRsets we already have.
+            chain = _build_validation_chain(original_qname, cache)
+            if not chain:
+                return ValidationResult(
+                    status="indeterminate",
+                    reason="no_dnskey_rrsets_in_chain",
+                )
+
+            # Mark zones that have an associated trust anchor as validated in the
+            # cache and remember which zones are anchored for DS/DNSKEY walking.
             validated_any = False
+            zones_in_chain = {zone.rstrip(".") for (zone, _dnskeys) in chain}
+            anchor_zones: list[str] = []
 
             for anchor in DEFAULT_TRUST_ANCHORS:
                 zone = anchor.owner.rstrip(".")
-                if not zone:
+                if not zone or zone not in zones_in_chain:
                     continue
 
                 base_key = RRsetKey(name=zone, rrtype=QTYPE.DNSKEY)
@@ -795,17 +1097,88 @@ def resolve_iterative(
                             expires_at_ms=base_entry.expires_at_ms,
                         ),
                     )
+
+                anchor_zones.append(zone)
                 validated_any = True
 
-            if validated_any:
+            if not validated_any:
                 return ValidationResult(
-                    status="secure",
-                    reason="validated_trust_anchors",
+                    status="indeterminate",
+                    reason="no_trust_anchors_in_chain",
                 )
 
+            # Prepare maps for walking the chain from each anchor down towards
+            # the most-specific zone (closest to the original qname).
+            zone_to_index: dict[str, int] = {}
+            zone_to_dnskeys: dict[str, list] = {}
+            for idx, (zone_name, dnskeys) in enumerate(chain):
+                z = zone_name.rstrip(".")
+                zone_to_index[z] = idx
+                zone_to_dnskeys[z] = dnskeys
+
+            any_bogus = False
+            any_secure_path = False
+            any_insecure = False
+
+            for anchor_zone in anchor_zones:
+                anchor_idx = zone_to_index.get(anchor_zone)
+                if anchor_idx is None:
+                    continue
+
+                # Start from the anchor itself and walk "down" the chain towards
+                # the child-most zone (index 0), checking DS/DNSKEY links.
+                status_for_anchor = "secure"
+                i = anchor_idx - 1
+                while i >= 0:
+                    child_zone = chain[i][0].rstrip(".")
+                    child_dnskeys = zone_to_dnskeys.get(child_zone) or []
+                    ds_rrs = _get_ds_rrs_from_cache(cache, child_zone)
+                    if not ds_rrs:
+                        # Unsigned or insecure delegation at this cut; once an
+                        # insecure link is hit, the remainder of the subtree is
+                        # treated as insecure.
+                        status_for_anchor = "insecure"
+                        break
+
+                    matched = _match_ds_to_dnskey(ds_rrs, child_dnskeys)
+                    if not matched:
+                        status_for_anchor = "bogus"
+                        break
+
+                    i -= 1
+
+                if status_for_anchor == "bogus":
+                    any_bogus = True
+                elif status_for_anchor == "insecure":
+                    any_insecure = True
+                else:
+                    any_secure_path = True
+
+            if any_bogus:
+                return ValidationResult(
+                    status="bogus",
+                    reason="ds_mismatch_in_chain",
+                )
+
+            if any_secure_path:
+                return ValidationResult(
+                    status="secure",
+                    reason="validated_trust_anchors_and_ds_chain",
+                )
+
+            # At least one anchor was present in the chain, but all reachable
+            # paths encountered an insecure delegation (no DS RRset).
+            if any_insecure:
+                return ValidationResult(
+                    status="insecure",
+                    reason="insecure_delegation_in_chain",
+                )
+
+            # Fallback: anchors existed but did not align with any usable chain
+            # entries; treat as indeterminate for now.
             return ValidationResult(
                 status="indeterminate",
-                reason="no_matching_dnskeys_for_trust_anchors",
+                reason="anchors_not_applicable_to_chain",
             )
 
         # 1. Cache fast path for positive answers.
@@ -1201,19 +1574,9 @@ def resolve_iterative(
             if dnssec_mode == "validate":
                 validation = _dnssec_validate_final_response(parsed)
                 trace.security = validation.status
-
-                if validation.status == "bogus":
-                    # Do not cache bogus data; surface SERVFAIL instead.
-                    return _make_servfail(
-                        f"dnssec_bogus: {validation.reason or ''}".rstrip(),
-                        authority=authority,
-                    )
-
-                if validation.status == "secure":
-                    # For secure responses, AD will eventually be set here once
-                    # the validation pipeline is implemented. The stub keeps
-                    # behavior identical for now.
-                    pass
+                # Bogus/secure classifications are currently observational only;
+                # AD/SERVFAIL behavior will be wired in once the full validation
+                # pipeline (including RRSIG checks) is in place.
 
             # Cache final positive and negative answers for (original_qname, qtype)
             # so subsequent queries can be satisfied from the recursive cache.

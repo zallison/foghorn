@@ -1040,6 +1040,591 @@ def test_dnssec_validate_mode_marks_dnskey_validated_with_trust_anchor(
     assert validated_entry.expires_at_ms == base_entry.expires_at_ms
 
 
+def test_dnskey_to_ds_digest_and_match_helpers_round_trip() -> None:
+    """Brief: _dnskey_to_ds_digest and _match_ds_to_dnskey agree on a simple pair.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts that a DNSKEY and corresponding DS built from the same
+        material are matched by _match_ds_to_dnskey, and that unrelated DNSKEYs
+        are ignored.
+    """
+
+    # Build a synthetic DNSKEY RR using dnslib's RR/label/rdata fields.
+    from dnslib import DNSKEY, DS
+
+    owner = "example-dnssec.test."
+    dnskey_rdata = DNSKEY(
+        flags=256,
+        protocol=3,
+        algorithm=8,
+        key=b"dummy-public-key-bytes",
+    )
+    dnskey_rr = RR(owner, QTYPE.DNSKEY, rdata=dnskey_rdata, ttl=300)
+
+    # Compute a DS-like structure using the helper under test.
+    computed = rr._dnskey_to_ds_digest(dnskey_rr, digest_type=2)
+    assert computed is not None
+    key_tag, digest = computed
+
+    ds_rdata = DS(
+        key_tag=key_tag,
+        algorithm=dnskey_rdata.algorithm,
+        digest_type=2,
+        digest=digest,
+    )
+    ds_rr = RR(owner, QTYPE.DS, rdata=ds_rdata, ttl=300)
+
+    # A second DNSKEY with different key material should not match the DS.
+    other_dnskey = RR(
+        owner,
+        QTYPE.DNSKEY,
+        rdata=DNSKEY(
+            flags=256,
+            protocol=3,
+            algorithm=8,
+            key=b"other-key-bytes",
+        ),
+        ttl=300,
+    )
+
+    matches = rr._match_ds_to_dnskey([ds_rr], [dnskey_rr, other_dnskey])
+    assert dnskey_rr in matches
+    assert other_dnskey not in matches
+
+
+def test_build_validation_chain_uses_cached_dnskey_rrsets() -> None:
+    """Brief: _build_validation_chain walks labels and returns DNSKEY zones.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts that when DNSKEY RRsets are present in the recursive cache
+        for a child and parent zone, _build_validation_chain emits both zones in
+        order from most-specific to least-specific.
+    """
+
+    cache = _FakeCache()
+
+    from dnslib import DNSKEY
+
+    # Child zone DNSKEY RRset (auth section).
+    child_rrset = DNSRecord()
+    child_rrset.add_auth(
+        RR(
+            "child.example.test",
+            QTYPE.DNSKEY,
+            rdata=DNSKEY(
+                flags=256,
+                protocol=3,
+                algorithm=8,
+                key=b"child-key",
+            ),
+            ttl=300,
+        )
+    )
+    cache.store_rrset(
+        rr.RRsetKey(name="child.example.test", rrtype=QTYPE.DNSKEY),
+        rr.RRsetEntry(rrset_wire=child_rrset.pack(), expires_at_ms=1_000_000),
+    )
+
+    # Parent zone DNSKEY RRset (auth section).
+    parent_rrset = DNSRecord()
+    parent_rrset.add_auth(
+        RR(
+            "example.test",
+            QTYPE.DNSKEY,
+            rdata=DNSKEY(
+                flags=256,
+                protocol=3,
+                algorithm=8,
+                key=b"parent-key",
+            ),
+            ttl=300,
+        )
+    )
+    cache.store_rrset(
+        rr.RRsetKey(name="example.test", rrtype=QTYPE.DNSKEY),
+        rr.RRsetEntry(rrset_wire=parent_rrset.pack(), expires_at_ms=1_000_000),
+    )
+
+    chain = rr._build_validation_chain("child.example.test", cache)
+    zones = [z for (z, _dnskeys) in chain]
+    assert zones == ["child.example.test", "example.test"]
+
+
+def test_dnssec_ds_chain_marks_child_secure_with_matching_ds(monkeypatch) -> None:
+    """Brief: DS that matches child DNSKEY yields a 'secure' classification.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that when a trust anchor exists at a parent zone and a DS
+        RRset matches the child DNSKEY RRset, dnssec_mode='validate' reports the
+        query as 'secure' via RecursiveTrace.security.
+    """
+
+    cache = _FakeCache()
+
+    from dnslib import DNSKEY, DS
+
+    # Parent and child DNSKEY RRsets.
+    parent_rrset = DNSRecord()
+    parent_rrset.add_auth(
+        RR(
+            "example.test",
+            QTYPE.DNSKEY,
+            rdata=DNSKEY(
+                flags=256,
+                protocol=3,
+                algorithm=8,
+                key=b"parent-key",
+            ),
+            ttl=300,
+        ),
+    )
+    cache.store_rrset(
+        rr.RRsetKey(name="example.test", rrtype=QTYPE.DNSKEY),
+        rr.RRsetEntry(rrset_wire=parent_rrset.pack(), expires_at_ms=1_000_000),
+    )
+
+    child_rrset = DNSRecord()
+    child_dnskey_rdata = DNSKEY(
+        flags=256,
+        protocol=3,
+        algorithm=8,
+        key=b"child-key",
+    )
+    child_dnskey_rr = RR(
+        "child.example.test",
+        QTYPE.DNSKEY,
+        rdata=child_dnskey_rdata,
+        ttl=300,
+    )
+    child_rrset.add_auth(child_dnskey_rr)
+    cache.store_rrset(
+        rr.RRsetKey(name="child.example.test", rrtype=QTYPE.DNSKEY),
+        rr.RRsetEntry(rrset_wire=child_rrset.pack(), expires_at_ms=1_000_000),
+    )
+
+    # DS RRset for the child zone that matches child_dnskey_rr.
+    key_tag, digest = rr._dnskey_to_ds_digest(child_dnskey_rr, digest_type=2)  # type: ignore[arg-type]
+    ds_rdata = DS(
+        key_tag=key_tag,
+        algorithm=child_dnskey_rdata.algorithm,
+        digest_type=2,
+        digest=digest,
+    )
+    ds_rrset = DNSRecord()
+    ds_rrset.add_auth(
+        RR(
+            "child.example.test",
+            QTYPE.DS,
+            rdata=ds_rdata,
+            ttl=300,
+        ),
+    )
+    cache.store_rrset(
+        rr.RRsetKey(name="child.example.test", rrtype=QTYPE.DS),
+        rr.RRsetEntry(rrset_wire=ds_rrset.pack(), expires_at_ms=1_000_000),
+    )
+
+    # Configure a trust anchor at the parent zone.
+    anchor = rr.TrustAnchor(
+        owner="example.test",
+        key_tag=0,
+        algorithm=0,
+        digest_type=0,
+        digest=b"",
+    )
+    monkeypatch.setattr(rr, "DEFAULT_TRUST_ANCHORS", (anchor,))
+
+    cfg = rr.ResolverConfig(
+        dnssec_mode="validate",
+        edns_udp_payload=1232,
+        timeout_ms=2000,
+        per_try_timeout_ms=500,
+        max_depth=4,
+        now_ms=lambda: 3_000_000,
+    )
+
+    # Upstream authority provides a simple NOERROR answer; DNSSEC classification
+    # is derived solely from cache + trust anchors.
+    q = DNSRecord.question("www.child.example.test", "A")
+    r = q.reply()
+    r.header.rcode = RCODE.NOERROR
+    answer_wire = r.pack()
+
+    class _AnsweringTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return answer_wire, None
+
+    transport = _AnsweringTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.84", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "www.child.example.test",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+    assert trace.final_rcode == RCODE.NOERROR
+    assert trace.security == "secure"
+
+
+def test_dnssec_ds_chain_marks_child_insecure_without_ds(monkeypatch) -> None:
+    """Brief: missing DS below an anchored zone yields an 'insecure' chain.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that when a trust anchor exists at the parent but no DS is
+        present for the child zone, the classification is 'insecure'.
+    """
+
+    cache = _FakeCache()
+
+    from dnslib import DNSKEY
+
+    # Parent and child DNSKEY RRsets without any DS RRset.
+    parent_rrset = DNSRecord()
+    parent_rrset.add_auth(
+        RR(
+            "example.test",
+            QTYPE.DNSKEY,
+            rdata=DNSKEY(
+                flags=256,
+                protocol=3,
+                algorithm=8,
+                key=b"parent-key",
+            ),
+            ttl=300,
+        ),
+    )
+    cache.store_rrset(
+        rr.RRsetKey(name="example.test", rrtype=QTYPE.DNSKEY),
+        rr.RRsetEntry(rrset_wire=parent_rrset.pack(), expires_at_ms=1_000_000),
+    )
+
+    child_rrset = DNSRecord()
+    child_rrset.add_auth(
+        RR(
+            "child.example.test",
+            QTYPE.DNSKEY,
+            rdata=DNSKEY(
+                flags=256,
+                protocol=3,
+                algorithm=8,
+                key=b"child-key",
+            ),
+            ttl=300,
+        ),
+    )
+    cache.store_rrset(
+        rr.RRsetKey(name="child.example.test", rrtype=QTYPE.DNSKEY),
+        rr.RRsetEntry(rrset_wire=child_rrset.pack(), expires_at_ms=1_000_000),
+    )
+
+    anchor = rr.TrustAnchor(
+        owner="example.test",
+        key_tag=0,
+        algorithm=0,
+        digest_type=0,
+        digest=b"",
+    )
+    monkeypatch.setattr(rr, "DEFAULT_TRUST_ANCHORS", (anchor,))
+
+    cfg = rr.ResolverConfig(
+        dnssec_mode="validate",
+        edns_udp_payload=1232,
+        timeout_ms=2000,
+        per_try_timeout_ms=500,
+        max_depth=4,
+        now_ms=lambda: 4_000_000,
+    )
+
+    q = DNSRecord.question("www.child.example.test", "A")
+    r = q.reply()
+    r.header.rcode = RCODE.NOERROR
+    answer_wire = r.pack()
+
+    class _AnsweringTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return answer_wire, None
+
+    transport = _AnsweringTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.85", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "www.child.example.test",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+    assert trace.final_rcode == RCODE.NOERROR
+    assert trace.security == "insecure"
+
+
+def test_dnssec_ds_chain_marks_child_bogus_on_mismatching_ds(monkeypatch) -> None:
+    """Brief: DS that does not match any child DNSKEY yields 'bogus'.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that when a DS RRset exists but does not match the child
+        DNSKEY RRset, the classification is 'bogus' while the wire answer
+        remains unchanged.
+    """
+
+    cache = _FakeCache()
+
+    from dnslib import DNSKEY, DS
+
+    # Parent DNSKEY RRset.
+    parent_rrset = DNSRecord()
+    parent_rrset.add_auth(
+        RR(
+            "example.test",
+            QTYPE.DNSKEY,
+            rdata=DNSKEY(
+                flags=256,
+                protocol=3,
+                algorithm=8,
+                key=b"parent-key",
+            ),
+            ttl=300,
+        ),
+    )
+    cache.store_rrset(
+        rr.RRsetKey(name="example.test", rrtype=QTYPE.DNSKEY),
+        rr.RRsetEntry(rrset_wire=parent_rrset.pack(), expires_at_ms=1_000_000),
+    )
+
+    # Child DNSKEY RRset with a key that does NOT match the DS we will create.
+    child_rrset = DNSRecord()
+    good_child_dnskey = DNSKEY(
+        flags=256,
+        protocol=3,
+        algorithm=8,
+        key=b"good-child-key",
+    )
+    child_dnskey_rr = RR(
+        "child.example.test",
+        QTYPE.DNSKEY,
+        rdata=good_child_dnskey,
+        ttl=300,
+    )
+    child_rrset.add_auth(child_dnskey_rr)
+    cache.store_rrset(
+        rr.RRsetKey(name="child.example.test", rrtype=QTYPE.DNSKEY),
+        rr.RRsetEntry(rrset_wire=child_rrset.pack(), expires_at_ms=1_000_000),
+    )
+
+    # Build a DS RR that refers to a different DNSKEY.
+    other_dnskey_rr = RR(
+        "child.example.test",
+        QTYPE.DNSKEY,
+        rdata=DNSKEY(
+            flags=256,
+            protocol=3,
+            algorithm=8,
+            key=b"other-child-key",
+        ),
+        ttl=300,
+    )
+    key_tag, digest = rr._dnskey_to_ds_digest(other_dnskey_rr, digest_type=2)  # type: ignore[arg-type]
+    ds_rdata = DS(
+        key_tag=key_tag,
+        algorithm=other_dnskey_rr.rdata.algorithm,
+        digest_type=2,
+        digest=digest,
+    )
+    ds_rrset = DNSRecord()
+    ds_rrset.add_auth(
+        RR(
+            "child.example.test",
+            QTYPE.DS,
+            rdata=ds_rdata,
+            ttl=300,
+        ),
+    )
+    cache.store_rrset(
+        rr.RRsetKey(name="child.example.test", rrtype=QTYPE.DS),
+        rr.RRsetEntry(rrset_wire=ds_rrset.pack(), expires_at_ms=1_000_000),
+    )
+
+    anchor = rr.TrustAnchor(
+        owner="example.test",
+        key_tag=0,
+        algorithm=0,
+        digest_type=0,
+        digest=b"",
+    )
+    monkeypatch.setattr(rr, "DEFAULT_TRUST_ANCHORS", (anchor,))
+
+    cfg = rr.ResolverConfig(
+        dnssec_mode="validate",
+        edns_udp_payload=1232,
+        timeout_ms=2000,
+        per_try_timeout_ms=500,
+        max_depth=4,
+        now_ms=lambda: 5_000_000,
+    )
+
+    q = DNSRecord.question("www.child.example.test", "A")
+    r = q.reply()
+    r.header.rcode = RCODE.NOERROR
+    answer_wire = r.pack()
+
+    class _AnsweringTransport(_FakeTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            return answer_wire, None
+
+    transport = _AnsweringTransport()
+
+    root = rr.AuthorityEndpoint(name=".", host="192.0.2.86", port=53, transport="udp")
+    monkeypatch.setattr(rr, "get_root_servers", lambda: [root])
+
+    wire, trace = rr.resolve_iterative(
+        "www.child.example.test",
+        QTYPE.A,
+        cfg=cfg,
+        cache=cache,
+        transports=transport,
+    )
+
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+    assert trace.final_rcode == RCODE.NOERROR
+    assert trace.security == "bogus"
+
+
+def test_get_rrset_and_rrsigs_from_cache_for_dnskey_rrset() -> None:
+    """Brief: _get_rrset_and_rrsigs_from_cache returns DNSKEY + covering RRSIG.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts that when a DNSKEY RRset and an RRSIG(DNSKEY) share the
+        same owner in an RRsetEntry, the helper returns both the DNSKEY RR and
+        its covering RRSIG RR.
+    """
+
+    cache = _FakeCache()
+
+    from dnslib import DNSKEY, RRSIG
+
+    owner = "example-signed.test"
+
+    dnskey_rdata = DNSKEY(
+        flags=256,
+        protocol=3,
+        algorithm=8,
+        key=b"dummy-public-key",
+    )
+    dnskey_rr = RR(owner, QTYPE.DNSKEY, rdata=dnskey_rdata, ttl=300)
+
+    # Construct an RRSIG that covers the DNSKEY RRset using the dnslib.RRSIG
+    # positional constructor: (covered, algorithm, labels, orig_ttl,
+    # sig_exp, sig_inc, key_tag, name, sig).
+    rrsig_rdata = RRSIG(
+        QTYPE.DNSKEY,
+        dnskey_rdata.algorithm,
+        2,
+        300,
+        0,
+        0,
+        12345,
+        "example-signed.test.",
+        b"sig-bytes",
+    )
+    rrsig_rr = RR(owner, QTYPE.RRSIG, rdata=rrsig_rdata, ttl=300)
+
+    msg = DNSRecord()
+    msg.add_auth(dnskey_rr)
+    msg.add_auth(rrsig_rr)
+
+    cache.store_rrset(
+        rr.RRsetKey(name=owner, rrtype=QTYPE.DNSKEY),
+        rr.RRsetEntry(rrset_wire=msg.pack(), expires_at_ms=1_000_000),
+    )
+
+    rrs, rrsigs = rr._get_rrset_and_rrsigs_from_cache(cache, owner, QTYPE.DNSKEY)
+    assert dnskey_rr in rrs
+    assert rrsig_rr in rrsigs
+
+
+def test_get_rrset_and_rrsigs_from_cache_for_answer_rrset() -> None:
+    """Brief: helper returns A RRset and its covering RRSIG from cache.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts that when an answer RRset and RRSIG share owner and
+        type_covered, the helper surfaces both to callers.
+    """
+
+    cache = _FakeCache()
+
+    from dnslib import RRSIG
+
+    owner = "signed-answer.test"
+
+    answer_rr = RR(owner, QTYPE.A, rdata=A("203.0.113.100"), ttl=600)
+
+    # Construct an RRSIG that covers the A RRset using the dnslib.RRSIG
+    # positional constructor: (covered, algorithm, labels, orig_ttl,
+    # sig_exp, sig_inc, key_tag, name, sig).
+    rrsig_rdata = RRSIG(
+        QTYPE.A,
+        8,
+        2,
+        600,
+        0,
+        0,
+        54321,
+        "signed-answer.test.",
+        b"sig",
+    )
+    rrsig_rr = RR(owner, QTYPE.RRSIG, rdata=rrsig_rdata, ttl=600)
+
+    msg = DNSRecord()
+    msg.add_answer(answer_rr)
+    msg.add_auth(rrsig_rr)
+
+    cache.store_rrset(
+        rr.RRsetKey(name=owner, rrtype=QTYPE.A),
+        rr.RRsetEntry(rrset_wire=msg.pack(), expires_at_ms=1_000_000),
+    )
+
+    rrs, rrsigs = rr._get_rrset_and_rrsigs_from_cache(cache, owner, QTYPE.A)
+    assert answer_rr in rrs
+    assert rrsig_rr in rrsigs
+
+
 def test_lookup_cached_authorities_single_label_qname(monkeypatch) -> None:
     """Brief: single-label qname yields no cached authorities.
 
