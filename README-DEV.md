@@ -55,6 +55,59 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
 - `dnssec.mode: ignore|passthrough|validate`, `dnssec.validation: upstream_ad|local` (local is experimental), `dnssec.udp_payload_size` (default 1232).
 - `min_cache_ttl` (seconds) clamps cache expiry floor; negative values are clamped to 0. When omitted, it defaults to 0 (no additional floor beyond upstream TTLs).
 
+### Recursive resolver configuration
+
+The recursive resolver core is controlled via a top-level `resolver` block in
+`config.yaml`. When omitted, Foghorn behaves purely as a forwarder.
+
+```yaml path=null start=null
+resolver:
+  mode: forward           # forward | recursive
+  timeout_ms: 2000        # per-query recursion budget (ms)
+  per_try_timeout_ms: 500 # per-authority timeout (ms); defaults to timeout_ms/2
+  max_depth: 8            # max number of referrals + CNAME hops
+  max_inflight: 128       # soft cap on concurrent recursive queries (0 = unlimited)
+  allow_recursive_from:
+    - 192.0.2.0/24        # optional ACL; when set, only these clients use recursion
+```
+
+- `mode`:
+  - `forward` (default): classic forwarding-only behavior.
+  - `recursive`: enable the iterative resolver core. Queries from allowed
+    clients use recursion; others still fall back to forwarding.
+- `timeout_ms`: overall time budget per recursive query (enforced inside
+  `resolve_iterative`).
+- `per_try_timeout_ms`: per-authority timeout within the recursive loop; when
+  unset, defaults to half of `timeout_ms`.
+- `max_depth`: guards against pathological CNAME chains and referral loops.
+- `max_inflight`: when greater than zero, caps concurrent recursive queries.
+  Additional queries fall back to forwarding and are counted as
+  `recursive_fallback_inflight`.
+- `allow_recursive_from`: optional list (or single string) of CIDR/IPs. When
+  present, only clients in these networks are allowed to use recursion. Others
+  are served via forwarding and counted as `recursive_fallback_acl`.
+
+### Recursion and DNSSEC statistics
+
+When statistics are enabled, recursive resolver activity and DNSSEC usage are
+surfaced via `StatsCollector` totals and the `/stats` / HTML dashboard:
+
+- `recursive_queries`: queries that used the recursive resolver core.
+- `recursive_fallback_acl`: recursion attempts that fell back because the
+  client IP was not allowed by `allow_recursive_from`.
+- `recursive_fallback_inflight`: recursion attempts that fell back because
+  `max_inflight` was reached.
+- `recursive_fallback_not_ready`: queries that would have used recursion but
+  fell back because recursive cache/transports were not initialized.
+- `recursive_fallback_error`: recursion attempts that failed internally and
+  were retried via forwarding.
+- `recursive_rcode_NOERROR` / `recursive_rcode_NXDOMAIN` /
+  `recursive_rcode_SERVFAIL`: outcome counters for recursive queries.
+- `dnssec_queries`: client queries processed while `dnssec.mode` was
+  `passthrough` or `validate`.
+- `dnssec_ad_upstream`: upstream responses that carried AD=1 while DNSSEC was
+  enabled (useful for seeing how often upstream validation is in effect).
+
 ## Plugin lifecycle and priorities
 
 - Plugins subclass `BasePlugin` and are discovered via `plugins/registry.py` using aliases (e.g., `acl`, `router`, `new_domain`, `filter`).
@@ -133,6 +186,11 @@ client‑scoped behavior is desired.
   - DoT: `kdig +tls @127.0.0.1 -p 8853 example.com A`
   - DoH: `curl -s -H 'accept: application/dns-message' --data-binary @query.bin http://127.0.0.1:8053/dns-query`
   - DNSSEC passthrough: `kdig +dnssec @127.0.0.1 -p 5353 example.com A`
+- Recursive resolver stress testing (optional):
+  - For ad-hoc stress testing, you can write temporary pytest cases or scripts
+    that generate long delegation trees and mixed CNAME/referral chains, then
+    verify that `timeout_ms`, `max_depth`, and `max_inflight` bounds are
+    respected and that recursion-specific stats counters behave as expected.
 
 ## Development
 

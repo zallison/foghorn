@@ -23,6 +23,7 @@ from foghorn.udp_server import DNSUDPHandler
 from foghorn import recursive_resolver as rr
 from foghorn.recursive_cache import InMemoryRecursiveCache
 from foghorn.stats import StatsCollector
+from foghorn.plugins.base import BasePlugin, PluginDecision
 
 
 class _FakeRecursiveTransport:
@@ -305,3 +306,151 @@ def test_recursive_stats_counters_for_recursive_query(monkeypatch) -> None:
     # reply from the fake transport.
     assert snap.totals["dnssec_queries"] == 1
     assert snap.totals["dnssec_ad_upstream"] == 1
+
+
+class _DenyRecursivePlugin(BasePlugin):
+    """Brief: Simple pre-resolve plugin that denies a specific qname.
+
+    Inputs:
+      - Standard plugin hook parameters provided by DNSUDPHandler.
+
+    Outputs:
+      - PluginDecision(action="deny") for deny-recursive.test; None otherwise.
+    """
+
+    def pre_resolve(self, qname: str, qtype: int, raw_req: bytes, ctx) -> PluginDecision | None:  # type: ignore[override]
+        if str(qname).rstrip(".") == "deny-recursive.test":
+            return PluginDecision(action="deny")
+        return None
+
+
+def test_recursive_mode_pre_plugin_deny_short_circuits_iterative(monkeypatch) -> None:
+    """Brief: recursive_mode=recursive still honors pre-plugin deny decisions.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures a pre-resolve PluginDecision('deny') short-circuits recursion so
+        resolve_iterative is never called and the client sees NXDOMAIN.
+    """
+
+    monkeypatch.setattr(DNSUDPHandler, "recursive_mode", "recursive", raising=False)
+    monkeypatch.setattr(
+        DNSUDPHandler, "plugins", [_DenyRecursivePlugin()], raising=False
+    )
+
+    # Provide recursive plumbing so that any accidental recursive call would hit
+    # the guard below.
+    cache = InMemoryRecursiveCache()
+    transports = _FakeRecursiveTransport()
+    monkeypatch.setattr(DNSUDPHandler, "recursive_cache", cache, raising=False)
+    monkeypatch.setattr(
+        DNSUDPHandler, "recursive_transports", transports, raising=False
+    )
+    monkeypatch.setattr(DNSUDPHandler, "upstream_addrs", [], raising=False)
+
+    def _boom(*args, **kwargs):  # type: ignore[override]
+        raise AssertionError(
+            "resolve_iterative should not be called when pre-plugin denies"
+        )
+
+    monkeypatch.setattr(rr, "resolve_iterative", _boom, raising=False)
+
+    q = DNSRecord.question("deny-recursive.test", "A")
+    wire = resolve_query_bytes(q.pack(), "127.0.0.1")
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NXDOMAIN
+
+
+def test_recursive_tries_additional_roots_when_one_fails(monkeypatch) -> None:
+    """Brief: iterative resolver falls back across multiple root hints.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures that when the first root authority fails at the transport layer,
+        resolve_iterative uses the second root hint and still reaches the child
+        authority to produce a final NOERROR answer.
+    """
+
+    class _MultiRootTransport(_FakeRecursiveTransport):
+        def query(self, authority, wire_query, *, timeout_ms):  # type: ignore[override]
+            self.calls.append((authority, wire_query, timeout_ms))
+            msg = DNSRecord.parse(wire_query)
+            q = msg.questions[0]
+            qname = str(q.qname).rstrip(".")
+
+            # First root: simulate a transport failure.
+            if authority.host == "192.0.2.10":
+                return None, "network_error"
+
+            # Second root: behave like the normal root referral.
+            if authority.host == "192.0.2.11":
+                root_reply = msg.reply()
+                root_reply.header.rcode = RCODE.NOERROR
+                root_reply.add_auth(
+                    RR(
+                        "example.test",
+                        QTYPE.NS,
+                        rdata=NS("ns.example.test."),
+                        ttl=300,
+                    )
+                )
+                root_reply.add_ar(
+                    RR(
+                        "ns.example.test",
+                        QTYPE.A,
+                        rdata=A("198.51.100.1"),
+                        ttl=300,
+                    )
+                )
+                return root_reply.pack(), None
+
+            # Child authority reached via glue IP: return final NOERROR answer.
+            if authority.host == "198.51.100.1" and qname == "www.example.test":
+                child_reply = msg.reply()
+                child_reply.header.rcode = RCODE.NOERROR
+                child_reply.add_answer(
+                    RR(
+                        "www.example.test",
+                        QTYPE.A,
+                        rdata=A("203.0.113.5"),
+                        ttl=300,
+                    )
+                )
+                return child_reply.pack(), None
+
+            return None, "network_error"
+
+    monkeypatch.setattr(DNSUDPHandler, "recursive_mode", "recursive", raising=False)
+    monkeypatch.setattr(DNSUDPHandler, "plugins", [], raising=False)
+
+    cache = InMemoryRecursiveCache()
+    transports = _MultiRootTransport()
+    monkeypatch.setattr(DNSUDPHandler, "recursive_cache", cache, raising=False)
+    monkeypatch.setattr(
+        DNSUDPHandler, "recursive_transports", transports, raising=False
+    )
+    monkeypatch.setattr(DNSUDPHandler, "upstream_addrs", [], raising=False)
+
+    roots = [
+        rr.AuthorityEndpoint(name=".", host="192.0.2.10", port=53, transport="udp"),
+        rr.AuthorityEndpoint(name=".", host="192.0.2.11", port=53, transport="udp"),
+    ]
+    monkeypatch.setattr(rr, "get_root_servers", lambda: roots)
+
+    q = DNSRecord.question("www.example.test", "A")
+    wire = resolve_query_bytes(q.pack(), "127.0.0.1")
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.NOERROR
+    answers = [rr_ for rr_ in (resp.rr or []) if rr_.rtype == QTYPE.A]
+    assert answers and str(answers[0].rdata) == "203.0.113.5"
+
+    # We expect to have contacted both roots (first failing, second succeeding)
+    # and the child authority IP.
+    hosts = [call[0].host for call in transports.calls]
+    assert "192.0.2.10" in hosts
+    assert "192.0.2.11" in hosts
+    assert "198.51.100.1" in hosts

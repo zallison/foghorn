@@ -640,6 +640,16 @@ timeout_ms: 2000
 # Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
 min_cache_ttl: 60
 
+# Optional recursive resolver configuration
+# resolver:
+#   mode: forward           # forward | recursive
+#   timeout_ms: 2000        # per-query recursion budget (ms)
+#   per_try_timeout_ms: 500 # per-authority timeout (ms); defaults to timeout_ms/2
+#   max_depth: 8            # max number of referrals + CNAME hops
+#   max_inflight: 128       # soft cap on concurrent recursive queries (0 = unlimited)
+#   allow_recursive_from:
+#     - 192.0.2.0/24        # optional ACL; when set, only these clients use recursion
+#
 # Optional DNSSEC configuration
 # dnssec:
 #   mode: passthrough            # ignore | passthrough | validate
