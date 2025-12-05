@@ -1,11 +1,10 @@
 import functools
 import logging
-import socketserver
 from typing import Dict, List, Optional, Tuple
 
 from dnslib import EDNS0, QTYPE, RCODE, RR, DNSRecord
 
-from .plugins.base import BasePlugin, PluginContext, PluginDecision
+from .plugins.base import PluginContext, PluginDecision
 from .transports.dot import DoTError, get_dot_pool
 from .transports.tcp import TCPError, get_tcp_pool, tcp_query
 from .udp_server import DNSUDPHandler, _edns_flags_for_mode
@@ -871,92 +870,3 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                 stats.record_latency(t1 - t0)
             except Exception:  # pragma: no cover
                 pass
-
-
-class DNSServer:
-    """
-    A basic DNS server.
-
-    Example use:
-        >>> from foghorn.server import DNSServer
-        >>> import threading
-        >>> import time
-        >>> # Start server in a background thread
-        >>> server = DNSServer("127.0.0.1", 5355, ("8.8.8.8", 53), [], timeout=1.0)
-        >>> server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-        >>> server_thread.start()
-        >>> # The server is now running in the background
-        >>> time.sleep(0.1)
-        >>> server.server.shutdown()
-    """
-
-    def __init__(
-        self,
-        host: str,
-        port: int,
-        upstreams: List[Dict],
-        plugins: List[BasePlugin],
-        timeout: float = 2.0,
-        timeout_ms: int = 2000,
-        min_cache_ttl: int = 60,
-        stats_collector=None,
-        *,
-        dnssec_mode: str = "ignore",
-        edns_udp_payload: int = 1232,
-    ) -> None:
-        """
-        Initializes the DNSServer.
-
-        Inputs:
-            host: The host to listen on.
-            port: The port to listen on.
-            upstreams: A list of upstream DNS server configurations.
-            plugins: A list of initialized plugins.
-            timeout: The timeout for upstream queries (seconds, legacy).
-            timeout_ms: The timeout for upstream queries (milliseconds).
-            min_cache_ttl: Minimum cache TTL in seconds applied to all cached responses.
-            stats_collector: Optional StatsCollector for recording metrics.
-
-        Outputs:
-            None
-
-        Uses socketserver.ThreadingUDPServer for concurrent request handling.
-
-        Example:
-            >>> from foghorn.server import DNSServer
-            >>> upstreams = [{'host': '8.8.8.8', 'port': 53}]
-            >>> server = DNSServer("127.0.0.1", 5353, upstreams, [], 2.0, 2000, 60)
-            >>> server.server.server_address
-            ('127.0.0.1', 5353)
-        """
-        DNSUDPHandler.upstream_addrs = upstreams  # pragma: no cover
-        DNSUDPHandler.plugins = plugins  # pragma: no cover
-        DNSUDPHandler.timeout = timeout  # pragma: no cover
-        DNSUDPHandler.timeout_ms = timeout_ms  # pragma: no cover
-        DNSUDPHandler.min_cache_ttl = max(0, int(min_cache_ttl))  # pragma: no cover
-        DNSUDPHandler.stats_collector = stats_collector  # pragma: no cover
-        DNSUDPHandler.dnssec_mode = str(dnssec_mode)
-        try:
-            DNSUDPHandler.edns_udp_payload = max(512, int(edns_udp_payload))
-        except Exception:
-            DNSUDPHandler.edns_udp_payload = 1232
-        self.server = socketserver.ThreadingUDPServer(
-            (host, port), DNSUDPHandler
-        )  # pragma: no cover
-
-        # Ensure request handler threads do not block shutdown
-        self.server.daemon_threads = True  # pragma: no cover
-        logger.debug("DNS UDP server bound to %s:%d", host, port)  # pragma: no cover
-
-    def serve_forever(self):
-        """
-        Starts the server and listens for requests.
-
-        Example use:
-            This method is typically run in a separate thread for testing.
-            See the DNSServer class docstring for an example.
-        """
-        try:  # pragma: no cover
-            self.server.serve_forever()  # pragma: no cover
-        except KeyboardInterrupt:  # pragma: no cover
-            pass  # pragma: no cover
