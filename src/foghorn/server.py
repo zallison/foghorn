@@ -716,81 +716,11 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
-        # Decide between recursive resolver mode and classic forwarding.
-        resolver_mode = str(getattr(DNSUDPHandler, "recursive_mode", "forward")).lower()
+        # Classic forwarding only; recursive resolver mode has been removed on
+        # this branch.
         reply: Optional[bytes] = None
         used_upstream: Optional[Dict] = None
         reason: Optional[str] = None
-
-        if resolver_mode == "recursive":
-            # Build a ResolverConfig snapshot for this query.
-            try:
-                from .recursive_resolver import ResolverConfig, resolve_iterative
-
-                # Shared recursive cache and transports are attached to the
-                # handler class by foghorn.main during startup.
-                cache_obj = getattr(DNSUDPHandler, "recursive_cache", None)
-                transports = getattr(DNSUDPHandler, "recursive_transports", None)
-
-                if cache_obj is None or transports is None:
-                    # Safety net: fall back to forward mode when recursive
-                    # support is not fully initialized.
-                    resolver_mode = "forward"
-                else:
-                    # Derive recursive time/depth budgets from handler knobs.
-                    try:
-                        r_timeout = int(
-                            getattr(
-                                DNSUDPHandler,
-                                "recursive_timeout_ms",
-                                DNSUDPHandler.timeout_ms,
-                            )
-                        )
-                    except Exception:
-                        r_timeout = DNSUDPHandler.timeout_ms
-                    try:
-                        r_per_try = int(
-                            getattr(
-                                DNSUDPHandler,
-                                "recursive_per_try_timeout_ms",
-                                max(1, r_timeout // 2),
-                            )
-                        )
-                    except Exception:
-                        r_per_try = max(1, r_timeout // 2)
-                    try:
-                        r_max_depth = int(
-                            getattr(DNSUDPHandler, "recursive_max_depth", 8)
-                        )
-                    except Exception:
-                        r_max_depth = 8
-
-                    r_cfg = ResolverConfig(
-                        dnssec_mode=str(DNSUDPHandler.dnssec_mode),
-                        edns_udp_payload=int(DNSUDPHandler.edns_udp_payload),
-                        timeout_ms=int(r_timeout),
-                        per_try_timeout_ms=int(r_per_try),
-                        max_depth=int(r_max_depth),
-                        now_ms=None,
-                    )
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass
-            if stats is not None and t0 is not None:
-                try:
-                    t1 = _time.perf_counter()
-                    stats.record_latency(t1 - t0)
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass
-            return _ResolveCoreResult(
-                wire=wire,
-                dnssec_status=None,
-                upstream_id=None,
-                rcode_name="SERVFAIL",
-            )
 
         # EDNS/DNSSEC adjustments (mirror DNSUDPHandler behavior).
         # Reuse DNSUDPHandler._ensure_edns so tests that monkeypatch that helper
@@ -816,6 +746,7 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
         # resolving via _resolve_core.
         upstream_id: Optional[str] = None
         timeout_ms = getattr(DNSUDPHandler, "timeout_ms", 2000)
+        upstreams = list(getattr(DNSUDPHandler, "upstream_addrs", []) or [])
         forward = getattr(DNSUDPHandler, "_forward_with_failover_helper", None)
         if callable(forward):
             handler = type("_H", (), {})()
@@ -916,64 +847,13 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
         # delegations/referrals using TTLs derived from SOA/NS records where
         # possible, following RFC 2308 guidance.
 
-        # DNSSEC classification for non-UDP transports (TCP/DoT/DoH) reusing the
-        # same semantics as the UDP handler. We classify responses as
-        # secure/insecure/indeterminate/bogus and, for local validation, may
-        # convert bogus answers into SERVFAIL.
+        # DNSSEC classification for non-UDP transports (TCP/DoT/DoH).
+        #
+        # On the testing branch we keep this logic disabled to avoid changing
+        # application behaviour while recursive/DNSSEC integration work is in
+        # progress. Responses are forwarded as-is; any DNSSEC status will be
+        # derived by upstream resolvers only.
         dnssec_status = None
-        try:
-            mode_val = str(getattr(DNSUDPHandler, "dnssec_mode", "ignore")).lower()
-            if mode_val == "validate":
-                validation = str(
-                    getattr(DNSUDPHandler, "dnssec_validation", "upstream_ad")
-                ).lower()
-                if validation == "local":
-                    try:
-                        from .dnssec_validate import classify_response_local
-
-                        dnssec_status = classify_response_local(
-                            qname,
-                            qtype,
-                            out,
-                            udp_payload_size=getattr(
-                                DNSUDPHandler, "edns_udp_payload", 1232
-                            ),
-                        )
-                    except (
-                        Exception
-                    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                        dnssec_status = "indeterminate"
-                else:
-                    try:
-                        tmp = DNSRecord.parse(out)
-                        validated = getattr(tmp.header, "ad", 0) == 1
-                    except (
-                        Exception
-                    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                        validated = False
-                    dnssec_status = "secure" if validated else "insecure"
-
-                # Enforce policy: SERVFAIL on locally validated bogus.
-                if (
-                    dnssec_status == "bogus"
-                    and mode_val == "validate"
-                    and validation == "local"
-                ):
-                    r = req.reply()
-                    r.header.rcode = RCODE.SERVFAIL
-                    out = r.pack()
-
-                if stats is not None and dnssec_status is not None:
-                    try:
-                        stats.record_dnssec_status(dnssec_status)
-                    except (
-                        Exception
-                    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                        pass
-        except (
-            Exception
-        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            dnssec_status = None
 
         try:
             r = DNSRecord.parse(out)
