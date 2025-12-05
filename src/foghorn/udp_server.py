@@ -1,5 +1,7 @@
 import logging
+import random
 import socketserver
+import time
 from functools import lru_cache
 from typing import Callable, Dict, List, Optional
 
@@ -92,6 +94,17 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     dnssec_validation = "upstream_ad"  # upstream_ad | local
     edns_udp_payload = 1232
 
+    # Upstream selection strategy and concurrency controls.
+    upstream_strategy: str = "failover"  # failover | round_robin | random
+    upstream_max_concurrent: int = 1
+    _upstream_rr_index: int = 0  # round-robin index shared across handler instances
+
+    # Lazy health state for upstreams, keyed by a stable upstream identifier.
+    # Each entry contains:
+    #   - fail_count: consecutive failure count (for backoff growth).
+    #   - down_until: epoch timestamp until which this upstream is considered down.
+    upstream_health: Dict[str, Dict[str, float]] = {}
+
     # Recursive resolver configuration (used when resolver.mode == 'recursive').
     # These are class-level knobs populated by foghorn.main during startup.
     recursive_mode = "forward"  # 'forward' (default) or 'recursive'
@@ -100,6 +113,91 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     recursive_max_depth = 8
     recursive_cache = None
     recursive_transports = None
+
+    @staticmethod
+    def _upstream_id(up: Dict) -> str:
+        """Brief: Compute a stable identifier string for an upstream config.
+
+        Inputs:
+          - up: Upstream mapping (may contain 'url' for DoH or 'host'/'port').
+
+        Outputs:
+          - str: Identifier suitable for indexing upstream_health.
+        """
+
+        if not isinstance(up, dict):
+            return ""
+        url = up.get("url")
+        if url:
+            return str(url)
+        host = up.get("host")
+        port = up.get("port")
+        if host is None and port is None:
+            return ""
+        try:
+            return f"{host}:{int(port) if port is not None else 0}"
+        except Exception:
+            return str(host) if host is not None else ""
+
+    @classmethod
+    def _mark_upstreams_down(cls, upstreams: List[Dict], reason: Optional[str]) -> None:
+        """Brief: Mark a set of upstreams as temporarily down with backoff.
+
+        Inputs:
+          - upstreams: List of upstream config dicts.
+          - reason: Optional string reason (e.g. 'all_failed', 'timeout').
+
+        Outputs:
+          - None; updates cls.upstream_health in-place.
+        """
+
+        now = time.time()
+        # Base delay in seconds and maximum backoff cap.
+        base_delay = 5.0
+        max_delay = 300.0
+
+        for up in upstreams or []:
+            up_id = cls._upstream_id(up)
+            if not up_id:
+                continue
+            entry = cls.upstream_health.get(up_id) or {
+                "fail_count": 0,
+                "down_until": 0.0,
+            }
+            fail_count = int(entry.get("fail_count", 0)) + 1
+
+            # Simple Fibonacci-like growth: 1, 2, 3, 5, 8, ... scaled by base_delay.
+            a, b = 1, 1
+            for _ in range(max(0, fail_count - 1)):
+                a, b = b, a + b
+            delay = min(base_delay * float(a), max_delay)
+
+            cls.upstream_health[up_id] = {
+                "fail_count": float(fail_count),
+                "down_until": now + delay,
+            }
+
+    @classmethod
+    def _mark_upstream_ok(cls, upstream: Optional[Dict]) -> None:
+        """Brief: Reset health state for a single upstream on success.
+
+        Inputs:
+          - upstream: Upstream config dict or None.
+
+        Outputs:
+          - None; clears or resets the upstream's health entry.
+        """
+
+        if not upstream or not isinstance(upstream, dict):
+            return
+        up_id = cls._upstream_id(upstream)
+        if not up_id:
+            return
+        entry = cls.upstream_health.get(up_id)
+        if not entry:
+            return
+        # Mark as healthy immediately; keep a small fail_count history if desired.
+        cls.upstream_health[up_id] = {"fail_count": 0.0, "down_until": 0.0}
 
     def _cache_store_if_applicable(
         self,
@@ -382,14 +480,74 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         Example:
             upstreams = self._choose_upstreams(qname, qtype, ctx)
         """
-        # Determine upstream candidates to try
-        upstreams_to_try = ctx.upstream_candidates or self.upstream_addrs
-        if upstreams_to_try:
-            logger.debug(
-                "Using %d upstreams for %s %s", len(upstreams_to_try), qname, qtype
-            )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        else:
-            logger.warning("No upstreams configured for %s type %s", qname, qtype)
+        # Determine base upstream candidates from plugins or global config.
+        base = ctx.upstream_candidates or self.upstream_addrs or []
+        base_list = list(base) if isinstance(base, list) else list(base)
+
+        # Filter out upstreams that are currently marked down until some time in
+        # the future. This is a lazy, traffic-driven health mechanism; upstreams
+        # are allowed back in automatically once their backoff window expires.
+        now = time.time()
+        healthy: List[Dict] = []
+        for up in base_list:
+            up_id = type(self)._upstream_id(up)
+            if not up_id:
+                healthy.append(up)
+                continue
+            entry = type(self).upstream_health.get(up_id)
+            down_until = float(entry.get("down_until", 0.0)) if entry else 0.0
+            if entry and down_until > now:
+                # Still in backoff window; skip for this query.
+                continue
+            healthy.append(up)
+
+        if not healthy:
+            logger.warning(
+                "No healthy upstreams available for %s type %s", qname, qtype
+            )
+            return []
+
+        base_list = healthy
+
+        # Resolve strategy and concurrency knobs, falling back to safe defaults.
+        try:
+            strategy = str(getattr(self, "upstream_strategy", "failover")).lower()
+        except Exception:
+            strategy = "failover"
+
+        try:
+            max_concurrent = int(getattr(self, "upstream_max_concurrent", 1) or 1)
+        except Exception:
+            max_concurrent = 1
+        if max_concurrent < 1:
+            max_concurrent = 1
+
+        # Apply selection strategy to derive an ordered list of upstreams.
+        ordered: List[Dict] = base_list
+        if strategy == "round_robin" and base_list:
+            # Simple global round-robin: rotate by a shared index.
+            cls = type(self)
+            idx = int(getattr(cls, "_upstream_rr_index", 0) or 0)
+            offset = idx % len(base_list)
+            ordered = base_list[offset:] + base_list[:offset]
+            cls._upstream_rr_index = (idx + 1) % len(base_list)
+        elif strategy == "random" and len(base_list) > 1:
+            ordered = base_list[:]
+            try:
+                random.shuffle(ordered)
+            except Exception:
+                # Best-effort shuffle; fall back to original order on error.
+                ordered = base_list
+
+        upstreams_to_try = ordered[:max_concurrent]
+        logger.debug(
+            "Using %d upstreams (strategy=%s, max_concurrent=%d) for %s %s",
+            len(upstreams_to_try),
+            strategy,
+            max_concurrent,
+            qname,
+            qtype,
+        )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         return upstreams_to_try
 
     def _forward_with_failover_helper(
@@ -428,6 +586,14 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         reply, used_upstream, reason = _server_mod.send_query_with_failover(
             request, safe_upstreams, self.timeout_ms, qname, qtype
         )
+
+        # Lazy health updates: on complete failure, mark all attempted upstreams
+        # down with backoff; on success, reset the winning upstream's health.
+        if reply is None:
+            type(self)._mark_upstreams_down(safe_upstreams, reason)
+        else:
+            type(self)._mark_upstream_ok(used_upstream)
+
         return reply, used_upstream, reason
 
     def _apply_post_plugins(
