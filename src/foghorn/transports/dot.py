@@ -88,17 +88,23 @@ class _DotConn:
 
     def send(self, query: bytes, read_timeout_ms: int) -> bytes:
         if self._tls is None:
-            raise DoTError("connection not established")  # pragma: no cover
+            raise DoTError(
+                "connection not established"
+            )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         self._tls.settimeout(read_timeout_ms / 1000.0)
         payload = len(query).to_bytes(2, "big") + query
         self._tls.sendall(payload)
         hdr = _recv_exact(self._tls, 2, read_timeout_ms)
         if len(hdr) != 2:
-            raise DoTError("short read on length header")  # pragma: no cover
+            raise DoTError(
+                "short read on length header"
+            )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         ln = int.from_bytes(hdr, "big")
         resp = _recv_exact(self._tls, ln, read_timeout_ms)
         if len(resp) != ln:
-            raise DoTError("short read on response body")  # pragma: no cover
+            raise DoTError(
+                "short read on response body"
+            )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         self._last_used = time.time()
         return resp
 
@@ -108,15 +114,19 @@ class _DotConn:
     def close(self):
         try:
             if self._tls is not None:
-                try:  # pragma: no cover
+                try:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                     self._tls.close()
-                except Exception:  # pragma: no cover
-                    pass  # pragma: no cover
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             if self._sock is not None:
                 try:
                     self._sock.close()
-                except Exception:  # pragma: no cover
-                    pass  # pragma: no cover
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         finally:
             self._tls = None
             self._sock = None
@@ -179,13 +189,17 @@ class DotConnectionPool:
         if max_connections is not None:
             try:
                 self._max = max(1, int(max_connections))
-            except Exception:  # pragma: no cover
-                pass  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         if idle_timeout_s is not None:
             try:
                 self._idle = max(1, int(idle_timeout_s))
-            except Exception:  # pragma: no cover
-                pass  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
     def send(
         self, query: bytes, connect_timeout_ms: int, read_timeout_ms: int
@@ -213,8 +227,10 @@ class DotConnectionPool:
         except Exception:
             try:
                 conn.close()
-            except Exception:  # pragma: no cover
-                pass  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             raise
         finally:
             if conn is not None and conn._tls is not None:
@@ -304,26 +320,38 @@ def dot_query(
                 # Read two-byte length then message
                 hdr = _recv_exact(tls_sock, 2, read_timeout_ms)
                 if len(hdr) != 2:
-                    raise DoTError("short read on length header")  # pragma: no cover
+                    raise DoTError(
+                        "short read on length header"
+                    )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 resp_len = int.from_bytes(hdr, byteorder="big")
                 resp = _recv_exact(tls_sock, resp_len, read_timeout_ms)
                 if len(resp) != resp_len:
-                    raise DoTError("short read on response body")  # pragma: no cover
+                    raise DoTError(
+                        "short read on response body"
+                    )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 return resp
             finally:
                 try:
                     tls_sock.close()
-                except Exception:  # pragma: no cover
-                    pass  # pragma: no cover
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         finally:
             try:
                 sock.close()
-            except Exception:  # pragma: no cover
-                pass  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
     except ssl.SSLError as e:
-        raise DoTError(f"TLS error: {e}")  # pragma: no cover
+        raise DoTError(
+            f"TLS error: {e}"
+        )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
     except (OSError, socket.timeout) as e:
-        raise DoTError(f"Network error: {e}")  # pragma: no cover
+        raise DoTError(
+            f"Network error: {e}"
+        )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
 
 def _recv_exact(sock: socket.socket, n: int, timeout_ms: int) -> bytes:
@@ -346,7 +374,7 @@ def _recv_exact(sock: socket.socket, n: int, timeout_ms: int) -> bytes:
     while remaining > 0:
         chunk = sock.recv(remaining)
         if not chunk:
-            break  # pragma: no cover
+            break  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)

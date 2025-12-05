@@ -21,12 +21,13 @@ For developer documentation (architecture, transports, plugin internals, testing
   - [`listen`](#listen)
   - [`upstream`](#upstream)
   - [`plugins`](#plugins)
-	- [AccessControlPlugin](#accesscontrolplugin)
-	- [NewDomainFilterPlugin](#newdomainfilterplugin)
-	- [UpstreamRouterPlugin](#upstreamrouterplugin)
-	- [FilterPlugin](#filterplugin)
-	- [ListDownloader plugin](#listdownloader-plugin)
-- [ZoneRecords plugin](#zonerecords-plugin)
+    - [AccessControlPlugin](#accesscontrolplugin)
+    - [NewDomainFilterPlugin](#newdomainfilterplugin)
+    - [RateLimitPlugin](#ratelimitplugin)
+    - [UpstreamRouterPlugin](#upstreamrouterplugin)
+    - [FilterPlugin](#filterplugin)
+    - [ListDownloader plugin](#listdownloader-plugin)
+    - [ZoneRecords plugin](#zonerecords-plugin)
   - [Complete `config.yaml` Example](#complete-configyaml-example)
 - [Logging](#logging)
 - [License](#license)
@@ -39,12 +40,15 @@ For developer documentation (architecture, transports, plugin internals, testing
 *   **Built-in Plugins:**
   *   **Access Control:** CIDR-based allow/deny (allowlist/blocklist terminology in docs).
   *   **EtcHosts:** Answer queries based on host file(s).
-  *   **Greylist:** Temporarily block newly seen domains.
-  *   **New Domain Filter:** Block recently registered domains.
-  *   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
   *   **Filter:** Filter by domain patterns/keywords IPs.
-  *   **ZoneRecords (formerly CustomRecords):** Serve static DNS records and authoritative zones from one or more files, with optional live reload on change.
+  *   **Rate Limit**: Adaptive or static rate limiting, by client, domain, or client-domain
+  *   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
+  *   **ZoneRecords** Serve static DNS records and authoritative zones from one or more files, with optional live reload on change.
+* **Examples**:
   *   **Examples:** Showcase of simple policies and rewrites.
+  *   **New Domain Filter:** Block recently registered domains.
+  *   **Greylist:** Temporarily block newly seen domains.
+
 
 ## Installation
 
@@ -104,7 +108,7 @@ docker run -d \
   -p 5353:5353/tcp \
   -p 8853:8853/tcp \
   -p 8053:8053/tcp \
-  -v /path/to/your/config.yaml:/foghorn/config.yaml \
+  -v /path/to/your/config.yaml:/foghorn/config/config.yaml \
   zallison/foghorn:latest
 ```
 
@@ -122,7 +126,7 @@ dnssec:
   - upstream_ad: require upstream AD bit (recommended for now)
   - local (experimental): perform local DNSSEC validation.
 
-# Configuration
+## Configuration
 
 Configuration is handled through a `config.yaml` file. The file has three main sections: `listen`, `upstream`, and `plugins`.
 
@@ -155,12 +159,12 @@ listen:
 	# Optional TLS
 	# cert_file: /path/to/cert.pem
 	# key_file: /path/to/key.pem
+```
 
 Note: The DoH listener is served by a dedicated FastAPI app using uvicorn in a
 single background thread. TLS is applied via `cert_file`/`key_file`. Behavior is
 RFC 8484‑compatible and unchanged from previous releases; only the runtime
 implementation has changed.
-```
 
 ----
 
@@ -206,6 +210,7 @@ You can use short aliases instead of full dotted paths:
 - new_domain_filter or new_domain -> foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
 - upstream_router or router -> foghorn.plugins.upstream_router.UpstreamRouterPlugin
 - filter -> foghorn.plugins.filter.FilterPlugin
+- rate_limit or ratelimit -> foghorn.plugins.rate_limit.RateLimitPlugin
 
 Examples of plugin entries:
 - As a dict with module/config: `{ module: acl, config: {...} }`
@@ -237,8 +242,8 @@ Semantics:
 
 These knobs are honored by core plugins such as AccessControl, Filter,
 Greylist, NewDomainFilter, UpstreamRouter, FlakyServer, Examples, and
-EtcHosts. See `example_configs/` (for example `kitchen_sink.yaml`) for usage
-patterns.
+EtcHosts. See `example_configs/` (for example `kitchen_sink.yaml` and
+`plugin_rate_limit.yaml`) for usage patterns.
 
 #### Plugin priorities and `setup_priority`
 
@@ -322,6 +327,39 @@ plugins:
 	config:
 	  threshold_days: 14
 ```
+
+------
+
+### RateLimitPlugin
+
+This plugin provides adaptive or fixed per-key DNS rate limiting, backed by a
+sqlite database. It can key profiles by client IP, client+domain, or domain
+only, and it learns a baseline requests-per-second (RPS) for each key.
+
+**Configuration (subset):**
+
+* `mode`: `per_client`, `per_client_domain`, or `per_domain`.
+* `window_seconds`: measurement window length in seconds.
+* `warmup_windows`: number of completed windows to observe before enforcing.
+* `alpha`: EWMA factor when the new window's RPS is >= the current average
+  (ramp-up speed).
+* `alpha_down`: optional EWMA factor when the new window's RPS is < the current
+  average (ramp-down speed). If omitted, it defaults to `alpha`.
+* `burst_factor`: multiplier over the learned average when computing
+  `allowed_rps`.
+* `min_enforce_rps`: lower bound on `allowed_rps`.
+* `global_max_rps`: optional hard upper bound on `allowed_rps` (0 disables).
+* `db_path`: sqlite file storing learned profiles.
+* `deny_response`: how to answer when a query is rate-limited (mirrors
+  FilterPlugin: `nxdomain`, `refused`, `servfail`, `noerror_empty`/`nodata`, or
+  `ip`).
+
+To make the limiter behave like a "dumb" fixed-rate limiter, set
+`min_enforce_rps` and `global_max_rps` to the same value; in that case the
+learned average no longer affects the enforcement threshold.
+
+See `example_configs/plugin_rate_limit.yaml` for concrete profiles (solo user,
+home network, SMB) and notes on static vs adaptive behavior.
 
 ------
 

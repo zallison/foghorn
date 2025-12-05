@@ -3,6 +3,9 @@ from __future__ import annotations
 import inspect
 import ipaddress
 import logging
+import logging.handlers
+import os
+import sys
 from dataclasses import dataclass
 from typing import ClassVar, Dict, List, Optional, Sequence, Tuple, Union, final
 
@@ -22,8 +25,19 @@ from dnslib import (  # noqa: F401 - imports are for implementations of this cla
 )
 
 from foghorn.cache import FoghornTTLCache
+from foghorn.logging_config import BracketLevelFormatter, SyslogFormatter
 
 logger = logging.getLogger(__name__)
+
+_PLUGIN_LOG_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warn": logging.WARNING,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+    "crit": logging.CRITICAL,
+    "critical": logging.CRITICAL,
+}
 
 
 @dataclass
@@ -79,7 +93,9 @@ class PluginDecision:
                     if self.plugin_label is None:
                         try:
                             label = getattr(self_obj, "name", None)
-                        except Exception:  # pragma: no cover - defensive
+                        except (
+                            Exception
+                        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                             label = None
                         if label is not None:
                             self.plugin_label = str(label)
@@ -222,7 +238,9 @@ class BasePlugin:
             # Prefer the first alias when available, falling back to the class name.
             try:
                 aliases = list(getattr(self.__class__, "get_aliases", lambda: [])())
-            except Exception:  # pragma: no cover - defensive
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 aliases = []
             if aliases:
                 default_name = str(aliases[0])
@@ -232,6 +250,18 @@ class BasePlugin:
 
         self.config = config
         logger.debug("loading %s", self)
+
+        # Per-plugin logger (optional): default to module logger and apply
+        # config["logging"] when provided.
+        self.logger = logging.getLogger(getattr(self.__class__, "__module__", __name__))
+        try:
+            plugin_logging_cfg = config.get("logging")
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+            plugin_logging_cfg = None
+        if isinstance(plugin_logging_cfg, dict):
+            self._init_instance_logger(plugin_logging_cfg)
 
         # Standard path: use class defaults or config overrides
         self.pre_priority = self._parse_priority_value(
@@ -266,6 +296,88 @@ class BasePlugin:
         # The TTL is configurable via targets_cache_ttl_seconds (default 300s).
         self._targets_cache_ttl: int = int(config.get("targets_cache_ttl_seconds", 300))
         self._targets_cache: FoghornTTLCache = FoghornTTLCache()
+
+    def _init_instance_logger(self, logging_cfg: Dict[str, object]) -> None:
+        """Brief: Configure an optional per-plugin logger from a logging config block.
+
+        Inputs:
+          - logging_cfg: Mapping-style object with per-plugin logging options
+            matching the root-level "logging" config (level, stderr, file, syslog).
+
+        Outputs:
+          - None; attaches a configured logger to self.logger and updates the
+            underlying module logger in-place.
+        """
+        try:
+            cfg: Dict[str, object] = dict(logging_cfg)
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+            return
+
+        logger_name = getattr(self.__class__, "__module__", __name__)
+        plugin_logger = logging.getLogger(str(logger_name))
+
+        level_str = str(cfg.get("level", "info")).lower()
+        level = _PLUGIN_LOG_LEVELS.get(level_str, logging.INFO)
+        plugin_logger.setLevel(level)
+
+        for handler in list(plugin_logger.handlers):
+            plugin_logger.removeHandler(handler)
+
+        fmt = "%(asctime)s %(level_tag)s %(name)s: %(message)s"
+        formatter = BracketLevelFormatter(fmt=fmt)
+
+        if bool(cfg.get("stderr", True)):
+            stderr_handler = logging.StreamHandler(sys.stderr)
+            stderr_handler.setFormatter(formatter)
+            plugin_logger.addHandler(stderr_handler)
+
+        file_path = cfg.get("file")
+        if isinstance(file_path, str) and file_path.strip():
+            path = os.path.abspath(os.path.expanduser(file_path.strip()))
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                file_handler = logging.FileHandler(path, mode="a", encoding="utf-8")
+                file_handler.setFormatter(formatter)
+                plugin_logger.addHandler(file_handler)
+            except (
+                OSError
+            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                plugin_logger.warning(
+                    "Failed to configure file logging for plugin %s", self.name
+                )
+
+        syslog_cfg = cfg.get("syslog")
+        if syslog_cfg:
+            try:
+                if isinstance(syslog_cfg, dict):
+                    address = syslog_cfg.get("address", "/dev/log")
+                    facility = getattr(
+                        logging.handlers.SysLogHandler,
+                        f"LOG_{syslog_cfg.get('facility', 'USER').upper()}",
+                        logging.handlers.SysLogHandler.LOG_USER,
+                    )
+                else:
+                    address = "/dev/log"
+                    facility = logging.handlers.SysLogHandler.LOG_USER
+
+                syslog_handler = logging.handlers.SysLogHandler(
+                    address=address, facility=facility
+                )
+                syslog_handler.setFormatter(SyslogFormatter())
+                plugin_logger.addHandler(syslog_handler)
+            except (
+                OSError,
+                ValueError,
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                plugin_logger.warning(
+                    "Failed to configure syslog for plugin %s", self.name
+                )
+
+        plugin_logger.propagate = False
+
+        self.logger = plugin_logger
 
     @staticmethod
     def _parse_priority_value(value: object, key: str, logger: logging.Logger) -> int:
@@ -388,13 +500,17 @@ class BasePlugin:
         # CIDR scans under sustained load.
         try:
             cached = self._targets_cache.get(cache_key)
-        except Exception:  # pragma: no cover - defensive
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             cached = None
 
         if cached is not None:
             try:
                 return bool(int(cached.decode()))
-            except Exception:  # pragma: no cover - defensive
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 pass
 
         # Cache miss or decode failure: compute targeting decision.
@@ -422,7 +538,9 @@ class BasePlugin:
                 int(self._targets_cache_ttl),
                 b"1" if result else b"0",
             )
-        except Exception:  # pragma: no cover - defensive
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             pass
 
         return result

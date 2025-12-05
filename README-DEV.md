@@ -110,6 +110,95 @@ and EtcHosts. Implementers of new plugins are encouraged to call
 `self.targets(ctx)` early in their `pre_resolve`/`post_resolve` hooks when
 client‑scoped behavior is desired.
 
+## Admin Webserver Endpoints
+
+The admin webserver can run either as a FastAPI app (preferred) or as a
+threaded `http.server` fallback. Both expose the same logical endpoints,
+with some aliases preserved for backwards compatibility.
+
+- Health
+  - `GET /health`, `GET /api/v1/health`
+  - Returns a small JSON liveness payload with `status` and `server_time`.
+
+- Statistics (/stats)
+  - `GET /stats`, `GET /api/v1/stats`
+    - FastAPI: served by `create_app(...).get_stats` using `_get_stats_snapshot_cached`.
+    - Threaded: served by `_ThreadedAdminRequestHandler._handle_stats`.
+    - Response includes `totals`, `rcodes`, `qtypes`, `uniques`, `upstreams`,
+      `meta` (hostname/IP/version/uptime plus uniques), latency histograms
+      (`latency`, `latency_recent`), upstream rcodes/qtypes, `qtype_qnames`,
+      per‑rcode domain/subdomain lists, cache hit/miss domains/subdomains, and
+      a derived `rate_limit` summary when `cache_stat_rate_limit` is present.
+    - Query params: `reset=true|1|yes` forces a fresh snapshot and reset.
+  - `POST /stats/reset`, `POST /api/v1/stats/reset`
+    - Resets all in‑memory statistics counters for the active `StatsCollector`.
+
+- Traffic summary (/traffic)
+  - `GET /traffic`, `GET /api/v1/traffic`
+  - Returns a lightweight view derived from a stats snapshot: `totals`,
+    `rcodes`, `qtypes`, `top_clients`, `top_domains`, and `latency`, plus
+    basic host metadata.
+
+- Configuration (/config)
+  - Sanitized config
+    - `GET /config`, `GET /api/v1/config`, `GET /apti/v1/config`
+      (FastAPI) – YAML body; uses `_get_sanitized_config_yaml_cached`.
+    - `GET /config` and `GET /config.json` families in the threaded handler
+      return sanitized YAML or JSON via `sanitize_config`, with values under
+      keys like `token`, `password`, and `secret` replaced by `***`.
+  - Raw config
+    - `GET /config/raw`, `GET /api/v1/config/raw` (FastAPI) and
+      `/config_raw` aliases in the threaded handler return the on‑disk YAML
+      unmodified.
+    - `GET /config/raw.json`, `GET /api/v1/config/raw.json` return both parsed
+      config (JSON) and the raw YAML string.
+  - Save config
+    - `POST /config/save`, `POST /api/v1/config/save`
+      - Expects a JSON object with a `raw_yaml` field containing the full
+        configuration document.
+      - Writes a backup, atomically replaces the active config, and schedules
+        (FastAPI) or immediately sends (threaded handler) SIGHUP via
+        `_schedule_sighup_after_config_save`.
+
+- Logs (/logs)
+  - `GET /logs`, `GET /api/v1/logs`
+  - Returns recent log‑like entries from the in‑memory `RingBuffer`.
+  - Query params: `limit` controls the maximum number of entries returned.
+
+- Rate‑limit inspection (/api/v1/ratelimit)
+  - `GET /api/v1/ratelimit`
+  - Uses `_collect_rate_limit_stats` to summarize `RateLimitPlugin` sqlite
+    profiles across any configured `db_path` values, with a short‑lived
+    in‑memory cache per process.
+
+- Static UI
+  - FastAPI:
+    - `GET /`, `GET /index.html` serve `html/index.html` from the resolved
+      `www_root` when `webserver.index` is true.
+    - `GET /{path:path}` serves static files from `www_root`, with
+      path‑traversal protection.
+  - Threaded admin server:
+    - `GET /`, `GET /index.html` via `_handle_index()`.
+    - Other paths under `html/` via `_try_serve_www()`.
+
+- CORS and preflight
+  - `OPTIONS *` is handled in the threaded handler and by FastAPI’s CORS
+    middleware when `webserver.cors.enabled` is true.
+
+Short endpoint summary (canonical forms):
+- `GET  /api/v1/health`           – liveness probe (alias: `/health`).
+- `GET  /api/v1/stats`            – full statistics snapshot (optionally `reset=1`; alias: `/stats`).
+- `POST /api/v1/stats/reset`      – reset stats counters (alias: `/stats/reset`).
+- `GET  /api/v1/traffic`          – lightweight traffic view (alias: `/traffic`).
+- `GET  /api/v1/config`           – sanitized YAML config (alias: `/config`).
+- `GET  /api/v1/config.json`      – sanitized JSON config (alias: `/config.json`).
+- `GET  /api/v1/config/raw`       – raw YAML from disk (aliases: `/config/raw`, `/config_raw`).
+- `GET  /api/v1/config/raw.json`  – raw YAML + parsed config as JSON (aliases: `/config/raw.json`, `/config_raw.json`).
+- `POST /api/v1/config/save`      – write new config (via `raw_yaml`) and trigger SIGHUP (alias: `/config/save`).
+- `GET  /api/v1/logs`             – recent in‑memory log entries (alias: `/logs`).
+- `GET  /api/v1/ratelimit`        – RateLimitPlugin sqlite profile summary.
+- `GET  /` and `/index.html`      – optional HTML dashboard when `webserver.index` is true.
+
 ## Logging and Statistics
 
 - Logging is configured via the YAML `logging` section (see README.md for a quickstart). Format uses bracketed levels and UTC timestamps.

@@ -71,6 +71,21 @@ class TestLatencyHistogram:
         assert 2 <= stats["p50_ms"] <= 10
         assert 2 <= stats["p90_ms"] <= 10
 
+    def test_percentile_overflow_bin(self) -> None:
+        """Brief: Percentiles hitting overflow bin return overflow sentinel.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None; asserts _percentile(1.0) for a large sample returns 10000.0.
+        """
+
+        hist = LatencyHistogram()
+        # Large sample in seconds so that it lands in the overflow bin (>=10s).
+        hist.add(12.0)
+        assert hist._percentile(1.0) == 10000.0
+
 
 class TestTopK:
     """Test Top-K heavy hitters tracker."""
@@ -285,6 +300,30 @@ class TestStatsCollector:
         snapshot = collector.snapshot()
         assert snapshot.latency_stats is None
 
+    def test_record_dnssec_status_valid_and_invalid(self) -> None:
+        """Brief: record_dnssec_status ignores unknown values and tracks known ones.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None; asserts only supported dnssec_* totals are incremented.
+        """
+
+        collector = StatsCollector()
+        # Empty/unknown statuses are ignored.
+        collector.record_dnssec_status("")
+        collector.record_dnssec_status("unknown")
+        # Supported statuses map to specific totals keys.
+        for status in ["secure", "insecure", "bogus", "indeterminate"]:
+            collector.record_dnssec_status(status)
+
+        snapshot = collector.snapshot()
+        assert snapshot.totals["dnssec_secure"] == 1
+        assert snapshot.totals["dnssec_insecure"] == 1
+        assert snapshot.totals["dnssec_bogus"] == 1
+        assert snapshot.totals["dnssec_indeterminate"] == 1
+
     def test_unique_tracking(self):
         """Unique clients and domains tracked."""
         collector = StatsCollector(track_uniques=True)
@@ -301,6 +340,39 @@ class TestStatsCollector:
         collector.record_query("192.0.2.1", "example.com", "A")
         snapshot = collector.snapshot()
         assert snapshot.uniques is None
+
+    def test_record_cache_stat_and_pre_plugin_labels(self) -> None:
+        """Brief: cache_stat and cache_pre_plugin labels update totals and stores safely.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None; asserts empty labels are ignored and valid labels touch totals
+          - and, when a store is attached, persistent counts.
+        """
+
+        from unittest.mock import MagicMock
+
+        # Empty labels are ignored
+        collector = StatsCollector()
+        collector.record_cache_stat("")
+        collector.record_cache_pre_plugin("")
+        snap = collector.snapshot(reset=False)
+        assert all(not k.startswith("cache_stat_") for k in snap.totals.keys())
+
+        # Defensive path: non-integer existing total should not raise
+        collector._totals["cache_stat_bad"] = "oops"  # type: ignore[assignment]
+        collector.record_cache_stat("bad")
+
+        # With a backing store, both helpers mirror into SQLite scopes.
+        store = MagicMock()
+        collector2 = StatsCollector(stats_store=store)
+        collector2.record_cache_stat("label")
+        collector2.record_cache_pre_plugin("pre_deny_filter")
+
+        store.increment_count.assert_any_call("cache", "label")
+        store.increment_count.assert_any_call("totals", "pre_deny_filter")
 
     def test_top_clients(self):
         """Top clients tracked when enabled."""
@@ -342,6 +414,23 @@ class TestStatsCollector:
         snapshot2 = collector.snapshot(reset=False)
         assert snapshot1.totals["total_queries"] == 1
         assert snapshot2.totals.get("total_queries", 0) == 0
+
+    def test_rate_limit_summary_handles_non_integer_total(self) -> None:
+        """Brief: rate_limit summary falls back safely when cache_stat counter is non-int.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None; asserts rate_limit.denied defaults to 0 on bad totals value.
+        """
+
+        collector = StatsCollector()
+        # Manually inject a non-integer cache_stat_rate_limit to exercise the
+        # defensive conversion path used when deriving rate_limit.
+        collector._totals["cache_stat_rate_limit"] = "not-an-int"  # type: ignore[assignment]
+        snapshot = collector.snapshot(reset=False)
+        assert snapshot.rate_limit == {"denied": 0}
 
     def test_qtype_breakdown(self):
         """Qtype breakdown tracked when enabled."""
@@ -411,6 +500,19 @@ class TestSubdomainMetrics:
             for entries in snapshot.rcode_subdomains.values():
                 for name, _count in entries:
                     assert _is_subdomain(name)
+
+    def test_is_subdomain_empty_and_base(self) -> None:
+        """Brief: _is_subdomain returns False for empty and base-domain names.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None; asserts "" and simple base domains are not treated as subdomains.
+        """
+
+        assert _is_subdomain("") is False
+        assert _is_subdomain("example.com") is False
 
 
 class TestConcurrency:
@@ -487,6 +589,28 @@ class TestFormatSnapshotJson:
         parsed = json.loads(json_str)
         assert "latency" in parsed
         assert "top_clients" in parsed
+
+    def test_json_includes_rate_limit_summary(self) -> None:
+        """Brief: JSON output includes derived rate_limit summary when present.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None; asserts rate_limit.denied reflects cache_stat_rate_limit.
+        """
+
+        collector = StatsCollector()
+        # Populate the cache_stat_rate_limit counter via the public helper.
+        collector.record_cache_stat("rate_limit")
+        collector.record_cache_stat("rate_limit")
+
+        snapshot = collector.snapshot(reset=False)
+        json_str = format_snapshot_json(snapshot)
+        parsed = json.loads(json_str)
+
+        assert "rate_limit" in parsed
+        assert parsed["rate_limit"]["denied"] == 2
 
 
 class TestStatsReporter:

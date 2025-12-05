@@ -152,8 +152,10 @@ def doh_query(
         finally:
             try:
                 conn.close()
-            except Exception:  # pragma: no cover
-                pass  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
     except ssl.SSLError as e:
         raise DoHError(f"TLS error: {e}")
     except OSError as e:
