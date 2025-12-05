@@ -117,7 +117,18 @@ def test_patterns_and_keywords_files(tmp_path, caplog):
     """
     pats = tmp_path / "patterns.re"
     keys = tmp_path / "keywords.txt"
-    pats.write_text("# comment\n(\n^ads\\.\n")  # includes an invalid and a valid
+    pats.write_text(
+        "\n".join(
+            [
+                "# comment",
+                "(",  # invalid regex
+                "^ads\\.",  # valid regex
+                "{",  # invalid JSON
+                '{"not_pattern": "x"}',  # JSON object missing 'pattern'
+            ]
+        )
+        + "\n"
+    )
     keys.write_text("\nTracker\n#x\nanalytics\n")
 
     p = FilterPlugin(
@@ -153,6 +164,7 @@ def test_load_keywords_from_file_json_error_and_missing_keyword(tmp_path, caplog
             [
                 "{",  # invalid JSON
                 '["not-object"]',  # JSON that is not a dict
+                '{"missing": "field"}',  # JSON object missing 'keyword'
                 '{"keyword": "Good"}',
             ]
         )
@@ -229,7 +241,8 @@ def test_blocked_ips_files_csv_simple_and_jsonl(tmp_path):
                 "203.0.113.1,remove",
                 "203.0.113.2,replace,203.0.113.200",
                 "2001:db8::1,replace,2001:db8::ffff",
-                "203.0.113.5,replace",  # invalid, missing replacement
+                "203.0.113.5,replace",  # invalid, missing replacement for single IP
+                "10.0.2.0/24,replace",  # invalid, missing replacement for network
                 "bogus,deny",  # invalid ip
                 "203.0.113.6,foo",  # unknown action => deny
                 "203.0.113.7,replace,not_ip",
@@ -371,3 +384,70 @@ def test_expand_globs_fallback_to_os_path_exists(tmp_path, monkeypatch):
     monkeypatch.setattr(filter_mod.glob, "glob", lambda pattern: [])
     resolved = filter_mod.FilterPlugin._expand_globs([str(f)])
     assert resolved == [str(f)]
+
+
+def test_load_list_from_file_json_non_object_line(monkeypatch, tmp_path, caplog):
+    """Brief: load_list_from_file logs when a JSON domain line is not an object.
+
+    Inputs:
+      - tmp_path/monkeypatch/caplog fixtures.
+
+    Outputs:
+      - None: Asserts the non-object JSON line is reported and skipped.
+    """
+    from foghorn.plugins import filter as filter_mod
+
+    db = tmp_path / "bl_nonobj.db"
+    p = FilterPlugin(db_path=str(db), default="deny")
+    p.setup()
+
+    f = tmp_path / "domains_json_nonobj.txt"
+    f.write_text('{"domain": "example.com"}\n')
+
+    def fake_loads(s):
+        # Force json.loads to return a non-dict for this test.
+        return ["not-object"]
+
+    monkeypatch.setattr(filter_mod.json, "loads", fake_loads)
+    caplog.set_level("ERROR")
+
+    with closing(p.conn):
+        p.load_list_from_file(str(f), mode="allow")
+
+    assert any(
+        "JSON domain line not an object" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_blocked_ips_file_json_non_object_line(monkeypatch, tmp_path, caplog):
+    """Brief: _load_blocked_ips_from_file logs when a JSON line is not an object.
+
+    Inputs:
+      - tmp_path/monkeypatch/caplog fixtures.
+
+    Outputs:
+      - None: Asserts the non-object JSON line is reported and skipped.
+    """
+    from foghorn.plugins import filter as filter_mod
+
+    jsonl = tmp_path / "ips_nonobj.jsonl"
+    jsonl.write_text('{"ip": "203.0.113.1", "action": "deny"}\n')
+
+    def fake_loads(s):
+        # Force json.loads to return a non-dict for this test.
+        return ["not-object"]
+
+    monkeypatch.setattr(filter_mod.json, "loads", fake_loads)
+    caplog.set_level("ERROR")
+
+    p = FilterPlugin(
+        db_path=str(tmp_path / "bl_ips_nonobj.db"),
+        blocked_ips_files=[str(jsonl)],
+        default="allow",
+    )
+    p.setup()
+
+    with closing(p.conn):
+        pass
+
+    assert any("JSON line is not an object" in r.getMessage() for r in caplog.records)

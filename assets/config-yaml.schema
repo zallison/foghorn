@@ -109,6 +109,7 @@
           "properties": {
             "module": { "type": "string", "minLength": 1 },
             "config": { "type": "object" },
+            "name": { "type": "string", "minLength": 1 },
             "pre_priority": { "type": "integer" },
             "post_priority": { "type": "integer" },
             "setup_priority": { "type": "integer" }

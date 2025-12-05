@@ -66,7 +66,9 @@ async def _read_request(
         try:
             ln = int(headers.get("content-length", "0"))
             body = await reader.readexactly(ln)
-        except Exception:  # pragma: no cover
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             body = await reader.read(0)
     return req_line, headers, body
 
@@ -148,16 +150,20 @@ async def _handle_conn(
         writer.write(resp)
         await writer.drain()
     except asyncio.TimeoutError:
-        pass  # pragma: no cover
+        pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
     except Exception:
         try:
             writer.write(_HTTP_BAD + _CONN_CLOSE + _CRLF)
             await writer.drain()
-        except Exception:  # pragma: no cover
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             pass
     finally:
         try:
             writer.close()
             await writer.wait_closed()
-        except Exception:  # pragma: no cover
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             pass

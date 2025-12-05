@@ -182,7 +182,9 @@ class NewDomainFilterPlugin(BasePlugin):
         """
         try:
             creation_date = self._fetch_creation_date(domain)
-            if not creation_date:  # pragma: no cover
+            if (
+                not creation_date
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 return None
 
             now = dt.datetime.now(dt.timezone.utc)
@@ -213,8 +215,10 @@ class NewDomainFilterPlugin(BasePlugin):
             try:
                 ts = int(cached.decode())
                 return dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc)
-            except Exception:  # pragma: no cover
-                pass  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
         # 2) Persistent DB cache
         rec = self._db_get_creation_record(domain)
@@ -230,7 +234,9 @@ class NewDomainFilterPlugin(BasePlugin):
 
         # 3) Network lookup as last resort
         creation_date = self._whois_lookup_creation_date(domain)
-        if creation_date is None:  # pragma: no cover
+        if (
+            creation_date is None
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             return None
 
         if creation_date.tzinfo is None:

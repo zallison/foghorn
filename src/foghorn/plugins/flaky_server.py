@@ -6,9 +6,8 @@ import random
 import secrets
 from typing import List, Optional, Union
 
-from pydantic import BaseModel, Field
-
 from dnslib import QTYPE, RCODE, DNSRecord
+from pydantic import BaseModel, Field
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
@@ -134,7 +133,9 @@ class FlakyServer(BasePlugin):
                 # ip_network handles both single IPs and CIDRs (strict=False allows host bits set)
                 net = ipaddress.ip_network(entry, strict=False)
                 self._allow_networks.append(net)
-            except Exception as e:  # pragma: no cover
+            except (
+                Exception
+            ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 logger.warning(
                     "FlakyServer: skipping invalid allow entry %r: %s", entry, e
                 )
@@ -165,7 +166,9 @@ class FlakyServer(BasePlugin):
                 self._rng: Union[random.Random, secrets.SystemRandom] = random.Random(
                     int(seed)
                 )
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 logger.warning("FlakyServer: bad seed %r; using SystemRandom()", seed)
                 self._rng = secrets.SystemRandom()
         else:
@@ -292,7 +295,9 @@ class FlakyServer(BasePlugin):
                 wire = self._make_response(req, RCODE.SERVFAIL)
                 if wire is not None:
                     return PluginDecision(action="override", response=wire)
-        except Exception as e:  # pragma: no cover
+        except (
+            Exception
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.debug("FlakyServer: SERVFAIL draw error: %s", e)
 
         # Then NXDOMAIN
@@ -301,7 +306,9 @@ class FlakyServer(BasePlugin):
                 wire = self._make_response(req, RCODE.NXDOMAIN)
                 if wire is not None:
                     return PluginDecision(action="override", response=wire)
-        except Exception as e:  # pragma: no cover
+        except (
+            Exception
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.debug("FlakyServer: NXDOMAIN draw error: %s", e)
 
         return None

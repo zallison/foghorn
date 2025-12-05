@@ -1,14 +1,14 @@
 import functools
 import logging
 import socketserver
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, NamedTuple
 
-from dnslib import EDNS0, QTYPE, RCODE, RR, DNSRecord
+from dnslib import QTYPE, RCODE, DNSRecord
 
 from .plugins.base import BasePlugin, PluginContext, PluginDecision
 from .transports.dot import DoTError, get_dot_pool
 from .transports.tcp import TCPError, get_tcp_pool, tcp_query
-from .udp_server import DNSUDPHandler, _edns_flags_for_mode
+from .udp_server import DNSUDPHandler
 
 logger = logging.getLogger("foghorn.server")
 
@@ -126,7 +126,9 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
         except Exception:
             bwire = wire  # fallback; will likely still be bytes
         return _set_response_id_cached(bwire, int(req_id))
-    except Exception as e:  # pragma: no cover - defensive
+    except (
+        Exception
+    ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
         logger.error("Failed to set response id: %s", e)
         return (
             bytes(wire)
@@ -152,7 +154,9 @@ def _set_response_id_cached(wire: bytes, req_id: int) -> bytes:
             lo = req_id & 0xFF
             return bytes([hi, lo]) + wire[2:]
         return wire
-    except Exception as e:  # pragma: no cover
+    except (
+        Exception
+    ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         logger.error("Failed to set response id (cached): %s", e)
         return wire
 
@@ -189,7 +193,9 @@ def send_query_with_failover(
         host = str(upstream.get("host", ""))
         try:
             port = int(upstream.get("port", 0))
-        except Exception:  # pragma: no cover
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             port = 0
         transport = str(upstream.get("transport", "udp")).lower()
         try:
@@ -226,8 +232,10 @@ def send_query_with_failover(
                             else None
                         ),
                     )
-                except Exception:  # pragma: no cover
-                    pass  # pragma: no cover
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 response_wire = pool.send(query.pack(), timeout_ms, timeout_ms)
             elif transport == "tcp":
                 pool_cfg = (
@@ -245,8 +253,10 @@ def send_query_with_failover(
                             else None
                         ),
                     )
-                except Exception:  # pragma: no cover
-                    pass  # pragma: no cover
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 response_wire = pool.send(query.pack(), timeout_ms, timeout_ms)
             elif transport == "doh":
                 doh_url = str(
@@ -322,10 +332,14 @@ def send_query_with_failover(
                             read_timeout_ms=timeout_ms,
                         )
                         return response_wire, {**upstream, "transport": "tcp"}, "ok"
-                    except Exception as e2:  # pragma: no cover
+                    except (
+                        Exception
+                    ) as e2:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                         last_exception = e2
                         continue
-            except Exception as e:  # pragma: no cover
+            except (
+                Exception
+            ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 # If parsing fails, treat as a server failure
                 logger.warning(
                     "Failed to parse response from %s:%d for %s: %s",
@@ -340,7 +354,11 @@ def send_query_with_failover(
             # Success (NOERROR, NXDOMAIN, etc.)
             return response_wire, upstream, "ok"
 
-        except (DoTError, TCPError, Exception) as e:  # pragma: no cover
+        except (
+            DoTError,
+            TCPError,
+            Exception,
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.debug(
                 "Upstream %s:%d via %s failed for %s: %s",
                 host,
@@ -362,22 +380,32 @@ def send_query_with_failover(
 # at the bottom of this module for backward compatibility.
 
 
-def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
-    """Resolve a single DNS wire query and return wire response.
+class _ResolveCoreResult(NamedTuple):
+    """Internal result for the shared resolve pipeline.
+
+    Inputs:
+      - None (constructed by _resolve_core).
+    Outputs:
+      - wire: Final DNS response bytes with ID fixed.
+      - dnssec_status: Optional DNSSEC status string.
+      - upstream_id: Optional upstream identifier string.
+      - rcode_name: Textual rcode name.
+    """
+
+    wire: bytes
+    dnssec_status: Optional[str]
+    upstream_id: Optional[str]
+    rcode_name: str
+
+
+def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
+    """Shared resolution pipeline used by UDP and non-UDP callers.
 
     Inputs:
       - data: Wire-format DNS query bytes.
-      - client_ip: String client IP for plugin context, logging, and statistics.
+      - client_ip: Client IP string for plugin context and stats.
     Outputs:
-      - bytes: Wire-format DNS response.
-
-    This helper reuses DNSUDPHandler's class-level configuration (cache,
-    plugins, upstreams, DNSSEC knobs, and optional StatsCollector) so that
-    TCP/DoT/DoH and other non-UDP callers share the same behavior and
-    statistics pipeline.
-
-    Example:
-      >>> resp = resolve_query_bytes(query_bytes, '127.0.0.1')
+      - _ResolveCoreResult with final wire bytes and metadata.
     """
     import time as _time  # Local import to avoid impacting module import time
 
@@ -385,6 +413,7 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
     t0 = _time.perf_counter() if stats is not None else None
 
     try:
+        rcode_name = "UNKNOWN"
         req = DNSRecord.parse(data)
         q = req.questions[0]
         qname = str(q.qname).rstrip(".")
@@ -396,7 +425,9 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
             try:
                 qtype_name = QTYPE.get(qtype, str(qtype))
                 stats.record_query(client_ip, qname, qtype_name)
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
         # Pre plugins
@@ -416,9 +447,62 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                             qtype_name = QTYPE.get(qtype, str(qtype))
                             try:
                                 # Pre-plugin deny bypasses cache; count it as
-                                # a cache_null response.
-                                stats.record_cache_null(qname)
-                            except Exception:  # pragma: no cover
+                                # a cache_null response and bump the
+                                # cache_deny_pre total for live counters.
+                                stats.record_cache_null(qname, status="deny_pre")
+                            except (
+                                Exception
+                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                                pass
+                            # When plugins provide a decision.stat label,
+                            # mirror it into cache statistics so the HTML
+                            # dashboard can expose per-decision tallies.
+                            try:
+                                stat_label = getattr(decision, "stat", None)
+                                if stat_label:
+                                    stats.record_cache_stat(str(stat_label))
+                            except (
+                                Exception
+                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                                pass
+                            # Also record per-plugin pre-deny totals so
+                            # stats.totals exposes pre_deny_<name> keys. Prefer
+                            # the originating plugin instance label when
+                            # available, falling back to alias/class naming.
+                            try:
+                                label_suffix = getattr(decision, "plugin_label", None)
+                                if not label_suffix:
+                                    plugin_cls = getattr(
+                                        decision, "plugin", None
+                                    ) or type(p)
+                                    plugin_name = getattr(
+                                        plugin_cls, "__name__", "plugin"
+                                    ).lower()
+                                    aliases = []
+                                    try:
+                                        aliases = list(
+                                            getattr(
+                                                plugin_cls, "get_aliases", lambda: []
+                                            )()
+                                        )
+                                    except (
+                                        Exception
+                                    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                                        aliases = []
+                                    if aliases:
+                                        label_suffix = str(aliases[0]).strip().lower()
+                                    else:
+                                        label_suffix = plugin_name
+
+                                short = str(label_suffix).strip()
+                                if short:
+                                    label = f"pre_deny_{short}"
+                                else:
+                                    label = "pre_deny_plugin"
+                                stats.record_cache_pre_plugin(label)
+                            except (
+                                Exception
+                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                                 pass
                             stats.record_response_rcode("NXDOMAIN", qname)
                             stats.record_query_result(
@@ -432,9 +516,24 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                                 first=None,
                                 result={"source": "pre_plugin", "action": "deny"},
                             )
-                        except Exception:  # pragma: no cover
+                        except (
+                            Exception
+                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                             pass
-                    return wire
+                    if stats is not None and t0 is not None:
+                        try:
+                            t1 = _time.perf_counter()
+                            stats.record_latency(t1 - t0)
+                        except (
+                            Exception
+                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                            pass
+                    return _ResolveCoreResult(
+                        wire=wire,
+                        dnssec_status=None,
+                        upstream_id=None,
+                        rcode_name="NXDOMAIN",
+                    )
                 if decision.action == "override" and decision.response is not None:
                     wire = _set_response_id(decision.response, req.header.id)
                     if stats is not None:
@@ -445,9 +544,61 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                             )
                             try:
                                 # Pre-plugin override also bypasses cache; count
-                                # it as a cache_null response.
-                                stats.record_cache_null(qname)
-                            except Exception:  # pragma: no cover
+                                # it as a cache_null response and bump the
+                                # cache_override_pre total for live counters.
+                                stats.record_cache_null(qname, status="override_pre")
+                            except (
+                                Exception
+                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                                pass
+                            # Mirror any decision.stat label into cache stats
+                            # so per-decision tallies are available in Totals.
+                            try:
+                                stat_label = getattr(decision, "stat", None)
+                                if stat_label:
+                                    stats.record_cache_stat(str(stat_label))
+                            except (
+                                Exception
+                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                                pass
+                            # Also record per-plugin pre-override totals so
+                            # stats.totals exposes pre_override_<name>. Prefer
+                            # the originating plugin instance label when
+                            # available, falling back to alias/class naming.
+                            try:
+                                label_suffix = getattr(decision, "plugin_label", None)
+                                if not label_suffix:
+                                    plugin_cls = getattr(
+                                        decision, "plugin", None
+                                    ) or type(p)
+                                    plugin_name = getattr(
+                                        plugin_cls, "__name__", "plugin"
+                                    ).lower()
+                                    aliases = []
+                                    try:
+                                        aliases = list(
+                                            getattr(
+                                                plugin_cls, "get_aliases", lambda: []
+                                            )()
+                                        )
+                                    except (
+                                        Exception
+                                    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                                        aliases = []
+                                    if aliases:
+                                        label_suffix = str(aliases[0]).strip().lower()
+                                    else:
+                                        label_suffix = plugin_name
+
+                                short = str(label_suffix).strip()
+                                if short:
+                                    label = f"pre_override_{short}"
+                                else:
+                                    label = "pre_override_plugin"
+                                stats.record_cache_pre_plugin(label)
+                            except (
+                                Exception
+                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                                 pass
                             stats.record_response_rcode(rcode_name, qname)
 
@@ -477,9 +628,24 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                                 first=str(first) if first is not None else None,
                                 result=result,
                             )
-                        except Exception:  # pragma: no cover
+                        except (
+                            Exception
+                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                             pass
-                    return wire
+                    if stats is not None and t0 is not None:
+                        try:
+                            t1 = _time.perf_counter()
+                            stats.record_latency(t1 - t0)
+                        except (
+                            Exception
+                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                            pass
+                    return _ResolveCoreResult(
+                        wire=wire,
+                        dnssec_status=None,
+                        upstream_id=None,
+                        rcode_name=rcode_name,
+                    )
                 if decision.action == "allow":
                     # Explicit allow: stop evaluating further pre plugins but
                     # continue normal resolution (cache/upstream).
@@ -521,15 +687,33 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                         first=str(first) if first is not None else None,
                         result=result,
                     )
-                except Exception:  # pragma: no cover
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                     pass
-            return _set_response_id(cached, req.header.id)
+            wire = _set_response_id(cached, req.header.id)
+            if stats is not None and t0 is not None:
+                try:
+                    t1 = _time.perf_counter()
+                    stats.record_latency(t1 - t0)
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    pass
+            return _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=None,
+                rcode_name=rcode_name,
+            )
 
         # Cache miss
         if stats is not None:
             try:
                 stats.record_cache_miss(qname)
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
         # Decide between recursive resolver mode and classic forwarding.
@@ -589,93 +773,80 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                         max_depth=int(r_max_depth),
                         now_ms=None,
                     )
-
-                    reply, _trace = resolve_iterative(
-                        qname,
-                        qtype,
-                        cfg=r_cfg,
-                        cache=cache_obj,
-                        transports=transports,
-                    )
-                    reason = "ok"
-            except Exception:  # pragma: no cover - defensive fallback
-                resolver_mode = "forward"
-
-        if resolver_mode != "recursive":
-            # Forward via upstreams when recursive mode is disabled or
-            # unavailable. Existing behaviour is preserved.
-            upstreams = ctx.upstream_candidates or DNSUDPHandler.upstream_addrs
-            if not upstreams:
-                r = req.reply()
-                r.header.rcode = RCODE.SERVFAIL
-                wire = _set_response_id(r.pack(), req.header.id)
-                if stats is not None:
-                    try:
-                        stats.record_response_rcode("SERVFAIL", qname)
-                        qtype_name = QTYPE.get(qtype, str(qtype))
-                        stats.record_query_result(
-                            client_ip=client_ip,
-                            qname=qname,
-                            qtype=qtype_name,
-                            rcode="SERVFAIL",
-                            upstream_id=None,
-                            status="no_upstreams",
-                            error="no upstreams configured",
-                            first=None,
-                            result={"source": "server", "error": "no_upstreams"},
-                        )
-                    except Exception:  # pragma: no cover
-                        pass
-                return wire
-
-            # EDNS/DNSSEC adjustments (mirror DNSUDPHandler behavior)
-            try:
-                mode = str(DNSUDPHandler.dnssec_mode).lower()
-                if mode in ("ignore", "passthrough", "validate"):
-                    # Use instance-like helper by constructing a temp handler
-                    dummy = type("_H", (), {})()
-                    dummy.dnssec_mode = DNSUDPHandler.dnssec_mode
-                    dummy.edns_udp_payload = DNSUDPHandler.edns_udp_payload
-
-                    def _ensure(req):
-                        # Inline simplified ensure to avoid method binding
-                        opt_idx = None
-                        for idx, rr in enumerate(getattr(req, "ar", []) or []):
-                            if rr.rtype == QTYPE.OPT:
-                                opt_idx = idx
-                                break
-                        flags = _edns_flags_for_mode(dummy.dnssec_mode)
-                        opt_rr = RR(
-                            rname=".",
-                            rtype=QTYPE.OPT,
-                            rclass=int(dummy.edns_udp_payload),
-                            ttl=0,
-                            rdata=EDNS0(flags=flags),
-                        )
-                        if opt_idx is None:
-                            req.add_ar(opt_rr)
-                        else:
-                            req.ar[opt_idx] = opt_rr
-
-                    _ensure(req)
-            except Exception:  # pragma: no cover
-                pass  # pragma: no cover
-
-            # Forward with failover
-            upstream_id: Optional[str] = None
-            reply, used_upstream, reason = send_query_with_failover(
-                req, upstreams, DNSUDPHandler.timeout_ms, qname, qtype
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    pass
+            if stats is not None and t0 is not None:
+                try:
+                    t1 = _time.perf_counter()
+                    stats.record_latency(t1 - t0)
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    pass
+            return _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=None,
+                rcode_name="SERVFAIL",
             )
 
-        # Record upstream result
+        # EDNS/DNSSEC adjustments (mirror DNSUDPHandler behavior).
+        # Reuse DNSUDPHandler._ensure_edns so tests that monkeypatch that helper
+        # continue to observe calls when resolving via _resolve_core.
+        try:
+            mode = str(getattr(DNSUDPHandler, "dnssec_mode", "ignore")).lower()
+            if mode in ("ignore", "passthrough", "validate"):
+                handler = type("_H", (), {})()
+                handler.dnssec_mode = DNSUDPHandler.dnssec_mode
+                handler.edns_udp_payload = getattr(
+                    DNSUDPHandler, "edns_udp_payload", 1232
+                )
+                ensure = getattr(DNSUDPHandler, "_ensure_edns", None)
+                if callable(ensure):
+                    ensure(handler, req)
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+
+        # Forward with failover. Prefer DNSUDPHandler._forward_with_failover_helper
+        # so tests that monkeypatch that helper continue to observe calls when
+        # resolving via _resolve_core.
+        upstream_id: Optional[str] = None
+        timeout_ms = getattr(DNSUDPHandler, "timeout_ms", 2000)
+        forward = getattr(DNSUDPHandler, "_forward_with_failover_helper", None)
+        if callable(forward):
+            handler = type("_H", (), {})()
+            handler.timeout_ms = timeout_ms
+            reply, used_upstream, reason = forward(
+                handler, req, upstreams, qname, qtype
+            )
+        else:
+            reply, used_upstream, reason = send_query_with_failover(
+                req, upstreams, timeout_ms, qname, qtype
+            )
+
+        # Record upstream result, even when all upstreams ultimately fail.
         if stats is not None and used_upstream:
             try:
                 host = str(used_upstream.get("host", ""))
                 port = int(used_upstream.get("port", 0))
-                upstream_id = f"{host}:{port}" if host or port else host or "unknown"
+                # For DoH-style upstreams identified by URL, prefer that as the
+                # upstream_id so stats can distinguish endpoints consistently.
+                url = str(used_upstream.get("url", "")).strip()
+                if url:
+                    upstream_id = url
+                else:
+                    upstream_id = (
+                        f"{host}:{port}" if host or port else host or "unknown"
+                    )
                 outcome = "success" if reason == "ok" else str(reason)
                 stats.record_upstream_result(upstream_id, outcome)
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
         if reply is None:
@@ -688,7 +859,9 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                     if upstream_id:
                         try:
                             stats.record_upstream_rcode(upstream_id, "SERVFAIL")
-                        except Exception:  # pragma: no cover
+                        except (
+                            Exception
+                        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                             pass
                     qtype_name = QTYPE.get(qtype, str(qtype))
                     status = str(reason or "all_failed")
@@ -707,9 +880,16 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                             "error": "all_upstreams_failed",
                         },
                     )
-                except Exception:  # pragma: no cover
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                     pass
-            return wire
+            return _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=upstream_id,
+                rcode_name="SERVFAIL",
+            )
 
         # Post plugins
         ctx2 = PluginContext(client_ip=client_ip)
@@ -735,6 +915,66 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
         # Cache store positive answers, negative responses (NXDOMAIN/NODATA), and
         # delegations/referrals using TTLs derived from SOA/NS records where
         # possible, following RFC 2308 guidance.
+
+        # DNSSEC classification for non-UDP transports (TCP/DoT/DoH) reusing the
+        # same semantics as the UDP handler. We classify responses as
+        # secure/insecure/indeterminate/bogus and, for local validation, may
+        # convert bogus answers into SERVFAIL.
+        dnssec_status = None
+        try:
+            mode_val = str(getattr(DNSUDPHandler, "dnssec_mode", "ignore")).lower()
+            if mode_val == "validate":
+                validation = str(
+                    getattr(DNSUDPHandler, "dnssec_validation", "upstream_ad")
+                ).lower()
+                if validation == "local":
+                    try:
+                        from .dnssec_validate import classify_response_local
+
+                        dnssec_status = classify_response_local(
+                            qname,
+                            qtype,
+                            out,
+                            udp_payload_size=getattr(
+                                DNSUDPHandler, "edns_udp_payload", 1232
+                            ),
+                        )
+                    except (
+                        Exception
+                    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                        dnssec_status = "indeterminate"
+                else:
+                    try:
+                        tmp = DNSRecord.parse(out)
+                        validated = getattr(tmp.header, "ad", 0) == 1
+                    except (
+                        Exception
+                    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                        validated = False
+                    dnssec_status = "secure" if validated else "insecure"
+
+                # Enforce policy: SERVFAIL on locally validated bogus.
+                if (
+                    dnssec_status == "bogus"
+                    and mode_val == "validate"
+                    and validation == "local"
+                ):
+                    r = req.reply()
+                    r.header.rcode = RCODE.SERVFAIL
+                    out = r.pack()
+
+                if stats is not None and dnssec_status is not None:
+                    try:
+                        stats.record_dnssec_status(dnssec_status)
+                    except (
+                        Exception
+                    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                        pass
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            dnssec_status = None
+
         try:
             r = DNSRecord.parse(out)
             rcode = r.header.rcode
@@ -770,12 +1010,15 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
 
             if ttl is not None and ttl > 0:
                 DNSUDPHandler.cache.set(cache_key, int(ttl), out)
-        except Exception:  # pragma: no cover
-            pass  # pragma: no cover
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
         wire = _set_response_id(out, req.header.id)
 
         # Record response rcode and append to persistent query_log when enabled.
+        rcode_name = "UNKNOWN"
         if stats is not None:
             try:
                 parsed = DNSRecord.parse(wire)
@@ -784,7 +1027,9 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                 if upstream_id:
                     try:
                         stats.record_upstream_rcode(upstream_id, rcode_name)
-                    except Exception:  # pragma: no cover
+                    except (
+                        Exception
+                    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                         pass
 
                 answers = [
@@ -798,6 +1043,8 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                 ]
                 first = answers[0]["rdata"] if answers else None
                 result = {"source": "upstream", "answers": answers}
+                if dnssec_status is not None:
+                    result["dnssec_status"] = dnssec_status
                 qtype_name = QTYPE.get(qtype, str(qtype))
                 status = "ok" if rcode_name == "NOERROR" else "error"
                 stats.record_query_result(
@@ -811,11 +1058,29 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                     first=str(first) if first is not None else None,
                     result=result,
                 )
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
-        return wire
+        # Latency tracking shared across all transports
+        if stats is not None and t0 is not None:
+            try:
+                t1 = _time.perf_counter()
+                stats.record_latency(t1 - t0)
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass
+
+        return _ResolveCoreResult(
+            wire=wire,
+            dnssec_status=dnssec_status,
+            upstream_id=upstream_id,
+            rcode_name=rcode_name,
+        )
     except Exception as e:
+        # Outer exception handler: synthesize SERVFAIL and record stats.
         try:
             req = DNSRecord.parse(data)
             r = req.reply()
@@ -840,24 +1105,56 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
                         first=None,
                         result={"source": "server", "error": "unhandled_exception"},
                     )
-                except Exception:  # pragma: no cover
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                     pass
-            return wire
+            if stats is not None and t0 is not None:
+                try:
+                    t1 = _time.perf_counter()
+                    stats.record_latency(t1 - t0)
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    pass
+            return _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=None,
+                rcode_name="SERVFAIL",
+            )
         except Exception:
-            return data  # fallback worst-case
-    finally:
-        # Latency tracking shared across all transports
-        if stats is not None and t0 is not None:
-            try:
-                t1 = _time.perf_counter()
-                stats.record_latency(t1 - t0)
-            except Exception:  # pragma: no cover
-                pass
+            # Worst-case fallback
+            return _ResolveCoreResult(
+                wire=data,
+                dnssec_status=None,
+                upstream_id=None,
+                rcode_name="UNKNOWN",
+            )
+
+
+def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
+    """Resolve a single DNS wire query and return wire response.
+
+    Inputs:
+      - data: Wire-format DNS query bytes.
+      - client_ip: String client IP for plugin context, logging, and statistics.
+    Outputs:
+      - bytes: Wire-format DNS response.
+
+    This helper reuses DNSUDPHandler's class-level configuration (cache,
+    plugins, upstreams, DNSSEC knobs, and optional StatsCollector) so that
+    TCP/DoT/DoH and other non-UDP callers share the same behavior and
+    statistics pipeline.
+
+    Example:
+      >>> resp = resolve_query_bytes(query_bytes, '127.0.0.1')
+    """
+    return _resolve_core(data, client_ip).wire
 
 
 class DNSServer:
-    """
-    A basic DNS server.
+    """A basic UDP DNS server wrapper.
 
     Example use:
         >>> from foghorn.server import DNSServer
@@ -885,9 +1182,9 @@ class DNSServer:
         *,
         dnssec_mode: str = "ignore",
         edns_udp_payload: int = 1232,
+        dnssec_validation: str = "upstream_ad",
     ) -> None:
-        """
-        Initializes the DNSServer.
+        """Initialize a UDP DNSServer.
 
         Inputs:
             host: The host to listen on.
@@ -898,47 +1195,65 @@ class DNSServer:
             timeout_ms: The timeout for upstream queries (milliseconds).
             min_cache_ttl: Minimum cache TTL in seconds applied to all cached responses.
             stats_collector: Optional StatsCollector for recording metrics.
-
-        Outputs:
-            None
-
-        Uses socketserver.ThreadingUDPServer for concurrent request handling.
-
-        Example:
-            >>> from foghorn.server import DNSServer
-            >>> upstreams = [{'host': '8.8.8.8', 'port': 53}]
-            >>> server = DNSServer("127.0.0.1", 5353, upstreams, [], 2.0, 2000, 60)
-            >>> server.server.server_address
-            ('127.0.0.1', 5353)
         """
-        DNSUDPHandler.upstream_addrs = upstreams  # pragma: no cover
-        DNSUDPHandler.plugins = plugins  # pragma: no cover
-        DNSUDPHandler.timeout = timeout  # pragma: no cover
-        DNSUDPHandler.timeout_ms = timeout_ms  # pragma: no cover
-        DNSUDPHandler.min_cache_ttl = max(0, int(min_cache_ttl))  # pragma: no cover
-        DNSUDPHandler.stats_collector = stats_collector  # pragma: no cover
+        DNSUDPHandler.upstream_addrs = upstreams  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        DNSUDPHandler.plugins = plugins  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        DNSUDPHandler.timeout = timeout  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        DNSUDPHandler.timeout_ms = timeout_ms  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        DNSUDPHandler.min_cache_ttl = max(
+            0, int(min_cache_ttl)
+        )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        DNSUDPHandler.stats_collector = stats_collector  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         DNSUDPHandler.dnssec_mode = str(dnssec_mode)
+        DNSUDPHandler.dnssec_validation = str(dnssec_validation)
         try:
             DNSUDPHandler.edns_udp_payload = max(512, int(edns_udp_payload))
         except Exception:
             DNSUDPHandler.edns_udp_payload = 1232
         self.server = socketserver.ThreadingUDPServer(
             (host, port), DNSUDPHandler
-        )  # pragma: no cover
+        )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
         # Ensure request handler threads do not block shutdown
-        self.server.daemon_threads = True  # pragma: no cover
-        logger.debug("DNS UDP server bound to %s:%d", host, port)  # pragma: no cover
+        self.server.daemon_threads = True  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        logger.debug(
+            "DNS UDP server bound to %s:%d", host, port
+        )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
-    def serve_forever(self):
-        """
-        Starts the server and listens for requests.
+    def serve_forever(self) -> None:
+        """Start the UDP server loop and listen for requests.
 
-        Example use:
-            This method is typically run in a separate thread for testing.
-            See the DNSServer class docstring for an example.
+        Inputs:
+          - None
+        Outputs:
+          - None; runs until shutdown is requested or KeyboardInterrupt occurs.
         """
-        try:  # pragma: no cover
-            self.server.serve_forever()  # pragma: no cover
-        except KeyboardInterrupt:  # pragma: no cover
-            pass  # pragma: no cover
+        try:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            self.server.serve_forever()  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        except (
+            KeyboardInterrupt
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+
+    def stop(self) -> None:
+        """Request graceful shutdown and close the underlying UDP socket.
+
+        Inputs:
+          - None
+        Outputs:
+          - None; best-effort shutdown suitable for use from signal handlers.
+        """
+        try:
+            # First ask the ThreadingUDPServer loop to stop accepting requests.
+            self.server.shutdown()
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+            logger.exception("Error while shutting down UDP server")
+        try:
+            # Then close the socket so resources are released promptly.
+            self.server.server_close()
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+            logger.exception("Error while closing UDP server socket")

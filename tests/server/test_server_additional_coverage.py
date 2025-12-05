@@ -52,7 +52,9 @@ class _Stats:
     def record_cache_miss(self, *a):
         self.calls.append(("record_cache_miss", a))
 
-    def record_cache_null(self, *a):
+    def record_cache_null(self, *a, **k):
+        # Accept optional keyword arguments (e.g., status="deny_pre") to mirror
+        # StatsCollector.record_cache_null while only tracking the call kind here.
         self.calls.append(("record_cache_null", a))
 
     def record_response_rcode(self, *a):

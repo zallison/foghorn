@@ -34,14 +34,16 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                 if len(hdr) != 2:
                     break
                 ln = int.from_bytes(hdr, "big")
-                if ln <= 0:  # pragma: nocover - network error
+                if ln <= 0:  # pragma: no cover - network error
                     break
                 body = _recv_exact(sock, ln)
-                if len(body) != ln:  # pragma: nocover - network error
+                if len(body) != ln:  # pragma: no cover - network error
                     break
                 resp = self.resolver(body, peer_ip)
                 sock.sendall(len(resp).to_bytes(2, "big") + resp)
-        except Exception:  # pragma: no cover
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             pass
 
 
@@ -72,8 +74,10 @@ def serve_tcp_threaded(
     finally:
         try:
             server.server_close()
-        except Exception:  # pragma: no cover
-            pass  # pragma: no cover
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
 
 async def _read_exact(reader: asyncio.StreamReader, n: int) -> bytes:
@@ -167,16 +171,22 @@ async def _handle_conn(
             # Write back
             writer.write(len(response).to_bytes(2, "big") + response)
             await writer.drain()
-    except asyncio.TimeoutError:  # pragma: no cover
-        pass  # pragma: no cover
-    except Exception:  # pragma: no cover
-        pass  # pragma: no cover
+    except (
+        asyncio.TimeoutError
+    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
     finally:
         try:
             writer.close()
             await writer.wait_closed()
-        except Exception:  # pragma: no cover
-            pass  # pragma: no cover
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
 
 async def serve_tcp(

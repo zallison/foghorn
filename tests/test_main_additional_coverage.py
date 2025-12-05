@@ -584,12 +584,7 @@ def test_sighup_with_udp_enabled_exits_cleanly(monkeypatch, caplog):
         """
 
         def __init__(self, *a: Any, **kw: Any) -> None:
-            # Expose .server with shutdown/server_close so main()'s teardown
-            # path can call them without error.
-            self.server = SimpleNamespace(
-                shutdown=lambda: None,
-                server_close=lambda: None,
-            )
+            self.stop_calls = 0
 
         def serve_forever(self) -> None:
             handler = captured["sighup"]
@@ -597,6 +592,10 @@ def test_sighup_with_udp_enabled_exits_cleanly(monkeypatch, caplog):
             # Invoke the handler to trigger coordinated shutdown; do not
             # raise so that udp_error remains None and exit_code stays 0.
             handler(None, None)
+
+        def stop(self) -> None:
+            # Track that stop() was invoked without affecting control flow.
+            self.stop_calls += 1
 
     monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)

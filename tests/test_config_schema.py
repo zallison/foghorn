@@ -115,7 +115,9 @@ def test_get_default_schema_path_last_resort_uses_project_root(monkeypatch) -> N
     assert p == expected
 
 
-def test_validate_config_schema_loading_errors_are_best_effort(monkeypatch, caplog) -> None:
+def test_validate_config_schema_loading_errors_are_best_effort(
+    monkeypatch, caplog
+) -> None:
     """Brief: validate_config logs schema loading failures and skips validation.
 
     Inputs:

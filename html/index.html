@@ -60,7 +60,7 @@
 		<section class="fh-pane fh-pane-left">
 			<div class="fh-pane-header">
 				<h2 class="fh-pane-title">Statistics</h2>
-				<p class="fh-pane-help">Live snapshot from <code>/stats</code>.</p>
+				<p class="fh-pane-help">Live snapshot from <code>/api/v1/stats</code>.</p>
 			</div>
 			<div id="stats-groups" class="fh-stats-groups">
 			</div>
@@ -178,6 +178,8 @@
 				cache_hits: 'Queries answered directly from the cache.',
 				cache_misses: 'Queries that required contacting upstream servers.',
 				cache_null: 'Responses generated directly by plugins before cache or upstream lookup.',
+				cache_deny_pre: 'Pre-plugin deny decisions that bypassed cache (e.g., filtering plugins).',
+				cache_override_pre: 'Pre-plugin overrides that bypassed cache (e.g., synthetic responses from plugins).',
 				min_ms: 'Fastest observed query latency in milliseconds.',
 				max_ms: 'Slowest observed query latency in milliseconds.',
 				avg_ms: 'Average (mean) query latency in milliseconds.',
@@ -1027,8 +1029,24 @@
 				if (Object.keys(meta).length) {
 					appendDictGroup('Meta', meta);
 				}
-				appendProcessGroup(data.system)
-				appendDictGroup('Totals', data.totals || {});
+				appendProcessGroup(data.system);
+
+				// For Totals, hide certain internal-pre cache counters from the UI.
+				var totalsForDisplay = {};
+				if (data.totals && typeof data.totals === 'object') {
+					Object.keys(data.totals).forEach(function (key) {
+						if (
+							key === 'cache_deny_pre' ||
+							key === 'cache_override_pre' ||
+							key === 'cache_null'
+						) {
+							return;
+						}
+						totalsForDisplay[key] = data.totals[key];
+					});
+				}
+
+				appendDictGroup('Totals', totalsForDisplay);
 				appendUpstreamsGroup(data.upstreams || {}, data.upstream_rcodes || {});
 				appendUpstreamQtypesGroup(data.upstream_qtypes || {});
 				appendDictGroup('Query types', data.qtypes || {});
@@ -1061,7 +1079,7 @@
 			}
 
 			function loadStats() {
-				fetchJson('/stats')
+				fetchJson('/api/v1/stats')
 					.then(function (data) {
 						renderStats(data);
 					})
@@ -1074,7 +1092,7 @@
 				if (raw === undefined) {
 					raw = 0;
 				}
-				var url = '/config';
+				var url = '/api/v1/config';
 				if (raw !== 0 || isEditing) {
 					url += '/raw';
 				}
@@ -1180,7 +1198,7 @@
 					return;
 				}
 
-				fetch('/config/save', {
+				fetch('/api/v1/config/save', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({ raw_yaml: yamlText }),

@@ -1,0 +1,108 @@
+# Foghorn example: RateLimit plugin
+# Adaptive or fixed ("dumb") rate limiting for different deployment sizes.
+#
+# This file is intentionally simple and shows a single active profile plus
+# commented variants. To use it, copy the relevant plugin block into your main
+# config or run Foghorn directly with this file and adjust db_path as needed.
+
+listen:
+  udp:
+    enabled: true
+    host: 127.0.0.1
+    port: 5333
+
+upstream:
+  - host: 1.1.1.1
+    port: 53
+
+# ---------------------------------------------------------------------------
+# Profile 1: solo user (single workstation)
+# ---------------------------------------------------------------------------
+# Key idea:
+#   - mode=per_domain: learn normal rates per base domain.
+#   - Quick warmup; moderate bursts allowed; relatively low global cap.
+#
+# Usage: best when Foghorn runs locally on your own machine.
+
+plugins:
+  - module: rate_limit  # RateLimitPlugin alias
+    name: localhost_ratelimit
+    config:
+      mode: per_domain
+
+      # On-disk store for learned profiles
+      db_path: ./config/var/ratelimit-solo.db # Default: in memory.
+
+      # Learning window and warmup
+      window_seconds: 10 # Default: 10
+      warmup_windows: 3  # Default: 6
+      alpha: 0.4         # Default: 0.2
+      alpha_down: 0.1    # Default: ${alpha}
+      # Optional separate EWMA factor when the rate drops (slower ramp-down)
+
+      # Enforcement thresholds
+      burst_factor: 5.0    # Default: 3
+      min_enforce_rps: 4.0 # Default: 50
+      global_max_rps: 50.0 # Default:  5,000
+
+      # To turn this into a fixed ("dumb") limiter at ~100 RPS per key, set:
+      #   min_enforce_rps: 100.0
+      #   global_max_rps: 100.0
+
+      # How to answer when a query is rate limited
+      deny_response: refused
+
+      # Target selection is handled at the plugin level; see BasePlugin docs.
+
+# ---------------------------------------------------------------------------
+# Profile 2: home network (small LAN)
+# ---------------------------------------------------------------------------
+# Example only. Enable by copying or adapting into your main config.
+#
+# Key idea:
+#   - mode=per_client_domain: one device + one domain is the unit being limited.
+#   - Slightly longer warmup and higher caps than solo user.
+
+#  - module: rate_limit
+#    name: homenetwork_ratelimit
+#    config:
+#      mode: per_client_domain
+#      db_path: ./config/var/ratelimit-home.db
+#
+#      window_seconds: 10
+#      warmup_windows: 6
+#      alpha: 0.3
+#
+#      burst_factor: 4.0
+#      min_enforce_rps: 5.0
+#      global_max_rps: 200.0
+#
+#      deny_response: servfail
+#
+
+# ---------------------------------------------------------------------------
+# Profile 3: small/medium business (SMB)
+# ---------------------------------------------------------------------------
+# Example only. Enable by copying or adapting into your main config.
+#
+# Key idea:
+#   - mode=per_client_domain with longer warmup and higher limits.
+#   - Suitable for office subnets or branch networks.
+
+#  - module: rate_limit
+#    name: ratelimit_rule_65
+#    config:
+#      mode: per_client_domain
+#      db_path: ./config/var/ratelimit-smb.db
+#
+#      window_seconds: 30
+#      warmup_windows: 8
+#      alpha: 0.2
+#
+#      burst_factor: 3.0
+#      min_enforce_rps: 10.0
+#      global_max_rps: 500.0
+#
+#      deny_response: refused
+#
+#      # Target selection is handled at the plugin level; see BasePlugin docs.
