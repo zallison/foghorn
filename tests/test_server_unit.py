@@ -194,13 +194,14 @@ def test_dnsserver_edns_udp_payload_config_and_fallback(monkeypatch):
     """
 
     import foghorn.server as srv_mod
+    import foghorn.udp_server as udp_srv_mod
 
     class _DummyServer:
         def __init__(self, *a, **kw):
             self.daemon_threads = False
 
-    # Avoid binding real UDP sockets in tests
-    monkeypatch.setattr(srv_mod.socketserver, "ThreadingUDPServer", _DummyServer)
+    # Avoid binding real UDP sockets in tests by patching the UDP server module
+    monkeypatch.setattr(udp_srv_mod.socketserver, "ThreadingUDPServer", _DummyServer)
 
     # Normal numeric edns_udp_payload
     srv_mod.DNSUDPHandler.edns_udp_payload = 0

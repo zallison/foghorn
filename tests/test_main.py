@@ -173,7 +173,11 @@ def test_main_starts_server_and_handles_keyboardinterrupt(monkeypatch):
             timeout_ms,
             min_cache_ttl,
             stats_collector=None,
+            **_extra,
         ):
+            # Capture the core positional arguments; ignore any additional
+            # keyword arguments (e.g., dnssec_mode, edns_udp_payload,
+            # dnssec_validation) that main() may pass through to DNSServer.
             self.args = (
                 host,
                 port,

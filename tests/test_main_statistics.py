@@ -57,6 +57,10 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
         def __init__(self, **kw):
             constructed["collector_kwargs"] = kw
 
+        def warm_load_from_store(self) -> None:
+            """Test stub: emulate real collector's warm_load_from_store()."""
+            constructed["collector_warm_loaded"] = True
+
     class DummyReporter:
         def __init__(
             self,
@@ -97,6 +101,7 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
             timeout_ms,
             min_cache_ttl,
             stats_collector=None,
+            **_extra,
         ):
             constructed["dnserver_kwargs"] = {
                 "stats_collector": stats_collector,
