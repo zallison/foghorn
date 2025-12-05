@@ -141,6 +141,15 @@
         ]
       }
     },
+    "upstream_strategy": {
+      "type": "string",
+      "enum": ["failover", "round_robin", "random"],
+      "default": "failover"
+    },
+    "upstream_max_concurrent": {
+      "type": "integer",
+      "minimum": 1
+    },
     "timeout_ms": { "type": "integer", "minimum": 1 },
     "min_cache_ttl": { "type": "integer", "minimum": 0 },
     "dnssec": {
