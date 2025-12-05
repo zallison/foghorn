@@ -758,11 +758,11 @@ def main(argv: List[str] | None = None) -> int:
             hard_kill_timer.daemon = True
             hard_kill_timer.start()
 
-        # When a UDP server is active, ask socketserver to stop its loop so the
-        # main thread can proceed to the coordinated shutdown logic.
+        # When a UDP server is active, ask it to stop so the main thread can
+        # proceed to the coordinated shutdown logic.
         try:
-            if server is not None and getattr(server, "server", None) is not None:
-                server.server.shutdown()
+            if server is not None and hasattr(server, "stop"):
+                server.stop()
         except Exception:  # pragma: no cover - defensive
             log.exception("Error while requesting UDP server shutdown for %s", reason)
 
@@ -814,6 +814,7 @@ def main(argv: List[str] | None = None) -> int:
     dnssec_cfg = cfg.get("dnssec", {}) or {}
     dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()
     edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
+    dnssec_validation = str(dnssec_cfg.get("validation", "upstream_ad")).lower()
 
     server = None
     udp_thread: threading.Thread | None = None
@@ -830,18 +831,10 @@ def main(argv: List[str] | None = None) -> int:
             timeout_ms=timeout_ms,
             min_cache_ttl=min_cache_ttl,
             stats_collector=stats_collector,
+            dnssec_mode=dnssec_mode,
+            edns_udp_payload=edns_payload,
+            dnssec_validation=dnssec_validation,
         )
-        # Set DNSSEC/EDNS knobs on handler class (keeps DNSServer signature stable)
-        try:
-            from . import server as _server_mod
-
-            _server_mod.DNSUDPHandler.dnssec_mode = dnssec_mode
-            _server_mod.DNSUDPHandler.edns_udp_payload = max(512, int(edns_payload))
-            _server_mod.DNSUDPHandler.dnssec_validation = str(
-                dnssec_cfg.get("validation", "upstream_ad")
-            ).lower()
-        except Exception:  # pragma: no cover
-            pass
 
     # Log startup info
     upstream_info = ", ".join(
@@ -1047,15 +1040,25 @@ def main(argv: List[str] | None = None) -> int:
         # during shutdown.
         if server is not None:
             try:
-                if getattr(server, "server", None) is not None:
-                    try:
-                        server.server.shutdown()
-                    except Exception:
-                        logger.exception("Error while shutting down UDP server")
-                    try:
-                        server.server.server_close()
-                    except Exception:
-                        logger.exception("Error while closing UDP server socket")
+                if hasattr(server, "stop"):
+                    # Preferred path: delegate shutdown/close to the UDP server
+                    # abstraction so all UDP-specific details live in the UDP
+                    # module.
+                    server.stop()
+                else:
+                    # Backwards-compatible path for legacy server stubs that
+                    # expose a .server attribute with shutdown/server_close
+                    # methods (used in tests and older call sites).
+                    inner = getattr(server, "server", None)
+                    if inner is not None:
+                        try:
+                            inner.shutdown()
+                        except Exception:
+                            logger.exception("Error while shutting down UDP server")
+                        try:
+                            inner.server_close()
+                        except Exception:
+                            logger.exception("Error while closing UDP server socket")
             except Exception:
                 logger.exception("Unexpected error during UDP server teardown")
 

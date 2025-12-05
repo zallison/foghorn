@@ -1145,6 +1145,7 @@ class DNSServer:
         *,
         dnssec_mode: str = "ignore",
         edns_udp_payload: int = 1232,
+        dnssec_validation: str = "upstream_ad",
     ) -> None:
         """
         Initializes the DNSServer.
@@ -1178,6 +1179,7 @@ class DNSServer:
         DNSUDPHandler.min_cache_ttl = max(0, int(min_cache_ttl))  # pragma: no cover
         DNSUDPHandler.stats_collector = stats_collector  # pragma: no cover
         DNSUDPHandler.dnssec_mode = str(dnssec_mode)
+        DNSUDPHandler.dnssec_validation = str(dnssec_validation)
         try:
             DNSUDPHandler.edns_udp_payload = max(512, int(edns_udp_payload))
         except Exception:
@@ -1191,17 +1193,36 @@ class DNSServer:
         logger.debug("DNS UDP server bound to %s:%d", host, port)  # pragma: no cover
 
     def serve_forever(self):
-        """
-        Starts the server and listens for requests.
+        """Start the UDP server loop and listen for requests.
 
-        Example use:
-            This method is typically run in a separate thread for testing.
-            See the DNSServer class docstring for an example.
+        Inputs:
+          - None
+        Outputs:
+          - None; runs until shutdown is requested or KeyboardInterrupt occurs.
         """
         try:  # pragma: no cover
             self.server.serve_forever()  # pragma: no cover
         except KeyboardInterrupt:  # pragma: no cover
             pass  # pragma: no cover
+
+    def stop(self) -> None:
+        """Request graceful shutdown and close the underlying UDP socket.
+
+        Inputs:
+          - None
+        Outputs:
+          - None; best-effort shutdown suitable for use from signal handlers.
+        """
+        try:
+            # First ask the ThreadingUDPServer loop to stop accepting requests.
+            self.server.shutdown()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Error while shutting down UDP server")
+        try:
+            # Then close the socket so resources are released promptly.
+            self.server.server_close()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Error while closing UDP server socket")
 
 
 class _UDPHandler(socketserver.BaseRequestHandler):
