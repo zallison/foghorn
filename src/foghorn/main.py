@@ -434,6 +434,12 @@ def main(argv: List[str] | None = None) -> int:
     # Normalize upstream configuration
     upstreams, timeout_ms = normalize_upstream_config(cfg)
 
+    # Upstream selection strategy and concurrency controls
+    upstream_strategy = str(cfg.get("upstream_strategy", "failover")).lower()
+    upstream_max_concurrent = int(cfg.get("upstream_max_concurrent", 1) or 1)
+    if upstream_max_concurrent < 1:
+        upstream_max_concurrent = 1
+
     # Resolver configuration (forward vs recursive) with conservative defaults.
 
     # Hold responses this long, even if the actual ttl is lower.
@@ -860,6 +866,8 @@ def main(argv: List[str] | None = None) -> int:
             dnssec_mode=dnssec_mode,
             edns_udp_payload=edns_payload,
             dnssec_validation=dnssec_validation,
+            upstream_strategy=upstream_strategy,
+            upstream_max_concurrent=upstream_max_concurrent,
         )
 
     # Log startup info
