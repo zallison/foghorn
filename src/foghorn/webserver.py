@@ -37,6 +37,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from .stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
+from .udp_server import DNSUDPHandler
 
 try:
     import psutil  # type: ignore[import]
@@ -1274,6 +1275,107 @@ def create_app(
             "latency": snap.latency_stats,
         }
 
+    @app.get("/api/v1/upstream_status", dependencies=[Depends(auth_dep)])
+    async def get_upstream_status() -> Dict[str, Any]:
+        """Return upstream strategy, concurrency, and lazy health state.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - Dict with keys:
+              * server_time: ISO8601 timestamp.
+              * strategy: current upstream selection strategy.
+              * max_concurrent: maximum upstreams considered per query.
+              * items: list of upstream entries with id, config, state, fail_count,
+                and optional down_until timestamp.
+        """
+
+        cfg = app.state.config or {}
+        upstream_cfg = cfg.get("upstream") or []
+        if not isinstance(upstream_cfg, list):
+            upstream_cfg = []
+
+        health = getattr(DNSUDPHandler, "upstream_health", {}) or {}
+        strategy = str(getattr(DNSUDPHandler, "upstream_strategy", "failover"))
+        try:
+            max_concurrent = int(
+                getattr(DNSUDPHandler, "upstream_max_concurrent", 1) or 1
+            )
+        except Exception:
+            max_concurrent = 1
+        if max_concurrent < 1:
+            max_concurrent = 1
+
+        now = time.time()
+        items: list[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        # First, map configured upstreams to health entries when available.
+        for up in upstream_cfg:
+            if not isinstance(up, dict):
+                continue
+            up_id = DNSUDPHandler._upstream_id(up)
+            if not up_id:
+                continue
+            seen_ids.add(up_id)
+            entry = health.get(up_id) or {}
+            try:
+                fail_count = int(entry.get("fail_count", 0))
+            except Exception:
+                fail_count = 0
+            try:
+                down_until = float(entry.get("down_until", 0.0) or 0.0)
+            except Exception:
+                down_until = 0.0
+            state = "down" if entry and down_until > now else "up"
+
+            # Include a minimal, stable subset of upstream config fields for display.
+            cfg_view = {}
+            for key in ("host", "port", "transport", "url"):
+                if key in up:
+                    cfg_view[key] = up[key]
+
+            items.append(
+                {
+                    "id": up_id,
+                    "config": cfg_view,
+                    "state": state,
+                    "fail_count": fail_count,
+                    "down_until": down_until if down_until else None,
+                }
+            )
+
+        # Include any remaining health-only entries not present in the config list.
+        for up_id, entry in health.items():
+            if up_id in seen_ids or not up_id:
+                continue
+            try:
+                fail_count = int(entry.get("fail_count", 0))
+            except Exception:
+                fail_count = 0
+            try:
+                down_until = float(entry.get("down_until", 0.0) or 0.0)
+            except Exception:
+                down_until = 0.0
+            state = "down" if down_until > now else "up"
+            items.append(
+                {
+                    "id": up_id,
+                    "config": {},
+                    "state": state,
+                    "fail_count": fail_count,
+                    "down_until": down_until if down_until else None,
+                }
+            )
+
+        return {
+            "server_time": _utc_now_iso(),
+            "strategy": strategy,
+            "max_concurrent": max_concurrent,
+            "items": items,
+        }
+
     @app.get("/api/v1/config", dependencies=[Depends(auth_dep)])
     @app.get("/apti/v1/config", dependencies=[Depends(auth_dep)])
     @app.get("/config", dependencies=[Depends(auth_dep)])
@@ -2192,6 +2294,103 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             {"server_time": _utc_now_iso(), "entries": entries},
         )
 
+    def _handle_upstream_status(
+        self,
+    ) -> (
+        None
+    ):  # pragma: no cover - threaded /api/v1/upstream_status mirrors FastAPI endpoint
+        """Brief: Handle GET /api/v1/upstream_status.
+
+        Inputs: none
+        Outputs: None (sends JSON response with upstream health state).
+        """
+
+        if not self._require_auth():
+            return
+
+        cfg = getattr(self._server(), "config", {}) or {}
+        upstream_cfg = cfg.get("upstream") or []
+        if not isinstance(upstream_cfg, list):
+            upstream_cfg = []
+
+        health = getattr(DNSUDPHandler, "upstream_health", {}) or {}
+        strategy = str(getattr(DNSUDPHandler, "upstream_strategy", "failover"))
+        try:
+            max_concurrent = int(
+                getattr(DNSUDPHandler, "upstream_max_concurrent", 1) or 1
+            )
+        except Exception:
+            max_concurrent = 1
+        if max_concurrent < 1:
+            max_concurrent = 1
+
+        now = time.time()
+        items: list[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        for up in upstream_cfg:
+            if not isinstance(up, dict):
+                continue
+            up_id = DNSUDPHandler._upstream_id(up)
+            if not up_id:
+                continue
+            seen_ids.add(up_id)
+            entry = health.get(up_id) or {}
+            try:
+                fail_count = int(entry.get("fail_count", 0))
+            except Exception:
+                fail_count = 0
+            try:
+                down_until = float(entry.get("down_until", 0.0) or 0.0)
+            except Exception:
+                down_until = 0.0
+            state = "down" if entry and down_until > now else "up"
+
+            cfg_view: Dict[str, Any] = {}
+            for key in ("host", "port", "transport", "url"):
+                if key in up:
+                    cfg_view[key] = up[key]
+
+            items.append(
+                {
+                    "id": up_id,
+                    "config": cfg_view,
+                    "state": state,
+                    "fail_count": fail_count,
+                    "down_until": down_until if down_until else None,
+                }
+            )
+
+        for up_id, entry in health.items():
+            if up_id in seen_ids or not up_id:
+                continue
+            try:
+                fail_count = int(entry.get("fail_count", 0))
+            except Exception:
+                fail_count = 0
+            try:
+                down_until = float(entry.get("down_until", 0.0) or 0.0)
+            except Exception:
+                down_until = 0.0
+            state = "down" if down_until > now else "up"
+            items.append(
+                {
+                    "id": up_id,
+                    "config": {},
+                    "state": state,
+                    "fail_count": fail_count,
+                    "down_until": down_until if down_until else None,
+                }
+            )
+
+        payload: Dict[str, Any] = {
+            "server_time": _utc_now_iso(),
+            "strategy": strategy,
+            "max_concurrent": max_concurrent,
+            "items": items,
+        }
+        self._send_json(200, payload)
+
     def _handle_config_save(
         self, body: Dict[str, Any]
     ) -> None:  # pragma: no cover - threaded /config/save mirrors FastAPI endpoint
@@ -2478,6 +2677,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_config_raw_json()
         elif path in {"/logs", "/api/v1/logs"}:
             self._handle_logs(params)
+        elif path == "/api/v1/upstream_status":
+            self._handle_upstream_status()
         elif path == "/api/v1/ratelimit":
             # Rate-limit statistics are derived from config and sqlite profile DBs.
             cfg = getattr(self._server(), "config", None)
