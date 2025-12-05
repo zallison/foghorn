@@ -310,7 +310,9 @@ def _start_doh_server_threaded(
         finally:
             try:
                 httpd.server_close()
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
     thread = threading.Thread(target=_serve, name="foghorn-doh-threaded", daemon=True)
@@ -401,7 +403,9 @@ def start_doh_server(
 
         loop = asyncio.new_event_loop()
         loop.close()
-    except PermissionError as exc:  # pragma: no cover
+    except (
+        PermissionError
+    ) as exc:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         logger.warning(
             "Asyncio loop creation failed for DoH; falling back to threaded HTTP server: %s",
             exc,
@@ -423,7 +427,9 @@ def start_doh_server(
 
     try:
         import uvicorn
-    except Exception as exc:  # pragma: no cover
+    except (
+        Exception
+    ) as exc:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         logger.error("uvicorn not available for DoH: %s; using threaded fallback", exc)
         return _start_doh_server_threaded(
             host,
@@ -453,7 +459,9 @@ def start_doh_server(
     def _runner() -> None:
         try:
             server.run()
-        except Exception:  # pragma: no cover
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.exception("Unhandled exception in DoH server thread")
 
     thread = _threading.Thread(target=_runner, name="foghorn-doh", daemon=True)

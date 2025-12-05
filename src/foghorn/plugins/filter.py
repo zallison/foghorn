@@ -12,12 +12,11 @@ import threading
 import time
 from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
 
-from pydantic import BaseModel, Field
-
 from dnslib import AAAA as RDATA_AAAA
 from dnslib import QTYPE, RCODE
 from dnslib import A as RDATA_A
 from dnslib import DNSRecord
+from pydantic import BaseModel, Field
 
 from foghorn.cache import FoghornTTLCache
 
@@ -31,7 +30,9 @@ class FilterConfig(BaseModel):
 
     Inputs:
       - cache_ttl_seconds: TTL for domain cache.
-      - db_path: Path to blocklist SQLite DB.
+      - db_path: Optional path to blocklist SQLite DB. When omitted or empty,
+        the plugin uses a per-instance in-memory database so that multiple
+        FilterPlugin instances do not share state by default.
       - default: Default policy ("allow" or "deny").
       - ttl: TTL for synthesized responses.
       - deny_response: Policy for deny responses.
@@ -47,7 +48,7 @@ class FilterConfig(BaseModel):
     """
 
     cache_ttl_seconds: int = Field(default=600, ge=0)
-    db_path: str = Field(default="./config/var/blocklist.db")
+    db_path: Optional[str] = Field(default=None)
     default: str = Field(default="deny")
     ttl: int = Field(default=300, ge=0)
     deny_response: str = Field(default="nxdomain")
@@ -143,6 +144,14 @@ class FilterPlugin(BasePlugin):
     def setup(self):
         """
         Initializes the FilterPlugin.  Config has been read.
+
+        Notes:
+            - When ``db_path`` is omitted or empty, this plugin uses an
+              in-memory SQLite database so each FilterPlugin instance has its
+              own isolated allow/deny state by default.
+            - When multiple instances explicitly share the same non-empty
+              ``db_path``, they also share the same underlying table and
+              last-writer-wins semantics apply.
         """
         # super().__init__(**config)
         self._domain_cache = FoghornTTLCache()
@@ -152,7 +161,9 @@ class FilterPlugin(BasePlugin):
         self._db_lock = threading.Lock()
 
         self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 600)  # 10 minutes
-        self.db_path: str = self.config.get("db_path", "./config/var/blocklist.db")
+        raw_db_path = self.config.get("db_path")
+        # None/empty db_path => per-instance in-memory database.
+        self.db_path: str = raw_db_path or ":memory:"
         self.default = self.config.get("default", "deny")
 
         # TTL used when synthesizing A/AAAA responses (e.g., when deny_response="ip")
@@ -207,7 +218,9 @@ class FilterPlugin(BasePlugin):
         for pattern in self.config.get("blocked_patterns", []):
             try:
                 self.blocked_patterns.append(re.compile(pattern, re.IGNORECASE))
-            except re.error as e:  # pragma: no cover
+            except (
+                re.error
+            ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 logger.error("Invalid regex pattern '%s': %s", pattern, e)
 
         # Post-resolve (IP) filtering configuration
@@ -253,7 +266,9 @@ class FilterPlugin(BasePlugin):
                     try:
                         # Validate the replacement IP
                         ipaddress.ip_address(replace_with)
-                    except ValueError as e:  # pragma: no cover
+                    except (
+                        ValueError
+                    ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                         logger.error(
                             "Invalid 'replace_with' IP address '%s' for rule '%s': %s",
                             replace_with,
@@ -283,7 +298,9 @@ class FilterPlugin(BasePlugin):
                     else:
                         self.blocked_ips[ip_addr] = {"action": action}
 
-            except ValueError as e:  # pragma: no cover
+            except (
+                ValueError
+            ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 logger.error("Invalid IP address/network '%s': %s", ip_spec, e)
 
         # Connect DB and initialize table
@@ -339,7 +356,9 @@ class FilterPlugin(BasePlugin):
             self._domain_cache.set(
                 norm_key, int(self.cache_ttl_seconds), b"1" if allowed else b"0"
             )
-        except Exception as e:  # pragma: no cover
+        except (
+            Exception
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.warning(f"exception adding to cache {e}")
 
     def pre_resolve(
@@ -373,8 +392,10 @@ class FilterPlugin(BasePlugin):
                     return PluginDecision(action="skip")
                 else:
                     return self._build_deny_decision_pre(qname, qtype, req, ctx)
-            except Exception:  # pragma: no cover
-                pass  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
         if not self.is_allowed(str(domain).rstrip(".")):
             logger.debug("Domain '%s' blocked (exact match)", qname)
@@ -500,7 +521,9 @@ class FilterPlugin(BasePlugin):
                                     )
                                     modified_records.append(rr)
                                 records_changed = True
-                            except ValueError:  # pragma: no cover
+                            except (
+                                ValueError
+                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                                 logger.error(
                                     "Invalid replacement IP: %s", replace_ip_str
                                 )
@@ -580,7 +603,9 @@ class FilterPlugin(BasePlugin):
         if mode in {"refused", "servfail", "noerror_empty", "nodata"}:
             try:
                 request = DNSRecord.parse(raw_req)
-            except Exception as e:  # pragma: no cover - defensive
+            except (
+                Exception
+            ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 logger.warning(
                     "FilterPlugin: failed to parse request while building deny response: %s",
                     e,
@@ -610,7 +635,9 @@ class FilterPlugin(BasePlugin):
             if ipaddr:
                 try:
                     ipaddress.ip_address(ipaddr)
-                except ValueError:  # pragma: no cover
+                except (
+                    ValueError
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                     logger.error(
                         "FilterPlugin: invalid deny_response IP %r for %s",
                         ipaddr,
@@ -688,7 +715,9 @@ class FilterPlugin(BasePlugin):
                 return PluginDecision(action="deny")
 
             return PluginDecision(action="override", response=response.pack())
-        except Exception as e:  # pragma: no cover
+        except (
+            Exception
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.warning(
                 "FilterPlugin: failed to pack deny response for %s (%s): %s",
                 qname,
@@ -787,7 +816,12 @@ class FilterPlugin(BasePlugin):
         with open(path, "r", encoding="utf-8") as fh:
             for idx, raw in enumerate(fh, start=1):
                 line = raw.strip()
-                if not line or line.startswith("#") or line.startswith("!"):
+                if (
+                    not line
+                    or line.startswith("#")
+                    or line.startswith("!")
+                    or line.startswith("[")
+                ):
                     continue
                 yield idx, line
 

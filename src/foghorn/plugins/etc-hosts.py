@@ -7,9 +7,8 @@ import threading
 import time
 from typing import Dict, Iterable, List, Optional
 
-from pydantic import BaseModel, Field
-
 from dnslib import AAAA, QTYPE, RR, A, DNSHeader, DNSRecord
+from pydantic import BaseModel, Field
 
 try:  # watchdog is used for cross-platform file watching
     from watchdog.events import FileSystemEventHandler
@@ -192,7 +191,9 @@ class EtcHosts(BasePlugin):
             # Include legacy file_path in the set of file paths
             paths.append(os.path.expanduser(str(legacy)))
         if not paths:
-            paths = ["/etc/hosts"]  # pragma: no cover
+            paths = [
+                "/etc/hosts"
+            ]  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         # De-duplicate while preserving order
         paths = list(dict.fromkeys(paths))
         return paths
@@ -633,7 +634,9 @@ class EtcHosts(BasePlugin):
             try:
                 observer.stop()
                 observer.join(timeout=2.0)
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
             self._observer = None
 
@@ -642,14 +645,18 @@ class EtcHosts(BasePlugin):
         if stop_event is not None:
             try:
                 stop_event.set()
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
         poll_thread = getattr(self, "_poll_thread", None)
         if poll_thread is not None:
             try:
                 poll_thread.join(timeout=2.0)
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
             self._poll_thread = None
 
@@ -659,6 +666,8 @@ class EtcHosts(BasePlugin):
         if timer is not None:
             try:
                 timer.cancel()
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
             self._reload_debounce_timer = None

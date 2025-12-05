@@ -4,9 +4,8 @@ import functools
 import logging
 from typing import List, Optional, Union
 
-from pydantic import BaseModel, Field
-
 from dnslib import AAAA, QTYPE, A, DNSRecord
+from pydantic import BaseModel, Field
 
 from foghorn.plugins.base import plugin_aliases
 
@@ -191,7 +190,9 @@ class ExamplesPlugin(BasePlugin):
 
         try:
             name = str(qname).rstrip(".")
-        except Exception:  # pragma: no cover
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             name = str(qname)
 
         if not self._applies(qtype):

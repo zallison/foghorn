@@ -165,11 +165,15 @@ def _validate_plugin_config(plugin_cls: type[BasePlugin], config: dict | None) -
             if callable(method):
                 try:
                     return dict(method())
-                except Exception:  # pragma: no cover - defensive
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                     break
         try:
             return dict(model_instance)
-        except Exception:  # pragma: no cover - defensive
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             return cfg
 
     # Fallback: JSON Schema-based per-plugin validation.
@@ -201,8 +205,10 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
 
     Args:
         plugin_specs: A list where each item is either a dict with keys
-                      {"module": <path-or-alias>, "config": {...}} or a string
-                      alias/dotted path.
+                      {"module": <path-or-alias>, "config": {...}, "name": "..."}
+                      or a string alias/dotted path. When provided, "name" is a
+                      human-friendly label used in place of the plugin class
+                      name when logging statistics or other plugin data.
 
     Returns:
         A list of initialized plugin instances.
@@ -211,10 +217,12 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         >>> from foghorn.plugins.base import BasePlugin
         >>> class MyTestPlugin(BasePlugin):
         ...     pass
-        >>> specs = [{"module": "__main__.MyTestPlugin"}]
+        >>> specs = [{"module": "__main__.MyTestPlugin", "name": "my_test"}]
         >>> plugins = load_plugins(specs)
         >>> isinstance(plugins[0], MyTestPlugin)
         True
+        >>> plugins[0].name
+        'my_test'
         >>> # Using aliases
         >>> plugins = load_plugins(["acl", {"module": "router", "config": {}}])
     """
@@ -224,15 +232,20 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         if isinstance(spec, str):
             module_path = spec
             config = {}
+            plugin_name = None
         else:
             module_path = spec.get("module")
             config = spec.get("config", {})
+            plugin_name = spec.get("name")
         if not module_path:
             continue
 
         plugin_cls = get_plugin_class(module_path, alias_registry)
         validated_config = _validate_plugin_config(plugin_cls, config)
-        plugin = plugin_cls(**validated_config)
+        if plugin_name is not None:
+            plugin = plugin_cls(name=str(plugin_name), **validated_config)
+        else:
+            plugin = plugin_cls(**validated_config)
         plugins.append(plugin)
     return plugins
 
@@ -308,7 +321,9 @@ def run_setup_plugins(plugins: List[BasePlugin]) -> None:
         )
         try:
             plugin.setup()
-        except Exception as e:  # pragma: no cover
+        except (
+            Exception
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.error("Setup for plugin %s failed: %s", name, e, exc_info=True)
             if abort_on_failure:
                 raise RuntimeError(f"Setup for plugin {name} failed") from e
@@ -495,7 +510,7 @@ def main(argv: List[str] | None = None) -> int:
                     "yes",
                     "y",
                     "on",
-                }  # pragma: nocover - best effort
+                }  # pragma: no cover - best effort
 
             # Allow force_rebuild to be controlled from three sources, in
             # increasing precedence order:
@@ -527,13 +542,17 @@ def main(argv: List[str] | None = None) -> int:
                     stats_persistence_store.rebuild_counts_if_needed(
                         force_rebuild=force_rebuild, logger_obj=logger
                     )
-                except Exception as exc:  # pragma: no cover - defensive
+                except (
+                    Exception
+                ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                     logger.error(
                         "Failed to rebuild statistics counts from query_log: %s",
                         exc,
                         exc_info=True,
                     )
-            except Exception as exc:  # pragma: no cover - defensive
+            except (
+                Exception
+            ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 logger.error(
                     "Failed to initialize statistics persistence: %s; continuing without persistence",
                     exc,
@@ -575,7 +594,9 @@ def main(argv: List[str] | None = None) -> int:
         try:
             stats_collector.warm_load_from_store()
             logger.info("Statistics warm-load from SQLite store completed")
-        except Exception as exc:  # pragma: no cover - defensive
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             logger.error(
                 "Failed to warm-load statistics from SQLite store: %s",
                 exc,
@@ -657,7 +678,9 @@ def main(argv: List[str] | None = None) -> int:
                     try:
                         stats_collector.snapshot(reset=True)
                         log.info("%s: statistics reset completed", sig_label)
-                    except Exception as e:  # pragma: no cover - defensive
+                    except (
+                        Exception
+                    ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                         log.error("%s: error during statistics reset: %s", sig_label, e)
                 else:
                     log.info(
@@ -670,7 +693,7 @@ def main(argv: List[str] | None = None) -> int:
                 )
         except (
             Exception
-        ) as e:  # pragma: nocover - defensive: do not block plugin notifications
+        ) as e:  # pragma: no cover - defensive: do not block plugin notifications
             log.error(
                 "%s: unexpected error checking statistics reset config: %s",
                 sig_label,
@@ -688,7 +711,9 @@ def main(argv: List[str] | None = None) -> int:
                 if callable(handler):
                     handler()
                     count += 1
-            except Exception as e:  # pragma: no cover - defensive
+            except (
+                Exception
+            ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 log.error(
                     "%s: plugin %s handler error: %s",
                     sig_label,
@@ -769,12 +794,14 @@ def main(argv: List[str] | None = None) -> int:
             hard_kill_timer.daemon = True
             hard_kill_timer.start()
 
-        # When a UDP server is active, ask socketserver to stop its loop so the
-        # main thread can proceed to the coordinated shutdown logic.
+        # When a UDP server is active, ask it to stop so the main thread can
+        # proceed to the coordinated shutdown logic.
         try:
-            if server is not None and getattr(server, "server", None) is not None:
-                server.server.shutdown()
-        except Exception:  # pragma: no cover - defensive
+            if server is not None and hasattr(server, "stop"):
+                server.stop()
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             log.exception("Error while requesting UDP server shutdown for %s", reason)
 
     def _sighup_handler(_signum, _frame):
@@ -806,25 +833,32 @@ def main(argv: List[str] | None = None) -> int:
     try:
         signal.signal(signal.SIGHUP, _sighup_handler)
         logger.debug("Installed SIGHUP handler for clean shutdown (exit code 0)")
-    except Exception:  # pragma: no cover - defensive
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
         logger.warning("Could not install SIGHUP handler on this platform")
 
     try:
         signal.signal(signal.SIGTERM, _sigterm_handler)
         logger.debug("Installed SIGTERM handler for immediate shutdown (exit code 2)")
-    except Exception:  # pragma: no cover - defensive
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
         logger.warning("Could not install SIGTERM handler on this platform")
 
     try:
         signal.signal(signal.SIGINT, _sigint_handler)
         logger.debug("Installed SIGINT handler for immediate shutdown (exit code 2)")
-    except Exception:  # pragma: no cover - defensive
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
         logger.warning("Could not install SIGINT handler on this platform")
 
     # DNSSEC config (ignore|passthrough|validate)
     dnssec_cfg = cfg.get("dnssec", {}) or {}
     dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()
     edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
+    dnssec_validation = str(dnssec_cfg.get("validation", "upstream_ad")).lower()
 
     server = None
     udp_thread: threading.Thread | None = None
@@ -841,39 +875,10 @@ def main(argv: List[str] | None = None) -> int:
             timeout_ms=timeout_ms,
             min_cache_ttl=min_cache_ttl,
             stats_collector=stats_collector,
+            dnssec_mode=dnssec_mode,
+            edns_udp_payload=edns_payload,
+            dnssec_validation=dnssec_validation,
         )
-        # Set DNSSEC/EDNS and recursive resolver knobs on handler class (keeps
-        # DNSServer signature stable).
-        try:
-            from . import recursive_cache as _recursive_cache_mod
-            from . import recursive_transport as _recursive_transport_mod
-            from . import server as _server_mod
-
-            _server_mod.DNSUDPHandler.dnssec_mode = dnssec_mode
-            _server_mod.DNSUDPHandler.edns_udp_payload = max(512, int(edns_payload))
-            _server_mod.DNSUDPHandler.dnssec_validation = str(
-                dnssec_cfg.get("validation", "upstream_ad")
-            ).lower()
-
-            # Recursive resolver configuration (used when resolver.mode == 'recursive').
-            _server_mod.DNSUDPHandler.recursive_mode = resolver_mode
-            _server_mod.DNSUDPHandler.recursive_timeout_ms = int(resolver_timeout_ms)
-            _server_mod.DNSUDPHandler.recursive_per_try_timeout_ms = int(
-                resolver_per_try_timeout_ms
-            )
-            _server_mod.DNSUDPHandler.recursive_max_depth = int(resolver_max_depth)
-
-            # Lazily initialize shared recursive cache and transport facade if missing.
-            if getattr(_server_mod.DNSUDPHandler, "recursive_cache", None) is None:
-                _server_mod.DNSUDPHandler.recursive_cache = (
-                    _recursive_cache_mod.InMemoryRecursiveCache()
-                )
-            if getattr(_server_mod.DNSUDPHandler, "recursive_transports", None) is None:
-                _server_mod.DNSUDPHandler.recursive_transports = (
-                    _recursive_transport_mod.DefaultTransportFacade()
-                )
-        except Exception:  # pragma: no cover
-            pass
 
     # Log startup info
     upstream_info = ", ".join(
@@ -1021,7 +1026,9 @@ def main(argv: List[str] | None = None) -> int:
             log_buffer=web_log_buffer,
             config_path=cfg_path,
         )
-    except Exception as e:  # pragma: no cover
+    except (
+        Exception
+    ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         logger.error("Failed to start webserver: %s", e)
         return 1
 
@@ -1065,10 +1072,12 @@ def main(argv: List[str] | None = None) -> int:
             # an explicit termination-like signal has already set a code.
             shutdown_event.set()
             exit_code = 0
-    except Exception as e:  # pragma: no cover
+    except (
+        Exception
+    ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         logger.exception(
             f"Unhandled exception during server operation {e}"
-        )  # pragma: no cover
+        )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         # Preserve a non-zero exit when an unhandled exception occurs unless a
         # stronger exit code (e.g., from SIGTERM) is already in place.
         if exit_code == 0:
@@ -1079,15 +1088,25 @@ def main(argv: List[str] | None = None) -> int:
         # during shutdown.
         if server is not None:
             try:
-                if getattr(server, "server", None) is not None:
-                    try:
-                        server.server.shutdown()
-                    except Exception:
-                        logger.exception("Error while shutting down UDP server")
-                    try:
-                        server.server.server_close()
-                    except Exception:
-                        logger.exception("Error while closing UDP server socket")
+                if hasattr(server, "stop"):
+                    # Preferred path: delegate shutdown/close to the UDP server
+                    # abstraction so all UDP-specific details live in the UDP
+                    # module.
+                    server.stop()
+                else:
+                    # Backwards-compatible path for legacy server stubs that
+                    # expose a .server attribute with shutdown/server_close
+                    # methods (used in tests and older call sites).
+                    inner = getattr(server, "server", None)
+                    if inner is not None:
+                        try:
+                            inner.shutdown()
+                        except Exception:
+                            logger.exception("Error while shutting down UDP server")
+                        try:
+                            inner.server_close()
+                        except Exception:
+                            logger.exception("Error while closing UDP server socket")
             except Exception:
                 logger.exception("Unexpected error during UDP server teardown")
 
@@ -1121,4 +1140,6 @@ def main(argv: List[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())  # pragma: no cover
+    raise SystemExit(
+        main()
+    )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
