@@ -741,23 +741,15 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
-        # Forward with failover. Prefer DNSUDPHandler._forward_with_failover_helper
-        # so tests that monkeypatch that helper continue to observe calls when
-        # resolving via _resolve_core.
+        # Forward with failover using the same helper as UDP handlers. Tests
+        # frequently monkeypatch send_query_with_failover directly, so we call
+        # it here rather than DNSUDPHandler._forward_with_failover_helper.
         upstream_id: Optional[str] = None
         timeout_ms = getattr(DNSUDPHandler, "timeout_ms", 2000)
         upstreams = list(getattr(DNSUDPHandler, "upstream_addrs", []) or [])
-        forward = getattr(DNSUDPHandler, "_forward_with_failover_helper", None)
-        if callable(forward):
-            handler = type("_H", (), {})()
-            handler.timeout_ms = timeout_ms
-            reply, used_upstream, reason = forward(
-                handler, req, upstreams, qname, qtype
-            )
-        else:
-            reply, used_upstream, reason = send_query_with_failover(
-                req, upstreams, timeout_ms, qname, qtype
-            )
+        reply, used_upstream, reason = send_query_with_failover(
+            req, upstreams, timeout_ms, qname, qtype
+        )
 
         # Record upstream result, even when all upstreams ultimately fail.
         if stats is not None and used_upstream:
@@ -1063,6 +1055,8 @@ class DNSServer:
         dnssec_mode: str = "ignore",
         edns_udp_payload: int = 1232,
         dnssec_validation: str = "upstream_ad",
+        upstream_strategy: str = "failover",
+        upstream_max_concurrent: int = 1,
     ) -> None:
         """Initialize a UDP DNSServer.
 
@@ -1086,6 +1080,11 @@ class DNSServer:
         DNSUDPHandler.stats_collector = stats_collector  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         DNSUDPHandler.dnssec_mode = str(dnssec_mode)
         DNSUDPHandler.dnssec_validation = str(dnssec_validation)
+        DNSUDPHandler.upstream_strategy = str(upstream_strategy).lower()
+        try:
+            DNSUDPHandler.upstream_max_concurrent = max(1, int(upstream_max_concurrent))
+        except Exception:
+            DNSUDPHandler.upstream_max_concurrent = 1
         try:
             DNSUDPHandler.edns_udp_payload = max(512, int(edns_udp_payload))
         except Exception:
