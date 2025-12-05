@@ -4,7 +4,7 @@ PREFIX ?= ${USER}
 CONTAINER_NAME ?= foghorn
 CONTAINER_DATA ?= ./.docker
 TAG ?= latest
-
+ADMINPORT ?= 8053
 # Files/folders that should NOT be deleted by `clean`
 # (Keep YAML files, so we exclude *.yaml and *.yml from the delete patterns)
 IGNORE_EXTS :=  .yaml .yml
@@ -85,7 +85,7 @@ docker-clean:
 docker-run: env docker-build
 	. ${VENV}/bin/activate
 	docker rm -f foghorn
-	docker run --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ -d -p 53:5333/udp -p 53:5333/tcp -p 8053:8053/tcp -p 801:1801/tcp -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker run --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ -d -p 53:5333/udp -p 53:5333/tcp -p ${ADMINPORT}:8053/tcp -p 801:1801/tcp -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-logs
 docker-logs:
