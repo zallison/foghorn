@@ -14,7 +14,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt update && \
 COPY . /foghorn
 
 # Ensure dependencies
-RUN pip install --root-user-action=ignore -e ".[dev]"
+RUN pip install --root-user-action=ignore -e "."
 
 # To prevent or tell which cuda device to use for fastapu
 # ENV CUDA_VISIBLE_DEVICES=""
