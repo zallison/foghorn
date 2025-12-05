@@ -434,6 +434,26 @@ def main(argv: List[str] | None = None) -> int:
     # Normalize upstream configuration
     upstreams, timeout_ms = normalize_upstream_config(cfg)
 
+    # Resolver configuration (forward vs recursive) with conservative defaults.
+    resolver_cfg = cfg.get("resolver", {}) or {}
+    resolver_mode = str(resolver_cfg.get("mode", "forward")).lower()
+    if resolver_mode not in ("forward", "recursive"):
+        resolver_mode = "forward"
+    try:
+        resolver_timeout_ms = int(resolver_cfg.get("timeout_ms", timeout_ms))
+    except Exception:
+        resolver_timeout_ms = timeout_ms
+    try:
+        resolver_per_try_timeout_ms = int(
+            resolver_cfg.get("per_try_timeout_ms", max(1, resolver_timeout_ms // 2))
+        )
+    except Exception:
+        resolver_per_try_timeout_ms = max(1, resolver_timeout_ms // 2)
+    try:
+        resolver_max_depth = int(resolver_cfg.get("max_depth", 8))
+    except Exception:
+        resolver_max_depth = 8
+
     # Hold responses this long, even if the actual ttl is lower.
     min_cache_ttl = _get_min_cache_ttl(cfg)
 

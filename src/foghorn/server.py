@@ -716,26 +716,62 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
-        # Upstreams
-        upstreams = ctx.upstream_candidates or DNSUDPHandler.upstream_addrs
-        if not upstreams:
-            r = req.reply()
-            r.header.rcode = RCODE.SERVFAIL
-            wire = _set_response_id(r.pack(), req.header.id)
-            if stats is not None:
-                try:
-                    stats.record_response_rcode("SERVFAIL", qname)
-                    qtype_name = QTYPE.get(qtype, str(qtype))
-                    stats.record_query_result(
-                        client_ip=client_ip,
-                        qname=qname,
-                        qtype=qtype_name,
-                        rcode="SERVFAIL",
-                        upstream_id=None,
-                        status="no_upstreams",
-                        error="no upstreams configured",
-                        first=None,
-                        result={"source": "server", "error": "no_upstreams"},
+        # Decide between recursive resolver mode and classic forwarding.
+        resolver_mode = str(getattr(DNSUDPHandler, "recursive_mode", "forward")).lower()
+        reply: Optional[bytes] = None
+        used_upstream: Optional[Dict] = None
+        reason: Optional[str] = None
+
+        if resolver_mode == "recursive":
+            # Build a ResolverConfig snapshot for this query.
+            try:
+                from .recursive_resolver import ResolverConfig, resolve_iterative
+
+                # Shared recursive cache and transports are attached to the
+                # handler class by foghorn.main during startup.
+                cache_obj = getattr(DNSUDPHandler, "recursive_cache", None)
+                transports = getattr(DNSUDPHandler, "recursive_transports", None)
+
+                if cache_obj is None or transports is None:
+                    # Safety net: fall back to forward mode when recursive
+                    # support is not fully initialized.
+                    resolver_mode = "forward"
+                else:
+                    # Derive recursive time/depth budgets from handler knobs.
+                    try:
+                        r_timeout = int(
+                            getattr(
+                                DNSUDPHandler,
+                                "recursive_timeout_ms",
+                                DNSUDPHandler.timeout_ms,
+                            )
+                        )
+                    except Exception:
+                        r_timeout = DNSUDPHandler.timeout_ms
+                    try:
+                        r_per_try = int(
+                            getattr(
+                                DNSUDPHandler,
+                                "recursive_per_try_timeout_ms",
+                                max(1, r_timeout // 2),
+                            )
+                        )
+                    except Exception:
+                        r_per_try = max(1, r_timeout // 2)
+                    try:
+                        r_max_depth = int(
+                            getattr(DNSUDPHandler, "recursive_max_depth", 8)
+                        )
+                    except Exception:
+                        r_max_depth = 8
+
+                    r_cfg = ResolverConfig(
+                        dnssec_mode=str(DNSUDPHandler.dnssec_mode),
+                        edns_udp_payload=int(DNSUDPHandler.edns_udp_payload),
+                        timeout_ms=int(r_timeout),
+                        per_try_timeout_ms=int(r_per_try),
+                        max_depth=int(r_max_depth),
+                        now_ms=None,
                     )
                 except (
                     Exception
