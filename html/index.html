@@ -60,7 +60,7 @@
 		<section class="fh-pane fh-pane-left">
 			<div class="fh-pane-header">
 				<h2 class="fh-pane-title">Statistics</h2>
-				<p class="fh-pane-help">Live snapshot from <code>/stats</code>.</p>
+				<p class="fh-pane-help">Live snapshot from <code>/api/v1/stats</code>.</p>
 			</div>
 			<div id="stats-groups" class="fh-stats-groups">
 			</div>
@@ -1079,7 +1079,7 @@
 			}
 
 			function loadStats() {
-				fetchJson('/stats')
+				fetchJson('/api/v1/stats')
 					.then(function (data) {
 						renderStats(data);
 					})
@@ -1092,7 +1092,7 @@
 				if (raw === undefined) {
 					raw = 0;
 				}
-				var url = '/config';
+				var url = '/api/v1/config';
 				if (raw !== 0 || isEditing) {
 					url += '/raw';
 				}
@@ -1198,7 +1198,7 @@
 					return;
 				}
 
-				fetch('/config/save', {
+				fetch('/api/v1/config/save', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({ raw_yaml: yamlText }),
