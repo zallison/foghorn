@@ -276,7 +276,9 @@ class UpstreamRouterPlugin(BasePlugin):
                     )
                     return True, reply_bytes
 
-            except Exception as e:  # pragma: no cover
+            except (
+                Exception
+            ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 logger.debug(
                     "Upstream %s:%d error for %s %s: %s",
                     host,
