@@ -206,7 +206,9 @@ class ListDownloader(BasePlugin):
                 logger.debug(
                     "ListDownloader added %d URLs from url_files", len(urls_from_files)
                 )
-            except Exception as e:  # pragma: no cover
+            except (
+                Exception
+            ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 logger.warning("Failed reading url_files: %s", e)
 
         os.makedirs(self.download_path, exist_ok=True)
@@ -219,7 +221,10 @@ class ListDownloader(BasePlugin):
             return
         try:
             interval = int(self.interval_seconds)
-        except (TypeError, ValueError):  # pragma: no cover
+        except (
+            TypeError,
+            ValueError,
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.warning(
                 "ListDownloader interval configuration %r is invalid; disabling periodic refresh",
                 self.interval_seconds,
@@ -250,7 +255,9 @@ class ListDownloader(BasePlugin):
             while not self._stop_event.is_set():
                 try:
                     self._maybe_run(force=False)
-                except Exception as exc:  # pragma: no cover
+                except (
+                    Exception
+                ) as exc:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                     logger.warning("ListDownloader periodic update failed: %s", exc)
                 # Wait for the interval or until stop is requested
                 self._stop_event.wait(interval)
@@ -272,7 +279,9 @@ class ListDownloader(BasePlugin):
         try:
             self._download_all(self.urls)
             self._last_run = now
-        except Exception as e:  # pragma: no cover
+        except (
+            Exception
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.warning("ListDownloader update failed: %s", e)
 
     def _download_all(self, urls: Iterable[str]) -> None:
@@ -323,7 +332,10 @@ class ListDownloader(BasePlugin):
             if self.interval_seconds is not None:
                 try:
                     min_age = max(0, int(self.interval_seconds))
-                except (TypeError, ValueError):  # pragma: no cover - defensive
+                except (
+                    TypeError,
+                    ValueError,
+                ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                     min_age = ONE_DAY_SECONDS
             if (now - local_mtime) < min_age:
                 return False

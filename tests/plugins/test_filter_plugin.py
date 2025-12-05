@@ -15,7 +15,7 @@ import pytest
 from dnslib import AAAA, QTYPE, RR, TXT, A, DNSRecord, RCODE
 
 from foghorn.plugins.base import PluginContext, PluginDecision
-from foghorn.plugins.filter import FilterPlugin
+from foghorn.plugins.filter import FilterConfig, FilterPlugin
 
 
 def _mk_query(name="example.com", qtype="A"):
@@ -705,3 +705,256 @@ def test_multiple_filter_instances_use_isolated_dbs_by_default(tmp_path):
     assert isinstance(dec2, PluginDecision)
     assert dec2.action == "deny"
     assert p2.pre_resolve("p1-block.com", QTYPE.A, b"", ctx).action == "skip"
+
+
+def test_get_config_model_returns_filter_config():
+    """Brief: get_config_model returns the FilterConfig model class.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None: Asserts returned model is FilterConfig.
+    """
+    assert FilterPlugin.get_config_model() is FilterConfig
+
+
+def test_setup_invalid_deny_response_defaults_to_nxdomain(tmp_path, caplog):
+    """Brief: Unknown deny_response during setup falls back to 'nxdomain'.
+
+    Inputs:
+      - tmp_path/caplog fixtures.
+
+    Outputs:
+      - None: Asserts deny_response is normalized and warning logged.
+    """
+    db = tmp_path / "bl_invalid.db"
+    p = FilterPlugin(
+        db_path=str(db), deny_response="WEIRD", blocked_domains=["blocked.com"]
+    )
+    caplog.set_level("WARNING")
+    p.setup()
+
+    with closing(p.conn):
+        assert p.deny_response == "nxdomain"
+        assert any("unknown deny_response" in r.getMessage() for r in caplog.records)
+
+
+def test_inline_allowlist_inserted_via_setup(tmp_path):
+    """Brief: Inline allowed_domains entries are inserted into the DB.
+
+    Inputs:
+      - tmp_path fixture.
+
+    Outputs:
+      - None: Asserts is_allowed honors inline allowed_domains.
+    """
+    db = tmp_path / "bl_allow_inline.db"
+    p = FilterPlugin(
+        db_path=str(db), default="deny", allowed_domains=["inline-allow.com"]
+    )
+    p.setup()
+
+    with closing(p.conn):
+        assert p.is_allowed("inline-allow.com") is True
+        assert p.is_allowed("unknown-inline.com") is False
+
+
+def test_pre_and_post_resolve_skip_when_not_target(tmp_path, monkeypatch):
+    """Brief: pre_resolve and post_resolve short-circuit when targets() is False.
+
+    Inputs:
+      - tmp_path/monkeypatch fixtures.
+
+    Outputs:
+      - None: Asserts both hooks return None when not targeting the client.
+    """
+    db = tmp_path / "bl_targets.db"
+    p = FilterPlugin(
+        db_path=str(db), blocked_domains=["blocked.com"], blocked_ips=["1.2.3.4"]
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+    monkeypatch.setattr(p, "targets", lambda _ctx: False)
+
+    resp = _mk_response_with_ips("ex.com", [("A", "1.2.3.4", 60)])
+
+    with closing(p.conn):
+        assert p.pre_resolve("blocked.com", QTYPE.A, b"", ctx) is None
+        assert p.post_resolve("ex.com", QTYPE.A, resp, ctx) is None
+
+
+def test_pre_resolve_deny_response_servfail_and_noerror_empty(tmp_path):
+    """Brief: deny_response 'servfail' and 'noerror_empty' build correct overrides.
+
+    Inputs:
+      - tmp_path fixture.
+
+    Outputs:
+      - None: Asserts rcode values and empty answers for noerror_empty.
+    """
+    db1 = tmp_path / "bl_servfail.db"
+    p1 = FilterPlugin(
+        db_path=str(db1),
+        blocked_domains=["blocked.com"],
+        default="allow",
+        deny_response="servfail",
+    )
+    p1.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+    q1, wire1 = _mk_query("blocked.com", "A")
+
+    with closing(p1.conn):
+        dec1 = p1.pre_resolve("blocked.com", QTYPE.A, wire1, ctx)
+        assert isinstance(dec1, PluginDecision)
+        assert dec1.action == "override"
+        reply1 = DNSRecord.parse(dec1.response)
+        assert reply1.header.rcode == RCODE.SERVFAIL
+
+    db2 = tmp_path / "bl_noerror.db"
+    p2 = FilterPlugin(
+        db_path=str(db2),
+        blocked_domains=["blocked.com"],
+        default="allow",
+        deny_response="noerror_empty",
+    )
+    p2.setup()
+    q2, wire2 = _mk_query("blocked.com", "A")
+
+    with closing(p2.conn):
+        dec2 = p2.pre_resolve("blocked.com", QTYPE.A, wire2, ctx)
+        assert isinstance(dec2, PluginDecision)
+        assert dec2.action == "override"
+        reply2 = DNSRecord.parse(dec2.response)
+        assert reply2.header.rcode == RCODE.NOERROR
+        assert not reply2.rr
+
+
+def test_pre_resolve_ip_mode_for_aaaa_and_other_qtypes(tmp_path):
+    """Brief: deny_response='ip' supports AAAA answers and fallback for other qtypes.
+
+    Inputs:
+      - tmp_path fixture.
+
+    Outputs:
+      - None: Asserts AAAA and non-A/AAAA paths build override responses.
+    """
+    db = tmp_path / "bl_ipmode.db"
+    p = FilterPlugin(
+        db_path=str(db),
+        blocked_domains=["blocked.com"],
+        default="allow",
+        deny_response="ip",
+        deny_response_ip4="192.0.2.55",
+        deny_response_ip6="2001:db8::55",
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+
+    q6, wire6 = _mk_query("blocked.com", "AAAA")
+    qtxt, wiretxt = _mk_query("blocked.com", "TXT")
+
+    with closing(p.conn):
+        dec6 = p.pre_resolve("blocked.com", QTYPE.AAAA, wire6, ctx)
+        assert isinstance(dec6, PluginDecision)
+        assert dec6.action == "override"
+        rep6 = DNSRecord.parse(dec6.response)
+        assert any(rr.rtype == QTYPE.AAAA for rr in rep6.rr)
+        assert any(
+            str(rr.rdata) == "2001:db8::55" for rr in rep6.rr if rr.rtype == QTYPE.AAAA
+        )
+
+        dec_txt = p.pre_resolve("blocked.com", QTYPE.TXT, wiretxt, ctx)
+        assert isinstance(dec_txt, PluginDecision)
+        assert dec_txt.action == "override"
+
+
+def test_build_deny_decision_pre_unknown_mode_defaults_to_deny(tmp_path):
+    """Brief: _build_deny_decision_pre falls back to deny for unknown modes.
+
+    Inputs:
+      - tmp_path fixture.
+
+    Outputs:
+      - None: Asserts PluginDecision(action='deny').
+    """
+    db = tmp_path / "bl_unknown_pre.db"
+    p = FilterPlugin(db_path=str(db))
+    p.setup()
+    p.deny_response = "weird-mode"
+    ctx = PluginContext(client_ip="1.2.3.4")
+    q, wire = _mk_query("ex.com", "A")
+
+    with closing(p.conn):
+        dec = p._build_deny_decision_pre("ex.com", QTYPE.A, wire, ctx)
+        assert isinstance(dec, PluginDecision)
+        assert dec.action == "deny"
+
+
+def test_post_resolve_deny_response_refused_and_noerror_empty(tmp_path):
+    """Brief: deny_response 'refused' and 'noerror_empty' map to correct post-resolve rcodes.
+
+    Inputs:
+      - tmp_path fixture.
+
+    Outputs:
+      - None: Asserts REFUSED and NOERROR/empty answers.
+    """
+    db1 = tmp_path / "bl_post_refused.db"
+    p1 = FilterPlugin(
+        db_path=str(db1),
+        blocked_ips=[{"ip": "1.2.3.4", "action": "deny"}],
+        deny_response="refused",
+    )
+    p1.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+    resp = _mk_response_with_ips("ex.com", [("A", "1.2.3.4", 60)])
+
+    with closing(p1.conn):
+        dec1 = p1.post_resolve("ex.com", QTYPE.A, resp, ctx)
+        assert isinstance(dec1, PluginDecision)
+        assert dec1.action == "override"
+        rep1 = DNSRecord.parse(dec1.response)
+        assert rep1.header.rcode == RCODE.REFUSED
+
+    db2 = tmp_path / "bl_post_noerror.db"
+    p2 = FilterPlugin(
+        db_path=str(db2),
+        blocked_ips=[{"ip": "1.2.3.4", "action": "deny"}],
+        deny_response="noerror_empty",
+    )
+    p2.setup()
+
+    with closing(p2.conn):
+        dec2 = p2.post_resolve("ex.com", QTYPE.A, resp, ctx)
+        assert isinstance(dec2, PluginDecision)
+        assert dec2.action == "override"
+        rep2 = DNSRecord.parse(dec2.response)
+        assert rep2.header.rcode == RCODE.NOERROR
+        assert not rep2.rr
+
+
+def test_build_deny_decision_post_unknown_mode_defaults_to_deny(tmp_path):
+    """Brief: _build_deny_decision_post falls back to deny for unknown modes.
+
+    Inputs:
+      - tmp_path fixture.
+
+    Outputs:
+      - None: Asserts PluginDecision(action='deny').
+    """
+    db = tmp_path / "bl_unknown_post.db"
+    p = FilterPlugin(
+        db_path=str(db),
+        blocked_ips=[{"ip": "1.2.3.4", "action": "deny"}],
+        deny_response="refused",
+    )
+    p.setup()
+    p.deny_response = "unknown-post"
+    ctx = PluginContext(client_ip="1.2.3.4")
+    resp = _mk_response_with_ips("ex.com", [("A", "1.2.3.4", 60)])
+
+    with closing(p.conn):
+        dec = p.post_resolve("ex.com", QTYPE.A, resp, ctx)
+        assert isinstance(dec, PluginDecision)
+        assert dec.action == "deny"

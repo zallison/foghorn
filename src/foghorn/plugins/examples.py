@@ -190,7 +190,9 @@ class ExamplesPlugin(BasePlugin):
 
         try:
             name = str(qname).rstrip(".")
-        except Exception:  # pragma: no cover
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             name = str(qname)
 
         if not self._applies(qtype):

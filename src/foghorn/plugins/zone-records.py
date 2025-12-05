@@ -217,16 +217,22 @@ class ZoneRecords(BasePlugin):
         # work as expected, without relying on QTYPE.SOA being present.
         try:
             raw = getattr(QTYPE, "SOA", None)
-        except Exception:  # pragma: no cover - defensive
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             raw = None
         if raw is None:
             try:
                 raw = QTYPE.get("SOA", None)
-            except Exception:  # pragma: no cover - defensive
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 raw = None
         try:
             soa_code: Optional[int] = int(raw) if raw is not None else None
-        except Exception:  # pragma: no cover - defensive
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             soa_code = None
 
         for fp in self.file_paths:
@@ -382,7 +388,9 @@ class ZoneRecords(BasePlugin):
         # Normalize domain to a consistent lookup key.
         try:
             name = str(qname).rstrip(".").lower()
-        except Exception:  # pragma: no cover
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             name = str(qname).lower()
 
         qtype_int = int(qtype)
@@ -521,7 +529,9 @@ class ZoneRecords(BasePlugin):
                     zone_line = f"{soa_owner} {soa_ttl} IN SOA {value}"
                     try:
                         rrs = RR.fromZone(zone_line)
-                    except Exception as exc:  # pragma: no cover
+                    except (
+                        Exception
+                    ) as exc:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                         logger.warning(
                             "ZoneRecords invalid SOA value %r for zone %s: %s",
                             value,
@@ -544,7 +554,9 @@ class ZoneRecords(BasePlugin):
                 zone_line = f"{soa_owner} {soa_ttl} IN SOA {value}"
                 try:
                     rrs = RR.fromZone(zone_line)
-                except Exception as exc:  # pragma: no cover
+                except (
+                    Exception
+                ) as exc:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                     logger.warning(
                         "ZoneRecords invalid SOA value %r for zone %s: %s",
                         value,
@@ -836,7 +848,9 @@ class ZoneRecords(BasePlugin):
             try:
                 observer.stop()
                 observer.join(timeout=2.0)
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
             self._observer = None
 
@@ -845,14 +859,18 @@ class ZoneRecords(BasePlugin):
         if stop_event is not None:
             try:
                 stop_event.set()
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
         poll_thread = getattr(self, "_poll_thread", None)
         if poll_thread is not None:
             try:
                 poll_thread.join(timeout=2.0)
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
             self._poll_thread = None
 
@@ -862,6 +880,8 @@ class ZoneRecords(BasePlugin):
         if timer is not None:
             try:
                 timer.cancel()
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
             self._reload_debounce_timer = None

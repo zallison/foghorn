@@ -218,7 +218,9 @@ class FilterPlugin(BasePlugin):
         for pattern in self.config.get("blocked_patterns", []):
             try:
                 self.blocked_patterns.append(re.compile(pattern, re.IGNORECASE))
-            except re.error as e:  # pragma: no cover
+            except (
+                re.error
+            ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 logger.error("Invalid regex pattern '%s': %s", pattern, e)
 
         # Post-resolve (IP) filtering configuration
@@ -264,7 +266,9 @@ class FilterPlugin(BasePlugin):
                     try:
                         # Validate the replacement IP
                         ipaddress.ip_address(replace_with)
-                    except ValueError as e:  # pragma: no cover
+                    except (
+                        ValueError
+                    ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                         logger.error(
                             "Invalid 'replace_with' IP address '%s' for rule '%s': %s",
                             replace_with,
@@ -294,7 +298,9 @@ class FilterPlugin(BasePlugin):
                     else:
                         self.blocked_ips[ip_addr] = {"action": action}
 
-            except ValueError as e:  # pragma: no cover
+            except (
+                ValueError
+            ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 logger.error("Invalid IP address/network '%s': %s", ip_spec, e)
 
         # Connect DB and initialize table
@@ -350,7 +356,9 @@ class FilterPlugin(BasePlugin):
             self._domain_cache.set(
                 norm_key, int(self.cache_ttl_seconds), b"1" if allowed else b"0"
             )
-        except Exception as e:  # pragma: no cover
+        except (
+            Exception
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.warning(f"exception adding to cache {e}")
 
     def pre_resolve(
@@ -384,8 +392,10 @@ class FilterPlugin(BasePlugin):
                     return PluginDecision(action="skip")
                 else:
                     return self._build_deny_decision_pre(qname, qtype, req, ctx)
-            except Exception:  # pragma: no cover
-                pass  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
         if not self.is_allowed(str(domain).rstrip(".")):
             logger.debug("Domain '%s' blocked (exact match)", qname)
@@ -511,7 +521,9 @@ class FilterPlugin(BasePlugin):
                                     )
                                     modified_records.append(rr)
                                 records_changed = True
-                            except ValueError:  # pragma: no cover
+                            except (
+                                ValueError
+                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                                 logger.error(
                                     "Invalid replacement IP: %s", replace_ip_str
                                 )
@@ -591,7 +603,9 @@ class FilterPlugin(BasePlugin):
         if mode in {"refused", "servfail", "noerror_empty", "nodata"}:
             try:
                 request = DNSRecord.parse(raw_req)
-            except Exception as e:  # pragma: no cover - defensive
+            except (
+                Exception
+            ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 logger.warning(
                     "FilterPlugin: failed to parse request while building deny response: %s",
                     e,
@@ -621,7 +635,9 @@ class FilterPlugin(BasePlugin):
             if ipaddr:
                 try:
                     ipaddress.ip_address(ipaddr)
-                except ValueError:  # pragma: no cover
+                except (
+                    ValueError
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                     logger.error(
                         "FilterPlugin: invalid deny_response IP %r for %s",
                         ipaddr,
@@ -699,7 +715,9 @@ class FilterPlugin(BasePlugin):
                 return PluginDecision(action="deny")
 
             return PluginDecision(action="override", response=response.pack())
-        except Exception as e:  # pragma: no cover
+        except (
+            Exception
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.warning(
                 "FilterPlugin: failed to pack deny response for %s (%s): %s",
                 qname,
