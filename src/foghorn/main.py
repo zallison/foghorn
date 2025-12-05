@@ -165,11 +165,15 @@ def _validate_plugin_config(plugin_cls: type[BasePlugin], config: dict | None) -
             if callable(method):
                 try:
                     return dict(method())
-                except Exception:  # pragma: no cover - defensive
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                     break
         try:
             return dict(model_instance)
-        except Exception:  # pragma: no cover - defensive
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             return cfg
 
     # Fallback: JSON Schema-based per-plugin validation.
@@ -317,7 +321,9 @@ def run_setup_plugins(plugins: List[BasePlugin]) -> None:
         )
         try:
             plugin.setup()
-        except Exception as e:  # pragma: no cover
+        except (
+            Exception
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.error("Setup for plugin %s failed: %s", name, e, exc_info=True)
             if abort_on_failure:
                 raise RuntimeError(f"Setup for plugin {name} failed") from e
@@ -484,7 +490,7 @@ def main(argv: List[str] | None = None) -> int:
                     "yes",
                     "y",
                     "on",
-                }  # pragma: nocover - best effort
+                }  # pragma: no cover - best effort
 
             # Allow force_rebuild to be controlled from three sources, in
             # increasing precedence order:
@@ -516,13 +522,17 @@ def main(argv: List[str] | None = None) -> int:
                     stats_persistence_store.rebuild_counts_if_needed(
                         force_rebuild=force_rebuild, logger_obj=logger
                     )
-                except Exception as exc:  # pragma: no cover - defensive
+                except (
+                    Exception
+                ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                     logger.error(
                         "Failed to rebuild statistics counts from query_log: %s",
                         exc,
                         exc_info=True,
                     )
-            except Exception as exc:  # pragma: no cover - defensive
+            except (
+                Exception
+            ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 logger.error(
                     "Failed to initialize statistics persistence: %s; continuing without persistence",
                     exc,
@@ -564,7 +574,9 @@ def main(argv: List[str] | None = None) -> int:
         try:
             stats_collector.warm_load_from_store()
             logger.info("Statistics warm-load from SQLite store completed")
-        except Exception as exc:  # pragma: no cover - defensive
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             logger.error(
                 "Failed to warm-load statistics from SQLite store: %s",
                 exc,
@@ -646,7 +658,9 @@ def main(argv: List[str] | None = None) -> int:
                     try:
                         stats_collector.snapshot(reset=True)
                         log.info("%s: statistics reset completed", sig_label)
-                    except Exception as e:  # pragma: no cover - defensive
+                    except (
+                        Exception
+                    ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                         log.error("%s: error during statistics reset: %s", sig_label, e)
                 else:
                     log.info(
@@ -659,7 +673,7 @@ def main(argv: List[str] | None = None) -> int:
                 )
         except (
             Exception
-        ) as e:  # pragma: nocover - defensive: do not block plugin notifications
+        ) as e:  # pragma: no cover - defensive: do not block plugin notifications
             log.error(
                 "%s: unexpected error checking statistics reset config: %s",
                 sig_label,
@@ -677,7 +691,9 @@ def main(argv: List[str] | None = None) -> int:
                 if callable(handler):
                     handler()
                     count += 1
-            except Exception as e:  # pragma: no cover - defensive
+            except (
+                Exception
+            ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 log.error(
                     "%s: plugin %s handler error: %s",
                     sig_label,
@@ -763,7 +779,9 @@ def main(argv: List[str] | None = None) -> int:
         try:
             if server is not None and hasattr(server, "stop"):
                 server.stop()
-        except Exception:  # pragma: no cover - defensive
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             log.exception("Error while requesting UDP server shutdown for %s", reason)
 
     def _sighup_handler(_signum, _frame):
@@ -795,19 +813,25 @@ def main(argv: List[str] | None = None) -> int:
     try:
         signal.signal(signal.SIGHUP, _sighup_handler)
         logger.debug("Installed SIGHUP handler for clean shutdown (exit code 0)")
-    except Exception:  # pragma: no cover - defensive
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
         logger.warning("Could not install SIGHUP handler on this platform")
 
     try:
         signal.signal(signal.SIGTERM, _sigterm_handler)
         logger.debug("Installed SIGTERM handler for immediate shutdown (exit code 2)")
-    except Exception:  # pragma: no cover - defensive
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
         logger.warning("Could not install SIGTERM handler on this platform")
 
     try:
         signal.signal(signal.SIGINT, _sigint_handler)
         logger.debug("Installed SIGINT handler for immediate shutdown (exit code 2)")
-    except Exception:  # pragma: no cover - defensive
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
         logger.warning("Could not install SIGINT handler on this platform")
 
     # DNSSEC config (ignore|passthrough|validate)
@@ -982,7 +1006,9 @@ def main(argv: List[str] | None = None) -> int:
             log_buffer=web_log_buffer,
             config_path=cfg_path,
         )
-    except Exception as e:  # pragma: no cover
+    except (
+        Exception
+    ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         logger.error("Failed to start webserver: %s", e)
         return 1
 
@@ -1026,10 +1052,12 @@ def main(argv: List[str] | None = None) -> int:
             # an explicit termination-like signal has already set a code.
             shutdown_event.set()
             exit_code = 0
-    except Exception as e:  # pragma: no cover
+    except (
+        Exception
+    ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         logger.exception(
             f"Unhandled exception during server operation {e}"
-        )  # pragma: no cover
+        )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         # Preserve a non-zero exit when an unhandled exception occurs unless a
         # stronger exit code (e.g., from SIGTERM) is already in place.
         if exit_code == 0:
@@ -1092,4 +1120,6 @@ def main(argv: List[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())  # pragma: no cover
+    raise SystemExit(
+        main()
+    )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
