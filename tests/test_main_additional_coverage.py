@@ -63,11 +63,12 @@ def test_normalize_upstream_config_missing_host_and_optional_fields():
 
     # Missing host should raise and cover the validation branch.
     with pytest.raises(ValueError):
-        normalize_upstream_config({"upstream": [{}]})
+        normalize_upstream_config({"upstreams": [{}]})
 
-    # Optional fields transport/tls/pool should be preserved.
+    # Optional fields transport/tls/pool should be preserved and timeout_ms is
+    # read from the foghorn header section with a default when omitted.
     cfg: Dict[str, Any] = {
-        "upstream": [
+        "upstreams": [
             {
                 "host": "1.2.3.4",
                 "port": 853,
@@ -75,7 +76,8 @@ def test_normalize_upstream_config_missing_host_and_optional_fields():
                 "tls": {"verify": True},
                 "pool": {"size": 4},
             }
-        ]
+        ],
+        "foghorn": {"timeout_ms": 2000},
     }
     ups, timeout_ms = normalize_upstream_config(cfg)
     assert timeout_ms == 2000
@@ -150,7 +152,7 @@ def test_main_returns_one_when_run_setup_plugins_fails(monkeypatch, caplog):
 
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
         "plugins: []\n"
     )
 
@@ -213,7 +215,7 @@ def test_sigusr1_skip_reset_and_coalescing(monkeypatch, caplog):
 
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
         "statistics:\n  enabled: true\n  sigusr2_resets_stats: false\n"
     )
 
@@ -310,7 +312,7 @@ def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
 
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
     def fake_signal(sig, handler):
@@ -353,7 +355,7 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
 
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
         "statistics:\n  enabled: true\n  sigusr2_resets_stats: true\n"
     )
 
@@ -468,7 +470,7 @@ def test_sigusr2_logs_no_collector_active(monkeypatch, caplog):
 
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
         "statistics:\n  enabled: true\n  sigusr2_resets_stats: true\n"
     )
 
@@ -517,7 +519,7 @@ def test_sigusr2_registration_failure_logs_warning(monkeypatch, caplog):
 
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
     def fake_signal(sig, handler):
@@ -561,7 +563,7 @@ def test_sighup_with_udp_enabled_exits_cleanly(monkeypatch, caplog):
 
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
     captured: Dict[str, Any] = {"sighup": None}
@@ -631,7 +633,7 @@ def test_start_without_udp_uses_keepalive_loop(monkeypatch, caplog):
         "  port: 5354\n"
         "  udp:\n"
         "    enabled: false\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
     # Ensure DNSServer is never constructed because UDP is disabled.
@@ -684,7 +686,7 @@ def test_tcp_permission_error_falls_back_to_threaded(monkeypatch, caplog):
         "    enabled: true\n"
         "    host: 127.0.0.1\n"
         "    port: 5354\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
     class DummyServer:
@@ -768,7 +770,7 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
         "    port: 8853\n"
         "    cert_file: cert.pem\n"
         "    key_file: key.pem\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
     class DummyServer:
@@ -839,7 +841,7 @@ def test_dot_start_logs_info(monkeypatch, caplog):
         "    port: 8853\n"
         "    cert_file: cert.pem\n"
         "    key_file: key.pem\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
     class DummyServer:
@@ -898,7 +900,7 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
         "    enabled: true\n"
         "    host: 127.0.0.1\n"
         "    port: 5354\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
     class DummyServer:
@@ -991,7 +993,7 @@ def test_doh_start_failure_returns_one(monkeypatch, caplog):
         "    enabled: true\n"
         "    host: 127.0.0.1\n"
         "    port: 8053\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
     class DummyServer:
@@ -1032,7 +1034,7 @@ def test_webserver_stop_called_on_shutdown(monkeypatch, caplog):
 
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
         "webserver:\n  enabled: true\n"
     )
 
@@ -1080,7 +1082,7 @@ def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
 
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
     def boom_validate(
@@ -1113,7 +1115,7 @@ def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):
 
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
     captured: Dict[str, Any] = {"sigterm": None, "sigint": None, "force_exit": None}
@@ -1239,7 +1241,7 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
 
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
     class FailingSocketServer:
@@ -1310,7 +1312,7 @@ def test_udp_teardown_outer_exception_logs_unexpected_error(monkeypatch, caplog)
 
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n  - host: 1.1.1.1\n    port: 53\n"
+        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
     class BrokenServerAttr:

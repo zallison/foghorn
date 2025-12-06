@@ -536,7 +536,7 @@ def test_config_endpoint_returns_sanitized_config() -> None:
             "redact_keys": ["token", "password"],
             "auth": {"token": "secret-token", "password": "pw"},
         },
-        "upstream": [
+        "upstreams": [
             {"host": "1.1.1.1", "token": "upstream-token"},
         ],
     }
@@ -553,7 +553,7 @@ def test_config_endpoint_returns_sanitized_config() -> None:
     assert auth_out["token"] == "***"
     assert auth_out["password"] == "***"
 
-    upstream_out = config_out["upstream"][0]
+    upstream_out = config_out["upstreams"][0]
     assert upstream_out["token"] == "***"
 
 
@@ -630,7 +630,7 @@ def test_config_json_endpoint_returns_sanitized_config() -> None:
             "redact_keys": ["token", "password"],
             "auth": {"token": "secret-token", "password": "pw"},
         },
-        "upstream": [
+        "upstreams": [
             {"host": "1.1.1.1", "token": "upstream-token"},
         ],
     }
@@ -648,7 +648,7 @@ def test_config_json_endpoint_returns_sanitized_config() -> None:
     assert auth_out["token"] == "***"
     assert auth_out["password"] == "***"
 
-    upstream_out = config_out["upstream"][0]
+    upstream_out = config_out["upstreams"][0]
     assert upstream_out["token"] == "***"
 
 
@@ -1196,7 +1196,7 @@ def test_config_json_fastapi_and_threaded_payloads_match() -> None:
             "auth": {"mode": "none"},
             "redact_keys": ["token", "password"],
         },
-        "upstream": [
+        "upstreams": [
             {"host": "1.1.1.1", "token": "upstream-token"},
         ],
     }

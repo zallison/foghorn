@@ -31,10 +31,18 @@ def test_get_min_cache_ttl_various_inputs():
     Outputs:
       - None: Asserts sanitized integer result
     """
+    # Root-level (legacy) placement
     assert _get_min_cache_ttl({"min_cache_ttl": 10}) == 10
     assert _get_min_cache_ttl({"min_cache_ttl": -5}) == 0
     assert _get_min_cache_ttl({"min_cache_ttl": "abc"}) == 0
     assert _get_min_cache_ttl({}) == 0
+
+    # New canonical placement under foghorn
+    assert _get_min_cache_ttl({"foghorn": {"min_cache_ttl": 42}}) == 42
+    # Nested value should override a conflicting root-level value
+    assert (
+        _get_min_cache_ttl({"min_cache_ttl": 5, "foghorn": {"min_cache_ttl": 9}}) == 9
+    )
 
 
 def test_normalize_upstream_config_list_only_and_timeout_default():
@@ -50,11 +58,11 @@ def test_normalize_upstream_config_list_only_and_timeout_default():
     # List form with explicit timeout
     ups, to = normalize_upstream_config(
         {
-            "upstream": [
+            "upstreams": [
                 {"host": "1.1.1.1", "port": 53},
                 {"host": "1.0.0.1", "port": 53},
             ],
-            "timeout_ms": 1500,
+            "foghorn": {"timeout_ms": 1500},
         }
     )
     assert ups == [{"host": "1.1.1.1", "port": 53}, {"host": "1.0.0.1", "port": 53}]
@@ -63,7 +71,7 @@ def test_normalize_upstream_config_list_only_and_timeout_default():
     # Default timeout when not provided
     ups2, to2 = normalize_upstream_config(
         {
-            "upstream": [
+            "upstreams": [
                 {"host": "8.8.8.8", "port": 53},
             ]
         }
@@ -121,10 +129,10 @@ def test_normalize_upstream_config_rejects_non_list():
       - None: Asserts ValueError raised.
     """
     with pytest.raises(ValueError):
-        normalize_upstream_config({"upstream": {"host": "1.1.1.1", "port": 53}})
+        normalize_upstream_config({"upstreams": {"host": "1.1.1.1", "port": 53}})
 
     with pytest.raises(ValueError):
-        normalize_upstream_config({"upstream": "invalid"})
+        normalize_upstream_config({"upstreams": "invalid"})
 
 
 def test_load_plugins_skips_missing_module():
@@ -154,11 +162,10 @@ def test_main_starts_server_and_handles_keyboardinterrupt(monkeypatch):
     """
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n"
+        "upstreams:\n"
         "  - host: 1.1.1.1\n"
         "    port: 53\n"
-        "timeout_ms: 777\n"
-        "min_cache_ttl: 33\n"
+        "foghorn:\n  timeout_ms: 777\n  min_cache_ttl: 33\n"
         "plugins: []\n"
     )
 
@@ -217,7 +224,7 @@ def test_normalize_upstream_config_rejects_non_mapping_entries():
       - None: Asserts ValueError raised.
     """
     with pytest.raises(ValueError):
-        normalize_upstream_config({"upstream": ["bad"]})
+        normalize_upstream_config({"upstreams": ["bad"]})
 
 
 def test_main_returns_one_on_exception_alt(monkeypatch):
@@ -232,7 +239,7 @@ def test_main_returns_one_on_exception_alt(monkeypatch):
     """
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n"
+        "upstreams:\n"
         "  - host: 1.1.1.1\n"
         "    port: 53\n"
     )

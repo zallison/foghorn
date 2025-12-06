@@ -9,6 +9,7 @@ Outputs:
 """
 
 from contextlib import closing
+import threading
 
 from dnslib import QTYPE, DNSRecord
 
@@ -487,6 +488,67 @@ def test_malformed_rate_profiles_rows_are_ignored(tmp_path, monkeypatch):
     profile = plugin._db_get_profile("192.0.2.1")
     assert profile is not None
     avg_rps, max_rps, samples = profile
+    assert avg_rps >= 0.0
+    assert max_rps >= avg_rps
+    assert samples >= 1
+
+
+def test_db_get_profile_is_thread_safe_with_lock(tmp_path):
+    """Brief: _db_get_profile can be called safely from multiple threads.
+
+    Inputs:
+      - tmp_path: pytest tmp path for sqlite db.
+
+    Outputs:
+      - None: asserts concurrent readers/writers do not raise and see profiles.
+    """
+
+    db = tmp_path / "rl-thread.db"
+    plugin = RateLimitPlugin(
+        db_path=str(db),
+        window_seconds=10,
+        warmup_windows=0,
+        min_enforce_rps=0.0,
+    )
+    plugin.setup()
+
+    key = "client-1"
+    now_ts = 1000
+    # Establish an initial profile so readers have something to fetch.
+    plugin._db_update_profile(key, 10.0, now_ts)
+
+    errors: list[Exception] = []
+
+    def reader() -> None:
+        try:
+            for _ in range(200):
+                profile = plugin._db_get_profile(key)
+                assert profile is not None
+        except Exception as exc:  # pragma: no cover - exercised via threaded stress
+            errors.append(exc)
+
+    def writer() -> None:
+        try:
+            local_now = now_ts
+            for i in range(50):
+                plugin._db_update_profile(key, 10.0 + float(i), local_now + i)
+        except Exception as exc:  # pragma: no cover - exercised via threaded stress
+            errors.append(exc)
+
+    threads = [threading.Thread(target=reader) for _ in range(8)]
+    threads.append(threading.Thread(target=writer))
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+
+    # Final profile should still be readable.
+    final_profile = plugin._db_get_profile(key)
+    assert final_profile is not None
+    avg_rps, max_rps, samples = final_profile
     assert avg_rps >= 0.0
     assert max_rps >= avg_rps
     assert samples >= 1
