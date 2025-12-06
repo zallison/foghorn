@@ -37,20 +37,28 @@ def _clear_lru_caches(wrappers: Optional[List[object]]):
 
 
 def _get_min_cache_ttl(cfg: dict) -> int:
-    """
-    Extracts and sanitizes min_cache_ttl from config.
+    """Extract and sanitize ``min_cache_ttl`` from the loaded config.
 
     Inputs:
-      - cfg: dict loaded from YAML
-    Outputs:
-      - int: non-negative min_cache_ttl in seconds (default 0 when omitted)
+      - cfg: dict loaded from YAML (top-level config mapping).
 
-    Returns a sanitized min_cache_ttl value. Negative values are clamped to 0.
+    Outputs:
+      - int: non-negative ``min_cache_ttl`` in seconds (default 0 when omitted).
+
+    The canonical location is now ``foghorn.min_cache_ttl``. For backward
+    compatibility, a root-level ``min_cache_ttl`` key is still honored when the
+    nested key is absent. Negative values and invalid types are clamped to 0.
     """
-    # Treat missing or None as 0 to avoid unintentionally extending cache TTLs
-    val = cfg.get("min_cache_ttl", 0)
+
+    foghorn_cfg = cfg.get("foghorn") or {}
+    if isinstance(foghorn_cfg, dict) and "min_cache_ttl" in foghorn_cfg:
+        raw_val = foghorn_cfg.get("min_cache_ttl")
+    else:
+        # Legacy root-level key (deprecated but still supported).
+        raw_val = cfg.get("min_cache_ttl", 0)
+
     try:
-        ival = int(val)
+        ival = int(raw_val)
     except (TypeError, ValueError):
         ival = 0
     return max(0, ival)
@@ -64,21 +72,21 @@ def normalize_upstream_config(
 
     Inputs:
       - cfg: dict containing parsed YAML. Supports only the modern form:
-          - cfg['upstream'] as a list of upstream entries, each either:
+          - cfg['upstreams'] as a list of upstream entries, each either:
               * DoH entry: {'transport': 'doh', 'url': str, ...}
               * host/port entry: {'host': str, 'port': int, ...}
-          - cfg['timeout_ms'] at top level.
+          - cfg['foghorn']['timeout_ms'] for the global upstream timeout.
 
     Outputs:
       - (upstreams, timeout_ms):
           - upstreams: list[dict] with keys like {'host': str, 'port': int} or DoH metadata.
           - timeout_ms: int timeout in milliseconds applied per upstream attempt (default 2000).
 
-    Legacy single-dict forms for cfg['upstream'] and upstream.timeout_ms are no longer supported.
+    Legacy single-dict forms for cfg['upstreams'] and upstream.timeout_ms are no longer supported.
     """
-    upstream_raw = cfg.get("upstream")
+    upstream_raw = cfg.get("upstreams")
     if not isinstance(upstream_raw, list):
-        raise ValueError("config.upstream must be a list of upstream definitions")
+        raise ValueError("config.upstreams must be a list of upstream definitions")
 
     upstreams: List[Dict[str, Union[str, int, dict]]] = []
     for u in upstream_raw:
@@ -117,7 +125,13 @@ def normalize_upstream_config(
             rec2["pool"] = u["pool"]
         upstreams.append(rec2)
 
-    timeout_ms = int(cfg.get("timeout_ms", 2000))
+    foghorn_cfg = cfg.get("foghorn") or {}
+    if not isinstance(foghorn_cfg, dict):
+        raise ValueError("config.foghorn must be a mapping when present")
+    try:
+        timeout_ms = int(foghorn_cfg.get("timeout_ms", 2000))
+    except (TypeError, ValueError):
+        timeout_ms = 2000
     return upstreams, timeout_ms
 
 
@@ -357,9 +371,11 @@ def main(argv: List[str] | None = None) -> int:
         ... listen:
         ...   host: 127.0.0.1
         ...   port: 5354
-        ... upstream:
-        ...   host: 1.1.1.1
-        ...   port: 53
+        ... upstreams:
+        ...   - host: 1.1.1.1
+        ...     port: 53
+        ... foghorn:
+        ...   timeout_ms: 2000
         ... ''')):
         ...     server_thread = threading.Thread(target=main, args=(["--config", "config.yaml"],), daemon=True)
         ...     server_thread.start()
@@ -416,6 +432,11 @@ def main(argv: List[str] | None = None) -> int:
     default_host = str(listen_cfg.get("host", "127.0.0.1"))
     default_port = int(listen_cfg.get("port", 5333))
 
+    # Global foghorn runtime options (timeouts, strategy, asyncio usage).
+    foghorn_cfg = cfg.get("foghorn") or {}
+    if not isinstance(foghorn_cfg, dict):
+        raise ValueError("config.foghorn must be a mapping when present")
+
     def _sub(key, defaults):
         d = listen_cfg.get(key, {}) or {}
         out = {**defaults, **d} if isinstance(d, dict) else defaults
@@ -435,10 +456,14 @@ def main(argv: List[str] | None = None) -> int:
     upstreams, timeout_ms = normalize_upstream_config(cfg)
 
     # Upstream selection strategy and concurrency controls
-    upstream_strategy = str(cfg.get("upstream_strategy", "failover")).lower()
-    upstream_max_concurrent = int(cfg.get("upstream_max_concurrent", 1) or 1)
+    upstream_strategy = str(foghorn_cfg.get("upstream_strategy", "failover")).lower()
+    upstream_max_concurrent = int(foghorn_cfg.get("upstream_max_concurrent", 1) or 1)
     if upstream_max_concurrent < 1:
         upstream_max_concurrent = 1
+
+    # Global knob to disable asyncio-based listeners/admin servers in restricted
+    # environments. When false, threaded fallbacks are used where available.
+    use_asyncio = bool(foghorn_cfg.get("use_asyncio", True))
 
     # Resolver configuration (forward vs recursive) with conservative defaults.
 
@@ -944,14 +969,24 @@ def main(argv: List[str] | None = None) -> int:
 
         thost = str(tcp_cfg.get("host", default_host))
         tport = int(tcp_cfg.get("port", 53))
-        logger.info("Starting TCP listener on %s:%d", thost, tport)
-        _start_asyncio_server(
-            lambda: serve_tcp(thost, tport, resolve_query_bytes),
-            name="foghorn-tcp",
-            on_permission_error=lambda: serve_tcp_threaded(
-                thost, tport, resolve_query_bytes
-            ),
-        )
+        if use_asyncio:
+            logger.info("Starting TCP listener on %s:%d (asyncio)", thost, tport)
+            _start_asyncio_server(
+                lambda: serve_tcp(thost, tport, resolve_query_bytes),
+                name="foghorn-tcp",
+                on_permission_error=lambda: serve_tcp_threaded(
+                    thost, tport, resolve_query_bytes
+                ),
+            )
+        else:
+            logger.info("Starting TCP listener on %s:%d (threaded)", thost, tport)
+            t = threading.Thread(
+                target=lambda: serve_tcp_threaded(thost, tport, resolve_query_bytes),
+                name="foghorn-tcp-threaded",
+                daemon=True,
+            )
+            t.start()
+            loop_threads.append(t)
 
     if bool(dot_cfg.get("enabled", False)):
         from .dot_server import serve_dot
@@ -962,7 +997,7 @@ def main(argv: List[str] | None = None) -> int:
         key_file = dot_cfg.get("key_file")
         if not cert_file or not key_file:
             logger.error(
-                "listen.dot.enabled=true but cert_file/key_file not provided; skipping DoT listener"
+                "listen.dot.enabled=true but cert_file/key_file not provided; skipping DoT"
             )
         else:
             logger.info("Starting DoT listener on %s:%d", dhost, dport)
@@ -986,7 +1021,12 @@ def main(argv: List[str] | None = None) -> int:
         try:
             # start uvicorn-based DoH FastAPI server in background thread
             doh_handle = start_doh_server(
-                h, p, resolve_query_bytes, cert_file=cert_file, key_file=key_file
+                h,
+                p,
+                resolve_query_bytes,
+                cert_file=cert_file,
+                key_file=key_file,
+                use_asyncio=use_asyncio,
             )
         except Exception as e:
             logger.error("Failed to start DoH server: %s", e)
