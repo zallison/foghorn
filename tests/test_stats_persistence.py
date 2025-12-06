@@ -563,6 +563,48 @@ def test_stats_collector_warm_load_from_store_uses_counts(tmp_path: Path) -> Non
         store.close()
 
 
+def test_stats_collector_warm_load_aggregates_upstream_rcodes(tmp_path: Path) -> None:
+    """Brief: warm_load_from_store aggregates per-rcode upstream counts per outcome.
+
+    Inputs:
+        tmp_path: pytest tmp path for an isolated SQLite DB.
+    Outputs:
+        None; asserts that multiple upstreams.* keys for the same upstream/outcome
+        are summed into a single in-memory outcome counter while preserving
+        per-rcode tallies.
+    """
+    db_path = tmp_path / "stats_warm_upstream_rcodes.db"
+    store = StatsSQLiteStore(db_path=str(db_path))
+
+    try:
+        # Two persisted rows for the same upstream/outcome with different rcodes.
+        store.increment_count("upstreams", "8.8.8.8:53|success|NOERROR", delta=3)
+        store.increment_count("upstreams", "8.8.8.8:53|success|NXDOMAIN", delta=2)
+
+        collector = StatsCollector(
+            track_uniques=True,
+            include_qtype_breakdown=True,
+            include_top_clients=False,
+            include_top_domains=False,
+            top_n=5,
+            track_latency=False,
+            stats_store=store,
+        )
+
+        collector.warm_load_from_store()
+        snap = collector.snapshot(reset=False)
+
+        # Outcome counter should reflect the sum across rcodes.
+        assert snap.upstreams["8.8.8.8:53"]["success"] == 5
+
+        # Per-upstream rcode aggregates should also be restored.
+        assert snap.upstream_rcodes is not None
+        assert snap.upstream_rcodes["8.8.8.8:53"]["NOERROR"] == 3
+        assert snap.upstream_rcodes["8.8.8.8:53"]["NXDOMAIN"] == 2
+    finally:
+        store.close()
+
+
 def test_stats_collector_warm_load_no_store_is_noop() -> None:
     """Brief: warm_load_from_store is a no-op when no store is attached.
 

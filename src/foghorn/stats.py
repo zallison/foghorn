@@ -2625,8 +2625,12 @@ class StatsCollector:
                 except (TypeError, ValueError):
                     continue
 
-                # Always restore outcome-based upstream aggregates.
-                self._upstreams[upstream_id][outcome] = int_value
+                # Always restore outcome-based upstream aggregates. Multiple
+                # persisted rows may exist for the same upstream/outcome pair
+                # when different rcodes are present; accumulate all of them so
+                # in-memory outcome counters reflect the total volume across
+                # rcodes rather than only the last row seen.
+                self._upstreams[upstream_id][outcome] += int_value
 
                 # When rcode is present in the key, also rebuild
                 # per-upstream rcode aggregates so that snapshot.upstream_rcodes
