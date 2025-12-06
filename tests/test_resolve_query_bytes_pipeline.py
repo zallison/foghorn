@@ -148,10 +148,10 @@ def test_resolve_query_bytes_stats_upstream_success_and_failure(
     q = DNSRecord.question("upstream-stats.example", "A")
     r_ok = q.reply()
 
-    def _forward_ok(req, upstreams, timeout_ms, qname, qtype):
+    def _forward_ok(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
         return r_ok.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
 
-    def _forward_fail(req, upstreams, timeout_ms, qname, qtype):
+    def _forward_fail(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
         return None, {"host": "2.2.2.2", "port": 53}, "all_failed"
 
     # Success case
@@ -192,7 +192,7 @@ def test_resolve_query_bytes_stats_outer_exception(
     DNSUDPHandler.cache._store = {}
     DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
 
-    def _boom_send(req, upstreams, timeout_ms, qname, qtype):
+    def _boom_send(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(server_mod, "send_query_with_failover", _boom_send)
