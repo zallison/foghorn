@@ -6,7 +6,7 @@ listen:
     host: 127.0.0.1
     port: 5353
 
-upstream:
+upstreams:
   - { host: 1.1.1.1, port: 53 }
   - { host: 8.8.8.8, port: 53 }
 
@@ -15,7 +15,6 @@ dnssec:
   validation: upstream_ad
   udp_payload_size: 1232
 
-timeout_ms: 2000
 logging:
   level: info
 

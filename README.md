@@ -116,7 +116,7 @@ Testing, docs & security
   - [DNSSEC modes](#dnssec-modes)
 - [Configuration](#configuration)
   - [`listen`](#listen)
-  - [`upstream`](#upstream)
+  - [`upstreams`](#upstreams)
   - [`plugins`](#plugins)
 	- [AccessControlPlugin](#accesscontrolplugin)
 	- [NewDomainFilterPlugin](#newdomainfilterplugin)
@@ -225,7 +225,7 @@ dnssec:
 
 ## Configuration
 
-Configuration is handled through a `config.yaml` file. The file has three main sections: `listen`, `upstream`, and `plugins`.
+Configuration is handled through a `config.yaml` file. The primary top-level sections are `listen`, `upstreams`, `foghorn`, and `plugins`.
 
 ------
 
@@ -265,12 +265,12 @@ implementation has changed.
 
 ----
 
-## `upstream`
+## `upstreams`
 
 You can mix transports per upstream. If `transport` is omitted it defaults to UDP.
 
 ```yaml
-upstream:
+upstreams:
   - host: 1.1.1.1
 	port: 853
 	transport: dot
@@ -746,8 +746,8 @@ listen:
 	# key_file: /path/to/key.pem
 
 # Multiple upstream DNS servers with automatic failover.
-# All upstreams share a single timeout (timeout_ms) per attempt.
-upstream:
+# All upstreams share a single timeout (foghorn.timeout_ms) per attempt).
+upstreams:
   - host: 8.8.8.8
 	port: 53
 	transport: udp
@@ -765,15 +765,19 @@ upstream:
 	  user-agent: foghorn
 	tls:
 	  verify: true
+	  # ca_file: /etc/ssl/certs/ca-certificates.crt
 
-# Global timeout applies to each upstream attempt
-timeout_ms: 2000
-
-# Minimum cache TTL (in seconds) applied to ***all*** cached responses.
-# - For NOERROR with answers: cache TTL = max(min(answer TTLs), min_cache_ttl)
-# - For NOERROR with no answers, NXDOMAIN, and SERVFAIL: cache TTL = min_cache_ttl
-# Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
-min_cache_ttl: 60
+# Global timeout and upstream behaviour knobs
+foghorn:
+  timeout_ms: 2000
+  upstream_strategy: failover
+  upstream_max_concurrent: 1
+  use_asyncio: true
+  # Minimum cache TTL (in seconds) applied to ***all*** cached responses.
+  # - For NOERROR with answers: cache TTL = max(min(answer TTLs), min_cache_ttl)
+  # - For NOERROR with no answers, NXDOMAIN, and SERVFAIL: cache TTL = min_cache_ttl
+  # Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
+  min_cache_ttl: 60
 
 # Optional DNSSEC configuration
 # dnssec:

@@ -12,7 +12,7 @@ listen:
     enabled: false
 
 # Ordered list: DoT first, then UDP fallback
-upstream:
+upstreams:
   - host: 1.1.1.1
     port: 853
     transport: dot
@@ -23,7 +23,11 @@ upstream:
     port: 53
 
 # Shorter timeout to demonstrate failover speed
-timeout_ms: 1200
+foghorn:
+  timeout_ms: 1200
+  upstream_strategy: failover
+  upstream_max_concurrent: 1
+  use_asyncio: true
 
 dnssec:
   mode: passthrough

@@ -109,7 +109,7 @@ def validate_config(
     Example:
       >>> from pathlib import Path
       >>> import yaml
-      >>> data = yaml.safe_load("listen: {host: 127.0.0.1, port: 5353}\nupstream: [{host: 1.1.1.1, port: 53}]")
+      >>> data = yaml.safe_load("listen: {host: 127.0.0.1, port: 5353}\\nupstreams: [{host: 1.1.1.1, port: 53}]")
       >>> validate_config(data)  # does not raise for valid config
     """
     # Resolve the effective schema path so that error messages clearly state
