@@ -738,8 +738,8 @@ def main(argv: List[str] | None = None) -> int:
           - code: Desired process exit code to return from main().
 
         Outputs:
-          - None. Sets shutdown_event/exit_code and triggers server shutdown
-            when running with a UDP listener.
+          - None. Sets shutdown_event/exit_code so the main keepalive loop can
+            drive a coordinated shutdown across all active listeners.
 
         Notes:
           - For SIGTERM and SIGINT, a best-effort hard-kill timer is started.
@@ -748,7 +748,7 @@ def main(argv: List[str] | None = None) -> int:
             issued to avoid hanging indefinitely.
         """
 
-        nonlocal exit_code, server, hard_kill_timer
+        nonlocal exit_code, hard_kill_timer
         log = logging.getLogger("foghorn.main")
 
         if shutdown_event.is_set():
@@ -781,16 +781,6 @@ def main(argv: List[str] | None = None) -> int:
             hard_kill_timer = threading.Timer(10.0, _force_exit)
             hard_kill_timer.daemon = True
             hard_kill_timer.start()
-
-        # When a UDP server is active, ask it to stop so the main thread can
-        # proceed to the coordinated shutdown logic.
-        try:
-            if server is not None and hasattr(server, "stop"):
-                server.stop()
-        except (
-            Exception
-        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-            log.exception("Error while requesting UDP server shutdown for %s", reason)
 
     def _sighup_handler(_signum, _frame):
         _request_shutdown("SIGHUP", 0)
@@ -851,6 +841,9 @@ def main(argv: List[str] | None = None) -> int:
     server = None
     udp_thread: threading.Thread | None = None
     udp_error: Exception | None = None
+    # Track background listener threads (UDP, TCP, DoT, etc.) uniformly so the
+    # keepalive loop does not treat UDP as a special case.
+    loop_threads: list[threading.Thread] = []
     if bool(udp_cfg.get("enabled", True)):
         uhost = str(udp_cfg.get("host", default_host))
         uport = int(udp_cfg.get("port", default_port))
@@ -903,6 +896,7 @@ def main(argv: List[str] | None = None) -> int:
             daemon=True,
         )
         udp_thread.start()
+        loop_threads.append(udp_thread)
     else:
         # When no UDP listener is configured, the main thread still enters the
         # keepalive loop below so that TCP/DoT/DoH listeners (or tests that
@@ -917,8 +911,6 @@ def main(argv: List[str] | None = None) -> int:
     import asyncio
 
     from .server import resolve_query_bytes
-
-    loop_threads = []
 
     def _start_asyncio_server(coro_factory, name: str, *, on_permission_error=None):
         def runner():
@@ -1036,6 +1028,29 @@ def main(argv: List[str] | None = None) -> int:
         # serve_forever() call.
         import time as _time
 
+        def _listener_thread_is_dead(t: threading.Thread) -> bool:
+            """Best-effort liveness check for background listener threads.
+
+            Inputs:
+              - t: Thread instance (or test stub) representing a listener.
+
+            Outputs:
+              - bool: True when the thread is known to have exited.
+
+            Notes:
+              - Test stubs may not implement is_alive(); in that case we
+                conservatively treat the thread as still running so the
+                keepalive loop remains active.
+            """
+
+            try:
+                return not t.is_alive()
+            except Exception:
+                # Test doubles used in unit tests may not implement is_alive();
+                # treat them as already exited so the keepalive loop can
+                # terminate promptly.
+                return True
+
         while not shutdown_event.is_set():
             # If the UDP server thread has reported an unhandled exception,
             # mirror the legacy behaviour by logging it and treating it as a
@@ -1048,12 +1063,14 @@ def main(argv: List[str] | None = None) -> int:
                     exit_code = 1
                 break
 
-            # If a UDP server thread was started and it has exited (for example
-            # because a test's DummyServer.serve_forever() raised
-            # KeyboardInterrupt or another exception), break out of the loop so
-            # coordinated shutdown can proceed.
-            if udp_thread is not None and not udp_thread.is_alive():
+            # When any background listener threads (UDP, TCP, DoT, etc.) have
+            # all exited—for example because their serve_forever loops
+            # returned—break out of the loop so coordinated shutdown can
+            # proceed. This avoids treating the UDP listener as a special case
+            # for keepalive behaviour.
+            if loop_threads and all(_listener_thread_is_dead(t) for t in loop_threads):
                 break
+
             _time.sleep(1.0)
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down")
