@@ -74,15 +74,6 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     #   - down_until: epoch timestamp until which this upstream is considered down.
     upstream_health: Dict[str, Dict[str, float]] = {}
 
-    # Recursive resolver configuration (used when resolver.mode == 'recursive').
-    # These are class-level knobs populated by foghorn.main during startup.
-    recursive_mode = "forward"  # 'forward' (default) or 'recursive'
-    recursive_timeout_ms = 2000
-    recursive_per_try_timeout_ms = 500
-    recursive_max_depth = 8
-    recursive_cache = None
-    recursive_transports = None
-
     @staticmethod
     def _upstream_id(up: Dict) -> str:
         """Brief: Compute a stable identifier string for an upstream config.
