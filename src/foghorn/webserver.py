@@ -1292,7 +1292,7 @@ def create_app(
         """
 
         cfg = app.state.config or {}
-        upstream_cfg = cfg.get("upstream") or []
+        upstream_cfg = cfg.get("upstreams") or []
         if not isinstance(upstream_cfg, list):
             upstream_cfg = []
 
@@ -2309,7 +2309,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         cfg = getattr(self._server(), "config", {}) or {}
-        upstream_cfg = cfg.get("upstream") or []
+        upstream_cfg = cfg.get("upstreams") or []
         if not isinstance(upstream_cfg, list):
             upstream_cfg = []
 
@@ -2914,35 +2914,40 @@ def start_webserver(
     if not web_cfg.get("enabled"):
         return None
 
+    foghorn_cfg = (config.get("foghorn") or {}) if isinstance(config, dict) else {}
+    use_asyncio = bool(foghorn_cfg.get("use_asyncio", True))
+
     # Detect restricted environments where asyncio cannot create its self-pipe
-    # and skip uvicorn entirely in that case.
-    can_use_asyncio = True
-    try:  # pragma: no cover - difficult to exercise PermissionError in CI
-        import asyncio
+    # and skip uvicorn entirely in that case, or when explicitly disabled via
+    # foghorn.use_asyncio.
+    can_use_asyncio = use_asyncio
+    if can_use_asyncio:
+        try:  # pragma: no cover - difficult to exercise PermissionError in CI
+            import asyncio
 
-        loop = asyncio.new_event_loop()
-        loop.close()
+            loop = asyncio.new_event_loop()
+            loop.close()
 
-    except PermissionError as exc:  # pragma: no cover - best effort
-        logger.warning(
-            "Asyncio loop creation failed for admin webserver: %s falling back to threaded HTTP server.",
-            exc,
-        )
-        # Always disable asyncio path on PermissionError, regardless of whether
-        # we are running inside a container. This mirrors the DoH server logic
-        # and ensures we reliably use the threaded fallback when self-pipe
-        # creation is not permitted.
-        can_use_asyncio = False
-        container_path = "/.dockerenv"
-        if os.path.exists(container_path):
+        except PermissionError as exc:  # pragma: no cover - best effort
             logger.warning(
-                "Possible container permission issues. Update, check seccomp settings, or run with --privileged "
+                "Asyncio loop creation failed for admin webserver: %s falling back to threaded HTTP server.",
+                exc,
             )
-            logger.warning(
-                "Now enjoy this exception and wait for the threaded server to start: \n"
-            )
-    except Exception:
-        can_use_asyncio = True
+            # Always disable asyncio path on PermissionError, regardless of whether
+            # we are running inside a container. This mirrors the DoH server logic
+            # and ensures we reliably use the threaded fallback when self-pipe
+            # creation is not permitted.
+            can_use_asyncio = False
+            container_path = "/.dockerenv"
+            if os.path.exists(container_path):
+                logger.warning(
+                    "Possible container permission issues. Update, check seccomp settings, or run with --privileged "
+                )
+                logger.warning(
+                    "Now enjoy this exception and wait for the threaded server to start: \n"
+                )
+        except Exception:
+            can_use_asyncio = use_asyncio
 
     if not can_use_asyncio:
         return _start_admin_server_threaded(
