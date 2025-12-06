@@ -183,6 +183,47 @@ def test_send_query_with_failover_no_upstreams():
     assert resp is None and used is None and reason == "no_upstreams"
 
 
+def test_send_query_with_failover_concurrent_path_uses_first_success(monkeypatch):
+    """Brief: send_query_with_failover with max_concurrent>1 returns first successful upstream.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: Asserts winner comes from second upstream when first fails.
+    """
+
+    class DummyQuery:
+        def send(self, host, port, timeout=None):
+            if host == "bad":
+                return b"resp-bad"
+            return b"resp-good"
+
+    def fake_parse(wire):
+        class _R:
+            class header:
+                rcode = RCODE.NOERROR
+
+        if wire == b"resp-bad":
+            raise ValueError("bad parse")
+        return _R
+
+    monkeypatch.setattr("foghorn.server.DNSRecord.parse", fake_parse)
+
+    resp, used, reason = send_query_with_failover(
+        DummyQuery(),
+        upstreams=[{"host": "bad", "port": 53}, {"host": "good", "port": 53}],
+        timeout_ms=100,
+        qname="example.com",
+        qtype=QTYPE.A,
+        max_concurrent=2,
+    )
+
+    assert resp == b"resp-good"
+    assert used == {"host": "good", "port": 53}
+    assert reason == "ok"
+
+
 def test_dnsserver_edns_udp_payload_config_and_fallback(monkeypatch):
     """Brief: DNSServer applies edns_udp_payload and falls back to default on error.
 

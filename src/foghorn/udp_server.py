@@ -2,7 +2,6 @@ import logging
 import random
 import socketserver
 import time
-from functools import lru_cache
 from typing import Callable, Dict, List, Optional
 
 from dnslib import QTYPE, RCODE, DNSRecord
@@ -22,42 +21,12 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
     Outputs:
       - bytes: response with corrected ID
 
-    Fast path: DNS ID is the first 2 bytes (big-endian). We rewrite them
-    without parsing to avoid any packing differences.
-
-    Note: We normalize to bytes before delegating to a cached helper so that
-    unhashable types (e.g., bytearray) do not break caching.
+    This helper now delegates to the shared implementation in foghorn.server
+    so that ID-rewrite behaviour is consistent across UDP and non-UDP paths.
     """
-    try:
-        # Normalize to bytes to ensure hashability and immutability
-        try:
-            bwire = bytes(wire)
-        except Exception:
-            bwire = wire  # fallback; will likely still be bytes
-        return _set_response_id_cached(bwire, int(req_id))
-    except (
-        Exception
-    ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-        logger.error("Failed to set response id: %s", e)
-        return (
-            bytes(wire)
-            if not isinstance(wire, (bytes, bytearray))
-            else (bytes(wire) if isinstance(wire, bytearray) else wire)
-        )
+    from . import server as _server_mod
 
-
-@lru_cache(maxsize=1024)
-def _set_response_id_cached(wire: bytes, req_id: int) -> bytes:
-    """Cached helper for setting DNS ID on an immutable bytes payload."""
-    try:
-        if len(wire) >= 2:
-            hi = (req_id >> 8) & 0xFF
-            lo = req_id & 0xFF
-            return bytes([hi, lo]) + wire[2:]
-        return wire
-    except Exception as e:
-        logger.error("Failed to set response id (cached): %s", e)
-        return wire
+    return _server_mod._set_response_id(wire, req_id)
 
 
 def _edns_flags_for_mode(dnssec_mode: str) -> int:
@@ -583,8 +552,20 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         # via foghorn.server so test monkeypatches on server_mod apply.
         from . import server as _server_mod
 
+        try:
+            max_concurrent = int(getattr(self, "upstream_max_concurrent", 1) or 1)
+        except Exception:
+            max_concurrent = 1
+        if max_concurrent < 1:
+            max_concurrent = 1
+
         reply, used_upstream, reason = _server_mod.send_query_with_failover(
-            request, safe_upstreams, self.timeout_ms, qname, qtype
+            request,
+            safe_upstreams,
+            self.timeout_ms,
+            qname,
+            qtype,
+            max_concurrent=max_concurrent,
         )
 
         # Lazy health updates: on complete failure, mark all attempted upstreams

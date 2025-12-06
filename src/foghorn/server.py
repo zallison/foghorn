@@ -1,9 +1,11 @@
 import functools
 import logging
 import socketserver
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple, NamedTuple
 
 from dnslib import QTYPE, RCODE, DNSRecord
+from dnslib import EDNS0, RR  # noqa: F401  (re-exported for udp_server._ensure_edns)
 
 from .plugins.base import BasePlugin, PluginContext, PluginDecision
 from .transports.dot import DoTError, get_dot_pool
@@ -167,9 +169,11 @@ def send_query_with_failover(
     timeout_ms: int,
     qname: str,
     qtype: int,
+    max_concurrent: int = 1,
 ) -> Tuple[Optional[bytes], Optional[Dict], str]:
     """
-    Sends a DNS query to a list of upstream servers, with failover.
+    Sends a DNS query to a list of upstream servers, with failover and optional
+    per-query concurrency across multiple upstreams.
 
     Args:
         query: The DNSRecord to send.
@@ -177,27 +181,50 @@ def send_query_with_failover(
         timeout_ms: The timeout in milliseconds for each attempt.
         qname: The query name (for logging).
         qtype: The query type (for logging).
+        max_concurrent: Maximum number of upstreams to query in parallel for
+            this request. Values <1 are treated as 1. When greater than 1,
+            up to ``max_concurrent`` upstreams are queried concurrently and the
+            first successful response is returned.
 
     Returns:
         A tuple of (response_wire_bytes, used_upstream, reason).
-        reason is 'ok', 'servfail', 'timeout', or 'all_failed'.
+        reason is 'ok', 'no_upstreams', or 'all_failed'.
     """
     if not upstreams:
         return None, None, "no_upstreams"
 
     timeout_sec = timeout_ms / 1000.0
-    last_exception = None
+    last_exception: Optional[Exception] = None
 
-    for upstream in upstreams:
+    try:
+        max_c = int(max_concurrent or 1)
+    except Exception:  # pragma: no cover - defensive: invalid caller input
+        max_c = 1
+    if max_c < 1:
+        max_c = 1
+
+    def _try_single(upstream: Dict) -> Tuple[Optional[bytes], Optional[Dict], str]:
+        """Send query to a single upstream and classify the result.
+
+        Inputs:
+          - upstream: Mapping describing host/port/transport configuration.
+
+        Outputs:
+          - (response_wire, used_upstream, reason) where response_wire is
+            None when this upstream failed and reason is 'ok' on success or
+            'all_failed' on per-upstream failure.
+        """
+
+        nonlocal last_exception
+
         # For DoH we may not have host/port; use safe defaults for logging
         host = str(upstream.get("host", ""))
         try:
             port = int(upstream.get("port", 0))
-        except (
-            Exception
-        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        except Exception:  # pragma: no cover - defensive: bad port value
             port = 0
         transport = str(upstream.get("transport", "udp")).lower()
+
         try:
             logger.debug(
                 "Forwarding %s type %s via %s to %s:%d",
@@ -232,10 +259,8 @@ def send_query_with_failover(
                             else None
                         ),
                     )
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                except Exception:  # pragma: no cover - defensive: pool tuning only
+                    pass
                 response_wire = pool.send(query.pack(), timeout_ms, timeout_ms)
             elif transport == "tcp":
                 pool_cfg = (
@@ -253,10 +278,8 @@ def send_query_with_failover(
                             else None
                         ),
                     )
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                    pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                except Exception:  # pragma: no cover - defensive: pool tuning only
+                    pass
                 response_wire = pool.send(query.pack(), timeout_ms, timeout_ms)
             elif transport == "doh":
                 doh_url = str(
@@ -277,7 +300,9 @@ def send_query_with_failover(
                 )
                 verify = bool(tls_cfg.get("verify", True))
                 ca_file = tls_cfg.get("ca_file")
-                from .transports.doh import doh_query  # local import to avoid overhead
+                from .transports.doh import (
+                    doh_query,
+                )  # local import to avoid overhead
 
                 body, resp_headers = doh_query(
                     doh_url,
@@ -316,7 +341,7 @@ def send_query_with_failover(
                         qname,
                     )
                     last_exception = Exception(f"SERVFAIL from {host}:{port}")
-                    continue  # Try next upstream
+                    return None, None, "all_failed"
                 # If UDP and TC=1, fallback to TCP for full response
                 tc_flag = getattr(parsed_response.header, "tc", 0)
                 if transport == "udp" and tc_flag == 1:
@@ -331,15 +356,15 @@ def send_query_with_failover(
                             connect_timeout_ms=timeout_ms,
                             read_timeout_ms=timeout_ms,
                         )
-                        return response_wire, {**upstream, "transport": "tcp"}, "ok"
-                    except (
-                        Exception
-                    ) as e2:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                        return (
+                            response_wire,
+                            {**upstream, "transport": "tcp"},
+                            "ok",
+                        )
+                    except Exception as e2:  # pragma: no cover - defensive
                         last_exception = e2
-                        continue
-            except (
-                Exception
-            ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                        return None, None, "all_failed"
+            except Exception as e:  # pragma: no cover - defensive
                 # If parsing fails, treat as a server failure
                 logger.warning(
                     "Failed to parse response from %s:%d for %s: %s",
@@ -349,7 +374,7 @@ def send_query_with_failover(
                     e,
                 )
                 last_exception = e
-                continue  # Try next upstream
+                return None, None, "all_failed"
 
             # Success (NOERROR, NXDOMAIN, etc.)
             return response_wire, upstream, "ok"
@@ -358,7 +383,7 @@ def send_query_with_failover(
             DoTError,
             TCPError,
             Exception,
-        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        ) as e:  # pragma: no cover - defensive: network/transport failure
             logger.debug(
                 "Upstream %s:%d via %s failed for %s: %s",
                 host,
@@ -368,7 +393,32 @@ def send_query_with_failover(
                 str(e),
             )
             last_exception = e
-            continue  # Try next upstream
+            return None, None, "all_failed"
+
+    # Sequential path: same semantics as the original implementation when
+    # max_concurrent == 1.
+    if max_c == 1 or len(upstreams) <= 1:
+        for upstream in upstreams:
+            resp, used, reason = _try_single(upstream)
+            if resp is not None:
+                return resp, used, reason
+    else:
+        # Concurrency path: query up to max_c upstreams in parallel and return
+        # the first successful response.
+        workers = min(max_c, len(upstreams))
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(_try_single, up) for up in upstreams]
+                for fut in as_completed(futures):
+                    try:
+                        resp, used, reason = fut.result()
+                    except Exception as e:  # pragma: no cover - defensive
+                        last_exception = e
+                        continue
+                    if resp is not None:
+                        return resp, used, reason
+        except Exception as e:  # pragma: no cover - defensive: executor failure
+            last_exception = e
 
     logger.warning(
         "All upstreams failed for %s %s. Last error: %s", qname, qtype, last_exception
@@ -747,8 +797,21 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
         upstream_id: Optional[str] = None
         timeout_ms = getattr(DNSUDPHandler, "timeout_ms", 2000)
         upstreams = list(getattr(DNSUDPHandler, "upstream_addrs", []) or [])
+        try:
+            max_concurrent = int(
+                getattr(DNSUDPHandler, "upstream_max_concurrent", 1) or 1
+            )
+        except Exception:
+            max_concurrent = 1
+        if max_concurrent < 1:
+            max_concurrent = 1
         reply, used_upstream, reason = send_query_with_failover(
-            req, upstreams, timeout_ms, qname, qtype
+            req,
+            upstreams,
+            timeout_ms,
+            qname,
+            qtype,
+            max_concurrent=max_concurrent,
         )
 
         # Record upstream result, even when all upstreams ultimately fail.

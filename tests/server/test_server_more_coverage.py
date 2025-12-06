@@ -293,7 +293,9 @@ def test_resolve_query_bytes_negative_caches_nxdomain_with_soa(monkeypatch):
 
     calls = {"n": 0}
 
-    def fake_failover(req, upstreams, timeout_ms, qname, qtype):  # noqa: ANN001
+    def fake_failover(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None
+    ):  # noqa: ANN001
         calls["n"] += 1
         return wire, upstreams[0], "ok"
 
@@ -339,7 +341,9 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
 
     calls = {"n": 0}
 
-    def fake_failover(req, upstreams, timeout_ms, qname, qtype):  # noqa: ANN001
+    def fake_failover(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None
+    ):  # noqa: ANN001
         calls["n"] += 1
         return wire, upstreams[0], "ok"
 
@@ -444,7 +448,7 @@ def test_resolve_query_bytes_post_hooks(monkeypatch):
     q = DNSRecord.question("hook.example", "A")
     r_ok = q.reply()
 
-    def fake_forward(req, upstreams, timeout_ms, qname, qtype):
+    def fake_forward(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
         return r_ok.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
 
     monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)

@@ -295,8 +295,8 @@ def test_forward_with_failover_helper_delegates(monkeypatch):
     """
     called = {}
 
-    def fake_send(q, ups, timeout_ms, qname, qtype):
-        called["args"] = (ups, timeout_ms, qname, qtype)
+    def fake_send(q, ups, timeout_ms, qname, qtype, max_concurrent=None):
+        called["args"] = (ups, timeout_ms, qname, qtype, max_concurrent)
         return b"x", {"host": "h", "port": 9}, "ok"
 
     monkeypatch.setattr(server_mod, "send_query_with_failover", fake_send)
@@ -306,7 +306,7 @@ def test_forward_with_failover_helper_delegates(monkeypatch):
     h.timeout_ms = 123
     upstreams = [{"host": "u1", "port": 53}]
     out = DNSUDPHandler._forward_with_failover_helper(h, q, upstreams, "ex", 1)
-    assert out[2] == "ok" and called["args"] == (upstreams, 123, "ex", 1)
+    assert out[2] == "ok" and called["args"] == (upstreams, 123, "ex", 1, 1)
 
 
 def test_choose_upstreams_logs_when_empty(caplog):

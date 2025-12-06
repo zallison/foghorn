@@ -264,7 +264,7 @@ def test_resolve_query_bytes_end_to_end_paths(monkeypatch):
     r3 = q3.reply()
     r3.add_answer(RR("cachehit.example", rdata=A("1.2.3.4"), ttl=5))
 
-    def fake_forward(req, upstreams, timeout_ms, qname, qtype):
+    def fake_forward(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
         return r3.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
 
     monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
