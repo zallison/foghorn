@@ -49,7 +49,7 @@ def test_invalid_config_raises_value_error() -> None:
 
     cfg = {
         "listen": {"host": "127.0.0.1", "port": 5353},
-        "upstream": [{"host": "1.1.1.1", "port": 53}],
+        "upstreams": [{"host": "1.1.1.1", "port": 53}],
         "extra": 42,
     }
 
