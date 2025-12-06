@@ -301,11 +301,13 @@ class RateLimitPlugin(BasePlugin):
           - Optional (avg_rps, max_rps, samples) tuple; None when no profile or row is malformed.
         """
 
-        cur = self._conn.cursor()
-        cur.execute(
-            "SELECT avg_rps, max_rps, samples FROM rate_profiles WHERE key=?", (key,)
-        )
-        row = cur.fetchone()
+        with self._db_lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "SELECT avg_rps, max_rps, samples FROM rate_profiles WHERE key=?",
+                (key,),
+            )
+            row = cur.fetchone()
         if not row:
             return None
         try:

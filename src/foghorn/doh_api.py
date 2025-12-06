@@ -378,6 +378,7 @@ def start_doh_server(
     *,
     cert_file: Optional[str] = None,
     key_file: Optional[str] = None,
+    use_asyncio: bool = True,
 ) -> Optional[DoHServerHandle]:
     """Brief: Start DoH server, preferring uvicorn but falling back to threaded HTTP.
 
@@ -396,25 +397,27 @@ def start_doh_server(
     """
     # First, detect environments where asyncio cannot create its self-pipe
     # (e.g., restricted containers or seccomp profiles). In that case, skip
-    # uvicorn entirely and use the threaded HTTP implementation.
-    can_use_asyncio = True
-    try:  # pragma: no cover - difficult to exercise PermissionError in CI
-        import asyncio
+    # uvicorn entirely and use the threaded HTTP implementation. Also honor the
+    # global foghorn.use_asyncio knob when provided by callers.
+    can_use_asyncio = bool(use_asyncio)
+    if can_use_asyncio:
+        try:  # pragma: no cover - difficult to exercise PermissionError in CI
+            import asyncio
 
-        loop = asyncio.new_event_loop()
-        loop.close()
-    except (
-        PermissionError
-    ) as exc:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        logger.warning(
-            "Asyncio loop creation failed for DoH; falling back to threaded HTTP server: %s",
-            exc,
-        )
-        can_use_asyncio = False
-    except Exception:
-        # For other issues we still attempt uvicorn and rely on its own error
-        # handling; the threaded fallback remains available on ImportError.
-        can_use_asyncio = True
+            loop = asyncio.new_event_loop()
+            loop.close()
+        except (
+            PermissionError
+        ) as exc:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            logger.warning(
+                "Asyncio loop creation failed for DoH; falling back to threaded HTTP server: %s",
+                exc,
+            )
+            can_use_asyncio = False
+        except Exception:
+            # For other issues we still attempt uvicorn and rely on its own error
+            # handling; the threaded fallback remains available on ImportError.
+            can_use_asyncio = bool(use_asyncio)
 
     if not can_use_asyncio:
         return _start_doh_server_threaded(
