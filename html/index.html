@@ -92,11 +92,11 @@
 		</section>
 
 		<section class="fh-pane fh-pane-right">
-				<div class="fh-pane-header">
-					<h2 class="fh-pane-title">Configuration</h2>
-					<div class="fh-config-actions" id="config-actions-view">
-						<button id="btn-edit" class="fh-btn" type="button">Edit Config</button>
-					</div>
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title">Configuration</h2>
+				<div class="fh-config-actions" id="config-actions-view">
+					<button id="btn-edit" class="fh-btn" type="button">Edit Config</button>
+				</div>
 				<div class="fh-config-actions fh-config-actions-edit" id="config-actions-edit" hidden>
 					<button id="btn-cancel" class="fh-btn fh-btn-secondary" type="button">Cancel</button>
 					<button id="btn-save" class="fh-btn fh-btn-primary" type="button">Save</button>
@@ -993,7 +993,7 @@
 				if (!items || !Array.isArray(items) || !items.length) {
 					return;
 				}
-				var target = statsGroupsRightEl || statsGroupsEl;
+				var target = statsGroupsEl || statsGroupsRightEl;
 				var group = document.createElement('section');
 				group.className = 'fh-stats-group';
 

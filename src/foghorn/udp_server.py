@@ -539,7 +539,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 # Best-effort shuffle; fall back to original order on error.
                 ordered = base_list
 
-        upstreams_to_try = ordered[:max_concurrent]
+        upstreams_to_try = ordered
         logger.debug(
             "Using %d upstreams (strategy=%s, max_concurrent=%d) for %s %s",
             len(upstreams_to_try),
