@@ -23,7 +23,7 @@ listen:
     # cert_file: /path/to/cert.pem
     # key_file: /path/to/key.pem
 
-upstream:
+upstreams:
   # UDP upstream
   - host: 8.8.8.8
     port: 53
@@ -59,9 +59,12 @@ upstream:
       verify: true
       # ca_file: /etc/ssl/certs/ca-certificates.crt
 
-timeout_ms: 2000
-min_cache_ttl: 60
-
+foghorn:
+  timeout_ms: 2000
+  upstream_strategy: failover
+  upstream_max_concurrent: 1
+  use_asyncio: true
+  min_cache_ttl: 60
 dnssec:
   mode: ignore
   validation: upstream_ad
