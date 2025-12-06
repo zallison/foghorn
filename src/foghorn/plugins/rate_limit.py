@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -265,6 +266,17 @@ class RateLimitPlugin(BasePlugin):
           - None (creates self._conn and the rate_profiles table).
         """
 
+        dir_path = os.path.dirname(self.db_path)
+        if dir_path:
+            try:
+                os.makedirs(dir_path, exist_ok=True)
+            except Exception as exc:  # pragma: no cover - defensive: log-only path
+                logger.warning(
+                    "RateLimitPlugin: failed to create directory for db_path %s: %s",
+                    self.db_path,
+                    exc,
+                )
+
         with self._db_lock:
             self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self._conn.execute("PRAGMA journal_mode=WAL")
@@ -286,7 +298,7 @@ class RateLimitPlugin(BasePlugin):
           - key: Normalized profile key string.
 
         Outputs:
-          - Optional (avg_rps, max_rps, samples) tuple; None when no profile.
+          - Optional (avg_rps, max_rps, samples) tuple; None when no profile or row is malformed.
         """
 
         cur = self._conn.cursor()
@@ -296,7 +308,17 @@ class RateLimitPlugin(BasePlugin):
         row = cur.fetchone()
         if not row:
             return None
-        return float(row[0]), float(row[1]), int(row[2])
+        try:
+            if row[0] is None or row[1] is None or row[2] is None:
+                raise TypeError("RateLimitPlugin: NULL fields in rate_profiles row")
+            return float(row[0]), float(row[1]), int(row[2])
+        except Exception as exc:  # pragma: no cover - defensive: malformed DB rows
+            logger.warning(
+                "RateLimitPlugin: ignoring malformed rate_profiles row for %s: %s",
+                key,
+                exc,
+            )
+            return None
 
     def _db_update_profile(self, key: str, rps: float, now_ts: int) -> None:
         """Brief: Update or insert the learned profile for a key.
@@ -317,27 +339,42 @@ class RateLimitPlugin(BasePlugin):
                 (key,),
             )
             row = cur.fetchone()
-            if not row:
+            if not row or row[0] is None or row[1] is None or row[2] is None:
+                # Treat missing or partially-null rows as if they do not exist,
+                # resetting the profile based on the current observation.
                 cur.execute(
-                    "INSERT INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) "
+                    "INSERT OR REPLACE INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (key, float(rps), float(rps), 1, int(now_ts)),
                 )
             else:
-                avg_rps, max_rps, samples = float(row[0]), float(row[1]), int(row[2])
-                # Use asymmetric smoothing so we can ramp up and down at different rates.
-                if float(rps) >= avg_rps:
-                    alpha = float(self.alpha)
+                try:
+                    avg_rps, max_rps, samples = (
+                        float(row[0]),
+                        float(row[1]),
+                        int(row[2]),
+                    )
+                except Exception:
+                    # Malformed existing row; reset it using the current observation.
+                    cur.execute(
+                        "INSERT OR REPLACE INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (key, float(rps), float(rps), 1, int(now_ts)),
+                    )
                 else:
-                    alpha = float(getattr(self, "alpha_down", self.alpha))
-                new_avg = (1.0 - alpha) * avg_rps + alpha * float(rps)
-                new_max = max(max_rps, float(rps))
-                new_samples = samples + 1
-                cur.execute(
-                    "UPDATE rate_profiles SET avg_rps=?, max_rps=?, samples=?, last_update=? "
-                    "WHERE key=?",
-                    (new_avg, new_max, new_samples, int(now_ts), key),
-                )
+                    # Use asymmetric smoothing so we can ramp up and down at different rates.
+                    if float(rps) >= avg_rps:
+                        alpha = float(self.alpha)
+                    else:
+                        alpha = float(getattr(self, "alpha_down", self.alpha))
+                    new_avg = (1.0 - alpha) * avg_rps + alpha * float(rps)
+                    new_max = max(max_rps, float(rps))
+                    new_samples = samples + 1
+                    cur.execute(
+                        "UPDATE rate_profiles SET avg_rps=?, max_rps=?, samples=?, last_update=? "
+                        "WHERE key=?",
+                        (new_avg, new_max, new_samples, int(now_ts), key),
+                    )
             self._conn.commit()
 
     def _make_key(self, qname: str, ctx: PluginContext) -> str:
@@ -533,8 +570,13 @@ class RateLimitPlugin(BasePlugin):
             profile = self._db_get_profile(key)
         except (
             Exception
-        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-            logger.warning("RateLimitPlugin: failed to load profile for %s", key)
+        ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+            logger.warning(
+                "RateLimitPlugin: failed to load profile for %s: %s",
+                key,
+                exc,
+                exc_info=True,
+            )
 
         if not profile:
             # No baseline yet; learning-only phase.

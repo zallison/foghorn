@@ -439,3 +439,54 @@ def test_asymmetric_alpha_allows_slower_ramp_down(tmp_path, monkeypatch):
     assert samples == 3
     #  new_avg = (1 - 0.1) * 15 + 0.1 * 0 = 13.5
     assert avg_rps == 13.5
+
+
+def test_malformed_rate_profiles_rows_are_ignored(tmp_path, monkeypatch):
+    """Brief: Malformed rate_profiles rows (bad values) are ignored safely.
+
+    Inputs:
+      - tmp_path: temporary directory for sqlite DB.
+      - monkeypatch: pytest monkeypatch fixture (unused here).
+
+    Outputs:
+      - None: asserts that bad avg_rps/max_rps/samples do not crash pre_resolve
+        and that profiles are reset on next update.
+    """
+
+    db = tmp_path / "rl-bad-row.db"
+    plugin = RateLimitPlugin(
+        db_path=str(db),
+        window_seconds=10,
+        warmup_windows=0,
+        min_enforce_rps=0.0,
+    )
+    plugin.setup()
+    ctx = PluginContext(client_ip="192.0.2.1")
+
+    # Seed a malformed row with bad "numeric" values that will fail conversion.
+    cur = plugin._conn.cursor()
+    cur.execute(
+        "INSERT OR REPLACE INTO rate_profiles(key, avg_rps, max_rps, samples, last_update) "
+        "VALUES(?, ?, ?, ?, ?)",
+        ("192.0.2.1", "not-a-float", "not-a-float", "not-an-int", int(1000)),
+    )
+    plugin._conn.commit()
+
+    # pre_resolve should not crash and should treat the profile as missing.
+    _set_time(monkeypatch, 1000.0)
+    decision = plugin.pre_resolve("example.com", QTYPE.A, b"", ctx)
+    assert decision is None
+
+    # A completed window should overwrite the malformed row via _db_update_profile.
+    _set_time(monkeypatch, 1010.0)
+    for _ in range(5):
+        # We only care that this does not crash; enforcement may begin once
+        # a valid profile exists again, so the decision can be None or deny.
+        plugin.pre_resolve("example.com", QTYPE.A, b"", ctx)
+
+    profile = plugin._db_get_profile("192.0.2.1")
+    assert profile is not None
+    avg_rps, max_rps, samples = profile
+    assert avg_rps >= 0.0
+    assert max_rps >= avg_rps
+    assert samples >= 1
