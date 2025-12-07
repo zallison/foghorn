@@ -1,8 +1,17 @@
 import base64
 import http.client
+import importlib
 import ssl
 import urllib.parse
 from typing import Dict, Optional, Tuple
+
+
+try:
+    FOGHORN_VERSION = importlib.metadata.version("foghorn")
+except (
+    Exception
+):  # pragma: no cover - defensive: metadata may be unavailable in some environments
+    FOGHORN_VERSION = "unknown"
 
 
 class DoHError(Exception):
@@ -106,6 +115,11 @@ def doh_query(
     connect_timeout = timeout_ms / 1000.0
     path = parsed.path or "/dns-query"
     extra_headers = {k: v for (k, v) in (headers or {}).items()}
+
+    # Ensure a sensible default User-Agent when caller does not provide one.
+    # Preserve any explicit header regardless of casing.
+    if not any(k.lower() == "user-agent" for k in extra_headers):
+        extra_headers["User-Agent"] = f"Foghorn v{FOGHORN_VERSION}"
 
     if method.upper() == "GET":
         qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)

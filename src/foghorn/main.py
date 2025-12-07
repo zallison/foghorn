@@ -93,8 +93,11 @@ def normalize_upstream_config(
         if not isinstance(u, dict):
             raise ValueError("each upstream entry must be a mapping")
 
+        # Normalize transport early so we can derive sensible defaults.
+        transport = str(u.get("transport", "udp")).lower()
+
         # DoH entries using URL
-        if str(u.get("transport", "")).lower() == "doh":
+        if transport == "doh":
             logger = logging.getLogger("foghorn.main.setup")
             logger.debug(f"doh: {u}")
             rec: Dict[str, Union[str, int, dict]] = {
@@ -113,12 +116,16 @@ def normalize_upstream_config(
         # Host/port-based upstream (udp/tcp/dot)
         if "host" not in u:
             raise ValueError("each upstream entry must include 'host'")
+
+        # Default ports by transport: UDP/TCP -> 53, DoT -> 853.
+        default_port = 853 if transport == "dot" else 53
+
         rec2: Dict[str, Union[str, int, dict]] = {
             "host": str(u["host"]),
-            "port": int(u.get("port", 53)),
+            "port": int(u.get("port", default_port)),
         }
         if "transport" in u:
-            rec2["transport"] = str(u.get("transport"))
+            rec2["transport"] = transport
         if "tls" in u and isinstance(u["tls"], dict):
             rec2["tls"] = u["tls"]
         if "pool" in u and isinstance(u["pool"], dict):
