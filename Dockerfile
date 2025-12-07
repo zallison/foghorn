@@ -13,7 +13,9 @@ RUN DEBIAN_FRONTEND=noninteractive apt update && \
 
 # Pre-install python modules
 
-RUN pip3 install --root-user-action=ignore PyYAML>=6.0.1 jsonschema>=4.17.3 cachetools dnslib>=0.9.24 dnspython>=2.6.1 fastapi>=0.111.0 httpx psutil ytest pytest-cov requests>=2.31.0 uvicorn>=0.30.0 watchdog whois coverage
+RUN pip3 install --root-user-action=ignore PyYAML>=6.0.1 jsonschema>=4.17.3 cachetools dnslib>=0.9.24 \
+	dnspython>=2.6.1 fastapi>=0.111.0 httpx psutil ytest pytest-cov requests>=2.31.0 uvicorn>=0.30.0 \
+	watchdog whois coverage docker
 
 # Copy the current directory contents into the container
 COPY . /foghorn
