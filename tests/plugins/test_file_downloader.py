@@ -1,12 +1,12 @@
 """
-Brief: Tests for foghorn.plugins.list_downloader.ListDownloader covering helper logic,
+Brief: Tests for foghorn.plugins.file_downloader.FileDownloader covering helper logic,
 interval handling, and download/validation behavior.
 
 Inputs:
   - None directly; uses pytest fixtures such as tmp_path and monkeypatch.
 
 Outputs:
-  - None; assertions validate ListDownloader helper functions and side effects.
+  - None; assertions validate FileDownloader helper functions and side effects.
 """
 
 import os
@@ -16,29 +16,29 @@ from datetime import datetime
 import pytest
 import requests
 
-import foghorn.plugins.list_downloader as list_downloader_mod
-from foghorn.plugins.list_downloader import ListDownloader
+import foghorn.plugins.file_downloader as file_downloader_mod
+from foghorn.plugins.file_downloader import FileDownloader
 
 
 @pytest.fixture
 def downloader(tmp_path):
-    """Brief: Construct ListDownloader with a temporary download path and no URLs.
+    """Brief: Construct FileDownloader with a temporary download path and no URLs.
 
     Inputs:
       - tmp_path (pathlib.Path): Pytest-provided temporary directory.
 
     Outputs:
-      - ListDownloader: Instance configured with empty urls/url_files and temp path.
+      - FileDownloader: Instance configured with empty urls/url_files and temp path.
     """
 
-    return ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    return FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
 
 
 def test_url_hash12_length_and_stability(downloader):
     """Brief: _url_hash12 returns a stable 12-char lowercase hex digest.
 
     Inputs:
-      - downloader: ListDownloader fixture.
+      - downloader: FileDownloader fixture.
 
     Outputs:
       - None; asserts digest length, stability, and hex characters.
@@ -55,7 +55,7 @@ def test_derive_base_and_ext_various_shapes(downloader):
     """Brief: _derive_base_and_ext handles paths, no paths, and no extensions.
 
     Inputs:
-      - downloader: ListDownloader fixture.
+      - downloader: FileDownloader fixture.
 
     Outputs:
       - None; asserts derived (base, ext) tuples for several URL forms.
@@ -83,7 +83,7 @@ def test_make_hashed_filename_uses_sanitized_base_and_ext(downloader):
     """Brief: _make_hashed_filename preserves extension and sanitizes base name.
 
     Inputs:
-      - downloader: ListDownloader fixture.
+      - downloader: FileDownloader fixture.
 
     Outputs:
       - None; asserts filename pattern and sanitization.
@@ -102,7 +102,7 @@ def test_make_hashed_filename_with_custom_base(downloader):
     """Brief: _make_hashed_filename respects base_name override and URL-derived ext.
 
     Inputs:
-      - downloader: ListDownloader fixture.
+      - downloader: FileDownloader fixture.
 
     Outputs:
       - None; asserts filename uses custom base with URL extension.
@@ -127,7 +127,7 @@ def test_read_url_files_parses_and_logs_missing(tmp_path, caplog):
       - None; asserts returned URLs and presence of missing-file warning.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
     f1 = tmp_path / "urls1.txt"
     f1.write_text("# comment\n\nhttps://one.example\n  https://two.example  \n")
     missing = tmp_path / "missing.txt"
@@ -155,7 +155,7 @@ def test_init_merges_url_files_and_logs_debug(tmp_path, caplog):
     url_file.write_text("# header\nhttps://b.example\nhttps://a.example\n")
 
     caplog.set_level("DEBUG")
-    dl = ListDownloader(
+    dl = FileDownloader(
         download_path=str(tmp_path),
         urls=["https://c.example"],
         url_files=[str(url_file)],
@@ -169,14 +169,14 @@ def test_init_merges_url_files_and_logs_debug(tmp_path, caplog):
         "https://c.example",
     ]
     # Debug message about added URLs is logged
-    assert any("ListDownloader added" in rec.getMessage() for rec in caplog.records)
+    assert any("FileDownloader added" in rec.getMessage() for rec in caplog.records)
 
 
 def test_make_header_line_uses_supplied_datetime(downloader):
     """Brief: _make_header_line uses provided datetime for deterministic output.
 
     Inputs:
-      - downloader: ListDownloader fixture.
+      - downloader: FileDownloader fixture.
 
     Outputs:
       - None; asserts formatted timestamp and URL.
@@ -197,7 +197,7 @@ def test_needs_update_true_for_missing_file(tmp_path):
       - None; asserts True for nonexistent file.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
     missing = tmp_path / "missing.txt"
     assert dl._needs_update("https://example.com/a.txt", str(missing)) is True
 
@@ -213,7 +213,7 @@ def test_needs_update_uses_last_modified_header(monkeypatch, tmp_path):
       - None; asserts True when remote is newer and False when older.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
     f = tmp_path / "list.txt"
     f.write_text("# header\n")
 
@@ -230,7 +230,7 @@ def test_needs_update_uses_last_modified_header(monkeypatch, tmp_path):
         calls["args"] = (url, timeout)
         return DummyResp()
 
-    monkeypatch.setattr(list_downloader_mod.requests, "head", fake_head)
+    monkeypatch.setattr(file_downloader_mod.requests, "head", fake_head)
 
     # Remote newer than local -> True
     assert dl._needs_update("https://example.com/a.txt", str(f)) is True
@@ -252,7 +252,7 @@ def test_needs_update_true_on_bad_last_modified(monkeypatch, tmp_path):
       - None; asserts True when time.strptime raises inside _needs_update.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
     f = tmp_path / "list.txt"
     f.write_text("# header\n")
     os.utime(f, (1_700_000_000, 1_700_000_000))
@@ -263,7 +263,7 @@ def test_needs_update_true_on_bad_last_modified(monkeypatch, tmp_path):
     def fake_head(url, timeout):
         return DummyResp()
 
-    monkeypatch.setattr(list_downloader_mod.requests, "head", fake_head)
+    monkeypatch.setattr(file_downloader_mod.requests, "head", fake_head)
 
     assert dl._needs_update("https://example.com/a.txt", str(f)) is True
 
@@ -279,7 +279,7 @@ def test_needs_update_true_on_request_exception(monkeypatch, tmp_path):
       - None; asserts True when RequestException is raised.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
     f = tmp_path / "list.txt"
     f.write_text("# header\n")
     os.utime(f, (1_700_000_000, 1_700_000_000))
@@ -287,7 +287,7 @@ def test_needs_update_true_on_request_exception(monkeypatch, tmp_path):
     def fake_head(url, timeout):
         raise requests.RequestException("boom")
 
-    monkeypatch.setattr(list_downloader_mod.requests, "head", fake_head)
+    monkeypatch.setattr(file_downloader_mod.requests, "head", fake_head)
 
     assert dl._needs_update("https://example.com/a.txt", str(f)) is True
 
@@ -303,7 +303,7 @@ def test_needs_update_true_when_no_last_modified(monkeypatch, tmp_path):
       - None; asserts True when response has no Last-Modified header.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
     f = tmp_path / "list.txt"
     f.write_text("# header\n")
     os.utime(f, (1_700_000_000, 1_700_000_000))
@@ -314,7 +314,7 @@ def test_needs_update_true_when_no_last_modified(monkeypatch, tmp_path):
     def fake_head(url, timeout):
         return DummyResp()
 
-    monkeypatch.setattr(list_downloader_mod.requests, "head", fake_head)
+    monkeypatch.setattr(file_downloader_mod.requests, "head", fake_head)
 
     assert dl._needs_update("https://example.com/a.txt", str(f)) is True
 
@@ -330,7 +330,7 @@ def test_needs_update_false_for_recent_file(monkeypatch, tmp_path):
       - None; asserts False and avoids calling requests.head when file is fresh.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
     f = tmp_path / "list.txt"
     f.write_text("# header\n")
 
@@ -342,7 +342,7 @@ def test_needs_update_false_for_recent_file(monkeypatch, tmp_path):
     def fake_head(url, timeout):  # pragma: no cover - should not be called
         raise AssertionError("requests.head should not be called for fresh files")
 
-    monkeypatch.setattr(list_downloader_mod.requests, "head", fake_head)
+    monkeypatch.setattr(file_downloader_mod.requests, "head", fake_head)
 
     assert dl._needs_update("https://example.com/a.txt", str(f)) is False
 
@@ -358,7 +358,7 @@ def test_needs_update_uses_interval_days_for_min_age(monkeypatch, tmp_path):
       - None; asserts False and avoids network when file is newer than interval.
     """
 
-    dl = ListDownloader(
+    dl = FileDownloader(
         download_path=str(tmp_path), urls=[], url_files=[], interval_days=7
     )
     f = tmp_path / "list.txt"
@@ -366,7 +366,7 @@ def test_needs_update_uses_interval_days_for_min_age(monkeypatch, tmp_path):
 
     # File age is 3 days, which is less than interval_days=7 -> treated as fresh.
     now = time.time()
-    three_days = 3 * list_downloader_mod.ONE_DAY_SECONDS
+    three_days = 3 * file_downloader_mod.ONE_DAY_SECONDS
     fresh_mtime = now - three_days
     os.utime(f, (fresh_mtime, fresh_mtime))
 
@@ -375,7 +375,7 @@ def test_needs_update_uses_interval_days_for_min_age(monkeypatch, tmp_path):
             "requests.head should not be called when file is newer than interval_days"
         )
 
-    monkeypatch.setattr(list_downloader_mod.requests, "head", fake_head)
+    monkeypatch.setattr(file_downloader_mod.requests, "head", fake_head)
 
     assert dl._needs_update("https://example.com/a.txt", str(f)) is False
 
@@ -390,7 +390,7 @@ def test_validate_domain_list_accepts_good_domain_only_list(tmp_path):
       - None; asserts True when at least 5 valid domain lines exist.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
     f = tmp_path / "domains.txt"
     lines = [
         "# header",
@@ -416,7 +416,7 @@ def test_validate_domain_list_ignores_bang_comment_lines(tmp_path):
       - None; asserts AdGuard-style '!' comments do not cause rejection.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
     f = tmp_path / "adguard.txt"
     lines = [
         "# header",
@@ -442,7 +442,7 @@ def test_validate_domain_list_rejects_hosts_and_bad_lines(tmp_path):
       - None; asserts False for hosts-style and invalid content.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
 
     # Hosts-style file: IP followed by hostname -> reject
     hosts = tmp_path / "hosts.txt"
@@ -465,14 +465,14 @@ def test_validate_domain_list_false_when_insufficient_valid_lines(tmp_path):
       - None; asserts False when valid domain count is below threshold.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
     short = tmp_path / "short.txt"
     short.write_text("one.example\ntwo.example\nthree.example\nfour.example\n")
     assert dl._validate_domain_list(str(short)) is False
 
 
 def test_fetch_writes_header_and_body(monkeypatch, tmp_path):
-    """Brief: _fetch writes a header line followed by response body.
+    """Brief: _fetch writes a header line followed by response body when enabled.
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture.
@@ -482,7 +482,12 @@ def test_fetch_writes_header_and_body(monkeypatch, tmp_path):
       - None; asserts header content and body lines written.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(
+        download_path=str(tmp_path),
+        urls=["https://example.com/list.txt"],
+        url_files=[],
+        add_comment=True,
+    )
     url = "https://example.com/list.txt"
     out = tmp_path / "out.txt"
 
@@ -498,7 +503,7 @@ def test_fetch_writes_header_and_body(monkeypatch, tmp_path):
         assert timeout == 20
         return DummyResp("line1\nline2\n")
 
-    monkeypatch.setattr(list_downloader_mod.requests, "get", fake_get)
+    monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
     monkeypatch.setattr(
         dl,
         "_make_header_line",
@@ -523,7 +528,9 @@ def test_download_all_fetches_and_validates(monkeypatch, tmp_path):
       - None; asserts fetch invocation and file validation succeeds.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(
+        download_path=str(tmp_path), urls=[], url_files=[], add_comment=True
+    )
     url = "https://example.com/list.txt"
 
     # Deterministic filename in tmp_path
@@ -556,7 +563,9 @@ def test_download_all_skips_when_no_update_needed(monkeypatch, tmp_path):
       - None; asserts _fetch is not called and validation fails when file is missing.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(
+        download_path=str(tmp_path), urls=[], url_files=[], add_comment=True
+    )
     url = "https://example.com/list.txt"
 
     monkeypatch.setattr(dl, "_make_hashed_filename", lambda _url: "list.txt")
@@ -592,7 +601,9 @@ def test_download_all_raises_on_invalid_content(monkeypatch, tmp_path):
       - None; asserts ValueError when _validate_domain_list returns False.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(
+        download_path=str(tmp_path), urls=[], url_files=[], add_comment=True
+    )
     url = "https://example.com/list.txt"
 
     monkeypatch.setattr(dl, "_make_hashed_filename", lambda _url: "list.txt")
@@ -608,7 +619,7 @@ def test_maybe_run_respects_interval(monkeypatch, tmp_path):
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture.
-      - tmp_path: Temporary directory for ListDownloader path.
+      - tmp_path: Temporary directory for FileDownloader path.
 
     Outputs:
       - None; asserts _download_all is skipped when within interval.
@@ -626,9 +637,9 @@ def test_maybe_run_respects_interval(monkeypatch, tmp_path):
     def fake_get(url, timeout):
         return DummyResp()
 
-    monkeypatch.setattr(list_downloader_mod.requests, "get", fake_get)
+    monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
 
-    dl = ListDownloader(
+    dl = FileDownloader(
         download_path=str(tmp_path), urls=["https://example.com/a.txt"], url_files=[]
     )
     dl.interval_seconds = 60
@@ -646,7 +657,7 @@ def test_maybe_run_respects_interval(monkeypatch, tmp_path):
     def fake_time():
         return times.pop(0)
 
-    monkeypatch.setattr(list_downloader_mod.time, "time", fake_time)
+    monkeypatch.setattr(file_downloader_mod.time, "time", fake_time)
 
     dl._maybe_run(force=False)  # t=100 -> should run
     dl._maybe_run(force=False)  # t=120 -> within 60s, skip
@@ -661,7 +672,7 @@ def test_maybe_run_force_ignores_interval(monkeypatch, tmp_path):
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture.
-      - tmp_path: Temporary directory for ListDownloader path.
+      - tmp_path: Temporary directory for FileDownloader path.
 
     Outputs:
       - None; asserts _download_all runs even within interval when forced.
@@ -679,9 +690,9 @@ def test_maybe_run_force_ignores_interval(monkeypatch, tmp_path):
     def fake_get(url, timeout):
         return DummyResp()
 
-    monkeypatch.setattr(list_downloader_mod.requests, "get", fake_get)
+    monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
 
-    dl = ListDownloader(
+    dl = FileDownloader(
         download_path=str(tmp_path), urls=["https://example.com/a.txt"], url_files=[]
     )
     dl.interval_seconds = 300
@@ -693,7 +704,7 @@ def test_maybe_run_force_ignores_interval(monkeypatch, tmp_path):
         calls.append(list(urls))
 
     monkeypatch.setattr(dl, "_download_all", fake_download)
-    monkeypatch.setattr(list_downloader_mod.time, "time", lambda: 1100.0)
+    monkeypatch.setattr(file_downloader_mod.time, "time", lambda: 1100.0)
 
     dl._maybe_run(force=True)
     assert len(calls) == 1
@@ -705,7 +716,7 @@ def test_setup_calls_maybe_run_and_returns_none(monkeypatch, tmp_path):
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture.
-      - tmp_path: Temporary directory for ListDownloader path.
+      - tmp_path: Temporary directory for FileDownloader path.
 
     Outputs:
       - None; asserts _maybe_run is called with force=True and return is None.
@@ -722,9 +733,9 @@ def test_setup_calls_maybe_run_and_returns_none(monkeypatch, tmp_path):
     def fake_get(url, timeout):
         return DummyResp()
 
-    monkeypatch.setattr(list_downloader_mod.requests, "get", fake_get)
+    monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
 
-    dl = ListDownloader(
+    dl = FileDownloader(
         download_path=str(tmp_path), urls=["https://example.com/a.txt"], url_files=[]
     )
 
@@ -752,7 +763,7 @@ def test_init_invalid_interval_days_disables_periodic_refresh(tmp_path, caplog):
     """
 
     caplog.set_level("WARNING")
-    dl = ListDownloader(
+    dl = FileDownloader(
         download_path=str(tmp_path),
         urls=[],
         url_files=[],
@@ -777,7 +788,7 @@ def test_init_invalid_legacy_interval_seconds_disables_periodic_refresh(
     """
 
     caplog.set_level("WARNING")
-    dl = ListDownloader(
+    dl = FileDownloader(
         download_path=str(tmp_path),
         urls=[],
         url_files=[],
@@ -809,10 +820,10 @@ def test_merge_urls_from_files_returns_early_when_no_urls(tmp_path, monkeypatch)
         return set()
 
     monkeypatch.setattr(
-        ListDownloader, "_read_url_files", fake_read_url_files, raising=False
+        FileDownloader, "_read_url_files", fake_read_url_files, raising=False
     )
 
-    dl = ListDownloader(
+    dl = FileDownloader(
         download_path=str(tmp_path),
         urls=["https://existing.example"],
         url_files=["ignored.txt"],
@@ -844,9 +855,9 @@ def test_setup_merges_url_files_and_logs_debug(monkeypatch, tmp_path, caplog):
     def fake_get(url, timeout):
         return DummyResp()
 
-    monkeypatch.setattr(list_downloader_mod.requests, "get", fake_get)
+    monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
 
-    dl = ListDownloader(
+    dl = FileDownloader(
         download_path=str(tmp_path), urls=["https://base.example"], url_files=[]
     )
     dl.url_files = ["urls1.txt"]
@@ -872,7 +883,7 @@ def test_setup_merges_url_files_and_logs_debug(monkeypatch, tmp_path, caplog):
     assert read_calls["paths"] == ["urls1.txt"]
     assert "https://fromfile.example" in dl.urls
     assert called_maybe["force"] is True
-    assert any("ListDownloader added" in rec.getMessage() for rec in caplog.records)
+    assert any("FileDownloader added" in rec.getMessage() for rec in caplog.records)
 
 
 def test_setup_invalid_interval_configuration_disables_refresh(
@@ -898,9 +909,9 @@ def test_setup_invalid_interval_configuration_disables_refresh(
     def fake_get(url, timeout):
         return DummyResp()
 
-    monkeypatch.setattr(list_downloader_mod.requests, "get", fake_get)
+    monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
 
     called_maybe = {"force": None}
 
@@ -940,9 +951,9 @@ def test_setup_starts_background_thread_with_valid_interval(monkeypatch, tmp_pat
     def fake_get(url, timeout):
         return DummyResp()
 
-    monkeypatch.setattr(list_downloader_mod.requests, "get", fake_get)
+    monkeypatch.setattr(file_downloader_mod.requests, "get", fake_get)
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
 
     call_count = {"maybe_run": 0, "forces": []}
 
@@ -995,15 +1006,15 @@ def test_setup_starts_background_thread_with_valid_interval(monkeypatch, tmp_pat
             if self._target is not None:
                 self._target()
 
-    monkeypatch.setattr(list_downloader_mod.threading, "Event", DummyEvent)
-    monkeypatch.setattr(list_downloader_mod.threading, "Thread", DummyThread)
+    monkeypatch.setattr(file_downloader_mod.threading, "Event", DummyEvent)
+    monkeypatch.setattr(file_downloader_mod.threading, "Thread", DummyThread)
 
     dl.interval_seconds = 60
     dl.setup()
 
     assert isinstance(dl._stop_event, DummyEvent)
     assert isinstance(dl._background_thread, DummyThread)
-    assert dl._background_thread.name == "ListDownloader-refresh"
+    assert dl._background_thread.name == "FileDownloader-refresh"
     assert dl._background_thread.daemon is True
     # One call from the initial forced update, one from the background loop.
     assert call_count["maybe_run"] == 2
@@ -1021,7 +1032,7 @@ def test_needs_update_ignores_stat_oserror_and_uses_remote(monkeypatch, tmp_path
       - None; asserts True is returned when getmtime raises OSError.
     """
 
-    dl = ListDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
     f = tmp_path / "list.txt"
     f.write_text("# header\n")
 
@@ -1034,7 +1045,7 @@ def test_needs_update_ignores_stat_oserror_and_uses_remote(monkeypatch, tmp_path
     def fake_head(url, timeout):  # noqa: ARG001
         return DummyResp()
 
-    monkeypatch.setattr(list_downloader_mod.os.path, "getmtime", fake_getmtime)
-    monkeypatch.setattr(list_downloader_mod.requests, "head", fake_head)
+    monkeypatch.setattr(file_downloader_mod.os.path, "getmtime", fake_getmtime)
+    monkeypatch.setattr(file_downloader_mod.requests, "head", fake_head)
 
     assert dl._needs_update("https://example.com/a.txt", str(f)) is True
