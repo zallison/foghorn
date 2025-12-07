@@ -605,6 +605,80 @@ def test_stats_collector_warm_load_aggregates_upstream_rcodes(tmp_path: Path) ->
         store.close()
 
 
+def test_stats_collector_persists_upstream_rcodes_and_warm_loads(
+    tmp_path: Path,
+) -> None:
+    """Brief: record_upstream_rcode persists per-upstream rcodes and warm-load restores them.
+
+    Inputs:
+        tmp_path: pytest tmp path for an isolated SQLite DB.
+    Outputs:
+        None; asserts that upstream/outcome totals and per-upstream rcodes are
+        written into counts and hydrated by warm_load_from_store.
+    """
+    db_path = tmp_path / "stats_upstream_rcodes_persist.db"
+    store = StatsSQLiteStore(db_path=str(db_path))
+
+    try:
+        # First collector simulates a running process that records upstream
+        # outcomes and rcodes with a real SQLite-backed store attached.
+        c1 = StatsCollector(
+            track_uniques=True,
+            include_qtype_breakdown=True,
+            include_top_clients=False,
+            include_top_domains=False,
+            top_n=5,
+            track_latency=False,
+            stats_store=store,
+        )
+
+        # Two successful resolutions for the same upstream and a mix of rcodes.
+        c1.record_upstream_result("8.8.8.8:53", "success", qtype="A")
+        c1.record_upstream_result("8.8.8.8:53", "success", qtype="A")
+        c1.record_upstream_rcode("8.8.8.8:53", "NOERROR")
+        c1.record_upstream_rcode("8.8.8.8:53", "NXDOMAIN")
+
+        # Inspect raw counts to ensure persistence used the expected scopes/keys.
+        counts = store.export_counts()
+        upstream_counts = counts.get("upstreams", {})
+        upstream_rcodes = counts.get("upstream_rcodes", {})
+        upstream_qtypes = counts.get("upstream_qtypes", {})
+
+        assert upstream_counts.get("8.8.8.8:53|success") == 2
+        assert upstream_rcodes.get("8.8.8.8:53|NOERROR") == 1
+        assert upstream_rcodes.get("8.8.8.8:53|NXDOMAIN") == 1
+        assert upstream_qtypes.get("8.8.8.8:53|A") == 2
+
+        # Second collector simulates a fresh process that warm-loads from the
+        # same SQLite store and should see the persisted aggregates.
+        c2 = StatsCollector(
+            track_uniques=True,
+            include_qtype_breakdown=True,
+            include_top_clients=False,
+            include_top_domains=False,
+            top_n=5,
+            track_latency=False,
+            stats_store=store,
+        )
+
+        c2.warm_load_from_store()
+        snap = c2.snapshot(reset=False)
+
+        # Upstream outcome totals restored from counts["upstreams"].
+        assert snap.upstreams["8.8.8.8:53"]["success"] == 2
+
+        # Per-upstream rcodes restored from counts["upstream_rcodes"].
+        assert snap.upstream_rcodes is not None
+        assert snap.upstream_rcodes["8.8.8.8:53"]["NOERROR"] == 1
+        assert snap.upstream_rcodes["8.8.8.8:53"]["NXDOMAIN"] == 1
+
+        # Per-upstream qtype aggregates restored from counts["upstream_qtypes"].
+        assert snap.upstream_qtypes is not None
+        assert snap.upstream_qtypes["8.8.8.8:53"]["A"] == 2
+    finally:
+        store.close()
+
+
 def test_stats_collector_warm_load_no_store_is_noop() -> None:
     """Brief: warm_load_from_store is a no-op when no store is attached.
 

@@ -1763,15 +1763,36 @@ class StatsCollector:
             rcode: Response code ("NOERROR", "NXDOMAIN", "SERVFAIL", etc.).
 
         Outputs:
-            None
+            None; updates in-memory per-upstream rcode aggregates and, when a
+            StatsSQLiteStore is attached, mirrors them into the persistent
+            "upstream_rcodes" scope so that warm-load and rebuild semantics stay
+            aligned with the HTML dashboard's upstream breakdown view.
 
         Example:
             >>> collector = StatsCollector()
             >>> collector.record_upstream_rcode("8.8.8.8:53", "NOERROR")
         """
 
+        if not upstream_id or not rcode:
+            return
+
         with self._lock:
             self._upstream_rcodes[upstream_id][rcode] += 1
+
+            if self._store is not None:
+                try:
+                    key = f"{upstream_id}|{rcode}"
+                    # Use a dedicated scope for per-upstream rcodes so that
+                    # warm_load_from_store can hydrate them directly without
+                    # relying solely on composite "upstreams" keys.
+                    self._store.increment_count("upstream_rcodes", key)
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                    logger.debug(
+                        "StatsCollector: failed to persist upstream rcode",
+                        exc_info=True,
+                    )
 
     def record_response_rcode(self, rcode: str, qname: Optional[str] = None) -> None:
         """Record DNS response code.
@@ -2555,8 +2576,8 @@ class StatsCollector:
               starts from empty in-memory counters.
             - Only scopes known to StatsCollector (totals, rcodes, qtypes,
               clients, sub_domains, domains, upstreams, upstream_qtypes,
-              qtype_qnames, cache_hit_domains, cache_miss_domains,
-              rcode_domains) are applied.
+              upstream_rcodes, qtype_qnames, cache_hit_domains,
+              cache_miss_domains, rcode_domains, rcode_subdomains) are applied.
             - Top-N client/domain trackers and unique counts are approximated
               from the aggregated counts when enabled.
         """
@@ -2606,6 +2627,17 @@ class StatsCollector:
                 except (TypeError, ValueError):
                     continue
 
+            # Decide whether we have a dedicated upstream_rcodes scope. When
+            # present, that scope is treated as authoritative for
+            # per-upstream rcode aggregates and we avoid double-counting from
+            # composite "upstreams" keys.
+            upstream_rcode_counts = counts.get("upstream_rcodes", {}) or {}
+            has_upstream_rcode_scope = bool(upstream_rcode_counts)
+
+            # Always start with a clean slate for upstream_rcodes when
+            # warm-loading from the persistent store.
+            self._upstream_rcodes.clear()
+
             # Upstreams: keys are stored as "upstream_id|outcome|rcode" in
             # new data, but we also accept legacy "upstream_id|outcome" keys
             # for backward compatibility.
@@ -2632,11 +2664,26 @@ class StatsCollector:
                 # rcodes rather than only the last row seen.
                 self._upstreams[upstream_id][outcome] += int_value
 
-                # When rcode is present in the key, also rebuild
-                # per-upstream rcode aggregates so that snapshot.upstream_rcodes
-                # reflects persisted history.
-                if rcode_key:
+                # When no dedicated upstream_rcodes scope is present, fall back
+                # to reconstructing per-upstream rcode aggregates from
+                # composite "upstreams" keys that include a rcode segment.
+                if not has_upstream_rcode_scope and rcode_key:
                     self._upstream_rcodes[upstream_id][rcode_key] += int_value
+
+            # If a dedicated upstream_rcodes scope exists, hydrate from it now,
+            # overriding any fallback reconstruction from composite keys.
+            if has_upstream_rcode_scope:
+                self._upstream_rcodes.clear()
+                for key, value in upstream_rcode_counts.items():
+                    try:
+                        upstream_id, rcode_name = str(key).split("|", 1)
+                    except ValueError:
+                        continue  # pragma: no cover - malformed key from persistent store
+                    try:
+                        int_value = int(value)
+                    except (TypeError, ValueError):
+                        continue  # pragma: no cover - defensive parse failure
+                    self._upstream_rcodes[upstream_id][rcode_name] += int_value
 
             # Upstream qtypes: keys are stored as "upstream_id|qtype".
             for key, value in counts.get("upstream_qtypes", {}).items():
