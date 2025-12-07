@@ -16,7 +16,17 @@ from io import BytesIO
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
+
+try:  # FastAPI is an optional dependency; skip these tests if unavailable.
+    from fastapi.testclient import TestClient
+except (
+    ModuleNotFoundError
+):  # pragma: no cover - environment-dependent optional dependency
+    TestClient = None
+    pytest.skip(
+        "fastapi not installed; skipping DoH FastAPI unit tests",
+        allow_module_level=True,
+    )
 
 import foghorn.doh_api as doh_api
 
