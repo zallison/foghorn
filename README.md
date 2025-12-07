@@ -23,7 +23,6 @@ For developer documentation (architecture, transports, plugin internals, testing
 ## DNSSEC & Resolver Pipeline
 - Enhanced DNSSEC validation, including RFC5011-style trust anchors and NSEC3 support.
 - Hardened local DNSSEC validation and added unit/chain/negative tests.
-- Simplified the resolver pipeline and removed the legacy `resolver.mode` setting so resolution always forwards through configured upstreams.
 - Added a shared in-memory cache implementation and stabilized cache-related stats keys.
 
 ## Upstream Strategy, Health, and Concurrency
