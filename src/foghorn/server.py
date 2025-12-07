@@ -870,6 +870,16 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                     Exception
                 ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                     pass
+                # Record latency for the all-upstreams-failed path as well so
+                # stats callers see a duration for every resolved query.
+                if t0 is not None:
+                    try:
+                        t1 = _time.perf_counter()
+                        stats.record_latency(t1 - t0)
+                    except (
+                        Exception
+                    ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                        pass
             return _ResolveCoreResult(
                 wire=wire,
                 dnssec_status=None,
@@ -902,13 +912,35 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
         # delegations/referrals using TTLs derived from SOA/NS records where
         # possible, following RFC 2308 guidance.
 
-        # DNSSEC classification for non-UDP transports (TCP/DoT/DoH).
-        #
-        # On the testing branch we keep this logic disabled to avoid changing
-        # application behaviour while recursive/DNSSEC integration work is in
-        # progress. Responses are forwarded as-is; any DNSSEC status will be
-        # derived by upstream resolvers only.
+        # DNSSEC classification for non-UDP transports (TCP/DoT/DoH) now shares
+        # the same helper as UDP handlers so stats and query_log entries carry a
+        # consistent "secure"/"insecure" status when dnssec.mode is 'validate'.
         dnssec_status = None
+        try:
+            from .dnssec_validate import classify_dnssec_status
+
+            mode = str(getattr(DNSUDPHandler, "dnssec_mode", "ignore"))
+            validation = str(getattr(DNSUDPHandler, "dnssec_validation", "upstream_ad"))
+            edns_udp_payload = int(getattr(DNSUDPHandler, "edns_udp_payload", 1232))
+            dnssec_status = classify_dnssec_status(
+                dnssec_mode=mode,
+                dnssec_validation=validation,
+                qname_text=qname,
+                qtype_num=qtype,
+                response_wire=out,
+                udp_payload_size=edns_udp_payload,
+            )
+            if stats is not None and dnssec_status is not None:
+                try:
+                    stats.record_dnssec_status(dnssec_status)
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    pass
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            dnssec_status = None
 
         try:
             r = DNSRecord.parse(out)
