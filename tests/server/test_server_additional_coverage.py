@@ -403,7 +403,7 @@ def test_resolve_core_dnssec_upstream_ad_shared_helper(monkeypatch):
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - Ensures dnssec_status is 'secure' and stats hook is invoked.
+      - Ensures dnssec_status is 'dnssec_secure' and stats hook is invoked.
     """
 
     DNSUDPHandler.plugins = []
@@ -434,7 +434,7 @@ def test_resolve_core_dnssec_upstream_ad_shared_helper(monkeypatch):
     DNSUDPHandler.stats_collector = None
 
     assert DNSRecord.parse(result.wire).header.rcode == RCODE.NOERROR
-    assert result.dnssec_status == "secure"
+    assert result.dnssec_status == "dnssec_secure"
 
     kinds = [k for k, _ in stats.calls]
     assert "record_dnssec_status" in kinds

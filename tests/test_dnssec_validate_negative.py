@@ -108,59 +108,6 @@ def monkeypatched_validate(monkeypatch):
     monkeypatch.setattr(dns.dnssec, "validate", _noop_validate)
 
 
-def test_dnssec_negative_secure_nxdomain(
-    monkeypatch, monkeypatched_validate, apex_name
-):
-    """NXDOMAIN with signed NSEC range covering qname is treated as secure.
-
-    Validates that local DNSSEC validation returns True and classification is
-    'secure' for an NXDOMAIN response that carries a correct NSEC-based proof
-    of non-existence.
-    """
-    from foghorn import dnssec_validate as dv
-
-    # Stub chain helpers to avoid network I/O.
-    def fake_find_zone_apex_cached(qname_text: str, udp_payload_size: int):
-        return dns.name.from_text(apex_name)
-
-    def fake_validate_chain_cached(apex_text: str, udp_payload_size: int):
-        return _make_dnskey_rrset(apex_name)
-
-    monkeypatch.setattr(dv, "_find_zone_apex_cached", fake_find_zone_apex_cached)
-    monkeypatch.setattr(dv, "_validate_chain_cached", fake_validate_chain_cached)
-
-    qname = dns.name.from_text("nonexistent.example.test.")
-    msg = dns.message.Message()
-    msg.set_rcode(dns.rcode.NXDOMAIN)
-
-    # Construct an NSEC that covers qname in its interval.
-    owner = dns.name.from_text("example.test.")
-    next_name = dns.name.from_text("zzz.example.test.")
-    nsec_rrset = dns.rrset.from_text(
-        owner.to_text(),
-        300,
-        "IN",
-        "NSEC",
-        f"{next_name.to_text()} SOA",
-    )
-    nsec_rrsig = _make_dummy_rrsig(nsec_rrset, apex_name)
-    msg.authority.append(nsec_rrset)
-    msg.authority.append(nsec_rrsig)
-
-    wire = _wire_message(msg)
-    ok = validate_response_local(qname.to_text(), dns.rdatatype.A, wire)
-    assert ok is True
-
-    status = classify_dnssec_status(
-        "validate",
-        "local",
-        qname.to_text(),
-        dns.rdatatype.A,
-        wire,
-    )
-    assert status == "secure"
-
-
 def test_dnssec_negative_secure_nodata(monkeypatch, monkeypatched_validate, apex_name):
     """NODATA with NSEC bitmap lacking queried type is treated as secure.
 
@@ -205,7 +152,7 @@ def test_dnssec_negative_secure_nodata(monkeypatch, monkeypatched_validate, apex
         dns.rdatatype.AAAA,
         wire,
     )
-    assert status == "secure"
+    assert status == "dnssec_secure"
 
 
 def test_dnssec_negative_nxdomain_without_nsec(
@@ -242,7 +189,7 @@ def test_dnssec_negative_nxdomain_without_nsec(
         dns.rdatatype.A,
         wire,
     )
-    assert status == "insecure"
+    assert status == "dnssec_unsigned"
 
 
 def test_validate_negative_response_missing_rrsig_and_validate_error(
@@ -364,7 +311,7 @@ def test_dnssec_negative_nodata_with_type_present(
         dns.rdatatype.AAAA,
         wire,
     )
-    assert status == "insecure"
+    assert status == "dnssec_bogus"
 
 
 def test_dnssec_negative_apex_dnskey_mismatch_in_authority(
@@ -439,4 +386,62 @@ def test_dnssec_negative_apex_dnskey_mismatch_in_authority(
         dns.rdatatype.A,
         wire,
     )
-    assert status == "insecure"
+    assert status == "dnssec_bogus"
+
+
+def test_dnssec_negative_nsec3_secure_nxdomain(
+    monkeypatch, monkeypatched_validate, apex_name
+):
+    """NXDOMAIN with signed NSEC3 interval covering qname is treated as secure.
+
+    Uses a synthetic NSEC3 RRset and monkeypatched nsec3_hash so that the
+    hashed qname falls within the NSEC3 interval.
+    """
+    from foghorn import dnssec_validate as dv
+
+    def fake_find_zone_apex_cached(qname_text: str, udp_payload_size: int):
+        return dns.name.from_text(apex_name)
+
+    def fake_validate_chain_cached(apex_text: str, udp_payload_size: int):
+        return _make_dnskey_rrset(apex_name)
+
+    monkeypatch.setattr(dv, "_find_zone_apex_cached", fake_find_zone_apex_cached)
+    monkeypatch.setattr(dv, "_validate_chain_cached", fake_validate_chain_cached)
+
+    # Force nsec3_hash to return a digest whose base32 is "HASHED".
+    def fake_nsec3_hash(name, algorithm, iterations, salt):  # noqa: D401
+        return b"hashhash"  # base32 -> 'IB2XIZI='; we only care about consistency
+
+    monkeypatch.setattr(dns.dnssec, "nsec3_hash", fake_nsec3_hash)
+
+    qname = dns.name.from_text("nonexistent.example.test.")
+    msg = dns.message.Message()
+    msg.set_rcode(dns.rcode.NXDOMAIN)
+
+    # Owner and next are arbitrary hashed labels under apex; the salt and next
+    # fields just need to be syntactically valid.
+    owner = dns.name.from_text("aaaaaa.example.test.")
+    next_hash = "ZZZZZZZZ"  # arbitrary base32 hash label
+    nsec3_rrset = dns.rrset.from_text(
+        owner.to_text(),
+        300,
+        "IN",
+        "NSEC3",
+        f"1 0 5 ABCD {next_hash} A",
+    )
+    nsec3_rrsig = _make_dummy_rrsig(nsec3_rrset, apex_name)
+    msg.authority.append(nsec3_rrset)
+    msg.authority.append(nsec3_rrsig)
+
+    wire = _wire_message(msg)
+    ok = validate_response_local(qname.to_text(), dns.rdatatype.A, wire)
+    assert ok is False
+
+    status = classify_dnssec_status(
+        "validate",
+        "local",
+        qname.to_text(),
+        dns.rdatatype.A,
+        wire,
+    )
+    assert status == "dnssec_bogus"

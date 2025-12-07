@@ -250,7 +250,7 @@ def test_sqlite_store_rebuild_counts_records_dnssec_status(tmp_path: Path) -> No
             status="ok",
             error=None,
             first="203.0.113.10",
-            result_json='{"answers":[],"dnssec_status":"bogus"}',
+            result_json='{"answers":[],"dnssec_status":"dnssec_bogus"}',
         )
 
         # Rebuild counts directly from query_log.
@@ -261,7 +261,7 @@ def test_sqlite_store_rebuild_counts_records_dnssec_status(tmp_path: Path) -> No
     finally:
         store.close()
 
-    # One dnssec_status="bogus" row should produce dnssec_bogus == 1.
+    # One dnssec_status="dnssec_bogus" row should produce dnssec_bogus == 1.
     assert totals.get("dnssec_bogus") == 1
 
 
@@ -365,7 +365,7 @@ def test_sqlite_store_rebuild_counts_from_query_log_cache_and_upstreams(
             status="cache_hit",
             error=None,
             first="93.184.216.34",
-            result_json='{"answers":[],"dnssec_status":"secure"}',
+            result_json='{"answers":[],"dnssec_status":"dnssec_secure"}',
         )
 
         # Pre-plugin deny and override treated as cache_null with per-status totals.

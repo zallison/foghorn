@@ -4,22 +4,23 @@ This document summarizes how Foghorn’s behavior maps onto major DNS-related RF
 
 ## RFC Summary Table
 
-| RFC           | Short Title                                  | Status                               |
-|---------------|-----------------------------------------------|--------------------------------------|
-| 1034          | DNS Concepts and Facilities                   | Implemented (core behavior)          |
-| 1035          | DNS Implementation and Specification          | Implemented (core behavior)          |
-| 7766          | DNS over TCP                                  | Implemented                          |
-| 7858          | DNS over TLS (DoT)                            | Implemented                          |
-| 8484          | DNS over HTTPS (DoH)                          | Implemented                          |
-| 2308          | Negative Caching of DNS Queries               | Implemented (negative/NS caching)    |
-| 6891          | Extension Mechanisms for DNS (EDNS(0))        | Partially implemented (minimal EDNS) |
-| 7958          | DNSSEC Trust Anchor Publication for the Root  | Implemented (root trust anchor)      |
-| 4033–4035     | DNSSEC protocol/records/validation            | Experimental / partial               |
-| 5936          | DNS Zone Transfer Protocol (AXFR/IXFR)        | Not implemented / out of scope       |
-| 7873          | Domain Name System (DNS) Cookies              | Not implemented / out of scope       |
-| 8914          | Extended DNS Errors                           | Not implemented / out of scope       |
-| 9230          | Oblivious DNS over HTTPS (ODoH)               | Not implemented / out of scope       |
-| 9250          | DNS over QUIC (DoQ)                           | Not implemented / out of scope       |
+|       RFC | Short Title                                     | Status                               |
+|-----------+-------------------------------------------------+--------------------------------------|
+|      1034 | DNS Concepts and Facilities                     | Implemented (core behavior)          |
+|      1035 | DNS Implementation and Specification            | Implemented (core behavior)          |
+|      2308 | Negative Caching of DNS Queries                 | Implemented (negative/NS caching)    |
+|      5011 | Automated Updates of DNS Security Trust Anchors | Implemented                          |
+|      7766 | DNS over TCP                                    | Implemented                          |
+|      7858 | DNS over TLS (DoT)                              | Implemented                          |
+|      7958 | DNSSEC Trust Anchor Publication for the Root    | Implemented (root trust anchor)      |
+|      8484 | DNS over HTTPS (DoH)                            | Implemented                          |
+| 4033–4035 | DNSSEC protocol/records/validation              | Experimental / partial               |
+|      6891 | Extension Mechanisms for DNS (EDNS(0))          | Partially implemented (minimal EDNS) |
+|      7873 | Domain Name System (DNS) Cookies                | Not implemented                      |
+|      8914 | Extended DNS Errors                             | Not implemented                      |
+|      5936 | DNS Zone Transfer Protocol (AXFR/IXFR)          | Not implemented / out of scope       |
+|      9230 | Oblivious DNS over HTTPS (ODoH)                 | Not implemented / out of scope       |
+|      9250 | DNS over QUIC (DoQ)                             | Not implemented / out of scope       |
 
 Status legend:
 
