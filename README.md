@@ -2,9 +2,11 @@
 
 <img src="html/logo.png" width="300px" alt="Foghorn Logo, a stylized alarm horn" />
 
-Foghorn is a caching DNS server built with Python (3.10+).
+Foghorn is a modern, programmable DNS proxy and recursive resolver focused on correctness, observability, and extensibility. It provides hardened DNSSEC validation, including RFC5011-style trust anchors and NSEC3 support, along with a first-class iterative recursive resolver and in‑memory caching layer. This makes it suitable as a secure validating resolver or as a smart front-end to upstream DNS providers.
 
-It's designed to be fast and extensible, featuring a pluggable policy system that allows you to customize its behavior to fit your needs.  Everything from a single user proxy to use secure uplinks, to a local lan server answering from your /etc/hosts file and using blockfiles, to a full authoritative DNS server.  It can even be used as a test server failing randomly or seeded.
+Operators can tune upstream strategy, concurrency, and health behavior directly from configuration, while monitoring real-time upstream status and response codes via a versioned `/api/v1` admin API and associated UI. Foghorn exposes rich statistics for DNSSEC, rate limiting, upstream health, and more, with both snapshot and persistent storage options.
+
+A plugin architecture enables advanced behaviors without forking core code. Built-in plugins like `AccessControlPlugin`, `EtcHosts`, `FilterPlugin`, `RateLimitPlugin`, `UpstreamRouterPlugin`, `ZoneRecords`, `FileDownloader`, `DockerHosts`, and `FlakyServer` cover access control, /etc-hosts mapping, domain/IP filtering, adaptive rate limiting, upstream routing, zone records, list downloads, Docker-aware name resolution, and chaos testing. Per-plugin logging and strict registry semantics help catch misconfiguration early.
 
 With special thanks to Fiona Weatherwax for their contributions and inspiration.
 
@@ -16,94 +18,70 @@ For developer documentation (architecture, transports, plugin internals, testing
 
 ----
 
-# Release Notes - v0.4.2
+New (since dev/0.4.3)
 
-Foghorn 0.4.2 adds a new file‑backed CustomRecords plugin, refactors the UDP server and signal/statistics pipelines, and significantly improves the web UI, configuration handling, and Docker/tooling. The 0.4.2 release then layers on schema‑based config validation, better stats and cache behavior, cleaner shutdown and logging, and a round of security, reliability, and test hardening.
+Major features
 
-Core server & signal handling
+•  DNSSEC & recursive resolver
+◦  Enhanced DNSSEC validation, including RFC5011-style trust anchors and NSEC3 support.
+◦  Hardened local DNSSEC validation and added unit/chain/negative tests.
+◦  Introduced iterative recursive resolver with resolver.mode wiring into the server.
+◦  Added in‑memory recursive cache implementation and stabilized cache-related stats keys.
+•  Upstream strategy, health, and concurrency
+◦  Added upstream strategy and concurrency options in config.
+◦  Implemented concurrent upstream failover with lazy health tracking.
+◦  Propagated upstream strategy/concurrency through DNSUDP handler and server pipeline.
+◦  Exposed upstream health/strategy via new /api/v1/upstream_status admin API and surfaced this in the UI.
+•  Plugins
+◦  RateLimitPlugin: sqlite‑backed rate limiting with per-profile configuration and admin inspection.
+◦  FileDownloader plugin: replaced ListDownloader with a more flexible file-based downloader and tests.
+◦  DockerHosts plugin: new plugin for container‑aware DNS resolution, wired into packaging, docs, and example configs.
+◦  Per‑plugin logging enhancements and stricter plugin registry behavior (fail fast on import errors).
+•  Admin API & stats
+◦  Added canonical /api/v1 admin endpoints (including rate-limit inspection and upstream status).
+◦  Extended stats to track DNSSEC and rate‑limit counters, with snapshot and persistent store support.
+◦  Persisted upstream rcodes and warm‑loaded them from the stats store.
 
-• Unified signal behavior (v0.4.1)
-◦ Centralizes SIGUSR1/SIGUSR2 handling with clearer responsibilities.
-◦ Decouples configuration reload from SIGUSR1 and introduces explicit flags governing statistics reset behavior.
-◦ Web API and UI messaging updated so /config/save and the config editor accurately describe when changes actually take effect.
-• Improved shutdown and process control (v0.4.2)
-◦ Fixes clean termination paths and aligns SIGHUP behavior with common service managers (systemd, Docker, etc.).
-◦ Adds small timing delays between launches to avoid transient startup issues.
-◦ Cleans up main and lowers some log messages from info to debug to reduce noise.
+Runtime, server, and transport changes
 
-UDP server & DNS forwarding
+•  Generalized cache value types to support shared caches across components.
+•  Refined upstream configuration semantics and DoH/TCP listener behavior.
+•  Tightened DoH/admin webserver configuration and rate‑limit behavior.
+•  Treated UDP listener like TCP/DoT/DoH in main keepalive/shutdown handling.
+•  Delegated DNSUDPHandler.handle to a shared resolver and pruned deprecated helpers.
+•  Removed vestigial recursive server and remaining old UDP wiring in main.py / server.py.
 
-• UDP server extraction and refactor (v0.4.1)
-◦ Moves UDP handler/server logic into a dedicated module to better separate responsibilities and improve testability.
-◦ Clarifies forwarding behavior, including EDNS/DNSSEC handling and how upstreams are invoked.
-◦ Updates helper tests to match the new structure and expectations for upstream configuration.
+Configuration, Docker, and tooling
 
-Statistics pipeline & /stats UI
+•  Synced config.yaml schema and examples with the 0.4.5/0.4.6 feature set.
+•  Updated example configs for:
+◦  FileDownloader plugin and per‑URL options.
+◦  New upstream strategy/concurrency options.
+•  Aligned Docker image and Makefile with current ports/tooling; added ADMINPORT option.
+•  Ensured Docker images don’t install dev dependencies by default.
 
-• Aggregation semantics and persistence (v0.4.1)
-◦ Refines how statistics are aggregated, especially around cache behavior vs. pre‑deny/override paths.
-◦ Updates the stats persistence tests and query‑log rebuild tooling so on‑disk data matches the revised semantics.
-• UI improvements and alignment (v0.4.1–v0.4.2)
-◦ Expands the /stats dashboard with richer panels (totals, upstreams, qtypes, rcodes, cache hit/miss lists, system/process metrics).
-◦ Reorders and cleans up sections to surface process/system information more prominently.
-◦ Adds tooltips and formatting tweaks so the UI more accurately reflects the underlying counters.
-◦ Further 0.4.2 fixes ensure the displayed metrics semantically match the internal stats.
+Tests
 
-Configuration, schema & web UI
+•  Added comprehensive DNSSEC and recursive resolver tests (unit and end‑to‑end).
+•  Expanded UDP helper coverage and made DoH FastAPI tests optional.
+•  Updated tests for new config fields, webserver behavior, and rate‑limit paths.
+•  Fixed stats tests for multiple rcodes and new snapshot keys.
 
-• Signals vs. config semantics (v0.4.1)
-◦ Clarifies that saving config writes the file but does not implicitly reload it; signals notify plugins and may reset statistics depending on configuration.
-◦ Updates config editor warning text and related documentation accordingly.
-• Schema‑based config validation (v0.4.2)
-◦ Introduces a dedicated config schema (and ships it with the Docker image).
-◦ Adds server‑side schema checking around config endpoints, wrapped in safe try/except handling so validation failures don’t crash the daemon.
-◦ Integrates client‑side JSON/YAML validation in the web UI, including better warning messages when config is invalid.
-◦ Switches certain responses to a plain‑text style more appropriate for JSON/YAML payloads.
-◦ Ensures redaction keeps YAML comments and structure intact when showing redacted config.
-◦ Fixes YAML output correctness and validates /config vs /config/raw behavior via tests.
-◦ On config load errors, the server avoids hard failure, preferring to surface a clear error instead.
+Documentation
 
-Plugins
+•  Documented:
+◦  Admin APIs and /api/v1 endpoints.
+◦  RateLimitPlugin behavior and configuration.
+◦  FileDownloader and DockerHosts plugins, including example usage and updated configs.
+•  Updated docs to reflect new ports, transports, and configuration knobs.
+•  Version-bump and release notes aligned with 0.4.5 and 0.4.6 changes.
 
-• New CustomRecords plugin (v0.4.1)
-◦ Adds a CustomRecords plugin capable of serving records from files, with examples and tests to verify parsing, reloads, and merge semantics.
-◦ Documents how to configure and use the plugin and wires it into example configs.
-• Filter & JSONL semantics (v0.4.1)
-◦ Clarifies documentation around FilterPlugin’s JSON Lines and other file‑backed input formats (globs, CSV, plain-text).
-◦ Expands tests to better cover precedence, error handling, and the mapping between examples and actual behavior.
-• Plugin robustness & tests (v0.4.1)
-◦ Adds and refines tests for BasePlugin, EtcHosts, Greylist, and NewDomainFilter to improve coverage, cleanup behavior, and edge‑case handling.
+Bug fixes and hardening
 
-Caching, performance & behavior fixes
-
-• Caching changes (v0.4.1–v0.4.2)
-◦ Adjusts stats to separately track different cache‑related outcomes (cache null vs. pre‑deny/override) and records them accurately.
-◦ Introduces additional caching for expensive calls, while also removing an inefficient cache that was not providing value.
-◦ Includes a small project cleanup pass and targeted regression fixes verified by tests.
-
-Docker, Makefile & tooling
-
-• Docker runtime and packaging (v0.4.1)
-◦ Switches the container entrypoint to a dedicated script and adjusts how configuration is mounted into the container.
-◦ Updates Makefile Docker targets for more predictable local workflows.
-• Refined image contents & deps (v0.4.2)
-◦ Ensures the Docker image installs runtime dependencies instead of dev extras.
-◦ Adds the assets (including schema) into the image to support in‑container validation and examples.
-• Makefile and repo tooling (v0.4.2)
-◦ Improves Makefile rules to cut down on unnecessary rebuilds and fixes minor shell usage (e.g., using . instead of source under certain shells).
-◦ Adds a maintenance script to keep the repo tidy and consistent.
-
-Testing, docs & security
-
-• Test coverage expansion (v0.4.1–v0.4.2)
-◦ Significantly expands test coverage across plugins, stats persistence, signal handling, main process logic, webserver endpoints, and the config/schema integration.
-◦ Adds targeted regression tests for previously problematic behaviors (e.g., web redaction, config endpoints, signal flows).
-• Documentation updates (v0.4.1–v0.4.2)
-◦ Updates README and developer docs with a clearer index, improved Docker instructions, detailed plugin and stats descriptions, and examples that match the current behavior.
-◦ Aligns example configs with the implemented plugins and new configuration options.
-• Security hardening (v0.4.2)
-◦ Addresses a code‑scanning alert related to incomplete URL substring sanitization, tightening how potentially unsafe URLs are handled.
-
+•  Fixed stats loading for multiple rcode values.
+•  Hardened RateLimitPlugin DB access and malformed row handling.
+•  Tightened upstream and DoH transport behavior under edge cases.
+•  Made plugin registry fail fast on import errors to avoid silent misconfiguration.
 
 ----
 
@@ -670,30 +648,30 @@ an in-memory map that is periodically refreshed.
 ```yaml
 plugins:
   - module: docker-hosts
-    config:
-      # Optional: list of Docker endpoints; defaults to the local Unix socket
-      endpoints:
-        - unix:///var/run/docker.sock
-        # Example TCP endpoints (remote Docker daemons or proxies):
-        # - tcp://127.0.0.1:2375
-        # - tcp://docker-host.internal:2375
-        # - tcp://10.0.0.10:2376
+	config:
+	  # Optional: list of Docker endpoints; defaults to the local Unix socket
+	  endpoints:
+		- unix:///var/run/docker.sock
+		# Example TCP endpoints (remote Docker daemons or proxies):
+		# - tcp://127.0.0.1:2375
+		# - tcp://docker-host.internal:2375
+		# - tcp://10.0.0.10:2376
 
-      # Optional: docker CLI binary; defaults to "docker"
-      docker_binary: docker
+	  # Optional: docker CLI binary; defaults to "docker"
+	  docker_binary: docker
 
-      # TTL for A/AAAA/PTR answers served by this plugin (seconds; default 300)
-      ttl: 300
+	  # TTL for A/AAAA/PTR answers served by this plugin (seconds; default 300)
+	  ttl: 300
 
-      # Background refresh interval in seconds. When set to 0, only the
-      # initial mapping from setup() is used and no periodic refresh occurs.
-      reload_interval_seconds: 60
+	  # Background refresh interval in seconds. When set to 0, only the
+	  # initial mapping from setup() is used and no periodic refresh occurs.
+	  reload_interval_seconds: 60
 
-      # Optional per-family host IP overrides. When set, these are used in
-      # place of per-container addresses so that clients reach the host even
-      # if container networks are not routable.
-      # use_ipv4: 192.0.2.10
-      # use_ipv6: 2001:db8::10
+	  # Optional per-family host IP overrides. When set, these are used in
+	  # place of per-container addresses so that clients reach the host even
+	  # if container networks are not routable.
+	  # use_ipv4: 192.0.2.10
+	  # use_ipv6: 2001:db8::10
 ```
 
 `module` may be any of:
