@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 
 class FoghornTTLCache:
@@ -45,10 +45,10 @@ class FoghornTTLCache:
             >>> cache._store
             {}
         """
-        self._store: Dict[Tuple[str, int], Tuple[float, bytes]] = {}
+        self._store: Dict[Tuple[str, int], Tuple[float, Any]] = {}
         self._lock = threading.RLock()
 
-    def get(self, key: Tuple[str, int]) -> bytes | None:
+    def get(self, key: Tuple[str, int]) -> Any | None:
         """
         Retrieves an item from the cache.
         Returns the item if it exists and has not expired.
@@ -57,7 +57,7 @@ class FoghornTTLCache:
             key: The key to retrieve.
 
         Outputs:
-            The cached data, or None if the key is not found or has expired.
+            The cached value, or None if the key is not found or has expired.
 
         Example use:
             >>> cache = FoghornTTLCache()
@@ -77,14 +77,14 @@ class FoghornTTLCache:
                 return None
             return data
 
-    def set(self, key: Tuple[str, int], ttl: int, data: bytes) -> None:
+    def set(self, key: Tuple[str, int], ttl: int, data: Any) -> None:
         """
         Adds an item to the cache with a specified TTL.
 
         Inputs:
-            key: The key to store the data under.
+            key: The key to store the value under.
             ttl: The Time-To-Live in seconds.
-            data: The data to store.
+            data: The value to store.
         Outputs:
             None
 
