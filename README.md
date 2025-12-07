@@ -18,7 +18,7 @@ For developer documentation (architecture, transports, plugin internals, testing
 
 ----
 
-# New (since dev/0.4.3)
+# New in 0.4.6 (since dev/0.4.3)
 
 ## DNSSEC & Resolver Pipeline
 - Enhanced DNSSEC validation, including RFC5011-style trust anchors and NSEC3 support.
