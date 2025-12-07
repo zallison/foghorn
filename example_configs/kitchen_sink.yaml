@@ -144,7 +144,7 @@ plugins:
 
   # 3) Download curated domain lists before filtering (ensures files exist).
   # Runs early in setup so files are present before Filter setup.
-  - module: list_downloader
+  - module: file_downloader
     config:
       setup_priority: 15
       download_path: ./config/var/lists
