@@ -23,7 +23,7 @@ def test_main_dot_missing_cert_logs_error(monkeypatch, caplog):
         "    enabled: true\n"
         "    host: 127.0.0.1\n"
         "    port: 8853\n"
-        "upstream:\n"
+        "upstreams:\n"
         "  - host: 1.1.1.1\n"
         "    port: 53\n"
     )

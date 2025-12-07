@@ -11,8 +11,11 @@ Outputs:
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 from foghorn.cache import FoghornTTLCache
-from foghorn.server import (DNSUDPHandler, compute_effective_ttl,
-                            send_query_with_failover)
+from foghorn.server import (
+    DNSUDPHandler,
+    compute_effective_ttl,
+    send_query_with_failover,
+)
 from foghorn.udp_server import _set_response_id
 
 
@@ -180,6 +183,47 @@ def test_send_query_with_failover_no_upstreams():
     assert resp is None and used is None and reason == "no_upstreams"
 
 
+def test_send_query_with_failover_concurrent_path_uses_first_success(monkeypatch):
+    """Brief: send_query_with_failover with max_concurrent>1 returns first successful upstream.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None: Asserts winner comes from second upstream when first fails.
+    """
+
+    class DummyQuery:
+        def send(self, host, port, timeout=None):
+            if host == "bad":
+                return b"resp-bad"
+            return b"resp-good"
+
+    def fake_parse(wire):
+        class _R:
+            class header:
+                rcode = RCODE.NOERROR
+
+        if wire == b"resp-bad":
+            raise ValueError("bad parse")
+        return _R
+
+    monkeypatch.setattr("foghorn.server.DNSRecord.parse", fake_parse)
+
+    resp, used, reason = send_query_with_failover(
+        DummyQuery(),
+        upstreams=[{"host": "bad", "port": 53}, {"host": "good", "port": 53}],
+        timeout_ms=100,
+        qname="example.com",
+        qtype=QTYPE.A,
+        max_concurrent=2,
+    )
+
+    assert resp == b"resp-good"
+    assert used == {"host": "good", "port": 53}
+    assert reason == "ok"
+
+
 def test_dnsserver_edns_udp_payload_config_and_fallback(monkeypatch):
     """Brief: DNSServer applies edns_udp_payload and falls back to default on error.
 
@@ -191,13 +235,14 @@ def test_dnsserver_edns_udp_payload_config_and_fallback(monkeypatch):
     """
 
     import foghorn.server as srv_mod
+    import foghorn.udp_server as udp_srv_mod
 
     class _DummyServer:
         def __init__(self, *a, **kw):
             self.daemon_threads = False
 
-    # Avoid binding real UDP sockets in tests
-    monkeypatch.setattr(srv_mod.socketserver, "ThreadingUDPServer", _DummyServer)
+    # Avoid binding real UDP sockets in tests by patching the UDP server module
+    monkeypatch.setattr(udp_srv_mod.socketserver, "ThreadingUDPServer", _DummyServer)
 
     # Normal numeric edns_udp_payload
     srv_mod.DNSUDPHandler.edns_udp_payload = 0

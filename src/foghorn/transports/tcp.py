@@ -66,7 +66,9 @@ class _TCPConn:
         if self._sock is not None:
             try:
                 self._sock.close()
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
         self._sock = None
 
@@ -109,12 +111,16 @@ class TCPConnectionPool:
         if max_connections is not None:
             try:
                 self._max = max(1, int(max_connections))
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
         if idle_timeout_s is not None:
             try:
                 self._idle = max(1, int(idle_timeout_s))
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
     def send(
@@ -140,7 +146,9 @@ class TCPConnectionPool:
                 conn.connect(connect_timeout_ms)
             resp = conn.send(query, read_timeout_ms)
             return resp
-        except Exception:  # pragma: no cover
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             try:
                 conn.close()
             except Exception:
@@ -151,7 +159,7 @@ class TCPConnectionPool:
                 with self._lock:
                     if len(self._stack) < self._max:
                         self._stack.append(conn)
-                    else:  # pragma: no cover
+                    else:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                         conn.close()
 
 
@@ -213,17 +221,23 @@ def tcp_query(
             sock.settimeout(read_timeout_ms / 1000.0)
             sock.sendall(payload)
             hdr = _recv_exact(sock, 2)
-            if len(hdr) != 2:  # pragma: no cover
+            if (
+                len(hdr) != 2
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 raise TCPError("short read on length header")
             resp_len = int.from_bytes(hdr, byteorder="big")
             resp = _recv_exact(sock, resp_len)
-            if len(resp) != resp_len:  # pragma: no cover
+            if (
+                len(resp) != resp_len
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 raise TCPError("short read on body")
             return resp
         finally:
             try:
                 sock.close()
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
     except (OSError, TimeoutError) as e:
         raise TCPError(f"Network error: {e}")

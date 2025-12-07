@@ -7,6 +7,8 @@ import threading
 import time
 from typing import Any, Optional
 
+from pydantic import BaseModel, Field
+
 from foghorn.cache import FoghornTTLCache
 
 # Try to import popular whois libraries in a robust way
@@ -25,6 +27,28 @@ from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 logger = logging.getLogger(__name__)
 
 
+class NewDomainFilterConfig(BaseModel):
+    """Brief: Typed configuration model for NewDomainFilterPlugin.
+
+    Inputs:
+      - threshold_days: Minimum allowed domain age in days.
+      - whois_db_path: Path to WHOIS cache DB.
+      - whois_cache_ttl_seconds: In-memory cache TTL.
+      - whois_refresh_seconds: Max age of DB entries before refresh.
+
+    Outputs:
+      - NewDomainFilterConfig instance with normalized field types.
+    """
+
+    threshold_days: int = Field(default=7, ge=0)
+    whois_db_path: str = Field(default="./config/var/whois_cache.db")
+    whois_cache_ttl_seconds: int = Field(default=3600, ge=0)
+    whois_refresh_seconds: int = Field(default=86400, ge=0)
+
+    class Config:
+        extra = "allow"
+
+
 @plugin_aliases("new_domain", "new_domain_filter", "ndf")
 class NewDomainFilterPlugin(BasePlugin):
     """Plugin that filters out domains registered too recently.
@@ -41,6 +65,19 @@ class NewDomainFilterPlugin(BasePlugin):
             config:
               threshold_days: 30
     """
+
+    @classmethod
+    def get_config_model(cls):
+        """Brief: Return the Pydantic model used to validate plugin configuration.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - NewDomainFilterConfig class for use by the core config loader.
+        """
+
+        return NewDomainFilterConfig
 
     def setup(self):
         """
@@ -145,7 +182,9 @@ class NewDomainFilterPlugin(BasePlugin):
         """
         try:
             creation_date = self._fetch_creation_date(domain)
-            if not creation_date:  # pragma: no cover
+            if (
+                not creation_date
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 return None
 
             now = dt.datetime.now(dt.timezone.utc)
@@ -176,8 +215,10 @@ class NewDomainFilterPlugin(BasePlugin):
             try:
                 ts = int(cached.decode())
                 return dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc)
-            except Exception:  # pragma: no cover
-                pass  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
         # 2) Persistent DB cache
         rec = self._db_get_creation_record(domain)
@@ -193,7 +234,9 @@ class NewDomainFilterPlugin(BasePlugin):
 
         # 3) Network lookup as last resort
         creation_date = self._whois_lookup_creation_date(domain)
-        if creation_date is None:  # pragma: no cover
+        if (
+            creation_date is None
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             return None
 
         if creation_date.tzinfo is None:

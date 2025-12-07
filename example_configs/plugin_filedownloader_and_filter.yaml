@@ -1,0 +1,64 @@
+# Example config: use FileDownloaderPlugin to fetch lists, then Filter to load them
+
+listen:
+  udp:
+    enabled: true
+    host: 127.0.0.1
+    port: 5353
+
+upstreams:
+  - { host: 1.1.1.1, port: 53 }
+  - { host: 8.8.8.8, port: 53 }
+
+dnssec:
+  mode: passthrough
+  validation: upstream_ad
+  udp_payload_size: 1232
+
+logging:
+  level: info
+
+plugins:
+  # 1) Download well-known domain-only blocklists to ./config/var/lists.
+  # Runs early in the setup phase so files are present before Filter runs.
+  - module: file_downloader
+    config:
+      setup_priority: 15  # lower runs earlier during setup()
+      download_path: ./config/var/lists
+      # Global defaults: hash filenames and add a header comment line.
+      hash_filenames: true
+      add_comment: true
+      # Optionally refresh no more than once per day during runtime
+      interval_days: 1
+      urls:
+        # Firebog curated domain-only lists
+        # This list keeps a stable, non-hashed filename and no header line.
+        - url: https://v.firebog.net/hosts/AdguardDNS.txt
+          hash_filenames: false
+          add_comment: false
+        # These lists inherit the global defaults (hashed filename + header).
+        - url: https://v.firebog.net/hosts/Easylist.txt
+        - url: https://v.firebog.net/hosts/Prigent-Ads.txt
+          # Explicitly disable the header line while still hashing the filename.
+          add_comment: null
+        - url: https://v.firebog.net/hosts/Prigent-Malware.txt
+
+  # 2) Filter consumes those files as blocklists.
+  - module: filter
+    config:
+      setup_priority: 20  # run setup after file_downloader
+      default: deny
+      db_path: ./config/var/blocklist.db
+      cache_ttl_seconds: 600
+
+      # Inline rules (optional)
+      # blocked_domains: [ 'tracker.example' ]
+      # allowed_domains: [ 'intranet.example' ]
+
+      # Domain lists produced by the downloader above. AdguardDNS uses a
+      # non-hashed filename; the others are hashed, so we use simple globs.
+      blocklist_files:
+        - ./config/var/lists/AdguardDNS.txt
+        - ./config/var/lists/Easylist-*.txt
+        - ./config/var/lists/Prigent-Ads-*.txt
+        - ./config/var/lists/Prigent-Malware-*.txt

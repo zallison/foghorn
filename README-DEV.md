@@ -24,7 +24,7 @@ This release introduces a few developer-visible breaking changes:
   - TCP: `src/foghorn/transports/tcp.py` with connection pooling
   - DoT: `src/foghorn/transports/dot.py` with connection pooling
   - DoH: `src/foghorn/transports/doh.py` (stdlib http.client; GET/POST; TLS verification controls)
-- Plugins: `src/foghorn/plugins/*`, discovered via `plugins/registry.py`. Hooks: `pre_resolve`, `post_resolve`. Aliases supported (e.g., `acl`, `router`, `new_domain`, `filter`, `custom`, `records`).
+- Plugins: `src/foghorn/plugins/*`, discovered via `plugins/registry.py`. Hooks: `pre_resolve`, `post_resolve`. Aliases supported (e.g., `acl`, `router`, `new_domain`, `filter`, `custom`, `records`, `docker-hosts`).
 - Cache: `src/foghorn/cache.py` TTLCache with opportunistic cleanup.
 
 ## Request Pipeline
@@ -53,7 +53,7 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
 - Listeners under `listen.{udp,tcp,dot,doh}` with `enabled`, `host`, `port`. DoT/DoH accept `cert_file` and `key_file` (optional for DoH if plain HTTP is desired). The DoH listener is implemented via `foghorn.doh_api.start_doh_server` and shares the same resolver/plugin pipeline as UDP/TCP/DoT.
 - Upstreams accept optional `transport: udp|tcp|dot|doh`. For DoT set `tls.server_name`, `tls.verify`. For DoH set `url`, optional `method`, `headers`, and `tls.verify`/`tls.ca_file`.
 - `dnssec.mode: ignore|passthrough|validate`, `dnssec.validation: upstream_ad|local` (local is experimental), `dnssec.udp_payload_size` (default 1232).
-- `min_cache_ttl` (seconds) clamps cache expiry floor; negative values are clamped to 0.
+- `foghorn.min_cache_ttl` (seconds) clamps cache expiry floor; negative values are clamped to 0. When omitted, it defaults to 0 (no additional floor beyond upstream TTLs). For backward compatibility, the deprecated root-level `min_cache_ttl` is still honored when `foghorn.min_cache_ttl` is not set.
 
 ## Plugin lifecycle and priorities
 
@@ -71,9 +71,9 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
   - Filters the instantiated plugin list down to those that override `BasePlugin.setup`.
   - Collects `(setup_priority, plugin)` pairs and runs `setup()` in ascending `setup_priority` order (stable sort; original registration order is preserved for ties).
   - Reads `abort_on_failure` from each plugin’s `config` (defaults to `True`); if `setup()` raises and `abort_on_failure` is true, startup is aborted with `RuntimeError`. If `abort_on_failure` is false, the error is logged and startup continues.
-- Example setup ordering (ListDownloader and Filter):
-  - `ListDownloader` defines `setup_priority = 15` so it runs early, downloads lists, and validates them before other plugins.
-  - `FilterPlugin` typically uses a higher `setup_priority` (for example 20), so it runs after ListDownloader and can safely load the downloaded files.
+- Example setup ordering (FileDownloader and Filter):
+  - `FileDownloader` defines `setup_priority = 15` so it runs early, downloads lists, and validates them before other plugins.
+  - `FilterPlugin` typically uses a higher `setup_priority` (for example 20), so it runs after FileDownloader and can safely load the downloaded files.
   - User config may override `setup_priority` on a per-plugin basis when composing plugin chains.
 
 ## BasePlugin targeting and TTL cache
@@ -96,11 +96,11 @@ Runtime behavior (`BasePlugin.targets(ctx) -> bool`):
 - When `targets` and/or `targets_ignore` are configured, the method first
   checks `_ignore_networks` (deny‑list wins), then `_target_networks`:
   - `targets` only: client is targeted iff its IP is in at least one target
-    network.
+	network.
   - `targets_ignore` only: client is targeted iff its IP is **not** in any
-    ignore network (inverted logic).
+	ignore network (inverted logic).
   - both: client is targeted iff it is **not** in any ignore network and is in
-    at least one target network.
+	at least one target network.
 - Decisions are cached per `(client_ip, 0)` key as `'1'`/`'0'` bytes for the
   configured TTL; cache lookups are a fast path on hot clients under load.
 
@@ -109,6 +109,95 @@ Filter, Greylist, NewDomainFilter, UpstreamRouter, FlakyServer, Examples,
 and EtcHosts. Implementers of new plugins are encouraged to call
 `self.targets(ctx)` early in their `pre_resolve`/`post_resolve` hooks when
 client‑scoped behavior is desired.
+
+## Admin Webserver Endpoints
+
+The admin webserver can run either as a FastAPI app (preferred) or as a
+threaded `http.server` fallback. Both expose the same logical endpoints,
+with some aliases preserved for backwards compatibility.
+
+- Health
+  - `GET /health`, `GET /api/v1/health`
+  - Returns a small JSON liveness payload with `status` and `server_time`.
+
+- Statistics (/stats)
+  - `GET /stats`, `GET /api/v1/stats`
+	- FastAPI: served by `create_app(...).get_stats` using `_get_stats_snapshot_cached`.
+	- Threaded: served by `_ThreadedAdminRequestHandler._handle_stats`.
+	- Response includes `totals`, `rcodes`, `qtypes`, `uniques`, `upstreams`,
+	  `meta` (hostname/IP/version/uptime plus uniques), latency histograms
+	  (`latency`, `latency_recent`), upstream rcodes/qtypes, `qtype_qnames`,
+	  per‑rcode domain/subdomain lists, cache hit/miss domains/subdomains, and
+	  a derived `rate_limit` summary when `cache_stat_rate_limit` is present.
+	- Query params: `reset=true|1|yes` forces a fresh snapshot and reset.
+  - `POST /stats/reset`, `POST /api/v1/stats/reset`
+	- Resets all in‑memory statistics counters for the active `StatsCollector`.
+
+- Traffic summary (/traffic)
+  - `GET /traffic`, `GET /api/v1/traffic`
+  - Returns a lightweight view derived from a stats snapshot: `totals`,
+	`rcodes`, `qtypes`, `top_clients`, `top_domains`, and `latency`, plus
+	basic host metadata.
+
+- Configuration (/config)
+  - Sanitized config
+	- `GET /config`, `GET /api/v1/config`, `GET /api/v1/config`
+	  (FastAPI) – YAML body; uses `_get_sanitized_config_yaml_cached`.
+	- `GET /config` and `GET /config.json` families in the threaded handler
+	  return sanitized YAML or JSON via `sanitize_config`, with values under
+	  keys like `token`, `password`, and `secret` replaced by `***`.
+  - Raw config
+	- `GET /config/raw`, `GET /api/v1/config/raw` (FastAPI) and
+	  `/config_raw` aliases in the threaded handler return the on‑disk YAML
+	  unmodified.
+	- `GET /config/raw.json`, `GET /api/v1/config/raw.json` return both parsed
+	  config (JSON) and the raw YAML string.
+  - Save config
+	- `POST /config/save`, `POST /api/v1/config/save`
+	  - Expects a JSON object with a `raw_yaml` field containing the full
+		configuration document.
+	  - Writes a backup, atomically replaces the active config, and schedules
+		(FastAPI) or immediately sends (threaded handler) SIGHUP via
+		`_schedule_sighup_after_config_save`.
+
+- Logs (/logs)
+  - `GET /logs`, `GET /api/v1/logs`
+  - Returns recent log‑like entries from the in‑memory `RingBuffer`.
+  - Query params: `limit` controls the maximum number of entries returned.
+
+- Rate‑limit inspection (/api/v1/ratelimit)
+  - `GET /api/v1/ratelimit`
+  - Uses `_collect_rate_limit_stats` to summarize `RateLimitPlugin` sqlite
+	profiles across any configured `db_path` values, with a short‑lived
+	in‑memory cache per process.
+
+- Static UI
+  - FastAPI:
+	- `GET /`, `GET /index.html` serve `html/index.html` from the resolved
+	  `www_root` when `webserver.index` is true.
+	- `GET /{path:path}` serves static files from `www_root`, with
+	  path‑traversal protection.
+  - Threaded admin server:
+	- `GET /`, `GET /index.html` via `_handle_index()`.
+	- Other paths under `html/` via `_try_serve_www()`.
+
+- CORS and preflight
+  - `OPTIONS *` is handled in the threaded handler and by FastAPI’s CORS
+	middleware when `webserver.cors.enabled` is true.
+
+Short endpoint summary (canonical forms):
+- `GET  /api/v1/health`           – liveness probe (alias: `/health`).
+- `GET  /api/v1/stats`            – full statistics snapshot (optionally `reset=1`; alias: `/stats`).
+- `POST /api/v1/stats/reset`      – reset stats counters (alias: `/stats/reset`).
+- `GET  /api/v1/traffic`          – lightweight traffic view (alias: `/traffic`).
+- `GET  /api/v1/config`           – sanitized YAML config (alias: `/config`).
+- `GET  /api/v1/config.json`      – sanitized JSON config (alias: `/config.json`).
+- `GET  /api/v1/config/raw`       – raw YAML from disk (aliases: `/config/raw`, `/config_raw`).
+- `GET  /api/v1/config/raw.json`  – raw YAML + parsed config as JSON (aliases: `/config/raw.json`, `/config_raw.json`).
+- `POST /api/v1/config/save`      – write new config (via `raw_yaml`) and trigger SIGHUP (alias: `/config/save`).
+- `GET  /api/v1/logs`             – recent in‑memory log entries (alias: `/logs`).
+- `GET  /api/v1/ratelimit`        – RateLimitPlugin sqlite profile summary.
+- `GET  /` and `/index.html`      – optional HTML dashboard when `webserver.index` is true.
 
 ## Logging and Statistics
 
@@ -124,6 +213,10 @@ client‑scoped behavior is desired.
 - SIGUSR1: notifies active plugins (via `handle_sigusr2()`) and, when statistics are enabled with `sigusr2_resets_stats: true`, resets in-memory statistics counters.
 - SIGUSR2: identical behavior to SIGUSR1; retained for backwards compatibility so existing tooling can continue to send either signal.
 - SIGHUP: requests a clean shutdown with exit code 0; intended for supervisors (e.g., systemd) to restart Foghorn with a new configuration. The `/config/save` admin endpoint writes the updated config file and then, after a brief delay, sends SIGHUP to the main process.
+
+Note: some plugins (such as DockerHosts) rely on configuration-driven background
+refresh loops rather than signal-triggered reloads. For those plugins,
+`handle_sigusr2()` remains a no-op unless explicitly overridden.
 
 ## Testing
 
@@ -179,6 +272,7 @@ good.com
 
 Project-specific notes
 - FilterPlugin is the only component that reads JSONL from external files; specifically the file-backed input fields: allowed_domains_files, allowlist_files, blocked_domains_files, blocklist_files, blocked_patterns_files, blocked_keywords_files, blocked_ips_files
+- Each FilterPlugin instance uses its own in-memory SQLite DB by default; a shared on-disk DB is only used when a non-empty db_path is explicitly configured for that instance.
 - The core YAML config does not accept JSONL; it only references which files to load
 - Statistics snapshots are logged as single-line JSON objects (conceptually JSONL when collected)
 

@@ -52,7 +52,9 @@ class _Stats:
     def record_cache_miss(self, *a):
         self.calls.append(("record_cache_miss", a))
 
-    def record_cache_null(self, *a):
+    def record_cache_null(self, *a, **k):
+        # Accept optional keyword arguments (e.g., status="deny_pre") to mirror
+        # StatsCollector.record_cache_null while only tracking the call kind here.
         self.calls.append(("record_cache_null", a))
 
     def record_response_rcode(self, *a):
@@ -69,6 +71,9 @@ class _Stats:
 
     def record_latency(self, *a):
         self.calls.append(("record_latency", a))
+
+    def record_dnssec_status(self, *a, **k):
+        self.calls.append(("record_dnssec_status", (a, k)))
 
 
 @pytest.mark.parametrize("path", ["cache_hit", "upstream_ok", "all_failed"])
@@ -88,20 +93,26 @@ def test_stats_hooks_are_called(monkeypatch, path):
 
     # forwarding behavior
     if path == "upstream_ok":
+        # Force the shared resolver path to succeed with an upstream reply.
         monkeypatch.setattr(
-            DNSUDPHandler,
-            "_forward_with_failover_helper",
-            lambda self, request, upstreams, qname, qtype: (
+            srv,
+            "send_query_with_failover",
+            lambda request, upstreams, timeout_ms, qname, qtype, max_concurrent=1: (
                 _mk_ok_reply(q),
                 upstreams[0],
                 "ok",
             ),
         )
     elif path == "all_failed":
+        # Simulate all upstreams failing in the shared resolver path.
         monkeypatch.setattr(
-            DNSUDPHandler,
-            "_forward_with_failover_helper",
-            lambda self, request, upstreams, qname, qtype: (None, None, "all_failed"),
+            srv,
+            "send_query_with_failover",
+            lambda request, upstreams, timeout_ms, qname, qtype, max_concurrent=1: (
+                None,
+                None,
+                "all_failed",
+            ),
         )
 
     stats = _Stats()
@@ -290,13 +301,16 @@ def test_handle_all_failed_with_stats_records_upstream_rcode(monkeypatch):
         {"transport": "doh", "url": "https://resolver/dns-query"}
     ]
 
-    def fake_forward(self, request, upstreams, qname, qtype):
-        return None, {"url": "https://resolver/dns-query"}, "all_failed"
-
+    # Simulate an all-failed DoH upstream where send_query_with_failover still
+    # reports which upstream was attempted.
     monkeypatch.setattr(
-        DNSUDPHandler,
-        "_forward_with_failover_helper",
-        fake_forward,
+        srv,
+        "send_query_with_failover",
+        lambda request, upstreams, timeout_ms, qname, qtype, max_concurrent=1: (
+            None,
+            {"url": "https://resolver/dns-query"},
+            "all_failed",
+        ),
     )
 
     stats = _Stats()
@@ -321,16 +335,24 @@ def test_dnssec_validate_upstream_ad_pass(monkeypatch):
     ok = _mk_ok_reply(base_q, ad=1)
 
     monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **k: None)
+
+    # Force the shared resolver path (used by UDP and others) to return an AD=1
+    # NOERROR reply so that validate+upstream_ad can classify it as secure.
     monkeypatch.setattr(
-        DNSUDPHandler,
-        "_forward_with_failover_helper",
-        lambda self, request, ups, qname, qtype: (ok, ups[0], "ok"),
+        srv,
+        "send_query_with_failover",
+        lambda req, ups, timeout_ms, qname, qtype, max_concurrent=1: (
+            ok,
+            ups[0],
+            "ok",
+        ),
     )
 
-    # validate mode, upstream_ad per-instance
+    # validate mode, upstream_ad at the handler class level (used by _resolve_core).
+    DNSUDPHandler.dnssec_mode = "validate"
+    DNSUDPHandler.dnssec_validation = "upstream_ad"
+
     h1, sock1 = _mk_handler(base_q.pack())
-    h1.dnssec_mode = "validate"
-    h1.dnssec_validation = "upstream_ad"
     h1.handle()
     r1 = DNSRecord.parse(sock1.sent[-1][0])
     assert r1.header.rcode == RCODE.NOERROR
@@ -343,25 +365,79 @@ def test_dnssec_validate_local_true(monkeypatch):
 
     q = DNSRecord.question("local.example", "A")
     ok = _mk_ok_reply(q)
+
+    # Force the shared resolver path to return a successful upstream reply.
     monkeypatch.setattr(
-        DNSUDPHandler,
-        "_forward_with_failover_helper",
-        lambda self, request, ups, qname, qtype: (ok, ups[0], "ok"),
+        srv,
+        "send_query_with_failover",
+        lambda req, ups, timeout_ms, qname, qtype, max_concurrent=1: (
+            ok,
+            ups[0],
+            "ok",
+        ),
     )
 
-    # Inject fake validator module returning True
-    import sys
-    import types
+    # Short-circuit local DNSSEC classification to "secure" without performing
+    # real DNSSEC validation network fetches.
+    import foghorn.dnssec_validate as dval
 
-    fake_mod = types.ModuleType("foghorn.dnssec_validate")
-    fake_mod.validate_response_local = lambda *a, **k: True
-    sys.modules["foghorn.dnssec_validate"] = fake_mod
+    monkeypatch.setattr(
+        dval,
+        "classify_dnssec_status",
+        lambda *a, **k: "secure",
+    )
+
+    # validate mode, local validation at the handler class level.
+    DNSUDPHandler.dnssec_mode = "validate"
+    DNSUDPHandler.dnssec_validation = "local"
 
     h1, s1 = _mk_handler(q.pack())
-    h1.dnssec_mode = "validate"
-    h1.dnssec_validation = "local"
     h1.handle()
     assert DNSRecord.parse(s1.sent[-1][0]).header.rcode == RCODE.NOERROR
+
+
+def test_resolve_core_dnssec_upstream_ad_shared_helper(monkeypatch):
+    """Brief: _resolve_core uses the shared DNSSEC helper for upstream_ad.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures dnssec_status is 'dnssec_secure' and stats hook is invoked.
+    """
+
+    DNSUDPHandler.plugins = []
+    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+
+    q = DNSRecord.question("ad-core.example", "A")
+    ok = _mk_ok_reply(q, ad=1)
+
+    monkeypatch.setattr(
+        srv,
+        "send_query_with_failover",
+        lambda req, ups, timeout_ms, qname, qtype, max_concurrent=1: (
+            ok,
+            {"host": "8.8.8.8", "port": 53},
+            "ok",
+        ),
+    )
+
+    DNSUDPHandler.dnssec_mode = "validate"
+    DNSUDPHandler.dnssec_validation = "upstream_ad"
+    DNSUDPHandler.edns_udp_payload = 1232
+
+    stats = _Stats()
+    DNSUDPHandler.stats_collector = stats
+
+    result = srv._resolve_core(q.pack(), "127.0.0.1")
+
+    DNSUDPHandler.stats_collector = None
+
+    assert DNSRecord.parse(result.wire).header.rcode == RCODE.NOERROR
+    assert result.dnssec_status == "dnssec_secure"
+
+    kinds = [k for k, _ in stats.calls]
+    assert "record_dnssec_status" in kinds
 
 
 # ---- DoH branch in send_query_with_failover ----

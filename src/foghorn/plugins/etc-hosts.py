@@ -8,6 +8,7 @@ import time
 from typing import Dict, Iterable, List, Optional
 
 from dnslib import AAAA, QTYPE, RR, A, DNSHeader, DNSRecord
+from pydantic import BaseModel, Field
 
 try:  # watchdog is used for cross-platform file watching
     from watchdog.events import FileSystemEventHandler
@@ -26,6 +27,32 @@ from foghorn.plugins.base import (
 logger = logging.getLogger(__name__)
 
 
+class EtcHostsConfig(BaseModel):
+    """Brief: Typed configuration model for EtcHosts.
+
+    Inputs:
+      - file_path: Legacy single hosts file path.
+      - file_paths: Preferred list of hosts file paths.
+      - watchdog_enabled: Enable watchdog-based reloads.
+      - watchdog_min_interval_seconds: Minimum seconds between reloads.
+      - watchdog_poll_interval_seconds: Optional polling interval.
+      - ttl: Response TTL in seconds.
+
+    Outputs:
+      - EtcHostsConfig instance with normalized field types.
+    """
+
+    file_path: Optional[str] = None
+    file_paths: Optional[List[str]] = None
+    watchdog_enabled: Optional[bool] = None
+    watchdog_min_interval_seconds: float = Field(default=1.0, ge=0)
+    watchdog_poll_interval_seconds: float = Field(default=0.0, ge=0)
+    ttl: int = Field(default=300, ge=0)
+
+    class Config:
+        extra = "allow"
+
+
 @plugin_aliases("hosts", "etc-hosts", "/etc/hosts")
 class EtcHosts(BasePlugin):
     """
@@ -35,6 +62,19 @@ class EtcHosts(BasePlugin):
     multiple files; when the same hostname appears in more than one file, entries
     from later files override earlier ones.
     """
+
+    @classmethod
+    def get_config_model(cls):
+        """Brief: Return the Pydantic model used to validate plugin configuration.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - EtcHostsConfig class for use by the core config loader.
+        """
+
+        return EtcHostsConfig
 
     def setup(self) -> None:
         """
@@ -151,7 +191,9 @@ class EtcHosts(BasePlugin):
             # Include legacy file_path in the set of file paths
             paths.append(os.path.expanduser(str(legacy)))
         if not paths:
-            paths = ["/etc/hosts"]  # pragma: no cover
+            paths = [
+                "/etc/hosts"
+            ]  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         # De-duplicate while preserving order
         paths = list(dict.fromkeys(paths))
         return paths
@@ -592,7 +634,9 @@ class EtcHosts(BasePlugin):
             try:
                 observer.stop()
                 observer.join(timeout=2.0)
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
             self._observer = None
 
@@ -601,14 +645,18 @@ class EtcHosts(BasePlugin):
         if stop_event is not None:
             try:
                 stop_event.set()
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
         poll_thread = getattr(self, "_poll_thread", None)
         if poll_thread is not None:
             try:
                 poll_thread.join(timeout=2.0)
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
             self._poll_thread = None
 
@@ -618,6 +666,8 @@ class EtcHosts(BasePlugin):
         if timer is not None:
             try:
                 timer.cancel()
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
             self._reload_debounce_timer = None

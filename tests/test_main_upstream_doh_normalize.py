@@ -13,7 +13,7 @@ from foghorn.main import normalize_upstream_config
 
 def test_normalize_upstream_config_doh_url():
     cfg = {
-        "upstream": [
+        "upstreams": [
             {
                 "transport": "doh",
                 "url": "https://dns.google/dns-query",
@@ -23,7 +23,7 @@ def test_normalize_upstream_config_doh_url():
             },
             {"host": "1.1.1.1", "port": 53},
         ],
-        "timeout_ms": 1234,
+        "foghorn": {"timeout_ms": 1234},
     }
     ups, to = normalize_upstream_config(cfg)
     assert to == 1234

@@ -36,9 +36,10 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
     """
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n"
+        "upstreams:\n"
         "  - host: 1.1.1.1\n"
         "    port: 53\n"
+        "foghorn:\n  timeout_ms: 2000\n"
         "statistics:\n"
         "  enabled: true\n"
         "  interval_seconds: 1\n"
@@ -56,6 +57,10 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
     class DummyCollector:
         def __init__(self, **kw):
             constructed["collector_kwargs"] = kw
+
+        def warm_load_from_store(self) -> None:
+            """Test stub: emulate real collector's warm_load_from_store()."""
+            constructed["collector_warm_loaded"] = True
 
     class DummyReporter:
         def __init__(
@@ -97,6 +102,7 @@ def test_main_statistics_enabled_initializes_and_starts_reporter(monkeypatch):
             timeout_ms,
             min_cache_ttl,
             stats_collector=None,
+            **_extra,
         ):
             constructed["dnserver_kwargs"] = {
                 "stats_collector": stats_collector,

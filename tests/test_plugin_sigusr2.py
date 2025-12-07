@@ -25,7 +25,7 @@ def test_sigusr2_calls_plugin_handlers(monkeypatch, caplog):
     """
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n"
+        "upstreams:\n"
         "  - host: 1.1.1.1\n"
         "    port: 53\n"
     )

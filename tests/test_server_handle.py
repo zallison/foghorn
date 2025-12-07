@@ -154,15 +154,15 @@ def test_handle_no_upstreams_sends_servfail(monkeypatch):
     assert resp.header.rcode == RCODE.SERVFAIL
 
 
-def test_handle_upstream_all_failed_sends_servfail_twice(monkeypatch):
+def test_handle_upstream_all_failed_sends_single_servfail(monkeypatch):
     """
-    Brief: When forwarding fails, handler sends two SERVFAIL responses.
+    Brief: When forwarding fails, handler sends a single SERVFAIL response.
 
     Inputs:
-      - _forward_with_failover_helper returns (None, None, 'all_failed')
+      - send_query_with_failover returns (None, None, 'all_failed').
 
     Outputs:
-      - None: Asserts two sends
+      - None: Asserts one SERVFAIL is sent.
     """
     q, data = _mk_query("fail.com")
     sock = FakeSock()
@@ -170,33 +170,33 @@ def test_handle_upstream_all_failed_sends_servfail_twice(monkeypatch):
     monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **kw: None)
     DNSUDPHandler.plugins = []
     DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
+
+    # Force the shared resolver path (used by UDP and other transports) to
+    # behave as if all upstreams failed.
+    import foghorn.server as srv_mod
+
     monkeypatch.setattr(
-        DNSUDPHandler,
-        "_choose_upstreams",
-        lambda *a, **kw: [{"host": "1.1.1.1", "port": 53}],
-    )
-    monkeypatch.setattr(
-        DNSUDPHandler,
-        "_forward_with_failover_helper",
+        srv_mod,
+        "send_query_with_failover",
         lambda *a, **kw: (None, None, "all_failed"),
     )
 
     h = _mk_handler(data, sock)
     h.handle()
 
-    assert len(sock.calls) == 2
-    assert all(DNSRecord.parse(c[0]).header.rcode == RCODE.SERVFAIL for c in sock.calls)
+    assert len(sock.calls) == 1
+    assert DNSRecord.parse(sock.calls[0][0]).header.rcode == RCODE.SERVFAIL
 
 
 def test_handle_success_with_post_override(monkeypatch):
     """
-    Brief: Success path applies post-resolve override and sends twice.
+    Brief: Success path applies post-resolve override and sends once.
 
     Inputs:
-      - _forward_with_failover_helper returns OK bytes; plugin post_resolve overrides
+      - send_query_with_failover returns OK bytes; plugin post_resolve overrides.
 
     Outputs:
-      - None: Asserts two sends with override bytes
+      - None: Asserts one send with override bytes.
     """
     q, data = _mk_query("ok.com")
     sock = FakeSock()
@@ -216,25 +216,28 @@ def test_handle_success_with_post_override(monkeypatch):
     monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **kw: None)
     DNSUDPHandler.plugins = [OverridePostPlugin()]
     DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
+
+    # Force the shared resolver to return the upstream_reply bytes so the
+    # post-resolve override plugin can replace them.
+    import foghorn.server as srv_mod
+
     monkeypatch.setattr(
-        DNSUDPHandler,
-        "_choose_upstreams",
-        lambda *a, **kw: [{"host": "1.1.1.1", "port": 53}],
-    )
-    monkeypatch.setattr(
-        DNSUDPHandler,
-        "_forward_with_failover_helper",
-        lambda *a, **kw: (upstream_reply.pack(), {"host": "1.1.1.1", "port": 53}, "ok"),
+        srv_mod,
+        "send_query_with_failover",
+        lambda *a, **kw: (
+            upstream_reply.pack(),
+            {"host": "1.1.1.1", "port": 53},
+            "ok",
+        ),
     )
 
     h = _mk_handler(data, sock)
     h.handle()
 
-    assert len(sock.calls) == 2
-    # Both sends should contain the override bytes (with request ID patched)
-    sent1, sent2 = sock.calls[0][0], sock.calls[1][0]
-    assert DNSRecord.parse(sent1).rr[0].rdata.toZone() == "7.7.7.7"
-    assert DNSRecord.parse(sent2).rr[0].rdata.toZone() == "7.7.7.7"
+    assert len(sock.calls) == 1
+    sent = sock.calls[0][0]
+    # Response should contain the override bytes (with request ID patched)
+    assert DNSRecord.parse(sent).rr[0].rdata.toZone() == "7.7.7.7"
 
 
 def test_handle_exception_path_sends_servfail(monkeypatch):
@@ -242,18 +245,22 @@ def test_handle_exception_path_sends_servfail(monkeypatch):
     Brief: Exceptions during processing result in SERVFAIL response.
 
     Inputs:
-      - _parse_query raises
+      - resolve_query_bytes raises inside the shared resolver.
 
     Outputs:
-      - None: Asserts one SERVFAIL sent
+      - None: Asserts one SERVFAIL sent.
     """
     q, data = _mk_query("boom.com")
     sock = FakeSock()
 
+    # Force the shared resolver used by DNSUDPHandler.handle to raise so that
+    # the handler's outer exception guard synthesizes a SERVFAIL.
+    import foghorn.server as srv_mod
+
     monkeypatch.setattr(
-        DNSUDPHandler,
-        "_parse_query",
-        lambda *a, **kw: (_ for _ in ()).throw(ValueError("boom")),
+        srv_mod,
+        "resolve_query_bytes",
+        lambda *_a, **_k: (_ for _ in ()).throw(ValueError("boom")),
     )
 
     h = _mk_handler(data, sock)

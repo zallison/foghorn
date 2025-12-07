@@ -293,7 +293,9 @@ def test_resolve_query_bytes_negative_caches_nxdomain_with_soa(monkeypatch):
 
     calls = {"n": 0}
 
-    def fake_failover(req, upstreams, timeout_ms, qname, qtype):  # noqa: ANN001
+    def fake_failover(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None
+    ):  # noqa: ANN001
         calls["n"] += 1
         return wire, upstreams[0], "ok"
 
@@ -339,7 +341,9 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
 
     calls = {"n": 0}
 
-    def fake_failover(req, upstreams, timeout_ms, qname, qtype):  # noqa: ANN001
+    def fake_failover(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None
+    ):  # noqa: ANN001
         calls["n"] += 1
         return wire, upstreams[0], "ok"
 
@@ -382,7 +386,7 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
     def fake_forward_ok(self, request, upstreams, qname, qtype):
         return wire_ok, upstreams[0], "ok"
 
-    # Case 1: validate with upstream_ad -> no AD -> SERVFAIL
+    # Case 1: validate with upstream_ad -> no AD -> treated as insecure but not SERVFAIL
     h1 = srv.DNSUDPHandler.__new__(srv.DNSUDPHandler)
 
     class _Sock:
@@ -401,9 +405,11 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
         srv.DNSUDPHandler, "_forward_with_failover_helper", fake_forward_noad
     )
     h1.handle()
-    assert DNSRecord.parse(sock1.sent[-1][0]).header.rcode == RCODE.SERVFAIL
+    # Upstream path without AD should now be treated as insecure/unsigned,
+    # not forced to SERVFAIL.
+    assert DNSRecord.parse(sock1.sent[-1][0]).header.rcode == RCODE.NOERROR
 
-    # Case 3: local validator raises -> SERVFAIL (exercise exception path)
+    # Case 3: local validator raises -> treated as insecure (exercise exception path)
     h3 = srv.DNSUDPHandler.__new__(srv.DNSUDPHandler)
     sock3 = _Sock()
     h3.request = (q.pack(), sock3)
@@ -425,7 +431,9 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
         srv.DNSUDPHandler, "_forward_with_failover_helper", fake_forward_noad
     )
     h3.handle()
-    assert DNSRecord.parse(sock3.sent[-1][0]).header.rcode == RCODE.SERVFAIL
+    # Local validator exceptions should no longer force SERVFAIL; the
+    # response should flow through unchanged.
+    assert DNSRecord.parse(sock3.sent[-1][0]).header.rcode == RCODE.NOERROR
 
 
 def test_resolve_query_bytes_post_hooks(monkeypatch):
@@ -440,7 +448,7 @@ def test_resolve_query_bytes_post_hooks(monkeypatch):
     q = DNSRecord.question("hook.example", "A")
     r_ok = q.reply()
 
-    def fake_forward(req, upstreams, timeout_ms, qname, qtype):
+    def fake_forward(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
         return r_ok.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
 
     monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)

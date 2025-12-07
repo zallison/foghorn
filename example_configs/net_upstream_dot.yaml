@@ -11,7 +11,7 @@ listen:
   dot:
     enabled: false
 
-upstream:
+upstreams:
   - host: 1.1.1.1
     port: 853
     transport: dot
@@ -26,7 +26,11 @@ upstream:
       verify: true
 
 # Per-upstream-attempt timeout (ms)
-timeout_ms: 2000
+foghorn:
+  timeout_ms: 2000
+  upstream_strategy: failover
+  upstream_max_concurrent: 1
+  use_asyncio: true
 
 dnssec:
   mode: passthrough

@@ -4,7 +4,7 @@
   "title": "Foghorn Config (modern YAML layout)",
   "type": "object",
   "additionalProperties": false,
-  "required": ["listen", "upstream"],
+  "required": ["listen", "upstreams"],
   "$defs": {
     "listener_udp": {
       "type": "object",
@@ -109,6 +109,7 @@
           "properties": {
             "module": { "type": "string", "minLength": 1 },
             "config": { "type": "object" },
+            "name": { "type": "string", "minLength": 1 },
             "pre_priority": { "type": "integer" },
             "post_priority": { "type": "integer" },
             "setup_priority": { "type": "integer" }
@@ -130,7 +131,7 @@
         "doh": { "$ref": "#/$defs/listener_doh" }
       }
     },
-    "upstream": {
+    "upstreams": {
       "type": "array",
       "minItems": 1,
       "items": {
@@ -140,8 +141,27 @@
         ]
       }
     },
-    "timeout_ms": { "type": "integer", "minimum": 1 },
-    "min_cache_ttl": { "type": "integer", "minimum": 0 },
+    "foghorn": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeout_ms": { "type": "integer", "minimum": 1 },
+        "upstream_strategy": {
+          "type": "string",
+          "enum": ["failover", "round_robin", "random"],
+          "default": "failover"
+        },
+        "upstream_max_concurrent": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "use_asyncio": {
+          "type": "boolean",
+          "default": true
+        },
+        "min_cache_ttl": { "type": "integer", "minimum": 0 }
+      }
+    },
     "dnssec": {
       "type": "object",
       "additionalProperties": false,
