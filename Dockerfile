@@ -10,24 +10,29 @@ RUN DEBIAN_FRONTEND=noninteractive apt update && \
 	DEBIAN_FRONTEND=noninteractive apt clean && \
 	rm -rf /var/lib/apt/lists/*
 
+
+# Pre-install python modules
+
+RUN pip3 install --root-user-action=ignore PyYAML>=6.0.1 jsonschema>=4.17.3 cachetools dnslib>=0.9.24 dnspython>=2.6.1 fastapi>=0.111.0 httpx psutil ytest pytest-cov requests>=2.31.0 uvicorn>=0.30.0 watchdog whois coverage
+
 # Copy the current directory contents into the container
 COPY . /foghorn
 
 # Ensure dependencies
 RUN pip install --root-user-action=ignore -e "."
 
-# To prevent or tell which cuda device to use for fastapu
+## To prevent or tell which cuda device to use for fastapi
 # ENV CUDA_VISIBLE_DEVICES=""
 
-
+## Port expose and suggusted mappings
 # Normal Port # Comment
 # Expose: Internal Port
 
 # 53 # Standard UDP/TCP
 EXPOSE 5333
 
-# 801  # DNS-over-TLS
-EXPOSE 1801
+# 853  # DNS-over-TLS
+EXPOSE 1853
 
 # 443  # DNS-over-HTTP
 EXPOSE 8153
