@@ -162,7 +162,6 @@
         "min_cache_ttl": { "type": "integer", "minimum": 0 }
       }
     },
-    "min_cache_ttl": { "type": "integer", "minimum": 0, "deprecated": true },
     "dnssec": {
       "type": "object",
       "additionalProperties": false,
