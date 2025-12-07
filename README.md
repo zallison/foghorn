@@ -123,7 +123,7 @@ Testing, docs & security
 	- [RateLimitPlugin](#ratelimitplugin)
 	- [UpstreamRouterPlugin](#upstreamrouterplugin)
 	- [FilterPlugin](#filterplugin)
-	- [ListDownloader plugin](#listdownloader-plugin)
+	- [FileDownloader plugin](#listdownloader-plugin)
 	- [ZoneRecords plugin](#zonerecords-plugin)
   - [Complete `config.yaml` Example](#complete-configyaml-example)
 - [Logging](#logging)
@@ -356,7 +356,7 @@ Plugins support three priority knobs in their config (all optional, integers 1�
 - Otherwise, reuse the config’s `pre_priority` value for setup-aware plugins.
 - Otherwise, fall back to the plugin’s class-level default (50).
 
-This lets you, for example, have a ListDownloader plugin run its setup early (to download lists) and a Filter plugin run slightly later to load those lists from disk.
+This lets you, for example, have a FileDownloader plugin run its setup early (to download lists) and a Filter plugin run slightly later to load those lists from disk.
 
 ------
 
@@ -611,7 +611,7 @@ Notes:
 
 ------
 
-### ListDownloader plugin
+### FileDownloader plugin
 
 Download domain-only blocklists from well-known sources to local files so the Filter plugin can load them.
 
@@ -632,7 +632,7 @@ Filenames are unique and stable per-URL: `{base}-{sha1(url)[:12]}{ext}`. If the 
 
 ```yaml
 plugins:
-  - module: list_downloader
+  - module: file_downloader
 	pre_priority: 15
 	config:
 	  download_path: ./config/var/lists
@@ -861,12 +861,12 @@ plugins:
 			- host: 10.0.0.2
 			  port: 53
 
-  # ListDownloader: runs early in the setup phase to download blocklists
+  # FileDownloader: runs early in the setup phase to download blocklists
   # that the Filter plugin will read from disk.
-  - module: list_downloader
+  - module: file_downloader
 	config:
 	  # setup_priority controls when setup() runs relative to other plugins.
-	  # Lower numbers run earlier. ListDownloader defaults to 15.
+	  # Lower numbers run earlier. FileDownloader defaults to 15.
 	  setup_priority: 15
 	  download_path: ./config/var/lists
 	  interval_seconds: 3600

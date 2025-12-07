@@ -71,9 +71,9 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
   - Filters the instantiated plugin list down to those that override `BasePlugin.setup`.
   - Collects `(setup_priority, plugin)` pairs and runs `setup()` in ascending `setup_priority` order (stable sort; original registration order is preserved for ties).
   - Reads `abort_on_failure` from each plugin’s `config` (defaults to `True`); if `setup()` raises and `abort_on_failure` is true, startup is aborted with `RuntimeError`. If `abort_on_failure` is false, the error is logged and startup continues.
-- Example setup ordering (ListDownloader and Filter):
-  - `ListDownloader` defines `setup_priority = 15` so it runs early, downloads lists, and validates them before other plugins.
-  - `FilterPlugin` typically uses a higher `setup_priority` (for example 20), so it runs after ListDownloader and can safely load the downloaded files.
+- Example setup ordering (FileDownloader and Filter):
+  - `FileDownloader` defines `setup_priority = 15` so it runs early, downloads lists, and validates them before other plugins.
+  - `FilterPlugin` typically uses a higher `setup_priority` (for example 20), so it runs after FileDownloader and can safely load the downloaded files.
   - User config may override `setup_priority` on a per-plugin basis when composing plugin chains.
 
 ## BasePlugin targeting and TTL cache
