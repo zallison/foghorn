@@ -2,7 +2,7 @@
 
 <img src="html/logo.png" width="300px" alt="Foghorn Logo, a stylized alarm horn" />
 
-Foghorn is a modern, programmable DNS proxy and recursive resolver focused on correctness, observability, and extensibility. It provides hardened DNSSEC validation, including RFC5011-style trust anchors and NSEC3 support, along with a first-class iterative recursive resolver and in‑memory caching layer. This makes it suitable as a secure validating resolver or as a smart front-end to upstream DNS providers.
+Foghorn is a modern, programmable DNS proxy and validating caching resolver focused on correctness, observability, and extensibility. It provides hardened DNSSEC validation, including RFC5011-style trust anchors and NSEC3 support, along with an in‑memory caching layer and pluggable policy engine. Foghorn operates as a caching forwarder to upstream resolvers rather than a fully standalone recursive server, making it well-suited as a secure validating front-end to upstream DNS providers.
 
 Operators can tune upstream strategy, concurrency, and health behavior directly from configuration, while monitoring real-time upstream status and response codes via a versioned `/api/v1` admin API and associated UI. Foghorn exposes rich statistics for DNSSEC, rate limiting, upstream health, and more, with both snapshot and persistent storage options.
 
@@ -20,11 +20,11 @@ For developer documentation (architecture, transports, plugin internals, testing
 
 # New (since dev/0.4.3)
 
-## DNSSEC & Recursive Resolver
+## DNSSEC & Resolver Pipeline
 - Enhanced DNSSEC validation, including RFC5011-style trust anchors and NSEC3 support.
 - Hardened local DNSSEC validation and added unit/chain/negative tests.
-- Introduced iterative recursive resolver with `resolver.mode` wiring into the server.
-- Added in-memory recursive cache implementation and stabilized cache-related stats keys.
+- Simplified the resolver pipeline and removed the legacy `resolver.mode` setting so resolution always forwards through configured upstreams.
+- Added a shared in-memory cache implementation and stabilized cache-related stats keys.
 
 ## Upstream Strategy, Health, and Concurrency
 - Added upstream strategy and concurrency options in config.
@@ -60,7 +60,7 @@ For developer documentation (architecture, transports, plugin internals, testing
 - Ensured Docker images don’t install dev dependencies by default.
 
 ## Tests
-- Added comprehensive DNSSEC and recursive resolver tests (unit and end-to-end).
+- Added comprehensive DNSSEC and resolver/forwarding path tests (unit and end-to-end).
 - Expanded UDP helper coverage and made DoH FastAPI tests optional.
 - Updated tests for new config fields, webserver behavior, and rate-limit paths.
 - Fixed stats tests for multiple rcodes and new snapshot keys.
