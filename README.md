@@ -141,6 +141,7 @@ Testing, docs & security
   *   **Rate Limit**: Adaptive or static rate limiting, by client, domain, or client-domain
   *   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
   *   **ZoneRecords** Serve static DNS records and authoritative zones from one or more files, with optional live reload on change.
+  *   **DockerHosts**: Answer A/AAAA/PTR queries for Docker container hostnames and reverse IPs by inspecting Docker endpoints.
 * **Examples**:
   *   **Examples:** Showcase of simple policies and rewrites.
   *   **New Domain Filter:** Block recently registered domains.
@@ -308,6 +309,7 @@ You can use short aliases instead of full dotted paths:
 - upstream_router or router -> foghorn.plugins.upstream_router.UpstreamRouterPlugin
 - filter -> foghorn.plugins.filter.FilterPlugin
 - rate_limit or ratelimit -> foghorn.plugins.rate_limit.RateLimitPlugin
+- docker-hosts, docker_hosts or docker -> foghorn.plugins.docker-hosts.DockerHosts
 
 Examples of plugin entries:
 - As a dict with module/config: `{ module: acl, config: {...} }`
@@ -653,6 +655,67 @@ plugins:
 		- ./config/var/lists/Prigent-Ads-*.txt
 		- ./config/var/lists/Prigent-Malware-*.txt
 ```
+
+------
+
+### DockerHosts plugin
+
+The `DockerHosts` plugin answers selected queries directly from Docker metadata.
+It discovers containers via the Docker CLI on one or more endpoints, extracts
+hostnames plus IPv4/IPv6 addresses, and serves forward and reverse entries from
+an in-memory map that is periodically refreshed.
+
+**Configuration keys**
+
+```yaml
+plugins:
+  - module: docker-hosts
+    config:
+      # Optional: list of Docker endpoints; defaults to the local Unix socket
+      endpoints:
+        - unix:///var/run/docker.sock
+        # Example TCP endpoints (remote Docker daemons or proxies):
+        # - tcp://127.0.0.1:2375
+        # - tcp://docker-host.internal:2375
+        # - tcp://10.0.0.10:2376
+
+      # Optional: docker CLI binary; defaults to "docker"
+      docker_binary: docker
+
+      # TTL for A/AAAA/PTR answers served by this plugin (seconds; default 300)
+      ttl: 300
+
+      # Background refresh interval in seconds. When set to 0, only the
+      # initial mapping from setup() is used and no periodic refresh occurs.
+      reload_interval_seconds: 60
+
+      # Optional per-family host IP overrides. When set, these are used in
+      # place of per-container addresses so that clients reach the host even
+      # if container networks are not routable.
+      # use_ipv4: 192.0.2.10
+      # use_ipv6: 2001:db8::10
+```
+
+`module` may be any of:
+
+- Full dotted path: `foghorn.plugins.docker-hosts.DockerHosts`
+- Alias: `docker-hosts`, `docker_hosts`, or `docker`
+
+DockerHosts inspects all containers on each endpoint, building:
+
+- forward maps from hostname (case-insensitive) to IPv4/IPv6 addresses
+- reverse maps from both IPv4 and IPv6 addresses to hostnames using
+  RFC-compliant in-addr.arpa and ip6.arpa reverse names
+
+During `pre_resolve`, the plugin:
+
+- answers A queries from the IPv4 map (`QTYPE.A`)
+- answers AAAA queries from the IPv6 map (`QTYPE.AAAA`)
+- answers PTR queries when the reverse lookup matches a known address
+
+If a container is missing a hostname or has no usable IP addresses, DockerHosts
+logs a warning and skips that container. If no containers across all endpoints
+have usable hostname/IP combinations, it logs a summary warning after reload.
 
 ------
 

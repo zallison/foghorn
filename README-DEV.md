@@ -24,7 +24,7 @@ This release introduces a few developer-visible breaking changes:
   - TCP: `src/foghorn/transports/tcp.py` with connection pooling
   - DoT: `src/foghorn/transports/dot.py` with connection pooling
   - DoH: `src/foghorn/transports/doh.py` (stdlib http.client; GET/POST; TLS verification controls)
-- Plugins: `src/foghorn/plugins/*`, discovered via `plugins/registry.py`. Hooks: `pre_resolve`, `post_resolve`. Aliases supported (e.g., `acl`, `router`, `new_domain`, `filter`, `custom`, `records`).
+- Plugins: `src/foghorn/plugins/*`, discovered via `plugins/registry.py`. Hooks: `pre_resolve`, `post_resolve`. Aliases supported (e.g., `acl`, `router`, `new_domain`, `filter`, `custom`, `records`, `docker-hosts`).
 - Cache: `src/foghorn/cache.py` TTLCache with opportunistic cleanup.
 
 ## Request Pipeline
@@ -213,6 +213,10 @@ Short endpoint summary (canonical forms):
 - SIGUSR1: notifies active plugins (via `handle_sigusr2()`) and, when statistics are enabled with `sigusr2_resets_stats: true`, resets in-memory statistics counters.
 - SIGUSR2: identical behavior to SIGUSR1; retained for backwards compatibility so existing tooling can continue to send either signal.
 - SIGHUP: requests a clean shutdown with exit code 0; intended for supervisors (e.g., systemd) to restart Foghorn with a new configuration. The `/config/save` admin endpoint writes the updated config file and then, after a brief delay, sends SIGHUP to the main process.
+
+Note: some plugins (such as DockerHosts) rely on configuration-driven background
+refresh loops rather than signal-triggered reloads. For those plugins,
+`handle_sigusr2()` remains a no-op unless explicitly overridden.
 
 ## Testing
 

@@ -26,6 +26,15 @@ logging:
   level: info
 
 plugins:
+  # Optional: resolve container hostnames before consulting /etc/hosts.
+  - module: docker-hosts
+    config:
+      endpoints:
+        - unix:///var/run/docker.sock
+        # - tcp://docker-host.internal:2375
+      reload_interval_seconds: 60
+      # use_ipv4: 192.0.2.10
+
   - module: etc-hosts  # EtcHosts plugin alias
     config:
       files:

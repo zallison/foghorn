@@ -26,6 +26,7 @@ dependencies = [
   "watchdog",
   "whois",
   "coverage",
+  "docker>=7.0.0",
 ]
 
 [optional-dependencies]

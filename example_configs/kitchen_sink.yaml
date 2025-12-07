@@ -132,9 +132,27 @@ webserver:
     - secret
 
 plugins:
-  # 1) /etc/hosts resolver – answers from hosts files first when possible
+  # 1) DockerHosts – resolve container hostnames and reverse IPs from Docker
+  - module: docker-hosts
+    pre_priority: 5            # run very early
+    config:
+      endpoints:
+        - unix:///var/run/docker.sock
+        # Example networked endpoints (Docker TCP APIs / proxies)
+        # - tcp://127.0.0.1:2375
+        # - tcp://docker-host.internal:2375
+      docker_binary: docker
+      ttl: 300
+      reload_interval_seconds: 60
+      # Optional: answer using host IP(s) instead of container addresses
+      # so that clients always talk to the host even when container
+      # networks are not directly routable.
+      # use_ipv4: 192.0.2.10
+      # use_ipv6: 2001:db8::10
+
+  # 2) /etc/hosts resolver – answers from hosts files first when possible
   - module: hosts
-    pre_priority: 10           # run early
+    pre_priority: 10           # run after DockerHosts
     config:
       allow: ["192.0.2.0/24", "2001:db8::/32"]
       servfail_one_in: 20
