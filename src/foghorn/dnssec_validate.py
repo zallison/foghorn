@@ -261,3 +261,72 @@ def validate_response_local(
             return False
     except Exception:
         return False
+
+
+def classify_dnssec_status(
+    dnssec_mode: str,
+    dnssec_validation: str,
+    qname_text: str,
+    qtype_num: int,
+    response_wire: bytes,
+    *,
+    udp_payload_size: int = 1232,
+) -> Optional[str]:
+    """Classify a DNS response as DNSSEC "secure" or "insecure".
+
+    Inputs:
+      - dnssec_mode: DNSSEC mode string (e.g. 'ignore', 'passthrough', 'validate').
+      - dnssec_validation: Validation strategy ('upstream_ad' or 'local').
+      - qname_text: Query name as text.
+      - qtype_num: Numeric qtype (e.g., 1=A, 28=AAAA).
+      - response_wire: Raw DNS response bytes.
+      - udp_payload_size: EDNS payload size for any local validation fetches.
+
+    Outputs:
+      - 'secure' when validation succeeds.
+      - 'insecure' when validation runs but does not authenticate the answer.
+      - None when dnssec_mode is not 'validate' or classification cannot be
+        determined due to errors.
+    """
+    try:
+        mode = str(dnssec_mode).lower()
+        if mode != "validate":
+            return None
+
+        strategy = str(dnssec_validation or "upstream_ad").lower()
+        validated: Optional[bool]
+
+        if strategy == "local":
+            try:
+                validated = bool(
+                    validate_response_local(
+                        qname_text,
+                        qtype_num,
+                        response_wire,
+                        udp_payload_size=udp_payload_size,
+                    )
+                )
+            except Exception as e:  # pragma: no cover - defensive logging only
+                logger.debug("Local DNSSEC validation error: %s", e)
+                validated = None
+        else:
+            try:
+                # For upstream_ad we rely on the AD bit in the header. Use
+                # dnslib here to remain compatible with how responses are
+                # constructed elsewhere in Foghorn.
+                from dnslib import DNSRecord as _DNSRecord  # local import
+
+                parsed = _DNSRecord.parse(response_wire)
+                validated = getattr(parsed.header, "ad", 0) == 1
+            except Exception as e:  # pragma: no cover - defensive logging only
+                logger.debug("Upstream AD check failed: %s", e)
+                validated = None
+
+        if validated is None:
+            # Leave status unset when classification is indeterminate so callers
+            # can treat the response as unsigned without forcing 'insecure'.
+            return None
+        return "secure" if validated else "insecure"
+    except Exception:  # pragma: no cover - defensive: low-value edge case
+        logger.debug("DNSSEC classification failed; leaving status unset")
+        return None
