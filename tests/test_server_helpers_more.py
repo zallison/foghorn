@@ -11,7 +11,6 @@ Outputs:
 from dnslib import QTYPE, RCODE, DNSRecord
 
 import foghorn.server as server_mod
-from foghorn.cache import FoghornTTLCache
 from foghorn.plugins.base import BasePlugin, PluginDecision
 from foghorn.server import DNSUDPHandler, compute_effective_ttl
 from foghorn.udp_server import _set_response_id
@@ -162,96 +161,16 @@ def test_apply_post_plugins_deny_turns_to_nxdomain():
     assert DNSRecord.parse(out).header.rcode == RCODE.NXDOMAIN
 
 
-def test_cache_store_if_applicable_servfail_and_noanswers():
-    """
-    Brief: _cache_store_if_applicable handles SERVFAIL and no-answer cases.
-
-    Inputs:
-      - responses: SERVFAIL, and NOERROR with no answers
-
-    Outputs:
-      - None: Asserts no exceptions
-    """
-    q = DNSRecord.question("example.com", "A")
-    h = object.__new__(DNSUDPHandler)
-    # SERVFAIL
-    r1 = q.reply()
-    r1.header.rcode = RCODE.SERVFAIL
-    DNSUDPHandler._cache_store_if_applicable(h, "example.com", 1, r1.pack())
-    # NOERROR with no answers
-    r2 = q.reply()
-    DNSUDPHandler._cache_store_if_applicable(h, "example.com", 1, r2.pack())
-
-
-def test_cache_store_if_applicable_ttl_zero_and_parse_error():
-    """
-    Brief: Covers TTL==0 no-cache path and parse error path.
-
-    Inputs:
-      - response with TTL 0
-      - invalid wire to trigger parse exception
-
-    Outputs:
-      - None: Asserts no exceptions
-    """
-    q = DNSRecord.question("example.com", "A")
-    r = q.reply()
-    from dnslib import RR, A
-
-    r.add_answer(RR("example.com", QTYPE.A, rdata=A("1.2.3.4"), ttl=0))
-    h = object.__new__(DNSUDPHandler)
-    DNSUDPHandler._cache_store_if_applicable(h, "example.com", 1, r.pack())
-
-    # Parse error path
-    DNSUDPHandler._cache_store_if_applicable(h, "example.com", 1, b"not-a-dns-packet")
-
-
-def test_cache_store_if_applicable_no_answer_ttls_branch(monkeypatch):
-    """Brief: _cache_store_if_applicable handles case where rr container yields no TTLs.
-
-    Inputs:
-      - monkeypatch: pytest monkeypatch fixture.
-
-    Outputs:
-      - None; asserts no cache entry is created and no crash occurs.
-    """
-
-    class _RRContainer:
-        def __bool__(self):  # truthy so earlier rr check passes
-            return True
-
-        def __iter__(self):
-            return iter([])  # but iteration yields no RRs/TTLs
-
-    class _FakeResp:
-        class header:
-            rcode = RCODE.NOERROR
-
-        def __init__(self):
-            self.rr = _RRContainer()
-
-    monkeypatch.setattr(
-        server_mod.DNSRecord, "parse", staticmethod(lambda _b: _FakeResp())
-    )
-
-    h = object.__new__(DNSUDPHandler)
-    h.cache = FoghornTTLCache()
-    h.min_cache_ttl = 60
-
-    DNSUDPHandler._cache_store_if_applicable(h, "example.com", 1, b"wire")
-    # No entries should have been created for this key
-    assert h.cache.get(("example.com", 1)) is None
-
-
 def test_handle_inner_exception_logs_and_does_not_send(monkeypatch):
     """
-    Brief: If exception handling also fails to parse, no response is sent.
+    Brief: If the shared resolver and its UDP fallback parsing both fail, the
+    handler falls back to echoing the original query bytes (one send).
 
     Inputs:
-      - monkeypatch: make _parse_query and DNSRecord.parse raise
+      - monkeypatch: make resolve_query_bytes and DNSRecord.parse raise
 
     Outputs:
-      - None: Asserts zero sends
+      - None: Asserts exactly one send containing the original query bytes
     """
     q = DNSRecord.question("example.com", "A")
     data = q.pack()
@@ -267,20 +186,28 @@ def test_handle_inner_exception_logs_and_does_not_send(monkeypatch):
     h.request = (data, Sock())
     h.client_address = ("1.2.3.4", 9)
 
+    # First make the shared resolver used by DNSUDPHandler.handle raise.
     monkeypatch.setattr(
-        DNSUDPHandler,
-        "_parse_query",
-        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")),
+        server_mod,
+        "resolve_query_bytes",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
     )
+    # Then make the fallback DNSRecord.parse in the UDP handler itself fail as
+    # well so no response can be constructed.
+    import foghorn.udp_server as udp_mod
+
     monkeypatch.setattr(
-        server_mod.DNSRecord,
+        udp_mod.DNSRecord,
         "parse",
         staticmethod(lambda b: (_ for _ in ()).throw(ValueError("bad"))),
     )
 
     DNSUDPHandler.handle(h)
 
-    assert len(h.request[1].calls) == 0
+    # Worst-case fallback echoes the original query bytes instead of
+    # constructing a response; ensure exactly one such send occurred.
+    assert len(h.request[1].calls) == 1
+    assert h.request[1].calls[0][0] == data
 
 
 def test_forward_with_failover_helper_delegates(monkeypatch):

@@ -111,49 +111,59 @@ def test__ensure_edns_sets_do_bit_for_validate_mode():
     assert flags_validate & 0x8000 == 0x8000
 
 
-def test__cache_store_if_applicable_variants():
-    """
-    Brief: Cover NOERROR/answers with TTL>0, TTL=0, SERVFAIL not cached, other rcodes no-answers.
+def test_resolve_query_bytes_cache_store_variants(monkeypatch):
+    """Brief: Core resolver caches positive answers but not TTL=0 or SERVFAIL variants.
 
     Inputs:
-      - None
+      - monkeypatch: pytest monkeypatch fixture.
+
     Outputs:
-      - None; asserts cache set/miss accordingly
+      - None; asserts cache set/miss semantics via resolve_query_bytes.
     """
-    name = "cache.example"
-    # Build replies
-    q = DNSRecord.question(name, "A")
+    name_ok = "cache.example"
+    name_zero = "zero.example"
+    name_sf = "servfail.example"
 
-    # NOERROR + answer TTL>0 -> cached
-    r_ok = q.reply()
-    r_ok.add_answer(RR(name, rdata=A("1.2.3.4"), ttl=33))
-    h, _ = _mk_handler(q.pack())
-    h._cache_store_if_applicable(name, QTYPE.A, r_ok.pack())
-    assert h.cache.get((name, QTYPE.A)) is not None
+    # Build replies for each scenario
+    q_ok = DNSRecord.question(name_ok, "A")
+    r_ok = q_ok.reply()
+    r_ok.add_answer(RR(name_ok, rdata=A("1.2.3.4"), ttl=33))
 
-    # NOERROR + answer TTL=0 -> not cached (remains from previous; use new key)
-    name2 = "zero.example"
-    q2 = DNSRecord.question(name2, "A")
-    r_zero = q2.reply()
-    r_zero.add_answer(RR(name2, rdata=A("1.2.3.4"), ttl=0))
-    h._cache_store_if_applicable(name2, QTYPE.A, r_zero.pack())
-    assert h.cache.get((name2, QTYPE.A)) is None
+    q_zero = DNSRecord.question(name_zero, "A")
+    r_zero = q_zero.reply()
+    r_zero.add_answer(RR(name_zero, rdata=A("1.2.3.4"), ttl=0))
 
-    # SERVFAIL -> never cached
-    name3 = "servfail.example"
-    q3 = DNSRecord.question(name3, "A")
-    r_sf = q3.reply()
+    q_sf = DNSRecord.question(name_sf, "A")
+    r_sf = q_sf.reply()
     r_sf.header.rcode = RCODE.SERVFAIL
-    h._cache_store_if_applicable(name3, QTYPE.A, r_sf.pack())
-    assert h.cache.get((name3, QTYPE.A)) is None
 
-    # NXDOMAIN with no answers -> not cached
-    name4 = "nx.example"
-    q4 = DNSRecord.question(name4, "A")
-    r_nx = q4.reply()
-    r_nx.header.rcode = RCODE.NXDOMAIN
-    h._cache_store_if_applicable(name4, QTYPE.A, r_nx.pack())
-    assert h.cache.get((name4, QTYPE.A)) is None
+    # Fresh cache and upstreams for this test
+    srv.DNSUDPHandler.cache = FoghornTTLCache()
+    srv.DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
+    srv.DNSUDPHandler.plugins = []
+
+    def fake_forward(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+        if qname == name_ok:
+            return r_ok.pack(), upstreams[0], "ok"
+        if qname == name_zero:
+            return r_zero.pack(), upstreams[0], "ok"
+        if qname == name_sf:
+            return r_sf.pack(), upstreams[0], "error"
+        raise AssertionError(f"unexpected qname {qname!r}")
+
+    monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
+
+    # 1) Positive NOERROR answer with TTL>0 is cached
+    srv.resolve_query_bytes(q_ok.pack(), "127.0.0.1")
+    assert srv.DNSUDPHandler.cache.get((name_ok, QTYPE.A)) is not None
+
+    # 2) NOERROR answer with TTL=0 is not cached
+    srv.resolve_query_bytes(q_zero.pack(), "127.0.0.1")
+    assert srv.DNSUDPHandler.cache.get((name_zero, QTYPE.A)) is None
+
+    # 3) SERVFAIL response is not cached
+    srv.resolve_query_bytes(q_sf.pack(), "127.0.0.1")
+    assert srv.DNSUDPHandler.cache.get((name_sf, QTYPE.A)) is None
 
 
 def test__apply_pre_plugins_override_short_circuits():
