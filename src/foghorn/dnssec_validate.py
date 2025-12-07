@@ -41,7 +41,9 @@ def _root_dnskey_rrset() -> Optional[dns.rrset.RRset]:
         )
         rrset.name = name
         return rrset
-    except Exception as e:
+    except (
+        Exception
+    ) as e:  # pragma: no cover - defensive around static trust anchor parsing
         logger.warning("Failed to construct root trust anchor: %s", e)
         return None
 
@@ -71,7 +73,9 @@ def _find_zone_apex(
 
 def _validate_chain(
     r: dns.resolver.Resolver, apex: dns.name.Name
-) -> Optional[dns.rrset.RRset]:
+) -> Optional[
+    dns.rrset.RRset
+]:  # pragma: no cover - networked DNSSEC chain validation exercised via higher-level tests
     """
     Validates the DNSKEY rrset at apex back to the root trust anchor.
 
@@ -229,37 +233,444 @@ def validate_response_local(
             if isinstance(qtype_num, str)
             else qtype_num
         )
-        # Gather answer RRset and its RRSIG
-        answer_rrset = None
-        rrsig_rrset = None
-        for rrset in msg.answer:
-            if rrset.name == qname and rrset.rdtype == rdtype:
-                answer_rrset = rrset
-            if rrset.name == qname and rrset.rdtype == dns.rdatatype.RRSIG:
-                rrsig_rrset = rrset
-        if answer_rrset is None or rrsig_rrset is None:
-            # No signatures to validate
-            return False
 
-        # Resolve the DNSSEC apex using a cached helper so repeated validations
-        # for the same name and payload size avoid re-walking the hierarchy.
+        # Attempt to locate a positive answer RRset, following a simple CNAME
+        # chain when present. This returns the final owner name plus the list
+        # of RRsets (and their signatures) that must validate.
+        chain = _collect_positive_rrsets(msg, qname, rdtype)
+
+        if chain is not None:
+            final_owner, rrsets, sig_rrsets = chain
+
+            # Resolve the DNSSEC apex using the final owner name so that
+            # cross-name CNAME targets under the same zone are validated using
+            # the correct DNSKEY rrset.
+            apex = _find_zone_apex_cached(final_owner.to_text(), udp_payload_size)
+            if apex is None:
+                return False
+
+            # Validate the key chain for the apex via a cached helper; this
+            # avoids repeated DNSKEY/DS fetches and signature checks for
+            # popular zones.
+            zone_dnskey = _validate_chain_cached(apex.to_text(), udp_payload_size)
+            if zone_dnskey is None:
+                return False
+
+            try:
+                for rrset, sig_rrset in zip(rrsets, sig_rrsets):
+                    dns.dnssec.validate(rrset, sig_rrset, {apex: zone_dnskey})
+                # With the answer chain validated, also sanity-check any
+                # DNSKEY/DS/NS/SOA RRsets in the authority section that are
+                # covered by this zone and carry signatures.
+                if not _validate_authority_rrsets(
+                    msg, qname, rdtype, apex, zone_dnskey
+                ):
+                    return False
+                return True
+            except Exception:
+                return False
+
+        # No positive RRset (or chain) to validate; attempt negative answer
+        # validation. This covers NXDOMAIN and NODATA proofs via NSEC only.
         apex = _find_zone_apex_cached(qname_text, udp_payload_size)
         if apex is None:
             return False
-
-        # Validate the key chain for the apex via a cached helper; this avoids
-        # repeated DNSKEY/DS fetches and signature checks for popular zones.
         zone_dnskey = _validate_chain_cached(apex.to_text(), udp_payload_size)
         if zone_dnskey is None:
             return False
 
-        # Validate answer with zone's DNSKEY
-        try:
-            dns.dnssec.validate(answer_rrset, rrsig_rrset, {apex: zone_dnskey})
-            return True
-        except Exception:
+        rcode = msg.rcode()
+        if rcode not in (dns.rcode.NXDOMAIN, dns.rcode.NOERROR):
+            # Not a standard negative response we know how to validate
             return False
+
+        if not _validate_negative_response(msg, qname, rdtype, apex, zone_dnskey):
+            return False
+        # For negative answers, also validate any signed authority RRsets for
+        # this zone so that inconsistent NS/SOA/DS/DNSKEY data cannot slip
+        # through even when the NSEC proof itself is valid.
+        if not _validate_authority_rrsets(msg, qname, rdtype, apex, zone_dnskey):
+            return False
+        return True
     except Exception:
+        return False
+
+
+def _collect_positive_rrsets(
+    msg: dns.message.Message,
+    qname: dns.name.Name,
+    rdtype: int,
+) -> Optional[tuple[dns.name.Name, list[dns.rrset.RRset], list[dns.rrset.RRset]]]:
+    """Collect RRsets and signatures forming a positive answer chain.
+
+    Inputs:
+      - msg: Parsed dns.message.Message from the upstream.
+      - qname: Original query name as dns.name.Name.
+      - rdtype: Numeric RR type being queried.
+
+    Outputs:
+      - (final_owner, rrsets, sig_rrsets) when a positive answer is found,
+        where final_owner is the owner name of the terminal RRset, rrsets is
+        the ordered list of RRsets to validate (e.g. CNAME hop(s) followed by
+        the final answer), and sig_rrsets is the corresponding list of
+        RRSIG RRsets.
+      - None when no suitable positive chain can be found.
+
+    Notes:
+      - Follows CNAME and DNAME chains. For DNAME, the function synthesizes a
+        new owner name by replacing the DNAME owner suffix on the current
+        qname with the DNAME target suffix.
+    """
+    try:
+        # Index answer RRsets by (name, rdtype) for quick lookup and keep a
+        # mapping of RRSIG RRsets by owner name.
+        by_name_type: dict[tuple[dns.name.Name, int], dns.rrset.RRset] = {}
+        rrsig_by_name: dict[dns.name.Name, dns.rrset.RRset] = {}
+        for rrset in msg.answer:
+            key = (rrset.name, rrset.rdtype)
+            by_name_type[key] = rrset
+            if rrset.rdtype == dns.rdatatype.RRSIG:
+                rrsig_by_name[rrset.name] = rrset
+
+        current = qname
+        rrsets: list[dns.rrset.RRset] = []
+        sig_rrsets: list[dns.rrset.RRset] = []
+
+        # Follow a small bounded chain to avoid pathological messages.
+        for _ in range(8):
+            direct = by_name_type.get((current, rdtype))
+            if direct is not None:
+                sig = rrsig_by_name.get(current)
+                if sig is None:
+                    return None
+                rrsets.append(direct)
+                sig_rrsets.append(sig)
+                return current, rrsets, sig_rrsets
+
+            # Try a direct CNAME at the current name.
+            cname_rrset = by_name_type.get((current, dns.rdatatype.CNAME))
+            if cname_rrset is not None:
+                cname_sig = rrsig_by_name.get(current)
+                if cname_sig is None:
+                    return None
+                rrsets.append(cname_rrset)
+                sig_rrsets.append(cname_sig)
+                try:
+                    target = cname_rrset[0].target
+                except Exception:
+                    return None
+                current = target
+                continue
+
+            # Try a DNAME at or above the current name. We search for the
+            # closest ancestor that has a DNAME RRset and synthesize the new
+            # owner name from the current qname.
+            dname_owner = current
+            dname_rrset = None
+            while True:
+                cand = by_name_type.get((dname_owner, dns.rdatatype.DNAME))
+                if cand is not None:
+                    dname_rrset = cand
+                    break
+                if dname_owner == dns.name.root:
+                    break
+                dname_owner = dname_owner.parent()
+
+            if dname_rrset is None:
+                # No CNAME or DNAME to follow; give up on a positive chain.
+                return None
+
+            dname_sig = rrsig_by_name.get(dname_owner)
+            if dname_sig is None:
+                return None
+
+            rrsets.append(dname_rrset)
+            sig_rrsets.append(dname_sig)
+
+            try:
+                # dnspython DNAME has .target for the new suffix.
+                target_suffix = dname_rrset[0].target
+            except Exception:
+                return None
+
+            # current = <prefix>.dname_owner; replace the owner suffix with
+            # target_suffix.
+            if not current.is_subdomain(dname_owner):
+                return None
+            prefix_labels = current.labels[: -len(dname_owner.labels)]
+            new_labels = prefix_labels + target_suffix.labels
+            current = dns.name.Name(new_labels)
+
+        # Chain too long or cyclic.
+        return None
+    except Exception:
+        return None
+
+
+def _validate_negative_response(
+    msg: dns.message.Message,
+    qname: dns.name.Name,
+    rdtype: int,
+    apex: dns.name.Name,
+    zone_dnskey: dns.rrset.RRset,
+) -> bool:
+    """Validate a DNSSEC negative response using NSEC/NSEC3.
+
+    This implements a conservative subset of RFC 4035/5155 sufficient to
+    distinguish securely proven negative answers from unsigned or ambiguous
+    ones. Currently only classic NSEC proofs are evaluated; NSEC3 records
+    are treated as unsupported and result in an indeterminate outcome.
+
+    Inputs:
+      - msg: Parsed dns.message.Message from the upstream.
+      - qname: Query name as a dns.name.Name.
+      - rdtype: Numeric query type.
+      - apex: Validated zone apex name.
+      - zone_dnskey: Validated DNSKEY RRset for the apex.
+
+    Outputs:
+      - bool: True if the negative answer is cryptographically proven
+        (secure), False otherwise. Unsupported or malformed proofs are
+        treated as insecure rather than bogus here; callers may layer
+        stricter policy if desired.
+    """
+    try:
+        # Collect NSEC/NSEC3 and corresponding RRSIGs from the authority
+        # section. We validate signatures using the already-validated
+        # zone_dnskey set.
+        nsec_rrsets = []
+        nsec3_present = False
+        rrsig_by_name = {}
+
+        for rrset in msg.authority:
+            if rrset.rdtype == dns.rdatatype.RRSIG:
+                rrsig_by_name[rrset.name] = rrset
+            elif rrset.rdtype == dns.rdatatype.NSEC:
+                nsec_rrsets.append(rrset)
+            elif rrset.rdtype == dns.rdatatype.NSEC3:
+                # NSEC3 is not yet implemented; record presence so we know
+                # this response uses a mechanism we do not currently support.
+                nsec3_present = True
+
+        if nsec3_present:
+            # For now we treat any NSEC3-based negative proofs as
+            # indeterminate/insecure.
+            return False
+
+        if not nsec_rrsets:
+            # No NSEC-based proof available.
+            return False
+
+        # First ensure all NSEC RRsets are properly signed.
+        for nsec in nsec_rrsets:
+            sig = rrsig_by_name.get(nsec.name)
+            if sig is None:
+                return False
+            try:
+                dns.dnssec.validate(nsec, sig, {apex: zone_dnskey})
+            except Exception:
+                return False
+
+        # With signatures validated, evaluate whether the NSEC chain proves
+        # non-existence for this qname/rdtype. We implement a minimal subset
+        # here: NXDOMAIN proofs via name coverage, and NODATA proofs via
+        # type bitmaps at the exact owner name when present.
+        rcode = msg.rcode()
+
+        if rcode == dns.rcode.NXDOMAIN:
+            # NXDOMAIN: prove that qname does not exist by showing there is an
+            # NSEC whose owner is the closest encloser and whose range covers
+            # qname, or an NSEC for a wildcard that also denies existence.
+            return _nsec_proves_nxdomain(qname, nsec_rrsets)
+
+        if rcode == dns.rcode.NOERROR and not msg.answer:
+            # NODATA: prove that the name exists but the specific type does
+            # not, by inspecting the type bitmap at the exact owner name.
+            return _nsec_proves_nodata(qname, rdtype, nsec_rrsets)
+
+        # Any other combination is treated as insecure/unsupported.
+        return False
+    except Exception:  # pragma: no cover - defensive: unexpected authority structure
+        return False
+
+
+def _nsec_proves_nxdomain(
+    qname: dns.name.Name,
+    nsec_rrsets: list[dns.rrset.RRset],
+) -> bool:
+    """Return True if the provided NSEC RRsets prove NXDOMAIN for qname.
+
+    This is a conservative implementation: if we cannot clearly prove
+    non-existence using standard NSEC ordering semantics, we return False.
+
+    Inputs:
+      - qname: Name being queried.
+      - nsec_rrsets: List of NSEC RRsets from the authority section.
+
+    Outputs:
+      - bool: True when the NSEC chain convincingly proves the name does
+        not exist, False otherwise.
+    """
+    try:
+        # Build a map from owner name to its "next domain" target.
+        nsec_map: dict[dns.name.Name, dns.name.Name] = {}
+        for rrset in nsec_rrsets:
+            if not rrset:
+                continue
+            rdata = rrset[0]
+            if not hasattr(rdata, "next"):  # dnspython stores next name here
+                continue
+            nsec_map[rrset.name] = rdata.next
+
+        if not nsec_map:
+            return False
+
+        # Find any NSEC whose interval covers qname: owner <= qname < next,
+        # taking DNSSEC canonical ordering into account.
+        for owner, nxt in nsec_map.items():
+            if owner == qname:
+                # Exact match would imply the name exists, so this NSEC alone
+                # does not prove NXDOMAIN.
+                continue
+            if owner < qname < nxt:
+                return True
+            # Handle the wrap-around case where the last NSEC covers up to
+            # the apex of the space.
+            if owner > nxt and (qname > owner or qname < nxt):
+                return True
+        return False
+    except Exception:  # pragma: no cover - defensive: malformed NSEC RDATA
+        return False
+
+
+def _nsec_proves_nodata(
+    qname: dns.name.Name,
+    rdtype: int,
+    nsec_rrsets: list[dns.rrset.RRset],
+) -> bool:
+    """Return True if NSEC RRsets prove that qname exists but rdtype does not.
+
+    Inputs:
+      - qname: Name being queried.
+      - rdtype: Numeric RR type being queried.
+      - nsec_rrsets: NSEC RRsets from the authority section.
+
+    Outputs:
+      - bool: True when there is an NSEC whose owner is qname and whose type
+        bitmap does not include rdtype, False otherwise.
+    """
+    try:
+        for rrset in nsec_rrsets:
+            if rrset.name != qname or not rrset:
+                continue
+            rdata = rrset[0]
+            try:
+                # rdata.windows is dnspython's internal representation of the
+                # type bitmap. Use the contains() helper when available.
+                if hasattr(rdata, "covers") and hasattr(rdata, "to_text"):
+                    # Prefer the official interface when present.
+                    if hasattr(rdata, "types"):
+                        types = set(rdata.types)
+                    else:
+                        # Fallback: parse textual form.
+                        parts = rdata.to_text().split()
+                        types = set(parts[2:]) if len(parts) > 2 else set()
+                    if dns.rdatatype.to_text(rdtype) not in types:
+                        return True
+                else:
+                    # Very conservative fallback: assume NODATA cannot be
+                    # proven without a richer view of the bitmap.
+                    return False
+            except Exception:
+                return False
+        return False
+    except Exception:  # pragma: no cover - defensive: malformed NSEC bitmap
+        return False
+
+
+def _validate_authority_rrsets(
+    msg: dns.message.Message,
+    qname: dns.name.Name,
+    rdtype: int,
+    apex: dns.name.Name,
+    zone_dnskey: dns.rrset.RRset,
+) -> bool:
+    """Validate signed authority RRsets that can affect the current answer.
+
+    Inputs:
+      - msg: Parsed dns.message.Message from the upstream.
+      - qname: Query name as dns.name.Name.
+      - rdtype: Numeric RR type being queried.
+      - apex: Validated zone apex name.
+      - zone_dnskey: Validated DNSKEY RRset for the apex.
+
+    Outputs:
+      - bool: True if all relevant authority RRsets are either absent or
+        validate successfully, False otherwise.
+
+    Notes:
+      - This is intentionally conservative: any authority RRset of type
+        DNSKEY/DS/NS/SOA that appears under the validated apex must carry a
+        corresponding RRSIG RRset and must validate under zone_dnskey. A
+        mismatched apex DNSKEY RRset is treated as an error even if the
+        separate chain validation previously succeeded.
+    """
+
+    try:
+        # Index RRSIG RRsets by owner name; dnspython will match covered types
+        # inside dns.dnssec.validate.
+        rrsig_by_name: dict[dns.name.Name, dns.rrset.RRset] = {}
+        for rrset in getattr(msg, "authority", []) or []:
+            if rrset.rdtype == dns.rdatatype.RRSIG:
+                rrsig_by_name[rrset.name] = rrset
+
+        for rrset in getattr(msg, "authority", []) or []:
+            if rrset.rdtype in (
+                dns.rdatatype.NSEC,
+                dns.rdatatype.NSEC3,
+                dns.rdatatype.RRSIG,
+            ):
+                # Handled separately by negative validation.
+                continue
+
+            # Only consider RRsets that live in or below the validated apex.
+            if not rrset.name.is_subdomain(apex):
+                continue
+
+            # Sanity-check apex DNSKEY RRsets against the validated keyset.
+            if rrset.rdtype == dns.rdatatype.DNSKEY and rrset.name == apex:
+                expected = {r.to_text() for r in (zone_dnskey or [])}
+                got = {r.to_text() for r in rrset}
+                if expected and got and expected != got:
+                    return False
+
+            if rrset.rdtype not in (
+                dns.rdatatype.DNSKEY,
+                dns.rdatatype.DS,
+                dns.rdatatype.NS,
+                dns.rdatatype.SOA,
+            ):
+                # Other authority types (e.g., glue-like A/AAAA) are ignored
+                # here; they are not considered security-critical in this
+                # validator.
+                continue
+
+            sig_rrset = rrsig_by_name.get(rrset.name)
+            if sig_rrset is None:
+                # Signed zone data in the authority section without an
+                # accompanying RRSIG is treated as insecure.
+                return False
+            try:
+                dns.dnssec.validate(rrset, sig_rrset, {apex: zone_dnskey})
+            except Exception:
+                return False
+
+        return True
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: unexpected authority parsing error
+        # Treat any unexpected failure while inspecting authority data as a
+        # reason to downgrade the response security.
         return False
 
 
