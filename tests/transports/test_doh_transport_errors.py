@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from foghorn.transports.doh import DoHError, doh_query
+from foghorn.transports.doh import DoHError, _build_ssl_ctx, doh_query
 
 
 class _ErrHandler(BaseHTTPRequestHandler):
@@ -48,3 +48,67 @@ def test_doh_http_500_raises(err_server):
 def test_doh_unsupported_scheme():
     with pytest.raises(DoHError):
         doh_query("ftp://example.com/dns-query", b"\x00\x01")
+
+
+def test_build_ssl_ctx_no_verify(monkeypatch):
+    calls = {}
+
+    def fake_unverified_context():
+        calls["called"] = True
+        return "CTX"
+
+    monkeypatch.setattr(
+        "foghorn.transports.doh.ssl._create_unverified_context", fake_unverified_context
+    )
+
+    ctx = _build_ssl_ctx(verify=False, ca_file=None)
+    assert ctx == "CTX"
+    assert calls.get("called") is True
+
+
+def test_build_ssl_ctx_with_cafile(monkeypatch):
+    captured = {}
+
+    def fake_create_default_context(*, cafile=None):
+        captured["cafile"] = cafile
+        return "CTX2"
+
+    monkeypatch.setattr(
+        "foghorn.transports.doh.ssl.create_default_context", fake_create_default_context
+    )
+
+    ctx = _build_ssl_ctx(verify=True, ca_file="/tmp/ca.pem")
+    assert ctx == "CTX2"
+    assert captured["cafile"] == "/tmp/ca.pem"
+
+
+def test_doh_https_tls_error(monkeypatch):
+    import ssl as _ssl
+
+    class FailingHTTPSConnection:
+        def __init__(self, *_, **__):  # pragma: no cover - init itself not under test
+            raise _ssl.SSLError("bad tls")
+
+    monkeypatch.setattr(
+        "foghorn.transports.doh.http.client.HTTPSConnection", FailingHTTPSConnection
+    )
+
+    with pytest.raises(DoHError) as excinfo:
+        doh_query("https://example.com/dns-query", b"\x00\x01")
+
+    assert "TLS error" in str(excinfo.value)
+
+
+def test_doh_https_os_error(monkeypatch):
+    class FailingHTTPSConnection:
+        def __init__(self, *_, **__):  # pragma: no cover - init itself not under test
+            raise OSError("boom")
+
+    monkeypatch.setattr(
+        "foghorn.transports.doh.http.client.HTTPSConnection", FailingHTTPSConnection
+    )
+
+    with pytest.raises(DoHError) as excinfo:
+        doh_query("https://example.com/dns-query", b"\x00\x01")
+
+    assert "Network error" in str(excinfo.value)

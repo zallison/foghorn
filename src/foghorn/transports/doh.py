@@ -1,8 +1,17 @@
 import base64
 import http.client
+import importlib
 import ssl
 import urllib.parse
 from typing import Dict, Optional, Tuple
+
+
+try:
+    FOGHORN_VERSION = importlib.metadata.version("foghorn")
+except (
+    Exception
+):  # pragma: no cover - defensive: metadata may be unavailable in some environments
+    FOGHORN_VERSION = "unknown"
 
 
 class DoHError(Exception):
@@ -107,6 +116,11 @@ def doh_query(
     path = parsed.path or "/dns-query"
     extra_headers = {k: v for (k, v) in (headers or {}).items()}
 
+    # Ensure a sensible default User-Agent when caller does not provide one.
+    # Preserve any explicit header regardless of casing.
+    if not any(k.lower() == "user-agent" for k in extra_headers):
+        extra_headers["User-Agent"] = f"Foghorn v{FOGHORN_VERSION}"
+
     if method.upper() == "GET":
         qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
         qs["dns"] = [_b64url_no_pad(query)]
@@ -152,8 +166,10 @@ def doh_query(
         finally:
             try:
                 conn.close()
-            except Exception:  # pragma: no cover
-                pass  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
     except ssl.SSLError as e:
         raise DoHError(f"TLS error: {e}")
     except OSError as e:

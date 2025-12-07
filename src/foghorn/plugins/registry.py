@@ -39,7 +39,9 @@ def _iter_plugin_modules(package_name: str = "foghorn.plugins") -> Iterable[str]
     pkg = importlib.import_module(package_name)
     for modinfo in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
         # Only import modules (skip packages unless they contain modules)
-        if modinfo.ispkg:  # pragma: no cover
+        if (
+            modinfo.ispkg
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             # Still yield submodules during walk; leave as-is
             pass
         yield modinfo.name
@@ -70,12 +72,13 @@ def discover_plugins(
         try:
             module = importlib.import_module(modname)
         except ImportError:
-            # Re-raise ImportError to signal hard failures in discovery
             logger.error("Failed importing plugin module %s: fail", modname)
             raise
-        except Exception as e:  # pragma: no cover
+        except (
+            Exception
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.error("Failed importing plugin module %s: %s", modname, e)
-            continue
+            raise
 
         for _, obj in inspect.getmembers(module, inspect.isclass):
             if not issubclass(obj, BasePlugin) or obj is BasePlugin:

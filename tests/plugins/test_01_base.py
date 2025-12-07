@@ -234,6 +234,34 @@ def test_base_plugin_subclass_inheritance():
     assert plugin.pre_resolve("test.com", 1, b"", ctx) is None
 
 
+def test_base_plugin_name_default_and_override() -> None:
+    """Brief: BasePlugin assigns a default name and honors explicit overrides.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts that the default name uses aliases/class name and that an
+        explicit "name" argument is stored on the instance.
+    """
+
+    # Default BasePlugin with no aliases should fall back to class name.
+    p = BasePlugin()
+    assert p.name == "BasePlugin"
+
+    # Plugins with aliases prefer the first alias when no explicit name is given.
+    @plugin_aliases("alias_one", "alias_two")
+    class P(BasePlugin):
+        pass
+
+    p2 = P()
+    assert p2.name == "alias_one"
+
+    # Explicit name should override any alias-derived default.
+    p3 = P(name="custom_name")
+    assert p3.name == "custom_name"
+
+
 def test_base_plugin_priority_from_config_and_fallback(caplog):
     """Brief: BasePlugin __init__ parses priorities and falls back via pre_priority.
 

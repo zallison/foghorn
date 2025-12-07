@@ -27,7 +27,7 @@ def test_sigusr1_resets_stats_and_notifies_plugins(monkeypatch, caplog):
 
     yaml_data = (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n"
+        "upstreams:\n"
         "  - host: 1.1.1.1\n"
         "    port: 53\n"
         "statistics:\n  enabled: true\n  sigusr2_resets_stats: true\n"

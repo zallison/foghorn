@@ -22,13 +22,20 @@ import yaml
 from fastapi.testclient import TestClient
 
 from foghorn.stats import StatsCollector
-from foghorn.webserver import (RingBuffer, WebServerHandle, _read_proc_meminfo,
-                               _redact_yaml_text_preserving_layout,
-                               _Suppress2xxAccessFilter, _utc_now_iso,
-                               create_app, get_system_info,
-                               install_uvicorn_2xx_suppression,
-                               resolve_www_root, sanitize_config,
-                               start_webserver)
+from foghorn.webserver import (
+    RingBuffer,
+    WebServerHandle,
+    _read_proc_meminfo,
+    _redact_yaml_text_preserving_layout,
+    _Suppress2xxAccessFilter,
+    _utc_now_iso,
+    create_app,
+    get_system_info,
+    install_uvicorn_2xx_suppression,
+    resolve_www_root,
+    sanitize_config,
+    start_webserver,
+)
 
 
 def test_sanitize_config_redacts_simple_keys() -> None:
@@ -529,7 +536,7 @@ def test_config_endpoint_returns_sanitized_config() -> None:
             "redact_keys": ["token", "password"],
             "auth": {"token": "secret-token", "password": "pw"},
         },
-        "upstream": [
+        "upstreams": [
             {"host": "1.1.1.1", "token": "upstream-token"},
         ],
     }
@@ -546,7 +553,7 @@ def test_config_endpoint_returns_sanitized_config() -> None:
     assert auth_out["token"] == "***"
     assert auth_out["password"] == "***"
 
-    upstream_out = config_out["upstream"][0]
+    upstream_out = config_out["upstreams"][0]
     assert upstream_out["token"] == "***"
 
 
@@ -623,7 +630,7 @@ def test_config_json_endpoint_returns_sanitized_config() -> None:
             "redact_keys": ["token", "password"],
             "auth": {"token": "secret-token", "password": "pw"},
         },
-        "upstream": [
+        "upstreams": [
             {"host": "1.1.1.1", "token": "upstream-token"},
         ],
     }
@@ -641,7 +648,7 @@ def test_config_json_endpoint_returns_sanitized_config() -> None:
     assert auth_out["token"] == "***"
     assert auth_out["password"] == "***"
 
-    upstream_out = config_out["upstream"][0]
+    upstream_out = config_out["upstreams"][0]
     assert upstream_out["token"] == "***"
 
 
@@ -1189,7 +1196,7 @@ def test_config_json_fastapi_and_threaded_payloads_match() -> None:
             "auth": {"mode": "none"},
             "redact_keys": ["token", "password"],
         },
-        "upstream": [
+        "upstreams": [
             {"host": "1.1.1.1", "token": "upstream-token"},
         ],
     }
@@ -2248,3 +2255,345 @@ def test_start_webserver_warns_when_public_host_without_auth(
         "bound to 0.0.0.0 without authentication" in rec.getMessage()
         for rec in caplog.records
     )
+
+
+def test_split_yaml_value_and_comment_with_and_without_comment() -> None:
+    """Brief: _split_yaml_value_and_comment must split value and inline comment.
+
+    Inputs:
+      - Sample YAML rest strings with and without an inline comment.
+
+    Outputs:
+      - Tuple where the value is stripped and the comment suffix preserves ' #'.
+    """
+
+    import foghorn.webserver as web_mod
+
+    value, comment = web_mod._split_yaml_value_and_comment(" value  # inline comment")
+    # Leading whitespace from the original rest segment is preserved.
+    assert value.endswith("value")
+    assert comment.startswith(" #")
+    assert "inline comment" in comment
+
+    value2, comment2 = web_mod._split_yaml_value_and_comment(" just-value ")
+    # No comment present; only trailing whitespace is stripped.
+    assert value2.endswith("just-value")
+    assert comment2 == ""
+
+
+def test_redact_yaml_preserving_layout_covers_lists_and_blank_lines() -> None:
+    """Brief: YAML redaction must handle blank lines, nested keys, and list forms.
+
+    Inputs:
+      - Raw YAML text containing a redacted mapping key, list-of-mapping entries,
+        and simple list items, with inline comments and a trailing newline.
+
+    Outputs:
+      - Redacted YAML preserves layout/comments and replaces values with '***'.
+    """
+
+    import foghorn.webserver as web_mod
+
+    yaml_text = (
+        "auth:\n"
+        "  token: secret-token  # c1\n"
+        "  password: secret-password\n"
+        "\n"  # blank line exercises empty-line branch
+        "items:\n"
+        "  - token: list-secret  # c2\n"
+        "  - other: keep-me\n"
+        "  - standalone-value  # c3\n"
+        ""  # no trailing newline here; function should not add one
+    )
+
+    body = web_mod._redact_yaml_text_preserving_layout(
+        yaml_text,
+        ["auth", "token", "password"],
+    )
+
+    # Top-level auth subtree redacted, including nested keys.
+    assert "auth:" in body
+    assert "token: ***" in body
+    assert "password: ***" in body
+    assert "secret-token" not in body
+    assert "secret-password" not in body
+
+    # List-of-mapping entry with sensitive key is redacted.
+    assert "- token: ***" in body
+    assert "list-secret" not in body
+
+    # Simple list items in a separate non-redacted block remain unchanged.
+    assert "- standalone-value  # c3" in body
+
+    # Non-redacted keys and comments are preserved.
+    assert "other: keep-me" in body
+    assert "# c1" in body
+    assert "# c2" in body
+    assert "# c3" in body
+
+
+def test_redact_yaml_preserving_layout_early_return_on_empty_input() -> None:
+    """Brief: YAML redaction returns input unchanged for empty text or keys.
+
+    Inputs:
+      - Empty raw_yaml and a non-empty redact_keys list.
+
+    Outputs:
+      - Function returns the original raw_yaml without modification.
+    """
+
+    import foghorn.webserver as web_mod
+
+    assert web_mod._redact_yaml_text_preserving_layout("", ["token"]) == ""
+    assert (
+        web_mod._redact_yaml_text_preserving_layout("key: value", None) == "key: value"
+    )
+
+
+def test_get_sanitized_config_yaml_cached_uses_config_path(tmp_path) -> None:
+    """Brief: _get_sanitized_config_yaml_cached should read and redact from cfg_path.
+
+    Inputs:
+      - Temporary YAML config file containing a token field and redact_keys.
+
+    Outputs:
+      - Returned YAML body preserves structure while redacting the token value.
+    """
+
+    import foghorn.webserver as web_mod
+
+    cfg_text = "webserver:\n  enabled: true\n  auth:\n    token: secret-token\n"
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(cfg_text, encoding="utf-8")
+
+    cfg = {"webserver": {"enabled": True, "auth": {"token": "secret-token"}}}
+
+    body = web_mod._get_sanitized_config_yaml_cached(
+        cfg, cfg_path=str(cfg_file), redact_keys=["token"]
+    )
+
+    assert "secret-token" not in body
+    assert "token: ***" in body
+
+
+def test_find_rate_limit_db_paths_from_config_extracts_db_paths() -> None:
+    """Brief: _find_rate_limit_db_paths_from_config discovers configured db_path values.
+
+    Inputs:
+      - Config with a mix of matching and non-matching plugin entries.
+
+    Outputs:
+      - Sorted list of db_path values for rate_limit plugins only.
+    """
+
+    import foghorn.webserver as web_mod
+
+    cfg = {
+        "plugins": [
+            {
+                "module": "foghorn.plugins.rate_limit",
+                "config": {"db_path": "/tmp/a.db"},
+            },
+            {"module": "rate_limit", "config": {"db_path": "/tmp/b.db"}},
+            {"module": "other", "config": {"db_path": "/tmp/c.db"}},
+            {"module": "rate_limit", "config": {}},
+            "not-a-dict",
+        ]
+    }
+
+    paths = web_mod._find_rate_limit_db_paths_from_config(cfg)
+    assert paths == ["/tmp/a.db", "/tmp/b.db"]
+    assert web_mod._find_rate_limit_db_paths_from_config(None) == []
+
+
+def test_collect_rate_limit_stats_handles_empty_and_populated_dbs(
+    tmp_path,
+) -> None:
+    """Brief: _collect_rate_limit_stats summarizes both empty and populated DBs.
+
+    Inputs:
+      - Two sqlite3 databases under tmp_path, one empty and one with sample rows.
+
+    Outputs:
+      - Databases list contains per-db summaries with correct profile counts and
+        max_* fields populated for the non-empty database.
+    """
+
+    import sqlite3
+
+    import foghorn.webserver as web_mod
+
+    empty_db = tmp_path / "empty.db"
+    populated_db = tmp_path / "profiles.db"
+
+    for db_path, rows in [
+        (empty_db, []),
+        (
+            populated_db,
+            [
+                ("key1", 1.5, 3.0, 10, 1000),
+                ("key2", "bad", "also-bad", "NaN", "not-int"),
+            ],
+        ),
+    ]:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE rate_profiles (key TEXT, avg_rps REAL, max_rps REAL, samples INTEGER, last_update INTEGER)"
+            )
+            conn.executemany(
+                "INSERT INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) VALUES (?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    cfg = {
+        "plugins": [
+            {
+                "module": "foghorn.plugins.rate_limit",
+                "config": {"db_path": empty_db.as_posix()},
+            },
+            {
+                "module": "rate_limit",
+                "config": {"db_path": populated_db.as_posix()},
+            },
+        ]
+    }
+
+    # Reset cache so this test is deterministic.
+    with web_mod._RATE_LIMIT_CACHE_LOCK:
+        web_mod._last_rate_limit_snapshot = None
+        web_mod._last_rate_limit_snapshot_ts = 0.0
+
+    data = web_mod._collect_rate_limit_stats(cfg)
+    databases = data["databases"]
+    assert len(databases) == 2
+
+    empty_summary = next(d for d in databases if d["db_path"] == empty_db.as_posix())
+    populated_summary = next(
+        d for d in databases if d["db_path"] == populated_db.as_posix()
+    )
+
+    assert empty_summary["total_profiles"] == 0
+    assert populated_summary["total_profiles"] == 2
+    assert populated_summary["max_avg_rps"] >= 0.0
+    assert populated_summary["max_max_rps"] >= 0.0
+
+
+def test_schedule_sighup_after_config_save_zero_delay_calls_kill(monkeypatch) -> None:
+    """Brief: _schedule_sighup_after_config_save sends SIGHUP synchronously when delay <= 0.
+
+    Inputs:
+      - monkeypatch fixture to stub os.kill.
+
+    Outputs:
+      - os.kill is invoked immediately with the current PID and signal.SIGHUP.
+    """
+
+    import os
+
+    import foghorn.webserver as web_mod
+
+    calls: list[tuple[int, int]] = []
+
+    def fake_kill(pid: int, sig: int) -> None:
+        calls.append((pid, sig))
+
+    monkeypatch.setattr(web_mod.os, "kill", fake_kill)
+
+    web_mod._schedule_sighup_after_config_save(delay_seconds=0.0)
+
+    assert calls, "expected os.kill to be called synchronously"
+    pid, sig = calls[0]
+    assert pid == os.getpid()
+    assert sig == web_mod.signal.SIGHUP
+
+
+def test_config_cache_ttl_overridden_by_web_cfg(monkeypatch) -> None:
+    """Brief: create_app applies webserver.config_cache_ttl_seconds to the TTL global.
+
+    Inputs:
+      - monkeypatch used to reset _CONFIG_TEXT_CACHE_TTL_SECONDS.
+
+    Outputs:
+      - After create_app(), the TTL global reflects the configured value.
+    """
+
+    import foghorn.webserver as web_mod
+
+    original_ttl = getattr(web_mod, "_CONFIG_TEXT_CACHE_TTL_SECONDS")
+    try:
+        monkeypatch.setattr(
+            web_mod, "_CONFIG_TEXT_CACHE_TTL_SECONDS", 2.0, raising=False
+        )
+        cfg = {"webserver": {"enabled": True, "config_cache_ttl_seconds": 7.5}}
+        create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+        assert web_mod._CONFIG_TEXT_CACHE_TTL_SECONDS == 7.5
+    finally:
+        web_mod._CONFIG_TEXT_CACHE_TTL_SECONDS = original_ttl
+
+
+def test_config_raw_json_500_when_config_path_missing() -> None:
+    """Brief: FastAPI /config/raw.json returns 500 when config_path is not set.
+
+    Inputs:
+      - App created with config_path=None.
+
+    Outputs:
+      - HTTP 500 with detail explaining missing config_path.
+    """
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+        config_path=None,
+    )
+    client = TestClient(app)
+
+    resp = client.get("/config/raw.json")
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "config_path not configured"
+
+
+def test_rate_limit_endpoint_wraps_collect_rate_limit_stats(monkeypatch) -> None:
+    """Brief: FastAPI /api/v1/ratelimit delegates to _collect_rate_limit_stats.
+
+    Inputs:
+      - monkeypatch to replace _collect_rate_limit_stats with a sentinel.
+
+    Outputs:
+      - Endpoint returns JSON including server_time and the sentinel payload.
+    """
+
+    import foghorn.webserver as web_mod
+
+    called: dict[str, object] = {}
+
+    def fake_collect(config: dict | None) -> dict:  # noqa: ANN001
+        called["config"] = config
+        return {"databases": []}
+
+    monkeypatch.setattr(web_mod, "_collect_rate_limit_stats", fake_collect)
+
+    cfg = {"webserver": {"enabled": True}}
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+
+    # Invoke the route handler directly rather than going through HTTP
+    # dispatch; this keeps the test focused on the wrapper behaviour
+    # without depending on FastAPI's routing table.
+    route = next(
+        r for r in app.router.routes if getattr(r, "path", None) == "/api/v1/ratelimit"
+    )
+
+    import asyncio
+
+    async def run() -> None:
+        body = await route.endpoint()  # type: ignore[func-returns-value]
+        assert "server_time" in body
+        assert body["databases"] == []
+
+    asyncio.run(run())
+    assert called["config"] is cfg

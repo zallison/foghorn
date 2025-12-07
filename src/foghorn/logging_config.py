@@ -138,7 +138,10 @@ def init_logging(cfg: Optional[Dict[str, Any]]) -> None:
             )
             syslog_handler.setFormatter(syslog_formatter)
             root.addHandler(syslog_handler)
-        except (OSError, ValueError) as e:  # pragma: no cover
+        except (
+            OSError,
+            ValueError,
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             # Fall back gracefully if syslog is not available
             root.warning(f"Failed to configure syslog: {e}")
 

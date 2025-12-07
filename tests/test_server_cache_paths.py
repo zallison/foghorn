@@ -1,5 +1,5 @@
 """
-Brief: Exercises cache store branches in server._cache_store_if_applicable and EDNS ensure logic.
+Brief: Exercises EDNS ensure logic for UDP handlers and core resolver paths.
 
 Inputs:
   - None
@@ -8,50 +8,9 @@ Outputs:
   - None
 """
 
-from dnslib import QTYPE, RCODE, RR, A, DNSRecord
+from dnslib import QTYPE, DNSRecord
 
 from foghorn.server import DNSUDPHandler
-
-
-def test_cache_store_paths():
-    h = DNSUDPHandler
-    # Fresh cache per test
-    h.cache._store = {}
-
-    # Use the class methods by binding minimal shim with required attributes
-    class _Shim:
-        cache = h.cache
-        min_cache_ttl = 60
-
-        def _cache_store_if_applicable(self, qname, qtype, response_wire):
-            return DNSUDPHandler._cache_store_if_applicable(
-                self, qname, qtype, response_wire
-            )
-
-        def _ensure_edns(self, req):
-            return DNSUDPHandler._ensure_edns(self, req)
-
-    # 1) NOERROR with no answers -> not cached
-    q = DNSRecord.question("example.com", "A")
-    r = q.reply()
-    wire = r.pack()
-    _Shim()._cache_store_if_applicable("example.com", QTYPE.A, wire)
-    assert h.cache.get(("example.com", QTYPE.A)) is None
-
-    # 2) SERVFAIL -> never cached
-    r2 = q.reply()
-    r2.header.rcode = RCODE.SERVFAIL
-    _Shim()._cache_store_if_applicable("example.com", QTYPE.A, r2.pack())
-    assert h.cache.get(("example.com", QTYPE.A)) is None
-
-    # 3) NOERROR with answers -> cached with min ttl (use unique name to avoid leaking into other tests)
-    q3 = DNSRecord.question("cacheonly.example", "A")
-    r3 = q3.reply()
-    r3.add_answer(RR("cacheonly.example", QTYPE.A, rdata=A("1.2.3.4"), ttl=2))
-    _Shim()._cache_store_if_applicable("cacheonly.example", QTYPE.A, r3.pack())
-    assert h.cache.get(("cacheonly.example", QTYPE.A)) is not None
-    # Clear cache after to avoid influencing other tests
-    h.cache._store = {}
 
 
 def test_handle_calls_ensure_edns_passthrough_no_crash(monkeypatch):

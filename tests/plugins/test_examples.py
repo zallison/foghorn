@@ -13,6 +13,7 @@ from dnslib import QTYPE, A, DNSRecord
 from foghorn.plugins.base import PluginContext
 from foghorn.plugins.examples import (
     ExamplesPlugin,
+    ExamplesConfig,
     _count_subdomains,
     _length_without_dots,
 )
@@ -208,6 +209,29 @@ def test_examples_plugin_applies_qtype_filter():
     assert decision_aaaa is None
 
 
+def test_examples_plugin_pre_resolve_not_targeted_and_qtype_filter():
+    """Brief: pre_resolve returns None when client not targeted or qtype not applied.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None: Asserts early-return branches in pre_resolve.
+    """
+
+    # Target only 10.0.0.0/8; client outside that range should be ignored.
+    plugin = ExamplesPlugin(targets=["10.0.0.0/8"])
+    plugin.setup()
+    ctx_not_targeted = PluginContext(client_ip="192.0.2.1")
+    assert plugin.pre_resolve("www.example.com", QTYPE.A, b"", ctx_not_targeted) is None
+
+    # Apply only to AAAA; A query should be skipped by _applies.
+    plugin2 = ExamplesPlugin(apply_to_qtypes=["AAAA"])
+    plugin2.setup()
+    ctx = PluginContext(client_ip="127.0.0.1")
+    assert plugin2.pre_resolve("www.example.com", QTYPE.A, b"", ctx) is None
+
+
 def test_examples_plugin_post_resolve_no_rewrite_rules():
     """
     Brief: Verify no action when rewrite_rules empty.
@@ -230,8 +254,7 @@ def test_examples_plugin_post_resolve_no_rewrite_rules():
 
 
 def test_examples_plugin_post_resolve_with_rewrite():
-    """
-    Brief: Verify A record rewrite works.
+    """Brief: Verify A record rewrite works and AAAA branch is exercised.
 
     Inputs:
       - rewrite_first_ipv4: rewrite rule configuration
@@ -267,6 +290,47 @@ def test_examples_plugin_post_resolve_with_rewrite():
     # Parse modified response and verify IP changed
     modified = DNSRecord.parse(decision.response)
     assert str(modified.rr[0].rdata) == "127.0.0.1"
+
+    # Also verify AAAA rewrite path uses matching_rule and AAAA rtype.
+    rewrite_first_ipv6 = [{"apply_to_qtypes": ["AAAA"], "ip_override": "::1"}]
+    plugin_v6 = ExamplesPlugin(rewrite_first_ipv4=rewrite_first_ipv6)
+    plugin_v6.setup()
+
+    from dnslib import RR, DNSHeader, AAAA as AAAA_RDATA
+
+    query_v6 = DNSRecord.question("example.com", "AAAA")
+    response_v6 = DNSRecord(
+        DNSHeader(id=query_v6.header.id, qr=1, aa=1, ra=1), q=query_v6.q
+    )
+    response_v6.add_answer(
+        RR(
+            rname="example.com",
+            rtype=QTYPE.AAAA,
+            rclass=1,
+            ttl=60,
+            rdata=AAAA_RDATA("2001:db8::1"),
+        )
+    )
+    decision_v6 = plugin_v6.post_resolve(
+        "example.com", QTYPE.AAAA, response_v6.pack(), ctx
+    )
+    assert decision_v6 is not None
+
+    modified_v6 = DNSRecord.parse(decision_v6.response)
+    assert str(modified_v6.rr[0].rdata) == "::1"
+
+
+def test_examples_plugin_get_config_model_returns_examples_config():
+    """Brief: get_config_model returns the ExamplesConfig model.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None: Asserts returned class is ExamplesConfig.
+    """
+
+    assert ExamplesPlugin.get_config_model() is ExamplesConfig
 
 
 def test_examples_plugin_qtype_name_normalization():

@@ -5,12 +5,37 @@ import logging
 from typing import List, Optional, Union
 
 from dnslib import AAAA, QTYPE, A, DNSRecord
+from pydantic import BaseModel, Field
 
 from foghorn.plugins.base import plugin_aliases
 
 from .base import BasePlugin, PluginContext, PluginDecision
 
 logger = logging.getLogger(__name__)
+
+
+class ExamplesConfig(BaseModel):
+    """Brief: Typed configuration model for ExamplesPlugin.
+
+    Inputs:
+      - max_subdomains: Maximum allowed subdomain depth.
+      - max_length_no_dots: Maximum label length excluding dots.
+      - base_labels: Rightmost labels comprising the base domain.
+      - apply_to_qtypes: Qtypes this plugin applies to.
+      - rewrite_first_ipv4: List of rewrite rules.
+
+    Outputs:
+      - ExamplesConfig instance with normalized field types.
+    """
+
+    max_subdomains: int = Field(default=5, ge=0)
+    max_length_no_dots: int = Field(default=50, ge=0)
+    base_labels: int = Field(default=2, ge=0)
+    apply_to_qtypes: List[str] = Field(default_factory=lambda: ["*"])
+    rewrite_first_ipv4: List[dict] = Field(default_factory=list)
+
+    class Config:
+        extra = "allow"
 
 
 @plugin_aliases("examples")
@@ -50,6 +75,19 @@ class ExamplesPlugin(BasePlugin):
         - Domains with > 50 non-dot characters -> denied pre-resolve.
         - A responses: first A RR is rewritten per matching rewrite rules.
     """
+
+    @classmethod
+    def get_config_model(cls):
+        """Brief: Return the Pydantic model used to validate plugin configuration.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - ExamplesConfig class for use by the core config loader.
+        """
+
+        return ExamplesConfig
 
     def setup(self) -> None:
         """
@@ -152,7 +190,9 @@ class ExamplesPlugin(BasePlugin):
 
         try:
             name = str(qname).rstrip(".")
-        except Exception:  # pragma: no cover
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             name = str(qname)
 
         if not self._applies(qtype):

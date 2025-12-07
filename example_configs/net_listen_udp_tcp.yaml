@@ -14,7 +14,7 @@ listen:
     enabled: false
 
 # Upstreams: plain UDP DNS
-upstream:
+upstreams:
   - host: 1.1.1.1
     port: 53
   - host: 8.8.8.8
@@ -25,7 +25,11 @@ dnssec:
   validation: upstream_ad
   udp_payload_size: 1232
 
-timeout_ms: 2000
+foghorn:
+  timeout_ms: 2000
+  upstream_strategy: failover
+  upstream_max_concurrent: 1
+  use_asyncio: true
 
 logging:
   level: info

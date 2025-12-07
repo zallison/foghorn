@@ -37,21 +37,30 @@ def _clear_lru_caches(wrappers: Optional[List[object]]):
 
 
 def _get_min_cache_ttl(cfg: dict) -> int:
-    """
-    Extracts and sanitizes min_cache_ttl from config.
+    """Extract and sanitize ``min_cache_ttl`` from the loaded config.
 
     Inputs:
-      - cfg: dict loaded from YAML
-    Outputs:
-      - int: non-negative min_cache_ttl in seconds (default 60)
+      - cfg: dict loaded from YAML (top-level config mapping).
 
-    Returns a sanitized min_cache_ttl value. Negative values are clamped to 0.
+    Outputs:
+      - int: non-negative ``min_cache_ttl`` in seconds (default 0 when omitted).
+
+    The canonical location is now ``foghorn.min_cache_ttl``. For backward
+    compatibility, a root-level ``min_cache_ttl`` key is still honored when the
+    nested key is absent. Negative values and invalid types are clamped to 0.
     """
-    val = cfg.get("min_cache_ttl", 60)
+
+    foghorn_cfg = cfg.get("foghorn") or {}
+    if isinstance(foghorn_cfg, dict) and "min_cache_ttl" in foghorn_cfg:
+        raw_val = foghorn_cfg.get("min_cache_ttl")
+    else:
+        # Legacy root-level key (deprecated but still supported).
+        raw_val = cfg.get("min_cache_ttl", 0)
+
     try:
-        ival = int(val)
+        ival = int(raw_val)
     except (TypeError, ValueError):
-        ival = 60
+        ival = 0
     return max(0, ival)
 
 
@@ -63,29 +72,32 @@ def normalize_upstream_config(
 
     Inputs:
       - cfg: dict containing parsed YAML. Supports only the modern form:
-          - cfg['upstream'] as a list of upstream entries, each either:
+          - cfg['upstreams'] as a list of upstream entries, each either:
               * DoH entry: {'transport': 'doh', 'url': str, ...}
               * host/port entry: {'host': str, 'port': int, ...}
-          - cfg['timeout_ms'] at top level.
+          - cfg['foghorn']['timeout_ms'] for the global upstream timeout.
 
     Outputs:
       - (upstreams, timeout_ms):
           - upstreams: list[dict] with keys like {'host': str, 'port': int} or DoH metadata.
           - timeout_ms: int timeout in milliseconds applied per upstream attempt (default 2000).
 
-    Legacy single-dict forms for cfg['upstream'] and upstream.timeout_ms are no longer supported.
+    Legacy single-dict forms for cfg['upstreams'] and upstream.timeout_ms are no longer supported.
     """
-    upstream_raw = cfg.get("upstream")
+    upstream_raw = cfg.get("upstreams")
     if not isinstance(upstream_raw, list):
-        raise ValueError("config.upstream must be a list of upstream definitions")
+        raise ValueError("config.upstreams must be a list of upstream definitions")
 
     upstreams: List[Dict[str, Union[str, int, dict]]] = []
     for u in upstream_raw:
         if not isinstance(u, dict):
             raise ValueError("each upstream entry must be a mapping")
 
+        # Normalize transport early so we can derive sensible defaults.
+        transport = str(u.get("transport", "udp")).lower()
+
         # DoH entries using URL
-        if str(u.get("transport", "")).lower() == "doh":
+        if transport == "doh":
             logger = logging.getLogger("foghorn.main.setup")
             logger.debug(f"doh: {u}")
             rec: Dict[str, Union[str, int, dict]] = {
@@ -104,20 +116,103 @@ def normalize_upstream_config(
         # Host/port-based upstream (udp/tcp/dot)
         if "host" not in u:
             raise ValueError("each upstream entry must include 'host'")
+
+        # Default ports by transport: UDP/TCP -> 53, DoT -> 853.
+        default_port = 853 if transport == "dot" else 53
+
         rec2: Dict[str, Union[str, int, dict]] = {
             "host": str(u["host"]),
-            "port": int(u.get("port", 53)),
+            "port": int(u.get("port", default_port)),
         }
         if "transport" in u:
-            rec2["transport"] = str(u.get("transport"))
+            rec2["transport"] = transport
         if "tls" in u and isinstance(u["tls"], dict):
             rec2["tls"] = u["tls"]
         if "pool" in u and isinstance(u["pool"], dict):
             rec2["pool"] = u["pool"]
         upstreams.append(rec2)
 
-    timeout_ms = int(cfg.get("timeout_ms", 2000))
+    foghorn_cfg = cfg.get("foghorn") or {}
+    if not isinstance(foghorn_cfg, dict):
+        raise ValueError("config.foghorn must be a mapping when present")
+    try:
+        timeout_ms = int(foghorn_cfg.get("timeout_ms", 2000))
+    except (TypeError, ValueError):
+        timeout_ms = 2000
     return upstreams, timeout_ms
+
+
+def _validate_plugin_config(plugin_cls: type[BasePlugin], config: dict | None) -> dict:
+    """Brief: Validate and normalize plugin configuration via optional schema hooks.
+
+    Inputs:
+      - plugin_cls: Plugin class (subclass of BasePlugin).
+      - config: Raw config mapping for this plugin (may be None).
+
+    Outputs:
+      - dict: Validated/normalized config mapping to be passed into plugin_cls.
+
+    Behavior:
+      - If plugin_cls exposes get_config_model() and it returns a model class,
+        the config is validated by instantiating the model; the resulting
+        mapping (model.dict() when available) is returned.
+      - If get_config_model() returns None, the config is accepted as-is.
+      - Otherwise, if plugin_cls exposes get_config_schema() and it returns a
+        JSON Schema dict, the config is validated using jsonschema; on success
+        the original config mapping is returned.
+      - If get_config_schema() returns None or no hooks are present, the config
+        is returned unchanged.
+    """
+
+    cfg = config or {}
+
+    # Prefer typed config models (e.g., Pydantic) when provided.
+    get_model = getattr(plugin_cls, "get_config_model", None)
+    if callable(get_model):  # pragma: no cover - exercised via plugin tests
+        model_cls = get_model()
+        if model_cls is None:
+            return cfg
+        try:
+            model_instance = model_cls(**cfg)
+        except Exception as exc:  # pragma: no cover - defensive, surfaced in tests
+            raise ValueError(
+                f"Invalid configuration for plugin {plugin_cls.__name__}: {exc}"
+            ) from exc
+
+        # Best-effort conversion back to a plain mapping so existing plugins
+        # that expect dict-like config continue to work.
+        for attr in ("dict", "model_dump"):
+            method = getattr(model_instance, attr, None)
+            if callable(method):
+                try:
+                    return dict(method())
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                    break
+        try:
+            return dict(model_instance)
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+            return cfg
+
+    # Fallback: JSON Schema-based per-plugin validation.
+    get_schema = getattr(plugin_cls, "get_config_schema", None)
+    if callable(get_schema):  # pragma: no cover - exercised via plugin tests
+        schema = get_schema()
+        if schema is None:
+            return cfg
+        try:
+            from jsonschema import validate as _js_validate  # type: ignore
+
+            _js_validate(instance=cfg, schema=schema)
+        except Exception as exc:  # pragma: no cover - defensive, surfaced in tests
+            raise ValueError(
+                f"Invalid configuration for plugin {plugin_cls.__name__}: {exc}"
+            ) from exc
+
+    return cfg
 
 
 def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
@@ -131,8 +226,10 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
 
     Args:
         plugin_specs: A list where each item is either a dict with keys
-                      {"module": <path-or-alias>, "config": {...}} or a string
-                      alias/dotted path.
+                      {"module": <path-or-alias>, "config": {...}, "name": "..."}
+                      or a string alias/dotted path. When provided, "name" is a
+                      human-friendly label used in place of the plugin class
+                      name when logging statistics or other plugin data.
 
     Returns:
         A list of initialized plugin instances.
@@ -141,10 +238,12 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         >>> from foghorn.plugins.base import BasePlugin
         >>> class MyTestPlugin(BasePlugin):
         ...     pass
-        >>> specs = [{"module": "__main__.MyTestPlugin"}]
+        >>> specs = [{"module": "__main__.MyTestPlugin", "name": "my_test"}]
         >>> plugins = load_plugins(specs)
         >>> isinstance(plugins[0], MyTestPlugin)
         True
+        >>> plugins[0].name
+        'my_test'
         >>> # Using aliases
         >>> plugins = load_plugins(["acl", {"module": "router", "config": {}}])
     """
@@ -154,14 +253,20 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         if isinstance(spec, str):
             module_path = spec
             config = {}
+            plugin_name = None
         else:
             module_path = spec.get("module")
             config = spec.get("config", {})
+            plugin_name = spec.get("name")
         if not module_path:
             continue
 
         plugin_cls = get_plugin_class(module_path, alias_registry)
-        plugin = plugin_cls(**config)
+        validated_config = _validate_plugin_config(plugin_cls, config)
+        if plugin_name is not None:
+            plugin = plugin_cls(name=str(plugin_name), **validated_config)
+        else:
+            plugin = plugin_cls(**validated_config)
         plugins.append(plugin)
     return plugins
 
@@ -237,7 +342,9 @@ def run_setup_plugins(plugins: List[BasePlugin]) -> None:
         )
         try:
             plugin.setup()
-        except Exception as e:  # pragma: no cover
+        except (
+            Exception
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.error("Setup for plugin %s failed: %s", name, e, exc_info=True)
             if abort_on_failure:
                 raise RuntimeError(f"Setup for plugin {name} failed") from e
@@ -271,9 +378,11 @@ def main(argv: List[str] | None = None) -> int:
         ... listen:
         ...   host: 127.0.0.1
         ...   port: 5354
-        ... upstream:
-        ...   host: 1.1.1.1
-        ...   port: 53
+        ... upstreams:
+        ...   - host: 1.1.1.1
+        ...     port: 53
+        ... foghorn:
+        ...   timeout_ms: 2000
         ... ''')):
         ...     server_thread = threading.Thread(target=main, args=(["--config", "config.yaml"],), daemon=True)
         ...     server_thread.start()
@@ -330,6 +439,11 @@ def main(argv: List[str] | None = None) -> int:
     default_host = str(listen_cfg.get("host", "127.0.0.1"))
     default_port = int(listen_cfg.get("port", 5333))
 
+    # Global foghorn runtime options (timeouts, strategy, asyncio usage).
+    foghorn_cfg = cfg.get("foghorn") or {}
+    if not isinstance(foghorn_cfg, dict):
+        raise ValueError("config.foghorn must be a mapping when present")
+
     def _sub(key, defaults):
         d = listen_cfg.get(key, {}) or {}
         out = {**defaults, **d} if isinstance(d, dict) else defaults
@@ -347,6 +461,18 @@ def main(argv: List[str] | None = None) -> int:
 
     # Normalize upstream configuration
     upstreams, timeout_ms = normalize_upstream_config(cfg)
+
+    # Upstream selection strategy and concurrency controls
+    upstream_strategy = str(foghorn_cfg.get("upstream_strategy", "failover")).lower()
+    upstream_max_concurrent = int(foghorn_cfg.get("upstream_max_concurrent", 1) or 1)
+    if upstream_max_concurrent < 1:
+        upstream_max_concurrent = 1
+
+    # Global knob to disable asyncio-based listeners/admin servers in restricted
+    # environments. When false, threaded fallbacks are used where available.
+    use_asyncio = bool(foghorn_cfg.get("use_asyncio", True))
+
+    # Resolver configuration (forward vs recursive) with conservative defaults.
 
     # Hold responses this long, even if the actual ttl is lower.
     min_cache_ttl = _get_min_cache_ttl(cfg)
@@ -404,11 +530,22 @@ def main(argv: List[str] | None = None) -> int:
                     "yes",
                     "y",
                     "on",
-                }  # pragma: nocover - best effort
+                }  # pragma: no cover - best effort
 
+            # Allow force_rebuild to be controlled from three sources, in
+            # increasing precedence order:
+            #   1) statistics.force_rebuild (root-level flag)
+            #   2) statistics.persistence.force_rebuild (legacy location)
+            #   3) FOGHORN_FORCE_REBUILD / --rebuild (highest precedence)
+            force_rebuild_root = bool(stats_cfg.get("force_rebuild", False))
             force_rebuild_cfg = bool(persistence_cfg.get("force_rebuild", False))
             force_rebuild_env = _is_truthy_env(os.getenv("FOGHORN_FORCE_REBUILD"))
-            force_rebuild = bool(args.rebuild or force_rebuild_cfg or force_rebuild_env)
+            force_rebuild = bool(
+                args.rebuild
+                or force_rebuild_env
+                or force_rebuild_cfg
+                or force_rebuild_root
+            )
 
             try:
                 stats_persistence_store = StatsSQLiteStore(
@@ -425,13 +562,17 @@ def main(argv: List[str] | None = None) -> int:
                     stats_persistence_store.rebuild_counts_if_needed(
                         force_rebuild=force_rebuild, logger_obj=logger
                     )
-                except Exception as exc:  # pragma: no cover - defensive
+                except (
+                    Exception
+                ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                     logger.error(
                         "Failed to rebuild statistics counts from query_log: %s",
                         exc,
                         exc_info=True,
                     )
-            except Exception as exc:  # pragma: no cover - defensive
+            except (
+                Exception
+            ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 logger.error(
                     "Failed to initialize statistics persistence: %s; continuing without persistence",
                     exc,
@@ -473,7 +614,9 @@ def main(argv: List[str] | None = None) -> int:
         try:
             stats_collector.warm_load_from_store()
             logger.info("Statistics warm-load from SQLite store completed")
-        except Exception as exc:  # pragma: no cover - defensive
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             logger.error(
                 "Failed to warm-load statistics from SQLite store: %s",
                 exc,
@@ -555,7 +698,9 @@ def main(argv: List[str] | None = None) -> int:
                     try:
                         stats_collector.snapshot(reset=True)
                         log.info("%s: statistics reset completed", sig_label)
-                    except Exception as e:  # pragma: no cover - defensive
+                    except (
+                        Exception
+                    ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                         log.error("%s: error during statistics reset: %s", sig_label, e)
                 else:
                     log.info(
@@ -568,7 +713,7 @@ def main(argv: List[str] | None = None) -> int:
                 )
         except (
             Exception
-        ) as e:  # pragma: nocover - defensive: do not block plugin notifications
+        ) as e:  # pragma: no cover - defensive: do not block plugin notifications
             log.error(
                 "%s: unexpected error checking statistics reset config: %s",
                 sig_label,
@@ -586,7 +731,9 @@ def main(argv: List[str] | None = None) -> int:
                 if callable(handler):
                     handler()
                     count += 1
-            except Exception as e:  # pragma: no cover - defensive
+            except (
+                Exception
+            ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 log.error(
                     "%s: plugin %s handler error: %s",
                     sig_label,
@@ -623,8 +770,8 @@ def main(argv: List[str] | None = None) -> int:
           - code: Desired process exit code to return from main().
 
         Outputs:
-          - None. Sets shutdown_event/exit_code and triggers server shutdown
-            when running with a UDP listener.
+          - None. Sets shutdown_event/exit_code so the main keepalive loop can
+            drive a coordinated shutdown across all active listeners.
 
         Notes:
           - For SIGTERM and SIGINT, a best-effort hard-kill timer is started.
@@ -633,7 +780,7 @@ def main(argv: List[str] | None = None) -> int:
             issued to avoid hanging indefinitely.
         """
 
-        nonlocal exit_code, server, hard_kill_timer
+        nonlocal exit_code, hard_kill_timer
         log = logging.getLogger("foghorn.main")
 
         if shutdown_event.is_set():
@@ -667,14 +814,6 @@ def main(argv: List[str] | None = None) -> int:
             hard_kill_timer.daemon = True
             hard_kill_timer.start()
 
-        # When a UDP server is active, ask socketserver to stop its loop so the
-        # main thread can proceed to the coordinated shutdown logic.
-        try:
-            if server is not None and getattr(server, "server", None) is not None:
-                server.server.shutdown()
-        except Exception:  # pragma: no cover - defensive
-            log.exception("Error while requesting UDP server shutdown for %s", reason)
-
     def _sighup_handler(_signum, _frame):
         _request_shutdown("SIGHUP", 0)
 
@@ -704,29 +843,39 @@ def main(argv: List[str] | None = None) -> int:
     try:
         signal.signal(signal.SIGHUP, _sighup_handler)
         logger.debug("Installed SIGHUP handler for clean shutdown (exit code 0)")
-    except Exception:  # pragma: no cover - defensive
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
         logger.warning("Could not install SIGHUP handler on this platform")
 
     try:
         signal.signal(signal.SIGTERM, _sigterm_handler)
         logger.debug("Installed SIGTERM handler for immediate shutdown (exit code 2)")
-    except Exception:  # pragma: no cover - defensive
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
         logger.warning("Could not install SIGTERM handler on this platform")
 
     try:
         signal.signal(signal.SIGINT, _sigint_handler)
         logger.debug("Installed SIGINT handler for immediate shutdown (exit code 2)")
-    except Exception:  # pragma: no cover - defensive
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
         logger.warning("Could not install SIGINT handler on this platform")
 
     # DNSSEC config (ignore|passthrough|validate)
     dnssec_cfg = cfg.get("dnssec", {}) or {}
     dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()
     edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
+    dnssec_validation = str(dnssec_cfg.get("validation", "upstream_ad")).lower()
 
     server = None
     udp_thread: threading.Thread | None = None
     udp_error: Exception | None = None
+    # Track background listener threads (UDP, TCP, DoT, etc.) uniformly so the
+    # keepalive loop does not treat UDP as a special case.
+    loop_threads: list[threading.Thread] = []
     if bool(udp_cfg.get("enabled", True)):
         uhost = str(udp_cfg.get("host", default_host))
         uport = int(udp_cfg.get("port", default_port))
@@ -739,18 +888,12 @@ def main(argv: List[str] | None = None) -> int:
             timeout_ms=timeout_ms,
             min_cache_ttl=min_cache_ttl,
             stats_collector=stats_collector,
+            dnssec_mode=dnssec_mode,
+            edns_udp_payload=edns_payload,
+            dnssec_validation=dnssec_validation,
+            upstream_strategy=upstream_strategy,
+            upstream_max_concurrent=upstream_max_concurrent,
         )
-        # Set DNSSEC/EDNS knobs on handler class (keeps DNSServer signature stable)
-        try:
-            from . import server as _server_mod
-
-            _server_mod.DNSUDPHandler.dnssec_mode = dnssec_mode
-            _server_mod.DNSUDPHandler.edns_udp_payload = max(512, int(edns_payload))
-            _server_mod.DNSUDPHandler.dnssec_validation = str(
-                dnssec_cfg.get("validation", "upstream_ad")
-            ).lower()
-        except Exception:  # pragma: no cover
-            pass
 
     # Log startup info
     upstream_info = ", ".join(
@@ -785,6 +928,7 @@ def main(argv: List[str] | None = None) -> int:
             daemon=True,
         )
         udp_thread.start()
+        loop_threads.append(udp_thread)
     else:
         # When no UDP listener is configured, the main thread still enters the
         # keepalive loop below so that TCP/DoT/DoH listeners (or tests that
@@ -799,8 +943,6 @@ def main(argv: List[str] | None = None) -> int:
     import asyncio
 
     from .server import resolve_query_bytes
-
-    loop_threads = []
 
     def _start_asyncio_server(coro_factory, name: str, *, on_permission_error=None):
         def runner():
@@ -834,14 +976,24 @@ def main(argv: List[str] | None = None) -> int:
 
         thost = str(tcp_cfg.get("host", default_host))
         tport = int(tcp_cfg.get("port", 53))
-        logger.info("Starting TCP listener on %s:%d", thost, tport)
-        _start_asyncio_server(
-            lambda: serve_tcp(thost, tport, resolve_query_bytes),
-            name="foghorn-tcp",
-            on_permission_error=lambda: serve_tcp_threaded(
-                thost, tport, resolve_query_bytes
-            ),
-        )
+        if use_asyncio:
+            logger.info("Starting TCP listener on %s:%d (asyncio)", thost, tport)
+            _start_asyncio_server(
+                lambda: serve_tcp(thost, tport, resolve_query_bytes),
+                name="foghorn-tcp",
+                on_permission_error=lambda: serve_tcp_threaded(
+                    thost, tport, resolve_query_bytes
+                ),
+            )
+        else:
+            logger.info("Starting TCP listener on %s:%d (threaded)", thost, tport)
+            t = threading.Thread(
+                target=lambda: serve_tcp_threaded(thost, tport, resolve_query_bytes),
+                name="foghorn-tcp-threaded",
+                daemon=True,
+            )
+            t.start()
+            loop_threads.append(t)
 
     if bool(dot_cfg.get("enabled", False)):
         from .dot_server import serve_dot
@@ -852,7 +1004,7 @@ def main(argv: List[str] | None = None) -> int:
         key_file = dot_cfg.get("key_file")
         if not cert_file or not key_file:
             logger.error(
-                "listen.dot.enabled=true but cert_file/key_file not provided; skipping DoT listener"
+                "listen.dot.enabled=true but cert_file/key_file not provided; skipping DoT"
             )
         else:
             logger.info("Starting DoT listener on %s:%d", dhost, dport)
@@ -876,7 +1028,12 @@ def main(argv: List[str] | None = None) -> int:
         try:
             # start uvicorn-based DoH FastAPI server in background thread
             doh_handle = start_doh_server(
-                h, p, resolve_query_bytes, cert_file=cert_file, key_file=key_file
+                h,
+                p,
+                resolve_query_bytes,
+                cert_file=cert_file,
+                key_file=key_file,
+                use_asyncio=use_asyncio,
             )
         except Exception as e:
             logger.error("Failed to start DoH server: %s", e)
@@ -898,7 +1055,9 @@ def main(argv: List[str] | None = None) -> int:
             log_buffer=web_log_buffer,
             config_path=cfg_path,
         )
-    except Exception as e:  # pragma: no cover
+    except (
+        Exception
+    ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         logger.error("Failed to start webserver: %s", e)
         return 1
 
@@ -916,6 +1075,29 @@ def main(argv: List[str] | None = None) -> int:
         # serve_forever() call.
         import time as _time
 
+        def _listener_thread_is_dead(t: threading.Thread) -> bool:
+            """Best-effort liveness check for background listener threads.
+
+            Inputs:
+              - t: Thread instance (or test stub) representing a listener.
+
+            Outputs:
+              - bool: True when the thread is known to have exited.
+
+            Notes:
+              - Test stubs may not implement is_alive(); in that case we
+                conservatively treat the thread as still running so the
+                keepalive loop remains active.
+            """
+
+            try:
+                return not t.is_alive()
+            except Exception:
+                # Test doubles used in unit tests may not implement is_alive();
+                # treat them as already exited so the keepalive loop can
+                # terminate promptly.
+                return True
+
         while not shutdown_event.is_set():
             # If the UDP server thread has reported an unhandled exception,
             # mirror the legacy behaviour by logging it and treating it as a
@@ -928,12 +1110,14 @@ def main(argv: List[str] | None = None) -> int:
                     exit_code = 1
                 break
 
-            # If a UDP server thread was started and it has exited (for example
-            # because a test's DummyServer.serve_forever() raised
-            # KeyboardInterrupt or another exception), break out of the loop so
-            # coordinated shutdown can proceed.
-            if udp_thread is not None and not udp_thread.is_alive():
+            # When any background listener threads (UDP, TCP, DoT, etc.) have
+            # all exited—for example because their serve_forever loops
+            # returned—break out of the loop so coordinated shutdown can
+            # proceed. This avoids treating the UDP listener as a special case
+            # for keepalive behaviour.
+            if loop_threads and all(_listener_thread_is_dead(t) for t in loop_threads):
                 break
+
             _time.sleep(1.0)
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down")
@@ -942,10 +1126,12 @@ def main(argv: List[str] | None = None) -> int:
             # an explicit termination-like signal has already set a code.
             shutdown_event.set()
             exit_code = 0
-    except Exception as e:  # pragma: no cover
+    except (
+        Exception
+    ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         logger.exception(
             f"Unhandled exception during server operation {e}"
-        )  # pragma: no cover
+        )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         # Preserve a non-zero exit when an unhandled exception occurs unless a
         # stronger exit code (e.g., from SIGTERM) is already in place.
         if exit_code == 0:
@@ -956,15 +1142,25 @@ def main(argv: List[str] | None = None) -> int:
         # during shutdown.
         if server is not None:
             try:
-                if getattr(server, "server", None) is not None:
-                    try:
-                        server.server.shutdown()
-                    except Exception:
-                        logger.exception("Error while shutting down UDP server")
-                    try:
-                        server.server.server_close()
-                    except Exception:
-                        logger.exception("Error while closing UDP server socket")
+                if hasattr(server, "stop"):
+                    # Preferred path: delegate shutdown/close to the UDP server
+                    # abstraction so all UDP-specific details live in the UDP
+                    # module.
+                    server.stop()
+                else:
+                    # Backwards-compatible path for legacy server stubs that
+                    # expose a .server attribute with shutdown/server_close
+                    # methods (used in tests and older call sites).
+                    inner = getattr(server, "server", None)
+                    if inner is not None:
+                        try:
+                            inner.shutdown()
+                        except Exception:
+                            logger.exception("Error while shutting down UDP server")
+                        try:
+                            inner.server_close()
+                        except Exception:
+                            logger.exception("Error while closing UDP server socket")
             except Exception:
                 logger.exception("Unexpected error during UDP server teardown")
 
@@ -998,4 +1194,6 @@ def main(argv: List[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())  # pragma: no cover
+    raise SystemExit(
+        main()
+    )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably

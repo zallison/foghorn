@@ -25,7 +25,7 @@ def _basic_yaml_base() -> str:
 
     return (
         "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstream:\n"
+        "upstreams:\n"
         "  - host: 1.1.1.1\n"
         "    port: 53\n"
     )
@@ -71,7 +71,7 @@ def test_doh_enabled_start_returns_none_is_fatal(monkeypatch, caplog):
         "    enabled: true\n"
         "    host: 127.0.0.1\n"
         "    port: 8053\n"
-        "upstream:\n"
+        "upstreams:\n"
         "  - host: 1.1.1.1\n"
         "    port: 53\n"
     )

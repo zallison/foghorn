@@ -7,10 +7,37 @@ import secrets
 from typing import List, Optional, Union
 
 from dnslib import QTYPE, RCODE, DNSRecord
+from pydantic import BaseModel, Field
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
 logger = logging.getLogger(__name__)
+
+
+class FlakyServerConfig(BaseModel):
+    """Brief: Typed configuration model for FlakyServer.
+
+    Inputs:
+      - allow: CIDR/IP strings to target.
+      - client_ip: Single client to target.
+      - servfail_one_in: 1-in-N probability for SERVFAIL.
+      - nxdomain_one_in: 1-in-N probability for NXDOMAIN.
+      - apply_to_qtypes: Qtypes this plugin applies to.
+      - seed: Optional RNG seed.
+
+    Outputs:
+      - FlakyServerConfig instance with normalized field types.
+    """
+
+    allow: Optional[Union[str, List[str]]] = None
+    client_ip: Optional[str] = None
+    servfail_one_in: int = Field(default=4, ge=1)
+    nxdomain_one_in: int = Field(default=10, ge=1)
+    apply_to_qtypes: List[str] = Field(default_factory=lambda: ["*"])
+    seed: Optional[int] = None
+
+    class Config:
+        extra = "allow"
 
 
 @plugin_aliases("flaky_server", "flaky", "buggy")
@@ -50,6 +77,19 @@ class FlakyServer(BasePlugin):
 
     # Default: run relatively early in pre chain
     pre_priority: int = 15
+
+    @classmethod
+    def get_config_model(cls):
+        """Brief: Return the Pydantic model used to validate plugin configuration.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - FlakyServerConfig class for use by the core config loader.
+        """
+
+        return FlakyServerConfig
 
     def __init__(self, **config) -> None:
         """
@@ -93,7 +133,9 @@ class FlakyServer(BasePlugin):
                 # ip_network handles both single IPs and CIDRs (strict=False allows host bits set)
                 net = ipaddress.ip_network(entry, strict=False)
                 self._allow_networks.append(net)
-            except Exception as e:  # pragma: no cover
+            except (
+                Exception
+            ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 logger.warning(
                     "FlakyServer: skipping invalid allow entry %r: %s", entry, e
                 )
@@ -124,7 +166,9 @@ class FlakyServer(BasePlugin):
                 self._rng: Union[random.Random, secrets.SystemRandom] = random.Random(
                     int(seed)
                 )
-            except Exception:  # pragma: no cover
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 logger.warning("FlakyServer: bad seed %r; using SystemRandom()", seed)
                 self._rng = secrets.SystemRandom()
         else:
@@ -251,7 +295,9 @@ class FlakyServer(BasePlugin):
                 wire = self._make_response(req, RCODE.SERVFAIL)
                 if wire is not None:
                     return PluginDecision(action="override", response=wire)
-        except Exception as e:  # pragma: no cover
+        except (
+            Exception
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.debug("FlakyServer: SERVFAIL draw error: %s", e)
 
         # Then NXDOMAIN
@@ -260,7 +306,9 @@ class FlakyServer(BasePlugin):
                 wire = self._make_response(req, RCODE.NXDOMAIN)
                 if wire is not None:
                     return PluginDecision(action="override", response=wire)
-        except Exception as e:  # pragma: no cover
+        except (
+            Exception
+        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.debug("FlakyServer: NXDOMAIN draw error: %s", e)
 
         return None

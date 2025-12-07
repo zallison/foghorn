@@ -60,7 +60,7 @@
 		<section class="fh-pane fh-pane-left">
 			<div class="fh-pane-header">
 				<h2 class="fh-pane-title">Statistics</h2>
-				<p class="fh-pane-help">Live snapshot from <code>/stats</code>.</p>
+				<p class="fh-pane-help">Live snapshot from <code>/api/v1/stats</code>.</p>
 			</div>
 			<div id="stats-groups" class="fh-stats-groups">
 			</div>
@@ -92,11 +92,11 @@
 		</section>
 
 		<section class="fh-pane fh-pane-right">
-				<div class="fh-pane-header">
-					<h2 class="fh-pane-title">Configuration</h2>
-					<div class="fh-config-actions" id="config-actions-view">
-						<button id="btn-edit" class="fh-btn" type="button">Edit Config</button>
-					</div>
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title">Configuration</h2>
+				<div class="fh-config-actions" id="config-actions-view">
+					<button id="btn-edit" class="fh-btn" type="button">Edit Config</button>
+				</div>
 				<div class="fh-config-actions fh-config-actions-edit" id="config-actions-edit" hidden>
 					<button id="btn-cancel" class="fh-btn fh-btn-secondary" type="button">Cancel</button>
 					<button id="btn-save" class="fh-btn fh-btn-primary" type="button">Save</button>
@@ -178,6 +178,8 @@
 				cache_hits: 'Queries answered directly from the cache.',
 				cache_misses: 'Queries that required contacting upstream servers.',
 				cache_null: 'Responses generated directly by plugins before cache or upstream lookup.',
+				cache_deny_pre: 'Pre-plugin deny decisions that bypassed cache (e.g., filtering plugins).',
+				cache_override_pre: 'Pre-plugin overrides that bypassed cache (e.g., synthetic responses from plugins).',
 				min_ms: 'Fastest observed query latency in milliseconds.',
 				max_ms: 'Slowest observed query latency in milliseconds.',
 				avg_ms: 'Average (mean) query latency in milliseconds.',
@@ -983,6 +985,79 @@
 				});
 			}
 
+			function appendUpstreamStatusGroup(status) {
+				if (!status || typeof status !== 'object') {
+					return;
+				}
+				var items = status.items;
+				if (!items || !Array.isArray(items) || !items.length) {
+					return;
+				}
+				var target = statsGroupsEl || statsGroupsRightEl;
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = 'Upstream health';
+				group.appendChild(heading);
+
+				var metaP = document.createElement('p');
+				metaP.className = 'fh-pane-help';
+				metaP.textContent = 'Strategy: ' + (status.strategy || 'failover') +
+					', max concurrent: ' + (status.max_concurrent != null ? status.max_concurrent : 1);
+				group.appendChild(metaP);
+
+				var table = document.createElement('table');
+				table.className = 'fh-table fh-table-upstreams';
+				var thead = document.createElement('thead');
+				var headRow = document.createElement('tr');
+				['Upstream', 'State', 'Failures', 'Backoff (s)'].forEach(function (label) {
+					var th = document.createElement('th');
+					th.textContent = label;
+					headRow.appendChild(th);
+				});
+				thead.appendChild(headRow);
+				table.appendChild(thead);
+
+				var tbody = document.createElement('tbody');
+				items.forEach(function (item) {
+					if (!item || typeof item !== 'object') {
+						return;
+					}
+					var id = item.id || '';
+					var state = item.state || 'up';
+					var failCount = item.fail_count != null ? item.fail_count : 0;
+					var backoffText = '';
+					if (item.down_until) {
+						var nowMs = Date.now();
+						var untilMs = Number(item.down_until) * 1000;
+						var remainingMs = untilMs - nowMs;
+						if (remainingMs > 0) {
+							backoffText = (remainingMs / 1000).toFixed(1);
+						}
+					}
+					var tr = document.createElement('tr');
+					var tdId = document.createElement('td');
+					tdId.textContent = id;
+					var tdState = document.createElement('td');
+					tdState.textContent = state;
+					var tdFail = document.createElement('td');
+					tdFail.textContent = String(failCount);
+					var tdBackoff = document.createElement('td');
+					tdBackoff.textContent = backoffText;
+					tr.appendChild(tdId);
+					tr.appendChild(tdState);
+					tr.appendChild(tdFail);
+					tr.appendChild(tdBackoff);
+					tbody.appendChild(tr);
+				});
+
+				table.appendChild(tbody);
+				group.appendChild(table);
+				target.appendChild(group);
+			}
+
 			function renderStats(data) {
 				clearStatsGroups();
 
@@ -1027,8 +1102,24 @@
 				if (Object.keys(meta).length) {
 					appendDictGroup('Meta', meta);
 				}
-				appendProcessGroup(data.system)
-				appendDictGroup('Totals', data.totals || {});
+				appendProcessGroup(data.system);
+
+				// For Totals, hide certain internal-pre cache counters from the UI.
+				var totalsForDisplay = {};
+				if (data.totals && typeof data.totals === 'object') {
+					Object.keys(data.totals).forEach(function (key) {
+						if (
+							key === 'cache_deny_pre' ||
+							key === 'cache_override_pre' ||
+							key === 'cache_null'
+						) {
+							return;
+						}
+						totalsForDisplay[key] = data.totals[key];
+					});
+				}
+
+				appendDictGroup('Totals', totalsForDisplay);
 				appendUpstreamsGroup(data.upstreams || {}, data.upstream_rcodes || {});
 				appendUpstreamQtypesGroup(data.upstream_qtypes || {});
 				appendDictGroup('Query types', data.qtypes || {});
@@ -1061,9 +1152,16 @@
 			}
 
 			function loadStats() {
-				fetchJson('/stats')
+				fetchJson('/api/v1/stats')
 					.then(function (data) {
 						renderStats(data);
+						return fetchJson('/api/v1/upstream_status')
+							.then(function (ustatus) {
+								appendUpstreamStatusGroup(ustatus);
+							})
+							.catch(function () {
+								// Upstream status is optional; ignore errors here.
+							});
 					})
 					.catch(function (err) {
 						statsRawEl.textContent = 'Failed to load statistics: ' + err.message;
@@ -1074,7 +1172,7 @@
 				if (raw === undefined) {
 					raw = 0;
 				}
-				var url = '/config';
+				var url = '/api/v1/config';
 				if (raw !== 0 || isEditing) {
 					url += '/raw';
 				}
@@ -1180,7 +1278,7 @@
 					return;
 				}
 
-				fetch('/config/save', {
+				fetch('/api/v1/config/save', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({ raw_yaml: yamlText }),
