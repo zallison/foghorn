@@ -18,70 +18,66 @@ For developer documentation (architecture, transports, plugin internals, testing
 
 ----
 
-New (since dev/0.4.3)
+# New (since dev/0.4.3)
 
-Major features
+## DNSSEC & Recursive Resolver
+- Enhanced DNSSEC validation, including RFC5011-style trust anchors and NSEC3 support.
+- Hardened local DNSSEC validation and added unit/chain/negative tests.
+- Introduced iterative recursive resolver with `resolver.mode` wiring into the server.
+- Added in-memory recursive cache implementation and stabilized cache-related stats keys.
 
-•  DNSSEC & recursive resolver
-◦  Enhanced DNSSEC validation, including RFC5011-style trust anchors and NSEC3 support.
-◦  Hardened local DNSSEC validation and added unit/chain/negative tests.
-◦  Introduced iterative recursive resolver with resolver.mode wiring into the server.
-◦  Added in‑memory recursive cache implementation and stabilized cache-related stats keys.
-•  Upstream strategy, health, and concurrency
-◦  Added upstream strategy and concurrency options in config.
-◦  Implemented concurrent upstream failover with lazy health tracking.
-◦  Propagated upstream strategy/concurrency through DNSUDP handler and server pipeline.
-◦  Exposed upstream health/strategy via new /api/v1/upstream_status admin API and surfaced this in the UI.
-•  Plugins
-◦  RateLimitPlugin: sqlite‑backed rate limiting with per-profile configuration and admin inspection.
-◦  FileDownloader plugin: replaced ListDownloader with a more flexible file-based downloader and tests.
-◦  DockerHosts plugin: new plugin for container‑aware DNS resolution, wired into packaging, docs, and example configs.
-◦  Per‑plugin logging enhancements and stricter plugin registry behavior (fail fast on import errors).
-•  Admin API & stats
-◦  Added canonical /api/v1 admin endpoints (including rate-limit inspection and upstream status).
-◦  Extended stats to track DNSSEC and rate‑limit counters, with snapshot and persistent store support.
-◦  Persisted upstream rcodes and warm‑loaded them from the stats store.
+## Upstream Strategy, Health, and Concurrency
+- Added upstream strategy and concurrency options in config.
+- Implemented concurrent upstream failover with lazy health tracking.
+- Propagated upstream strategy/concurrency through DNSUDP handler and server pipeline.
+- Exposed upstream health/strategy via new `/api/v1/upstream_status` admin API and surfaced this in the UI.
 
-Runtime, server, and transport changes
+## Plugins
+- **RateLimitPlugin**: sqlite-backed rate limiting with per-profile configuration and admin inspection.
+- **FileDownloader plugin**: replaced `ListDownloader` with a more flexible file-based downloader and tests.
+- **DockerHosts plugin**: new plugin for container-aware DNS resolution, wired into packaging, docs, and example configs.
+- Per-plugin logging enhancements and stricter plugin registry behavior (fail fast on import errors).
 
-•  Generalized cache value types to support shared caches across components.
-•  Refined upstream configuration semantics and DoH/TCP listener behavior.
-•  Tightened DoH/admin webserver configuration and rate‑limit behavior.
-•  Treated UDP listener like TCP/DoT/DoH in main keepalive/shutdown handling.
-•  Delegated DNSUDPHandler.handle to a shared resolver and pruned deprecated helpers.
-•  Removed vestigial recursive server and remaining old UDP wiring in main.py / server.py.
+## Admin API & Stats
+- Added canonical `/api/v1` admin endpoints (including rate-limit inspection and upstream status).
+- Extended stats to track DNSSEC and rate-limit counters, with snapshot and persistent store support.
+- Persisted upstream rcodes and warm-loaded them from the stats store.
 
-Configuration, Docker, and tooling
+## Runtime, Server, and Transport Changes
+- Generalized cache value types to support shared caches across components.
+- Refined upstream configuration semantics and DoH/TCP listener behavior.
+- Tightened DoH/admin webserver configuration and rate-limit behavior.
+- Treated UDP listener like TCP/DoT/DoH in main keepalive/shutdown handling.
+- Delegated `DNSUDPHandler.handle` to a shared resolver and pruned deprecated helpers.
+- Removed vestigial recursive server and remaining old UDP wiring in `main.py`/`server.py`.
 
-•  Synced config.yaml schema and examples with the 0.4.5/0.4.6 feature set.
-•  Updated example configs for:
-◦  FileDownloader plugin and per‑URL options.
-◦  New upstream strategy/concurrency options.
-•  Aligned Docker image and Makefile with current ports/tooling; added ADMINPORT option.
-•  Ensured Docker images don’t install dev dependencies by default.
+## Configuration, Docker, and Tooling
+- Synced `config.yaml` schema and examples with the 0.4.5/0.4.6 feature set.
+- Updated example configs for:
+  - FileDownloader plugin and per-URL options.
+  - New upstream strategy/concurrency options.
+- Aligned Docker image and Makefile with current ports/tooling; added `ADMINPORT` option.
+- Ensured Docker images don’t install dev dependencies by default.
 
-Tests
+## Tests
+- Added comprehensive DNSSEC and recursive resolver tests (unit and end-to-end).
+- Expanded UDP helper coverage and made DoH FastAPI tests optional.
+- Updated tests for new config fields, webserver behavior, and rate-limit paths.
+- Fixed stats tests for multiple rcodes and new snapshot keys.
 
-•  Added comprehensive DNSSEC and recursive resolver tests (unit and end‑to‑end).
-•  Expanded UDP helper coverage and made DoH FastAPI tests optional.
-•  Updated tests for new config fields, webserver behavior, and rate‑limit paths.
-•  Fixed stats tests for multiple rcodes and new snapshot keys.
+## Documentation
+- Documented:
+  - Admin APIs and `/api/v1` endpoints.
+  - RateLimitPlugin behavior and configuration.
+  - FileDownloader and DockerHosts plugins, including example usage and updated configs.
+- Updated docs to reflect new ports, transports, and configuration knobs.
+- Version-bump and release notes aligned with 0.4.5 and 0.4.6 changes.
 
-Documentation
-
-•  Documented:
-◦  Admin APIs and /api/v1 endpoints.
-◦  RateLimitPlugin behavior and configuration.
-◦  FileDownloader and DockerHosts plugins, including example usage and updated configs.
-•  Updated docs to reflect new ports, transports, and configuration knobs.
-•  Version-bump and release notes aligned with 0.4.5 and 0.4.6 changes.
-
-Bug fixes and hardening
-
-•  Fixed stats loading for multiple rcode values.
-•  Hardened RateLimitPlugin DB access and malformed row handling.
-•  Tightened upstream and DoH transport behavior under edge cases.
-•  Made plugin registry fail fast on import errors to avoid silent misconfiguration.
+## Bug Fixes and Hardening
+- Fixed stats loading for multiple rcode values.
+- Hardened RateLimitPlugin DB access and malformed row handling.
+- Tightened upstream and DoH transport behavior under edge cases.
+- Made plugin registry fail fast on import errors to avoid silent misconfiguration.
 
 ----
 
