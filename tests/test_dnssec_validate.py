@@ -155,6 +155,11 @@ def test_validate_chain_cached_success_and_failure(monkeypatch):
       - None; asserts successful validation and error path both behave.
     """
 
+    # Clear any cached entries so this test is independent of prior calls.
+    cache = getattr(getattr(dval, "_validate_chain_cached"), "cache", None)
+    if hasattr(cache, "clear"):
+        cache.clear()
+
     dnskey = object()
 
     def _fake_resolver(payload_size):

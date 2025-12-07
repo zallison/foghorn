@@ -965,14 +965,15 @@ class StatsSQLiteStore:
                     except Exception:
                         dnssec_status = None
 
-                    if dnssec_status in {
-                        "secure",
-                        "insecure",
-                        "bogus",
-                        "indeterminate",
-                    }:
-                        key = f"dnssec_{dnssec_status}"
-                        self.increment_count("totals", key, 1)
+                if dnssec_status in {
+                    "dnssec_secure",
+                    "dnssec_unsigned",
+                    "dnssec_bogus",
+                    "dnssec_indeterminate",
+                }:
+                    # dnssec_status values are already fully-qualified
+                    # keys in the new scheme (for example, 'dnssec_secure').
+                    self.increment_count("totals", dnssec_status, 1)
 
             # Ensure any batched operations are flushed so that export_counts()
             # immediately observes the recomputed aggregates when this method
@@ -1459,7 +1460,8 @@ class StatsCollector:
         """Record a DNSSEC validation outcome.
 
         Inputs:
-            status: One of "secure", "insecure", "bogus", "indeterminate".
+            status: One of "dnssec_secure", "dnssec_unsigned", "dnssec_bogus",
+                "dnssec_indeterminate".
 
         Outputs:
             None; updates totals.dnssec_* counters in memory and, when a
@@ -1470,13 +1472,9 @@ class StatsCollector:
         if not status:
             return
 
-        key_map = {
-            "secure": "dnssec_secure",
-            "insecure": "dnssec_insecure",
-            "bogus": "dnssec_bogus",
-            "indeterminate": "dnssec_indeterminate",
-        }
-        totals_key = key_map.get(status)
+        # In the new scheme we expect fully-qualified dnssec_* keys rather
+        # than short status labels.
+        totals_key = status if status.startswith("dnssec_") else None
         if not totals_key:
             return
 

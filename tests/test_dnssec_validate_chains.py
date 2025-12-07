@@ -130,7 +130,7 @@ def test_dnssec_cname_chain_secure(monkeypatch, monkeypatched_validate, apex_nam
         dns.rdatatype.A,
         wire,
     )
-    assert status == "secure"
+    assert status == "dnssec_secure"
 
 
 def test_dnssec_cname_chain_missing_rrsig(
@@ -196,7 +196,9 @@ def test_dnssec_cname_chain_missing_rrsig(
         dns.rdatatype.A,
         wire,
     )
-    assert status == "insecure"
+    # Chain is incomplete and carries DNSSEC material, so this should be
+    # classified as 'dnssec_bogus' rather than 'dnssec_unsigned'.
+    assert status == "dnssec_bogus"
 
 
 def test_dnssec_dname_chain_secure(monkeypatch, monkeypatched_validate, apex_name):
@@ -274,4 +276,4 @@ def test_dnssec_dname_chain_secure(monkeypatch, monkeypatched_validate, apex_nam
         dns.rdatatype.A,
         wire,
     )
-    assert status == "secure"
+    assert status == "dnssec_secure"

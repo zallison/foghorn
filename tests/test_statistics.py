@@ -314,13 +314,18 @@ class TestStatsCollector:
         # Empty/unknown statuses are ignored.
         collector.record_dnssec_status("")
         collector.record_dnssec_status("unknown")
-        # Supported statuses map to specific totals keys.
-        for status in ["secure", "insecure", "bogus", "indeterminate"]:
+        # Supported statuses map directly to dnssec_* totals keys.
+        for status in [
+            "dnssec_secure",
+            "dnssec_unsigned",
+            "dnssec_bogus",
+            "dnssec_indeterminate",
+        ]:
             collector.record_dnssec_status(status)
 
         snapshot = collector.snapshot()
         assert snapshot.totals["dnssec_secure"] == 1
-        assert snapshot.totals["dnssec_insecure"] == 1
+        assert snapshot.totals["dnssec_unsigned"] == 1
         assert snapshot.totals["dnssec_bogus"] == 1
         assert snapshot.totals["dnssec_indeterminate"] == 1
 

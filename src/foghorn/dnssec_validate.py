@@ -1,5 +1,7 @@
+import base64
 import logging
-from typing import Optional
+import time
+from typing import Optional, Tuple
 
 import dns.dnssec
 import dns.flags
@@ -10,6 +12,43 @@ import dns.resolver
 from cachetools import TTLCache, cached
 
 logger = logging.getLogger("foghorn.dnssec")
+
+# RFC 5011-style trust anchor configuration (wired in by the application
+# config loader). Defaults keep existing static behavior.
+_TRUST_ANCHOR_MODE: str = "rfc5011"  # "static" or "rfc5011"
+_TRUST_ANCHOR_STORE_PATH: Optional[str] = None
+_TRUST_ANCHOR_HOLD_ADD_DAYS: int = 2
+_TRUST_ANCHOR_HOLD_REMOVE_DAYS: int = 2
+
+
+def configure_trust_anchors(
+    mode: str = "static",
+    store_path: Optional[str] = None,
+    hold_down_add_days: int = 2,
+    hold_down_remove_days: int = 2,
+) -> None:
+    """Configure DNSSEC trust-anchor management mode.
+
+    Inputs:
+      - mode: 'static' to use the baked-in root KSK only, or 'rfc5011' to enable
+        RFC 5011-style automated trust anchor management.
+      - store_path: Optional filesystem path to the JSON trust anchor store.
+      - hold_down_add_days: Number of days a new key must be continuously
+        present before promotion from pending_add to trusted.
+      - hold_down_remove_days: Number of days a removed/revoked key must remain
+        absent before being dropped from the trusted set.
+
+    Outputs:
+      - None; updates module-level configuration used by validation helpers.
+    """
+    global _TRUST_ANCHOR_MODE, _TRUST_ANCHOR_STORE_PATH
+    global _TRUST_ANCHOR_HOLD_ADD_DAYS, _TRUST_ANCHOR_HOLD_REMOVE_DAYS
+
+    _TRUST_ANCHOR_MODE = (mode or "static").lower()
+    _TRUST_ANCHOR_STORE_PATH = store_path
+    _TRUST_ANCHOR_HOLD_ADD_DAYS = int(hold_down_add_days or 2)
+    _TRUST_ANCHOR_HOLD_REMOVE_DAYS = int(hold_down_remove_days or 2)
+
 
 # Root trust anchor (KSK-2017) as DNSKEY public key (RFC 7958) in presentation form
 # Source: https://data.iana.org/root-anchors/root-anchors.xml
@@ -30,20 +69,57 @@ def _fetch(r: dns.resolver.Resolver, name: dns.name.Name, rdtype: str):
     return r.resolve(name, rdtype, raise_on_no_answer=True)
 
 
-@cached(cache=TTLCache(maxsize=1024, ttl=30))
+@cached(cache=TTLCache(maxsize=16, ttl=86400))
 def _root_dnskey_rrset() -> Optional[dns.rrset.RRset]:
+    """Return the current root trust anchor DNSKEY RRset.
+
+    In 'static' mode this is derived from the baked-in constant. In 'rfc5011'
+    mode the baked-in key is used to seed the on-disk trust anchor store if
+    needed, and the store contents are then returned.
+    """
+    from . import trust_anchors as _ta  # local import to avoid cycles
+
     try:
-        # Parse constant DNSKEY line into an rrset
+        if _TRUST_ANCHOR_MODE != "rfc5011" or not _TRUST_ANCHOR_STORE_PATH:
+            # Static behavior: parse the constant line into an rrset.
+            name = dns.name.from_text(".")
+            txt = ROOT_DNSKEY_STR.replace("\n", " ")
+            rrset = dns.rrset.from_text_list(
+                name,
+                0,
+                dns.rdataclass.IN,
+                dns.rdatatype.DNSKEY,
+                [txt.split(" DNSKEY ")[1]],
+            )
+            rrset.name = name
+            return rrset
+
+        # RFC 5011 mode: load/store-backed anchors.
+        store = _ta.load_store(_TRUST_ANCHOR_STORE_PATH)
+        anchors = _ta.anchors_for_zone(store, ".")
+        if not anchors:
+            # Bootstrap the store from the baked-in root key.
+            name = dns.name.from_text(".")
+            txt = ROOT_DNSKEY_STR.replace("\n", " ")
+            rrset = dns.rrset.from_text_list(
+                name,
+                0,
+                dns.rdataclass.IN,
+                dns.rdatatype.DNSKEY,
+                [txt.split(" DNSKEY ")[1]],
+            )
+            rrset.name = name
+            store = _ta.bootstrap_from_rrset(store, ".", rrset)
+            _ta.save_store(_TRUST_ANCHOR_STORE_PATH, store)
+            return rrset
+
+        # Build an rrset from trusted anchors in the store.
         name = dns.name.from_text(".")
-        txt = ROOT_DNSKEY_STR.replace("\n", " ")
-        rrset = dns.rrset.from_text_list(
-            name, 0, dns.rdataclass.IN, dns.rdatatype.DNSKEY, [txt.split(" DNSKEY ")[1]]
-        )
-        rrset.name = name
+        rrset = dns.rrset.RRset(name, dns.rdataclass.IN, dns.rdatatype.DNSKEY)
+        for rdata in anchors:
+            rrset.add(rdata)
         return rrset
-    except (
-        Exception
-    ) as e:  # pragma: no cover - defensive around static trust anchor parsing
+    except Exception as e:  # pragma: no cover - defensive around store handling
         logger.warning("Failed to construct root trust anchor: %s", e)
         return None
 
@@ -71,6 +147,56 @@ def _find_zone_apex(
             n = n.parent()
 
 
+# DNSKEY/DS caches keyed by owner name with per-entry TTLs derived from RRset
+# TTLs, clamped to a maximum lifetime.
+_MAX_KEY_CACHE_TTL_SECONDS = 4 * 3600  # 4 hours
+_DNSKEY_CACHE: dict[str, Tuple[dns.rrset.RRset, float]] = {}
+_DS_CACHE: dict[str, Tuple[dns.rrset.RRset, float]] = {}
+
+
+def _fetch_dnskey_cached(
+    r: dns.resolver.Resolver, name: dns.name.Name
+) -> dns.rrset.RRset:
+    """Fetch and cache the DNSKEY RRset for name.
+
+    Cache lifetime is based on the RRset TTL, clamped to
+    _MAX_KEY_CACHE_TTL_SECONDS.
+    """
+    key = name.to_text()
+    now = time.time()
+    cached_entry = _DNSKEY_CACHE.get(key)
+    if cached_entry is not None:
+        rrset, expires_at = cached_entry
+        if now < expires_at:
+            return rrset
+        # Expired entry; fall through to refresh.
+    rr = _fetch(r, name, "DNSKEY").rrset
+    ttl = getattr(rr, "ttl", _MAX_KEY_CACHE_TTL_SECONDS)
+    ttl = max(0, min(int(ttl), _MAX_KEY_CACHE_TTL_SECONDS))
+    _DNSKEY_CACHE[key] = (rr, now + ttl)
+    return rr
+
+
+def _fetch_ds_cached(r: dns.resolver.Resolver, name: dns.name.Name) -> dns.rrset.RRset:
+    """Fetch and cache the DS RRset for name.
+
+    Cache lifetime is based on the RRset TTL, clamped to
+    _MAX_KEY_CACHE_TTL_SECONDS.
+    """
+    key = name.to_text()
+    now = time.time()
+    cached_entry = _DS_CACHE.get(key)
+    if cached_entry is not None:
+        rrset, expires_at = cached_entry
+        if now < expires_at:
+            return rrset
+    rr = _fetch(r, name, "DS").rrset
+    ttl = getattr(rr, "ttl", _MAX_KEY_CACHE_TTL_SECONDS)
+    ttl = max(0, min(int(ttl), _MAX_KEY_CACHE_TTL_SECONDS))
+    _DS_CACHE[key] = (rr, now + ttl)
+    return rr
+
+
 def _validate_chain(
     r: dns.resolver.Resolver, apex: dns.name.Name
 ) -> Optional[
@@ -95,7 +221,7 @@ def _validate_chain(
             return None
         # Initialize parent
         parent = dns.name.root
-        parent_dnskey = _fetch(r, parent, "DNSKEY").rrset
+        parent_dnskey = _fetch_dnskey_cached(r, parent)
         # Ensure trust anchor exists in fetched root keys
         # (If mismatch, still proceed; many validators trust by key match.)
         # Walk down from parent to apex
@@ -107,7 +233,7 @@ def _validate_chain(
         for child in reversed(labels):
             # DS at parent for child
             try:
-                ds = _fetch(r, child, "DS").rrset
+                ds = _fetch_ds_cached(r, child)
             except Exception:
                 # No DS → insecure child; fail strict validation
                 return None
@@ -183,7 +309,7 @@ def _find_zone_apex_cached(
         return None
 
 
-@cached(cache=TTLCache(maxsize=1024, ttl=120))
+@cached(cache=TTLCache(maxsize=4096, ttl=900))
 def _validate_chain_cached(
     apex_text: str, udp_payload_size: int
 ) -> Optional[dns.rrset.RRset]:
@@ -418,8 +544,8 @@ def _validate_negative_response(
 
     This implements a conservative subset of RFC 4035/5155 sufficient to
     distinguish securely proven negative answers from unsigned or ambiguous
-    ones. Currently only classic NSEC proofs are evaluated; NSEC3 records
-    are treated as unsupported and result in an indeterminate outcome.
+    ones. Classic NSEC proofs are preferred when present; when only NSEC3
+    records are available, a simplified NSEC3-based proof is attempted.
 
     Inputs:
       - msg: Parsed dns.message.Message from the upstream.
@@ -439,7 +565,7 @@ def _validate_negative_response(
         # section. We validate signatures using the already-validated
         # zone_dnskey set.
         nsec_rrsets = []
-        nsec3_present = False
+        nsec3_rrsets = []
         rrsig_by_name = {}
 
         for rrset in msg.authority:
@@ -448,47 +574,37 @@ def _validate_negative_response(
             elif rrset.rdtype == dns.rdatatype.NSEC:
                 nsec_rrsets.append(rrset)
             elif rrset.rdtype == dns.rdatatype.NSEC3:
-                # NSEC3 is not yet implemented; record presence so we know
-                # this response uses a mechanism we do not currently support.
-                nsec3_present = True
+                nsec3_rrsets.append(rrset)
 
-        if nsec3_present:
-            # For now we treat any NSEC3-based negative proofs as
-            # indeterminate/insecure.
-            return False
-
-        if not nsec_rrsets:
-            # No NSEC-based proof available.
-            return False
-
-        # First ensure all NSEC RRsets are properly signed.
-        for nsec in nsec_rrsets:
-            sig = rrsig_by_name.get(nsec.name)
+        # First ensure all NSEC and NSEC3 RRsets are properly signed.
+        for rrset in list(nsec_rrsets) + list(nsec3_rrsets):
+            sig = rrsig_by_name.get(rrset.name)
             if sig is None:
                 return False
             try:
-                dns.dnssec.validate(nsec, sig, {apex: zone_dnskey})
+                dns.dnssec.validate(rrset, sig, {apex: zone_dnskey})
             except Exception:
                 return False
 
-        # With signatures validated, evaluate whether the NSEC chain proves
-        # non-existence for this qname/rdtype. We implement a minimal subset
-        # here: NXDOMAIN proofs via name coverage, and NODATA proofs via
-        # type bitmaps at the exact owner name when present.
         rcode = msg.rcode()
 
-        if rcode == dns.rcode.NXDOMAIN:
-            # NXDOMAIN: prove that qname does not exist by showing there is an
-            # NSEC whose owner is the closest encloser and whose range covers
-            # qname, or an NSEC for a wildcard that also denies existence.
-            return _nsec_proves_nxdomain(qname, nsec_rrsets)
+        # Prefer classic NSEC proofs when present.
+        if nsec_rrsets:
+            if rcode == dns.rcode.NXDOMAIN:
+                return _nsec_proves_nxdomain(qname, nsec_rrsets)
+            if rcode == dns.rcode.NOERROR and not msg.answer:
+                return _nsec_proves_nodata(qname, rdtype, nsec_rrsets)
+            return False
 
-        if rcode == dns.rcode.NOERROR and not msg.answer:
-            # NODATA: prove that the name exists but the specific type does
-            # not, by inspecting the type bitmap at the exact owner name.
-            return _nsec_proves_nodata(qname, rdtype, nsec_rrsets)
+        # Fall back to NSEC3-based proofs when no NSEC is available.
+        if nsec3_rrsets:
+            if rcode == dns.rcode.NXDOMAIN:
+                return _nsec3_proves_nxdomain(qname, nsec3_rrsets)
+            if rcode == dns.rcode.NOERROR and not msg.answer:
+                return _nsec3_proves_nodata(qname, rdtype, nsec3_rrsets)
+            return False
 
-        # Any other combination is treated as insecure/unsupported.
+        # No usable proof available.
         return False
     except Exception:  # pragma: no cover - defensive: unexpected authority structure
         return False
@@ -532,7 +648,9 @@ def _nsec_proves_nxdomain(
                 # Exact match would imply the name exists, so this NSEC alone
                 # does not prove NXDOMAIN.
                 continue
-            if owner < qname < nxt:
+            # Treat qname subdomains of the owner as covered when the interval
+            # spans past the owner label in canonical order.
+            if owner < qname < nxt or (qname.is_subdomain(owner) and owner < nxt):
                 return True
             # Handle the wrap-around case where the last NSEC covers up to
             # the apex of the space.
@@ -585,6 +703,114 @@ def _nsec_proves_nodata(
                 return False
         return False
     except Exception:  # pragma: no cover - defensive: malformed NSEC bitmap
+        return False
+
+
+def _nsec3_common_params(
+    nsec3_rrsets: list[dns.rrset.RRset],
+) -> Optional[tuple[dns.name.Name, int, int, bytes]]:
+    """Extract common NSEC3 parameters (origin, algorithm, iterations, salt)."""
+    try:
+        if not nsec3_rrsets:
+            return None
+        first = nsec3_rrsets[0]
+        if not first:
+            return None
+        rdata = first[0]
+        origin = first.name.parent()
+        algorithm = getattr(rdata, "algorithm", None)
+        iterations = getattr(rdata, "iterations", None)
+        salt = getattr(rdata, "salt", None)
+        if algorithm is None or iterations is None or salt is None:
+            return None
+        for rrset in nsec3_rrsets[1:]:
+            if not rrset:
+                return None
+            r = rrset[0]
+            if (
+                getattr(r, "algorithm", None) != algorithm
+                or getattr(r, "iterations", None) != iterations
+                or getattr(r, "salt", None) != salt
+            ):
+                return None
+        return origin, algorithm, iterations, salt
+    except Exception:
+        return None
+
+
+def _nsec3_proves_nxdomain(
+    qname: dns.name.Name,
+    nsec3_rrsets: list[dns.rrset.RRset],
+) -> bool:
+    """Return True if the provided NSEC3 RRsets prove NXDOMAIN for qname."""
+    try:
+        params = _nsec3_common_params(nsec3_rrsets)
+        if params is None:
+            return False
+        origin, algorithm, iterations, salt = params
+
+        digest = dns.dnssec.nsec3_hash(qname, algorithm, iterations, salt)
+        hash_label = base64.b32encode(digest).decode("ascii").strip("=").lower()
+        hashed_qname = dns.name.from_text(f"{hash_label}.{origin}")
+
+        nsec_map: dict[dns.name.Name, dns.name.Name] = {}
+        for rrset in nsec3_rrsets:
+            if not rrset:
+                continue
+            rdata = rrset[0]
+            next_hash = getattr(rdata, "next", None)
+            if next_hash is None:
+                continue
+            next_name = dns.name.Name(next_hash.labels + origin.labels)
+            nsec_map[rrset.name] = next_name
+
+        if not nsec_map:
+            return False
+
+        for owner, nxt in nsec_map.items():
+            if owner == hashed_qname:
+                continue
+            if owner < hashed_qname < nxt:
+                return True
+            if owner > nxt and (hashed_qname > owner or hashed_qname < nxt):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _nsec3_proves_nodata(
+    qname: dns.name.Name,
+    rdtype: int,
+    nsec3_rrsets: list[dns.rrset.RRset],
+) -> bool:
+    """Return True if NSEC3 RRsets prove that qname exists but rdtype does not."""
+    try:
+        params = _nsec3_common_params(nsec3_rrsets)
+        if params is None:
+            return False
+        origin, algorithm, iterations, salt = params
+
+        digest = dns.dnssec.nsec3_hash(qname, algorithm, iterations, salt)
+        hash_label = base64.b32encode(digest).decode("ascii").strip("=").lower()
+        hashed_qname = dns.name.from_text(f"{hash_label}.{origin}")
+
+        for rrset in nsec3_rrsets:
+            if rrset.name != hashed_qname or not rrset:
+                continue
+            rdata = rrset[0]
+            try:
+                if hasattr(rdata, "types"):
+                    types = set(rdata.types)
+                else:
+                    parts = rdata.to_text().split()
+                    types = set(parts[5:]) if len(parts) > 5 else set()
+                if dns.rdatatype.to_text(rdtype) not in types:
+                    return True
+            except Exception:
+                return False
+        return False
+    except Exception:
         return False
 
 
@@ -683,7 +909,7 @@ def classify_dnssec_status(
     *,
     udp_payload_size: int = 1232,
 ) -> Optional[str]:
-    """Classify a DNS response as DNSSEC "secure" or "insecure".
+    """Classify a DNS response as DNSSEC "secure", "unsigned", or "bogus".
 
     Inputs:
       - dnssec_mode: DNSSEC mode string (e.g. 'ignore', 'passthrough', 'validate').
@@ -694,8 +920,11 @@ def classify_dnssec_status(
       - udp_payload_size: EDNS payload size for any local validation fetches.
 
     Outputs:
-      - 'secure' when validation succeeds.
-      - 'insecure' when validation runs but does not authenticate the answer.
+      - 'dnssec_secure' when validation succeeds.
+      - 'dnssec_unsigned' when the response appears to come from an unsigned
+        zone (no DNSSEC records present in the message or upstream did not
+        validate).
+      - 'dnssec_bogus' when the zone appears signed but validation fails.
       - None when dnssec_mode is not 'validate' or classification cannot be
         determined due to errors.
     """
@@ -705,10 +934,31 @@ def classify_dnssec_status(
             return None
 
         strategy = str(dnssec_validation or "upstream_ad").lower()
-        validated: Optional[bool]
 
         if strategy == "local":
+            # For local validation we distinguish three cases:
+            #   * No DNSSEC material in the message -> treat as unsigned.
+            #   * DNSSEC material present and validate_response_local() is True
+            #       -> secure.
+            #   * DNSSEC material present but validate_response_local() is False
+            #       -> bogus.
             try:
+                # Parse once with dnspython to look for DNSSEC-related RR types.
+                msg = dns.message.from_wire(response_wire)
+                has_dnssec_rr = False
+                for rrset in list(getattr(msg, "answer", []) or []) + list(
+                    getattr(msg, "authority", []) or []
+                ):
+                    if rrset.rdtype in (
+                        dns.rdatatype.DNSKEY,
+                        dns.rdatatype.DS,
+                        dns.rdatatype.RRSIG,
+                        dns.rdatatype.NSEC,
+                        dns.rdatatype.NSEC3,
+                    ):
+                        has_dnssec_rr = True
+                        break
+
                 validated = bool(
                     validate_response_local(
                         qname_text,
@@ -717,27 +967,28 @@ def classify_dnssec_status(
                         udp_payload_size=udp_payload_size,
                     )
                 )
+
+                if validated:
+                    return "dnssec_secure"
+
+                # Local validation failed.
+                return "dnssec_bogus" if has_dnssec_rr else "dnssec_unsigned"
             except Exception as e:  # pragma: no cover - defensive logging only
-                logger.debug("Local DNSSEC validation error: %s", e)
-                validated = None
+                logger.debug("Local DNSSEC classification error: %s", e)
+                return None
         else:
+            # For upstream_ad we rely on the AD bit only and cannot
+            # reliably distinguish unsigned from bogus. Treat AD=1 as
+            # 'secure' and AD=0 as 'unsigned'.
             try:
-                # For upstream_ad we rely on the AD bit in the header. Use
-                # dnslib here to remain compatible with how responses are
-                # constructed elsewhere in Foghorn.
                 from dnslib import DNSRecord as _DNSRecord  # local import
 
                 parsed = _DNSRecord.parse(response_wire)
-                validated = getattr(parsed.header, "ad", 0) == 1
+                ad_set = getattr(parsed.header, "ad", 0) == 1
+                return "dnssec_secure" if ad_set else "dnssec_unsigned"
             except Exception as e:  # pragma: no cover - defensive logging only
                 logger.debug("Upstream AD check failed: %s", e)
-                validated = None
-
-        if validated is None:
-            # Leave status unset when classification is indeterminate so callers
-            # can treat the response as unsigned without forcing 'insecure'.
-            return None
-        return "secure" if validated else "insecure"
+                return None
     except Exception:  # pragma: no cover - defensive: low-value edge case
         logger.debug("DNSSEC classification failed; leaving status unset")
         return None
