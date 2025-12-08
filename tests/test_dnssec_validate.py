@@ -380,6 +380,144 @@ def test_validate_response_local_positive_apex_and_authority_failures(monkeypatc
     assert dval.validate_response_local(qname_text, rdtype, b"wire") is False
 
 
+# Local helpers reused from negative DNSSEC tests to avoid cross-module imports.
+
+
+def _make_dnskey_rrset_ext(name: str) -> dns.rrset.RRset:
+    owner = dns.name.from_text(name)
+    dnskey = dns.rdtypes.ANY.DNSKEY.DNSKEY(
+        dns.rdataclass.IN,
+        dns.rdatatype.DNSKEY,
+        257,
+        3,
+        dns.dnssec.Algorithm.RSASHA256,
+        b"",
+    )
+    rrset = dns.rrset.RRset(owner, dns.rdataclass.IN, dns.rdatatype.DNSKEY)
+    rrset.add(dnskey)
+    return rrset
+
+
+def _make_dummy_rrsig_ext(rrset: dns.rrset.RRset, signer_name: str) -> dns.rrset.RRset:
+    signer = dns.name.from_text(signer_name)
+    inception = 0
+    expiration = 2**31
+    rrsig_rdata = dns.rdtypes.ANY.RRSIG.RRSIG(
+        dns.rdataclass.IN,
+        dns.rdatatype.RRSIG,
+        rrset.rdtype,
+        dns.dnssec.Algorithm.RSASHA256,
+        len(rrset.name.labels),
+        300,
+        expiration,
+        inception,
+        0,
+        signer,
+        b"",
+    )
+    sig_rrset = dns.rrset.RRset(rrset.name, rrset.rdclass, dns.rdatatype.RRSIG)
+    sig_rrset.add(rrsig_rdata)
+    return sig_rrset
+
+
+def test_classify_dnssec_local_extended_zone_chain_without_rrsig(monkeypatch):
+    """local_extended returns dnssec_ext_secure when only the zone chain is valid.
+
+    Original response:
+      - NOERROR with an unsigned A RRset (no DNSSEC records at all).
+
+    Extended path:
+      - _find_zone_apex_cached / _validate_chain_cached validate the zone's
+        DNSKEY/DS chain.
+      - _resolver/_fetch return a message containing the same unsigned A RRset
+        plus a signed DNSKEY RRset for the apex, but still no RRSIG for A.
+
+    Expectations:
+      - validation='local' -> dnssec_unsigned
+      - validation='local_extended' -> dnssec_ext_secure
+    """
+
+    from foghorn import dnssec_validate as dv
+
+    qname_text = "www.example.test."
+    qname = dns.name.from_text(qname_text)
+    rdtype = dns.rdatatype.A
+
+    # Original upstream response: unsigned A only, no DNSSEC.
+    orig = dns.message.Message()
+    orig.set_rcode(dns.rcode.NOERROR)
+    a_rrset = dns.rrset.from_text(qname, 300, dns.rdataclass.IN, rdtype, "1.2.3.4")
+    orig.answer.append(a_rrset)
+    orig_wire = orig.to_wire()
+
+    # Baseline local classification sees no DNSSEC material and yields unsigned.
+    base = dv.classify_dnssec_status(
+        dnssec_mode="validate",
+        dnssec_validation="local",
+        qname_text=qname_text,
+        qtype_num=rdtype,
+        response_wire=orig_wire,
+        udp_payload_size=1232,
+    )
+    assert base == "dnssec_unsigned"
+
+    # Fake a validated DNSKEY rrset for the apex.
+    zone_apex = dns.name.from_text("example.test.")
+    zone_dnskey = _make_dnskey_rrset_ext("example.test.")
+
+    def fake_find_zone_apex_cached(name_text: str, payload_size: int):
+        assert name_text == qname_text
+        return zone_apex
+
+    def fake_validate_chain_cached(apex_text: str, payload_size: int):
+        assert apex_text == "example.test."
+        return zone_dnskey
+
+    # Enriched message: same A RRset plus signed DNSKEY for the apex.
+    enriched = dns.message.Message()
+    enriched.set_rcode(dns.rcode.NOERROR)
+    enriched.answer.append(a_rrset)
+
+    dnskey_rrset = dns.rrset.RRset(zone_apex, dns.rdataclass.IN, dns.rdatatype.DNSKEY)
+    for r in zone_dnskey:
+        dnskey_rrset.add(r)
+    dnskey_sig = _make_dummy_rrsig_ext(dnskey_rrset, "example.test.")
+    enriched.authority.append(dnskey_rrset)
+    enriched.authority.append(dnskey_sig)
+
+    class _Resp:
+        def __init__(self, message: dns.message.Message) -> None:
+            self.response = message
+
+    def fake_resolver(payload_size: int):  # pragma: no cover - simple stub
+        class _R:
+            pass
+
+        return _R()
+
+    def fake_fetch(resolver, name, rtype):  # pragma: no cover - simple stub
+        # Extended lookup for qname/rdtype returns the enriched message.
+        assert name == qname
+        assert dns.rdatatype.from_text(rtype) == rdtype
+        return _Resp(enriched)
+
+    monkeypatch.setattr(dv, "_find_zone_apex_cached", fake_find_zone_apex_cached)
+    monkeypatch.setattr(dv, "_validate_chain_cached", fake_validate_chain_cached)
+    monkeypatch.setattr(dv, "_resolver", fake_resolver)
+    monkeypatch.setattr(dv, "_fetch", fake_fetch)
+
+    out_ext = dv.classify_dnssec_status(
+        dnssec_mode="validate",
+        dnssec_validation="local_extended",
+        qname_text=qname_text,
+        qtype_num=rdtype,
+        response_wire=orig_wire,
+        udp_payload_size=1232,
+    )
+
+    assert out_ext == "dnssec_ext_secure"
+
+
 def test_collect_positive_rrsets_direct_cname_and_dname(monkeypatch):
     """Brief: _collect_positive_rrsets handles direct, CNAME, and DNAME cases.
 
