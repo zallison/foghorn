@@ -3,6 +3,21 @@ import logging
 import time
 from typing import Optional, Tuple
 
+try:  # Ensure required crypto backend is present before enabling DNSSEC logic.
+    import importlib.util as _importlib_util
+
+    if _importlib_util.find_spec("cryptography") is None:
+        raise ImportError("No module named 'cryptography'")
+except (
+    ImportError
+) as exc:  # pragma: no cover - exercised only when dependency is missing at runtime
+    _log = logging.getLogger("foghorn.dnssec")
+    _log.critical(
+        "The 'cryptography' package is required for DNSSEC validation but is not installed: %s",
+        exc,
+    )
+    raise SystemExit(1)
+
 import dns.dnssec
 import dns.flags
 import dns.message
