@@ -19,7 +19,6 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Type
 
-from foghorn.config_schema import get_default_schema_path
 from foghorn.plugins.base import BasePlugin
 from foghorn.plugins import registry as plugin_registry
 
@@ -132,15 +131,23 @@ def _load_base_schema() -> Dict[str, Any]:
     """Brief: Load the main Foghorn config JSON Schema from disk.
 
     Inputs:
-      - None (uses get_default_schema_path()).
+      - None. The loader searches for ``assets/config-yaml.schema`` by walking
+        up from this script's directory.
 
     Outputs:
       - Dict representing the base configuration JSON Schema.
     """
 
-    schema_path = get_default_schema_path()
-    with schema_path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    here = Path(__file__).resolve()
+    for ancestor in here.parents:
+        candidate = ancestor / "assets" / "config-yaml.schema"
+        if candidate.is_file():
+            with candidate.open("r", encoding="utf-8") as f:
+                return json.load(f)
+
+    raise FileNotFoundError(
+        "assets/config-yaml.schema not found relative to generate_plugin_schema.py"
+    )
 
 
 def build_document() -> Dict[str, Any]:
