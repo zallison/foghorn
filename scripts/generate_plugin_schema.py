@@ -19,6 +19,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Type
 
+from foghorn.config_schema import get_default_schema_path
 from foghorn.plugins.base import BasePlugin
 from foghorn.plugins import registry as plugin_registry
 
@@ -127,30 +128,47 @@ def collect_plugin_schemas() -> Dict[str, Any]:
     return results
 
 
+def _load_base_schema() -> Dict[str, Any]:
+    """Brief: Load the main Foghorn config JSON Schema from disk.
+
+    Inputs:
+      - None (uses get_default_schema_path()).
+
+    Outputs:
+      - Dict representing the base configuration JSON Schema.
+    """
+
+    schema_path = get_default_schema_path()
+    with schema_path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def build_document() -> Dict[str, Any]:
-    """Brief: Build the final JSON document containing all plugin schemas.
+    """Brief: Build a combined JSON Schema including core config and plugins.
 
     Inputs:
       - None.
 
     Outputs:
-      - Dict with the following top-level structure:
+      - Dict based on the existing config-yaml.schema with an extra
+        ``$defs.plugin_configs`` mapping that contains all discovered plugin
+        configuration schemas keyed by canonical alias.
 
-        .. code-block:: json
-
-           {
-             "$schema": "https://json-schema.org/draft/2020-12/schema",
-             "title": "Foghorn plugin configuration schemas",
-             "plugins": { ... per-plugin mapping from collect_plugin_schemas() ... }
-           }
+    Notes:
+      - This does not change validation behaviour of the main schema; the
+        additional definitions are informational only and can be consumed by
+        tooling (e.g. UIs or editors) that want per-plugin config schemas.
     """
 
+    base = _load_base_schema()
     plugins = collect_plugin_schemas()
-    return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "title": "Foghorn plugin configuration schemas",
-        "plugins": plugins,
-    }
+
+    # Attach plugin schemas under a dedicated defs key so existing references
+    # remain untouched.
+    defs = base.setdefault("$defs", {})
+    defs["plugin_configs"] = plugins
+
+    return base
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
