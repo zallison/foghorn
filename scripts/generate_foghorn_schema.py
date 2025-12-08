@@ -131,7 +131,7 @@ def _load_base_schema() -> Dict[str, Any]:
     """Brief: Load the main Foghorn config JSON Schema from disk.
 
     Inputs:
-      - None. The loader searches for ``assets/config-yaml.schema`` by walking
+      - None. The loader searches for ``assets/config-schema.json`` by walking
         up from this script's directory.
 
     Outputs:
@@ -140,13 +140,13 @@ def _load_base_schema() -> Dict[str, Any]:
 
     here = Path(__file__).resolve()
     for ancestor in here.parents:
-        candidate = ancestor / "assets" / "config-yaml.schema"
+        candidate = ancestor / "assets" / "config-schema.json"
         if candidate.is_file():
             with candidate.open("r", encoding="utf-8") as f:
                 return json.load(f)
 
     raise FileNotFoundError(
-        "assets/config-yaml.schema not found relative to generate_plugin_schema.py"
+        "assets/config-schema.json not found relative to generate_plugin_schema.py"
     )
 
 
@@ -157,7 +157,7 @@ def build_document() -> Dict[str, Any]:
       - None.
 
     Outputs:
-      - Dict based on the existing config-yaml.schema with an extra
+      - Dict based on the existing config-schema.json with an extra
         ``$defs.plugin_configs`` mapping that contains all discovered plugin
         configuration schemas keyed by canonical alias.
 
