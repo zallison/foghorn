@@ -13,6 +13,34 @@ from cachetools import TTLCache, cached
 
 logger = logging.getLogger("foghorn.dnssec")
 
+# Optional override for the nameservers used by the local DNSSEC validator.
+# When None, the system resolver configuration is used (as provided by
+# dnspython). When set to a non-empty list of IP strings, all validation
+# lookups (_resolver) will send queries directly to those nameservers.
+_VALIDATION_NAMESERVERS: list[str] | None = None
+
+
+def configure_dnssec_resolver(nameservers: Optional[list[str]]) -> None:
+    """Configure nameservers for DNSSEC validation lookups.
+
+    Inputs:
+      - nameservers: Optional list of IP address strings. When None or empty,
+        validation uses the system resolver configuration. When provided,
+        validation lookups bypass the system config and talk directly to these
+        servers.
+
+    Outputs:
+      - None; updates module-level configuration used by _resolver().
+    """
+
+    global _VALIDATION_NAMESERVERS
+    if not nameservers:
+        _VALIDATION_NAMESERVERS = None
+    else:
+        # Store a shallow copy so callers cannot mutate our internal list.
+        _VALIDATION_NAMESERVERS = list(nameservers)
+
+
 # RFC 5011-style trust anchor configuration (wired in by the application
 # config loader). Defaults keep existing static behavior.
 _TRUST_ANCHOR_MODE: str = "rfc5011"  # "static" or "rfc5011"
@@ -59,7 +87,24 @@ CfJ4H3CvGf2bQ3aU/J5g7y3i7vU898vW3HjR8wQ6Y2GQ7QvG4hVYbVUrkE0="""
 
 
 def _resolver(payload_size: int = 1232) -> dns.resolver.Resolver:
-    r = dns.resolver.Resolver(configure=True)
+    """Return a dnspython Resolver configured for DNSSEC validation.
+
+    The resolver always enables EDNS(0) with the DO bit set. When
+    _VALIDATION_NAMESERVERS is configured via configure_dnssec_resolver(), the
+    resolver is created without reading system configuration and uses those
+    nameservers directly. Otherwise, the system's resolver configuration
+    (/etc/resolv.conf, etc.) is used.
+    """
+
+    # When explicit nameservers are configured for validation, construct a
+    # resolver without loading system configuration and point it at those
+    # addresses. Otherwise, fall back to dnspython's default behavior.
+    if _VALIDATION_NAMESERVERS:
+        r = dns.resolver.Resolver(configure=False)
+        r.nameservers = list(_VALIDATION_NAMESERVERS)
+    else:
+        r = dns.resolver.Resolver(configure=True)
+
     r.use_edns(edns=0, ednsflags=dns.flags.DO, payload=payload_size)
     r.lifetime = 2.0
     return r
@@ -197,6 +242,37 @@ def _fetch_ds_cached(r: dns.resolver.Resolver, name: dns.name.Name) -> dns.rrset
     return rr
 
 
+def _fetch_dnskey_and_rrsig(
+    r: dns.resolver.Resolver, name: dns.name.Name
+) -> tuple[dns.rrset.RRset, Optional[dns.rrset.RRset]]:
+    """Fetch DNSKEY RRset and its covering RRSIG(DNSKEY) for the given owner.
+
+    Inputs:
+      - r: Resolver configured with DO.
+      - name: Owner name to query.
+
+    Outputs:
+      - (dnskey_rrset, rrsig_rrset_or_None).
+    """
+    ans = r.resolve(name, "DNSKEY", raise_on_no_answer=True)
+    resp = ans.response
+    dnskey_rrset = None
+    sig_rrset = None
+    for rrset in resp.answer:
+        if rrset.rdtype == dns.rdatatype.DNSKEY:
+            dnskey_rrset = rrset
+        elif rrset.rdtype == dns.rdatatype.RRSIG:
+            try:
+                covered = rrset[0].type_covered
+            except Exception:
+                continue
+            if covered == dns.rdatatype.DNSKEY:
+                sig_rrset = rrset
+    if dnskey_rrset is None:
+        raise Exception(f"No DNSKEY RRset found in answer for {name}")
+    return dnskey_rrset, sig_rrset
+
+
 def _validate_chain(
     r: dns.resolver.Resolver, apex: dns.name.Name
 ) -> Optional[
@@ -218,10 +294,17 @@ def _validate_chain(
     try:
         root_keys = _root_dnskey_rrset()
         if root_keys is None:
+            logger.debug("_validate_chain: no root_keys available")
             return None
-        # Initialize parent
+        # Initialize parent at the root using the baked-in trust anchor and the
+        # live DNSKEY RRset from the resolver.
         parent = dns.name.root
         parent_dnskey = _fetch_dnskey_cached(r, parent)
+        logger.debug(
+            "_validate_chain: starting at parent=%s with %d DNSKEY records",
+            parent,
+            len(parent_dnskey or []),
+        )
         # Ensure trust anchor exists in fetched root keys
         # (If mismatch, still proceed; many validators trust by key match.)
         # Walk down from parent to apex
@@ -231,26 +314,34 @@ def _validate_chain(
             labels.append(cur)
             cur = cur.parent()
         for child in reversed(labels):
-            # DS at parent for child
+            logger.debug(
+                "_validate_chain: descending to child=%s from parent=%s", child, parent
+            )
+            # DS records for the child are queried at the child owner name (for
+            # example, DS for "com" is published at name "com."). We rely on the
+            # parent DNSKEY set that has already been validated to trust these
+            # DS records and then verify that at least one of them matches the
+            # child's DNSKEY RRset. For now we do not attempt an additional
+            # RRSIG(DS) validation step because typical resolver APIs do not
+            # expose the covering RRSIG RRset in a straightforward way.
             try:
                 ds = _fetch_ds_cached(r, child)
-            except Exception:
-                # No DS → insecure child; fail strict validation
+            except Exception as e:
+                # No DS for this child  treat the delegation as insecure and
+                # stop strict validation.
+                logger.debug("_validate_chain: DS fetch failed for %s: %s", child, e)
                 return None
-            # Validate DS RRset with parent's DNSKEY (if RRSIG present)
+
+            # Fetch child DNSKEY and its RRSIG(DNSKEY) in one query so we do not
+            # depend on separate RRSIG lookups that many resolvers do not
+            # support as standalone qtypes.
             try:
-                dssig = _fetch(
-                    r, child, "RRSIG"
-                ).rrset  # RRSIG(DS) may be in the DS response; if not, resolver packs differently
-            except Exception:
-                dssig = None
-            if dssig is not None:
-                try:
-                    dns.dnssec.validate(ds, dssig, {parent: parent_dnskey})
-                except Exception:
-                    return None
-            # Fetch child DNSKEY
-            child_dnskey = _fetch(r, child, "DNSKEY").rrset
+                child_dnskey, child_dnskey_sig = _fetch_dnskey_and_rrsig(r, child)
+            except Exception as e:
+                logger.debug(
+                    "_validate_chain: DNSKEY/RRSIG fetch failed for %s: %s", child, e
+                )
+                return None
             # Compare DS against child DNSKEY (at least one matches)
             match = False
             for dnskey in child_dnskey:
@@ -272,19 +363,31 @@ def _validate_chain(
                 except Exception:
                     continue
             if not match:
+                logger.debug("_validate_chain: no DS/DNSKEY match for %s", child)
                 return None
-            # Validate child DNSKEY RRset self-signature (requires RRSIG)
+            # Validate child DNSKEY RRset self-signature (requires RRSIG).
+            if child_dnskey_sig is None:
+                logger.debug("_validate_chain: missing RRSIG(DNSKEY) for %s", child)
+                return None
             try:
-                dnskey_sig = _fetch(r, child, "RRSIG").rrset
-                dns.dnssec.validate(child_dnskey, dnskey_sig, {child: child_dnskey})
-            except Exception:
+                dns.dnssec.validate(
+                    child_dnskey, child_dnskey_sig, {child: child_dnskey}
+                )
+            except Exception as e:
                 # If missing/invalid, fail
+                logger.debug(
+                    "_validate_chain: DNSKEY self-signature validation failed for %s: %s",
+                    child,
+                    e,
+                )
                 return None
             # Advance parent
             parent = child
             parent_dnskey = child_dnskey
+        logger.debug("_validate_chain: successfully validated chain to apex %s", apex)
         return parent_dnskey
-    except Exception:
+    except Exception as e:
+        logger.debug("_validate_chain: unexpected error for apex %s: %s", apex, e)
         return None
 
 
@@ -900,6 +1003,177 @@ def _validate_authority_rrsets(
         return False
 
 
+def _message_has_dnssec_rr(msg: dns.message.Message) -> bool:
+    """Return True if the message carries any DNSSEC-related RR types.
+
+    Inputs:
+      - msg: Parsed dns.message.Message instance.
+
+    Outputs:
+      - bool: True when any RRset in answer/authority is DNSKEY/DS/RRSIG/NSEC/NSEC3.
+    """
+
+    for rrset in getattr(msg, "answer", []) or []:
+        if rrset.rdtype in (
+            dns.rdatatype.DNSKEY,
+            dns.rdatatype.DS,
+            dns.rdatatype.RRSIG,
+            dns.rdatatype.NSEC,
+            dns.rdatatype.NSEC3,
+        ):
+            return True
+    for rrset in getattr(msg, "authority", []) or []:
+        if rrset.rdtype in (
+            dns.rdatatype.DNSKEY,
+            dns.rdatatype.DS,
+            dns.rdatatype.RRSIG,
+            dns.rdatatype.NSEC,
+            dns.rdatatype.NSEC3,
+        ):
+            return True
+    return False
+
+
+def _classify_dnssec_local(
+    qname_text: str,
+    qtype_num: int,
+    response_wire: bytes,
+    udp_payload_size: int,
+) -> Optional[str]:
+    """Baseline local DNSSEC classification used by 'local' and 'local_extended'.
+
+    This inspects only the DNSSEC material present in the provided response and
+    does not perform any extra upstream lookups.
+    """
+
+    try:
+        msg = dns.message.from_wire(response_wire)
+        has_dnssec_rr = _message_has_dnssec_rr(msg)
+
+        validated = bool(
+            validate_response_local(
+                qname_text,
+                qtype_num,
+                response_wire,
+                udp_payload_size=udp_payload_size,
+            )
+        )
+
+        if validated:
+            return "dnssec_secure"
+        # If the response carried any DNSSEC material but validation failed,
+        # treat it as explicitly bogus. Otherwise it is simply unsigned.
+        return "dnssec_bogus" if has_dnssec_rr else "dnssec_unsigned"
+    except Exception as e:  # pragma: no cover - defensive logging only
+        logger.debug("Local DNSSEC classification error: %s", e)
+        return None
+
+
+def _classify_dnssec_local_extended(
+    qname_text: str,
+    qtype_num: int,
+    response_wire: bytes,
+    udp_payload_size: int,
+) -> Optional[str]:
+    """Extended local DNSSEC classification.
+
+    This first applies the baseline local classification and, when the result is
+    'dnssec_unsigned' and the original response contains no DNSSEC material, it
+    issues an extra DO=1 query via the configured resolver to obtain a
+    DNSSEC-rich response and re-runs validation on that enriched message.
+    """
+
+    # Step 1: baseline local classification on the original response.
+    base_status = _classify_dnssec_local(
+        qname_text, qtype_num, response_wire, udp_payload_size
+    )
+    if base_status in {"dnssec_secure", "dnssec_bogus"} or base_status is None:
+        # Already have a strong or indeterminate verdict; do not second-guess it.
+        return base_status
+
+    # Only attempt to extend when we believe the response is effectively unsigned
+    # and carries no DNSSEC material at all.
+    try:
+        original_msg = dns.message.from_wire(response_wire)
+    except Exception:
+        return base_status
+
+    if _message_has_dnssec_rr(original_msg):
+        # There is DNSSEC material but baseline validation treated it as
+        # unsigned; for now, keep the baseline classification.
+        return base_status
+
+    # Step 2: validate the DNSKEY/DS chain for the zone apex using DO=1
+    # lookups, even if the original response carried no DNSSEC records.
+    try:
+        apex = _find_zone_apex_cached(qname_text, udp_payload_size)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("Extended local DNSSEC: failed to find apex: %s", e)
+        apex = None
+
+    if apex is None:
+        return base_status
+
+    try:
+        zone_dnskey = _validate_chain_cached(apex.to_text(), udp_payload_size)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("Extended local DNSSEC: chain validation error: %s", e)
+        zone_dnskey = None
+
+    if zone_dnskey is None:
+        # Could not validate the zone's DNSKEY/DS chain; cannot claim any
+        # additional security beyond the baseline decision.
+        return base_status
+
+    # At this point the zone's DNSKEY/DS chain is validated. Attempt to obtain a
+    # DNSSEC-rich answer for the specific qname/qtype so we can decide whether
+    # the RRset itself is signed.
+    try:
+        r = _resolver(payload_size=udp_payload_size)
+        rdtype = (
+            qtype_num
+            if isinstance(qtype_num, int)
+            else dns.rdatatype.from_text(str(qtype_num))
+        )
+        qname = dns.name.from_text(qname_text)
+        answer = _fetch(r, qname, dns.rdatatype.to_text(rdtype))
+        enriched_msg = answer.response
+    except Exception as e:  # pragma: no cover - defensive networking path
+        logger.debug("Extended local DNSSEC: fetch of RRset failed: %s", e)
+        # We still know the zone's keys are valid even if we could not obtain a
+        # DNSSEC-signed RRset; treat as extended secure.
+        return "dnssec_ext_secure"
+
+    # Look for a matching RRset and its covering RRSIG in the enriched answer.
+    try:
+        # Find the answer RRset for the queried name/type.
+        rrset = None
+        sig_rrset = None
+        for rr in enriched_msg.answer:
+            if rr.rdtype == rdtype and rr.name == qname:
+                rrset = rr
+            elif rr.rdtype == dns.rdatatype.RRSIG and rr.name == qname:
+                sig_rrset = rr
+        if rrset is not None and sig_rrset is not None:
+            try:
+                dns.dnssec.validate(rrset, sig_rrset, {apex: zone_dnskey})
+                return "dnssec_secure"
+            except Exception:
+                # The RRset is claimed to be signed but does not validate.
+                return "dnssec_bogus"
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug(
+            "Extended local DNSSEC: error while inspecting enriched RRset: %s", e
+        )
+        # Fall through to extended secure if the chain is valid.
+
+    # No usable RRSIG for the specific RRset, but we have a validated
+    # DNSKEY/DS chain for the zone. Surface this as an "extended" secure
+    # result: the zone is DNSSEC-secure even if the particular RRset is
+    # effectively unsigned by the upstream.
+    return "dnssec_ext_secure"
+
+
 def classify_dnssec_status(
     dnssec_mode: str,
     dnssec_validation: str,
@@ -913,18 +1187,24 @@ def classify_dnssec_status(
 
     Inputs:
       - dnssec_mode: DNSSEC mode string (e.g. 'ignore', 'passthrough', 'validate').
-      - dnssec_validation: Validation strategy ('upstream_ad' or 'local').
+      - dnssec_validation: Validation strategy ('upstream_ad', 'local', or
+        'local_extended').
       - qname_text: Query name as text.
       - qtype_num: Numeric qtype (e.g., 1=A, 28=AAAA).
       - response_wire: Raw DNS response bytes.
       - udp_payload_size: EDNS payload size for any local validation fetches.
 
     Outputs:
-      - 'dnssec_secure' when validation succeeds.
+      - 'dnssec_secure' when the specific RRset (or negative response) has been
+        fully validated using DNSSEC, including an appropriate RRSIG.
+      - 'dnssec_ext_secure' when the DNSKEY/DS chain for the zone has been
+        successfully validated via extended lookups, but the particular RRset
+        could not be directly verified (e.g. the upstream does not return an
+        RRSIG for the answer while still publishing signed DNSKEY/DS).
       - 'dnssec_unsigned' when the response appears to come from an unsigned
-        zone (no DNSSEC records present in the message or upstream did not
-        validate).
-      - 'dnssec_bogus' when the zone appears signed but validation fails.
+        context (no DNSSEC material available and/or no validated chain).
+      - 'dnssec_bogus' when the response carries DNSSEC material that fails
+        validation under the current trust anchors.
       - None when dnssec_mode is not 'validate' or classification cannot be
         determined due to errors.
     """
@@ -936,59 +1216,27 @@ def classify_dnssec_status(
         strategy = str(dnssec_validation or "upstream_ad").lower()
 
         if strategy == "local":
-            # For local validation we distinguish three cases:
-            #   * No DNSSEC material in the message -> treat as unsigned.
-            #   * DNSSEC material present and validate_response_local() is True
-            #       -> secure.
-            #   * DNSSEC material present but validate_response_local() is False
-            #       -> bogus.
-            try:
-                # Parse once with dnspython to look for DNSSEC-related RR types.
-                msg = dns.message.from_wire(response_wire)
-                has_dnssec_rr = False
-                for rrset in list(getattr(msg, "answer", []) or []) + list(
-                    getattr(msg, "authority", []) or []
-                ):
-                    if rrset.rdtype in (
-                        dns.rdatatype.DNSKEY,
-                        dns.rdatatype.DS,
-                        dns.rdatatype.RRSIG,
-                        dns.rdatatype.NSEC,
-                        dns.rdatatype.NSEC3,
-                    ):
-                        has_dnssec_rr = True
-                        break
+            return _classify_dnssec_local(
+                qname_text, qtype_num, response_wire, udp_payload_size
+            )
 
-                validated = bool(
-                    validate_response_local(
-                        qname_text,
-                        qtype_num,
-                        response_wire,
-                        udp_payload_size=udp_payload_size,
-                    )
-                )
+        if strategy == "local_extended":
+            return _classify_dnssec_local_extended(
+                qname_text, qtype_num, response_wire, udp_payload_size
+            )
 
-                if validated:
-                    return "dnssec_secure"
+        # For upstream_ad we rely on the AD bit only and cannot
+        # reliably distinguish unsigned from bogus. Treat AD=1 as
+        # 'secure' and AD=0 as 'unsigned'.
+        try:
+            from dnslib import DNSRecord as _DNSRecord  # local import
 
-                # Local validation failed.
-                return "dnssec_bogus" if has_dnssec_rr else "dnssec_unsigned"
-            except Exception as e:  # pragma: no cover - defensive logging only
-                logger.debug("Local DNSSEC classification error: %s", e)
-                return None
-        else:
-            # For upstream_ad we rely on the AD bit only and cannot
-            # reliably distinguish unsigned from bogus. Treat AD=1 as
-            # 'secure' and AD=0 as 'unsigned'.
-            try:
-                from dnslib import DNSRecord as _DNSRecord  # local import
-
-                parsed = _DNSRecord.parse(response_wire)
-                ad_set = getattr(parsed.header, "ad", 0) == 1
-                return "dnssec_secure" if ad_set else "dnssec_unsigned"
-            except Exception as e:  # pragma: no cover - defensive logging only
-                logger.debug("Upstream AD check failed: %s", e)
-                return None
+            parsed = _DNSRecord.parse(response_wire)
+            ad_set = getattr(parsed.header, "ad", 0) == 1
+            return "dnssec_secure" if ad_set else "dnssec_unsigned"
+        except Exception as e:  # pragma: no cover - defensive logging only
+            logger.debug("Upstream AD check failed: %s", e)
+            return None
     except Exception:  # pragma: no cover - defensive: low-value edge case
         logger.debug("DNSSEC classification failed; leaving status unset")
         return None

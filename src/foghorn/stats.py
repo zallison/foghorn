@@ -965,15 +965,16 @@ class StatsSQLiteStore:
                     except Exception:
                         dnssec_status = None
 
-                if dnssec_status in {
-                    "dnssec_secure",
-                    "dnssec_unsigned",
-                    "dnssec_bogus",
-                    "dnssec_indeterminate",
-                }:
-                    # dnssec_status values are already fully-qualified
-                    # keys in the new scheme (for example, 'dnssec_secure').
-                    self.increment_count("totals", dnssec_status, 1)
+                    if dnssec_status in {
+                        "dnssec_secure",
+                        "dnssec_ext_secure",
+                        "dnssec_unsigned",
+                        "dnssec_bogus",
+                        "dnssec_indeterminate",
+                    }:
+                        # dnssec_status values are already fully-qualified
+                        # keys in the new scheme (for example, 'dnssec_secure').
+                        self.increment_count("totals", dnssec_status, 1)
 
             # Ensure any batched operations are flushed so that export_counts()
             # immediately observes the recomputed aggregates when this method
