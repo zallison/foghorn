@@ -173,7 +173,7 @@
         },
         "validation": {
           "type": "string",
-          "enum": ["upstream_ad", "local"],
+          "enum": ["upstream_ad", "local", "local_extended"],
           "default": "upstream_ad"
         },
         "udp_payload_size": { "type": "integer", "minimum": 512 }
