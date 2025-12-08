@@ -1215,6 +1215,11 @@ def create_app(
             "cache_miss_subdomains": snap.cache_miss_subdomains,
             "rate_limit": getattr(snap, "rate_limit", None),
         }
+
+        dnssec_totals = getattr(snap, "dnssec_totals", None)
+        if dnssec_totals:
+            payload["dnssec"] = dnssec_totals
+
         return payload
 
     @app.post("/api/v1/stats/reset", dependencies=[Depends(auth_dep)])
@@ -2058,6 +2063,11 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             "cache_miss_subdomains": snap.cache_miss_subdomains,
             "rate_limit": getattr(snap, "rate_limit", None),
         }
+
+        dnssec_totals = getattr(snap, "dnssec_totals", None)
+        if dnssec_totals:
+            payload["dnssec"] = dnssec_totals
+
         self._send_json(200, payload)
 
     def _handle_stats_reset(
