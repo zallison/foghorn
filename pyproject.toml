@@ -28,6 +28,7 @@ dependencies = [
   "whois",
   "coverage",
   "docker>=7.0.0",
+  "cryptography",
 ]
 
 [optional-dependencies]
