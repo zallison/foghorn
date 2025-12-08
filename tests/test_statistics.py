@@ -317,6 +317,7 @@ class TestStatsCollector:
         # Supported statuses map directly to dnssec_* totals keys.
         for status in [
             "dnssec_secure",
+            "dnssec_ext_secure",
             "dnssec_unsigned",
             "dnssec_bogus",
             "dnssec_indeterminate",
@@ -325,6 +326,7 @@ class TestStatsCollector:
 
         snapshot = collector.snapshot()
         assert snapshot.totals["dnssec_secure"] == 1
+        assert snapshot.totals["dnssec_ext_secure"] == 1
         assert snapshot.totals["dnssec_unsigned"] == 1
         assert snapshot.totals["dnssec_bogus"] == 1
         assert snapshot.totals["dnssec_indeterminate"] == 1

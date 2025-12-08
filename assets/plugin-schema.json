@@ -99,50 +99,6 @@
             "title": "DockerEndpointConfig",
             "type": "object"
           }
-        }
-      ]
-    }
-  },
-  "properties": {
-    "$schema": {
-      "type": "string",
-      "description": "Optional URI or identifier for the JSON Schema associated with this configuration file. Ignored by Foghorn at runtime."
-    },
-    "listen": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "host": { "type": "string" },
-        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "udp": { "$ref": "#/$defs/listener_udp" },
-        "tcp": { "$ref": "#/$defs/listener_tcp" },
-        "dot": { "$ref": "#/$defs/listener_dot" },
-        "doh": { "$ref": "#/$defs/listener_doh" }
-      }
-    },
-    "upstreams": {
-      "type": "array",
-      "minItems": 1,
-      "items": {
-        "oneOf": [
-          { "$ref": "#/$defs/upstream_host" },
-          { "$ref": "#/$defs/upstream_doh" }
-        ]
-      }
-    },
-    "foghorn": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "timeout_ms": { "type": "integer", "minimum": 1 },
-        "upstream_strategy": {
-          "type": "string",
-          "enum": ["failover", "round_robin", "random"],
-          "default": "failover"
-        },
-        "upstream_max_concurrent": {
-          "type": "integer",
-          "minimum": 1
         },
         "additionalProperties": true,
         "description": "Brief: Typed configuration model for DockerHosts plugin.\n\nInputs:\n  - endpoints: List of endpoint dictionaries.\n    Each entry must contain:\n      - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n        \"tcp://127.0.0.1:2375\").\n    and may contain:\n      - reload_interval_second: float seconds between refreshes for that\n        endpoint.\n      - use_ipv4: Optional IPv4 address to use instead of per-container\n        IPv4 addresses for containers discovered via that endpoint.\n      - use_ipv6: Optional IPv6 address to use instead of per-container\n        IPv6 addresses for containers discovered via that endpoint.\n      - ttl: Optional TTL override (seconds) for answers derived from that\n        endpoint.\n  - ttl: Plugin-level DNS answer TTL in seconds used when an endpoint does\n    not specify its own ttl.\n\nOutputs:\n  - DockerHostsConfig instance with normalized field types.",
@@ -233,19 +189,6 @@
             "title": "Watchdog Poll Interval Seconds",
             "type": "number"
           }
-    "dnssec": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "mode": {
-          "type": "string",
-          "enum": ["ignore", "passthrough", "validate"],
-          "default": "ignore"
-        },
-        "validation": {
-          "type": "string",
-          "enum": ["upstream_ad", "local", "local_extended"],
-          "default": "upstream_ad"
         },
         "title": "EtcHostsConfig",
         "type": "object"
