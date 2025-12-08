@@ -119,6 +119,10 @@
     }
   },
   "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional URI or identifier for the JSON Schema associated with this configuration file. Ignored by Foghorn at runtime."
+    },
     "listen": {
       "type": "object",
       "additionalProperties": false,
@@ -173,7 +177,7 @@
         },
         "validation": {
           "type": "string",
-          "enum": ["upstream_ad", "local"],
+          "enum": ["upstream_ad", "local", "local_extended"],
           "default": "upstream_ad"
         },
         "udp_payload_size": { "type": "integer", "minimum": 512 }

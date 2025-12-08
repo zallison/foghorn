@@ -363,10 +363,10 @@ class StatsSnapshot:
     Immutable point-in-time snapshot of statistics for logging.
 
     Inputs (constructor):
-        All fields provided by StatsCollector.snapshot()
+        All fields provided by StatsCollector.snapshot().
 
     Outputs:
-        Snapshot instance with read-only view of statistics
+        Snapshot instance with read-only view of statistics.
 
     This dataclass is created under lock but logged outside the lock to
     minimize contention. All collections are copied to prevent mutation.
@@ -404,6 +404,11 @@ class StatsSnapshot:
     # Optional aggregated view of rate limiting derived from totals and/or
     # persistent counters (for example, cache_stat_rate_limit).
     rate_limit: Optional[Dict[str, Any]] = None
+    # Optional DNSSEC status counters (subset of totals where keys start with
+    # "dnssec_"). This is derived from ``totals`` for convenience in APIs and
+    # UI rendering; the same keys remain present under ``totals`` for
+    # backwards-compatibility.
+    dnssec_totals: Optional[Dict[str, int]] = None
 
 
 class StatsSQLiteStore:
@@ -965,15 +970,16 @@ class StatsSQLiteStore:
                     except Exception:
                         dnssec_status = None
 
-                if dnssec_status in {
-                    "dnssec_secure",
-                    "dnssec_unsigned",
-                    "dnssec_bogus",
-                    "dnssec_indeterminate",
-                }:
-                    # dnssec_status values are already fully-qualified
-                    # keys in the new scheme (for example, 'dnssec_secure').
-                    self.increment_count("totals", dnssec_status, 1)
+                    if dnssec_status in {
+                        "dnssec_secure",
+                        "dnssec_ext_secure",
+                        "dnssec_unsigned",
+                        "dnssec_bogus",
+                        "dnssec_indeterminate",
+                    }:
+                        # dnssec_status values are already fully-qualified
+                        # keys in the new scheme (for example, 'dnssec_secure').
+                        self.increment_count("totals", dnssec_status, 1)
 
             # Ensure any batched operations are flushed so that export_counts()
             # immediately observes the recomputed aggregates when this method
@@ -2383,6 +2389,21 @@ class StatsCollector:
                     denied = 0
                 rate_limit = {"denied": denied}
 
+            # Extract DNSSEC-related counters (keys beginning with "dnssec_")
+            # into a dedicated mapping while leaving them under ``totals`` for
+            # backwards-compatibility.
+            dnssec_totals: Optional[Dict[str, int]] = None
+            try:
+                dnssec_subset = {
+                    k: int(v)
+                    for k, v in totals.items()
+                    if isinstance(v, (int, float)) and str(k).startswith("dnssec_")
+                }
+            except Exception:
+                dnssec_subset = {}
+            if dnssec_subset:
+                dnssec_totals = dnssec_subset
+
             snapshot = StatsSnapshot(
                 created_at=time.time(),
                 totals=totals,
@@ -2406,6 +2427,7 @@ class StatsCollector:
                 cache_hit_subdomains=cache_hit_subdomains,
                 cache_miss_subdomains=cache_miss_subdomains,
                 rate_limit=rate_limit,
+                dnssec_totals=dnssec_totals,
             )
 
             # Reset if requested
@@ -2939,6 +2961,10 @@ def format_snapshot_json(snapshot: StatsSnapshot) -> str:
         "totals": snapshot.totals,
         "meta": meta,
     }
+
+    # When available, expose DNSSEC totals as a dedicated top-level object.
+    if getattr(snapshot, "dnssec_totals", None):
+        output["dnssec"] = snapshot.dnssec_totals
 
     if snapshot.uniques:
         output["uniques"] = snapshot.uniques

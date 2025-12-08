@@ -189,6 +189,11 @@
 				load_1m: 'System load average over the last 1 minute.',
 				load_5m: 'System load average over the last 5 minutes.',
 				load_15m: 'System load average over the last 15 minutes.',
+				dnssec_secure: 'Responses that validated successfully against DNSSEC trust anchors (secure).',
+				dnssec_ext_secure: 'Responses treated as DNSSEC-secure based on extended upstream signals (for example, AD bit).',
+				dnssec_unsigned: 'Responses from zones that are not signed with DNSSEC (unsigned but not an error).',
+				dnssec_bogus: 'Responses that failed DNSSEC validation (bogus).',
+				dnssec_indeterminate: 'Responses where DNSSEC status could not be determined (indeterminate).',
 			};
 
 			function setMessage(text, level) {
@@ -1102,10 +1107,11 @@
 				if (Object.keys(meta).length) {
 					appendDictGroup('Meta', meta);
 				}
-				appendProcessGroup(data.system);
 
-				// For Totals, hide certain internal-pre cache counters from the UI.
+				// For Totals, hide certain internal-pre cache counters from the UI and
+				// peel off DNSSEC-specific counters into their own mapping.
 				var totalsForDisplay = {};
+				var dnssecTotalsFromTotals = {};
 				if (data.totals && typeof data.totals === 'object') {
 					Object.keys(data.totals).forEach(function (key) {
 						if (
@@ -1115,13 +1121,33 @@
 						) {
 							return;
 						}
+						if (key.indexOf('dnssec_') === 0) {
+							dnssecTotalsFromTotals[key] = data.totals[key];
+							return;
+						}
 						totalsForDisplay[key] = data.totals[key];
 					});
 				}
 
 				appendDictGroup('Totals', totalsForDisplay);
+
+				// Prefer a dedicated dnssec object from the API when present; fall
+				// back to DNSSEC counters discovered under totals.
+				var dnssecMapping = null;
+				if (data.dnssec && typeof data.dnssec === 'object') {
+					dnssecMapping = data.dnssec;
+				} else if (dnssecTotalsFromTotals && Object.keys(dnssecTotalsFromTotals).length) {
+					dnssecMapping = dnssecTotalsFromTotals;
+				}
+				if (dnssecMapping && Object.keys(dnssecMapping).length) {
+					appendDictGroup('DNSSEC', dnssecMapping);
+				}
+
+				// Show per-process stats immediately after Totals/DNSSEC so they stay
+				// visually grouped near core counters.
+				appendProcessGroup(data.system);
+
 				appendUpstreamsGroup(data.upstreams || {}, data.upstream_rcodes || {});
-				appendUpstreamQtypesGroup(data.upstream_qtypes || {});
 				appendDictGroup('Query types', data.qtypes || {});
 				appendDictGroup('Response codes', data.rcodes || {});
 				appendDictGroup('Recent latency', data.latency_recent || {});
