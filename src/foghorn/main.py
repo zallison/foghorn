@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import yaml
 
 from .config_schema import validate_config
+from .dnssec_validate import configure_dnssec_resolver
 from .doh_api import start_doh_server
 from .logging_config import init_logging
 from .plugins.base import BasePlugin
@@ -869,6 +870,21 @@ def main(argv: List[str] | None = None) -> int:
     dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()
     edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
     dnssec_validation = str(dnssec_cfg.get("validation", "upstream_ad")).lower()
+
+    # When performing local DNSSEC validation (including local_extended), point
+    # the validator's internal resolver at the configured upstream hosts so that
+    # chain validation and extended lookups use the same recursive resolvers as
+    # normal forwarding. DoH-style upstreams identified only by URL are ignored
+    # here; only host-based upstreams (udp/tcp/dot) participate.
+    if dnssec_mode == "validate" and dnssec_validation in {"local", "local_extended"}:
+        upstream_hosts = [
+            str(u["host"]) for u in upstreams if isinstance(u, dict) and "host" in u
+        ]
+        configure_dnssec_resolver(upstream_hosts or None)
+    else:
+        # For non-validating modes or upstream_ad, fall back to system resolver
+        # configuration inside the DNSSEC validator.
+        configure_dnssec_resolver(None)
 
     server = None
     udp_thread: threading.Thread | None = None
