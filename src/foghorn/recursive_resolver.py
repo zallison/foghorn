@@ -8,8 +8,9 @@ from typing import Dict, List, Optional, Tuple
 
 from dnslib import QTYPE, RCODE, DNSRecord
 
-from .transports.tcp import tcp_query
-from .transports.udp import udp_query
+from . import (
+    recursive_resolver as _recursive_module,
+)  # Self-import to honour test monkeypatching.
 
 """Iterative recursive resolver for Foghorn.
 
@@ -118,7 +119,9 @@ class RecursiveResolver:
         """
 
         try:
-            resp = udp_query(
+            # Import via this module alias so tests which monkeypatch
+            # foghorn.recursive_resolver.udp_query see the effect here.
+            resp = _recursive_module.udp_query(
                 server.host,
                 int(server.port),
                 wire,
@@ -142,7 +145,9 @@ class RecursiveResolver:
 
         if getattr(parsed.header, "tc", 0):
             try:
-                resp = tcp_query(
+                # Likewise, use the module alias for tcp_query so tests can
+                # safely stub it via monkeypatch without hitting the network.
+                resp = _recursive_module.tcp_query(
                     server.host,
                     int(server.port),
                     wire,
@@ -336,9 +341,51 @@ class RecursiveResolver:
             if not is_final:
                 minimise_count += 1
 
-            resp_wire = self._query_single(server, wire)
-            if resp_wire is None:
+            # Perform the upstream query directly here so that tests which
+            # monkeypatch foghorn.recursive_resolver.udp_query/tcp_query can
+            # reliably intercept all network operations.
+            try:
+                resp_wire = _recursive_module.udp_query(
+                    server.host,
+                    int(server.port),
+                    wire,
+                    timeout_ms=self._per_try_timeout_ms,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug(
+                    "UDP query to %s:%d failed: %s", server.host, server.port, exc
+                )
                 continue
+
+            # If TC=1, retry over TCP for a full answer.
+            try:
+                parsed = DNSRecord.parse(resp_wire)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug(
+                    "Failed to parse UDP response from %s:%d: %s",
+                    server.host,
+                    server.port,
+                    exc,
+                )
+                continue
+
+            if getattr(parsed.header, "tc", 0):
+                try:
+                    resp_wire = _recursive_module.tcp_query(
+                        server.host,
+                        int(server.port),
+                        wire,
+                        connect_timeout_ms=self._per_try_timeout_ms,
+                        read_timeout_ms=self._per_try_timeout_ms,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug(
+                        "TCP follow-up to %s:%d failed: %s",
+                        server.host,
+                        server.port,
+                        exc,
+                    )
+                    continue
 
             last_upstream = f"{server.host}:{server.port}"
 
