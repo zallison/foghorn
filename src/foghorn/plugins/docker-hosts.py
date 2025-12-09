@@ -1,7 +1,3 @@
-from __future__ import annotations
-
-# ruff: noqa: E402
-
 """DockerHosts plugin: resolve container hostnames and reverse IPs via Docker.
 
 Brief:
@@ -12,11 +8,13 @@ Brief:
     / ip6.arpa-style reverse names (PTR) derived from those addresses.
 """
 
+from __future__ import annotations
+
 import ipaddress
 import logging
 import threading
-from typing import Dict, Iterable, List, Optional, Tuple
 
+from typing import Dict, Iterable, List, Optional, Tuple
 from dnslib import AAAA, PTR, QTYPE, RR, A, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field
 
