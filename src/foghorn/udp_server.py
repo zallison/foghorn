@@ -60,10 +60,17 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     min_cache_ttl = 60
     stats_collector = None  # Optional StatsCollector instance
     dnssec_mode = "ignore"  # ignore | passthrough | validate
-    dnssec_validation = "upstream_ad"  # upstream_ad | local
+    dnssec_validation = "upstream_ad"  # upstream_ad | local | local_extended
     edns_udp_payload = 1232
 
-    # Upstream selection strategy and concurrency controls.
+    # Resolver mode and recursion controls.
+    resolver_mode: str = "forward"  # forward | recursive
+    recursive_max_depth: int = 16
+    recursive_timeout_ms: int = 2000
+    recursive_per_try_timeout_ms: int = 2000
+    root_hints_path: Optional[str] = None
+
+    # Upstream selection strategy and concurrency controls (forward mode).
     upstream_strategy: str = "failover"  # failover | round_robin | random
     upstream_max_concurrent: int = 1
     _upstream_rr_index: int = 0  # round-robin index shared across handler instances

@@ -460,8 +460,40 @@ def main(argv: List[str] | None = None) -> int:
     dot_cfg = _sub("dot", {"enabled": False, "host": default_host, "port": 853})
     doh_cfg = _sub("doh", {"enabled": False, "host": default_host, "port": 1443})
 
-    # Normalize upstream configuration
-    upstreams, timeout_ms = normalize_upstream_config(cfg)
+    # Resolver configuration (forward vs recursive) with conservative defaults.
+    resolver_cfg = cfg.get("resolver") or {}
+    if resolver_cfg is None:
+        resolver_cfg = {}
+    if not isinstance(resolver_cfg, dict):
+        raise ValueError("config.resolver must be a mapping when present")
+
+    resolver_mode = str(resolver_cfg.get("mode", "forward")).lower()
+    try:
+        recursive_max_depth = int(resolver_cfg.get("max_depth", 16))
+    except (TypeError, ValueError):
+        recursive_max_depth = 16
+    try:
+        recursive_timeout_ms = int(
+            resolver_cfg.get("timeout_ms", foghorn_cfg.get("timeout_ms", 2000))
+        )
+    except (TypeError, ValueError):
+        recursive_timeout_ms = int(foghorn_cfg.get("timeout_ms", 2000) or 2000)
+    try:
+        recursive_per_try_timeout_ms = int(
+            resolver_cfg.get("per_try_timeout_ms", recursive_timeout_ms)
+        )
+    except (TypeError, ValueError):
+        recursive_per_try_timeout_ms = recursive_timeout_ms
+
+    # Normalize upstream configuration only in forwarder mode.
+    if resolver_mode == "forward":
+        upstreams, timeout_ms = normalize_upstream_config(cfg)
+    else:
+        upstreams = []
+        try:
+            timeout_ms = int(foghorn_cfg.get("timeout_ms", 2000))
+        except (TypeError, ValueError):
+            timeout_ms = 2000
 
     # Upstream selection strategy and concurrency controls
     upstream_strategy = str(foghorn_cfg.get("upstream_strategy", "failover")).lower()
@@ -472,8 +504,6 @@ def main(argv: List[str] | None = None) -> int:
     # Global knob to disable asyncio-based listeners/admin servers in restricted
     # environments. When false, threaded fallbacks are used where available.
     use_asyncio = bool(foghorn_cfg.get("use_asyncio", True))
-
-    # Resolver configuration (forward vs recursive) with conservative defaults.
 
     # Hold responses this long, even if the actual ttl is lower.
     min_cache_ttl = _get_min_cache_ttl(cfg)
@@ -874,13 +904,19 @@ def main(argv: List[str] | None = None) -> int:
     # When performing local DNSSEC validation (including local_extended), point
     # the validator's internal resolver at the configured upstream hosts so that
     # chain validation and extended lookups use the same recursive resolvers as
-    # normal forwarding. DoH-style upstreams identified only by URL are ignored
-    # here; only host-based upstreams (udp/tcp/dot) participate.
+    # normal forwarding. In recursive mode there are no forwarder upstreams; in
+    # that case, route all DNSSEC helper lookups through Foghorn's own
+    # RecursiveResolver rather than the system resolver.
     if dnssec_mode == "validate" and dnssec_validation in {"local", "local_extended"}:
-        upstream_hosts = [
-            str(u["host"]) for u in upstreams if isinstance(u, dict) and "host" in u
-        ]
-        configure_dnssec_resolver(upstream_hosts or None)
+        if resolver_mode == "forward":
+            upstream_hosts = [
+                str(u["host"]) for u in upstreams if isinstance(u, dict) and "host" in u
+            ]
+            configure_dnssec_resolver(upstream_hosts or None)
+        else:
+            # Empty list is a sentinel telling dnssec_validate to use
+            # RecursiveResolver for all validation lookups.
+            configure_dnssec_resolver([])
     else:
         # For non-validating modes or upstream_ad, fall back to system resolver
         # configuration inside the DNSSEC validator.
@@ -909,14 +945,25 @@ def main(argv: List[str] | None = None) -> int:
             dnssec_validation=dnssec_validation,
             upstream_strategy=upstream_strategy,
             upstream_max_concurrent=upstream_max_concurrent,
+            resolver_mode=resolver_mode,
+            recursive_max_depth=recursive_max_depth,
+            recursive_timeout_ms=recursive_timeout_ms,
+            recursive_per_try_timeout_ms=recursive_per_try_timeout_ms,
         )
 
     # Log startup info
-    upstream_info = ", ".join(
-        [f"{u['url']}" if "url" in u else f"{u['host']}:{u['port']}" for u in upstreams]
-    )
+    if resolver_mode == "forward":
+        upstream_info = ", ".join(
+            [
+                f"{u['url']}" if "url" in u else f"{u['host']}:{u['port']}"
+                for u in upstreams
+            ]
+        )
+    else:
+        upstream_info = "(recursive mode; no forward upstreams)"
     logger.info(
-        "Upstreams: [%s], timeout: %dms",
+        "Resolver mode=%s, upstreams: [%s], timeout: %dms",
+        resolver_mode,
         upstream_info,
         timeout_ms,
     )

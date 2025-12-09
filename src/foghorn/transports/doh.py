@@ -5,7 +5,6 @@ import ssl
 import urllib.parse
 from typing import Dict, Optional, Tuple
 
-
 try:
     FOGHORN_VERSION = importlib.metadata.version("foghorn")
 except (
