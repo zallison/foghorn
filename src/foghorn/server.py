@@ -2,12 +2,18 @@ import functools
 import logging
 import socketserver
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple, NamedTuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
-from dnslib import QTYPE, RCODE, DNSRecord
-from dnslib import EDNS0, RR  # noqa: F401  (re-exported for udp_server._ensure_edns)
+from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
+    EDNS0,
+    QTYPE,
+    RCODE,
+    RR,
+    DNSRecord,
+)
 
 from .plugins.base import BasePlugin, PluginContext, PluginDecision
+from .recursive_resolver import RecursiveResolver
 from .transports.dot import DoTError, get_dot_pool
 from .transports.tcp import TCPError, get_tcp_pool, tcp_query
 from .udp_server import DNSUDPHandler
@@ -300,9 +306,9 @@ def send_query_with_failover(
                 )
                 verify = bool(tls_cfg.get("verify", True))
                 ca_file = tls_cfg.get("ca_file")
-                from .transports.doh import (
+                from .transports.doh import (  # local import to avoid overhead
                     doh_query,
-                )  # local import to avoid overhead
+                )
 
                 body, resp_headers = doh_query(
                     doh_url,
@@ -766,53 +772,102 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
-        # Classic forwarding only; recursive resolver mode has been removed on
-        # this branch.
         reply: Optional[bytes] = None
         used_upstream: Optional[Dict] = None
         reason: Optional[str] = None
 
-        # EDNS/DNSSEC adjustments (mirror DNSUDPHandler behavior).
-        # Reuse DNSUDPHandler._ensure_edns so tests that monkeypatch that helper
-        # continue to observe calls when resolving via _resolve_core.
-        try:
-            mode = str(getattr(DNSUDPHandler, "dnssec_mode", "ignore")).lower()
-            if mode in ("ignore", "passthrough", "validate"):
-                handler = type("_H", (), {})()
-                handler.dnssec_mode = DNSUDPHandler.dnssec_mode
-                handler.edns_udp_payload = getattr(
-                    DNSUDPHandler, "edns_udp_payload", 1232
-                )
-                ensure = getattr(DNSUDPHandler, "_ensure_edns", None)
-                if callable(ensure):
-                    ensure(handler, req)
-        except (
-            Exception
-        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        # Decide between forwarding and recursive resolution based on resolver_mode.
+        resolver_mode = str(getattr(DNSUDPHandler, "resolver_mode", "forward")).lower()
 
-        # Forward with failover using the same helper as UDP handlers. Tests
-        # frequently monkeypatch send_query_with_failover directly, so we call
-        # it here rather than DNSUDPHandler._forward_with_failover_helper.
-        upstream_id: Optional[str] = None
-        timeout_ms = getattr(DNSUDPHandler, "timeout_ms", 2000)
-        upstreams = list(getattr(DNSUDPHandler, "upstream_addrs", []) or [])
-        try:
-            max_concurrent = int(
-                getattr(DNSUDPHandler, "upstream_max_concurrent", 1) or 1
+        if resolver_mode == "recursive":
+            # In recursive mode we bypass configured upstreams and instead walk
+            # from the root using RecursiveResolver. We still honour the
+            # dnssec_mode when constructing the query (RD bit and EDNS DO bit
+            # are already handled earlier in the pipeline) and we reuse
+            # DNSUDPHandler's recursion knobs.
+            try:
+                max_depth = int(getattr(DNSUDPHandler, "recursive_max_depth", 16) or 16)
+            except Exception:  # pragma: no cover - defensive
+                max_depth = 16
+            try:
+                recursion_timeout_ms = int(
+                    getattr(
+                        DNSUDPHandler,
+                        "recursive_timeout_ms",
+                        getattr(DNSUDPHandler, "timeout_ms", 2000),
+                    )
+                    or getattr(DNSUDPHandler, "timeout_ms", 2000)
+                )
+            except Exception:  # pragma: no cover - defensive
+                recursion_timeout_ms = int(
+                    getattr(DNSUDPHandler, "timeout_ms", 2000) or 2000
+                )
+            try:
+                per_try_ms = int(
+                    getattr(
+                        DNSUDPHandler,
+                        "recursive_per_try_timeout_ms",
+                        recursion_timeout_ms,
+                    )
+                    or recursion_timeout_ms
+                )
+            except Exception:  # pragma: no cover - defensive
+                per_try_ms = recursion_timeout_ms
+
+            resolver = RecursiveResolver(
+                cache=DNSUDPHandler.cache,
+                stats=stats,
+                max_depth=max_depth,
+                timeout_ms=recursion_timeout_ms,
+                per_try_timeout_ms=per_try_ms,
             )
-        except Exception:
-            max_concurrent = 1
-        if max_concurrent < 1:
-            max_concurrent = 1
-        reply, used_upstream, reason = send_query_with_failover(
-            req,
-            upstreams,
-            timeout_ms,
-            qname,
-            qtype,
-            max_concurrent=max_concurrent,
-        )
+
+            # Perform iterative resolution. RecursiveResolver is responsible for
+            # talking to upstream authorities; we only receive the final wire
+            # and an optional upstream identifier for stats.
+            reply, upstream_id = resolver.resolve(req)
+            reason = "ok" if reply is not None else "all_failed"
+        else:
+            # Classic forwarding: EDNS/DNSSEC adjustments (mirror
+            # DNSUDPHandler behaviour) followed by send_query_with_failover.
+            try:
+                mode = str(getattr(DNSUDPHandler, "dnssec_mode", "ignore")).lower()
+                if mode in ("ignore", "passthrough", "validate"):
+                    handler = type("_H", (), {})()
+                    handler.dnssec_mode = DNSUDPHandler.dnssec_mode
+                    handler.edns_udp_payload = getattr(
+                        DNSUDPHandler, "edns_udp_payload", 1232
+                    )
+                    ensure = getattr(DNSUDPHandler, "_ensure_edns", None)
+                    if callable(ensure):
+                        ensure(handler, req)
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+
+            # Forward with failover using the same helper as UDP handlers. Tests
+            # frequently monkeypatch send_query_with_failover directly, so we call
+            # it here rather than DNSUDPHandler._forward_with_failover_helper.
+            upstream_id = None
+            timeout_ms = getattr(DNSUDPHandler, "timeout_ms", 2000)
+            upstreams = list(getattr(DNSUDPHandler, "upstream_addrs", []) or [])
+            try:
+                max_concurrent = int(
+                    getattr(DNSUDPHandler, "upstream_max_concurrent", 1) or 1
+                )
+            except Exception:
+                max_concurrent = 1
+            if max_concurrent < 1:
+                max_concurrent = 1
+            reply, used_upstream, reason = send_query_with_failover(
+                req,
+                upstreams,
+                timeout_ms,
+                qname,
+                qtype,
+                max_concurrent=max_concurrent,
+            )
 
         # Record upstream result, even when all upstreams ultimately fail.
         if stats is not None and used_upstream:
@@ -1152,6 +1207,10 @@ class DNSServer:
         dnssec_validation: str = "upstream_ad",
         upstream_strategy: str = "failover",
         upstream_max_concurrent: int = 1,
+        resolver_mode: str = "forward",
+        recursive_max_depth: int = 16,
+        recursive_timeout_ms: int = 2000,
+        recursive_per_try_timeout_ms: int = 2000,
     ) -> None:
         """Initialize a UDP DNSServer.
 
@@ -1176,6 +1235,10 @@ class DNSServer:
         DNSUDPHandler.dnssec_mode = str(dnssec_mode)
         DNSUDPHandler.dnssec_validation = str(dnssec_validation)
         DNSUDPHandler.upstream_strategy = str(upstream_strategy).lower()
+        DNSUDPHandler.resolver_mode = str(resolver_mode).lower()
+        DNSUDPHandler.recursive_max_depth = int(recursive_max_depth)
+        DNSUDPHandler.recursive_timeout_ms = int(recursive_timeout_ms)
+        DNSUDPHandler.recursive_per_try_timeout_ms = int(recursive_per_try_timeout_ms)
         try:
             DNSUDPHandler.upstream_max_concurrent = max(1, int(upstream_max_concurrent))
         except Exception:
