@@ -32,7 +32,11 @@ logger = logging.getLogger("foghorn.dnssec")
 # When None, the system resolver configuration is used (as provided by
 # dnspython). When set to a non-empty list of IP strings, all validation
 # lookups (_resolver) will send queries directly to those nameservers.
+#
+# When configured via an empty list ("[]"), validation lookups are performed
+# using Foghorn's own RecursiveResolver instead of any external resolvers.
 _VALIDATION_NAMESERVERS: list[str] | None = None
+_VALIDATION_VIA_RECURSIVE: bool = False
 
 
 def configure_dnssec_resolver(nameservers: Optional[list[str]]) -> None:
@@ -48,12 +52,23 @@ def configure_dnssec_resolver(nameservers: Optional[list[str]]) -> None:
       - None; updates module-level configuration used by _resolver().
     """
 
-    global _VALIDATION_NAMESERVERS
-    if not nameservers:
+    global _VALIDATION_NAMESERVERS, _VALIDATION_VIA_RECURSIVE
+
+    # Sentinel semantics:
+    #   - nameservers is None: use system resolver configuration.
+    #   - nameservers is an empty list: use Foghorn's own RecursiveResolver for
+    #     all validation lookups (no system resolver, no external stub).
+    #   - nameservers is a non-empty list: talk directly to those IPs.
+    if nameservers is None:
         _VALIDATION_NAMESERVERS = None
+        _VALIDATION_VIA_RECURSIVE = False
+    elif isinstance(nameservers, list) and len(nameservers) == 0:
+        _VALIDATION_NAMESERVERS = []
+        _VALIDATION_VIA_RECURSIVE = True
     else:
         # Store a shallow copy so callers cannot mutate our internal list.
         _VALIDATION_NAMESERVERS = list(nameservers)
+        _VALIDATION_VIA_RECURSIVE = False
 
 
 # RFC 5011-style trust anchor configuration (wired in by the application
@@ -101,15 +116,100 @@ j8GvXfY8+9GZV3fQ0R2U2GZQBaL8Xo4Z5V3Ckq5oO2GhgGZLQG5w5fVsrEo3xPx+
 CfJ4H3CvGf2bQ3aU/J5g7y3i7vU898vW3HjR8wQ6Y2GQ7QvG4hVYbVUrkE0="""
 
 
-def _resolver(payload_size: int = 1232) -> dns.resolver.Resolver:
-    """Return a dnspython Resolver configured for DNSSEC validation.
+class _RecursiveAnswer:
+    """Minimal Answer-like object for RecursiveResolver-backed lookups.
 
-    The resolver always enables EDNS(0) with the DO bit set. When
-    _VALIDATION_NAMESERVERS is configured via configure_dnssec_resolver(), the
-    resolver is created without reading system configuration and uses those
-    nameservers directly. Otherwise, the system's resolver configuration
-    (/etc/resolv.conf, etc.) is used.
+    Inputs:
+      - rrset: The RRset corresponding to the queried name/type (or None).
+      - response: Full dns.message.Message parsed from wire.
+
+    Outputs:
+      - Instances exposing .rrset and .response attributes compatible with the
+        subset of dnspython's Answer API used by this module.
     """
+
+    def __init__(self, rrset, response):
+        self.rrset = rrset
+        self.response = response
+
+
+class _RecursiveValidationResolver:
+    """Resolver shim that routes DNSSEC helper queries via RecursiveResolver.
+
+    This class implements the small subset of the dnspython Resolver API that
+    dnssec_validate relies on: a ``resolve(name, rdtype, raise_on_no_answer)``
+    method returning an object with ``rrset`` and ``response`` attributes.
+
+    It sends its queries using Foghorn's RecursiveResolver and never consults
+    the system resolver configuration or external stub resolvers.
+    """
+
+    def __init__(self, payload_size: int = 1232) -> None:
+        self._payload_size = int(payload_size or 1232)
+
+    def resolve(self, name, rdtype, raise_on_no_answer: bool = True):  # noqa: D401
+        """Resolve a single qname/rdtype using RecursiveResolver."""
+
+        # Local imports to avoid introducing hard module-level dependencies or
+        # import cycles when DNSSEC is disabled.
+        from dnslib import EDNS0, DNSRecord
+
+        from .recursive_resolver import RecursiveResolver
+
+        # Normalise name and rdtype to text for dnslib.
+        qname_text = getattr(name, "to_text", lambda: str(name))()
+        if isinstance(rdtype, str):
+            rdtype_text = rdtype
+        else:
+            rdtype_text = dns.rdatatype.to_text(rdtype)
+
+        # Build a DNS query with EDNS(0) + DO bit set so that upstream
+        # authorities can return DNSSEC material when available.
+        q = DNSRecord.question(qname_text, rdtype_text)
+        try:
+            q.add_ar(EDNS0(payload=self._payload_size, flags=dns.flags.DO))
+        except Exception:  # pragma: no cover - defensive: EDNS helper failure
+            pass
+
+        resolver = RecursiveResolver(
+            cache=None,
+            stats=None,
+            max_depth=16,
+            timeout_ms=2000,
+            per_try_timeout_ms=2000,
+        )
+        wire, _ = resolver.resolve(q)
+        resp = dns.message.from_wire(wire)
+
+        # Locate the RRset for the requested owner/type in the answer section.
+        wanted_type = dns.rdatatype.from_text(rdtype_text)
+        owner = dns.name.from_text(qname_text)
+        rrset = None
+        for rr in resp.answer:
+            if rr.name == owner and rr.rdtype == wanted_type:
+                rrset = rr
+                break
+
+        if rrset is None and raise_on_no_answer:
+            raise dns.resolver.NoAnswer(f"No RRset for {owner} {rdtype_text}")
+
+        return _RecursiveAnswer(rrset, resp)
+
+
+def _resolver(payload_size: int = 1232):
+    """Return a resolver object configured for DNSSEC validation.
+
+    The resolver always enables EDNS(0) with the DO bit set when using the
+    system or explicit nameserver configuration. When validation is configured
+    to run via Foghorn's RecursiveResolver, a small shim object is returned
+    instead that issues its queries through that engine.
+    """
+
+    # When validation is configured to run via Foghorn's RecursiveResolver,
+    # return a small shim that issues its queries through that engine instead of
+    # using any system or stub resolvers.
+    if _VALIDATION_VIA_RECURSIVE:
+        return _RecursiveValidationResolver(payload_size=payload_size)
 
     # When explicit nameservers are configured for validation, construct a
     # resolver without loading system configuration and point it at those
