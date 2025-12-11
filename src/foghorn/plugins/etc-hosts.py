@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Dict, Iterable, List, Optional
 
-from dnslib import AAAA, QTYPE, RR, A, DNSHeader, DNSRecord
+from dnslib import AAAA, PTR, QTYPE, RR, A, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field
 
 try:  # watchdog is used for cross-platform file watching
@@ -265,22 +265,20 @@ class EtcHosts(BasePlugin):
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
         """
-        Brief: Return an override decision if qname exists in loaded hosts.
+        Brief: Return an override decision for A/AAAA/PTR when qname exists in hosts.
 
         Inputs:
-            qname: Queried domain name.
+            qname: Queried domain name (may include a trailing dot).
             qtype: DNS record type.
             req: Raw DNS request bytes.
             ctx: Plugin context.
         Outputs:
-            PluginDecision("override") when domain is mapped (and type matches),
-            otherwise None.
+            PluginDecision("override") when domain is mapped and type is A/AAAA
+            (using the stored IP) or PTR (using the stored hostname), otherwise
+            None.
 
         """
         if not self.targets(ctx):
-            return None
-
-        if qtype not in (QTYPE.A, QTYPE.AAAA):
             return None
 
         qname = qname.rstrip(".")
@@ -289,13 +287,42 @@ class EtcHosts(BasePlugin):
         # reloading it in the background.
         lock = getattr(self, "_hosts_lock", None)
         if lock is None:
-            ip = self.hosts.get(qname)
+            value = self.hosts.get(qname)
         else:
             with lock:
-                ip = self.hosts.get(qname)
+                value = self.hosts.get(qname)
 
-        if not ip:
+        if not value:
             return None
+
+        # Handle reverse lookups using the precomputed in-addr.arpa entries.
+        if qtype == QTYPE.PTR:
+            hostname = str(value).rstrip(".") + "."
+            try:
+                request = DNSRecord.parse(req)
+            except Exception as exc:
+                logger.warning("EtcHosts: parse failure for PTR %s: %s", qname, exc)
+                return PluginDecision(action="override", response=None)
+
+            reply = DNSRecord(
+                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+            )
+            reply.add_answer(
+                RR(
+                    rname=request.q.qname,
+                    rtype=QTYPE.PTR,
+                    rclass=1,
+                    ttl=self._ttl,
+                    rdata=PTR(hostname),
+                )
+            )
+            return PluginDecision(action="override", response=reply.pack())
+
+        # Only A/AAAA lookups use the stored IP value.
+        if qtype not in (QTYPE.A, QTYPE.AAAA):
+            return None
+
+        ip = value
 
         # If the requested type doesn't match the IP version we have, let normal
         # resolution continue (avoid constructing invalid AAAA from IPv4, etc.).
