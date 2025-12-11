@@ -61,7 +61,7 @@ def test_default_priority():
 
 
 def test_no_targets_is_noop():
-    p = FlakyServer()  # no allow / client_ip
+    p = FlakyServer()  # no BasePlugin targets configured
     q, wire = _mk_query()
     ctx = PluginContext("192.0.2.55")
     assert p.pre_resolve("example.com", QTYPE.A, wire, ctx) is None
@@ -69,7 +69,7 @@ def test_no_targets_is_noop():
 
 def test_client_ip_targets_only_that_ip():
     p = FlakyServer(
-        client_ip="192.0.2.55", servfail_one_in=1, nxdomain_one_in=999, seed=1
+        targets=["192.0.2.55"], servfail_one_in=1, nxdomain_one_in=999, seed=1
     )
     q, wire = _mk_query()
     # Target IP should be affected (SERVFAIL forced by 1-in-1)
@@ -83,7 +83,9 @@ def test_client_ip_targets_only_that_ip():
 
 
 def test_allow_list_targets_cidr_and_single():
-    p = FlakyServer(allow=["192.0.2.0/24", "198.51.100.10"], servfail_one_in=1, seed=2)
+    p = FlakyServer(
+        targets=["192.0.2.0/24", "198.51.100.10"], servfail_one_in=1, seed=2
+    )
     q, wire = _mk_query()
     assert p.pre_resolve("ex", QTYPE.A, wire, PluginContext("192.0.2.99")) is not None
     assert (
@@ -95,7 +97,7 @@ def test_allow_list_targets_cidr_and_single():
 
 def test_servfail_precedence_over_nxdomain():
     p = FlakyServer(
-        client_ip="192.0.2.55", servfail_one_in=1, nxdomain_one_in=1, seed=3
+        targets=["192.0.2.55"], servfail_one_in=1, nxdomain_one_in=1, seed=3
     )
     q, wire = _mk_query()
     dec = p.pre_resolve("ex", QTYPE.A, wire, PluginContext("192.0.2.55"))
@@ -106,8 +108,7 @@ def test_servfail_precedence_over_nxdomain():
 
 def test_qtype_filtering_only_A():
     p = FlakyServer(
-        client_ip="192.0.2.55",
-        allow=None,
+        targets=["192.0.2.55"],
         servfail_one_in=1,
         apply_to_qtypes=["A"],
         seed=4,
@@ -122,11 +123,11 @@ def test_qtype_filtering_only_A():
     assert dec_aaaa is None
 
 
-def test_invalid_allow_entries_do_not_crash(caplog):
+def test_invalid_targets_entries_do_not_crash(caplog):
     caplog.set_level("WARNING")
     p = FlakyServer(
-        allow=["not-an-ip", "300.300.300.300/33"], servfail_one_in=1, seed=5
+        targets=["not-an-ip", "300.300.300.300/33"], servfail_one_in=1, seed=5
     )
     q, wire = _mk_query()
-    # With no valid targets, it's a no-op
+    # With no valid targets, BasePlugin will ignore them and FlakyServer is a no-op
     assert p.pre_resolve("ex", QTYPE.A, wire, PluginContext("192.0.2.55")) is None
