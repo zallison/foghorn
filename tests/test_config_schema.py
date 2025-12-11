@@ -68,7 +68,7 @@ def test_get_default_schema_path_docker_fallback(monkeypatch) -> None:
       - monkeypatch: Pytest monkeypatch fixture used to stub Path.is_file.
 
     Outputs:
-      - None; asserts returned path points to /foghorn/assets/config-yaml.schema.
+      - None; asserts returned path points to /foghorn/assets/config-schema.json.
     """
 
     real_path_cls = config_schema_mod.Path
@@ -77,14 +77,14 @@ def test_get_default_schema_path_docker_fallback(monkeypatch) -> None:
         """Return True only for the Docker candidate, False otherwise."""
 
         s = str(self)
-        if s == "/foghorn/assets/config-yaml.schema":
+        if s == "/foghorn/assets/config-schema.json":
             return True
         return False
 
     monkeypatch.setattr(real_path_cls, "is_file", fake_is_file, raising=False)
 
     p = get_default_schema_path()
-    assert str(p) == "/foghorn/assets/config-yaml.schema"
+    assert str(p) == "/foghorn/assets/config-schema.json"
 
 
 def test_get_default_schema_path_last_resort_uses_project_root(monkeypatch) -> None:
@@ -109,7 +109,7 @@ def test_get_default_schema_path_last_resort_uses_project_root(monkeypatch) -> N
     # Mirror the logic inside get_default_schema_path() by resolving the
     # config_schema module's file, not this test file.
     here = real_path_cls(config_schema_mod.__file__).resolve()
-    expected = here.parents[2] / "assets" / "config-yaml.schema"
+    expected = here.parents[2] / "assets" / "config-schema.json"
 
     p = get_default_schema_path()
     assert p == expected
