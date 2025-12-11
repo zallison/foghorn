@@ -39,7 +39,7 @@ _MINIMISE_ONE_LAB = 2
 
 
 def udp_query(host: str, port: int, wire: bytes, *, timeout_ms: int = 2000) -> bytes:
-    """Brief: DNS-over-UDP helper used by RecursiveResolver.
+    """Brief: DNS-over-UDP helper used by RecursiveResolver and tests.
 
     Inputs:
       - host: Upstream authority host/IP.
@@ -62,7 +62,7 @@ def tcp_query(
     connect_timeout_ms: int = 1000,
     read_timeout_ms: int = 1500,
 ) -> bytes:
-    """Brief: DNS-over-TCP helper used by RecursiveResolver.
+    """Brief: DNS-over-TCP helper used by RecursiveResolver and tests.
 
     Inputs:
       - host: Upstream authority host/IP.
