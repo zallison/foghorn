@@ -15,7 +15,7 @@ from foghorn.plugins.base import BasePlugin, PluginContext
 
 def test_default_priorities_are_100():
     """
-    Brief: Verify BasePlugin defaults to pre_priority=100 and post_priority=100.
+    Brief: Verify BasePlugin defaults to pre_priority=100, post_priority=100, and setup_priority=100.
 
     Inputs:
       - None
@@ -25,10 +25,12 @@ def test_default_priorities_are_100():
     """
     assert BasePlugin.pre_priority == 100
     assert BasePlugin.post_priority == 100
+    assert BasePlugin.setup_priority == 100
 
     plugin = BasePlugin()
     assert plugin.pre_priority == 100
     assert plugin.post_priority == 100
+    assert plugin.setup_priority == 100
 
 
 def test_class_attribute_defaults_respected():
@@ -53,8 +55,10 @@ def test_class_attribute_defaults_respected():
 
     assert a.pre_priority == 10
     assert a.post_priority == 100  # default
+    assert a.setup_priority == 100  # default
     assert b.pre_priority == 100
     assert b.post_priority == 100  # default
+    assert b.setup_priority == 100  # default
 
 
 def test_yaml_config_overrides_class_defaults():
@@ -152,12 +156,12 @@ def test_stable_ties_preserve_registration_order():
 
     plugins = [PluginA(), PluginB(), PluginC()]
 
-    # Sort by pre_priority (all 50)
-    sorted_pre = sorted(plugins, key=lambda p: getattr(p, "pre_priority", 50))
+    # Sort by pre_priority (all 100)
+    sorted_pre = sorted(plugins, key=lambda p: getattr(p, "pre_priority", 100))
     assert [type(p).__name__ for p in sorted_pre] == ["PluginA", "PluginB", "PluginC"]
 
-    # Sort by post_priority (all 50)
-    sorted_post = sorted(plugins, key=lambda p: getattr(p, "post_priority", 50))
+    # Sort by post_priority (all 100)
+    sorted_post = sorted(plugins, key=lambda p: getattr(p, "post_priority", 100))
     assert [type(p).__name__ for p in sorted_post] == ["PluginA", "PluginB", "PluginC"]
 
 
@@ -199,7 +203,7 @@ def test_integration_ordering_pre_hooks():
 
     # Sort and execute
     ctx = PluginContext(client_ip="127.0.0.1")
-    for p in sorted(plugins, key=lambda p: getattr(p, "pre_priority", 50)):
+    for p in sorted(plugins, key=lambda p: getattr(p, "pre_priority", 100)):
         p.pre_resolve("example.com", 1, b"", ctx)
 
     assert execution_order == ["Allowlist", "Blocklist", "Redirect"]
@@ -243,7 +247,7 @@ def test_integration_ordering_post_hooks():
 
     # Sort and execute
     ctx = PluginContext(client_ip="127.0.0.1")
-    for p in sorted(plugins, key=lambda p: getattr(p, "post_priority", 50)):
+    for p in sorted(plugins, key=lambda p: getattr(p, "post_priority", 100)):
         p.post_resolve("example.com", 1, b"response", ctx)
 
     assert execution_order == ["Logger", "Filter", "Rewrite"]
@@ -270,7 +274,7 @@ def test_mixed_priorities_and_defaults():
         pre_priority = 200
 
     plugins = [PluginC(), PluginB(), PluginA()]
-    sorted_plugins = sorted(plugins, key=lambda p: getattr(p, "pre_priority", 50))
+    sorted_plugins = sorted(plugins, key=lambda p: getattr(p, "pre_priority", 100))
 
     assert [type(p).__name__ for p in sorted_plugins] == [
         "PluginA",

@@ -13,8 +13,8 @@ from __future__ import annotations
 import ipaddress
 import logging
 import threading
-
 from typing import Dict, Iterable, List, Optional, Tuple
+
 from dnslib import AAAA, PTR, QTYPE, RR, A, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field
 
@@ -463,6 +463,7 @@ class DockerHosts(BasePlugin):
                 if hostname and hostname != raw_name:
                     candidate_names.append(hostname)
                 if container_id:
+                    candidate_names.append(container_id[:12]) # "Short" hash
                     candidate_names.append(container_id)
 
                 normalized_names: List[str] = []

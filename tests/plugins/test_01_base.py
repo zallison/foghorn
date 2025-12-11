@@ -212,6 +212,7 @@ def test_base_plugin_priority_default():
     """
     assert BasePlugin.pre_priority == 100
     assert BasePlugin.post_priority == 100
+    assert BasePlugin.setup_priority == 100
 
 
 def test_base_plugin_subclass_inheritance():

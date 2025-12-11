@@ -411,8 +411,14 @@ def main(argv: List[str] | None = None) -> int:
         print(str(exc))
         return 1
 
-    # Initialize logging before any other operations
-    init_logging(cfg.get("logging"))
+    # Initialize logging before any other operations. Prefer nested
+    # foghorn.logging but fall back to root-level logging for backward
+    # compatibility with older config layouts.
+    foghorn_for_logging = cfg.get("foghorn") or {}
+    if not isinstance(foghorn_for_logging, dict):
+        foghorn_for_logging = {}
+    logging_cfg = foghorn_for_logging.get("logging") or cfg.get("logging")
+    init_logging(logging_cfg)
     logger = logging.getLogger("foghorn.main")
     logger.info("Loaded config from %s", args.config)
 
@@ -461,9 +467,11 @@ def main(argv: List[str] | None = None) -> int:
     doh_cfg = _sub("doh", {"enabled": False, "host": default_host, "port": 1443})
 
     # Resolver configuration (forward vs recursive) with conservative defaults.
-    resolver_cfg = cfg.get("resolver") or {}
+    resolver_cfg = (
+        foghorn_cfg.get("resolver") if isinstance(foghorn_cfg, dict) else None
+    )
     if resolver_cfg is None:
-        resolver_cfg = {}
+        resolver_cfg = cfg.get("resolver") or {}
     if not isinstance(resolver_cfg, dict):
         raise ValueError("config.resolver must be a mapping when present")
 
@@ -895,8 +903,14 @@ def main(argv: List[str] | None = None) -> int:
     ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
         logger.warning("Could not install SIGINT handler on this platform")
 
-    # DNSSEC config (ignore|passthrough|validate)
-    dnssec_cfg = cfg.get("dnssec", {}) or {}
+    # DNSSEC config (ignore|passthrough|validate). Prefer nested
+    # foghorn.dnssec but fall back to root-level dnssec for backward
+    # compatibility.
+    dnssec_cfg = foghorn_cfg.get("dnssec") if isinstance(foghorn_cfg, dict) else None
+    if dnssec_cfg is None:
+        dnssec_cfg = cfg.get("dnssec", {}) or {}
+    if not isinstance(dnssec_cfg, dict):
+        dnssec_cfg = {}
     dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()
     edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
     dnssec_validation = str(dnssec_cfg.get("validation", "upstream_ad")).lower()
