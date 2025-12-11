@@ -181,9 +181,9 @@ class BasePlugin:
 
     ttl: ClassVar[int] = 300
 
-    pre_priority: ClassVar[int] = 50
-    post_priority: ClassVar[int] = 50
-    setup_priority: ClassVar[int] = 50
+    pre_priority: ClassVar[int] = 100
+    post_priority: ClassVar[int] = 100
+    setup_priority: ClassVar[int] = 100
     aliases: ClassVar[Sequence[str]] = ()
 
     @classmethod
@@ -278,7 +278,7 @@ class BasePlugin:
         # config as a fallback, then class default.
         raw_setup = config.get(
             "setup_priority",
-            config.get("pre_priority", getattr(self.__class__, "setup_priority", 50)),
+            config.get("pre_priority", getattr(self.__class__, "setup_priority", 100)),
         )
         self.setup_priority = self._parse_priority_value(
             raw_setup,
@@ -389,7 +389,7 @@ class BasePlugin:
           - logger: Logger instance for warnings.
 
         Outputs:
-          - int: Clamped priority value in range [1, 255]; defaults to 50 on invalid input.
+          - int: Clamped priority value in range [1, 255]; defaults to 100 on invalid input.
 
         Example:
             >>> BasePlugin._parse_priority_value("25", "pre_priority", logger)
@@ -397,7 +397,7 @@ class BasePlugin:
             >>> BasePlugin._parse_priority_value(300, "post_priority", logger)
             255
         """
-        default = 50
+        default = 100
         try:
             val = int(value)  # type: ignore[arg-type]
         except (ValueError, TypeError):

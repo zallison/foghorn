@@ -323,9 +323,9 @@ def run_setup_plugins(plugins: List[BasePlugin]) -> None:
         if not _is_setup_plugin(p):
             continue
         try:
-            prio = int(getattr(p, "setup_priority", 50))
+            prio = int(getattr(p, "setup_priority", 100))
         except Exception:
-            prio = 50
+            prio = 100
         setup_entries.append((prio, p))
 
     # Stable sort by priority; list order is preserved for equal priorities
