@@ -13,8 +13,8 @@ from __future__ import annotations
 import ipaddress
 import logging
 import threading
-
 from typing import Dict, Iterable, List, Optional, Tuple
+
 from dnslib import AAAA, PTR, QTYPE, RR, A, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field
 
