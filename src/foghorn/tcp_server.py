@@ -40,6 +40,11 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                 if len(body) != ln:  # pragma: no cover - network error
                     break
                 resp = self.resolver(body, peer_ip)
+                # Treat an empty response as an explicit drop/timeout request
+                # from the shared resolver: do not send a DNS message so the
+                # client observes a timeout at the TCP or application layer.
+                if not resp:
+                    break
                 sock.sendall(len(resp).to_bytes(2, "big") + resp)
         except (
             Exception
@@ -168,6 +173,11 @@ async def _handle_conn(
             response = await asyncio.get_running_loop().run_in_executor(
                 None, resolver, query, client_ip
             )
+            # Treat an empty response as an explicit drop/timeout request from
+            # the shared resolver: stop processing without writing a DNS
+            # message so the client observes a timeout.
+            if not response:
+                break
             # Write back
             writer.write(len(response).to_bytes(2, "big") + response)
             await writer.drain()

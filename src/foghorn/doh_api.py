@@ -84,6 +84,12 @@ def create_doh_app(
         except Exception:
             logger.exception("resolver raised")
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
+        # Interpret an empty response as an explicit drop/timeout request from
+        # the shared resolver. For DoH we surface this as an HTTP 504 so that
+        # callers can distinguish it from protocol errors while still getting a
+        # well-formed HTTP response.
+        if not resp:
+            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT)
         return Response(
             content=resp, media_type=_DNS_CT, headers={"Connection": "close"}
         )
@@ -109,6 +115,10 @@ def create_doh_app(
         except Exception:
             logger.exception("resolver raised")
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
+        # Empty response -> explicit drop/timeout from resolver; return HTTP
+        # 504 so DoH clients can treat this as a timeout-equivalent condition.
+        if not resp:
+            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT)
         return Response(
             content=resp, media_type=_DNS_CT, headers={"Connection": "close"}
         )
@@ -204,6 +214,13 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_empty(400)
             return
 
+        # Empty response means explicit drop/timeout from resolver; for the
+        # threaded HTTP path we simply close the connection without sending an
+        # HTTP response so DoH clients observe a network-level timeout.
+        if not resp:
+            self.close_connection = True
+            return
+
         self._send_bytes(200, resp, _DNS_CT)
 
     def do_POST(self) -> None:  # noqa: N802 (HTTP verb name)
@@ -235,6 +252,13 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
         except Exception:
             logger.exception("resolver raised in threaded DoH POST")
             self._send_empty(400)
+            return
+
+        # Empty response -> explicit drop/timeout from resolver; close the
+        # connection without sending an HTTP response so clients see a
+        # timeout-style failure.
+        if not resp:
+            self.close_connection = True
             return
 
         self._send_bytes(200, resp, _DNS_CT)
