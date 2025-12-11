@@ -9,6 +9,7 @@ Outputs:
 """
 
 import importlib
+import ipaddress
 import os
 import threading
 
@@ -483,3 +484,41 @@ def test_have_files_changed_handles_missing_and_oserror(monkeypatch, tmp_path):
     assert plugin._have_files_changed() is True
     # Second call with same stats returns False.
     assert plugin._have_files_changed() is False
+
+
+def test_etc_hosts_pre_resolve_ptr_from_ipv4(tmp_path):
+    """Brief: IPv4 entries yield PTR answers for corresponding in-addr.arpa names.
+
+    Inputs:
+      - tmp_path: pytest-provided temporary directory for a simple hosts file.
+
+    Outputs:
+      - None; asserts pre_resolve returns an override decision with PTR RR
+        pointing at the configured hostname.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    EtcHosts = mod.EtcHosts
+
+    hosts_file = tmp_path / "hosts"
+    ip = "192.0.2.5"
+    hostname = "ptrhost.local"
+    hosts_file.write_text(f"{ip} {hostname}\n", encoding="utf-8")
+
+    plugin = EtcHosts(file_path=str(hosts_file), watchdog_enabled=False)
+    plugin.setup()
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    ptr_name = ipaddress.ip_address(ip).reverse_pointer
+    q = DNSRecord.question(ptr_name, "PTR")
+    decision = plugin.pre_resolve(ptr_name, QTYPE.PTR, q.pack(), ctx)
+
+    assert decision is not None
+    assert decision.action == "override"
+    assert decision.response is not None
+
+    resp = DNSRecord.parse(decision.response)
+    assert any(rr.rtype == QTYPE.PTR for rr in resp.rr)
+    assert any(
+        str(rr.rdata).rstrip(".") == hostname for rr in resp.rr if rr.rtype == QTYPE.PTR
+    )
