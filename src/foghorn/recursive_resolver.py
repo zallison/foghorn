@@ -11,6 +11,8 @@ from dnslib import QTYPE, RCODE, DNSRecord
 from . import (
     recursive_resolver as _recursive_module,
 )  # Self-import to honour test monkeypatching.
+from .transports.tcp import tcp_query as _tcp_transport_query
+from .transports.udp import udp_query as _udp_transport_query
 
 """Iterative recursive resolver for Foghorn.
 
@@ -34,6 +36,52 @@ logger = logging.getLogger("foghorn.recursive")
 #   minimisation budget.
 _MAX_MINIMISE_COUNT = 10
 _MINIMISE_ONE_LAB = 2
+
+
+def udp_query(host: str, port: int, wire: bytes, *, timeout_ms: int = 2000) -> bytes:
+    """Brief: DNS-over-UDP helper used by RecursiveResolver.
+
+    Inputs:
+      - host: Upstream authority host/IP.
+      - port: Upstream UDP port.
+      - wire: Wire-format DNS query bytes.
+      - timeout_ms: Per-query timeout in milliseconds.
+
+    Outputs:
+      - bytes: Wire-format DNS response bytes.
+    """
+
+    return _udp_transport_query(host, int(port), wire, timeout_ms=timeout_ms)
+
+
+def tcp_query(
+    host: str,
+    port: int,
+    wire: bytes,
+    *,
+    connect_timeout_ms: int = 1000,
+    read_timeout_ms: int = 1500,
+) -> bytes:
+    """Brief: DNS-over-TCP helper used by RecursiveResolver.
+
+    Inputs:
+      - host: Upstream authority host/IP.
+      - port: Upstream TCP port.
+      - wire: Wire-format DNS query bytes.
+      - connect_timeout_ms: TCP connect timeout in milliseconds.
+      - read_timeout_ms: TCP read timeout in milliseconds.
+
+    Outputs:
+      - bytes: Wire-format DNS response bytes.
+    """
+
+    return _tcp_transport_query(
+        host,
+        int(port),
+        wire,
+        connect_timeout_ms=connect_timeout_ms,
+        read_timeout_ms=read_timeout_ms,
+    )
 
 
 @dataclass
@@ -326,7 +374,14 @@ class RecursiveResolver:
 
             # Build a stage-specific query with RD=0 as we are the resolver.
             try:
-                stage_req = DNSRecord.question(stage_qname, stage_qtype)
+                # dnslib.DNSRecord.question in our version expects the qtype as a
+                # string name (e.g. "A", "NS"), not a numeric code. Convert any
+                # integer QTYPE values to their textual representation so tests
+                # which monkeypatch udp_query see valid wire queries.
+                stage_qtype_name = (
+                    QTYPE[stage_qtype] if isinstance(stage_qtype, int) else stage_qtype
+                )
+                stage_req = DNSRecord.question(stage_qname, stage_qtype_name)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug(
                     "Failed to build stage query %s %s: %s",
