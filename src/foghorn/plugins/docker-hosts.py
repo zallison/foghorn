@@ -467,7 +467,8 @@ class DockerHosts(BasePlugin):
                     candidate_names.append(hostname)
                 if container_id:
                     # Include both short and full IDs so lookups by abbreviated
-                    # container ID work when rendered into hosts-style records.
+                    # container ID work when rendered into hosts-style records
+                    # or when querying via PTR names generated from these labels.
                     candidate_names.append(container_id[:12])
                     candidate_names.append(container_id)
 
