@@ -603,6 +603,11 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             # Delegate to the shared core resolver. Any exceptions inside the
             # resolver are converted to SERVFAIL by _resolve_core.
             wire = _server_mod.resolve_query_bytes(data, client_ip)
+            # When plugins request an explicit drop/timeout, the shared
+            # resolver returns an empty wire sentinel; in that case we do not
+            # send any response so the client observes a timeout.
+            if not wire:
+                return
         except Exception:  # pragma: no cover - defensive: outermost guard
             try:
                 # Best-effort SERVFAIL synthesis if the shared resolver fails

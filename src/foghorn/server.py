@@ -493,6 +493,15 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
         ):
             decision = p.pre_resolve(qname, qtype, data, ctx)
             if isinstance(decision, PluginDecision):
+                if decision.action == "drop":
+                    # Pre-plugin timeout/drop: return sentinel empty wire so UDP
+                    # handlers and other transports can choose not to reply.
+                    return _ResolveCoreResult(
+                        wire=b"",
+                        dnssec_status=None,
+                        upstream_id=None,
+                        rcode_name="DROP",
+                    )
                 if decision.action == "deny":
                     # NXDOMAIN deny path
                     r = req.reply()
@@ -950,6 +959,14 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
         ):
             decision = p.post_resolve(qname, qtype, out, ctx2)
             if isinstance(decision, PluginDecision):
+                if decision.action == "drop":
+                    # Post-plugin timeout/drop: do not send a response.
+                    return _ResolveCoreResult(
+                        wire=b"",
+                        dnssec_status=None,
+                        upstream_id=upstream_id,
+                        rcode_name="DROP",
+                    )
                 if decision.action == "deny":
                     r = req.reply()
                     r.header.rcode = RCODE.NXDOMAIN

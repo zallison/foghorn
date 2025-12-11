@@ -63,6 +63,11 @@ async def _handle_conn(
             response = await asyncio.get_running_loop().run_in_executor(
                 None, resolver, query, client_ip
             )
+            # Interpret an empty response as an explicit drop/timeout request
+            # from the shared resolver: do not send a DNS message so the
+            # client-side DoT stack experiences a timeout.
+            if not response:
+                break
             writer.write(len(response).to_bytes(2, "big") + response)
             await writer.drain()
     except (
