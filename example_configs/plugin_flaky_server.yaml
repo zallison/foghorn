@@ -29,14 +29,15 @@ plugins:
   - module: flaky  # FlakyServer alias
     # pre_priority: 15  # optional: run early so failures happen before other plugins
     config:
-      # Only apply flaky behavior to these client subnets:
-      allow:
+      # Only apply flaky behavior to these client subnets, using BasePlugin
+      # targets/targets_ignore fields:
+      targets:
         - 192.0.2.0/24
         - 2001:db8::/32
 
-      # Probability controls: "one in N" chance of returning the error
-      servfail_one_in: 4   # ~25% SERVFAIL
-      nxdomain_one_in: 10  # ~10% NXDOMAIN
+      # Probability controls: percentage chance of returning the error
+      servfail_percent: 25.0   # ~25% SERVFAIL
+      nxdomain_percent: 10.0   # ~10% NXDOMAIN
 
       # Limit to certain query types
       apply_to_qtypes: ["A", "AAAA"]

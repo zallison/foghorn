@@ -577,26 +577,8 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for FlakyServer.\n\nInputs:\n  - allow: CIDR/IP strings to target.\n  - client_ip: Single client to target.\n  - servfail_one_in: 1-in-N probability for SERVFAIL.\n  - nxdomain_one_in: 1-in-N probability for NXDOMAIN.\n  - apply_to_qtypes: Qtypes this plugin applies to.\n  - seed: Optional RNG seed.\n\nOutputs:\n  - FlakyServerConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for FlakyServer.\n\nInputs:\n  - servfail_percent / nxdomain_percent: Percent probabilities (0–100) for\n    SERVFAIL/NXDOMAIN draws. When omitted, legacy servfail_one_in /\n    nxdomain_one_in 1-in-N fields are still accepted and converted.\n  - timeout_percent: Percent probability (0–100) of dropping the query so no\n    response is sent (client timeout).\n  - truncate_percent: Percent probability (0–100) of marking responses as\n    truncated (TC=1) to encourage client TCP fallback.\n  - formerr_percent: Percent probability (0–100) of replying with FORMERR.\n  - noerror_empty_percent: Percent probability (0–100) of replying with\n    NOERROR and an empty answer section.\n  - apply_to_qtypes: Qtypes this plugin applies to.\n  - fuzz_percent: Percent of matching responses to fuzz at the byte level.\n  - min_fuzz_bytes / max_fuzz_bytes: Min/max number of bytes to mutate when\n    fuzzing responses.\n  - wrong_qtype_percent: Percent of matching responses whose question qtype is\n    rewritten to a different RR type.\n  - fuzz_actions: List of fuzzing primitives to use (bit_flip, swap_bytes).\n  - seed: Optional RNG seed.\n\nOutputs:\n  - FlakyServerConfig instance with normalized field types.",
           "properties": {
-            "allow": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Allow"
-            },
             "apply_to_qtypes": {
               "items": {
                 "type": "string"
@@ -604,23 +586,25 @@
               "title": "Apply To Qtypes",
               "type": "array"
             },
-            "client_ip": {
+            "nxdomain_one_in": {
+              "default": 10,
+              "minimum": 1,
+              "title": "Nxdomain One In",
+              "type": "integer"
+            },
+            "nxdomain_percent": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "maximum": 100.0,
+                  "minimum": 0.0,
+                  "type": "number"
                 },
                 {
                   "type": "null"
                 }
               ],
               "default": null,
-              "title": "Client Ip"
-            },
-            "nxdomain_one_in": {
-              "default": 10,
-              "minimum": 1,
-              "title": "Nxdomain One In",
-              "type": "integer"
+              "title": "Nxdomain Percent"
             },
             "seed": {
               "anyOf": [
@@ -639,6 +623,81 @@
               "minimum": 1,
               "title": "Servfail One In",
               "type": "integer"
+            },
+            "servfail_percent": {
+              "anyOf": [
+                {
+                  "maximum": 100.0,
+                  "minimum": 0.0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Servfail Percent"
+            },
+            "fuzz_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Fuzz Percent",
+              "type": "number"
+            },
+            "timeout_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Timeout Percent",
+              "type": "number"
+            },
+            "truncate_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Truncate Percent",
+              "type": "number"
+            },
+            "formerr_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Formerr Percent",
+              "type": "number"
+            },
+            "noerror_empty_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Noerror Empty Percent",
+              "type": "number"
+            },
+            "min_fuzz_bytes": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Min Fuzz Bytes",
+              "type": "integer"
+            },
+            "max_fuzz_bytes": {
+              "default": 4,
+              "minimum": 1,
+              "title": "Max Fuzz Bytes",
+              "type": "integer"
+            },
+            "wrong_qtype_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Wrong Qtype Percent",
+              "type": "number"
+            },
+            "fuzz_actions": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Fuzz Actions",
+              "type": "array"
             }
           },
           "title": "FlakyServerConfig",
@@ -1207,6 +1266,15 @@
         "use_asyncio": {
           "default": true,
           "type": "boolean"
+        },
+        "logging": {
+          "$ref": "#/properties/logging"
+        },
+        "resolver": {
+          "$ref": "#/properties/resolver"
+        },
+        "dnssec": {
+          "$ref": "#/properties/dnssec"
         }
       },
       "type": "object"
