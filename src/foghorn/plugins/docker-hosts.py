@@ -43,6 +43,9 @@ logger = logging.getLogger(__name__)
 class DockerEndpointConfig(BaseModel):
     """Brief: Per-endpoint configuration for DockerHosts.
 
+    In addition to full container names and IDs, DockerHosts also exposes a
+    short container ID alias (the first 12 hex characters) for convenience.
+
     Inputs:
       - url: Docker endpoint URL (e.g. "unix:///var/run/docker.sock",
         "tcp://127.0.0.1:2375").
@@ -463,6 +466,9 @@ class DockerHosts(BasePlugin):
                 if hostname and hostname != raw_name:
                     candidate_names.append(hostname)
                 if container_id:
+                    # Include both short and full IDs so lookups by abbreviated
+                    # container ID work when rendered into hosts-style records.
+                    candidate_names.append(container_id[:12])
                     candidate_names.append(container_id)
 
                 normalized_names: List[str] = []
