@@ -210,8 +210,8 @@ def test_base_plugin_priority_default():
     Outputs:
       - None: Asserts priority values
     """
-    assert BasePlugin.pre_priority == 50
-    assert BasePlugin.post_priority == 50
+    assert BasePlugin.pre_priority == 100
+    assert BasePlugin.post_priority == 100
 
 
 def test_base_plugin_subclass_inheritance():
@@ -285,9 +285,9 @@ def test_base_plugin_priority_from_config_and_fallback(caplog):
     assert p.post_priority == 200
     assert p.setup_priority == 10
 
-    # Invalid post_priority is logged and defaults to 50.
+    # Invalid post_priority is logged and defaults to 100.
     p2 = P(post_priority="not-an-int")
-    assert p2.post_priority == 50
+    assert p2.post_priority == 100
     assert any("Invalid post_priority" in r.message for r in caplog.records)
 
 
@@ -306,8 +306,8 @@ def test_parse_priority_value_valid_and_clamped(caplog):
     # Valid string value
     assert BasePlugin._parse_priority_value("25", "pre_priority", base_logger) == 25
 
-    # Invalid type falls back to default 50
-    assert BasePlugin._parse_priority_value("xx", "pre_priority", base_logger) == 50
+    # Invalid type falls back to default 100
+    assert BasePlugin._parse_priority_value("xx", "pre_priority", base_logger) == 100
     assert any("Invalid pre_priority" in r.message for r in caplog.records)
 
     # Below range clamps to 1
