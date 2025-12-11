@@ -56,11 +56,12 @@ class EtcHostsConfig(BaseModel):
 @plugin_aliases("hosts", "etc-hosts", "/etc/hosts")
 class EtcHosts(BasePlugin):
     """
-    Brief: Resolve A/AAAA queries from one or more hosts files.
+    Brief: Resolve A/AAAA/PTR queries from one or more hosts files.
 
     Load IPs and hostnames from /etc/hosts or other host files. Supports reading
     multiple files; when the same hostname appears in more than one file, entries
-    from later files override earlier ones.
+    from later files override earlier ones. IPv4 entries also seed in-addr.arpa
+    reverse mappings so PTR lookups for those addresses can be answered locally.
     """
 
     @classmethod
