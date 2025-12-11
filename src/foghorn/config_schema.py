@@ -1,7 +1,7 @@
 """JSON Schema-based validation for Foghorn YAML configuration.
 
 This module centralizes loading and validating the main ``config.yaml`` using
-an external JSON Schema document stored under ``assets/config-yaml.schema``.
+an external JSON Schema document stored under ``assets/config-schema.json``.
 """
 
 from __future__ import annotations
@@ -24,25 +24,25 @@ def get_default_schema_path() -> Path:
       - None.
 
     Outputs:
-      - Path to a readable ``assets/config-yaml.schema`` file.
+      - Path to a readable ``assets/config-schema.json`` file.
     """
 
     here = Path(__file__).resolve()
 
-    # 1) Look for assets/config-yaml.schema in ancestors (source checkout).
+    # 1) Look for assets/config-schema.json in ancestors (source checkout).
     for ancestor in here.parents:
-        candidate = ancestor / "assets" / "config-yaml.schema"
+        candidate = ancestor / "assets" / "config-schema.json"
         if candidate.is_file():
             return candidate
 
     # 2) Docker image fallback: COPY . /foghorn puts assets here.
-    docker_candidate = Path("/foghorn/assets/config-yaml.schema")
+    docker_candidate = Path("/foghorn/assets/config-schema.json")
     if docker_candidate.is_file():
         return docker_candidate
 
     # 3) Last resort: previous behavior (keeps error message shape consistent).
     project_root = here.parents[2]
-    return project_root / "assets" / "config-yaml.schema"
+    return project_root / "assets" / "config-schema.json"
 
 
 def _load_schema(schema_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -95,7 +95,7 @@ def validate_config(
     Inputs:
       - cfg: Dict loaded from YAML (top-level configuration mapping).
       - schema_path: Optional explicit path to JSON Schema file. When omitted,
-        the default ``assets/config-yaml.schema`` is used.
+        the default ``assets/config-schema.json`` is used.
       - config_path: Optional string path to the YAML file, used only for
         error messages.
 

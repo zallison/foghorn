@@ -57,18 +57,18 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
 
 ## Config JSON Schema and plugin schemas
 
-- The main configuration JSON Schema lives in `assets/config-yaml.schema` and is loaded by `foghorn.config_schema.validate_config()`.
+- The main configuration JSON Schema lives in `assets/config-schema.json` and is loaded by `foghorn.config_schema.validate_config()`.
 - The top-level YAML config optionally supports a `$schema` key (string URI/identifier). This is accepted by the JSON Schema but ignored at runtime; it exists purely for editor/tooling hints.
 - A helper script can generate a combined schema document that includes both the core config schema and per-plugin config schemas under `$defs.plugin_configs`:
   - Location: `scripts/generate_plugin_schema.py`
-  - Behavior: loads the existing `config-yaml.schema`, discovers all plugins via `plugins/registry.py`, and attaches each plugin's config schema (from `get_config_model()` / `get_config_schema()`) into `$defs.plugin_configs`.
+  - Behavior: loads the existing `config-schema.json`, discovers all plugins via `plugins/registry.py`, and attaches each plugin's config schema (from `get_config_model()` / `get_config_schema()`) into `$defs.plugin_configs`.
   - Example usage from the project root:
 
     ```bash path=null start=null
     PYTHONPATH=src python scripts/generate_plugin_schema.py -o schema.json
     ```
 
-  - The generated `schema.json` keeps the original top-level structure of `config-yaml.schema`; the extra `$defs.plugin_configs` node is informational only and does not change validation semantics.
+  - The generated `schema.json` keeps the original top-level structure of `config-schema.json`; the extra `$defs.plugin_configs` node is informational only and does not change validation semantics.
 
 ## Plugin lifecycle and priorities
 

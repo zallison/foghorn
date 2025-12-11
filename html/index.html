@@ -161,7 +161,40 @@
 			var btnTabStats = document.getElementById('btn-tab-stats');
 			var btnTabEdit = document.getElementById('btn-tab-edit');
 
-			var currentSource = 'disk'; // 'disk' or 'memory'
+			var currentSource = 'disk'; // 'disk' only
+			var lastDiskConfigObj = null;
+			var lastDiskRawYaml = null;
+			var isEditing = false;
+
+			// Client-side JSON Schema validation (Ajv from CDN). We prefer window.ajv7.Ajv
+			// when available, falling back to window.Ajv when present. When Ajv is
+			// missing, validation becomes a no-op and server-side validation still
+			// enforces correctness on save/startup.
+			var AjvCtor = (window.ajv7 && window.ajv7.Ajv) || window.Ajv || null;
+			var configSchemaValidator = null;
+
+			var STATS_TOOLTIPS = {
+				total_queries: 'Total DNS queries handled since the collector started or was last reset.',
+				cache_hits: 'Queries answered directly from the cache.',
+				cache_misses: 'Queries that required contacting upstream servers.',
+				cache_null: 'Responses generated directly by plugins before cache or upstream lookup.',
+				cache_deny_pre: 'Pre-plugin deny decisions that bypassed cache (e.g., filtering plugins).',
+				cache_override_pre: 'Pre-plugin overrides that bypassed cache (e.g., synthetic responses from plugins).',
+				min_ms: 'Fastest observed query latency in milliseconds.',
+				max_ms: 'Slowest observed query latency in milliseconds.',
+				avg_ms: 'Average (mean) query latency in milliseconds.',
+				p50_ms: 'Median (50th percentile) query latency in milliseconds.',
+				p90_ms: '90th percentile query latency in milliseconds.',
+				p99_ms: '99th percentile query latency in milliseconds.',
+				load_1m: 'System load average over the last 1 minute.',
+				load_5m: 'System load average over the last 5 minutes.',
+				load_15m: 'System load average over the last 15 minutes.',
+				dnssec_secure: 'Responses that validated successfully against DNSSEC trust anchors (secure).',
+				dnssec_ext_secure: 'Responses treated as DNSSEC-secure based on extended upstream signals (for example, AD bit).',
+				dnssec_unsigned: 'Responses from zones that are not signed with DNSSEC (unsigned but not an error).',
+				dnssec_bogus: 'Responses that failed DNSSEC validation (bogus).',
+				dnssec_indeterminate: 'Responses where DNSSEC status could not be determined (indeterminate).',
+			};
 			var lastDiskConfigObj = null;
 			var lastDiskRawYaml = null;
 			var isEditing = false;
@@ -241,10 +274,10 @@
 				if (configSchemaValidator) {
 					return Promise.resolve(configSchemaValidator);
 				}
-				return fetch('/config-yaml.schema', { cache: 'no-store' })
+				return fetch('/config-schema.json', { cache: 'no-store' })
 					.then(function (resp) {
 						if (!resp.ok) {
-							throw new Error('HTTP ' + resp.status + ' from /config-yaml.schema');
+							throw new Error('HTTP ' + resp.status + ' from /config-schema.json');
 						}
 						return resp.json();
 					})
@@ -1227,12 +1260,7 @@
 					});
 			}
 
-			// TODO: Remove legacy code.
-			function loadMemoryConfig() {
-				loadDiskConfig();
-			}
-
-			function setSource(newSource) {
+			function refreshDiskConfigView() {
 				loadDiskConfig();
 			}
 
@@ -1323,7 +1351,6 @@
 						setMessage('Configuration saved; restart requested via SIGHUP. Path: ' + (data.path || ''), 'success');
 						exitEditMode(true);
 						loadDiskConfig();
-						loadMemoryConfig();
 						loadStats();
 					})
 					.catch(function (err) {
@@ -1427,10 +1454,10 @@
 			applyTheme(initialTheme);
 			applyTab('stats');
 			loadStats();
-			setInterval(loadStats, 15000);
-			setSource('disk');
-		})();
-	</script>
+				setInterval(loadStats, 15000);
+				refreshDiskConfigView();
+			})();
+		</script>
 </body>
 
 </html>
