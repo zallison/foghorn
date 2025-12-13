@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 from dnslib import DNSRecord
 
-import foghorn.server as srv
+import foghorn.servers.server as srv
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:

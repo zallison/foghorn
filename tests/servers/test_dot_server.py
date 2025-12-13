@@ -16,7 +16,7 @@ import threading
 
 import pytest
 
-from foghorn.dot_server import serve_dot
+from foghorn.servers.dot_server import serve_dot
 
 
 def _echo_resolver(q: bytes, client_ip: str) -> bytes:

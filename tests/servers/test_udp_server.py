@@ -15,7 +15,7 @@ import time
 import pytest
 from dnslib import DNSRecord, QTYPE, RCODE
 
-from foghorn.udp_server import DNSUDPHandler, serve_udp
+from foghorn.servers.udp_server import DNSUDPHandler, serve_udp
 from foghorn.plugins.base import PluginContext, PluginDecision
 
 
@@ -120,7 +120,7 @@ def test_mark_upstreams_down_backoff(monkeypatch):
     Outputs: Ensure health state is updated with growing fail_count and delay.
     """
 
-    from foghorn import udp_server as udp_mod
+    from foghorn.servers import udp_server as udp_mod
 
     monkeypatch.setattr(udp_mod.time, "time", lambda: 1000.0)
     DNSUDPHandler.upstream_health.clear()

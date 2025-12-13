@@ -11,11 +11,11 @@ Outputs:
 import pytest
 from dnslib import QTYPE, RCODE, DNSRecord, RR, A
 
-import foghorn.server as server_mod
+import foghorn.servers.server as server_mod
 from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
 from foghorn.plugins import base as plugin_base
 from foghorn.plugins.base import BasePlugin, PluginContext, PluginDecision
-from foghorn.server import DNSUDPHandler, resolve_query_bytes
+from foghorn.servers.server import DNSUDPHandler, resolve_query_bytes
 
 
 class _DenyPlugin(BasePlugin):

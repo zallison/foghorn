@@ -6,7 +6,7 @@ from dnslib import QTYPE, DNSRecord
 
 from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
 from foghorn.plugins import base as plugin_base
-from foghorn.server import DNSUDPHandler
+from foghorn.servers.server import DNSUDPHandler
 from foghorn.stats import StatsCollector
 
 

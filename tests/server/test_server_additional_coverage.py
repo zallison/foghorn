@@ -11,9 +11,9 @@ Outputs:
 import pytest
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
-import foghorn.server as srv
+import foghorn.servers.server as srv
 from foghorn.plugins import base as plugin_base
-from foghorn.server import DNSUDPHandler, send_query_with_failover
+from foghorn.servers.server import DNSUDPHandler, send_query_with_failover
 
 
 class _Sock:
@@ -189,7 +189,7 @@ def test_handle_pre_deny_records_stats_and_query_result():
       - None; asserts NXDOMAIN and key stats calls are present.
     """
 
-    from foghorn.server import PluginDecision
+    from foghorn.servers.server import PluginDecision
 
     class _PreDeny:
         def pre_resolve(self, qname, qtype, data, ctx):
@@ -230,7 +230,7 @@ def test_handle_pre_override_records_stats_and_query_result():
       - None; asserts stats calls present for override path.
     """
 
-    from foghorn.server import PluginDecision
+    from foghorn.servers.server import PluginDecision
 
     class _PreOverride:
         def pre_resolve(self, qname, qtype, data, ctx):

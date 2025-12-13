@@ -11,7 +11,7 @@ Outputs:
 from dnslib import QTYPE, DNSRecord
 
 from foghorn.plugins import base as plugin_base
-from foghorn.server import DNSUDPHandler
+from foghorn.servers.server import DNSUDPHandler
 
 
 def test_handle_calls_ensure_edns_passthrough_no_crash(monkeypatch):
@@ -25,7 +25,7 @@ def test_handle_calls_ensure_edns_passthrough_no_crash(monkeypatch):
     ok = q.reply().pack()
 
     # Patch failover to return our canned response and mark success
-    import foghorn.server as srv
+    import foghorn.servers.server as srv
 
     def fake_forward(req, upstreams, qname, qtype):
         return ok, {"host": "1.1.1.1", "port": 53}, "ok"
@@ -87,8 +87,8 @@ def test_ensure_edns_adds_and_replaces_opt_record(monkeypatch):
             self.ttl = ttl
             self.rdata = rdata
 
-    monkeypatch.setattr("foghorn.server.EDNS0", _FakeEDNS0)
-    monkeypatch.setattr("foghorn.server.RR", _FakeRR)
+    monkeypatch.setattr("foghorn.servers.server.EDNS0", _FakeEDNS0)
+    monkeypatch.setattr("foghorn.servers.server.RR", _FakeRR)
 
     class _Shim:
         cache = plugin_base.DNS_CACHE

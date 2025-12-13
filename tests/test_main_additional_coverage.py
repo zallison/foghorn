@@ -734,7 +734,7 @@ def test_tcp_permission_error_falls_back_to_threaded(monkeypatch, caplog):
     # Patch the underlying tcp_server module so that when main() imports
     # serve_tcp_threaded, it receives our stub.
     monkeypatch.setattr(
-        "foghorn.tcp_server.serve_tcp_threaded", fake_serve_tcp_threaded
+        "foghorn.servers.tcp_server.serve_tcp_threaded", fake_serve_tcp_threaded
     )
     # Patch asyncio's global new_event_loop so that the instance imported in
     # foghorn.main sees the PermissionError.
@@ -960,7 +960,7 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
     )
     # Ensure serve_tcp imported inside main() refers to our stub.
-    monkeypatch.setattr("foghorn.tcp_server.serve_tcp", fake_serve_tcp)
+    monkeypatch.setattr("foghorn.servers.tcp_server.serve_tcp", fake_serve_tcp)
     monkeypatch.setattr(_asyncio, "new_event_loop", fake_new_event_loop)
     monkeypatch.setattr(_asyncio, "set_event_loop", fake_set_event_loop)
     monkeypatch.setattr(_asyncio, "get_event_loop", fake_get_event_loop)

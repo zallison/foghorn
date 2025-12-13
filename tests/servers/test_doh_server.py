@@ -16,8 +16,8 @@ import time
 
 import pytest
 
-from foghorn.doh_api import start_doh_server
-from foghorn.server import resolve_query_bytes
+from foghorn.servers.doh_api import start_doh_server
+from foghorn.servers.server import resolve_query_bytes
 
 
 def _echo_resolver(q: bytes, client_ip: str) -> bytes:
