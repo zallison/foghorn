@@ -22,6 +22,58 @@ except Exception:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 
+def _normalize_cache_config_for_validation(cfg: Dict[str, Any]) -> None:
+    """Brief: Normalize cache config for backward-compatible schema validation.
+
+    Inputs:
+      - cfg: Parsed YAML configuration mapping (mutated in-place).
+
+    Outputs:
+      - None.
+
+    Notes:
+      - Some configuration templating patterns produce YAML like:
+
+          cache:
+            module:
+
+        which is parsed as {"module": None}. The runtime cache loader treats this
+        as "use the default cache", but the JSON Schema expects either:
+        - cache omitted entirely, or
+        - cache: null, or
+        - cache: <string>, or
+        - cache: {module: <string>, config: <object>}
+
+        To keep validation aligned with runtime behavior, treat:
+        - cache: {module: null, config: {}} as "cache omitted"
+        - cache: {module: null, config: {...}} as "module=in_memory_ttl".
+    """
+
+    cache_cfg = cfg.get("cache")
+    if not isinstance(cache_cfg, dict):
+        return
+
+    module = cache_cfg.get("module")
+    if isinstance(module, str) and not module.strip():
+        module = None
+
+    # If cache.module is explicitly null, interpret it as the "none" cache
+    # plugin alias (i.e., disable caching). This keeps behavior aligned with the
+    # NullCache documentation which uses `module: null`.
+    if "module" in cache_cfg and cache_cfg.get("module") is None:
+        cache_cfg["module"] = "none"
+        module = "none"
+
+    # Support legacy/alternate keys used elsewhere in the config.
+    if module is None:
+        module = cache_cfg.get("class") or cache_cfg.get("type")
+
+    subcfg = cache_cfg.get("config")
+    if subcfg is None:
+        # Schema expects an object when present; keep validation permissive.
+        cache_cfg.pop("config", None)
+
+
 def get_default_schema_path() -> Path:
     """Brief: Resolve the default JSON Schema path for configuration.
 
@@ -146,6 +198,10 @@ def validate_config(
     if Draft202012Validator is None:
         logger.warning("jsonschema is not installed; skipping JSON Schema validation")
         return None
+
+    # Normalize select config fields to keep schema validation aligned with
+    # runtime defaulting and backwards-compatible parsing.
+    _normalize_cache_config_for_validation(cfg)
 
     validator = Draft202012Validator(schema)
     errors = sorted(validator.iter_errors(cfg), key=lambda e: list(e.path))

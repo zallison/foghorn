@@ -143,12 +143,23 @@ def load_cache_plugin(cfg: Optional[object]) -> CachePlugin:
         return cls()
 
     if isinstance(cfg, dict):
-        module = cfg.get("module") or cfg.get("class") or cfg.get("type")
-        subcfg = cfg.get("config") or {}
-        if module is None:
-            module = "in_memory_ttl"
+        # Special-case explicit null module as an alias for disabling caching.
+        # Omitting the cache key entirely still means "use the default cache".
+        if "module" in cfg and cfg.get("module") is None:
+            module = "none"
+        else:
+            module = cfg.get("module")
+            if isinstance(module, str):
+                module = module.strip() or None
+            if module is None:
+                module = cfg.get("class") or cfg.get("type")
+            if module is None:
+                module = "in_memory_ttl"
+
+        subcfg = cfg.get("config")
         if not isinstance(subcfg, dict):
             subcfg = {}
+
         cls = get_cache_plugin_class(str(module))
         return cls(**dict(subcfg))
 
