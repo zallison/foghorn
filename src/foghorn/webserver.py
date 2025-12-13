@@ -1132,12 +1132,14 @@ def create_app(
 
     @app.get("/api/v1/stats", dependencies=[Depends(auth_dep)])
     @app.get("/stats", dependencies=[Depends(auth_dep)])
-    async def get_stats(reset: bool = False) -> Dict[str, Any]:
+    async def get_stats(reset: bool = False, top: int = 10) -> Dict[str, Any]:
         """Return statistics snapshot from StatsCollector as JSON.
 
         Inputs:
           - reset: If True, reset counters after snapshot.
-          - request: Optional Request (unused, reserved for future filtering).
+          - top: Optional integer limit for the number of entries returned in
+            top_* lists (Top Domains/Subdomains, Top Clients, cache_* and
+            rcode/qtype top lists). Defaults to 10.
 
         Outputs:
           - Dict representing StatsSnapshot fields.
@@ -1220,6 +1222,43 @@ def create_app(
         if dnssec_totals:
             payload["dnssec"] = dnssec_totals
 
+        # Apply optional per-request limit to top-* style lists so callers can
+        # request deeper views when StatsCollector keeps a larger internal
+        # ranking. When "top" is invalid or <= 0 we fall back to 10.
+        try:
+            limit = int(top)
+        except (TypeError, ValueError):
+            limit = 10
+        if limit <= 0:
+            limit = 10
+
+        def _trim_top_field(key: str) -> None:
+            value = payload.get(key)
+            if isinstance(value, list):
+                payload[key] = value[:limit]
+            elif isinstance(value, dict):
+                trimmed: Dict[str, Any] = {}
+                for k, v in value.items():
+                    if isinstance(v, list):
+                        trimmed[k] = v[:limit]
+                    else:
+                        trimmed[k] = v
+                payload[key] = trimmed
+
+        for field in [
+            "top_clients",
+            "top_subdomains",
+            "top_domains",
+            "cache_hit_domains",
+            "cache_miss_domains",
+            "cache_hit_subdomains",
+            "cache_miss_subdomains",
+            "qtype_qnames",
+            "rcode_domains",
+            "rcode_subdomains",
+        ]:
+            _trim_top_field(field)
+
         return payload
 
     @app.post("/api/v1/stats/reset", dependencies=[Depends(auth_dep)])
@@ -1239,10 +1278,12 @@ def create_app(
 
     @app.get("/api/v1/traffic", dependencies=[Depends(auth_dep)])
     @app.get("/traffic", dependencies=[Depends(auth_dep)])
-    async def get_traffic() -> Dict[str, Any]:
+    async def get_traffic(top: int = 10) -> Dict[str, Any]:
         """Return a summarized traffic view derived from statistics snapshot.
 
-        Inputs: none
+        Inputs:
+          - top: Optional integer limit for entries in topClients/topDomains
+            lists; defaults to 10.
         Outputs: dict with totals, rcodes, qtypes, latency, and top lists.
         """
 
@@ -1268,6 +1309,16 @@ def create_app(
             "version": FOGHORN_VERSION,
         }
 
+        try:
+            limit = int(top)
+        except (TypeError, ValueError):
+            limit = 10
+        if limit <= 0:
+            limit = 10
+
+        top_clients = list(snap.top_clients or [])[:limit]
+        top_domains = list(snap.top_domains or [])[:limit]
+
         return {
             "server_time": _utc_now_iso(),
             "created_at": snap.created_at,
@@ -1275,8 +1326,8 @@ def create_app(
             "rcodes": snap.rcodes,
             "qtypes": snap.qtypes,
             "meta": meta,
-            "top_clients": snap.top_clients,
-            "top_domains": snap.top_domains,
+            "top_clients": top_clients,
+            "top_domains": top_domains,
             "latency": snap.latency_stats,
         }
 
@@ -2022,6 +2073,13 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         reset_raw = params.get("reset", ["false"])[0]
         reset = str(reset_raw).lower() in {"1", "true", "yes"}
+        top_raw = params.get("top", ["10"])[0]
+        try:
+            top = int(top_raw)
+        except (TypeError, ValueError):
+            top = 10
+        if top <= 0:
+            top = 10
         snap: StatsSnapshot = collector.snapshot(reset=reset)
 
         server = self._server()
@@ -2068,6 +2126,36 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         if dnssec_totals:
             payload["dnssec"] = dnssec_totals
 
+        # Apply optional per-request limit to top-* style lists.
+        limit = int(top) if isinstance(top, int) and top > 0 else 10
+
+        def _trim_top_field(key: str) -> None:
+            value = payload.get(key)
+            if isinstance(value, list):
+                payload[key] = value[:limit]
+            elif isinstance(value, dict):
+                trimmed: Dict[str, Any] = {}
+                for k, v in value.items():
+                    if isinstance(v, list):
+                        trimmed[k] = v[:limit]
+                    else:
+                        trimmed[k] = v
+                payload[key] = trimmed
+
+        for field in [
+            "top_clients",
+            "top_subdomains",
+            "top_domains",
+            "cache_hit_domains",
+            "cache_miss_domains",
+            "cache_hit_subdomains",
+            "cache_miss_subdomains",
+            "qtype_qnames",
+            "rcode_domains",
+            "rcode_subdomains",
+        ]:
+            _trim_top_field(field)
+
         self._send_json(200, payload)
 
     def _handle_stats_reset(
@@ -2094,6 +2182,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_traffic(
         self,
+        params: Dict[str, list[str]],
     ) -> None:  # pragma: no cover - threaded /traffic mirrors FastAPI endpoint
         """Brief: Handle GET /traffic.
 
@@ -2111,15 +2200,26 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 {"status": "disabled", "server_time": _utc_now_iso()},
             )
             return
+
+        top_raw = params.get("top", ["10"])[0]
+        try:
+            top = int(top_raw)
+        except (TypeError, ValueError):
+            top = 10
+        if top <= 0:
+            top = 10
+
         snap: StatsSnapshot = collector.snapshot(reset=False)
+        top_clients = list(snap.top_clients or [])[:top]
+        top_domains = list(snap.top_domains or [])[:top]
         payload = {
             "server_time": _utc_now_iso(),
             "created_at": snap.created_at,
             "totals": snap.totals,
             "rcodes": snap.rcodes,
             "qtypes": snap.qtypes,
-            "top_clients": snap.top_clients,
-            "top_domains": snap.top_domains,
+            "top_clients": top_clients,
+            "top_domains": top_domains,
             "latency": snap.latency_stats,
         }
         self._send_json(200, payload)
@@ -2666,7 +2766,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         elif path in {"/stats", "/api/v1/stats"}:
             self._handle_stats(params)
         elif path in {"/traffic", "/api/v1/traffic"}:
-            self._handle_traffic()
+            self._handle_traffic(params)
         elif path in {"/config", "/api/v1/config", "/apti/v1/config"}:
             self._handle_config()
         elif path in {"/config.json", "/api/v1/config.json", "/apti/v1/config.json"}:
