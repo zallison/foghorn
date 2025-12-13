@@ -18,65 +18,117 @@ For developer documentation (architecture, transports, plugin internals, testing
 
 ----
 
-# New in 0.4.6 (since dev/0.4.3)
+## v0.4.7 (2025-12-12)
 
-## DNSSEC & Resolver Pipeline
-- Enhanced DNSSEC validation, including RFC5011-style trust anchors and NSEC3 support.
-- Hardened local DNSSEC validation and added unit/chain/negative tests.
-- Added a shared in-memory cache implementation and stabilized cache-related stats keys.
+Release includes **55 commits** from `v0.4.6` (2025-12-07) to `v0.4.7` (2025-12-12).
 
-## Upstream Strategy, Health, and Concurrency
-- Added upstream strategy and concurrency options in config.
-- Implemented concurrent upstream failover with lazy health tracking.
-- Propagated upstream strategy/concurrency through DNSUDP handler and server pipeline.
-- Exposed upstream health/strategy via new `/api/v1/upstream_status` admin API and surfaced this in the UI.
+### Highlights
+- Added a full **recursive resolver mode** (iterative recursion with QNAME minimization) and wired it through UDP/TCP/DoT/DoH.
+- Introduced a **cache plugin system** (including a null cache) and began moving caching to a shared, pluggable cache interface.
+- Expanded **DNSSEC validation** with a new `local_extended` strategy plus DNSSEC counters exposed in stats and the admin UI.
+- Added new plugins: **mDNS bridge** and **DNS prefetch**.
 
-## Plugins
-- **RateLimitPlugin**: sqlite-backed rate limiting with per-profile configuration and admin inspection.
-- **FileDownloader plugin**: replaced `ListDownloader` with a more flexible file-based downloader and tests.
-- **DockerHosts plugin**: new plugin for container-aware DNS resolution, wired into packaging, docs, and example configs.
-- Per-plugin logging enhancements and stricter plugin registry behavior (fail fast on import errors).
+---
 
-## Admin API & Stats
-- Added canonical `/api/v1` admin endpoints (including rate-limit inspection and upstream status).
-- Extended stats to track DNSSEC and rate-limit counters, with snapshot and persistent store support.
-- Persisted upstream rcodes and warm-loaded them from the stats store.
+## Added
 
-## Runtime, Server, and Transport Changes
-- Generalized cache value types to support shared caches across components.
-- Refined upstream configuration semantics and DoH/TCP listener behavior.
-- Tightened DoH/admin webserver configuration and rate-limit behavior.
-- Treated UDP listener like TCP/DoT/DoH in main keepalive/shutdown handling.
-- Delegated `DNSUDPHandler.handle` to a shared resolver and pruned deprecated helpers.
-- Removed vestigial recursive server and remaining old UDP wiring in `main.py`/`server.py`.
+### Resolver / core pipeline
+- **Recursive resolver mode** (`resolver.mode: recursive`) with:
+  - Iterative recursion with QNAME minimization.
+  - UDP queries with TCP fallback.
+  - Max depth and timeout budgeting (overall + per-try).
+- Support for a plugin **`drop` action** in the resolution pipeline (used to intentionally produce client-side timeouts by not responding).
 
-## Configuration, Docker, and Tooling
-- Synced `config.yaml` schema and examples with the 0.4.5/0.4.6 feature set.
-- Updated example configs for:
-  - FileDownloader plugin and per-URL options.
-  - New upstream strategy/concurrency options.
-- Aligned Docker image and Makefile with current ports/tooling; added `ADMINPORT` option.
-- Ensured Docker images don’t install dev dependencies by default.
+### Caching
+- New **cache plugin framework**:
+  - Cache plugin registry/loader supporting aliases, dotted paths, and `{module, config}` objects.
+  - New cache plugins under `src/foghorn/cache_plugins/` (including a **null cache** implementation).
+- Cache entries now expose TTL metadata via a new cache API helper (`get_with_meta()`), enabling richer cache behavior.
+- Server caching moved toward a shared global cache (`foghorn.plugins.base.DNS_CACHE`) rather than per-handler caches.
 
-## Tests
-- Added comprehensive DNSSEC and resolver/forwarding path tests (unit and end-to-end).
-- Expanded UDP helper coverage and made DoH FastAPI tests optional.
-- Updated tests for new config fields, webserver behavior, and rate-limit paths.
-- Fixed stats tests for multiple rcodes and new snapshot keys.
+### DNSSEC
+- New DNSSEC validation strategy: **`local_extended`** (in addition to `upstream_ad` and `local`).
+- DNSSEC validation can now route its internal lookups through:
+  - configured forward upstreams (forward mode), or
+  - Foghorn’s own recursive resolver (recursive mode).
+- New DNSSEC status accounting: stats track totals for:
+  - `dnssec_secure`, `dnssec_ext_secure`, `dnssec_unsigned`, `dnssec_bogus`, `dnssec_indeterminate`.
+
+### Plugins
+- **MdnsBridgePlugin**: bridges zeroconf/mDNS into standard DNS answering (PTR/SRV/TXT/A/AAAA), with example config added.
+- **DnsPrefetchPlugin**: background worker that prefetches hot domains (based on stats) to keep cache entries warm.
+- **EtcHosts plugin**: added PTR reverse-lookup support.
+- **DockerHosts plugin**: added support for a short container ID alias (first 12 chars) as an additional candidate name.
+
+### Observability / admin
+- `/stats`, `/api/v1/stats`, `/traffic`, `/api/v1/traffic` now accept a **`top`** query parameter to limit returned Top-N list sizes.
+- Admin dashboard updated to show DNSSEC counters.
+
+### Tooling
+- New generated JSON schema: `assets/config-schema.json` (replaces the old `assets/config-yaml.schema`).
+- New script: `scripts/generate_foghorn_schema.py` to generate a combined schema including plugin schemas.
+
+---
+
+## Changed
+
+### Configuration / schema
+- Schema file rename & format change:
+  - Removed: `assets/config-yaml.schema` and `html/config-yaml.schema`
+  - Added: `assets/config-schema.json` and `html/config-schema.json`
+  - Admin UI now fetches `/config-schema.json` and validates with Ajv.
+- Cache config is now modeled as a top-level `cache:` configuration (and `min_cache_ttl` moved under `cache.config` in examples/docs).
+
+### Plugins
+- Default plugin priority values increased from **50 → 100** (pre/post/setup), affecting ordering when priorities are omitted.
+
+### Stats behavior
+- Added an `include_in_stats` toggle for ignore filters, allowing ignored traffic to be excluded from aggregation while still being logged.
+- Increased internal Top-K capacity (keeps more candidates internally; truncation is applied at response time via the `top` query param).
+
+### DoH behavior & dependencies
+- DoH FastAPI usage is now more defensive:
+  - FastAPI imports are deferred; if unavailable, DoH starts in a threaded fallback mode.
+  - Empty resolver responses are treated as timeouts (e.g., FastAPI path returns HTTP 504; other paths effectively time out).
+
+---
+
+## Fixed / Hardening
+- DNSSEC local validation now fails fast with a clear error when `cryptography` is missing (instead of silently misbehaving).
+- Transport handlers (UDP/TCP/DoT) now consistently treat “no response” from the resolver as “don’t reply” (client timeout), aligning with the new drop/timeout semantics.
+
+---
+
+## Dependencies / Packaging
+- Added `cryptography` dependency (required for DNSSEC local validation).
+- Docker image install list updated to include `cryptography`.
+- JSON Schema validation is now optional at runtime (skips validation if `jsonschema` is not installed).
+
+---
 
 ## Documentation
-- Documented:
-  - Admin APIs and `/api/v1` endpoints.
-  - RateLimitPlugin behavior and configuration.
-  - FileDownloader and DockerHosts plugins, including example usage and updated configs.
-- Updated docs to reflect new ports, transports, and configuration knobs.
-- Version-bump and release notes aligned with 0.4.5 and 0.4.6 changes.
+- Updated docs and examples to reflect:
+  - new cache config layout (`cache.module`, `cache.config.min_cache_ttl`)
+  - new plugins (`dns_prefetch`, `mdns`)
+  - schema generation + using `assets/config-schema.json`
 
-## Bug Fixes and Hardening
-- Fixed stats loading for multiple rcode values.
-- Hardened RateLimitPlugin DB access and malformed row handling.
-- Tightened upstream and DoH transport behavior under edge cases.
-- Made plugin registry fail fast on import errors to avoid silent misconfiguration.
+---
+
+## Tests
+- Added/expanded coverage for:
+  - recursive resolver behavior (including transport helpers and QNAME minimization)
+  - DNSSEC extended local validation and trust anchor behavior
+  - new plugins (mDNS, DNS prefetch) and updated plugin behaviors
+  - cache plugin behavior (including null cache)
+
+---
+
+## Notable PRs
+- Merged PR: **#20**
+
+---
+
+**Full Changelog:** `https://github.com/zallison/foghorn/compare/v0.4.6...v0.4.7`
 
 ----
 
