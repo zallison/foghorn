@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import base64
 import http.server
 import logging
@@ -7,8 +5,6 @@ import ssl
 import threading
 import urllib.parse
 from typing import Any, Callable, Optional
-
-from fastapi import FastAPI, HTTPException, Request, Response, status
 
 logger = logging.getLogger("foghorn.doh_api")
 
@@ -37,7 +33,7 @@ def _b64url_decode_nopad(s: str) -> bytes:
 
 def create_doh_app(
     resolver: Callable[[bytes, str], bytes],
-) -> FastAPI:
+) -> Any:
     """
     Brief: Create FastAPI app implementing RFC 8484 DoH endpoints.
 
@@ -51,6 +47,13 @@ def create_doh_app(
       >>> def _echo(q: bytes, ip: str) -> bytes: return q
       >>> app = create_doh_app(_echo)
     """
+
+    try:
+        from fastapi import FastAPI, HTTPException, Request, Response, status
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "FastAPI is required for the uvicorn-based DoH server. Install fastapi or run with use_asyncio: false to use the threaded fallback."
+        ) from exc
 
     app = FastAPI(
         title="Foghorn DoH",
@@ -466,7 +469,17 @@ def start_doh_server(
             key_file=key_file,
         )
 
-    app = create_doh_app(resolver)
+    try:
+        app = create_doh_app(resolver)
+    except Exception as exc:  # pragma: no cover
+        logger.error("FastAPI not available for DoH: %s; using threaded fallback", exc)
+        return _start_doh_server_threaded(
+            host,
+            port,
+            resolver,
+            cert_file=cert_file,
+            key_file=key_file,
+        )
 
     ssl_cert = cert_file or None
     ssl_key = key_file or None

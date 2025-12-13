@@ -15,6 +15,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+pytest.importorskip("jsonschema")
+
 import foghorn.config_schema as config_schema_mod
 from foghorn.config_schema import get_default_schema_path, validate_config
 

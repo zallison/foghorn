@@ -11,8 +11,13 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from jsonschema import Draft202012Validator, ValidationError
-from jsonschema.exceptions import SchemaError
+try:
+    from jsonschema import Draft202012Validator, ValidationError
+    from jsonschema.exceptions import SchemaError
+except Exception:  # pragma: no cover
+    Draft202012Validator = None  # type: ignore[assignment]
+    ValidationError = Exception  # type: ignore[assignment]
+    SchemaError = Exception  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +141,10 @@ def validate_config(
             effective_schema_path,
             exc,
         )
+        return None
+
+    if Draft202012Validator is None:
+        logger.warning("jsonschema is not installed; skipping JSON Schema validation")
         return None
 
     validator = Draft202012Validator(schema)
