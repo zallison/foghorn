@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
 class FoghornTTLCache:
@@ -46,6 +46,10 @@ class FoghornTTLCache:
             {}
         """
         self._store: Dict[Tuple[str, int], Tuple[float, Any]] = {}
+        # Track original TTLs separately so callers interested in cache
+        # prefetch / stale-while-revalidate behaviour can reason about the
+        # configured lifetime without changing the existing get()/set() API.
+        self._ttls: Dict[Tuple[str, int], int] = {}
         self._lock = threading.RLock()
 
     def get(self, key: Tuple[str, int]) -> Any | None:
@@ -74,6 +78,7 @@ class FoghornTTLCache:
             # Check if the entry has expired.
             if now >= expiry:
                 self._store.pop(key, None)
+                self._ttls.pop(key, None)
                 return None
             return data
 
@@ -94,15 +99,16 @@ class FoghornTTLCache:
             >>> cache.get(("example.com", 1))
             b'data'
         """
-        expiry = time.time() + max(0, int(ttl))
+        ttl_int = max(0, int(ttl))
+        expiry = time.time() + ttl_int
         with self._lock:
             self._store[key] = (expiry, data)
+            self._ttls[key] = ttl_int
             # Opportunistic cleanup
             self._purge_expired_locked(now=time.time())
 
     def purge_expired(self) -> int:
-        """
-        Remove all expired entries.
+        """Remove all expired entries.
 
         Inputs:
             None
@@ -117,8 +123,7 @@ class FoghornTTLCache:
             return self._purge_expired_locked(now=time.time())
 
     def _purge_expired_locked(self, now: float) -> int:
-        """
-        Remove expired entries while holding the lock.
+        """Remove expired entries while holding the lock.
 
         Inputs:
             now: Current time as float epoch seconds
@@ -130,5 +135,37 @@ class FoghornTTLCache:
         for k, (exp, _) in list(self._store.items()):
             if exp <= now:
                 del self._store[k]
+                # Keep TTL metadata in sync with store removals.
+                self._ttls.pop(k, None)
                 removed += 1
         return removed
+
+    def get_with_meta(
+        self, key: Tuple[str, int]
+    ) -> Tuple[Any | None, Optional[float], Optional[int]]:
+        """Brief: Return cached value plus seconds_remaining and original TTL.
+
+        Inputs:
+            key: Cache key tuple (qname, qtype).
+
+        Outputs:
+            Tuple of (value_or_None, seconds_remaining_or_None, ttl_or_None).
+
+        Notes:
+            - Unlike get(), this helper does not purge expired entries
+              aggressively; callers can decide whether slightly stale entries are
+              acceptable based on the returned seconds_remaining value.
+        """
+        now = time.time()
+        with self._lock:
+            entry = self._store.get(key)
+            if not entry:
+                return None, None, None
+            expiry, data = entry
+            seconds_remaining = float(expiry - now)
+            ttl = self._ttls.get(key)
+            return (
+                data,
+                seconds_remaining,
+                int(ttl) if ttl is not None else None,
+            )
