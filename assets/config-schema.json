@@ -1254,6 +1254,32 @@
           "minimum": 1,
           "type": "integer"
         },
+        "prefetch": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "min_ttl": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_ttl": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "refresh_before_expiry": {
+              "minimum": 0,
+              "type": "number"
+            },
+            "allow_stale_after_expiry": {
+              "minimum": 0,
+              "type": "number"
+            }
+          },
+          "type": "object"
+        },
         "upstream_strategy": {
           "default": "failover",
           "enum": [
