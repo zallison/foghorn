@@ -1,6 +1,7 @@
 import functools
 import logging
 import socketserver
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -19,6 +20,50 @@ from .transports.tcp import TCPError, get_tcp_pool, tcp_query
 from .udp_server import DNSUDPHandler
 
 logger = logging.getLogger("foghorn.server")
+
+
+# Thread-local flag used to bypass cache lookups when performing background
+# refresh queries. When bypass_cache is True, _resolve_core skips the cache
+# hit path and always treats the query as a miss.
+_CACHE_LOCAL = threading.local()
+
+
+def _schedule_cache_refresh(data: bytes, client_ip: str) -> None:
+    """Brief: Schedule a background cache refresh for a given query.
+
+    Inputs:
+      - data: Original wire-format DNS query bytes.
+      - client_ip: Client IP string used when reissuing the query (typically
+        the same as the original requester so stats attribution is consistent).
+
+    Outputs:
+      - None; best-effort background refresh that bypasses cache on the next
+        resolve_query_bytes() call for this thread.
+    """
+
+    def _worker() -> None:
+        try:
+            setattr(_CACHE_LOCAL, "bypass_cache", True)
+            try:
+                # Use the shared resolver so cache, plugins, and stats are all
+                # kept consistent with normal query handling.
+                resolve_query_bytes(data, client_ip)
+            finally:
+                setattr(_CACHE_LOCAL, "bypass_cache", False)
+        except Exception:
+            # Background refresh failures must never impact the caller; log
+            # at debug level only.
+            logger.debug("Cache refresh failed", exc_info=True)
+
+    try:
+        t = threading.Thread(
+            target=_worker,
+            name="FoghornCacheRefresh",
+            daemon=True,
+        )
+        t.start()
+    except Exception:
+        logger.debug("Failed to start cache refresh thread", exc_info=True)
 
 
 def compute_effective_ttl(resp: DNSRecord, min_cache_ttl: int) -> int:
@@ -716,9 +761,36 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                     # continue normal resolution (cache/upstream).
                     break
 
-        # Cache lookup
-        cached = DNSUDPHandler.cache.get(cache_key)
+        # Cache lookup (with optional stale-while-revalidate prefetch).
+        cache = getattr(DNSUDPHandler, "cache", None)
+        cached: Optional[bytes] = None
+        seconds_remaining: Optional[float] = None
+        ttl_original: Optional[int] = None
+        bypass_cache = bool(getattr(_CACHE_LOCAL, "bypass_cache", False))
+
+        if cache is not None and not bypass_cache:
+            get_meta = getattr(cache, "get_with_meta", None)
+            if callable(get_meta):
+                try:
+                    value, remaining, ttl_val = get_meta(cache_key)
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: cache implementation detail
+                    value, remaining, ttl_val = None, None, None
+                if value is not None:
+                    cached = value
+                    seconds_remaining = remaining
+                    ttl_original = ttl_val
+            else:
+                try:
+                    cached = cache.get(cache_key)
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: cache implementation detail
+                    cached = None
+
         if cached is not None:
+            # Record cache hit statistics
             if stats is not None:
                 try:
                     stats.record_cache_hit(qname)
@@ -756,6 +828,52 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                     Exception
                 ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                     pass
+
+            # Decide whether to schedule a background refresh for this cache hit
+            prefetch_enabled = bool(
+                getattr(DNSUDPHandler, "cache_prefetch_enabled", False)
+            )
+            min_ttl = int(getattr(DNSUDPHandler, "cache_prefetch_min_ttl", 0) or 0)
+            max_ttl = int(getattr(DNSUDPHandler, "cache_prefetch_max_ttl", 0) or 0)
+            window_before = float(
+                getattr(
+                    DNSUDPHandler,
+                    "cache_prefetch_refresh_before_expiry",
+                    0.0,
+                )
+                or 0.0
+            )
+            window_after = float(
+                getattr(
+                    DNSUDPHandler,
+                    "cache_prefetch_allow_stale_after_expiry",
+                    0.0,
+                )
+                or 0.0
+            )
+
+            should_refresh = False
+            if (
+                prefetch_enabled
+                and seconds_remaining is not None
+                and ttl_original is not None
+            ):
+                ttl_ok = True
+                if ttl_original < min_ttl:
+                    ttl_ok = False
+                if max_ttl > 0 and ttl_original > max_ttl:
+                    ttl_ok = False
+                if ttl_ok:
+                    if 0.0 <= seconds_remaining <= window_before:
+                        should_refresh = True
+                    elif (
+                        window_after > 0.0 and -window_after <= seconds_remaining < 0.0
+                    ):
+                        should_refresh = True
+
+            if should_refresh and not bypass_cache:
+                _schedule_cache_refresh(data, client_ip)
+
             wire = _set_response_id(cached, req.header.id)
             if stats is not None and t0 is not None:
                 try:
@@ -1228,6 +1346,11 @@ class DNSServer:
         recursive_max_depth: int = 16,
         recursive_timeout_ms: int = 2000,
         recursive_per_try_timeout_ms: int = 2000,
+        cache_prefetch_enabled: bool = False,
+        cache_prefetch_min_ttl: int = 0,
+        cache_prefetch_max_ttl: int = 0,
+        cache_prefetch_refresh_before_expiry: float = 0.0,
+        cache_prefetch_allow_stale_after_expiry: float = 0.0,
     ) -> None:
         """Initialize a UDP DNSServer.
 
@@ -1256,6 +1379,30 @@ class DNSServer:
         DNSUDPHandler.recursive_max_depth = int(recursive_max_depth)
         DNSUDPHandler.recursive_timeout_ms = int(recursive_timeout_ms)
         DNSUDPHandler.recursive_per_try_timeout_ms = int(recursive_per_try_timeout_ms)
+
+        # Cache prefetch / stale-while-revalidate knobs used by _resolve_core.
+        DNSUDPHandler.cache_prefetch_enabled = bool(cache_prefetch_enabled)
+        try:
+            DNSUDPHandler.cache_prefetch_min_ttl = max(0, int(cache_prefetch_min_ttl))
+        except Exception:
+            DNSUDPHandler.cache_prefetch_min_ttl = 0
+        try:
+            DNSUDPHandler.cache_prefetch_max_ttl = max(0, int(cache_prefetch_max_ttl))
+        except Exception:
+            DNSUDPHandler.cache_prefetch_max_ttl = 0
+        try:
+            DNSUDPHandler.cache_prefetch_refresh_before_expiry = max(
+                0.0, float(cache_prefetch_refresh_before_expiry)
+            )
+        except Exception:
+            DNSUDPHandler.cache_prefetch_refresh_before_expiry = 0.0
+        try:
+            DNSUDPHandler.cache_prefetch_allow_stale_after_expiry = max(
+                0.0, float(cache_prefetch_allow_stale_after_expiry)
+            )
+        except Exception:
+            DNSUDPHandler.cache_prefetch_allow_stale_after_expiry = 0.0
+
         try:
             DNSUDPHandler.upstream_max_concurrent = max(1, int(upstream_max_concurrent))
         except Exception:

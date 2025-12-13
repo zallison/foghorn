@@ -63,6 +63,15 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     dnssec_validation = "upstream_ad"  # upstream_ad | local | local_extended
     edns_udp_payload = 1232
 
+    # Cache prefetch / stale-while-revalidate knobs controlled by DNSServer.
+    # When enabled, cache hits near expiry can trigger a background refresh via
+    # the shared resolver without delaying the client response.
+    cache_prefetch_enabled: bool = False
+    cache_prefetch_min_ttl: int = 0
+    cache_prefetch_max_ttl: int = 0  # 0 == no upper bound
+    cache_prefetch_refresh_before_expiry: float = 0.0
+    cache_prefetch_allow_stale_after_expiry: float = 0.0
+
     # Resolver mode and recursion controls.
     resolver_mode: str = "forward"  # forward | recursive
     recursive_max_depth: int = 16
