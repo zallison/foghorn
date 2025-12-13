@@ -509,6 +509,67 @@ def main(argv: List[str] | None = None) -> int:
     if upstream_max_concurrent < 1:
         upstream_max_concurrent = 1
 
+    # Cache prefetch / stale-while-revalidate knobs for _resolve_core.
+    # Preferred layout lives under foghorn.prefetch.* but we still honour the
+    # legacy flat foghorn.cache_prefetch_* keys for backward compatibility.
+    prefetch_cfg = foghorn_cfg.get("prefetch") or {}
+    if not isinstance(prefetch_cfg, dict):
+        prefetch_cfg = {}
+
+    def _get_prefetch(key: str, legacy_key: str, default: object) -> object:
+        """Brief: Resolve a prefetch setting from nested foghorn.prefetch.*.
+
+        Inputs:
+          - key: Field name inside foghorn.prefetch.
+          - legacy_key: Legacy flat key name under foghorn (cache_prefetch_*).
+          - default: Fallback when neither key is present or values are invalid.
+
+        Outputs:
+          - Best-effort resolved value, favouring nested config over legacy.
+        """
+
+        if key in prefetch_cfg:
+            return prefetch_cfg.get(key, default)
+        return foghorn_cfg.get(legacy_key, default)
+
+    cache_prefetch_enabled = bool(
+        _get_prefetch("enabled", "cache_prefetch_enabled", False)
+    )
+    try:
+        cache_prefetch_min_ttl = int(
+            _get_prefetch("min_ttl", "cache_prefetch_min_ttl", 0) or 0
+        )
+    except (TypeError, ValueError):
+        cache_prefetch_min_ttl = 0
+    try:
+        cache_prefetch_max_ttl = int(
+            _get_prefetch("max_ttl", "cache_prefetch_max_ttl", 0) or 0
+        )
+    except (TypeError, ValueError):
+        cache_prefetch_max_ttl = 0
+    try:
+        cache_prefetch_refresh_before_expiry = float(
+            _get_prefetch(
+                "refresh_before_expiry",
+                "cache_prefetch_refresh_before_expiry",
+                0.0,
+            )
+            or 0.0
+        )
+    except (TypeError, ValueError):
+        cache_prefetch_refresh_before_expiry = 0.0
+    try:
+        cache_prefetch_allow_stale_after_expiry = float(
+            _get_prefetch(
+                "allow_stale_after_expiry",
+                "cache_prefetch_allow_stale_after_expiry",
+                0.0,
+            )
+            or 0.0
+        )
+    except (TypeError, ValueError):
+        cache_prefetch_allow_stale_after_expiry = 0.0
+
     # Global knob to disable asyncio-based listeners/admin servers in restricted
     # environments. When false, threaded fallbacks are used where available.
     use_asyncio = bool(foghorn_cfg.get("use_asyncio", True))
@@ -963,6 +1024,11 @@ def main(argv: List[str] | None = None) -> int:
             recursive_max_depth=recursive_max_depth,
             recursive_timeout_ms=recursive_timeout_ms,
             recursive_per_try_timeout_ms=recursive_per_try_timeout_ms,
+            cache_prefetch_enabled=cache_prefetch_enabled,
+            cache_prefetch_min_ttl=cache_prefetch_min_ttl,
+            cache_prefetch_max_ttl=cache_prefetch_max_ttl,
+            cache_prefetch_refresh_before_expiry=cache_prefetch_refresh_before_expiry,
+            cache_prefetch_allow_stale_after_expiry=cache_prefetch_allow_stale_after_expiry,
         )
 
     # Log startup info
