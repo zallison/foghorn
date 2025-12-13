@@ -12,12 +12,12 @@ from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
 from foghorn.plugins import base as plugin_base
-from foghorn.server import (
+from foghorn.servers.server import (
     DNSUDPHandler,
     compute_effective_ttl,
     send_query_with_failover,
 )
-from foghorn.udp_server import _set_response_id
+from foghorn.servers.udp_server import _set_response_id
 
 
 def test_set_response_id_rewrites_first_two_bytes():
@@ -120,7 +120,7 @@ def test_send_query_with_failover_parsing_and_servfail_failover(monkeypatch):
             return DummyParsed
         return DummyParsedOK
 
-    monkeypatch.setattr("foghorn.server.DNSRecord.parse", fake_parse)
+    monkeypatch.setattr("foghorn.servers.server.DNSRecord.parse", fake_parse)
 
     resp, used, reason = send_query_with_failover(
         DummyQuery(),
@@ -154,7 +154,7 @@ def test_send_query_with_failover_all_failed(monkeypatch):
     def fake_parse(wire):
         raise ValueError("bad packet")
 
-    monkeypatch.setattr("foghorn.server.DNSRecord.parse", fake_parse)
+    monkeypatch.setattr("foghorn.servers.server.DNSRecord.parse", fake_parse)
 
     resp, used, reason = send_query_with_failover(
         DummyQuery(),
@@ -209,7 +209,7 @@ def test_send_query_with_failover_concurrent_path_uses_first_success(monkeypatch
             raise ValueError("bad parse")
         return _R
 
-    monkeypatch.setattr("foghorn.server.DNSRecord.parse", fake_parse)
+    monkeypatch.setattr("foghorn.servers.server.DNSRecord.parse", fake_parse)
 
     resp, used, reason = send_query_with_failover(
         DummyQuery(),
@@ -235,8 +235,8 @@ def test_dnsserver_edns_udp_payload_config_and_fallback(monkeypatch):
       - None; asserts DNSUDPHandler.edns_udp_payload is set or reset as expected.
     """
 
-    import foghorn.server as srv_mod
-    import foghorn.udp_server as udp_srv_mod
+    import foghorn.servers.server as srv_mod
+    import foghorn.servers.udp_server as udp_srv_mod
 
     class _DummyServer:
         def __init__(self, *a, **kw):

@@ -22,7 +22,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from foghorn.stats import StatsCollector
-from foghorn.webserver import (
+from foghorn.servers.webserver import (
     RingBuffer,
     WebServerHandle,
     _read_proc_meminfo,
@@ -117,7 +117,12 @@ def test_get_system_info_uses_meminfo_and_load(monkeypatch) -> None:
         process RSS keys present.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
+
+    # Ensure this test is deterministic even if earlier tests populated the
+    # module-level system info cache.
+    web_mod._last_system_info = None
+    web_mod._last_system_info_ts = 0.0
 
     def fake_getloadavg() -> tuple[float, float, float]:
         return (1.0, 2.0, 3.0)
@@ -155,7 +160,7 @@ def test_stats_includes_system_section(monkeypatch) -> None:
       - JSON body of /stats contains a "system" key with stubbed values.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     collector = StatsCollector(
         track_uniques=True, include_qtype_breakdown=True, track_latency=True
@@ -288,7 +293,7 @@ def test_stats_fastapi_and_threaded_payloads_match(monkeypatch) -> None:
         differences (e.g., server_time timestamp field).
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     # Build a collector with enough data to exercise the rich stats fields.
     collector = StatsCollector(
@@ -431,7 +436,7 @@ def test_stats_snapshot_cache_avoids_multiple_snapshot_calls(monkeypatch) -> Non
         StatsCollector.snapshot() call; a reset=True request forces another.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     collector = StatsCollector(
         track_uniques=False,
@@ -568,7 +573,7 @@ def test_config_yaml_cache_reuses_body_within_ttl(monkeypatch) -> None:
         yaml.safe_dump only once; changing redact_keys causes a new dump.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     cfg = {"webserver": {"enabled": True}}
     calls = {"dump": 0}
@@ -1000,7 +1005,7 @@ def test_resolve_www_root_prefers_config_then_env_then_cwd(
 
     import os
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     # 1) Config override takes precedence when directory exists
     cfg_root = tmp_path / "cfg_html"
@@ -1188,7 +1193,7 @@ def test_config_json_fastapi_and_threaded_payloads_match() -> None:
 
     import http.client
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     cfg = {
         "webserver": {
@@ -1265,7 +1270,7 @@ def test_config_raw_threaded_endpoint_returns_plain_yaml(tmp_path) -> None:
 
     import http.client
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     cfg_path = tmp_path / "config.yaml"
     yaml_text = "webserver:\n  enabled: true\nanswer: 42\n"
@@ -1323,7 +1328,7 @@ def test_config_raw_json_threaded_endpoint_reads_from_disk(tmp_path) -> None:
 
     import http.client
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     cfg_path = tmp_path / "config.yaml"
     yaml_text = "webserver:\n  enabled: true\nanswer: 42\n"
@@ -1382,7 +1387,7 @@ def test_save_config_persists_raw_yaml_and_signals(monkeypatch, tmp_path) -> Non
 
     import os
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text("initial: 1\n", encoding="utf-8")
@@ -1481,7 +1486,7 @@ def test_get_system_info_handles_missing_psutil(monkeypatch) -> None:
       - Returned dict still contains process_* keys but values may be None.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     monkeypatch.setattr(web_mod, "psutil", None)
 
@@ -1688,7 +1693,7 @@ def test_json_safe_handles_exceptions_and_custom_objects() -> None:
       - Exception represented as {"type", "message"}; custom object as string.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     class Custom:
         def __str__(self) -> str:  # noqa: D401
@@ -1717,7 +1722,7 @@ def test_get_system_info_swallows_psutil_exceptions(monkeypatch) -> None:
 
     import types
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     class DummyMemInfo:
         def __init__(self) -> None:
@@ -1778,7 +1783,7 @@ def test_resolve_www_root_falls_back_to_package_html(monkeypatch, tmp_path) -> N
 
     import os
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     # Ensure no env override and a CWD without html/ directory
     empty_root = tmp_path / "no_html_here"
@@ -2123,7 +2128,7 @@ def test_start_webserver_permission_error_uses_threaded_fallback(monkeypatch) ->
     import asyncio
     import threading
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     def boom_new_loop() -> None:
         raise PermissionError("no self-pipe")
@@ -2267,7 +2272,7 @@ def test_split_yaml_value_and_comment_with_and_without_comment() -> None:
       - Tuple where the value is stripped and the comment suffix preserves ' #'.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     value, comment = web_mod._split_yaml_value_and_comment(" value  # inline comment")
     # Leading whitespace from the original rest segment is preserved.
@@ -2292,7 +2297,7 @@ def test_redact_yaml_preserving_layout_covers_lists_and_blank_lines() -> None:
       - Redacted YAML preserves layout/comments and replaces values with '***'.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     yaml_text = (
         "auth:\n"
@@ -2342,7 +2347,7 @@ def test_redact_yaml_preserving_layout_early_return_on_empty_input() -> None:
       - Function returns the original raw_yaml without modification.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     assert web_mod._redact_yaml_text_preserving_layout("", ["token"]) == ""
     assert (
@@ -2360,7 +2365,7 @@ def test_get_sanitized_config_yaml_cached_uses_config_path(tmp_path) -> None:
       - Returned YAML body preserves structure while redacting the token value.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     cfg_text = "webserver:\n  enabled: true\n  auth:\n    token: secret-token\n"
     cfg_file = tmp_path / "config.yaml"
@@ -2386,7 +2391,7 @@ def test_find_rate_limit_db_paths_from_config_extracts_db_paths() -> None:
       - Sorted list of db_path values for rate_limit plugins only.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     cfg = {
         "plugins": [
@@ -2421,7 +2426,7 @@ def test_collect_rate_limit_stats_handles_empty_and_populated_dbs(
 
     import sqlite3
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     empty_db = tmp_path / "empty.db"
     populated_db = tmp_path / "profiles.db"
@@ -2494,7 +2499,7 @@ def test_schedule_sighup_after_config_save_zero_delay_calls_kill(monkeypatch) ->
 
     import os
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     calls: list[tuple[int, int]] = []
 
@@ -2521,7 +2526,7 @@ def test_config_cache_ttl_overridden_by_web_cfg(monkeypatch) -> None:
       - After create_app(), the TTL global reflects the configured value.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     original_ttl = getattr(web_mod, "_CONFIG_TEXT_CACHE_TTL_SECONDS")
     try:
@@ -2568,7 +2573,7 @@ def test_rate_limit_endpoint_wraps_collect_rate_limit_stats(monkeypatch) -> None
       - Endpoint returns JSON including server_time and the sentinel payload.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     called: dict[str, object] = {}
 

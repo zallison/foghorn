@@ -10,10 +10,10 @@ Outputs:
 
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
-import foghorn.server as srv
+import foghorn.servers.server as srv
 from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
 from foghorn.plugins import base as plugin_base
-from foghorn.udp_server import _set_response_id
+from foghorn.servers.udp_server import _set_response_id
 
 
 def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
@@ -101,7 +101,7 @@ def test__ensure_edns_sets_do_bit_for_validate_mode():
     Outputs:
       - None; asserts DO bit mapping for dnssec_mode values.
     """
-    from foghorn.udp_server import _edns_flags_for_mode
+    from foghorn.servers.udp_server import _edns_flags_for_mode
 
     flags_ignore = _edns_flags_for_mode("ignore")
     flags_passthrough = _edns_flags_for_mode("passthrough")

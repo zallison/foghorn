@@ -10,10 +10,10 @@ Outputs:
 
 from dnslib import QTYPE, RCODE, DNSRecord
 
-import foghorn.server as server_mod
+import foghorn.servers.server as server_mod
 from foghorn.plugins.base import BasePlugin, PluginDecision
-from foghorn.server import DNSUDPHandler, compute_effective_ttl
-from foghorn.udp_server import _set_response_id
+from foghorn.servers.server import DNSUDPHandler, compute_effective_ttl
+from foghorn.servers.udp_server import _set_response_id
 
 
 def test_compute_effective_ttl_exception_returns_floor():
@@ -194,7 +194,7 @@ def test_handle_inner_exception_logs_and_does_not_send(monkeypatch):
     )
     # Then make the fallback DNSRecord.parse in the UDP handler itself fail as
     # well so no response can be constructed.
-    import foghorn.udp_server as udp_mod
+    import foghorn.servers.udp_server as udp_mod
 
     monkeypatch.setattr(
         udp_mod.DNSRecord,

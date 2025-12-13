@@ -10,7 +10,7 @@ Outputs:
 
 from dnslib import NS, QTYPE, RCODE, RR, SOA, A, DNSRecord
 
-import foghorn.server as srv
+import foghorn.servers.server as srv
 from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
 from foghorn.plugins import base as plugin_base
 

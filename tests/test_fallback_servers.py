@@ -20,10 +20,10 @@ from typing import Any
 
 import pytest
 
-from foghorn import doh_api as doh_mod
-from foghorn import webserver as web_mod
-from foghorn.doh_api import DoHServerHandle, start_doh_server
-from foghorn.webserver import RingBuffer, WebServerHandle, start_webserver
+from foghorn.servers import doh_api as doh_mod
+from foghorn.servers import webserver as web_mod
+from foghorn.servers.doh_api import DoHServerHandle, start_doh_server
+from foghorn.servers.webserver import RingBuffer, WebServerHandle, start_webserver
 
 pytestmark = pytest.mark.slow
 

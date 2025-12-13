@@ -10,7 +10,7 @@ Outputs:
 
 from dnslib import QTYPE, DNSRecord
 
-import foghorn.server as srv
+import foghorn.servers.server as srv
 
 
 def test_tc_bit_udp_fallbacks_to_tcp(monkeypatch):

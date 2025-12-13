@@ -10,7 +10,7 @@ Outputs:
 
 from dnslib import RCODE, DNSRecord
 
-import foghorn.server as srv
+import foghorn.servers.server as srv
 
 
 def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):

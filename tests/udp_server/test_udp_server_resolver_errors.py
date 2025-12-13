@@ -13,7 +13,7 @@ import threading
 
 import pytest
 
-from foghorn.udp_server import serve_udp
+from foghorn.servers.udp_server import serve_udp
 
 
 def _boom(q: bytes, client_ip: str) -> bytes:
