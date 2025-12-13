@@ -91,20 +91,21 @@ For developer documentation (architecture, transports, plugin internals, testing
   - [`listen`](#listen)
   - [`upstreams`](#upstreams)
   - [`plugins`](#plugins)
-	- [AccessControlPlugin](#accesscontrolplugin)
-	- [NewDomainFilterPlugin](#newdomainfilterplugin)
-	- [RateLimitPlugin](#ratelimitplugin)
-	- [UpstreamRouterPlugin](#upstreamrouterplugin)
-	- [FilterPlugin](#filterplugin)
-	- [FileDownloader plugin](#listdownloader-plugin)
-	- [ZoneRecords plugin](#zonerecords-plugin)
+ 	- [AccessControlPlugin](#accesscontrolplugin)
+ 	- [NewDomainFilterPlugin](#newdomainfilterplugin)
+ 	- [RateLimitPlugin](#ratelimitplugin)
+ 	- [UpstreamRouterPlugin](#upstreamrouterplugin)
+ 	- [FilterPlugin](#filterplugin)
+ 	- [FileDownloader plugin](#listdownloader-plugin)
+ 	- [ZoneRecords plugin](#zonerecords-plugin)
+ 	- [DnsPrefetchPlugin](#dnsprefetchplugin)
   - [Complete `config.yaml` Example](#complete-configyaml-example)
 - [Logging](#logging)
 - [License](#license)
 
 ## Features
 
-*   **DNS Caching:** Speeds up DNS resolution by caching responses from upstream servers.
+*   **DNS Caching and Prefetch:** Speeds up DNS resolution by caching responses from upstream servers, with optional cache prefetch / stale‑while‑revalidate and a dns_prefetch plugin that keeps hot entries warm using statistics.
 *   **Extensible Plugin System:** Easily add custom logic to control DNS resolution.
 *   **Flexible Configuration:** Configure listeners, upstream resolvers (UDP/TCP/DoT/DoH), and plugins using YAML.
 *   **Built-in Plugins:**
@@ -200,6 +201,8 @@ dnssec:
 ## Configuration
 
 Configuration is handled through a `config.yaml` file. The primary top-level sections are `listen`, `upstreams`, `foghorn`, and `plugins`.
+
+The `foghorn` section also exposes optional cache prefetch / stale‑while‑revalidate knobs that work together with the shared resolver, and you can enable the `dns_prefetch` plugin to use statistics to keep frequently requested domains warm in cache.
 
 ------
 
@@ -751,6 +754,33 @@ setups where file change notifications are unreliable.
 
 ------
 
+### DnsPrefetchPlugin
+
+The `DnsPrefetchPlugin` runs a background worker that periodically inspects
+statistics (primarily `cache_hit_domains`, with `top_domains` as a fallback) and
+issues synthetic DNS queries for the hottest domains and qtypes so that cache
+entries stay warm.
+
+**Configuration keys**
+
+```yaml
+plugins:
+  - module: dns_prefetch
+    config:
+      interval_seconds: 60        # how often to run a prefetch cycle
+      prefetch_top_n: 100         # max domains considered each cycle
+      max_consecutive_misses: 5   # stop prefetching if no hits are ever seen
+      qtypes: ["A", "AAAA"]       # record types to prefetch
+```
+
+Notes:
+- The plugin never modifies individual client queries; it only issues
+  background prefetches.
+- Statistics must be enabled for the plugin to be effective (see
+  `example_configs/prefetch.yaml` for a minimal example).
+
+------
+
 ## Complete `config.yaml` Example
 
 Here is a complete `config.yaml` file that uses the modern configuration format and shows how plugin priorities (including `setup_priority`) work:
@@ -814,6 +844,15 @@ foghorn:
   # - For NOERROR with no answers, NXDOMAIN, and SERVFAIL: cache TTL = min_cache_ttl
   # Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
   min_cache_ttl: 60
+  # Optional cache prefetch / stale-while-revalidate knobs. When enabled,
+  # cache hits within this window will trigger a background refresh using the
+  # shared resolver while clients continue to receive cached responses.
+  prefetch:
+    enabled: false
+    min_ttl: 60
+    max_ttl: 86400
+    refresh_before_expiry: 10.0
+    allow_stale_after_expiry: 0.0
 
 # Optional DNSSEC configuration
 # dnssec:
