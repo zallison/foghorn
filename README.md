@@ -200,7 +200,15 @@ dnssec:
 
 ## Configuration
 
-Configuration is handled through a `config.yaml` file. The primary top-level sections are `listen`, `upstreams`, `foghorn`, and `plugins`.
+Configuration is handled through a `config.yaml` file. The primary top-level sections are `listen`, `upstreams`, `cache`, `foghorn`, and `plugins`.
+
+The `cache` section selects the DNS response cache implementation (default: in-memory TTL):
+
+```yaml
+cache:
+  module: in_memory_ttl
+  config: {}
+```
 
 The `foghorn` section also exposes optional cache prefetch / stale‑while‑revalidate knobs that work together with the shared resolver, and you can enable the `dns_prefetch` plugin to use statistics to keep frequently requested domains warm in cache.
 
@@ -839,20 +847,15 @@ foghorn:
   upstream_strategy: failover
   upstream_max_concurrent: 1
   use_asyncio: true
-  # Minimum cache TTL (in seconds) applied to ***all*** cached responses.
-  # - For NOERROR with answers: cache TTL = max(min(answer TTLs), min_cache_ttl)
-  # - For NOERROR with no answers, NXDOMAIN, and SERVFAIL: cache TTL = min_cache_ttl
-  # Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
-  min_cache_ttl: 60
-  # Optional cache prefetch / stale-while-revalidate knobs. When enabled,
-  # cache hits within this window will trigger a background refresh using the
-  # shared resolver while clients continue to receive cached responses.
-  prefetch:
-    enabled: false
-    min_ttl: 60
-    max_ttl: 86400
-    refresh_before_expiry: 10.0
-    allow_stale_after_expiry: 0.0
+# Cache configuration
+cache:
+  module: in_memory_ttl
+  config:
+    # Minimum cache TTL (in seconds) applied to ***all*** cached responses.
+    # - For NOERROR with answers: cache TTL = max(min(answer TTLs), min_cache_ttl)
+    # - For NOERROR with no answers, NXDOMAIN, and SERVFAIL: cache TTL = min_cache_ttl
+    # Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
+    min_cache_ttl: 60
 
 # Optional DNSSEC configuration
 # dnssec:
