@@ -13,6 +13,7 @@ from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
     DNSRecord,
 )
 
+from .plugins import base as plugin_base
 from .plugins.base import BasePlugin, PluginContext, PluginDecision
 from .recursive_resolver import RecursiveResolver
 from .transports.dot import DoTError, get_dot_pool
@@ -762,32 +763,30 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                     break
 
         # Cache lookup (with optional stale-while-revalidate prefetch).
-        cache = getattr(DNSUDPHandler, "cache", None)
+        cache = getattr(plugin_base, "DNS_CACHE", None)
         cached: Optional[bytes] = None
         seconds_remaining: Optional[float] = None
         ttl_original: Optional[int] = None
         bypass_cache = bool(getattr(_CACHE_LOCAL, "bypass_cache", False))
 
         if cache is not None and not bypass_cache:
-            get_meta = getattr(cache, "get_with_meta", None)
-            if callable(get_meta):
-                try:
-                    value, remaining, ttl_val = get_meta(cache_key)
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: cache implementation detail
-                    value, remaining, ttl_val = None, None, None
+            # Prefer get_with_meta() for stale-while-revalidate behavior. Allow a
+            # fallback to get() for transitional/custom cache implementations.
+            try:
+                value, remaining, ttl_val = cache.get_with_meta(cache_key)
                 if value is not None:
                     cached = value
                     seconds_remaining = remaining
                     ttl_original = ttl_val
-            else:
+            except NotImplementedError:
                 try:
                     cached = cache.get(cache_key)
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: cache implementation detail
+                except NotImplementedError:
                     cached = None
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: cache implementation detail
+                cached = None
 
         if cached is not None:
             # Record cache hit statistics
@@ -942,7 +941,7 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                 per_try_ms = recursion_timeout_ms
 
             resolver = RecursiveResolver(
-                cache=DNSUDPHandler.cache,
+                cache=getattr(plugin_base, "DNS_CACHE", None),
                 stats=stats,
                 max_depth=max_depth,
                 timeout_ms=recursion_timeout_ms,
@@ -1166,7 +1165,9 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                     )
 
             if ttl is not None and ttl > 0:
-                DNSUDPHandler.cache.set(cache_key, int(ttl), out)
+                cache = getattr(plugin_base, "DNS_CACHE", None)
+                if cache is not None:
+                    cache.set(cache_key, int(ttl), out)
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
@@ -1299,10 +1300,11 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
     Outputs:
       - bytes: Wire-format DNS response.
 
-    This helper reuses DNSUDPHandler's class-level configuration (cache,
-    plugins, upstreams, DNSSEC knobs, and optional StatsCollector) so that
-    TCP/DoT/DoH and other non-UDP callers share the same behavior and
-    statistics pipeline.
+    This helper reuses DNSUDPHandler's class-level configuration (plugins,
+    upstreams, DNSSEC knobs, and optional StatsCollector) so that TCP/DoT/DoH
+    and other non-UDP callers share the same behavior and statistics pipeline.
+
+    DNS response caching is provided by `foghorn.plugins.base.DNS_CACHE`.
 
     Example:
       >>> resp = resolve_query_bytes(query_bytes, '127.0.0.1')
@@ -1336,6 +1338,7 @@ class DNSServer:
         timeout_ms: int = 2000,
         min_cache_ttl: int = 60,
         stats_collector=None,
+        cache=None,
         *,
         dnssec_mode: str = "ignore",
         edns_udp_payload: int = 1232,
@@ -1364,6 +1367,19 @@ class DNSServer:
             min_cache_ttl: Minimum cache TTL in seconds applied to all cached responses.
             stats_collector: Optional StatsCollector for recording metrics.
         """
+        # Install cache plugin for all transports.
+        if cache is None:
+            try:
+                from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+
+                cache = InMemoryTTLCachePlugin()
+            except Exception:
+                cache = None
+        try:
+            plugin_base.DNS_CACHE = cache  # type: ignore[assignment]
+        except Exception:
+            pass
+
         DNSUDPHandler.upstream_addrs = upstreams  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         DNSUDPHandler.plugins = plugins  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         DNSUDPHandler.timeout = timeout  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably

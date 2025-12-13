@@ -5,9 +5,12 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 
+""" TTLCache where each entry has it's own TTL. """
+
+
 class FoghornTTLCache:
     """
-    Thread-safe in-memory cache with Time-To-Live (TTL) support.
+    Thread-safe in-memory cache with individual Time-To-Live (TTL) support.
 
     Inputs:
         None (constructor)

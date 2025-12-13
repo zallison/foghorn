@@ -37,34 +37,6 @@ def _clear_lru_caches(wrappers: Optional[List[object]]):
         wrapper.cache_clear()
 
 
-def _get_min_cache_ttl(cfg: dict) -> int:
-    """Extract and sanitize ``min_cache_ttl`` from the loaded config.
-
-    Inputs:
-      - cfg: dict loaded from YAML (top-level config mapping).
-
-    Outputs:
-      - int: non-negative ``min_cache_ttl`` in seconds (default 0 when omitted).
-
-    The canonical location is now ``foghorn.min_cache_ttl``. For backward
-    compatibility, a root-level ``min_cache_ttl`` key is still honored when the
-    nested key is absent. Negative values and invalid types are clamped to 0.
-    """
-
-    foghorn_cfg = cfg.get("foghorn") or {}
-    if isinstance(foghorn_cfg, dict) and "min_cache_ttl" in foghorn_cfg:
-        raw_val = foghorn_cfg.get("min_cache_ttl")
-    else:
-        # Legacy root-level key (deprecated but still supported).
-        raw_val = cfg.get("min_cache_ttl", 0)
-
-    try:
-        ival = int(raw_val)
-    except (TypeError, ValueError):
-        ival = 0
-    return max(0, ival)
-
-
 def normalize_upstream_config(
     cfg: Dict[str, Any],
 ) -> Tuple[List[Dict[str, Union[str, int, dict]]], int]:
@@ -509,73 +481,37 @@ def main(argv: List[str] | None = None) -> int:
     if upstream_max_concurrent < 1:
         upstream_max_concurrent = 1
 
-    # Cache prefetch / stale-while-revalidate knobs for _resolve_core.
-    # Preferred layout lives under foghorn.prefetch.* but we still honour the
-    # legacy flat foghorn.cache_prefetch_* keys for backward compatibility.
-    prefetch_cfg = foghorn_cfg.get("prefetch") or {}
-    if not isinstance(prefetch_cfg, dict):
-        prefetch_cfg = {}
-
-    def _get_prefetch(key: str, legacy_key: str, default: object) -> object:
-        """Brief: Resolve a prefetch setting from nested foghorn.prefetch.*.
-
-        Inputs:
-          - key: Field name inside foghorn.prefetch.
-          - legacy_key: Legacy flat key name under foghorn (cache_prefetch_*).
-          - default: Fallback when neither key is present or values are invalid.
-
-        Outputs:
-          - Best-effort resolved value, favouring nested config over legacy.
-        """
-
-        if key in prefetch_cfg:
-            return prefetch_cfg.get(key, default)
-        return foghorn_cfg.get(legacy_key, default)
-
-    cache_prefetch_enabled = bool(
-        _get_prefetch("enabled", "cache_prefetch_enabled", False)
-    )
-    try:
-        cache_prefetch_min_ttl = int(
-            _get_prefetch("min_ttl", "cache_prefetch_min_ttl", 0) or 0
-        )
-    except (TypeError, ValueError):
-        cache_prefetch_min_ttl = 0
-    try:
-        cache_prefetch_max_ttl = int(
-            _get_prefetch("max_ttl", "cache_prefetch_max_ttl", 0) or 0
-        )
-    except (TypeError, ValueError):
-        cache_prefetch_max_ttl = 0
-    try:
-        cache_prefetch_refresh_before_expiry = float(
-            _get_prefetch(
-                "refresh_before_expiry",
-                "cache_prefetch_refresh_before_expiry",
-                0.0,
-            )
-            or 0.0
-        )
-    except (TypeError, ValueError):
-        cache_prefetch_refresh_before_expiry = 0.0
-    try:
-        cache_prefetch_allow_stale_after_expiry = float(
-            _get_prefetch(
-                "allow_stale_after_expiry",
-                "cache_prefetch_allow_stale_after_expiry",
-                0.0,
-            )
-            or 0.0
-        )
-    except (TypeError, ValueError):
-        cache_prefetch_allow_stale_after_expiry = 0.0
-
     # Global knob to disable asyncio-based listeners/admin servers in restricted
     # environments. When false, threaded fallbacks are used where available.
     use_asyncio = bool(foghorn_cfg.get("use_asyncio", True))
 
-    # Hold responses this long, even if the actual ttl is lower.
-    min_cache_ttl = _get_min_cache_ttl(cfg)
+    # Cache plugin selection.
+    #
+    # Brief:
+    #   Cache is configured at the top-level `cache:` block so operators can
+    #   swap implementations without changing the resolver pipeline.
+    #
+    # Inputs:
+    #   - cfg['cache']: null | str | mapping
+    #
+    # Outputs:
+    #   - cache_plugin: CachePlugin instance
+    try:
+        from foghorn.cache_plugins.registry import load_cache_plugin
+
+        cache_plugin = load_cache_plugin(cfg.get("cache"))
+    except Exception:
+        cache_plugin = None
+
+    # Cache TTL floor (applied to cache expiry, not the on-wire DNS TTL) is now
+    # configured via the cache plugin.
+    min_cache_ttl = 0
+    if cache_plugin is not None:
+        try:
+            min_cache_ttl = int(getattr(cache_plugin, "min_cache_ttl", 0) or 0)
+        except Exception:
+            min_cache_ttl = 0
+    min_cache_ttl = max(0, min_cache_ttl)
 
     plugins = load_plugins(cfg.get("plugins", []))
     logger.info(
@@ -1015,6 +951,7 @@ def main(argv: List[str] | None = None) -> int:
             timeout_ms=timeout_ms,
             min_cache_ttl=min_cache_ttl,
             stats_collector=stats_collector,
+            cache=cache_plugin,
             dnssec_mode=dnssec_mode,
             edns_udp_payload=edns_payload,
             dnssec_validation=dnssec_validation,
@@ -1024,11 +961,6 @@ def main(argv: List[str] | None = None) -> int:
             recursive_max_depth=recursive_max_depth,
             recursive_timeout_ms=recursive_timeout_ms,
             recursive_per_try_timeout_ms=recursive_per_try_timeout_ms,
-            cache_prefetch_enabled=cache_prefetch_enabled,
-            cache_prefetch_min_ttl=cache_prefetch_min_ttl,
-            cache_prefetch_max_ttl=cache_prefetch_max_ttl,
-            cache_prefetch_refresh_before_expiry=cache_prefetch_refresh_before_expiry,
-            cache_prefetch_allow_stale_after_expiry=cache_prefetch_allow_stale_after_expiry,
         )
 
     # Log startup info

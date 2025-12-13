@@ -10,6 +10,7 @@ Outputs:
 
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
+from foghorn.plugins import base as plugin_base
 from foghorn.plugins.base import BasePlugin, PluginDecision
 from foghorn.server import DNSUDPHandler
 
@@ -118,7 +119,7 @@ def test_handle_cache_hit_short_circuits_response(monkeypatch):
 
     # Pre-populate cache
     cache_key = ("cached.com", QTYPE.A)
-    DNSUDPHandler.cache.set(cache_key, 60, b"\x00\x01cached-bytes")
+    plugin_base.DNS_CACHE.set(cache_key, 60, b"\x00\x01cached-bytes")
 
     h = _mk_handler(data, sock)
     h.handle()
