@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .webserver import RingBuffer, create_app
+from .servers.webserver import RingBuffer, create_app
 
 
 def _empty_config() -> Dict[str, Any]:
