@@ -13,13 +13,13 @@ import yaml
 
 from .config_schema import validate_config
 from .dnssec_validate import configure_dnssec_resolver
-from .doh_api import start_doh_server
 from .logging_config import init_logging
 from .plugins.base import BasePlugin
 from .plugins.registry import discover_plugins, get_plugin_class
-from .server import DNSServer
+from .servers.doh_api import start_doh_server
+from .servers.server import DNSServer
+from .servers.webserver import RingBuffer, start_webserver
 from .stats import StatsCollector, StatsReporter, StatsSQLiteStore
-from .webserver import RingBuffer, start_webserver
 
 
 def _clear_lru_caches(wrappers: Optional[List[object]]):
@@ -1019,7 +1019,7 @@ def main(argv: List[str] | None = None) -> int:
     # Resolver adapter for TCP/DoT servers
     import asyncio
 
-    from .server import resolve_query_bytes
+    from .servers.server import resolve_query_bytes
 
     def _start_asyncio_server(coro_factory, name: str, *, on_permission_error=None):
         def runner():
@@ -1049,7 +1049,7 @@ def main(argv: List[str] | None = None) -> int:
         loop_threads.append(t)
 
     if bool(tcp_cfg.get("enabled", False)):
-        from .tcp_server import serve_tcp, serve_tcp_threaded
+        from .servers.tcp_server import serve_tcp, serve_tcp_threaded
 
         thost = str(tcp_cfg.get("host", default_host))
         tport = int(tcp_cfg.get("port", 53))
@@ -1073,7 +1073,7 @@ def main(argv: List[str] | None = None) -> int:
             loop_threads.append(t)
 
     if bool(dot_cfg.get("enabled", False)):
-        from .dot_server import serve_dot
+        from .servers.dot_server import serve_dot
 
         dhost = str(dot_cfg.get("host", default_host))
         dport = int(dot_cfg.get("port", 853))
