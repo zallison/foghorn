@@ -1704,6 +1704,6 @@
     "listen",
     "upstreams"
   ],
-  "title": "Foghorn Config (modern YAML layout)",
+  "title": "Foghorn Config (v0.4.7)",
   "type": "object"
 }

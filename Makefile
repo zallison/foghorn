@@ -4,7 +4,12 @@ PREFIX ?= ${USER}
 CONTAINER_NAME ?= foghorn
 CONTAINER_DATA ?= ./.docker
 TAG ?= latest
+# Default ports
 ADMINPORT ?= 8053
+UDPPORT ?= 53
+TCPPORT ?= 53
+DoTPORT ?= 853
+DoHPORT ?= 443
 # Files/folders that should NOT be deleted by `clean`
 # (Keep YAML files, so we exclude *.yaml and *.yml from the delete patterns)
 IGNORE_EXTS :=  .yaml .yml
@@ -75,7 +80,7 @@ docker: clean docker-build docker-run docker-logs
 
 .PHONY: docker-build
 docker-build: $(VENV)/bin/foghorn
-	rsync -qr --exclude='*/__pycache__/*' --delete-during ./entrypoint.sh ./*md ./src ./html ./Makefile ./pyproject.toml ./Dockerfile ./docker-compose.yaml ./assets docker-build/
+	rsync -qr --exclude='*/__pycache__/*' --delete-during LICENSE.txt ./entrypoint.sh ./src ./html ./pyproject.toml ./Dockerfile ./docker-compose.yaml ./assets docker-build/
 	docker build ./docker-build -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-clean
@@ -86,7 +91,7 @@ docker-clean:
 .PHONY: docker-run
 docker-run: docker-build
 	docker rm -f foghorn
-	docker run --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ -d -p 53:5333/udp -p 53:5333/tcp -p ${ADMINPORT}:8053/tcp -p 853:1853/tcp -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker run --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ -d -p ${UDPPORT}:5333/udp -p ${TCPPORT}:5333/tcp -p ${ADMINPORT}:8053/tcp -p ${DoTPORT}:1853/tcp -p ${DoHPORT}:1443 -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-logs
 docker-logs:
@@ -102,12 +107,12 @@ dev-ship: clean docker-build
 .PHONY: help
 help:
 	@echo "Makefile targets:"
-	@echo "  run	        – Execute foghorn --config config/config.yaml (depends on build)"
-	@echo "  env	        – Create virtual environment in $(VENV)"
+	@echo "  run	         – Execute foghorn --config config/config.yaml (depends on build)"
+	@echo "  env	         – Create virtual environment in $(VENV)"
 	@echo "  build          – Install project in editable mode (with dev dependencies) into $(VENV)"
-	@echo "  test	        – Run pytest with coverage"
-	@echo "  clean	        – Remove venv/, var/, build/, and temp files"
-	@echo "  docker	        – Clean image, build it, run container, then follow logs"
+	@echo "  test	         – Run pytest with coverage"
+	@echo "  clean	         – Remove venv/, var/, build/, and temp files"
+	@echo "  docker         – Clean image, build it, run container, then follow logs"
 	@echo "  docker-build   – Build docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
 	@echo "  docker-clean   – Remove docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
 	@echo "  docker-run     – Run docker container (ports 53/udp, 53/tcp, 8053/tcp)"
