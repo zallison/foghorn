@@ -115,6 +115,46 @@
         },
         "module": "foghorn.plugins.access_control.AccessControlPlugin"
       },
+      "dns_prefetch": {
+        "aliases": [
+          "dns_prefetch",
+          "prefetch"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for DnsPrefetchPlugin.\n\nInputs:\n  - interval_seconds: How often to sample statistics and perform prefetch cycles.\n  - prefetch_top_n: Maximum number of domains considered per cycle based on\n    cache_hit_domains/top_domains statistics.\n  - max_consecutive_misses: Per-domain cap on consecutive prefetch cycles\n    without any observed cache hit; once exceeded, prefetching for that\n    domain is paused until a new cache hit is seen.\n  - qtypes: List of DNS qtype names to prefetch (e.g. [\"A\", \"AAAA\"]).\n\nOutputs:\n  - DnsPrefetchConfig instance with normalized field types.",
+          "properties": {
+            "interval_seconds": {
+              "default": 60.0,
+              "minimum": 1.0,
+              "title": "Interval Seconds",
+              "type": "number"
+            },
+            "max_consecutive_misses": {
+              "default": 5,
+              "minimum": 1,
+              "title": "Max Consecutive Misses",
+              "type": "integer"
+            },
+            "prefetch_top_n": {
+              "default": 100,
+              "minimum": 1,
+              "title": "Prefetch Top N",
+              "type": "integer"
+            },
+            "qtypes": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Qtypes",
+              "type": "array"
+            }
+          },
+          "title": "DnsPrefetchConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.dns_prefetch.DnsPrefetchPlugin"
+      },
       "docker_hosts": {
         "aliases": [
           "docker",
@@ -123,7 +163,7 @@
         "config_schema": {
           "$defs": {
             "DockerEndpointConfig": {
-              "description": "Brief: Per-endpoint configuration for DockerHosts.\n\nInputs:\n  - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n    \"tcp://127.0.0.1:2375\").\n  - reload_interval_second: Interval in seconds between background refreshes\n    for this endpoint. When set to 0, the endpoint is only refreshed at\n    startup (or when other endpoints cause a global refresh).\n  - use_ipv4: Optional IPv4 address to use in answers instead of\n    per-container IPv4 addresses discovered from this endpoint.\n  - use_ipv6: Optional IPv6 address to use in answers instead of\n    per-container IPv6 addresses discovered from this endpoint.\n  - ttl: Optional TTL override for answers derived from this endpoint; when\n    omitted, the plugin-level ttl is used.\n\nOutputs:\n  - DockerEndpointConfig instance with normalized field types.",
+              "description": "Brief: Per-endpoint configuration for DockerHosts.\n\nIn addition to full container names and IDs, DockerHosts also exposes a\nshort container ID alias (the first 12 hex characters) for convenience.\n\nInputs:\n  - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n    \"tcp://127.0.0.1:2375\").\n  - reload_interval_second: Interval in seconds between background refreshes\n    for this endpoint. When set to 0, the endpoint is only refreshed at\n    startup (or when other endpoints cause a global refresh).\n  - use_ipv4: Optional IPv4 address to use in answers instead of\n    per-container IPv4 addresses discovered from this endpoint.\n  - use_ipv6: Optional IPv6 address to use in answers instead of\n    per-container IPv6 addresses discovered from this endpoint.\n  - ttl: Optional TTL override for answers derived from this endpoint; when\n    omitted, the plugin-level ttl is used.\n\nOutputs:\n  - DockerEndpointConfig instance with normalized field types.",
               "properties": {
                 "reload_interval_second": {
                   "default": 60.0,
@@ -577,7 +617,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for FlakyServer.\n\nInputs:\n  - servfail_percent / nxdomain_percent: Percent probabilities (0–100) for\n    SERVFAIL/NXDOMAIN draws. When omitted, legacy servfail_one_in /\n    nxdomain_one_in 1-in-N fields are still accepted and converted.\n  - timeout_percent: Percent probability (0–100) of dropping the query so no\n    response is sent (client timeout).\n  - truncate_percent: Percent probability (0–100) of marking responses as\n    truncated (TC=1) to encourage client TCP fallback.\n  - formerr_percent: Percent probability (0–100) of replying with FORMERR.\n  - noerror_empty_percent: Percent probability (0–100) of replying with\n    NOERROR and an empty answer section.\n  - apply_to_qtypes: Qtypes this plugin applies to.\n  - fuzz_percent: Percent of matching responses to fuzz at the byte level.\n  - min_fuzz_bytes / max_fuzz_bytes: Min/max number of bytes to mutate when\n    fuzzing responses.\n  - wrong_qtype_percent: Percent of matching responses whose question qtype is\n    rewritten to a different RR type.\n  - fuzz_actions: List of fuzzing primitives to use (bit_flip, swap_bytes).\n  - seed: Optional RNG seed.\n\nOutputs:\n  - FlakyServerConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for FlakyServer.\n\nInputs:\n  - servfail_one_in / nxdomain_one_in: Legacy 1-in-N probabilities for\n    SERVFAIL/NXDOMAIN (still accepted; converted to percentages).\n  - servfail_percent / nxdomain_percent: Percent probabilities (0\u2013100) for\n    SERVFAIL/NXDOMAIN draws; override the legacy one-in-N fields when set.\n  - timeout_percent: Percent probability (0\u2013100) of dropping the query and\n    sending no response (client observes a timeout).\n  - truncate_percent: Percent probability (0\u2013100) of setting the TC bit on\n    responses to encourage client fallback to TCP.\n  - formerr_percent: Percent probability (0\u2013100) of replying with FORMERR\n    instead of forwarding.\n  - noerror_empty_percent: Percent probability (0\u2013100) of replying with\n    NOERROR and an empty answer section.\n  - apply_to_qtypes: Qtypes this plugin applies to.\n  - fuzz_percent: Percent of matching responses to fuzz at the byte level.\n  - min_fuzz_bytes / max_fuzz_bytes: Bounds for how many bytes to mutate\n    when fuzzing a response.\n  - wrong_qtype_percent: Percent of matching responses whose question\n    qtype is rewritten to a different RR type.\n  - fuzz_actions: Fuzz primitives to use (e.g. [\"bit_flip\", \"swap_bytes\"]).\n  - seed: Optional RNG seed.\n\nOutputs:\n  - FlakyServerConfig instance with normalized field types.",
           "properties": {
             "apply_to_qtypes": {
               "items": {
@@ -585,6 +625,46 @@
               },
               "title": "Apply To Qtypes",
               "type": "array"
+            },
+            "formerr_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Formerr Percent",
+              "type": "number"
+            },
+            "fuzz_actions": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Fuzz Actions",
+              "type": "array"
+            },
+            "fuzz_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Fuzz Percent",
+              "type": "number"
+            },
+            "max_fuzz_bytes": {
+              "default": 4,
+              "minimum": 1,
+              "title": "Max Fuzz Bytes",
+              "type": "integer"
+            },
+            "min_fuzz_bytes": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Min Fuzz Bytes",
+              "type": "integer"
+            },
+            "noerror_empty_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Noerror Empty Percent",
+              "type": "number"
             },
             "nxdomain_one_in": {
               "default": 10,
@@ -638,13 +718,6 @@
               "default": null,
               "title": "Servfail Percent"
             },
-            "fuzz_percent": {
-              "default": 0.0,
-              "maximum": 100.0,
-              "minimum": 0.0,
-              "title": "Fuzz Percent",
-              "type": "number"
-            },
             "timeout_percent": {
               "default": 0.0,
               "maximum": 100.0,
@@ -659,45 +732,12 @@
               "title": "Truncate Percent",
               "type": "number"
             },
-            "formerr_percent": {
-              "default": 0.0,
-              "maximum": 100.0,
-              "minimum": 0.0,
-              "title": "Formerr Percent",
-              "type": "number"
-            },
-            "noerror_empty_percent": {
-              "default": 0.0,
-              "maximum": 100.0,
-              "minimum": 0.0,
-              "title": "Noerror Empty Percent",
-              "type": "number"
-            },
-            "min_fuzz_bytes": {
-              "default": 1,
-              "minimum": 1,
-              "title": "Min Fuzz Bytes",
-              "type": "integer"
-            },
-            "max_fuzz_bytes": {
-              "default": 4,
-              "minimum": 1,
-              "title": "Max Fuzz Bytes",
-              "type": "integer"
-            },
             "wrong_qtype_percent": {
               "default": 0.0,
               "maximum": 100.0,
               "minimum": 0.0,
               "title": "Wrong Qtype Percent",
               "type": "number"
-            },
-            "fuzz_actions": {
-              "items": {
-                "type": "string"
-              },
-              "title": "Fuzz Actions",
-              "type": "array"
             }
           },
           "title": "FlakyServerConfig",
@@ -754,6 +794,52 @@
           "type": "object"
         },
         "module": "foghorn.plugins.greylist.GreylistPlugin"
+      },
+      "mdns_bridge": {
+        "aliases": [
+          "bonjour",
+          "dns_sd",
+          "dnssd",
+          "mdns",
+          "mdns_bridge",
+          "zeroconf"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for MdnsBridgePlugin.\n\nInputs:\n  - ttl: int DNS TTL to apply to synthesized answers.\n  - network_enabled: bool controlling whether the plugin starts zeroconf\n    browsing threads. When False, the plugin still initializes internal\n    state but does not touch the network (useful for tests).\n  - include_ipv4: bool controlling whether A records are synthesized.\n  - include_ipv6: bool controlling whether AAAA records are synthesized.\n  - info_timeout_ms: int timeout in milliseconds for fetching ServiceInfo.\n\nOutputs:\n  - MdnsBridgeConfig instance.",
+          "properties": {
+            "include_ipv4": {
+              "default": true,
+              "title": "Include Ipv4",
+              "type": "boolean"
+            },
+            "include_ipv6": {
+              "default": true,
+              "title": "Include Ipv6",
+              "type": "boolean"
+            },
+            "info_timeout_ms": {
+              "default": 1500,
+              "minimum": 0,
+              "title": "Info Timeout Ms",
+              "type": "integer"
+            },
+            "network_enabled": {
+              "default": true,
+              "title": "Network Enabled",
+              "type": "boolean"
+            },
+            "ttl": {
+              "default": 60,
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            }
+          },
+          "title": "MdnsBridgeConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.mdns.MdnsBridgePlugin"
       },
       "new_domain_filter": {
         "aliases": [
@@ -1211,6 +1297,29 @@
       "description": "Optional URI or identifier for the JSON Schema associated with this configuration file. Ignored by Foghorn at runtime.",
       "type": "string"
     },
+    "cache": {
+      "description": "Cache plugin configuration. May be a string alias/dotted path, an object with {module, config}, or null for default.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "config": {
+              "type": "object"
+            },
+            "module": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
     "dnssec": {
       "additionalProperties": false,
       "properties": {
@@ -1242,9 +1351,14 @@
     "foghorn": {
       "additionalProperties": false,
       "properties": {
-        "min_cache_ttl": {
-          "minimum": 0,
-          "type": "integer"
+        "dnssec": {
+          "$ref": "#/properties/dnssec"
+        },
+        "logging": {
+          "$ref": "#/properties/logging"
+        },
+        "resolver": {
+          "$ref": "#/properties/resolver"
         },
         "timeout_ms": {
           "minimum": 1,
@@ -1253,32 +1367,6 @@
         "upstream_max_concurrent": {
           "minimum": 1,
           "type": "integer"
-        },
-        "prefetch": {
-          "additionalProperties": false,
-          "properties": {
-            "enabled": {
-              "default": false,
-              "type": "boolean"
-            },
-            "min_ttl": {
-              "minimum": 0,
-              "type": "integer"
-            },
-            "max_ttl": {
-              "minimum": 0,
-              "type": "integer"
-            },
-            "refresh_before_expiry": {
-              "minimum": 0,
-              "type": "number"
-            },
-            "allow_stale_after_expiry": {
-              "minimum": 0,
-              "type": "number"
-            }
-          },
-          "type": "object"
         },
         "upstream_strategy": {
           "default": "failover",
@@ -1292,15 +1380,6 @@
         "use_asyncio": {
           "default": true,
           "type": "boolean"
-        },
-        "logging": {
-          "$ref": "#/properties/logging"
-        },
-        "resolver": {
-          "$ref": "#/properties/resolver"
-        },
-        "dnssec": {
-          "$ref": "#/properties/dnssec"
         }
       },
       "type": "object"
