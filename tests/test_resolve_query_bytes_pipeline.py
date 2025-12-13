@@ -12,6 +12,8 @@ import pytest
 from dnslib import QTYPE, RCODE, DNSRecord, RR, A
 
 import foghorn.server as server_mod
+from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins import base as plugin_base
 from foghorn.plugins.base import BasePlugin, PluginContext, PluginDecision
 from foghorn.server import DNSUDPHandler, resolve_query_bytes
 
@@ -54,7 +56,7 @@ def test_resolve_query_bytes_cache_hit():
     DNSUDPHandler.plugins = []
     q = DNSRecord.question("cache.example", "A")
     r = q.reply()
-    DNSUDPHandler.cache.set(("cache.example", QTYPE.A), 10, r.pack())
+    plugin_base.DNS_CACHE.set(("cache.example", QTYPE.A), 10, r.pack())
     resp = resolve_query_bytes(q.pack(), "127.0.0.1")
     out = DNSRecord.parse(resp)
     assert out.header.rcode == RCODE.NOERROR
@@ -70,7 +72,7 @@ def test_resolve_query_bytes_stats_pre_deny_and_override():
       - None; asserts key stats hooks are called for deny/override.
     """
 
-    DNSUDPHandler.cache = DNSUDPHandler.cache  # reuse existing cache
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
 
     stats = _Stats()
     DNSUDPHandler.stats_collector = stats
@@ -110,11 +112,11 @@ def test_resolve_query_bytes_stats_cache_and_no_upstreams():
     DNSUDPHandler.plugins = []
     q = DNSRecord.question("cache-stats.example", "A")
     r = q.reply()
-    DNSUDPHandler.cache.set(("cache-stats.example", QTYPE.A), 10, r.pack())
+    plugin_base.DNS_CACHE.set(("cache-stats.example", QTYPE.A), 10, r.pack())
     resolve_query_bytes(q.pack(), "127.0.0.1")
 
     # No upstreams: clear cache and ensure no upstreams configured
-    DNSUDPHandler.cache._store = {}
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
     DNSUDPHandler.upstream_addrs = []
     q2 = DNSRecord.question("no-upstreams-stats.example", "A")
     resolve_query_bytes(q2.pack(), "127.0.0.1")
@@ -189,7 +191,7 @@ def test_resolve_query_bytes_stats_outer_exception(
     stats = _Stats()
     DNSUDPHandler.stats_collector = stats
     DNSUDPHandler.plugins = []
-    DNSUDPHandler.cache._store = {}
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
     DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
 
     def _boom_send(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
@@ -264,7 +266,7 @@ def test_resolve_query_bytes_recursive_mode_uses_recursive_resolver(
 
     # Configure handler state for recursive mode.
     DNSUDPHandler.plugins = []
-    DNSUDPHandler.cache._store = {}
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
     DNSUDPHandler.resolver_mode = "recursive"
     DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
 

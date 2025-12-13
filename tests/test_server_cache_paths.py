@@ -10,6 +10,7 @@ Outputs:
 
 from dnslib import QTYPE, DNSRecord
 
+from foghorn.plugins import base as plugin_base
 from foghorn.server import DNSUDPHandler
 
 
@@ -90,7 +91,7 @@ def test_ensure_edns_adds_and_replaces_opt_record(monkeypatch):
     monkeypatch.setattr("foghorn.server.RR", _FakeRR)
 
     class _Shim:
-        cache = DNSUDPHandler.cache
+        cache = plugin_base.DNS_CACHE
         min_cache_ttl = 60
         dnssec_mode = "ignore"
         edns_udp_payload = 1600

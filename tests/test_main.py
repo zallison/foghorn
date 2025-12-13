@@ -14,35 +14,10 @@ import pytest
 
 import foghorn.main as main_mod
 from foghorn.main import (
-    _get_min_cache_ttl,
     load_plugins,
     main,
     normalize_upstream_config,
 )
-
-
-def test_get_min_cache_ttl_various_inputs():
-    """
-    Brief: _get_min_cache_ttl clamps negatives and handles bad types.
-
-    Inputs:
-      - cfg: dict with min_cache_ttl values
-
-    Outputs:
-      - None: Asserts sanitized integer result
-    """
-    # Root-level (legacy) placement
-    assert _get_min_cache_ttl({"min_cache_ttl": 10}) == 10
-    assert _get_min_cache_ttl({"min_cache_ttl": -5}) == 0
-    assert _get_min_cache_ttl({"min_cache_ttl": "abc"}) == 0
-    assert _get_min_cache_ttl({}) == 0
-
-    # New canonical placement under foghorn
-    assert _get_min_cache_ttl({"foghorn": {"min_cache_ttl": 42}}) == 42
-    # Nested value should override a conflicting root-level value
-    assert (
-        _get_min_cache_ttl({"min_cache_ttl": 5, "foghorn": {"min_cache_ttl": 9}}) == 9
-    )
 
 
 def test_normalize_upstream_config_list_only_and_timeout_default():
@@ -165,7 +140,8 @@ def test_main_starts_server_and_handles_keyboardinterrupt(monkeypatch):
         "upstreams:\n"
         "  - host: 1.1.1.1\n"
         "    port: 53\n"
-        "foghorn:\n  timeout_ms: 777\n  min_cache_ttl: 33\n"
+        "cache:\n  module: in_memory_ttl\n  config:\n    min_cache_ttl: 33\n"
+        "foghorn:\n  timeout_ms: 777\n"
         "plugins: []\n"
     )
 

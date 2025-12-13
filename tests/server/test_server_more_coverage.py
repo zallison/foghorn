@@ -11,7 +11,8 @@ Outputs:
 from dnslib import NS, QTYPE, RCODE, RR, SOA, A, DNSRecord
 
 import foghorn.server as srv
-from foghorn.cache import FoghornTTLCache
+from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins import base as plugin_base
 
 
 def test_compute_effective_ttl_variants():
@@ -193,7 +194,7 @@ def test__cache_and_send_response_parse_error_still_sends():
             self.sent.append((data, addr))
 
     sock = _Sock()
-    h.cache = FoghornTTLCache()
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
     req = DNSRecord.question("bad.example", "A")
     h._cache_and_send_response(
         b"\x00\x01garbage",
@@ -258,7 +259,7 @@ def test_dnssec_validate_mode_upstream_ad_and_local_paths(monkeypatch):
     """
     # Ensure clean slate
     srv.DNSUDPHandler.plugins = []
-    srv.DNSUDPHandler.cache = FoghornTTLCache()
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
 
 
 def test_resolve_query_bytes_negative_caches_nxdomain_with_soa(monkeypatch):
@@ -301,7 +302,7 @@ def test_resolve_query_bytes_negative_caches_nxdomain_with_soa(monkeypatch):
 
     monkeypatch.setattr(srv, "send_query_with_failover", fake_failover)
 
-    srv.DNSUDPHandler.cache = FoghornTTLCache()
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
     srv.DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
     srv.DNSUDPHandler.plugins = []
     srv.DNSUDPHandler.min_cache_ttl = 5
@@ -349,7 +350,7 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
 
     monkeypatch.setattr(srv, "send_query_with_failover", fake_failover)
 
-    srv.DNSUDPHandler.cache = FoghornTTLCache()
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
     srv.DNSUDPHandler.upstream_addrs = [{"host": "2.2.2.2", "port": 53}]
     srv.DNSUDPHandler.plugins = []
     srv.DNSUDPHandler.min_cache_ttl = 5
@@ -365,7 +366,7 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
     # The remainder of this file continues with dnssec validation tests.
     # Ensure clean slate for those tests.
     srv.DNSUDPHandler.plugins = []
-    srv.DNSUDPHandler.cache = FoghornTTLCache()
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
 
     name = "dnssec.example"
     q = DNSRecord.question(name, "A")
@@ -452,7 +453,7 @@ def test_resolve_query_bytes_post_hooks(monkeypatch):
         return r_ok.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
 
     monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
-    srv.DNSUDPHandler.cache = FoghornTTLCache()
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
     srv.DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
 
     class _PostDeny:

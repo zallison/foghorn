@@ -12,6 +12,7 @@ import pytest
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 import foghorn.server as srv
+from foghorn.plugins import base as plugin_base
 from foghorn.server import DNSUDPHandler, send_query_with_failover
 
 
@@ -83,13 +84,21 @@ def test_stats_hooks_are_called(monkeypatch, path):
     DNSUDPHandler.plugins = []
     DNSUDPHandler.upstream_addrs = [{"host": "h", "port": 53}]
 
+    # Be explicit about cache isolation for this parametrized test.
+    try:
+        from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+
+        plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+    except Exception:  # pragma: no cover
+        pass
+
     # ensure no pre plugins
     monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **k: None)
 
     # cache priming when needed
     cache_key = ("stats.example", QTYPE.A)
     if path == "cache_hit":
-        DNSUDPHandler.cache.set(cache_key, 30, _mk_ok_reply(q))
+        plugin_base.DNS_CACHE.set(cache_key, 30, _mk_ok_reply(q))
 
     # forwarding behavior
     if path == "upstream_ok":
