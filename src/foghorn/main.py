@@ -621,6 +621,7 @@ def main(argv: List[str] | None = None) -> int:
         ignore_top_clients = list(ignore_cfg.get("top_clients", []) or [])
         ignore_top_domains = list(ignore_cfg.get("top_domains", []) or [])
         ignore_top_subdomains = list(ignore_cfg.get("top_subdomains", []) or [])
+        include_in_stats = bool(ignore_cfg.get("include_in_stats", True))
         domains_mode = str(ignore_cfg.get("top_domains_mode", "exact")).lower()
         subdomains_mode = str(ignore_cfg.get("top_subdomains_mode", "exact")).lower()
         ignore_domains_as_suffix = domains_mode == "suffix"
@@ -644,6 +645,7 @@ def main(argv: List[str] | None = None) -> int:
             ignore_domains_as_suffix=ignore_domains_as_suffix,
             ignore_subdomains_as_suffix=ignore_subdomains_as_suffix,
             ignore_single_host=ignore_single_host,
+            include_ignored_in_stats=include_in_stats,
         )
 
         # Best-effort warm-load of persisted aggregate counters on startup.

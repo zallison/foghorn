@@ -1110,6 +1110,7 @@ class StatsCollector:
         ignore_domains_as_suffix: bool = False,
         ignore_subdomains_as_suffix: bool = False,
         ignore_single_host: bool = False,
+        include_ignored_in_stats: bool = True,
     ) -> None:
         """Initialize statistics collector with configuration flags.
 
@@ -1130,6 +1131,10 @@ class StatsCollector:
             ignore_subdomains_as_suffix: When True, treat ignore_top_subdomains
                 entries (or the fallback domain set) as suffixes when matching
                 top_subdomains.
+            include_ignored_in_stats: When True (default), ignore filters only
+                affect display/exported top lists. When False, entries matching
+                ignore filters are excluded from aggregation (totals/uniques/topk)
+                but are still written to the persistent query_log.
 
         Outputs:
             None
@@ -1145,6 +1150,9 @@ class StatsCollector:
         self.track_latency = track_latency
         # Display-only flag for hiding single-label hosts from top lists
         self.ignore_single_host = bool(ignore_single_host)
+
+        # Control whether ignore filters exclude entries from aggregation.
+        self.include_ignored_in_stats = bool(include_ignored_in_stats)
 
         # Optional persistent store for long-lived aggregates and query logs
         self._store: Optional[StatsSQLiteStore] = stats_store
@@ -1240,7 +1248,15 @@ class StatsCollector:
             LatencyHistogram() if track_latency else None
         )
 
-        # Display-only ignore filters for top lists
+        # Ignore filters.
+        #
+        # Brief:
+        #   By default (include_ignored_in_stats=True), these filters are
+        #   display-only (they hide entries from exported top lists but do not
+        #   affect totals/uniques).
+        #   When include_ignored_in_stats=False, matching entries are excluded
+        #   from aggregation (totals/uniques/topk) while leaving the persistent
+        #   query log untouched.
         self._ignore_top_client_networks: List[ipaddress._BaseNetwork] = []
         self._ignore_top_domains: Set[str] = set()
         self._ignore_top_subdomains: Set[str] = set()
@@ -1252,6 +1268,93 @@ class StatsCollector:
             ignore_top_domains or [],
             ignore_top_subdomains or [],
         )
+
+    def _client_is_ignored_locked(self, client_ip: str) -> bool:
+        """Brief: Return True if the client IP matches ignore_top_clients.
+
+        Inputs:
+          - client_ip: Client IP string.
+
+        Outputs:
+          - bool
+        """
+
+        if not client_ip or not self._ignore_top_client_networks:
+            return False
+        try:
+            addr = ipaddress.ip_address(str(client_ip))
+        except Exception:
+            return False
+        return any(addr in net for net in self._ignore_top_client_networks)
+
+    def _base_domain_is_ignored_locked(self, base_domain: str) -> bool:
+        """Brief: Return True if base domain matches ignore_top_domains.
+
+        Inputs:
+          - base_domain: Normalized base domain (typically last two labels).
+
+        Outputs:
+          - bool
+        """
+
+        norm = _normalize_domain(str(base_domain or ""))
+        if not norm or not self._ignore_top_domains:
+            return False
+        if self._ignore_domains_as_suffix:
+            return any(
+                norm == ig or norm.endswith("." + ig) for ig in self._ignore_top_domains
+            )
+        return norm in self._ignore_top_domains
+
+    def _qname_is_ignored_locked(self, qname: str) -> bool:
+        """Brief: Return True if full qname matches ignore_top_subdomains.
+
+        Inputs:
+          - qname: Normalized qname.
+
+        Outputs:
+          - bool
+        """
+
+        norm = _normalize_domain(str(qname or ""))
+        if not norm:
+            return False
+
+        active: Set[str]
+        if self._ignore_top_subdomains:
+            active = self._ignore_top_subdomains
+        else:
+            # Fallback to domain ignore set when subdomain ignore set is empty.
+            active = self._ignore_top_domains
+
+        if not active:
+            return False
+
+        if self._ignore_subdomains_as_suffix:
+            return any(norm == ig or norm.endswith("." + ig) for ig in active)
+        return norm in active
+
+    def _should_ignore_query_locked(
+        self, client_ip: str, domain: str, base: str
+    ) -> bool:
+        """Brief: Return True if a query should be excluded from aggregation.
+
+        Inputs:
+          - client_ip: Client IP string.
+          - domain: Normalized qname.
+          - base: Normalized base domain.
+
+        Outputs:
+          - bool
+        """
+
+        if self._client_is_ignored_locked(client_ip):
+            return True
+        if base and self._base_domain_is_ignored_locked(base):
+            return True
+        if domain and self._qname_is_ignored_locked(domain):
+            return True
+        return False
 
     def record_query(self, client_ip: str, qname: str, qtype: str) -> None:
         """Record an incoming DNS query.
@@ -1270,7 +1373,19 @@ class StatsCollector:
         """
         domain = _normalize_domain(qname)
 
+        # Compute base domain once so it can be reused for top_domains and persistence.
+        parts = domain.split(".") if domain else []
+        base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
+
         with self._lock:
+            # When include_ignored_in_stats is False, ignore filters exclude
+            # entries from aggregation but do not affect persistent query logging
+            # (record_query_result).
+            if not self.include_ignored_in_stats and self._should_ignore_query_locked(
+                client_ip, domain, base
+            ):
+                return
+
             self._totals["total_queries"] += 1
 
             if self.include_qtype_breakdown:
@@ -1284,12 +1399,6 @@ class StatsCollector:
 
             if self._top_clients is not None:
                 self._top_clients.add(client_ip)
-
-            # Compute base domain once so it can be reused for top_domains and
-            # persistence. The base domain is always the last two labels of the
-            # normalized name when available.
-            parts = domain.split(".") if domain else []
-            base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
 
             if self._top_subdomains is not None and _is_subdomain(domain):
                 self._top_subdomains.add(domain)
@@ -1317,14 +1426,10 @@ class StatsCollector:
                         self._store.increment_count("sub_domains", domain)
                     if base:
                         self._store.increment_count("domains", base)
-                    # Persist per-qtype domain counts as "qtype|domain" so they
-                    # can be reconstructed on warm-load and via rebuild scripts.
                     if qtype and domain:
                         qkey = f"{qtype}|{domain}"
                         self._store.increment_count("qtype_qnames", qkey)
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                except Exception:  # pragma: no cover
                     logger.debug(
                         "StatsCollector: failed to persist query counters",
                         exc_info=True,
@@ -1351,6 +1456,12 @@ class StatsCollector:
         base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
 
         with self._lock:
+            if not self.include_ignored_in_stats:
+                if base and self._base_domain_is_ignored_locked(base):
+                    return
+                if domain and self._qname_is_ignored_locked(domain):
+                    return
+
             self._totals["cache_hits"] += 1
 
             if self._top_cache_hit_domains is not None and base:
@@ -1397,6 +1508,12 @@ class StatsCollector:
         base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
 
         with self._lock:
+            if not self.include_ignored_in_stats:
+                if base and self._base_domain_is_ignored_locked(base):
+                    return
+                if domain and self._qname_is_ignored_locked(domain):
+                    return
+
             self._totals["cache_misses"] += 1
 
             if self._top_cache_miss_domains is not None and base:
@@ -1442,9 +1559,17 @@ class StatsCollector:
             >>> collector = StatsCollector()
             >>> collector.record_cache_null("example.com")
         """
-        _normalize_domain(qname)
+        domain = _normalize_domain(qname)
+        parts = domain.split(".") if domain else []
+        base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
 
         with self._lock:
+            if not self.include_ignored_in_stats:
+                if base and self._base_domain_is_ignored_locked(base):
+                    return
+                if domain and self._qname_is_ignored_locked(domain):
+                    return
+
             self._totals["cache_null"] += 1
 
             # When the cache-null event is caused by a pre-plugin deny/override
@@ -1577,7 +1702,7 @@ class StatsCollector:
         domains_as_suffix: Optional[bool] = None,
         subdomains_as_suffix: Optional[bool] = None,
     ) -> None:
-        """Update display-only ignore filters for top statistics lists.
+        """Update ignore filters for statistics aggregation.
 
         Inputs:
             clients: Optional list of client IPs or CIDR strings to hide from
@@ -1605,8 +1730,8 @@ class StatsCollector:
                 When None, the existing setting is preserved.
 
         Outputs:
-            None (updates internal ignore sets used only when exporting
-            snapshot top lists; counters and TopK data are unchanged).
+            None (updates internal ignore sets used during aggregation in
+            record_query/record_cache_* and when exporting snapshots).
 
         Example:
             >>> collector = StatsCollector(include_top_clients=True)
@@ -1617,8 +1742,8 @@ class StatsCollector:
             ...     domains_as_suffix=True,
             ... )
             >>> snap = collector.snapshot(reset=False)
-            >>> # top_clients/top_domains/top_subdomains will omit matching
-            >>> # entries, but totals["total_queries"] counts all queries.
+            >>> # Matching entries will not be counted in totals/top lists,
+            >>> # but queries are still written to the persistent query_log.
         """
         clients = clients or []
         domains = domains or []
@@ -1826,6 +1951,12 @@ class StatsCollector:
             base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
 
         with self._lock:
+            if not self.include_ignored_in_stats:
+                if base and self._base_domain_is_ignored_locked(base):
+                    return
+                if domain and self._qname_is_ignored_locked(domain):
+                    return
+
             self._rcodes[rcode] += 1
 
             # Track per-rcode top base domains when domain information is
