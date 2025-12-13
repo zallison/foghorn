@@ -255,7 +255,8 @@ class LatencyHistogram:
         return self.max_ms or 0.0  # pragma: no cover - defensive fallback
 
 
-TOPK_CAPACITY_FACTOR = 4
+TOPK_CAPACITY_FACTOR = 100
+TOPK_MIN_CAPACITY = 1024
 
 
 class TopK:
@@ -1185,10 +1186,13 @@ class StatsCollector:
         self._unique_clients: Optional[Set[str]] = set() if track_uniques else None
         self._unique_domains: Optional[Set[str]] = set() if track_uniques else None
 
-        # Optional: top-K trackers. Use a slightly larger internal capacity so
-        # that display-only ignore filters applied at snapshot time have enough
-        # headroom to still return up to top_n visible entries.
-        internal_capacity = max(1, self.top_n * TOPK_CAPACITY_FACTOR)
+        # Optional: top-K trackers. Use a larger internal capacity so that
+        # display-only filters and downstream consumers (such as prefetching
+        # logic) can work with deeper top lists than the default display size.
+        # By default we keep up to max(top_n * TOPK_CAPACITY_FACTOR, TOPK_MIN_CAPACITY)
+        # entries in memory.
+        internal_capacity = max(TOPK_MIN_CAPACITY, self.top_n * TOPK_CAPACITY_FACTOR)
+        self._top_capacity: int = internal_capacity
 
         self._top_clients: Optional[TopK] = (
             TopK(capacity=internal_capacity) if include_top_clients else None
@@ -1298,7 +1302,7 @@ class StatsCollector:
             if self.include_top_domains and qtype:
                 tracker = self._top_qtype_qnames.get(qtype)
                 if tracker is None:
-                    tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                    tracker = TopK(capacity=self._top_capacity)
                     self._top_qtype_qnames[qtype] = tracker
                 tracker.add(domain)
 
@@ -1838,7 +1842,7 @@ class StatsCollector:
                 if domain and domain != base:
                     sub_tracker = self._top_rcode_subdomains.get(rcode)
                     if sub_tracker is None:
-                        sub_tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                        sub_tracker = TopK(capacity=self._top_capacity)
                         self._top_rcode_subdomains[rcode] = sub_tracker
                     sub_tracker.add(domain)
 
@@ -2059,9 +2063,9 @@ class StatsCollector:
                     filtered_clients.append((client, count))
                 top_clients = filtered_clients
 
-            # Always truncate exported top lists to the configured display size.
-            if top_clients is not None:
-                top_clients = top_clients[: self.top_n]
+            # Do not truncate here; export the full internal capacity so callers
+            # (including HTTP APIs and prefetch logic) can decide how many items
+            # to display or consume.
 
             if top_domains is not None:
                 filtered_domains: List[Tuple[str, int]] = []
@@ -2083,8 +2087,8 @@ class StatsCollector:
                     filtered_domains.append((domain, count))
                 top_domains = filtered_domains
 
-            if top_domains is not None:
-                top_domains = top_domains[: self.top_n]
+            # Leave top_domains at full internal capacity; downstream code can
+            # apply its own view-specific limits.
 
             if top_subdomains is not None:
                 # Fallback: if no explicit subdomain ignore list is configured,
@@ -2120,8 +2124,8 @@ class StatsCollector:
                     filtered_subdomains.append((name, count))
                 top_subdomains = filtered_subdomains
 
-            if top_subdomains is not None:
-                top_subdomains = top_subdomains[: self.top_n]
+            # Leave top_subdomains at full internal capacity; downstream code
+            # (e.g. HTTP APIs) is responsible for applying any display limits.
 
             # Per-qtype top domains (full qnames) for configured qtypes.
             qtype_qnames: Optional[Dict[str, List[Tuple[str, int]]]] = None
@@ -2165,7 +2169,7 @@ class StatsCollector:
                         entries = filtered_entries
 
                     if entries:
-                        qtype_qnames[qtype_name] = entries[: self.top_n]
+                        qtype_qnames[qtype_name] = entries
 
                 if not qtype_qnames:
                     qtype_qnames = None
@@ -2200,7 +2204,7 @@ class StatsCollector:
                     if not filtered_entries:
                         continue  # pragma: no cover - no visible entries after filtering
 
-                    rcode_domains[rcode_name] = filtered_entries[: self.top_n]
+                    rcode_domains[rcode_name] = filtered_entries
 
                 if not rcode_domains:
                     rcode_domains = (
@@ -2246,7 +2250,7 @@ class StatsCollector:
                     if not filtered_entries:
                         continue
 
-                    rcode_subdomains[rcode_name] = filtered_entries[: self.top_n]
+                    rcode_subdomains[rcode_name] = filtered_entries
 
                 if not rcode_subdomains:
                     rcode_subdomains = None
@@ -2276,7 +2280,7 @@ class StatsCollector:
                                     continue  # pragma: no cover - ignore filter branch
                         filtered_entries.append((domain, count))
                     if filtered_entries:
-                        cache_hit_domains = filtered_entries[: self.top_n]
+                        cache_hit_domains = filtered_entries
 
             cache_miss_domains: Optional[List[Tuple[str, int]]] = None
             if self._top_cache_miss_domains is not None:
@@ -2302,7 +2306,7 @@ class StatsCollector:
                                     continue  # pragma: no cover - ignore filter branch
                         filtered_entries.append((domain, count))
                     if filtered_entries:
-                        cache_miss_domains = filtered_entries[: self.top_n]
+                        cache_miss_domains = filtered_entries
 
             # Top subdomain names (full qnames) for cache outcome restricted to
             # subdomain queries only (qname != base). Only true subdomains are
@@ -2335,7 +2339,7 @@ class StatsCollector:
                                     continue  # pragma: no cover - ignore filter branch
                         filtered_entries.append((domain, count))
                     if filtered_entries:
-                        cache_hit_subdomains = filtered_entries[: self.top_n]
+                        cache_hit_subdomains = filtered_entries
 
             cache_miss_subdomains: Optional[List[Tuple[str, int]]] = None
             if self._top_cache_miss_subdomains is not None:
@@ -2362,7 +2366,7 @@ class StatsCollector:
                                     continue  # pragma: no cover - ignore filter branch
                         filtered_entries.append((domain, count))
                     if filtered_entries:
-                        cache_miss_subdomains = filtered_entries[: self.top_n]
+                        cache_miss_subdomains = filtered_entries
 
             # Latency
             latency_stats = None
@@ -2807,7 +2811,7 @@ class StatsCollector:
                         key=lambda kv: kv[1],
                         reverse=True,
                     )
-                    tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                    tracker = TopK(capacity=self._top_capacity)
                     tracker.counts = dict(items[: tracker.capacity])
                     self._top_qtype_qnames[qtype_name] = tracker
 
@@ -2820,7 +2824,7 @@ class StatsCollector:
                         key=lambda kv: kv[1],
                         reverse=True,
                     )
-                    tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                    tracker = TopK(capacity=self._top_capacity)
                     tracker.counts = dict(items[: tracker.capacity])
                     self._top_rcode_domains[rcode_name] = tracker
 
@@ -2834,7 +2838,7 @@ class StatsCollector:
                         key=lambda kv: kv[1],
                         reverse=True,
                     )
-                    tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                    tracker = TopK(capacity=self._top_capacity)
                     tracker.counts = dict(items[: tracker.capacity])
                     self._top_rcode_subdomains[rcode_name] = tracker
 
