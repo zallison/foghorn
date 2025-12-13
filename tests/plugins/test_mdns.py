@@ -1,3 +1,5 @@
+import ipaddress
+
 import pytest
 from dnslib import QTYPE, DNSRecord
 
@@ -126,3 +128,192 @@ def test_mdns_bridge_falls_through_when_unknown() -> None:
     ctx = PluginContext(client_ip="127.0.0.1")
     req = _make_query("unknown.local", int(QTYPE.A))
     assert plugin.pre_resolve("unknown.local", int(QTYPE.A), req, ctx) is None
+
+
+def test_mdns_bridge_mirror_suffixes_roundtrip() -> None:
+    """Brief: `_mirror_suffixes` treats `.mdns` as an alias for `.local`.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts suffix mirroring behavior and normalization.
+    """
+
+    from foghorn.plugins.mdns import MdnsBridgePlugin
+
+    plugin = MdnsBridgePlugin(network_enabled=False)
+    plugin.setup()
+
+    assert plugin._mirror_suffixes("Foo.Local.") == ["foo.local", "foo.mdns"]
+    assert plugin._mirror_suffixes("foo.mdns") == ["foo.mdns", "foo.local"]
+    assert plugin._mirror_suffixes("example.com") == ["example.com"]
+
+
+def test_mdns_bridge_ptr_add_and_remove_mirrors_suffixes() -> None:
+    """Brief: PTR add/remove mirrors `.local` and `.mdns` keys and targets.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts `_ptr` cache contains/clears mirrored entries.
+    """
+
+    from foghorn.plugins.mdns import MdnsBridgePlugin
+
+    plugin = MdnsBridgePlugin(network_enabled=False)
+    plugin.setup()
+
+    plugin._ptr_add("_http._tcp.local.", "my._http._tcp.local.")
+
+    assert "_http._tcp.local" in plugin._ptr
+    assert "_http._tcp.mdns" in plugin._ptr
+    assert "my._http._tcp.local" in plugin._ptr["_http._tcp.local"]
+    assert "my._http._tcp.mdns" in plugin._ptr["_http._tcp.local"]
+
+    plugin._ptr_remove("_http._tcp.local.", "my._http._tcp.local.")
+
+    assert "_http._tcp.local" not in plugin._ptr
+    assert "_http._tcp.mdns" not in plugin._ptr
+
+
+@pytest.mark.parametrize(
+    "include_ipv4,include_ipv6",
+    [
+        (True, True),
+        (False, True),
+        (True, False),
+    ],
+)
+def test_mdns_bridge_ingest_service_info_populates_caches(
+    include_ipv4: bool, include_ipv6: bool
+) -> None:
+    """Brief: `_ingest_service_info` builds SRV/TXT and optional A/AAAA caches.
+
+    Inputs:
+      - include_ipv4: whether A records are enabled.
+      - include_ipv6: whether AAAA records are enabled.
+
+    Outputs:
+      - None; asserts internal caches are populated as expected.
+    """
+
+    from foghorn.plugins.mdns import MdnsBridgePlugin
+
+    class DummyInfo:
+        def __init__(self) -> None:
+            self.name = "myservice._http._tcp.local."
+            self.server = "myhost.local."
+            self.port = 8080
+            self.priority = 0
+            self.weight = 0
+            self.properties = {b"path": b"/", b"version": b"1"}
+            self.addresses = [
+                ipaddress.ip_address("192.0.2.10").packed,
+                ipaddress.ip_address("2001:db8::10").packed,
+            ]
+
+    plugin = MdnsBridgePlugin(
+        network_enabled=False,
+        include_ipv4=include_ipv4,
+        include_ipv6=include_ipv6,
+    )
+    plugin.setup()
+
+    plugin._ingest_service_info(DummyInfo())
+
+    # Instance has SRV and TXT under both suffixes.
+    assert "myservice._http._tcp.local" in plugin._srv
+    assert "myservice._http._tcp.mdns" in plugin._srv
+    assert "myservice._http._tcp.local" in plugin._txt
+
+    txt_set = set(plugin._txt["myservice._http._tcp.local"])
+    assert txt_set == {"path=/", "version=1"}
+
+    # Host has optional A/AAAA records.
+    if include_ipv4:
+        assert "myhost.local" in plugin._a
+        assert "192.0.2.10" in plugin._a["myhost.local"]
+    else:
+        assert "myhost.local" not in plugin._a
+
+    if include_ipv6:
+        assert "myhost.local" in plugin._aaaa
+        assert "2001:db8::10" in plugin._aaaa["myhost.local"]
+    else:
+        assert "myhost.local" not in plugin._aaaa
+
+
+def test_mdns_bridge_pre_resolve_returns_none_for_untargeted_client() -> None:
+    """Brief: pre_resolve respects BasePlugin targets() filtering.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts untargeted clients do not receive overrides.
+    """
+
+    from foghorn.plugins.mdns import MdnsBridgePlugin
+
+    plugin = MdnsBridgePlugin(network_enabled=False, targets=["10.0.0.0/8"])
+    plugin.setup()
+
+    plugin._test_seed_records(a={"myhost.local": ["192.0.2.10"]})
+
+    ctx = PluginContext(client_ip="192.0.2.1")
+    req = _make_query("myhost.local", int(QTYPE.A))
+    assert plugin.pre_resolve("myhost.local", int(QTYPE.A), req, ctx) is None
+
+
+def test_mdns_bridge_pre_resolve_returns_none_for_invalid_dns_request() -> None:
+    """Brief: pre_resolve returns None when the raw DNS request cannot be parsed.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts parse errors fall through.
+    """
+
+    from foghorn.plugins.mdns import MdnsBridgePlugin
+
+    plugin = MdnsBridgePlugin(network_enabled=False)
+    plugin.setup()
+
+    plugin._test_seed_records(a={"myhost.local": ["192.0.2.10"]})
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    assert (
+        plugin.pre_resolve("myhost.local", int(QTYPE.A), b"not-a-dns-packet", ctx)
+        is None
+    )
+
+
+def test_mdns_bridge_pre_resolve_uses_configured_ttl() -> None:
+    """Brief: Synthesized answers use the plugin `ttl` config.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts TTL in answer RRs matches configured value.
+    """
+
+    from foghorn.plugins.mdns import MdnsBridgePlugin
+
+    plugin = MdnsBridgePlugin(network_enabled=False, ttl=123)
+    plugin.setup()
+
+    plugin._test_seed_records(a={"myhost.local": ["192.0.2.10"]})
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req = _make_query("myhost.local", int(QTYPE.A))
+    decision = plugin.pre_resolve("myhost.local", int(QTYPE.A), req, ctx)
+    assert decision is not None
+
+    resp = DNSRecord.parse(decision.response)
+    answers = [rr for rr in resp.rr if rr.rtype == QTYPE.A]
+    assert len(answers) == 1
+    assert answers[0].ttl == 123
