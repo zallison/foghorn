@@ -275,12 +275,13 @@ class DnsPrefetchPlugin(BasePlugin):
                 if streak >= self.max_consecutive_misses:
                     # Stop prefetching this domain until a future cycle sees
                     # additional cache hits.
-                    logger.info(
-                        "DnsPrefetchPlugin: skipping %s (streak=%d, max=%d)",
-                        name,
-                        streak,
-                        self.max_consecutive_misses,
-                    )
+                    if streak >= self.max_consecutive_misses:
+                        logger.info(
+                            "DnsPrefetchPlugin: skipping %s (streak=%d, max=%d)",
+                            name,
+                            streak,
+                            self.max_consecutive_misses,
+                        )
                     continue
 
             self._prefetch_domain(name)
