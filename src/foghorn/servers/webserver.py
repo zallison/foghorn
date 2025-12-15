@@ -10,8 +10,9 @@ backed by the in-process StatsCollector and current configuration dict.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import http.server
-import importlib
+import importlib.metadata as importlib_metadata
 import json
 import logging
 import mimetypes
@@ -26,6 +27,7 @@ import time
 import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -33,7 +35,12 @@ import yaml
 from cachetools import TTLCache, cached
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+)
 from pydantic import BaseModel
 
 from ..stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
@@ -45,7 +52,13 @@ except Exception:  # pragma: no cover - optional dependency fallback
     psutil = None  # type: ignore[assignment]
 
 
-FOGHORN_VERSION = importlib.metadata.version("foghorn")
+_GITHUB_URL = "https://github.com/zallison/foghorn"
+
+try:
+    FOGHORN_VERSION = importlib_metadata.version("foghorn")
+except Exception:  # pragma: no cover - defensive fallback
+    FOGHORN_VERSION = "unknown"
+
 logger = logging.getLogger("foghorn.webserver")
 
 # Lightweight cache for expensive system metrics to keep /stats fast under load.
@@ -244,6 +257,597 @@ def _utc_now_iso() -> str:
     """
 
     return datetime.now(timezone.utc).isoformat()
+
+
+@dataclasses.dataclass
+class _ListenerRuntime:
+    """Brief: Track the runtime state of a single listener for readiness checks.
+
+    Inputs (fields):
+      - name: Logical listener name (e.g. 'udp', 'tcp', 'dot', 'doh', 'webserver').
+      - enabled: Whether this listener is expected to be running.
+      - thread: Optional Thread-like object that may implement is_alive().
+      - error: Optional string describing a startup/runtime error.
+
+    Outputs:
+      - _ListenerRuntime instance.
+    """
+
+    name: str
+    enabled: bool
+    thread: Any | None = None
+    error: str | None = None
+
+
+class RuntimeState:
+    """Brief: Shared, thread-safe runtime state used by /ready endpoints.
+
+    Inputs (constructor):
+      - startup_complete: Optional bool indicating whether main startup has completed.
+
+    Outputs:
+      - RuntimeState instance.
+
+    Notes:
+      - main() should mark startup_complete=True only after all configured listeners
+        and the admin webserver have been started.
+      - Listeners can be registered incrementally as threads/handles are created.
+
+    Example:
+      >>> state = RuntimeState()
+      >>> state.set_listener('udp', enabled=True, thread=None)
+      >>> state.mark_startup_complete()
+    """
+
+    def __init__(self, startup_complete: bool = False) -> None:
+        self._lock = threading.Lock()
+        self._startup_complete = bool(startup_complete)
+        self._listeners: dict[str, _ListenerRuntime] = {}
+
+    def mark_startup_complete(self) -> None:
+        """Brief: Mark the process as having completed startup.
+
+        Inputs: none
+        Outputs: none
+        """
+
+        with self._lock:
+            self._startup_complete = True
+
+    def set_listener(self, name: str, *, enabled: bool, thread: Any | None) -> None:
+        """Brief: Register or update a listener entry.
+
+        Inputs:
+          - name: Listener name string.
+          - enabled: Whether the listener is expected to be running.
+          - thread: Optional thread/handle object.
+
+        Outputs:
+          - None.
+        """
+
+        if not name:
+            return
+        with self._lock:
+            current = self._listeners.get(name)
+            error = current.error if current is not None else None
+            self._listeners[name] = _ListenerRuntime(
+                name=str(name),
+                enabled=bool(enabled),
+                thread=thread,
+                error=error,
+            )
+
+    def set_listener_error(self, name: str, exc: Exception | str) -> None:
+        """Brief: Attach an error message to a listener entry.
+
+        Inputs:
+          - name: Listener name string.
+          - exc: Exception instance or error string.
+
+        Outputs:
+          - None.
+        """
+
+        if not name:
+            return
+        msg = str(exc)
+        with self._lock:
+            current = self._listeners.get(name)
+            enabled = current.enabled if current is not None else True
+            thread = current.thread if current is not None else None
+            self._listeners[name] = _ListenerRuntime(
+                name=str(name),
+                enabled=bool(enabled),
+                thread=thread,
+                error=msg,
+            )
+
+    def snapshot(self) -> dict[str, Any]:
+        """Brief: Return a JSON-safe snapshot of current runtime state.
+
+        Inputs: none
+
+        Outputs:
+          - dict with keys: startup_complete (bool) and listeners (mapping).
+        """
+
+        with self._lock:
+            listeners = {
+                name: {
+                    "enabled": entry.enabled,
+                    "running": _thread_is_alive(entry.thread),
+                    "error": entry.error,
+                }
+                for name, entry in self._listeners.items()
+            }
+            return {
+                "startup_complete": bool(self._startup_complete),
+                "listeners": listeners,
+            }
+
+
+def _thread_is_alive(obj: Any | None) -> bool:
+    """Brief: Best-effort check whether a thread/handle is alive.
+
+    Inputs:
+      - obj: Thread-like object (may implement is_alive()) or None.
+
+    Outputs:
+      - bool: True when obj appears to be running.
+    """
+
+    if obj is None:
+        return False
+    try:
+        fn = getattr(obj, "is_alive", None)
+        if callable(fn):
+            return bool(fn())
+    except Exception:
+        return False
+    # Some handles expose is_running instead of is_alive.
+    try:
+        fn = getattr(obj, "is_running", None)
+        if callable(fn):
+            return bool(fn())
+    except Exception:
+        return False
+    return False
+
+
+@lru_cache(maxsize=1)
+def _get_package_build_info() -> Dict[str, Any]:
+    """Brief: Best-effort build metadata (commit, VCS url, etc.) from packaging.
+
+    Inputs: none
+
+    Outputs:
+      - dict with keys:
+          * git_sha: str|None
+          * vcs_url: str|None
+          * requested_revision: str|None
+          * build_time: str|None
+          * build_id: str|None
+
+    Notes:
+      - Prefers environment variables so container builds can inject stable build
+        identifiers.
+      - Falls back to PEP 610 direct_url.json metadata when available.
+    """
+
+    info: Dict[str, Any] = {
+        "git_sha": None,
+        "vcs_url": None,
+        "requested_revision": None,
+        "build_time": None,
+        "build_id": None,
+    }
+
+    # Environment variable overrides (common in CI/container builds).
+    for key, out_key in (
+        ("FOGHORN_GIT_SHA", "git_sha"),
+        ("GIT_SHA", "git_sha"),
+        ("FOGHORN_BUILD_TIME", "build_time"),
+        ("BUILD_TIME", "build_time"),
+        ("FOGHORN_BUILD_ID", "build_id"),
+        ("BUILD_ID", "build_id"),
+    ):
+        val = os.environ.get(key)
+        if val and not info.get(out_key):
+            info[out_key] = str(val)
+
+    # PEP 610 direct_url.json (useful for editable installs from VCS).
+    try:
+        dist = importlib_metadata.distribution("foghorn")
+        direct = dist.read_text("direct_url.json")
+        if direct:
+            payload = json.loads(direct)
+            vcs_info = payload.get("vcs_info") if isinstance(payload, dict) else None
+            if isinstance(vcs_info, dict):
+                if not info.get("git_sha") and vcs_info.get("commit_id"):
+                    info["git_sha"] = str(vcs_info.get("commit_id"))
+                if vcs_info.get("requested_revision") and not info.get(
+                    "requested_revision"
+                ):
+                    info["requested_revision"] = str(vcs_info.get("requested_revision"))
+            if payload.get("url") and not info.get("vcs_url"):
+                info["vcs_url"] = str(payload.get("url"))
+    except Exception:
+        pass
+
+    return info
+
+
+def _get_about_payload() -> Dict[str, Any]:
+    """Brief: Build the lightweight /about payload.
+
+    Inputs: none
+
+    Outputs:
+      - dict containing version, build info, and the project GitHub URL.
+    """
+
+    build = _get_package_build_info()
+    # Only include non-empty build fields to keep the payload compact.
+    build_clean = {k: v for k, v in build.items() if v}
+    return {
+        "server_time": _utc_now_iso(),
+        "version": FOGHORN_VERSION,
+        "github_url": _GITHUB_URL,
+        "build": build_clean,
+    }
+
+
+def _expected_listeners_from_config(config: Dict[str, Any] | None) -> Dict[str, bool]:
+    """Brief: Determine which listeners should be running based on config.
+
+    Inputs:
+      - config: Full configuration mapping loaded from YAML (or None).
+
+    Outputs:
+      - dict mapping listener name -> enabled bool.
+
+    Notes:
+      - Mirrors the defaults in foghorn.main: UDP defaults to enabled, others default
+        to disabled.
+    """
+
+    cfg = config if isinstance(config, dict) else {}
+    listen = cfg.get("listen") or {}
+    if not isinstance(listen, dict):
+        listen = {}
+
+    def _enabled(subkey: str, default: bool) -> bool:
+        sub = listen.get(subkey)
+        if not isinstance(sub, dict):
+            return bool(default)
+        return bool(sub.get("enabled", default))
+
+    return {
+        "udp": _enabled("udp", True),
+        "tcp": _enabled("tcp", False),
+        "dot": _enabled("dot", False),
+        "doh": _enabled("doh", False),
+        "webserver": bool((_get_web_cfg(cfg)).get("enabled", False)),
+    }
+
+
+def evaluate_readiness(
+    *,
+    stats: Optional[StatsCollector],
+    config: Dict[str, Any] | None,
+    runtime_state: RuntimeState | None,
+) -> tuple[bool, list[str], dict[str, Any]]:
+    """Brief: Compute readiness result and reasons for /ready endpoints.
+
+    Inputs:
+      - stats: Optional StatsCollector instance.
+      - config: Full configuration mapping loaded from YAML (or None).
+      - runtime_state: Optional RuntimeState populated by foghorn.main.
+
+    Outputs:
+      - (ready, not_ready, details)
+        * ready: bool
+        * not_ready: list[str] human-readable reasons
+        * details: dict with structured readiness details
+
+    Notes:
+      - Readiness is stricter than liveness: it verifies expected listeners are
+        running, required upstream configuration exists, and optional persistence
+        store health checks pass.
+    """
+
+    cfg = config if isinstance(config, dict) else {}
+    expected = _expected_listeners_from_config(cfg)
+
+    not_ready: list[str] = []
+
+    state_snapshot = (
+        runtime_state.snapshot()
+        if runtime_state is not None
+        else {
+            "startup_complete": True,
+            "listeners": {},
+        }
+    )
+
+    if not state_snapshot.get("startup_complete"):
+        not_ready.append("startup not complete")
+
+    # Upstream configuration: required in forwarder mode.
+    fog_cfg = cfg.get("foghorn") or {}
+    resolver_cfg = (
+        (fog_cfg.get("resolver") if isinstance(fog_cfg, dict) else None)
+        or cfg.get("resolver")
+        or {}
+    )
+    if not isinstance(resolver_cfg, dict):
+        resolver_cfg = {}
+    mode = str(resolver_cfg.get("mode", "forward")).lower()
+
+    if mode == "forward":
+        upstreams = cfg.get("upstreams") or []
+        if (
+            not isinstance(upstreams, list)
+            or len([u for u in upstreams if isinstance(u, dict)]) == 0
+        ):
+            not_ready.append("no upstreams configured")
+
+    # Listener threads/handles.
+    listeners_state = state_snapshot.get("listeners") or {}
+    for name, enabled in expected.items():
+        if not enabled:
+            continue
+        entry = listeners_state.get(name) or {}
+        running = bool(entry.get("running"))
+        err = entry.get("error")
+        if err:
+            not_ready.append(f"{name} error: {err}")
+        elif not running:
+            not_ready.append(f"{name} listener not running")
+
+    # Store availability (only when persistence is configured).
+    stats_cfg = cfg.get("statistics") or {}
+    if not isinstance(stats_cfg, dict):
+        stats_cfg = {}
+    persistence_cfg = stats_cfg.get("persistence") or {}
+    if not isinstance(persistence_cfg, dict):
+        persistence_cfg = {}
+
+    stats_enabled = bool(stats_cfg.get("enabled", False))
+    persistence_enabled = bool(persistence_cfg.get("enabled", True))
+
+    if stats_enabled and persistence_enabled:
+        store = getattr(stats, "_store", None) if stats is not None else None
+        if store is None:
+            not_ready.append("statistics persistence store not available")
+        else:
+            try:
+                # Prefer an explicit health_check() when available.
+                fn = getattr(store, "health_check", None)
+                ok = bool(fn()) if callable(fn) else True
+                if not ok:
+                    not_ready.append("statistics persistence store not healthy")
+            except Exception as exc:
+                not_ready.append(f"statistics persistence store error: {exc}")
+
+    details = {
+        "mode": mode,
+        "expected_listeners": expected,
+        "runtime": state_snapshot,
+    }
+
+    ready = len(not_ready) == 0
+    return ready, not_ready, details
+
+
+def _get_web_cfg(config: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Brief: Return the webserver config subsection from a full config mapping.
+
+    Inputs:
+      - config: Full configuration mapping loaded from YAML (or None).
+
+    Outputs:
+      - Dict representing config['webserver'] when present; otherwise {}.
+
+    Notes:
+      - Centralizing this avoids drift between FastAPI and threaded HTTP paths.
+    """
+
+    if isinstance(config, dict):
+        web_cfg = config.get("webserver") or {}
+        return web_cfg if isinstance(web_cfg, dict) else {}
+    return {}
+
+
+def _get_redact_keys(config: Dict[str, Any] | None) -> list[str]:
+    """Brief: Determine which config keys should be redacted for /config endpoints.
+
+    Inputs:
+      - config: Full configuration mapping loaded from YAML (or None).
+
+    Outputs:
+      - List of key names that should have their values redacted.
+
+    Notes:
+      - Uses webserver.redact_keys when set; otherwise falls back to a small
+        default allowlist.
+    """
+
+    web_cfg = _get_web_cfg(config)
+    keys = web_cfg.get("redact_keys") or ["token", "password", "secret"]
+    # Normalize to a list[str]
+    if isinstance(keys, (list, tuple)):
+        return [str(k) for k in keys]
+    return [str(keys)]
+
+
+def _trim_top_fields(payload: Dict[str, Any], limit: int, fields: list[str]) -> None:
+    """Brief: Trim top-N style payload fields in-place.
+
+    Inputs:
+      - payload: Response payload mapping to modify.
+      - limit: Positive integer N.
+      - fields: List of top-level keys to trim when the value is a list or a
+        mapping of lists.
+
+    Outputs:
+      - None. payload is modified in-place.
+
+    Notes:
+      - Both FastAPI and threaded /stats use the same trimming semantics.
+    """
+
+    if limit <= 0:
+        limit = 10
+
+    def _trim_one(key: str) -> None:
+        value = payload.get(key)
+        if isinstance(value, list):
+            payload[key] = value[:limit]
+        elif isinstance(value, dict):
+            trimmed: Dict[str, Any] = {}
+            for k, v in value.items():
+                if isinstance(v, list):
+                    trimmed[k] = v[:limit]
+                else:
+                    trimmed[k] = v
+            payload[key] = trimmed
+
+    for f in fields:
+        _trim_one(f)
+
+
+def _build_stats_payload_from_snapshot(
+    snap: StatsSnapshot,
+    *,
+    meta: Dict[str, Any],
+    system_info: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Brief: Build the /stats response body from an existing StatsSnapshot.
+
+    Inputs:
+      - snap: StatsSnapshot from StatsCollector.
+      - meta: Metadata mapping (hostname/version/etc) computed by the caller.
+      - system_info: System metrics mapping (see get_system_info()).
+
+    Outputs:
+      - Dict suitable for JSON serialization with all /stats keys.
+
+    Notes:
+      - This is shared by the FastAPI and threaded fallback implementations.
+      - The caller is responsible for setting server_time and any meta differences.
+    """
+
+    payload: Dict[str, Any] = {
+        "server_time": _utc_now_iso(),
+        "totals": snap.totals,
+        "rcodes": snap.rcodes,
+        "qtypes": snap.qtypes,
+        "uniques": snap.uniques,
+        "upstreams": snap.upstreams,
+        "meta": meta,
+        "top_clients": snap.top_clients,
+        "top_subdomains": snap.top_subdomains,
+        "top_domains": snap.top_domains,
+        "latency": snap.latency_stats,
+        "latency_recent": snap.latency_recent_stats,
+        "system": system_info,
+        "upstream_rcodes": snap.upstream_rcodes,
+        "upstream_qtypes": snap.upstream_qtypes,
+        "qtype_qnames": snap.qtype_qnames,
+        "rcode_domains": snap.rcode_domains,
+        "rcode_subdomains": snap.rcode_subdomains,
+        "cache_hit_domains": snap.cache_hit_domains,
+        "cache_miss_domains": snap.cache_miss_domains,
+        "cache_hit_subdomains": snap.cache_hit_subdomains,
+        "cache_miss_subdomains": snap.cache_miss_subdomains,
+        "rate_limit": getattr(snap, "rate_limit", None),
+    }
+
+    dnssec_totals = getattr(snap, "dnssec_totals", None)
+    if dnssec_totals:
+        payload["dnssec"] = dnssec_totals
+
+    return payload
+
+
+def _build_traffic_payload_from_snapshot(
+    snap: StatsSnapshot,
+    *,
+    meta: Dict[str, Any] | None,
+    top: int,
+) -> Dict[str, Any]:
+    """Brief: Build the /traffic response body from an existing StatsSnapshot.
+
+    Inputs:
+      - snap: StatsSnapshot from StatsCollector.
+      - meta: Optional metadata mapping computed by the caller.
+      - top: Max number of items in top lists.
+
+    Outputs:
+      - Dict suitable for JSON serialization.
+
+    Notes:
+      - FastAPI includes a meta block; the threaded fallback historically did not.
+        Passing meta=None preserves that behaviour.
+    """
+
+    if top <= 0:
+        top = 10
+
+    top_clients = list(snap.top_clients or [])[:top]
+    top_domains = list(snap.top_domains or [])[:top]
+
+    payload: Dict[str, Any] = {
+        "server_time": _utc_now_iso(),
+        "created_at": snap.created_at,
+        "totals": snap.totals,
+        "rcodes": snap.rcodes,
+        "qtypes": snap.qtypes,
+        "top_clients": top_clients,
+        "top_domains": top_domains,
+        "latency": snap.latency_stats,
+    }
+    if meta is not None:
+        payload["meta"] = meta
+    return payload
+
+
+def _get_config_raw_text(cfg_path: str) -> str:
+    """Brief: Read and return the raw config YAML text from disk.
+
+    Inputs:
+      - cfg_path: Filesystem path to the YAML configuration file.
+
+    Outputs:
+      - Raw YAML text.
+
+    Raises:
+      - OSError/IOError for filesystem failures.
+    """
+
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _get_config_raw_json(cfg_path: str) -> Dict[str, Any]:
+    """Brief: Read the on-disk YAML config and return both parsed mapping and raw text.
+
+    Inputs:
+      - cfg_path: Filesystem path to the YAML configuration file.
+
+    Outputs:
+      - Dict with keys: config (parsed mapping) and raw_yaml (exact text).
+
+    Raises:
+      - OSError/IOError for filesystem failures.
+      - yaml.YAMLError (or generic Exception) for parse errors.
+    """
+
+    raw_text = _get_config_raw_text(cfg_path)
+    raw_cfg = yaml.safe_load(raw_text) or {}
+    return {"config": raw_cfg, "raw_yaml": raw_text}
 
 
 def _ts_to_utc_iso(ts: float) -> str:
@@ -1051,7 +1655,9 @@ def _build_auth_dependency(web_cfg: Dict[str, Any]):
             provided = api_key.strip() if api_key else ""
         if not provided or provided != str(token):
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, detail="forbidden"
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="unauthorized",
+                headers={"WWW-Authenticate": "Bearer"},
             )
 
     if mode == "token":
@@ -1098,6 +1704,7 @@ def create_app(
     config: Dict[str, Any],
     log_buffer: Optional[RingBuffer] = None,
     config_path: str | None = None,
+    runtime_state: RuntimeState | None = None,
 ) -> FastAPI:
     """Create and configure FastAPI app exposing Foghorn admin endpoints.
 
@@ -1172,6 +1779,12 @@ def create_app(
     )
     app.state.www_root = www_root
     app.state.debug_stats_timings = bool(web_cfg.get("debug_timings", False))
+    app.state.runtime_state = runtime_state
+
+    # Best-effort: register the webserver as enabled. The thread/handle liveness
+    # is tracked by foghorn.main when runtime_state is provided.
+    if runtime_state is not None:
+        runtime_state.set_listener("webserver", enabled=True, thread=None)
 
     # CORS configuration
     cors_cfg = web_cfg.get("cors") or {}
@@ -1199,6 +1812,47 @@ def create_app(
         """
 
         return {"status": "ok", "server_time": _utc_now_iso()}
+
+    @app.get("/api/v1/about")
+    @app.get("/about")
+    async def about() -> Dict[str, Any]:
+        """Brief: Return lightweight version/build metadata.
+
+        Inputs: none
+
+        Outputs:
+          - dict containing version, github_url, and optional build metadata.
+        """
+
+        return _get_about_payload()
+
+    @app.get("/api/v1/ready")
+    @app.get("/ready")
+    async def ready() -> JSONResponse:
+        """Brief: Readiness probe endpoint (configuration + listener readiness).
+
+        Inputs: none
+
+        Outputs:
+          - JSONResponse with status_code 200 when ready, else 503.
+          - Body includes 'ready', 'not_ready' (list), and structured 'details'.
+        """
+
+        state: RuntimeState | None = getattr(app.state, "runtime_state", None)
+        ready_ok, not_ready, details = evaluate_readiness(
+            stats=getattr(app.state, "stats_collector", None),
+            config=getattr(app.state, "config", None),
+            runtime_state=state,
+        )
+        payload = {
+            "server_time": _utc_now_iso(),
+            "ready": ready_ok,
+            "not_ready": not_ready,
+            "details": details,
+        }
+        return JSONResponse(
+            content=_json_safe(payload), status_code=200 if ready_ok else 503
+        )
 
     @app.get("/api/v1/stats", dependencies=[Depends(auth_dep)])
     @app.get("/stats", dependencies=[Depends(auth_dep)])
@@ -1262,39 +1916,14 @@ def create_app(
         else:
             meta_with_uniques = meta
 
-        payload: Dict[str, Any] = {
-            "server_time": _utc_now_iso(),
-            "totals": snap.totals,
-            "rcodes": snap.rcodes,
-            "qtypes": snap.qtypes,
-            "uniques": snap.uniques,
-            "upstreams": snap.upstreams,
-            "meta": meta_with_uniques,
-            "top_clients": snap.top_clients,
-            "top_subdomains": snap.top_subdomains,
-            "top_domains": snap.top_domains,
-            "latency": snap.latency_stats,
-            "latency_recent": snap.latency_recent_stats,
-            "system": system_info,
-            "upstream_rcodes": snap.upstream_rcodes,
-            "upstream_qtypes": snap.upstream_qtypes,
-            "qtype_qnames": snap.qtype_qnames,
-            "rcode_domains": snap.rcode_domains,
-            "rcode_subdomains": snap.rcode_subdomains,
-            "cache_hit_domains": snap.cache_hit_domains,
-            "cache_miss_domains": snap.cache_miss_domains,
-            "cache_hit_subdomains": snap.cache_hit_subdomains,
-            "cache_miss_subdomains": snap.cache_miss_subdomains,
-            "rate_limit": getattr(snap, "rate_limit", None),
-        }
-
-        dnssec_totals = getattr(snap, "dnssec_totals", None)
-        if dnssec_totals:
-            payload["dnssec"] = dnssec_totals
+        payload = _build_stats_payload_from_snapshot(
+            snap,
+            meta=meta_with_uniques,
+            system_info=system_info,
+        )
 
         # Apply optional per-request limit to top-* style lists so callers can
-        # request deeper views when StatsCollector keeps a larger internal
-        # ranking. When "top" is invalid or <= 0 we fall back to 10.
+        # request deeper views when StatsCollector keeps a larger internal ranking.
         try:
             limit = int(top)
         except (TypeError, ValueError):
@@ -1302,32 +1931,22 @@ def create_app(
         if limit <= 0:
             limit = 10
 
-        def _trim_top_field(key: str) -> None:
-            value = payload.get(key)
-            if isinstance(value, list):
-                payload[key] = value[:limit]
-            elif isinstance(value, dict):
-                trimmed: Dict[str, Any] = {}
-                for k, v in value.items():
-                    if isinstance(v, list):
-                        trimmed[k] = v[:limit]
-                    else:
-                        trimmed[k] = v
-                payload[key] = trimmed
-
-        for field in [
-            "top_clients",
-            "top_subdomains",
-            "top_domains",
-            "cache_hit_domains",
-            "cache_miss_domains",
-            "cache_hit_subdomains",
-            "cache_miss_subdomains",
-            "qtype_qnames",
-            "rcode_domains",
-            "rcode_subdomains",
-        ]:
-            _trim_top_field(field)
+        _trim_top_fields(
+            payload,
+            limit,
+            [
+                "top_clients",
+                "top_subdomains",
+                "top_domains",
+                "cache_hit_domains",
+                "cache_miss_domains",
+                "cache_hit_subdomains",
+                "cache_miss_subdomains",
+                "qtype_qnames",
+                "rcode_domains",
+                "rcode_subdomains",
+            ],
+        )
 
         return payload
 
@@ -1386,20 +2005,7 @@ def create_app(
         if limit <= 0:
             limit = 10
 
-        top_clients = list(snap.top_clients or [])[:limit]
-        top_domains = list(snap.top_domains or [])[:limit]
-
-        return {
-            "server_time": _utc_now_iso(),
-            "created_at": snap.created_at,
-            "totals": snap.totals,
-            "rcodes": snap.rcodes,
-            "qtypes": snap.qtypes,
-            "meta": meta,
-            "top_clients": top_clients,
-            "top_domains": top_domains,
-            "latency": snap.latency_stats,
-        }
+        return _build_traffic_payload_from_snapshot(snap, meta=meta, top=limit)
 
     @app.get("/api/v1/upstream_status", dependencies=[Depends(auth_dep)])
     async def get_upstream_status() -> Dict[str, Any]:
@@ -1513,12 +2119,7 @@ def create_app(
         """
 
         cfg = app.state.config or {}
-        web_cfg_inner = (cfg.get("webserver") or {}) if isinstance(cfg, dict) else {}
-        redact_keys = web_cfg_inner.get("redact_keys") or [
-            "token",
-            "password",
-            "secret",
-        ]
+        redact_keys = _get_redact_keys(cfg)
 
         cfg_path = getattr(app.state, "config_path", None)
         body = _get_sanitized_config_yaml_cached(cfg, cfg_path, redact_keys)
@@ -1545,8 +2146,7 @@ def create_app(
                 detail="config_path not configured",
             )
         try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                raw_text = f.read()
+            raw_text = _get_config_raw_text(cfg_path)
         except (
             Exception
         ) as exc:  # pragma: no cover - I/O errors are environment-specific
@@ -1568,12 +2168,7 @@ def create_app(
         """
 
         cfg = app.state.config or {}
-        web_cfg_inner = (cfg.get("webserver") or {}) if isinstance(cfg, dict) else {}
-        redact_keys = web_cfg_inner.get("redact_keys") or [
-            "token",
-            "password",
-            "secret",
-        ]
+        redact_keys = _get_redact_keys(cfg)
         clean = sanitize_config(cfg, redact_keys=redact_keys)
         return {"server_time": _utc_now_iso(), "config": clean}
 
@@ -1594,9 +2189,7 @@ def create_app(
                 detail="config_path not configured",
             )
         try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                raw_text = f.read()
-                raw_cfg = yaml.safe_load(raw_text) or {}
+            raw = _get_config_raw_json(cfg_path)
         except (
             Exception
         ) as exc:  # pragma: no cover - I/O errors are environment-specific
@@ -1607,8 +2200,8 @@ def create_app(
 
         return {
             "server_time": _utc_now_iso(),
-            "config": raw_cfg,
-            "raw_yaml": raw_text,
+            "config": raw["config"],
+            "raw_yaml": raw["raw_yaml"],
         }
 
     @app.post("/api/v1/config/save", dependencies=[Depends(auth_dep)])
@@ -1863,7 +2456,9 @@ def create_app(
             )
 
         interval_seconds = interval_i * int(unit_seconds)
-        if interval_seconds <= 0:
+        if (
+            interval_seconds <= 0
+        ):  # pragma: no cover - defensive; unit_seconds is always > 0 here
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="interval_seconds must be > 0",
@@ -2029,6 +2624,7 @@ class _AdminHTTPServer(http.server.ThreadingHTTPServer):
         config: Dict[str, Any],
         log_buffer: Optional[RingBuffer],
         config_path: str | None = None,
+        runtime_state: RuntimeState | None = None,
     ) -> None:
         """Initialize admin HTTP server with shared state and host metadata.
 
@@ -2051,6 +2647,10 @@ class _AdminHTTPServer(http.server.ThreadingHTTPServer):
         self.config = config
         self.log_buffer = log_buffer
         self.config_path = config_path
+        self.runtime_state = runtime_state
+
+        if runtime_state is not None:
+            runtime_state.set_listener("webserver", enabled=True, thread=None)
 
         # Cache hostname and IP once; they are stable for the process lifetime
         # and may be relatively expensive to resolve repeatedly in hot paths
@@ -2113,9 +2713,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """
 
         cfg = getattr(self._server(), "config", {}) or {}
-        if isinstance(cfg, dict):
-            return cfg.get("webserver", {}) or {}
-        return {}
+        return _get_web_cfg(cfg)
 
     def _apply_cors_headers(
         self,
@@ -2146,13 +2744,18 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "*")
 
     def _send_json(
-        self, status_code: int, payload: Dict[str, Any]
+        self,
+        status_code: int,
+        payload: Dict[str, Any],
+        headers: Dict[str, str] | None = None,
     ) -> None:  # pragma: no cover - low-level HTTP I/O helper
         """Brief: Send JSON response with appropriate headers.
 
         Inputs:
           - status_code: HTTP status code
           - payload: Dict that will be converted to a JSON-safe structure.
+          - headers: Optional mapping of extra HTTP headers to include.
+
         Outputs:
           - None
         """
@@ -2163,6 +2766,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
+        if headers:
+            for k, v in headers.items():
+                self.send_header(str(k), str(v))
         self._apply_cors_headers()
         self.end_headers()
         try:
@@ -2306,8 +2912,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             provided = api_key.strip() if api_key else ""
         if not provided or provided != str(token):
             self._send_json(
-                403,
-                {"detail": "forbidden", "server_time": _utc_now_iso()},
+                401,
+                {"detail": "unauthorized", "server_time": _utc_now_iso()},
+                headers={"WWW-Authenticate": "Bearer"},
             )
             return False
         return True
@@ -2324,6 +2931,41 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """
 
         self._send_json(200, {"status": "ok", "server_time": _utc_now_iso()})
+
+    def _handle_about(self) -> None:
+        """Brief: Handle GET /about and /api/v1/about.
+
+        Inputs: none
+
+        Outputs:
+          - None (sends JSON response with version/build info).
+        """
+
+        self._send_json(200, _get_about_payload())
+
+    def _handle_ready(self) -> None:
+        """Brief: Handle GET /ready and /api/v1/ready.
+
+        Inputs: none
+
+        Outputs:
+          - None (sends JSON response with 200 when ready, else 503).
+        """
+
+        server = self._server()
+        state = getattr(server, "runtime_state", None)
+        ready_ok, not_ready, details = evaluate_readiness(
+            stats=getattr(server, "stats", None),
+            config=getattr(server, "config", None),
+            runtime_state=state,
+        )
+        payload = {
+            "server_time": _utc_now_iso(),
+            "ready": ready_ok,
+            "not_ready": not_ready,
+            "details": details,
+        }
+        self._send_json(200 if ready_ok else 503, payload)
 
     def _handle_stats(
         self, params: Dict[str, list[str]]
@@ -2356,7 +2998,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             top = 10
         if top <= 0:
             top = 10
-        snap: StatsSnapshot = collector.snapshot(reset=reset)
+        snap: StatsSnapshot = _get_stats_snapshot_cached(collector, reset=reset)
 
         server = self._server()
         hostname = getattr(server, "hostname", "unknown-host")
@@ -2371,66 +3013,30 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             "uptime": get_process_uptime_seconds(),
         }
 
-        payload: Dict[str, Any] = {
-            "created_at": snap.created_at,
-            "server_time": _utc_now_iso(),
-            "totals": snap.totals,
-            "rcodes": snap.rcodes,
-            "qtypes": snap.qtypes,
-            "uniques": snap.uniques,
-            "upstreams": snap.upstreams,
-            "meta": meta,
-            "top_clients": snap.top_clients,
-            "top_subdomains": snap.top_subdomains,
-            "top_domains": snap.top_domains,
-            "latency": snap.latency_stats,
-            "latency_recent": snap.latency_recent_stats,
-            "system": get_system_info(),
-            "upstream_rcodes": snap.upstream_rcodes,
-            "upstream_qtypes": snap.upstream_qtypes,
-            "qtype_qnames": snap.qtype_qnames,
-            "rcode_domains": snap.rcode_domains,
-            "rcode_subdomains": snap.rcode_subdomains,
-            "cache_hit_domains": snap.cache_hit_domains,
-            "cache_miss_domains": snap.cache_miss_domains,
-            "cache_hit_subdomains": snap.cache_hit_subdomains,
-            "cache_miss_subdomains": snap.cache_miss_subdomains,
-            "rate_limit": getattr(snap, "rate_limit", None),
-        }
+        payload = _build_stats_payload_from_snapshot(
+            snap,
+            meta=meta,
+            system_info=get_system_info(),
+        )
+        payload["created_at"] = snap.created_at
 
-        dnssec_totals = getattr(snap, "dnssec_totals", None)
-        if dnssec_totals:
-            payload["dnssec"] = dnssec_totals
-
-        # Apply optional per-request limit to top-* style lists.
         limit = int(top) if isinstance(top, int) and top > 0 else 10
-
-        def _trim_top_field(key: str) -> None:
-            value = payload.get(key)
-            if isinstance(value, list):
-                payload[key] = value[:limit]
-            elif isinstance(value, dict):
-                trimmed: Dict[str, Any] = {}
-                for k, v in value.items():
-                    if isinstance(v, list):
-                        trimmed[k] = v[:limit]
-                    else:
-                        trimmed[k] = v
-                payload[key] = trimmed
-
-        for field in [
-            "top_clients",
-            "top_subdomains",
-            "top_domains",
-            "cache_hit_domains",
-            "cache_miss_domains",
-            "cache_hit_subdomains",
-            "cache_miss_subdomains",
-            "qtype_qnames",
-            "rcode_domains",
-            "rcode_subdomains",
-        ]:
-            _trim_top_field(field)
+        _trim_top_fields(
+            payload,
+            limit,
+            [
+                "top_clients",
+                "top_subdomains",
+                "top_domains",
+                "cache_hit_domains",
+                "cache_miss_domains",
+                "cache_hit_subdomains",
+                "cache_miss_subdomains",
+                "qtype_qnames",
+                "rcode_domains",
+                "rcode_subdomains",
+            ],
+        )
 
         self._send_json(200, payload)
 
@@ -2485,19 +3091,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         if top <= 0:
             top = 10
 
-        snap: StatsSnapshot = collector.snapshot(reset=False)
-        top_clients = list(snap.top_clients or [])[:top]
-        top_domains = list(snap.top_domains or [])[:top]
-        payload = {
-            "server_time": _utc_now_iso(),
-            "created_at": snap.created_at,
-            "totals": snap.totals,
-            "rcodes": snap.rcodes,
-            "qtypes": snap.qtypes,
-            "top_clients": top_clients,
-            "top_domains": top_domains,
-            "latency": snap.latency_stats,
-        }
+        snap: StatsSnapshot = _get_stats_snapshot_cached(collector, reset=False)
+        payload = _build_traffic_payload_from_snapshot(snap, meta=None, top=top)
         self._send_json(200, payload)
 
     #    @cached(cache=TTLCache(maxsize=1, ttl=2))
@@ -2514,35 +3109,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         cfg = getattr(self._server(), "config", {}) or {}
-        web_cfg_inner = (cfg.get("webserver") or {}) if isinstance(cfg, dict) else {}
-        redact_keys = web_cfg_inner.get("redact_keys") or [
-            "token",
-            "password",
-            "secret",
-        ]
-
+        redact_keys = _get_redact_keys(cfg)
         cfg_path = getattr(self._server(), "config_path", None)
-        if cfg_path:
-            try:
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    raw_text = f.read()
-                body = _redact_yaml_text_preserving_layout(raw_text, redact_keys)
-            except Exception:  # pragma: no cover - defensive / I/O specific
-                clean = sanitize_config(cfg, redact_keys=redact_keys)
-                try:
-                    body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
-                except Exception:
-                    body = ""
-        else:
-            clean = sanitize_config(cfg, redact_keys=redact_keys)
-            try:
-                body = yaml.safe_dump(clean, sort_keys=False)  # type: ignore[arg-type]
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                body = ""
-
-        self._send_text(200, body)
+        body = _get_sanitized_config_yaml_cached(cfg, cfg_path, redact_keys)
+        self._send_yaml(200, body)
 
     #    @cached(cache=TTLCache(maxsize=1, ttl=2))
     def _handle_config_json(
@@ -2554,12 +3124,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         cfg = getattr(self._server(), "config", {}) or {}
-        web_cfg_inner = (cfg.get("webserver") or {}) if isinstance(cfg, dict) else {}
-        redact_keys = web_cfg_inner.get("redact_keys") or [
-            "token",
-            "password",
-            "secret",
-        ]
+        redact_keys = _get_redact_keys(cfg)
         clean = sanitize_config(cfg, redact_keys=redact_keys)
         self._send_json(
             200,
@@ -2590,8 +3155,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
         try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                raw_text = f.read()
+            raw_text = _get_config_raw_text(cfg_path)
         except Exception as exc:  # pragma: no cover - environment-specific
             self._send_json(
                 500,
@@ -2628,9 +3192,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
         try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                raw_text = f.read()
-                raw_cfg = yaml.safe_load(raw_text) or {}
+            raw = _get_config_raw_json(cfg_path)
         except Exception as exc:  # pragma: no cover - environment-specific
             self._send_json(
                 500,
@@ -2645,8 +3207,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             200,
             {
                 "server_time": _utc_now_iso(),
-                "config": raw_cfg,
-                "raw_yaml": raw_text,
+                "config": raw["config"],
+                "raw_yaml": raw["raw_yaml"],
             },
         )
 
@@ -3267,15 +3829,19 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         path = parsed.path
         params = urllib.parse.parse_qs(parsed.query)
 
-        if path == "/health":
+        if path in {"/health", "/api/v1/health"}:
             self._handle_health()
+        elif path in {"/about", "/api/v1/about"}:
+            self._handle_about()
+        elif path in {"/ready", "/api/v1/ready"}:
+            self._handle_ready()
         elif path in {"/stats", "/api/v1/stats"}:
             self._handle_stats(params)
         elif path in {"/traffic", "/api/v1/traffic"}:
             self._handle_traffic(params)
-        elif path in {"/config", "/api/v1/config", "/apti/v1/config"}:
+        elif path in {"/config", "/api/v1/config"}:
             self._handle_config()
-        elif path in {"/config.json", "/api/v1/config.json", "/apti/v1/config.json"}:
+        elif path in {"/config.json", "/api/v1/config.json"}:
             self._handle_config_json()
         elif path in {
             "/config/raw",
@@ -3380,6 +3946,7 @@ def _start_admin_server_threaded(
     config: Dict[str, Any],
     log_buffer: Optional[RingBuffer],
     config_path: str | None = None,
+    runtime_state: RuntimeState | None = None,
 ) -> Optional[
     "WebServerHandle"
 ]:  # pragma: no cover - environment-dependent threaded fallback; exercised via start_webserver tests
@@ -3412,6 +3979,7 @@ def _start_admin_server_threaded(
             config=config,
             log_buffer=log_buffer,
             config_path=config_path,
+            runtime_state=runtime_state,
         )
     except (
         OSError
@@ -3513,6 +4081,7 @@ def start_webserver(
     config: Dict[str, Any],
     log_buffer: Optional[RingBuffer] = None,
     config_path: str | None = None,
+    runtime_state: RuntimeState | None = None,
 ) -> Optional[WebServerHandle]:
     """Start admin HTTP server, preferring uvicorn but falling back to threaded HTTP.
 
@@ -3570,9 +4139,23 @@ def start_webserver(
             can_use_asyncio = use_asyncio
 
     if not can_use_asyncio:
-        return _start_admin_server_threaded(
-            stats, config, log_buffer, config_path=config_path
+        if runtime_state is None:
+            return _start_admin_server_threaded(
+                stats,
+                config,
+                log_buffer,
+                config_path=config_path,
+            )
+
+        handle = _start_admin_server_threaded(
+            stats,
+            config,
+            log_buffer,
+            config_path=config_path,
+            runtime_state=runtime_state,
         )
+        runtime_state.set_listener("webserver", enabled=True, thread=handle)
+        return handle
 
     try:
         import uvicorn
@@ -3581,7 +4164,23 @@ def start_webserver(
             "webserver.enabled=true but uvicorn is not available: %s; using threaded fallback",
             exc,
         )
-        return _start_admin_server_threaded(stats, config, log_buffer)
+        if runtime_state is None:
+            return _start_admin_server_threaded(
+                stats,
+                config,
+                log_buffer,
+                config_path=config_path,
+            )
+
+        handle = _start_admin_server_threaded(
+            stats,
+            config,
+            log_buffer,
+            config_path=config_path,
+            runtime_state=runtime_state,
+        )
+        runtime_state.set_listener("webserver", enabled=True, thread=handle)
+        return handle
 
     host = str(web_cfg.get("host", "127.0.0.1"))
     port = int(web_cfg.get("port", 8053))
@@ -3595,7 +4194,13 @@ def start_webserver(
             host,
         )
 
-    app = create_app(stats, config, log_buffer, config_path=config_path)
+    app = create_app(
+        stats,
+        config,
+        log_buffer,
+        config_path=config_path,
+        runtime_state=runtime_state,
+    )
 
     config_uvicorn = uvicorn.Config(app, host=host, port=port, log_level="info")
     server = uvicorn.Server(config_uvicorn)
@@ -3618,5 +4223,9 @@ def start_webserver(
 
     thread = threading.Thread(target=_runner, name="foghorn-webserver", daemon=True)
     thread.start()
+
+    if runtime_state is not None:
+        runtime_state.set_listener("webserver", enabled=True, thread=thread)
+
     logger.info("Started Foghorn webserver on %s:%d", host, port)
     return WebServerHandle(thread)

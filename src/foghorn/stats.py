@@ -551,6 +551,34 @@ class StatsSQLiteStore:
         conn.commit()
         return conn
 
+    def health_check(self) -> bool:
+        """Brief: Return True when the underlying SQLite store is usable.
+
+        Inputs: none
+
+        Outputs:
+            bool: True when a trivial query succeeds, else False.
+
+        Notes:
+            - This is intended for readiness probes (e.g., /ready) and should be
+              very lightweight.
+            - The method uses the store lock to avoid racing with batched writes.
+
+        Example:
+            >>> store = StatsSQLiteStore(":memory:")
+            >>> store.health_check()
+            True
+        """
+
+        try:
+            with self._lock:
+                cur = self._conn.cursor()
+                cur.execute("SELECT 1")
+                cur.fetchone()
+            return True
+        except Exception:
+            return False
+
     # ------------------------------------------------------------------
     # Low-level execution helpers
     # ------------------------------------------------------------------

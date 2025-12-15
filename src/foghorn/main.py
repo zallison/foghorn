@@ -15,7 +15,7 @@ from .logging_config import init_logging
 from .plugins.base import BasePlugin
 from .servers.doh_api import start_doh_server
 from .servers.server import DNSServer
-from .servers.webserver import RingBuffer, start_webserver
+from .servers.webserver import RingBuffer, RuntimeState, start_webserver
 from .stats import StatsCollector, StatsReporter, StatsSQLiteStore
 
 
@@ -203,6 +203,9 @@ def main(argv: List[str] | None = None) -> int:
     # also used when starting the threaded admin HTTP fallback.
     web_log_buffer: Optional[RingBuffer] = None
 
+    # Runtime state used by /ready readiness probes exposed by the admin webserver.
+    runtime_state = RuntimeState(startup_complete=False)
+
     # Normalize listen configuration with backward compatibility.
     # If listen.udp is present, prefer it; otherwise fall back to legacy listen.host/port.
     listen_cfg = cfg.get("listen", {}) or {}
@@ -228,6 +231,21 @@ def main(argv: List[str] | None = None) -> int:
     )
     dot_cfg = _sub("dot", {"enabled": False, "host": default_host, "port": 853})
     doh_cfg = _sub("doh", {"enabled": False, "host": default_host, "port": 1443})
+
+    # Seed readiness state with expected listeners. The thread/handle references
+    # are filled in later once each listener is started.
+    runtime_state.set_listener(
+        "udp", enabled=bool(udp_cfg.get("enabled", True)), thread=None
+    )
+    runtime_state.set_listener(
+        "tcp", enabled=bool(tcp_cfg.get("enabled", False)), thread=None
+    )
+    runtime_state.set_listener(
+        "dot", enabled=bool(dot_cfg.get("enabled", False)), thread=None
+    )
+    runtime_state.set_listener(
+        "doh", enabled=bool(doh_cfg.get("enabled", False)), thread=None
+    )
 
     # Resolver configuration (forward vs recursive) with conservative defaults.
     resolver_cfg = (
@@ -471,6 +489,11 @@ def main(argv: List[str] | None = None) -> int:
     if web_cfg.get("enabled", False):
         buffer_size = int((web_cfg.get("logs") or {}).get("buffer_size", 500))
         web_log_buffer = RingBuffer(capacity=buffer_size)
+
+    # Seed webserver readiness expectation.
+    runtime_state.set_listener(
+        "webserver", enabled=bool(web_cfg.get("enabled", False)), thread=None
+    )
 
     # --- Coordinated shutdown state ---
     # shutdown_event is set when a termination-like signal (KeyboardInterrupt,
@@ -783,6 +806,7 @@ def main(argv: List[str] | None = None) -> int:
                 server.serve_forever()
             except Exception as e:  # pragma: no cover - propagated via udp_error
                 udp_error = e
+                runtime_state.set_listener_error("udp", e)
 
         logger.info(
             "Starting UDP listener on %s:%d",
@@ -797,6 +821,7 @@ def main(argv: List[str] | None = None) -> int:
         )
         udp_thread.start()
         loop_threads.append(udp_thread)
+        runtime_state.set_listener("udp", enabled=True, thread=udp_thread)
     else:
         # When no UDP listener is configured, the main thread still enters the
         # keepalive loop below so that TCP/DoT/DoH listeners (or tests that
@@ -812,7 +837,13 @@ def main(argv: List[str] | None = None) -> int:
 
     from .servers.server import resolve_query_bytes
 
-    def _start_asyncio_server(coro_factory, name: str, *, on_permission_error=None):
+    def _start_asyncio_server(
+        coro_factory,
+        name: str,
+        *,
+        listener_key: str,
+        on_permission_error=None,
+    ):
         def runner():
             try:
                 asyncio.set_event_loop(asyncio.new_event_loop())
@@ -821,15 +852,20 @@ def main(argv: List[str] | None = None) -> int:
                     loop.run_until_complete(coro_factory())
                 finally:
                     loop.close()
-            except PermissionError:
+            except PermissionError as e:
                 # Environment forbids creating asyncio self-pipe/socketpair (e.g., restricted seccomp).
+                # When a fallback is provided, treat it as a successful start and
+                # do not mark the listener as failed.
                 if callable(on_permission_error):
                     on_permission_error()
                 else:
+                    runtime_state.set_listener_error(listener_key, e)
                     logging.getLogger("foghorn.main").error(
                         "Asyncio loop creation failed with PermissionError for %s; no fallback provided",
                         name,
                     )
+            except Exception as e:  # pragma: no cover - best-effort readiness tracking
+                runtime_state.set_listener_error(listener_key, e)
 
         # Import threading dynamically so tests can monkeypatch via sys.modules
         import importlib as _importlib
@@ -838,6 +874,8 @@ def main(argv: List[str] | None = None) -> int:
         t = _threading.Thread(target=runner, name=name, daemon=True)
         t.start()
         loop_threads.append(t)
+        runtime_state.set_listener(listener_key, enabled=True, thread=t)
+        return t
 
     if bool(tcp_cfg.get("enabled", False)):
         from .servers.tcp_server import serve_tcp, serve_tcp_threaded
@@ -849,6 +887,7 @@ def main(argv: List[str] | None = None) -> int:
             _start_asyncio_server(
                 lambda: serve_tcp(thost, tport, resolve_query_bytes),
                 name="foghorn-tcp",
+                listener_key="tcp",
                 on_permission_error=lambda: serve_tcp_threaded(
                     thost, tport, resolve_query_bytes
                 ),
@@ -862,6 +901,7 @@ def main(argv: List[str] | None = None) -> int:
             )
             t.start()
             loop_threads.append(t)
+            runtime_state.set_listener("tcp", enabled=True, thread=t)
 
     if bool(dot_cfg.get("enabled", False)):
         from .servers.dot_server import serve_dot
@@ -885,6 +925,7 @@ def main(argv: List[str] | None = None) -> int:
                     key_file=key_file,
                 ),
                 name="foghorn-dot",
+                listener_key="dot",
             )
 
     if bool(doh_cfg.get("enabled", False)):
@@ -904,13 +945,17 @@ def main(argv: List[str] | None = None) -> int:
                 use_asyncio=use_asyncio,
             )
         except Exception as e:
+            runtime_state.set_listener_error("doh", e)
             logger.error("Failed to start DoH server: %s", e)
             return 1
         if doh_handle is None:
+            runtime_state.set_listener_error("doh", "start_doh_server returned None")
             logger.error(
                 "Fatal: listen.doh.enabled=true but start_doh_server returned None"
             )
             return 1
+
+        runtime_state.set_listener("doh", enabled=True, thread=doh_handle)
 
     # Start admin HTTP webserver (FastAPI) and treat None handle as fatal when
     # webserver.enabled is true. Tests and production code both rely on a
@@ -922,6 +967,7 @@ def main(argv: List[str] | None = None) -> int:
             cfg,
             log_buffer=web_log_buffer,
             config_path=cfg_path,
+            runtime_state=runtime_state,
         )
     except (
         Exception
@@ -930,9 +976,14 @@ def main(argv: List[str] | None = None) -> int:
         return 1
 
     if bool(web_cfg.get("enabled", False)) and web_handle is None:
+        runtime_state.set_listener_error("webserver", "start_webserver returned None")
         logger.error("Fatal: webserver.enabled=true but start_webserver returned None")
         return 1
 
+    if web_handle is not None:
+        runtime_state.set_listener("webserver", enabled=True, thread=web_handle)
+
+    runtime_state.mark_startup_complete()
     logger.info("Startup Completed")
 
     try:
