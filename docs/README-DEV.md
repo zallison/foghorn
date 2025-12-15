@@ -157,7 +157,7 @@ with some aliases preserved for backwards compatibility.
 
 - Configuration (/config)
   - Sanitized config
-	- `GET /config`, `GET /api/v1/config`, `GET /api/v1/config`
+	- `GET /config`, `GET /api/v1/config`
 	  (FastAPI) – YAML body; uses `_get_sanitized_config_yaml_cached`.
 	- `GET /config` and `GET /config.json` families in the threaded handler
 	  return sanitized YAML or JSON via `sanitize_config`, with values under

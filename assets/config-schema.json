@@ -1375,8 +1375,7 @@
           "default": "upstream_ad",
           "enum": [
             "upstream_ad",
-            "local",
-            "local_extended"
+            "local"
           ],
           "type": "string"
         }
@@ -1664,6 +1663,16 @@
               "type": "string"
             },
             "token": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "api": {
+          "additionalProperties": false,
+          "properties": {
+            "timezone": {
+              "description": "Timezone used for API day bucket alignment. Accepts 'utc', 'local', or an IANA tz database name like 'America/New_York'.",
               "type": "string"
             }
           },
