@@ -12,12 +12,10 @@ from unittest.mock import mock_open, patch
 
 import pytest
 
+import foghorn.config_parser as parser_mod
 import foghorn.main as main_mod
-from foghorn.main import (
-    load_plugins,
-    main,
-    normalize_upstream_config,
-)
+from foghorn.config_parser import load_plugins, normalize_upstream_config
+from foghorn.main import main
 
 
 def test_normalize_upstream_config_list_only_and_timeout_default():
@@ -84,8 +82,8 @@ def test_load_plugins_uses_registry(monkeypatch):
             alias_map.get(identifier, alias_map["a"]) if identifier in alias_map else P2
         )
 
-    monkeypatch.setattr(main_mod, "discover_plugins", fake_discover)
-    monkeypatch.setattr(main_mod, "get_plugin_class", fake_get)
+    monkeypatch.setattr(parser_mod, "discover_plugins", fake_discover)
+    monkeypatch.setattr(parser_mod, "get_plugin_class", fake_get)
 
     plugins = load_plugins(["a", {"module": "pkg.P2", "config": {"x": 1}}])
     assert type(plugins[0]).__name__ == "P1"

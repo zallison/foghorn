@@ -23,7 +23,33 @@ from foghorn.config_schema import get_default_schema_path, validate_config
 EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "example_configs"
 
 
-@pytest.mark.parametrize("yaml_path", sorted(EXAMPLE_DIR.glob("*.yaml")))
+def _example_yaml_paths() -> list[Path]:
+    """Brief: Return example YAML files suitable for schema validation.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - list[Path]: YAML paths under example_configs/ excluding editor temp/backup files.
+
+    Notes:
+      - Some editors create files like `.#+name.yaml` (Emacs lock) or `#name.yaml#`
+        (Emacs autosave) or `name.yaml~` (backup). These should not be treated as
+        real example configs.
+    """
+
+    paths: list[Path] = []
+    for p in sorted(EXAMPLE_DIR.glob("*.yaml")):
+        name = p.name
+        if name.startswith(".") or name.startswith("#") or name.endswith("~"):
+            continue
+        if not p.is_file():
+            continue
+        paths.append(p)
+    return paths
+
+
+@pytest.mark.parametrize("yaml_path", _example_yaml_paths())
 def test_example_configs_are_schema_valid(yaml_path: Path) -> None:
     """Brief: All example_configs/*.yaml files must satisfy the JSON Schema.
 
