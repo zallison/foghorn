@@ -7,15 +7,12 @@ import logging
 import os
 import signal
 import threading
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import List, Optional
 
-import yaml
-
-from .config_schema import validate_config
+from .config_parser import load_plugins, normalize_upstream_config, parse_config_file
 from .dnssec_validate import configure_dnssec_resolver
 from .logging_config import init_logging
 from .plugins.base import BasePlugin
-from .plugins.registry import discover_plugins, get_plugin_class
 from .servers.doh_api import start_doh_server
 from .servers.server import DNSServer
 from .servers.webserver import RingBuffer, start_webserver
@@ -37,222 +34,14 @@ def _clear_lru_caches(wrappers: Optional[List[object]]):
         wrapper.cache_clear()
 
 
-def normalize_upstream_config(
-    cfg: Dict[str, Any],
-) -> Tuple[List[Dict[str, Union[str, int, dict]]], int]:
-    """
-    Brief: Normalize modern upstream configuration to a list-of-endpoints plus a timeout.
-
-    Inputs:
-      - cfg: dict containing parsed YAML. Supports only the modern form:
-          - cfg['upstreams'] as a list of upstream entries, each either:
-              * DoH entry: {'transport': 'doh', 'url': str, ...}
-              * host/port entry: {'host': str, 'port': int, ...}
-          - cfg['foghorn']['timeout_ms'] for the global upstream timeout.
-
-    Outputs:
-      - (upstreams, timeout_ms):
-          - upstreams: list[dict] with keys like {'host': str, 'port': int} or DoH metadata.
-          - timeout_ms: int timeout in milliseconds applied per upstream attempt (default 2000).
-
-    Legacy single-dict forms for cfg['upstreams'] and upstream.timeout_ms are no longer supported.
-    """
-    upstream_raw = cfg.get("upstreams")
-    if not isinstance(upstream_raw, list):
-        raise ValueError("config.upstreams must be a list of upstream definitions")
-
-    upstreams: List[Dict[str, Union[str, int, dict]]] = []
-    for u in upstream_raw:
-        if not isinstance(u, dict):
-            raise ValueError("each upstream entry must be a mapping")
-
-        # Normalize transport early so we can derive sensible defaults.
-        transport = str(u.get("transport", "udp")).lower()
-
-        # DoH entries using URL
-        if transport == "doh":
-            logger = logging.getLogger("foghorn.main.setup")
-            logger.debug(f"doh: {u}")
-            rec: Dict[str, Union[str, int, dict]] = {
-                "transport": "doh",
-                "url": str(u["url"]),
-            }
-            if "method" in u:
-                rec["method"] = str(u.get("method"))
-            if "headers" in u and isinstance(u["headers"], dict):
-                rec["headers"] = u["headers"]
-            if "tls" in u and isinstance(u["tls"], dict):
-                rec["tls"] = u["tls"]
-            upstreams.append(rec)
-            continue
-
-        # Host/port-based upstream (udp/tcp/dot)
-        if "host" not in u:
-            raise ValueError("each upstream entry must include 'host'")
-
-        # Default ports by transport: UDP/TCP -> 53, DoT -> 853.
-        default_port = 853 if transport == "dot" else 53
-
-        rec2: Dict[str, Union[str, int, dict]] = {
-            "host": str(u["host"]),
-            "port": int(u.get("port", default_port)),
-        }
-        if "transport" in u:
-            rec2["transport"] = transport
-        if "tls" in u and isinstance(u["tls"], dict):
-            rec2["tls"] = u["tls"]
-        if "pool" in u and isinstance(u["pool"], dict):
-            rec2["pool"] = u["pool"]
-        upstreams.append(rec2)
-
-    foghorn_cfg = cfg.get("foghorn") or {}
-    if not isinstance(foghorn_cfg, dict):
-        raise ValueError("config.foghorn must be a mapping when present")
-    try:
-        timeout_ms = int(foghorn_cfg.get("timeout_ms", 2000))
-    except (TypeError, ValueError):
-        timeout_ms = 2000
-    return upstreams, timeout_ms
-
-
-def _validate_plugin_config(plugin_cls: type[BasePlugin], config: dict | None) -> dict:
-    """Brief: Validate and normalize plugin configuration via optional schema hooks.
-
-    Inputs:
-      - plugin_cls: Plugin class (subclass of BasePlugin).
-      - config: Raw config mapping for this plugin (may be None).
-
-    Outputs:
-      - dict: Validated/normalized config mapping to be passed into plugin_cls.
-
-    Behavior:
-      - If plugin_cls exposes get_config_model() and it returns a model class,
-        the config is validated by instantiating the model; the resulting
-        mapping (model.dict() when available) is returned.
-      - If get_config_model() returns None, the config is accepted as-is.
-      - Otherwise, if plugin_cls exposes get_config_schema() and it returns a
-        JSON Schema dict, the config is validated using jsonschema; on success
-        the original config mapping is returned.
-      - If get_config_schema() returns None or no hooks are present, the config
-        is returned unchanged.
-    """
-
-    cfg = config or {}
-
-    # Prefer typed config models (e.g., Pydantic) when provided.
-    get_model = getattr(plugin_cls, "get_config_model", None)
-    if callable(get_model):  # pragma: no cover - exercised via plugin tests
-        model_cls = get_model()
-        if model_cls is None:
-            return cfg
-        try:
-            model_instance = model_cls(**cfg)
-        except Exception as exc:  # pragma: no cover - defensive, surfaced in tests
-            raise ValueError(
-                f"Invalid configuration for plugin {plugin_cls.__name__}: {exc}"
-            ) from exc
-
-        # Best-effort conversion back to a plain mapping so existing plugins
-        # that expect dict-like config continue to work.
-        for attr in ("dict", "model_dump"):
-            method = getattr(model_instance, attr, None)
-            if callable(method):
-                try:
-                    return dict(method())
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                    break
-        try:
-            return dict(model_instance)
-        except (
-            Exception
-        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-            return cfg
-
-    # Fallback: JSON Schema-based per-plugin validation.
-    get_schema = getattr(plugin_cls, "get_config_schema", None)
-    if callable(get_schema):  # pragma: no cover - exercised via plugin tests
-        schema = get_schema()
-        if schema is None:
-            return cfg
-        try:
-            from jsonschema import validate as _js_validate  # type: ignore
-
-            _js_validate(instance=cfg, schema=schema)
-        except Exception as exc:  # pragma: no cover - defensive, surfaced in tests
-            raise ValueError(
-                f"Invalid configuration for plugin {plugin_cls.__name__}: {exc}"
-            ) from exc
-
-    return cfg
-
-
-def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
-    """
-    Loads and initializes plugins from a list of plugin specifications.
-
-    Supports either full dotted class paths or short aliases:
-    - access_control | acl -> foghorn.plugins.access_control.AccessControlPlugin
-    - new_domain_filter | new_domain -> foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
-    - upstream_router | router -> foghorn.plugins.upstream_router.UpstreamRouterPlugin
-
-    Args:
-        plugin_specs: A list where each item is either a dict with keys
-                      {"module": <path-or-alias>, "config": {...}, "name": "..."}
-                      or a string alias/dotted path. When provided, "name" is a
-                      human-friendly label used in place of the plugin class
-                      name when logging statistics or other plugin data.
-
-    Returns:
-        A list of initialized plugin instances.
-
-    Example use:
-        >>> from foghorn.plugins.base import BasePlugin
-        >>> class MyTestPlugin(BasePlugin):
-        ...     pass
-        >>> specs = [{"module": "__main__.MyTestPlugin", "name": "my_test"}]
-        >>> plugins = load_plugins(specs)
-        >>> isinstance(plugins[0], MyTestPlugin)
-        True
-        >>> plugins[0].name
-        'my_test'
-        >>> # Using aliases
-        >>> plugins = load_plugins(["acl", {"module": "router", "config": {}}])
-    """
-    alias_registry = discover_plugins()
-    plugins: List[BasePlugin] = []
-    for spec in plugin_specs or []:
-        if isinstance(spec, str):
-            module_path = spec
-            config = {}
-            plugin_name = None
-        else:
-            module_path = spec.get("module")
-            config = spec.get("config", {})
-            plugin_name = spec.get("name")
-        if not module_path:
-            continue
-
-        plugin_cls = get_plugin_class(module_path, alias_registry)
-        validated_config = _validate_plugin_config(plugin_cls, config)
-        if plugin_name is not None:
-            plugin = plugin_cls(name=str(plugin_name), **validated_config)
-        else:
-            plugin = plugin_cls(**validated_config)
-        plugins.append(plugin)
-    return plugins
-
-
 def _is_setup_plugin(plugin: BasePlugin) -> bool:
-    """
-    Determine whether a plugin overrides BasePlugin.setup and should
-    participate in the setup phase.
+    """Brief: Determine whether a plugin overrides BasePlugin.setup.
 
     Inputs:
       - plugin: BasePlugin instance.
+
     Outputs:
-      - bool: True if the plugin defines its own setup() implementation.
+      - bool: True when plugin defines its own setup() implementation.
 
     Example use:
       >>> from foghorn.plugins.base import BasePlugin
@@ -263,6 +52,7 @@ def _is_setup_plugin(plugin: BasePlugin) -> bool:
       >>> _is_setup_plugin(p)
       True
     """
+
     try:
         return plugin.__class__.setup is not BasePlugin.setup
     except Exception:
@@ -270,26 +60,22 @@ def _is_setup_plugin(plugin: BasePlugin) -> bool:
 
 
 def run_setup_plugins(plugins: List[BasePlugin]) -> None:
-    """
-    Run setup() on all setup-aware plugins in ascending setup_priority order.
+    """Brief: Run setup() on setup-aware plugins in ascending setup_priority order.
 
     Inputs:
       - plugins: List[BasePlugin] instances, typically from load_plugins().
+
     Outputs:
-      - None; raises RuntimeError if a setup plugin with abort_on_failure=True
-        fails.
+      - None; raises RuntimeError if a setup plugin with abort_on_failure=True fails.
 
-    Brief: This helper is invoked by main() after plugin instantiation but
-    before listeners start. Plugins that override BasePlugin.setup are
-    considered setup plugins. Their setup_priority attribute (or corresponding
-    config value) controls execution order.
-
-    Example use:
-      >>> plugins = load_plugins([])
-      >>> run_setup_plugins(plugins)  # no-op when there are no setup plugins
+    Notes:
+      - Plugins that override BasePlugin.setup are considered setup plugins.
+      - Execution order is controlled by each plugin's setup_priority attribute
+        (default 100).
     """
+
     logger = logging.getLogger("foghorn.main.setup")
-    # Collect (priority, plugin) pairs for setup-capable plugins
+
     setup_entries: List[tuple[int, BasePlugin]] = []
     for p in plugins or []:
         if not _is_setup_plugin(p):
@@ -300,7 +86,6 @@ def run_setup_plugins(plugins: List[BasePlugin]) -> None:
             prio = 100
         setup_entries.append((prio, p))
 
-    # Stable sort by priority; list order is preserved for equal priorities
     setup_entries.sort(key=lambda item: item[0])
 
     for prio, plugin in setup_entries:
@@ -315,15 +100,12 @@ def run_setup_plugins(plugins: List[BasePlugin]) -> None:
         )
         try:
             plugin.setup()
-        except (
-            Exception
-        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        except Exception as e:  # pragma: no cover
             logger.error("Setup for plugin %s failed: %s", name, e, exc_info=True)
             if abort_on_failure:
                 raise RuntimeError(f"Setup for plugin {name} failed") from e
             logger.warning(
-                "Continuing startup despite setup failure in plugin %s "
-                "because abort_on_failure is False",
+                "Continuing startup despite setup failure in plugin %s because abort_on_failure is False",
                 name,
             )
 
@@ -364,6 +146,16 @@ def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Caching DNS server with plugins")
     parser.add_argument("--config", default="config.yaml", help="Path to YAML config")
     parser.add_argument(
+        "-v",
+        "--var",
+        action="append",
+        default=[],
+        help=(
+            "Set a configuration variable (KEY=YAML). May be provided multiple times; "
+            "CLI overrides environment overrides config file variables."
+        ),
+    )
+    parser.add_argument(
         "--rebuild",
         action="store_true",
         help=(
@@ -373,12 +165,11 @@ def main(argv: List[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    with open(args.config, "r") as f:
-        cfg = yaml.safe_load(f) or {}
-
-    # Validate configuration against JSON Schema before proceeding.
+    # Load and validate configuration.
     try:
-        validate_config(cfg, config_path=args.config)
+        cfg = parse_config_file(
+            args.config, cli_vars=list(getattr(args, "var", []) or [])
+        )
     except ValueError as exc:
         print(str(exc))
         return 1
