@@ -806,8 +806,13 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for MdnsBridgePlugin.\n\nInputs:\n  - ttl: int DNS TTL to apply to synthesized answers.\n  - network_enabled: bool controlling whether the plugin starts zeroconf\n    browsing threads. When False, the plugin still initializes internal\n    state but does not touch the network (useful for tests).\n  - include_ipv4: bool controlling whether A records are synthesized.\n  - include_ipv6: bool controlling whether AAAA records are synthesized.\n  - info_timeout_ms: int timeout in milliseconds for fetching ServiceInfo.\n\nOutputs:\n  - MdnsBridgeConfig instance.",
+          "description": "Brief: Typed configuration model for MdnsBridgePlugin.\n\nInputs:\n  - domain: str DNS domain suffix to treat as the mDNS namespace (default: `.local`).\n  - ttl: int DNS TTL to apply to synthesized answers.\n  - network_enabled: bool controlling whether the plugin starts active\n    zeroconf browsing and uses `get_service_info()` to fetch ServiceInfo. When\n    False, the plugin still initializes internal state but does not touch the\n    network (useful for tests).\n  - include_ipv4: bool controlling whether A records are synthesized.\n  - include_ipv6: bool controlling whether AAAA records are synthesized.\n  - info_timeout_ms: int timeout in milliseconds for fetching ServiceInfo.\n  - zeroconf_interfaces: Which interfaces Zeroconf should bind to.\n    Accepts: \"default\" | \"all\" | list[str] of interface IPs.\n  - zeroconf_ip_version: Which IP versions Zeroconf should use.\n    Accepts: \"v4\" | \"v6\" | \"all\".\n  - zeroconf_unicast: bool passed to Zeroconf(unicast=...).\n\nOutputs:\n  - MdnsBridgeConfig instance.",
           "properties": {
+            "domain": {
+              "default": ".local",
+              "title": "Domain",
+              "type": "string"
+            },
             "include_ipv4": {
               "default": true,
               "title": "Include Ipv4",
@@ -834,6 +839,27 @@
               "minimum": 0,
               "title": "Ttl",
               "type": "integer"
+            },
+            "zeroconf_interfaces": {
+              "default": "default",
+              "title": "Zeroconf Interfaces"
+            },
+            "zeroconf_ip_version": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Zeroconf Ip Version"
+            },
+            "zeroconf_unicast": {
+              "default": false,
+              "title": "Zeroconf Unicast",
+              "type": "boolean"
             }
           },
           "title": "MdnsBridgeConfig",
@@ -1171,6 +1197,15 @@
             "name": {
               "minLength": 1,
               "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "comment": {
+              "type": "string"
+            },
+            "priority": {
+              "type": "integer"
             },
             "post_priority": {
               "type": "integer"
