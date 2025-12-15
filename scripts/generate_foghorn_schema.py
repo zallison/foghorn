@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Generate aggregated JSON schema for all Foghorn plugins.
+"""Brief: Generate an aggregated JSON schema document for Foghorn.
 
 Inputs:
-    - Command-line arguments (optional):
-        - --output / -o: Output path for JSON schema (default: ./schema.json).
-        - --verbose / -v: Enable verbose logging.
+  - Command-line arguments (optional):
+    - --output / -o: Output path for JSON schema (default: ./schema.json).
+    - --verbose / -v: Enable verbose logging.
+    - --base-schema: Optional path to a base schema JSON file. When omitted, the
+      generator searches for `assets/config-schema.json` by walking up from this
+      script.
 
 Outputs:
-    - JSON file written to the specified output path containing discovered
-      plugin configuration schemas keyed by canonical alias.
+  - JSON file written to the specified output path.
+
+Notes:
+  - The generator *loads* the existing base schema (usually `assets/config-schema.json`)
+    and adds an additional `$defs.plugin_configs` mapping that contains per-plugin
+    configuration schemas.
+  - This is primarily intended for tooling/editor support; it does not otherwise
+    change runtime behavior.
 """
 
 from __future__ import annotations
@@ -127,16 +136,20 @@ def collect_plugin_schemas() -> Dict[str, Any]:
     return results
 
 
-def _load_base_schema() -> Dict[str, Any]:
+def _load_base_schema(base_schema_path: Optional[str] = None) -> Dict[str, Any]:
     """Brief: Load the main Foghorn config JSON Schema from disk.
 
     Inputs:
-      - None. The loader searches for ``assets/config-schema.json`` by walking
-        up from this script's directory.
+      - base_schema_path: Optional explicit path to a base schema JSON file.
 
     Outputs:
       - Dict representing the base configuration JSON Schema.
     """
+
+    if base_schema_path:
+        p = Path(base_schema_path)
+        with p.open("r", encoding="utf-8") as f:
+            return json.load(f)
 
     here = Path(__file__).resolve()
     for ancestor in here.parents:
@@ -146,15 +159,15 @@ def _load_base_schema() -> Dict[str, Any]:
                 return json.load(f)
 
     raise FileNotFoundError(
-        "assets/config-schema.json not found relative to generate_plugin_schema.py"
+        "assets/config-schema.json not found relative to generate_foghorn_schema.py"
     )
 
 
-def build_document() -> Dict[str, Any]:
+def build_document(base_schema_path: Optional[str] = None) -> Dict[str, Any]:
     """Brief: Build a combined JSON Schema including core config and plugins.
 
     Inputs:
-      - None.
+      - base_schema_path: Optional explicit path to a base schema JSON file.
 
     Outputs:
       - Dict based on the existing config-schema.json with an extra
@@ -167,7 +180,7 @@ def build_document() -> Dict[str, Any]:
         tooling (e.g. UIs or editors) that want per-plugin config schemas.
     """
 
-    base = _load_base_schema()
+    base = _load_base_schema(base_schema_path=base_schema_path)
     plugins = collect_plugin_schemas()
 
     # Attach plugin schemas under a dedicated defs key so existing references
@@ -179,7 +192,7 @@ def build_document() -> Dict[str, Any]:
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
-    """Brief: Parse CLI arguments for the plugin schema generator.
+    """Brief: Parse CLI arguments for the schema generator.
 
     Inputs:
       - argv: Optional iterable of CLI argument strings; defaults to
@@ -206,6 +219,12 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
         help="Output JSON file path (default: ./schema.json)",
     )
     parser.add_argument(
+        "--base-schema",
+        dest="base_schema",
+        default=None,
+        help="Optional path to base schema JSON (default: auto-detect assets/config-schema.json)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -215,7 +234,7 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
-    """Brief: CLI entrypoint to generate plugin schema JSON.
+    """Brief: CLI entrypoint to generate a combined schema JSON.
 
     Inputs:
       - argv: Optional iterable of CLI argument strings.
@@ -224,9 +243,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
       - int: 0 on success, non-zero on failure.
 
     Example usage (from project root):
-
-      - ``PYTHONPATH=src python scripts/generate_plugin_schema.py``
-      - ``PYTHONPATH=src python scripts/generate_plugin_schema.py -o assets/plugin-schema.json``
+      - ``PYTHONPATH=src python scripts/generate_foghorn_schema.py``
+      - ``PYTHONPATH=src python scripts/generate_foghorn_schema.py -o schema.json``
+      - ``PYTHONPATH=src python scripts/generate_foghorn_schema.py --base-schema assets/config-schema.json -o schema.json``
     """
 
     args = parse_args(argv)
@@ -239,7 +258,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     logger.info("Generating plugin schema to %s", output_path)
 
     try:
-        doc = build_document()
+        doc = build_document(base_schema_path=getattr(args, "base_schema", None))
         output_path.write_text(
             json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8"
         )
