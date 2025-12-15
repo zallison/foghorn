@@ -4,12 +4,12 @@ import logging
 import threading
 from typing import Dict, List, Optional, Tuple
 
-from dnslib import DNSRecord, QTYPE
+from dnslib import QTYPE, DNSRecord
 from pydantic import BaseModel, Field
 
 from foghorn.servers.server import resolve_query_bytes
-from foghorn.stats import StatsCollector, StatsSnapshot
 from foghorn.servers.udp_server import DNSUDPHandler
+from foghorn.stats import StatsCollector, StatsSnapshot
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
