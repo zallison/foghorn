@@ -14,18 +14,18 @@ This release introduces a few developer-visible breaking changes:
 ## Architecture Overview
 
 - Entry: `src/foghorn/main.py` parses YAML, initializes logging/plugins, starts listeners, installs signal handlers.
-- Downstream servers:
-  - UDP 5333: `src/foghorn/udp_server.py` (ThreadingUDPServer wrapper) — handler logic lives in `src/foghorn/server.py`.
-  - TCP 5333: `src/foghorn/tcp_server.py` (length‑prefixed, persistent connections, RFC 7766; asyncio with threaded fallback).
-  - DoT 1853: `src/foghorn/dot_server.py` (TLS, RFC 7858; asyncio).
-  - DoH 8153: `src/foghorn/doh_server.py` (HTTP/1.1 minimal parser, RFC 8484; optional TLS).
+- Downstream servers (configured via `listen.*`):
+  - UDP: `src/foghorn/servers/udp_server.py` (ThreadingUDPServer wrapper) — handler logic lives in `src/foghorn/servers/server.py`.
+  - TCP: `src/foghorn/servers/tcp_server.py` (length‑prefixed, persistent connections, RFC 7766; asyncio with threaded fallback).
+  - DoT: `src/foghorn/servers/dot_server.py` (TLS, RFC 7858; asyncio).
+  - DoH: `src/foghorn/servers/doh_server.py` (HTTP admin and DNS-over-HTTPS plumbing; RFC 8484).
 - Upstream transports:
   - UDP: `src/foghorn/transports/udp.py` (dnslib send)
   - TCP: `src/foghorn/transports/tcp.py` with connection pooling
   - DoT: `src/foghorn/transports/dot.py` with connection pooling
   - DoH: `src/foghorn/transports/doh.py` (stdlib http.client; GET/POST; TLS verification controls)
 - Plugins: `src/foghorn/plugins/*`, discovered via `plugins/registry.py`. Hooks: `pre_resolve`, `post_resolve`. Aliases supported (e.g., `acl`, `router`, `new_domain`, `filter`, `custom`, `records`, `docker-hosts`).
-- Cache: `src/foghorn/cache.py` TTLCache with opportunistic cleanup.
+- Cache: cache plugins live in `src/foghorn/cache_plugins/`; `src/foghorn/cache.py` provides internal TTL caches used by the resolver and some plugins.
 
 ## Request Pipeline
 
@@ -40,6 +40,7 @@ This release introduces a few developer-visible breaking changes:
 When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnssec.validation`:
 - `upstream_ad`: require upstream AD bit; otherwise respond SERVFAIL
 - `local` (experimental): local validation; behavior may change
+- `local_extended`: local validation with additional hardening/coverage; behavior may change
 
 ## Transports and Pooling
 
@@ -52,20 +53,20 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
 
 - Listeners under `listen.{udp,tcp,dot,doh}` with `enabled`, `host`, `port`. DoT/DoH accept `cert_file` and `key_file` (optional for DoH if plain HTTP is desired). The DoH listener is implemented via `foghorn.doh_api.start_doh_server` and shares the same resolver/plugin pipeline as UDP/TCP/DoT.
 - Upstreams accept optional `transport: udp|tcp|dot|doh`. For DoT set `tls.server_name`, `tls.verify`. For DoH set `url`, optional `method`, `headers`, and `tls.verify`/`tls.ca_file`.
-- `dnssec.mode: ignore|passthrough|validate`, `dnssec.validation: upstream_ad|local` (local is experimental), `dnssec.udp_payload_size` (default 1232).
-- `foghorn.min_cache_ttl` (seconds) clamps cache expiry floor; negative values are clamped to 0. When omitted, it defaults to 0 (no additional floor beyond upstream TTLs). For backward compatibility, the deprecated root-level `min_cache_ttl` is still honored when `foghorn.min_cache_ttl` is not set.
+- `dnssec.mode: ignore|passthrough|validate`, `dnssec.validation: upstream_ad|local|local_extended` (local* are experimental), `dnssec.udp_payload_size` (default 1232).
+- Cache TTL flooring is configured via the cache plugin: `cache.config.min_cache_ttl` (seconds). Set `cache.module: none` (or `cache.module: null` as an alias) to disable caching.
 
 ## Config JSON Schema and plugin schemas
 
 - The main configuration JSON Schema lives in `assets/config-schema.json` and is loaded by `foghorn.config_schema.validate_config()`.
 - The top-level YAML config optionally supports a `$schema` key (string URI/identifier). This is accepted by the JSON Schema but ignored at runtime; it exists purely for editor/tooling hints.
 - A helper script can generate a combined schema document that includes both the core config schema and per-plugin config schemas under `$defs.plugin_configs`:
-  - Location: `scripts/generate_plugin_schema.py`
-  - Behavior: loads the existing `config-schema.json`, discovers all plugins via `plugins/registry.py`, and attaches each plugin's config schema (from `get_config_model()` / `get_config_schema()`) into `$defs.plugin_configs`.
+  - Location: `scripts/generate_foghorn_schema.py`
+  - Behavior: loads the existing `assets/config-schema.json`, discovers all plugins via `plugins/registry.py`, and attaches each plugin's config schema (from `get_config_model()` / `get_config_schema()`) into `$defs.plugin_configs`.
   - Example usage from the project root:
 
     ```bash path=null start=null
-    PYTHONPATH=src python scripts/generate_plugin_schema.py -o schema.json
+    PYTHONPATH=src python scripts/generate_foghorn_schema.py -o schema.json
     ```
 
   - The generated `schema.json` keeps the original top-level structure of `config-schema.json`; the extra `$defs.plugin_configs` node is informational only and does not change validation semantics.
@@ -81,7 +82,7 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
 - `setup_priority` resolution:
   - Prefer explicit `setup_priority` from config.
   - Otherwise fall back to config-provided `pre_priority` for setup-aware plugins.
-  - Otherwise fall back to the class attribute `setup_priority` (default 50).
+- Otherwise fall back to the class attribute `setup_priority` (default 100).
 - `main.run_setup_plugins()`:
   - Filters the instantiated plugin list down to those that override `BasePlugin.setup`.
   - Collects `(setup_priority, plugin)` pairs and runs `setup()` in ascending `setup_priority` order (stable sort; original registration order is preserved for ties).
