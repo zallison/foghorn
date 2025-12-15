@@ -24,6 +24,7 @@ from foghorn.servers import doh_api as doh_mod
 from foghorn.servers import webserver as web_mod
 from foghorn.servers.doh_api import DoHServerHandle, start_doh_server
 from foghorn.servers.webserver import RingBuffer, WebServerHandle, start_webserver
+from foghorn.stats import StatsCollector, StatsSQLiteStore
 
 pytestmark = pytest.mark.slow
 
@@ -225,6 +226,111 @@ def test_admin_fallback_logs_with_limit_and_static_files(
             assert b"<html><body>Admin UI</body></html>" == body5
         finally:
             conn5.close()
+
+    handle.stop()
+
+
+def test_admin_fallback_query_log_and_aggregate(monkeypatch: Any, tmp_path) -> None:
+    """Brief: Threaded admin HTTP exposes /api/v1/query_log and /api/v1/query_log/aggregate.
+
+    Inputs:
+      - monkeypatch forcing asyncio.new_event_loop() to raise PermissionError (threaded fallback).
+      - tmp_path used for a temporary stats SQLite database.
+
+    Outputs:
+      - /api/v1/query_log returns paginated query_log rows.
+      - /api/v1/query_log/aggregate returns dense bucket counts.
+    """
+
+    def boom_new_loop(*_a: Any, **_kw: Any) -> asyncio.AbstractEventLoop:
+        raise PermissionError("no self-pipe")
+
+    monkeypatch.setattr(asyncio, "new_event_loop", boom_new_loop, raising=True)
+
+    store = StatsSQLiteStore(str(tmp_path / "stats.db"))
+    collector = StatsCollector(stats_store=store)
+
+    # Insert two rows in a known window.
+    from datetime import datetime, timezone
+
+    start_dt = datetime(2025, 12, 10, 1, 0, 0, tzinfo=timezone.utc)
+    collector.record_query_result(
+        client_ip="192.0.2.1",
+        qname="example.com",
+        qtype="A",
+        rcode="REFUSED",
+        upstream_id=None,
+        status="error",
+        error=None,
+        first=None,
+        result={"source": "server"},
+        ts=start_dt.timestamp() + 60,
+    )
+    collector.record_query_result(
+        client_ip="192.0.2.1",
+        qname="example.com",
+        qtype="A",
+        rcode="REFUSED",
+        upstream_id=None,
+        status="error",
+        error=None,
+        first=None,
+        result={"source": "server"},
+        ts=start_dt.timestamp() + 16 * 60,
+    )
+
+    cfg = {
+        "webserver": {
+            "enabled": True,
+            "host": "127.0.0.1",
+            "port": 0,
+        }
+    }
+
+    handle = start_webserver(stats=collector, config=cfg, log_buffer=RingBuffer())
+    assert isinstance(handle, WebServerHandle)
+
+    server = handle._server  # type: ignore[attr-defined]
+    assert server is not None
+    host, port = server.server_address
+
+    time.sleep(0.05)
+
+    # Query log list
+    conn = http.client.HTTPConnection(host, port, timeout=2)
+    try:
+        conn.request("GET", "/api/v1/query_log?page=1&page_size=1")
+        resp = conn.getresponse()
+        body = resp.read()
+        assert resp.status == 200
+        data = json.loads(body.decode("utf-8"))
+        assert data["total"] == 2
+        assert len(data["items"]) == 1
+    finally:
+        conn.close()
+
+    # Aggregate: 15-minute buckets over 1 hour
+    conn2 = http.client.HTTPConnection(host, port, timeout=2)
+    try:
+        qs = (
+            "/api/v1/query_log/aggregate"
+            "?rcode=REFUSED"
+            "&interval=15"
+            "&interval_units=minutes"
+            "&start=2025-12-10%2001:00:00"
+            "&end=2025-12-10%2002:00:00"
+        )
+        conn2.request("GET", qs)
+        resp2 = conn2.getresponse()
+        body2 = resp2.read()
+        assert resp2.status == 200
+        data2 = json.loads(body2.decode("utf-8"))
+        items = data2["items"]
+        assert len(items) == 4
+        counts = [it["count"] for it in items]
+        assert counts == [1, 1, 0, 0]
+    finally:
+        conn2.close()
 
     handle.stop()
 
