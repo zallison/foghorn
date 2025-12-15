@@ -21,15 +21,11 @@ def _make_query(name: str, qtype: int) -> bytes:
     return DNSRecord.question(name, qtype=qtype_name).pack()
 
 
-@pytest.mark.parametrize(
-    "suffix",
-    ["local", "mdns"],
-)
-def test_mdns_bridge_answers_dns_sd_records(suffix: str) -> None:
-    """Brief: MdnsBridgePlugin can answer PTR/SRV/TXT/A/AAAA under .local and .mdns.
+def test_mdns_bridge_answers_dns_sd_records() -> None:
+    """Brief: MdnsBridgePlugin can answer PTR/SRV/TXT/A/AAAA under .local.
 
     Inputs:
-      - suffix: zone suffix to test (.local or .mdns).
+      - None.
 
     Outputs:
       - Asserts override responses include expected RR types.
@@ -40,14 +36,22 @@ def test_mdns_bridge_answers_dns_sd_records(suffix: str) -> None:
     plugin = MdnsBridgePlugin(network_enabled=False, ttl=120)
     plugin.setup()
 
+    suffix = "local"
     service_type = f"_http._tcp.{suffix}"
     instance = f"My Service._http._tcp.{suffix}"
     host = f"myhost.{suffix}"
 
+    service_node = f"_http._tcp.{host}"  # service type prefix + host
+
     plugin._test_seed_records(
         ptr={
+            # DNS-SD meta-enumeration (service types)
             f"_services._dns-sd._udp.{suffix}": [service_type],
-            service_type: [instance],
+            # Service type -> hostnames (Foghorn behavior)
+            service_type: [host],
+            # Foghorn convenience indexes
+            f"_hosts.{suffix}": [host],
+            f"_services.{suffix}": [service_node],
         },
         srv={
             instance: (0, 0, 8080, host),
@@ -75,12 +79,35 @@ def test_mdns_bridge_answers_dns_sd_records(suffix: str) -> None:
     resp = DNSRecord.parse(decision.response)
     assert any(rr.rtype == QTYPE.PTR for rr in resp.rr)
 
-    # PTR: enumerate instances
+    # PTR: service type -> hostnames
     req = _make_query(service_type, int(QTYPE.PTR))
     decision = plugin.pre_resolve(service_type, int(QTYPE.PTR), req, ctx)
     assert decision is not None
     resp = DNSRecord.parse(decision.response)
     assert any(rr.rtype == QTYPE.PTR for rr in resp.rr)
+    assert any(
+        str(rr.rdata).rstrip(".") == host for rr in resp.rr if rr.rtype == QTYPE.PTR
+    )
+
+    # PTR: list all hosts
+    req = _make_query(f"_hosts.{suffix}", int(QTYPE.PTR))
+    decision = plugin.pre_resolve(f"_hosts.{suffix}", int(QTYPE.PTR), req, ctx)
+    assert decision is not None
+    resp = DNSRecord.parse(decision.response)
+    assert any(
+        str(rr.rdata).rstrip(".") == host for rr in resp.rr if rr.rtype == QTYPE.PTR
+    )
+
+    # PTR: list host-qualified services
+    req = _make_query(f"_services.{suffix}", int(QTYPE.PTR))
+    decision = plugin.pre_resolve(f"_services.{suffix}", int(QTYPE.PTR), req, ctx)
+    assert decision is not None
+    resp = DNSRecord.parse(decision.response)
+    assert any(
+        str(rr.rdata).rstrip(".") == service_node
+        for rr in resp.rr
+        if rr.rtype == QTYPE.PTR
+    )
 
     # SRV
     req = _make_query(instance, int(QTYPE.SRV))
@@ -131,13 +158,13 @@ def test_mdns_bridge_falls_through_when_unknown() -> None:
 
 
 def test_mdns_bridge_mirror_suffixes_roundtrip() -> None:
-    """Brief: `_mirror_suffixes` treats `.mdns` as an alias for `.local`.
+    """Brief: `_mirror_suffixes` normalizes `.local` names.
 
     Inputs:
       - None.
 
     Outputs:
-      - None; asserts suffix mirroring behavior and normalization.
+      - None; asserts suffix normalization behavior.
     """
 
     from foghorn.plugins.mdns import MdnsBridgePlugin
@@ -145,19 +172,18 @@ def test_mdns_bridge_mirror_suffixes_roundtrip() -> None:
     plugin = MdnsBridgePlugin(network_enabled=False)
     plugin.setup()
 
-    assert plugin._mirror_suffixes("Foo.Local.") == ["foo.local", "foo.mdns"]
-    assert plugin._mirror_suffixes("foo.mdns") == ["foo.mdns", "foo.local"]
+    assert plugin._mirror_suffixes("Foo.Local.") == ["foo.local"]
     assert plugin._mirror_suffixes("example.com") == ["example.com"]
 
 
 def test_mdns_bridge_ptr_add_and_remove_mirrors_suffixes() -> None:
-    """Brief: PTR add/remove mirrors `.local` and `.mdns` keys and targets.
+    """Brief: PTR add/remove stores `.local` keys.
 
     Inputs:
       - None.
 
     Outputs:
-      - None; asserts `_ptr` cache contains/clears mirrored entries.
+      - None; asserts `_ptr` cache contains/clears `.local` entries.
     """
 
     from foghorn.plugins.mdns import MdnsBridgePlugin
@@ -165,17 +191,14 @@ def test_mdns_bridge_ptr_add_and_remove_mirrors_suffixes() -> None:
     plugin = MdnsBridgePlugin(network_enabled=False)
     plugin.setup()
 
-    plugin._ptr_add("_http._tcp.local.", "my._http._tcp.local.")
+    plugin._ptr_add("_http._tcp.local.", "myhost.local.")
 
     assert "_http._tcp.local" in plugin._ptr
-    assert "_http._tcp.mdns" in plugin._ptr
-    assert "my._http._tcp.local" in plugin._ptr["_http._tcp.local"]
-    assert "my._http._tcp.mdns" in plugin._ptr["_http._tcp.local"]
+    assert "myhost.local" in plugin._ptr["_http._tcp.local"]
 
-    plugin._ptr_remove("_http._tcp.local.", "my._http._tcp.local.")
+    plugin._ptr_remove("_http._tcp.local.", "myhost.local.")
 
     assert "_http._tcp.local" not in plugin._ptr
-    assert "_http._tcp.mdns" not in plugin._ptr
 
 
 @pytest.mark.parametrize(
@@ -223,9 +246,8 @@ def test_mdns_bridge_ingest_service_info_populates_caches(
 
     plugin._ingest_service_info(DummyInfo())
 
-    # Instance has SRV and TXT under both suffixes.
+    # Instance has SRV and TXT under the `.local` suffix.
     assert "myservice._http._tcp.local" in plugin._srv
-    assert "myservice._http._tcp.mdns" in plugin._srv
     assert "myservice._http._tcp.local" in plugin._txt
 
     txt_set = set(plugin._txt["myservice._http._tcp.local"])
