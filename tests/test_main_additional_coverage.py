@@ -19,7 +19,8 @@ from unittest.mock import mock_open, patch
 import pytest
 
 import foghorn.main as main_mod
-from foghorn.main import _clear_lru_caches, normalize_upstream_config, run_setup_plugins
+from foghorn.config_parser import normalize_upstream_config
+from foghorn.main import _clear_lru_caches, run_setup_plugins
 from foghorn.plugins.base import BasePlugin
 
 
@@ -1071,10 +1072,10 @@ def test_webserver_stop_called_on_shutdown(monkeypatch, caplog):
 
 
 def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
-    """Brief: main() returns 1 and prints the validation error when config is invalid.
+    """Brief: main() returns 1 and prints the config parsing/validation error.
 
     Inputs:
-      - monkeypatch/capsys fixtures; validate_config patched to raise ValueError.
+      - monkeypatch/capsys fixtures; parse_config_file patched to raise ValueError.
 
     Outputs:
       - None: asserts exit code 1 and that the error message is printed to stdout.
@@ -1085,12 +1086,10 @@ def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
         "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
     )
 
-    def boom_validate(
-        _cfg: Dict[str, Any], config_path: str | None = None
-    ) -> None:  # noqa: ARG001
+    def boom_parse_config_file(*_a: Any, **_kw: Any) -> Dict[str, Any]:  # noqa: ANN401
         raise ValueError("bad config value")
 
-    monkeypatch.setattr(main_mod, "validate_config", boom_validate)
+    monkeypatch.setattr(main_mod, "parse_config_file", boom_parse_config_file)
     # init_logging should not be called, but keep it harmless if it is.
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
 

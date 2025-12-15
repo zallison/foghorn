@@ -8,7 +8,7 @@ Outputs:
   - None
 """
 
-from foghorn.main import normalize_upstream_config
+from foghorn.config_parser import normalize_upstream_config
 
 
 def test_normalize_upstream_config_doh_url():
