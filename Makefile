@@ -8,8 +8,6 @@ TAG ?= latest
 ADMINPORT ?= 8053
 UDPPORT ?= 53
 TCPPORT ?= 53
-DoTPORT ?= 853
-DoHPORT ?= 443
 # Files/folders that should NOT be deleted by `clean`
 # (Keep YAML files, so we exclude *.yaml and *.yml from the delete patterns)
 IGNORE_EXTS :=  .yaml .yml
@@ -80,7 +78,7 @@ docker: clean docker-build docker-run docker-logs
 
 .PHONY: docker-build
 docker-build: $(VENV)/bin/foghorn
-	rsync -qr --exclude='*/__pycache__/*' --delete-during LICENSE.txt ./entrypoint.sh ./src ./html ./pyproject.toml ./Dockerfile ./docker-compose.yaml ./assets docker-build/
+	rsync -qr --exclude='*/__pycache__/*' --delete-during LICENSE.txt ./entrypoint.sh ./src ./html ./pyproject.toml ./Dockerfile ./docker-compose.yaml ./assets ./docs ./scripts docker-build/
 	docker build ./docker-build -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-clean
@@ -91,7 +89,7 @@ docker-clean:
 .PHONY: docker-run
 docker-run: docker-build
 	docker rm -f foghorn
-	docker run --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ -d -p ${UDPPORT}:5333/udp -p ${TCPPORT}:5333/tcp -p ${ADMINPORT}:8053/tcp -p ${DoTPORT}:1853/tcp -p ${DoHPORT}:1443 -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker run --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ -d -p ${UDPPORT}:5333/udp -p ${TCPPORT}:5333/tcp -p ${ADMINPORT}:8053/tcp -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-logs
 docker-logs:
