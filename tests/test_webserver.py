@@ -21,7 +21,7 @@ import threading
 import yaml
 from fastapi.testclient import TestClient
 
-from foghorn.stats import StatsCollector
+from foghorn.stats import StatsCollector, StatsSQLiteStore
 from foghorn.servers.webserver import (
     RingBuffer,
     WebServerHandle,
@@ -719,6 +719,157 @@ def test_logs_endpoint_returns_entries_from_ringbuffer() -> None:
     assert len(entries) == 3
     assert entries[0]["n"] == 2
     assert entries[-1]["n"] == 4
+
+
+def test_query_log_endpoint_paginates_and_filters(tmp_path) -> None:
+    """Brief: /api/v1/query_log returns paginated rows and supports basic filters.
+
+    Inputs:
+      - StatsCollector backed by a StatsSQLiteStore with several query_log rows.
+
+    Outputs:
+      - Response contains total/page/page_size metadata.
+      - Results are ordered newest-first and can be filtered by rcode.
+    """
+
+    store = StatsSQLiteStore(str(tmp_path / "stats.db"))
+    collector = StatsCollector(stats_store=store)
+
+    # Insert a few rows at deterministic timestamps.
+    collector.record_query_result(
+        client_ip="192.0.2.1",
+        qname="example.com",
+        qtype="A",
+        rcode="NOERROR",
+        upstream_id="8.8.8.8:53",
+        status="ok",
+        error=None,
+        first="1.2.3.4",
+        result={"source": "upstream"},
+        ts=1000.0,
+    )
+    collector.record_query_result(
+        client_ip="192.0.2.2",
+        qname="example.com",
+        qtype="AAAA",
+        rcode="NXDOMAIN",
+        upstream_id="8.8.8.8:53",
+        status="error",
+        error=None,
+        first=None,
+        result={"source": "upstream"},
+        ts=1001.0,
+    )
+    collector.record_query_result(
+        client_ip="192.0.2.3",
+        qname="other.example.com",
+        qtype="A",
+        rcode="NXDOMAIN",
+        upstream_id="1.1.1.1:53",
+        status="error",
+        error=None,
+        first=None,
+        result={"source": "upstream"},
+        ts=1002.0,
+    )
+
+    app = create_app(
+        stats=collector,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+    )
+    client = TestClient(app)
+
+    # Page 1, size 2 -> newest two rows.
+    resp = client.get("/api/v1/query_log", params={"page": 1, "page_size": 2})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 3
+    assert data["page"] == 1
+    assert data["page_size"] == 2
+    assert data["total_pages"] == 2
+    assert len(data["items"]) == 2
+
+    # Ordered newest-first: ts 1002 then 1001
+    assert data["items"][0]["ts"] == 1002.0
+    assert data["items"][1]["ts"] == 1001.0
+
+    # Filter by rcode
+    resp2 = client.get("/api/v1/query_log", params={"rcode": "NXDOMAIN"})
+    assert resp2.status_code == 200
+    data2 = resp2.json()
+    assert data2["total"] == 2
+    assert all(item.get("rcode") == "NXDOMAIN" for item in data2["items"])
+
+
+def test_query_log_aggregate_fills_zero_buckets(tmp_path) -> None:
+    """Brief: /api/v1/query_log/aggregate returns a dense series (including zeros).
+
+    Inputs:
+      - StatsCollector backed by a StatsSQLiteStore with a few REFUSED rows.
+
+    Outputs:
+      - Buckets cover the full [start, end) range and include zero-count buckets.
+    """
+
+    store = StatsSQLiteStore(str(tmp_path / "stats2.db"))
+    collector = StatsCollector(stats_store=store)
+
+    # Range: 2025-12-10 01:00:00Z to 02:00:00Z, 15-minute buckets.
+    from datetime import datetime, timezone
+
+    start_dt = datetime(2025, 12, 10, 1, 0, 0, tzinfo=timezone.utc)
+
+    # Two REFUSED events at 01:05 and 01:35.
+    collector.record_query_result(
+        client_ip="192.0.2.1",
+        qname="example.com",
+        qtype="A",
+        rcode="REFUSED",
+        upstream_id=None,
+        status="error",
+        error=None,
+        first=None,
+        result={"source": "server"},
+        ts=start_dt.timestamp() + 5 * 60,
+    )
+    collector.record_query_result(
+        client_ip="192.0.2.1",
+        qname="example.com",
+        qtype="A",
+        rcode="REFUSED",
+        upstream_id=None,
+        status="error",
+        error=None,
+        first=None,
+        result={"source": "server"},
+        ts=start_dt.timestamp() + 35 * 60,
+    )
+
+    app = create_app(
+        stats=collector,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+    )
+    client = TestClient(app)
+
+    resp = client.get(
+        "/api/v1/query_log/aggregate",
+        params={
+            "rcode": "REFUSED",
+            "interval": 15,
+            "interval_units": "minutes",
+            "start": "2025-12-10 01:00:00",
+            "end": "2025-12-10 02:00:00",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    items = data["items"]
+    assert len(items) == 4
+    counts = [it["count"] for it in items]
+    assert counts == [1, 0, 1, 0]
 
 
 def test_suppress2xx_filter_handles_status_attribute() -> None:
