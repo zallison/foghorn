@@ -219,6 +219,43 @@ def _normalize_variables_for_validation(cfg: Dict[str, Any]) -> None:
     cfg.pop("variables", None)
 
 
+def _normalize_dnssec_config_for_validation(cfg: Dict[str, Any]) -> None:
+    """Brief: Normalize DNSSEC validation mode for schema/runtime compatibility.
+
+    Inputs:
+      - cfg: Parsed YAML configuration mapping (mutated in-place).
+
+    Outputs:
+      - None.
+
+    Behavior:
+      - If dnssec.validation is set to 'local', rewrite it to 'local_extended'.
+      - Accept a legacy key 'validate' as an alias for 'validation' when
+        'validation' is not already set.
+
+    Notes:
+      - DNSSEC config can appear at the root 'dnssec' block or nested under
+        'foghorn.dnssec' (preferred).
+    """
+
+    def _normalize_dnssec_block(block: Any) -> None:
+        if not isinstance(block, dict):
+            return
+
+        if "validation" not in block and "validate" in block:
+            block["validation"] = block.pop("validate")
+
+        validation = block.get("validation")
+        if isinstance(validation, str) and validation.strip().lower() == "local":
+            block["validation"] = "local_extended"
+
+    _normalize_dnssec_block(cfg.get("dnssec"))
+
+    foghorn_cfg = cfg.get("foghorn")
+    if isinstance(foghorn_cfg, dict):
+        _normalize_dnssec_block(foghorn_cfg.get("dnssec"))
+
+
 def _normalize_plugin_entries_for_validation(cfg: Dict[str, Any]) -> None:
     """Brief: Normalize plugin entry aliases/meta fields for JSON Schema validation.
 
@@ -399,6 +436,7 @@ def validate_config(
     # missing or jsonschema is not installed.
     _normalize_variables_for_validation(cfg)
     _normalize_cache_config_for_validation(cfg)
+    _normalize_dnssec_config_for_validation(cfg)
     _normalize_plugin_entries_for_validation(cfg)
 
     # If the base schema file cannot be found, log a warning and skip

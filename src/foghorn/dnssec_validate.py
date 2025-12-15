@@ -26,6 +26,38 @@ import dns.rdatatype
 import dns.resolver
 from cachetools import TTLCache, cached
 
+
+def _parse_resolv_conf_nameservers(path: str = "/etc/resolv.conf") -> list[str]:
+    """Brief: Best-effort parse of nameserver entries from a resolv.conf file.
+
+    Inputs:
+      - path: Filesystem path to a resolv.conf-format file.
+
+    Outputs:
+      - List of nameserver IP strings in the order encountered. Returns an empty
+        list when the file cannot be read or contains no nameserver entries.
+
+    Notes:
+      - This intentionally ignores search/domain directives. Some environments
+        may contain invalid search suffixes (e.g. leading dots) that cause
+        dnspython's strict parser to raise; we only need nameservers here.
+    """
+
+    servers: list[str] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                raw = line.split("#", 1)[0].strip()
+                if not raw:
+                    continue
+                parts = raw.split()
+                if len(parts) >= 2 and parts[0].lower() == "nameserver":
+                    servers.append(parts[1])
+    except Exception:  # pragma: no cover - depends on host environment
+        return []
+    return servers
+
+
 logger = logging.getLogger("foghorn.dnssec")
 
 # Optional override for the nameservers used by the local DNSSEC validator.
@@ -218,7 +250,21 @@ def _resolver(payload_size: int = 1232):
         r = dns.resolver.Resolver(configure=False)
         r.nameservers = list(_VALIDATION_NAMESERVERS)
     else:
-        r = dns.resolver.Resolver(configure=True)
+        # Prefer dnspython's default behavior (read system resolver config). Some
+        # host environments ship malformed resolv.conf search/domain directives
+        # (e.g. leading dots) which can make dnspython raise during parsing.
+        # In that case, fall back to a minimal nameserver-only parse.
+        try:
+            r = dns.resolver.Resolver(configure=True)
+        except Exception as exc:  # pragma: no cover - environment specific
+            logger.warning(
+                "DNSSEC resolver could not parse system resolv.conf; falling back to nameserver-only config: %s",
+                exc,
+            )
+            r = dns.resolver.Resolver(configure=False)
+            ns = _parse_resolv_conf_nameservers()
+            if ns:
+                r.nameservers = ns
 
     r.use_edns(edns=0, ednsflags=dns.flags.DO, payload=payload_size)
     r.lifetime = 2.0
