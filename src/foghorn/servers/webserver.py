@@ -246,6 +246,76 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _ts_to_utc_iso(ts: float) -> str:
+    """Brief: Convert a Unix timestamp (seconds) to an ISO8601 UTC string.
+
+    Inputs:
+      - ts: Unix timestamp in seconds.
+
+    Outputs:
+      - ISO8601 string in UTC ("...Z" suffix).
+    """
+
+    try:
+        dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+    except Exception:
+        dt = datetime.fromtimestamp(0.0, tz=timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _parse_utc_datetime(value: str) -> datetime:
+    """Parse a datetime string into an aware UTC datetime.
+
+    Brief:
+      Accepts either ISO-8601-like strings (including a trailing 'Z') or
+      a simple space-separated format "YYYY-MM-DD HH:MM:SS" (optionally with
+      fractional seconds).
+
+    Inputs:
+      - value: Datetime string.
+
+    Outputs:
+      - datetime: Timezone-aware datetime in UTC.
+
+    Raises:
+      - ValueError when parsing fails.
+
+    Example:
+      >>> dt = _parse_utc_datetime('2025-12-10 01:02:03')
+      >>> dt.tzinfo is not None
+      True
+    """
+
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("empty datetime")
+
+    # ISO8601 (support trailing Z)
+    iso = raw.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(iso)
+    except Exception:
+        dt = None  # type: ignore[assignment]
+
+    if dt is None:
+        # Common non-ISO format used in config/UI
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except Exception:
+                dt = None  # type: ignore[assignment]
+
+    if dt is None:
+        raise ValueError(f"invalid datetime: {raw}")
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
+
+
 def sanitize_config(
     cfg: Dict[str, Any], redact_keys: List[str] | None = None
 ) -> Dict[str, Any]:
@@ -1626,6 +1696,212 @@ def create_app(
             "backed_up_to": backup_path,
         }
 
+    @app.get("/api/v1/query_log", dependencies=[Depends(auth_dep)])
+    @app.get("/query_log", dependencies=[Depends(auth_dep)])
+    async def get_query_log(
+        client_ip: str | None = None,
+        qtype: str | None = None,
+        qname: str | None = None,
+        rcode: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> Dict[str, Any]:
+        """Return query_log entries filtered by client/qname/qtype/rcode.
+
+        Inputs:
+          - client_ip: Optional client IP address filter.
+          - qtype: Optional qtype filter (e.g. "A").
+          - qname: Optional qname filter (e.g. "example.com").
+          - rcode: Optional rcode filter (e.g. "NXDOMAIN").
+          - start: Optional UTC datetime string limiting results to ts >= start.
+          - end: Optional UTC datetime string limiting results to ts < end.
+          - page: 1-based page number.
+          - page_size: Page size (defaults to 100).
+
+        Outputs:
+          - Dict with server_time, pagination metadata, and items.
+        """
+
+        collector: Optional[StatsCollector] = app.state.stats_collector
+        store = getattr(collector, "_store", None) if collector is not None else None
+        if store is None:
+            return {
+                "status": "disabled",
+                "server_time": _utc_now_iso(),
+                "items": [],
+                "total": 0,
+                "page": int(page) if isinstance(page, int) else 1,
+                "page_size": int(page_size) if isinstance(page_size, int) else 100,
+                "total_pages": 0,
+            }
+
+        # Parse optional time bounds.
+        start_ts: float | None = None
+        end_ts: float | None = None
+        if start:
+            try:
+                start_ts = _parse_utc_datetime(start).timestamp()
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"invalid start datetime: {exc}",
+                ) from exc
+        if end:
+            try:
+                end_ts = _parse_utc_datetime(end).timestamp()
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"invalid end datetime: {exc}",
+                ) from exc
+
+        # Clamp page_size to a conservative upper bound.
+        try:
+            ps = int(page_size)
+        except Exception:
+            ps = 100
+        if ps <= 0:
+            ps = 100
+        if ps > 1000:
+            ps = 1000
+
+        res = store.select_query_log(
+            client_ip=client_ip,
+            qtype=qtype,
+            qname=qname,
+            rcode=rcode,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            page=page,
+            page_size=ps,
+        )
+
+        # Add ISO timestamps for convenience.
+        items = []
+        for item in res.get("items", []) or []:
+            if isinstance(item, dict) and "ts" in item:
+                item = dict(item)
+                item["timestamp"] = _ts_to_utc_iso(float(item.get("ts") or 0.0))
+            items.append(item)
+
+        return {
+            "server_time": _utc_now_iso(),
+            "total": res.get("total", 0),
+            "page": res.get("page", 1),
+            "page_size": res.get("page_size", ps),
+            "total_pages": res.get("total_pages", 0),
+            "items": items,
+        }
+
+    @app.get("/api/v1/query_log/aggregate", dependencies=[Depends(auth_dep)])
+    async def get_query_log_aggregate(
+        interval: int,
+        interval_units: str,
+        start: str,
+        end: str,
+        client_ip: str | None = None,
+        qtype: str | None = None,
+        qname: str | None = None,
+        rcode: str | None = None,
+        group_by: str | None = None,
+    ) -> Dict[str, Any]:
+        """Return time-bucketed query counts for graphing.
+
+        Inputs:
+          - interval: Positive integer bucket width.
+          - interval_units: One of seconds, minutes, hours, days.
+          - start: UTC datetime string (inclusive).
+          - end: UTC datetime string (exclusive).
+          - client_ip/qtype/qname/rcode: Optional filters.
+          - group_by: Optional grouping dimension (client_ip, qtype, qname, rcode).
+
+        Outputs:
+          - Dict with server_time, interval_seconds, start/end, and bucket items.
+        """
+
+        collector: Optional[StatsCollector] = app.state.stats_collector
+        store = getattr(collector, "_store", None) if collector is not None else None
+        if store is None:
+            return {"status": "disabled", "server_time": _utc_now_iso(), "items": []}
+
+        try:
+            start_dt = _parse_utc_datetime(start)
+            end_dt = _parse_utc_datetime(end)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+
+        try:
+            interval_i = int(interval)
+        except Exception:
+            interval_i = 0
+        if interval_i <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="interval must be a positive integer",
+            )
+
+        units = str(interval_units or "").strip().lower()
+        unit_seconds = {
+            "seconds": 1,
+            "second": 1,
+            "minutes": 60,
+            "minute": 60,
+            "hours": 3600,
+            "hour": 3600,
+            "days": 86400,
+            "day": 86400,
+        }.get(units)
+        if not unit_seconds:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="interval_units must be one of seconds, minutes, hours, days",
+            )
+
+        interval_seconds = interval_i * int(unit_seconds)
+        if interval_seconds <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="interval_seconds must be > 0",
+            )
+
+        res = store.aggregate_query_log_counts(
+            start_ts=start_dt.timestamp(),
+            end_ts=end_dt.timestamp(),
+            interval_seconds=interval_seconds,
+            client_ip=client_ip,
+            qtype=qtype,
+            qname=qname,
+            rcode=rcode,
+            group_by=group_by,
+        )
+
+        items = []
+        for item in res.get("items", []) or []:
+            if isinstance(item, dict):
+                out = dict(item)
+                if "bucket_start_ts" in out:
+                    out["bucket_start"] = _ts_to_utc_iso(
+                        float(out.get("bucket_start_ts") or 0.0)
+                    )
+                if "bucket_end_ts" in out:
+                    out["bucket_end"] = _ts_to_utc_iso(
+                        float(out.get("bucket_end_ts") or 0.0)
+                    )
+                items.append(out)
+
+        return {
+            "server_time": _utc_now_iso(),
+            "start": start_dt.isoformat().replace("+00:00", "Z"),
+            "end": end_dt.isoformat().replace("+00:00", "Z"),
+            "interval_seconds": interval_seconds,
+            "items": items,
+        }
+
     @app.get("/api/v1/logs", dependencies=[Depends(auth_dep)])
     @app.get("/logs", dependencies=[Depends(auth_dep)])
     async def get_logs(limit: int = 100) -> Dict[str, Any]:
@@ -2374,6 +2650,236 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
+    def _handle_query_log(self, params: Dict[str, list[str]]) -> None:
+        """Brief: Handle GET /api/v1/query_log for the threaded fallback server.
+
+        Inputs:
+          - params: Query parameters mapping.
+
+        Outputs:
+          - None (sends JSON response).
+        """
+
+        if not self._require_auth():
+            return
+
+        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        store = getattr(collector, "_store", None) if collector is not None else None
+        if store is None:
+            self._send_json(
+                200,
+                {
+                    "status": "disabled",
+                    "server_time": _utc_now_iso(),
+                    "items": [],
+                    "total": 0,
+                    "page": 1,
+                    "page_size": 100,
+                    "total_pages": 0,
+                },
+            )
+            return
+
+        client_ip = (params.get("client_ip") or [None])[0]
+        qtype = (params.get("qtype") or [None])[0]
+        qname = (params.get("qname") or [None])[0]
+        rcode = (params.get("rcode") or [None])[0]
+        start = (params.get("start") or [None])[0]
+        end = (params.get("end") or [None])[0]
+
+        page_raw = (params.get("page") or ["1"])[0]
+        page_size_raw = (params.get("page_size") or ["100"])[0]
+
+        try:
+            page = int(page_raw)
+        except Exception:
+            page = 1
+        if page < 1:
+            page = 1
+
+        try:
+            ps = int(page_size_raw)
+        except Exception:
+            ps = 100
+        if ps <= 0:
+            ps = 100
+        if ps > 1000:
+            ps = 1000
+
+        start_ts: float | None = None
+        end_ts: float | None = None
+        if start:
+            try:
+                start_ts = _parse_utc_datetime(str(start)).timestamp()
+            except Exception:
+                self._send_json(
+                    400,
+                    {"detail": "invalid start datetime", "server_time": _utc_now_iso()},
+                )
+                return
+        if end:
+            try:
+                end_ts = _parse_utc_datetime(str(end)).timestamp()
+            except Exception:
+                self._send_json(
+                    400,
+                    {"detail": "invalid end datetime", "server_time": _utc_now_iso()},
+                )
+                return
+
+        res = store.select_query_log(
+            client_ip=client_ip,
+            qtype=qtype,
+            qname=qname,
+            rcode=rcode,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            page=page,
+            page_size=ps,
+        )
+
+        items = []
+        for item in res.get("items", []) or []:
+            if isinstance(item, dict) and "ts" in item:
+                out = dict(item)
+                out["timestamp"] = _ts_to_utc_iso(float(out.get("ts") or 0.0))
+                items.append(out)
+            else:
+                items.append(item)
+
+        self._send_json(
+            200,
+            {
+                "server_time": _utc_now_iso(),
+                "total": res.get("total", 0),
+                "page": res.get("page", page),
+                "page_size": res.get("page_size", ps),
+                "total_pages": res.get("total_pages", 0),
+                "items": items,
+            },
+        )
+
+    def _handle_query_log_aggregate(self, params: Dict[str, list[str]]) -> None:
+        """Brief: Handle GET /api/v1/query_log/aggregate for the threaded fallback server.
+
+        Inputs:
+          - params: Query parameters mapping.
+
+        Outputs:
+          - None (sends JSON response).
+        """
+
+        if not self._require_auth():
+            return
+
+        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        store = getattr(collector, "_store", None) if collector is not None else None
+        if store is None:
+            self._send_json(
+                200, {"status": "disabled", "server_time": _utc_now_iso(), "items": []}
+            )
+            return
+
+        interval_raw = (params.get("interval") or [""])[0]
+        units = (params.get("interval_units") or [""])[0]
+        start = (params.get("start") or [""])[0]
+        end = (params.get("end") or [""])[0]
+
+        if not start or not end:
+            self._send_json(
+                400,
+                {"detail": "start and end are required", "server_time": _utc_now_iso()},
+            )
+            return
+
+        try:
+            start_dt = _parse_utc_datetime(start)
+            end_dt = _parse_utc_datetime(end)
+        except Exception:
+            self._send_json(
+                400,
+                {"detail": "invalid start/end datetime", "server_time": _utc_now_iso()},
+            )
+            return
+
+        try:
+            interval_i = int(interval_raw)
+        except Exception:
+            interval_i = 0
+        if interval_i <= 0:
+            self._send_json(
+                400,
+                {
+                    "detail": "interval must be a positive integer",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        unit_seconds = {
+            "seconds": 1,
+            "second": 1,
+            "minutes": 60,
+            "minute": 60,
+            "hours": 3600,
+            "hour": 3600,
+            "days": 86400,
+            "day": 86400,
+        }.get(str(units or "").strip().lower())
+        if not unit_seconds:
+            self._send_json(
+                400,
+                {
+                    "detail": "interval_units must be one of seconds, minutes, hours, days",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        interval_seconds = interval_i * int(unit_seconds)
+
+        client_ip = (params.get("client_ip") or [None])[0]
+        qtype = (params.get("qtype") or [None])[0]
+        qname = (params.get("qname") or [None])[0]
+        rcode = (params.get("rcode") or [None])[0]
+        group_by = (params.get("group_by") or [None])[0]
+
+        res = store.aggregate_query_log_counts(
+            start_ts=start_dt.timestamp(),
+            end_ts=end_dt.timestamp(),
+            interval_seconds=interval_seconds,
+            client_ip=client_ip,
+            qtype=qtype,
+            qname=qname,
+            rcode=rcode,
+            group_by=group_by,
+        )
+
+        items = []
+        for item in res.get("items", []) or []:
+            if isinstance(item, dict):
+                out = dict(item)
+                if "bucket_start_ts" in out:
+                    out["bucket_start"] = _ts_to_utc_iso(
+                        float(out.get("bucket_start_ts") or 0.0)
+                    )
+                if "bucket_end_ts" in out:
+                    out["bucket_end"] = _ts_to_utc_iso(
+                        float(out.get("bucket_end_ts") or 0.0)
+                    )
+                items.append(out)
+
+        self._send_json(
+            200,
+            {
+                "server_time": _utc_now_iso(),
+                "start": start_dt.isoformat().replace("+00:00", "Z"),
+                "end": end_dt.isoformat().replace("+00:00", "Z"),
+                "interval_seconds": interval_seconds,
+                "items": items,
+            },
+        )
+
     def _handle_logs(
         self, params: Dict[str, list[str]]
     ) -> None:  # pragma: no cover - threaded /logs mirrors FastAPI endpoint
@@ -2787,6 +3293,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_config_raw_json()
         elif path in {"/logs", "/api/v1/logs"}:
             self._handle_logs(params)
+        elif path in {"/query_log", "/api/v1/query_log"}:
+            self._handle_query_log(params)
+        elif path == "/api/v1/query_log/aggregate":
+            self._handle_query_log_aggregate(params)
         elif path == "/api/v1/upstream_status":
             self._handle_upstream_status()
         elif path == "/api/v1/ratelimit":
