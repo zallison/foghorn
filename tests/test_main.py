@@ -85,10 +85,41 @@ def test_load_plugins_uses_registry(monkeypatch):
     monkeypatch.setattr(parser_mod, "discover_plugins", fake_discover)
     monkeypatch.setattr(parser_mod, "get_plugin_class", fake_get)
 
-    plugins = load_plugins(["a", {"module": "pkg.P2", "config": {"x": 1}}])
+    # Patch global cache and cache loader so load_plugins injects a cache instance.
+    import foghorn.plugins.base as plugin_base
+
+    global_cache = object()
+    plugin_base.DNS_CACHE = global_cache  # type: ignore[assignment]
+
+    custom_cache = object()
+
+    def fake_load_cache_plugin(cfg):  # type: ignore[no-untyped-def]
+        assert cfg == {"module": "none"}
+        return custom_cache
+
+    monkeypatch.setattr(
+        parser_mod,
+        "load_cache_plugin",
+        fake_load_cache_plugin,
+        raising=False,
+    )
+
+    plugins = load_plugins(
+        [
+            "a",
+            {"module": "pkg.P2", "config": {"x": 1, "cache": {"module": "none"}}},
+        ]
+    )
     assert type(plugins[0]).__name__ == "P1"
     assert type(plugins[1]).__name__ == "P2"
-    assert plugins[1].kw == {"x": 1}
+
+    # Plugin 1: no cache selected -> global cache injected.
+    assert plugins[0].kw.get("cache") is global_cache
+
+    # Plugin 2: explicit cache config -> custom cache injected; raw cache config removed.
+    assert plugins[1].kw.get("cache") is custom_cache
+    assert plugins[1].kw.get("x") == 1
+    assert not isinstance(plugins[1].kw.get("cache"), dict)
 
 
 def test_normalize_upstream_config_rejects_non_list():

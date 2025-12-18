@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from foghorn.current_cache import get_current_namespaced_cache, module_namespace
+
 from dnslib import QTYPE, RCODE, DNSRecord
 
 from . import (
@@ -149,7 +151,16 @@ class RecursiveResolver:
         timeout_ms: int = 2000,
         per_try_timeout_ms: int = 2000,
     ) -> None:
+        # `cache` is the currently configured DNS cache plugin. We derive a
+        # separate namespaced TTL cache from it (when backed by sqlite) to store
+        # recursive minimization/referral results without colliding with the
+        # primary DNS response cache table.
         self._cache = cache
+        self._ns_cache = get_current_namespaced_cache(
+            namespace=module_namespace(__file__),
+            cache_plugin=cache,
+        )
+
         self._stats = stats
         self._max_depth = max(1, int(max_depth or 1))
         self._timeout_ms = int(timeout_ms or 2000)
@@ -218,6 +229,38 @@ class RecursiveResolver:
         except Exception:  # pragma: no cover - defensive
             pass
         return servers
+
+    @staticmethod
+    def _ttl_from_response(resp: DNSRecord, *, default_ttl: int = 60) -> int:
+        """Brief: Best-effort TTL to use when caching a response.
+
+        Inputs:
+          - resp: Parsed DNSRecord.
+          - default_ttl: Fallback TTL seconds when no TTLs are present.
+
+        Outputs:
+          - int: TTL seconds (>= 1).
+        """
+
+        try:
+            ttls: list[int] = []
+            for section in (
+                getattr(resp, "rr", None) or [],
+                getattr(resp, "auth", None) or [],
+                getattr(resp, "ar", None) or [],
+            ):
+                for rr in section:
+                    try:
+                        ttl = int(getattr(rr, "ttl", 0) or 0)
+                    except Exception:
+                        ttl = 0
+                    if ttl > 0:
+                        ttls.append(ttl)
+            if ttls:
+                return max(1, int(min(ttls)))
+        except Exception:
+            pass
+        return max(1, int(default_ttl))
 
     def _extract_next_servers(self, resp: DNSRecord) -> List[_Server]:
         """Brief: Derive next-hop authority servers from an NS referral.
@@ -396,21 +439,35 @@ class RecursiveResolver:
             if not is_final:
                 minimise_count += 1
 
+            # For minimization stages (NS lookups), consult the current
+            # namespaced cache first. This can reduce repeated root/TLD queries in
+            # recursive mode while keeping the final answer flow and upstream_id
+            # semantics unchanged.
+            resp_wire = None
+            if not is_final:
+                try:
+                    cached = self._ns_cache.get((stage_qname.lower(), int(stage_qtype)))
+                    if isinstance(cached, (bytes, bytearray, memoryview)):
+                        resp_wire = bytes(cached)
+                except Exception:
+                    resp_wire = None
+
             # Perform the upstream query directly here so that tests which
             # monkeypatch foghorn.recursive_resolver.udp_query/tcp_query can
             # reliably intercept all network operations.
-            try:
-                resp_wire = _recursive_module.udp_query(
-                    server.host,
-                    int(server.port),
-                    wire,
-                    timeout_ms=self._per_try_timeout_ms,
-                )
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.debug(
-                    "UDP query to %s:%d failed: %s", server.host, server.port, exc
-                )
-                continue
+            if resp_wire is None:
+                try:
+                    resp_wire = _recursive_module.udp_query(
+                        server.host,
+                        int(server.port),
+                        wire,
+                        timeout_ms=self._per_try_timeout_ms,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug(
+                        "UDP query to %s:%d failed: %s", server.host, server.port, exc
+                    )
+                    continue
 
             # If TC=1, retry over TCP for a full answer.
             try:
@@ -451,6 +508,17 @@ class RecursiveResolver:
                     "Failed to parse recursive response from %s: %s", last_upstream, exc
                 )
                 continue
+
+            # Cache minimization-stage (NS referral) responses in the namespaced
+            # cache. Final answers are cached by the outer resolver pipeline.
+            if not is_final:
+                try:
+                    ttl = self._ttl_from_response(resp)
+                    self._ns_cache.set(
+                        (stage_qname.lower(), int(stage_qtype)), ttl, resp_wire
+                    )
+                except Exception:
+                    pass
 
             rcode = resp.header.rcode
             has_answer = bool(resp.rr)

@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 from dnslib import QTYPE, RCODE, DNSRecord
 from pydantic import BaseModel, Field
 
-from foghorn.cache import FoghornTTLCache
+from foghorn.current_cache import get_current_namespaced_cache, module_namespace
 from foghorn.plugins.base import (
     BasePlugin,
     PluginContext,
@@ -173,7 +173,10 @@ class RateLimitPlugin(BasePlugin):
             self._ttl = 60
 
         # Per-key rolling window counters (key -> "window_id:count")
-        self._window_cache: FoghornTTLCache = FoghornTTLCache()
+        self._window_cache = get_current_namespaced_cache(
+            namespace=module_namespace(__file__),
+            cache_plugin=self.config.get("cache"),
+        )
 
         # SQLite-backed learned profiles
         cfg_db_path = self.config.get("db_path", "./config/var/rate_limit.db")

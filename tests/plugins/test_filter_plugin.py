@@ -14,6 +14,7 @@ from contextlib import closing
 import pytest
 from dnslib import AAAA, QTYPE, RR, TXT, A, DNSRecord, RCODE
 
+from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
 from foghorn.plugins.base import PluginContext, PluginDecision
 from foghorn.plugins.filter import FilterConfig, FilterPlugin
 
@@ -677,7 +678,7 @@ def test_glob_expansion_for_blocklist_and_allowlist_files(tmp_path):
 
 
 def test_multiple_filter_instances_use_isolated_dbs_by_default(tmp_path):
-    """Brief: Default db_path uses per-instance in-memory DB, so instances do not share state.
+    """Brief: Instances do not share state when using per-instance cache overrides.
 
     Inputs:
       - tmp_path: temporary directory (unused, kept for symmetry with other tests).
@@ -686,12 +687,20 @@ def test_multiple_filter_instances_use_isolated_dbs_by_default(tmp_path):
       - None: Asserts that two FilterPlugin instances block only their own domains.
     """
     # First plugin blocks p1-block.com only.
-    p1 = FilterPlugin(default="allow", blocked_domains=["p1-block.com"])
+    p1 = FilterPlugin(
+        default="allow",
+        blocked_domains=["p1-block.com"],
+        cache=InMemoryTTLCachePlugin(),
+    )
     p1.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     # Second plugin blocks p2-block.com only.
-    p2 = FilterPlugin(default="allow", blocked_domains=["p2-block.com"])
+    p2 = FilterPlugin(
+        default="allow",
+        blocked_domains=["p2-block.com"],
+        cache=InMemoryTTLCachePlugin(),
+    )
     p2.setup()
 
     # p1 sees its own blocked domain but not p2's.
