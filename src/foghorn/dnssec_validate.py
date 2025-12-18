@@ -1376,16 +1376,11 @@ def classify_dnssec_status(
 
         strategy = str(dnssec_validation or "upstream_ad").lower()
 
-        if strategy == "local":
-            return _classify_dnssec_local(
-                qname_text, qtype_num, response_wire, udp_payload_size
-            )
-
-        if strategy == "local_extended":
+        if strategy in {"local", "local_extended"}:
+            strategy = "local_extended"
             return _classify_dnssec_local_extended(
                 qname_text, qtype_num, response_wire, udp_payload_size
             )
-
         # For upstream_ad we rely on the AD bit only and cannot
         # reliably distinguish unsigned from bogus. Treat AD=1 as
         # 'secure' and AD=0 as 'unsigned'.

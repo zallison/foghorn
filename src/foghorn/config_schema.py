@@ -229,7 +229,7 @@ def _normalize_dnssec_config_for_validation(cfg: Dict[str, Any]) -> None:
       - None.
 
     Behavior:
-      - If dnssec.validation is set to 'local', rewrite it to 'local_extended'.
+      - If dnssec.validation is set to 'local_extended', rewrite it to 'local'.
       - Accept a legacy key 'validate' as an alias for 'validation' when
         'validation' is not already set.
 
@@ -246,8 +246,11 @@ def _normalize_dnssec_config_for_validation(cfg: Dict[str, Any]) -> None:
             block["validation"] = block.pop("validate")
 
         validation = block.get("validation")
-        if isinstance(validation, str) and validation.strip().lower() == "local":
-            block["validation"] = "local_extended"
+        if (
+            isinstance(validation, str)
+            and validation.strip().lower() == "local_extended"
+        ):
+            block["validation"] = "local"
 
     _normalize_dnssec_block(cfg.get("dnssec"))
 
