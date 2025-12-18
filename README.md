@@ -24,7 +24,7 @@ Release includes **55 commits** from `v0.4.6` (2025-12-07) to `v0.4.7` (2025-12-
 
 ### Highlights
 - Added a full **recursive resolver mode** (iterative recursion with QNAME minimization) and wired it through UDP/TCP/DoT/DoH.
-- Introduced a **cache plugin system** (including a null cache) and began moving caching to a shared, pluggable cache interface.
+- Introduced a **cache plugin system** (including a `none` cache plugin) and began moving caching to a shared, pluggable cache interface.
 - Expanded **DNSSEC validation** with a new `local_extended` strategy plus DNSSEC counters exposed in stats and the admin UI.
 - Added new plugins: **mDNS bridge** and **DNS prefetch**.
 
@@ -42,7 +42,7 @@ Release includes **55 commits** from `v0.4.6` (2025-12-07) to `v0.4.7` (2025-12-
 ### Caching
 - New **cache plugin framework**:
   - Cache plugin registry/loader supporting aliases, dotted paths, and `{module, config}` objects.
-  - New cache plugins under `src/foghorn/cache_plugins/` (including a **null cache** implementation).
+  - New cache plugins under `src/foghorn/cache_plugins/` (including a **`none` cache** implementation).
 - Cache entries now expose TTL metadata via a new cache API helper (`get_with_meta()`), enabling richer cache behavior.
 - Server caching moved toward a shared global cache (`foghorn.plugins.base.DNS_CACHE`) rather than per-handler caches.
 
@@ -119,7 +119,7 @@ Release includes **55 commits** from `v0.4.6` (2025-12-07) to `v0.4.7` (2025-12-
   - recursive resolver behavior (including transport helpers and QNAME minimization)
   - DNSSEC extended local validation and trust anchor behavior
   - new plugins (mDNS, DNS prefetch) and updated plugin behaviors
-  - cache plugin behavior (including null cache)
+  - cache plugin behavior (including the `none` cache)
 
 ---
 

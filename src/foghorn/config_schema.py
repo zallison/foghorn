@@ -39,16 +39,16 @@ def _normalize_cache_config_for_validation(cfg: Dict[str, Any]) -> None:
           cache:
             module:
 
-        which is parsed as {"module": None}. The runtime cache loader treats this
-        as "use the default cache", but the JSON Schema expects either:
+        which is parsed as {"module": None}. The runtime cache loader treats an
+        explicit null module as "disable caching" (i.e., the `none` cache plugin),
+        but the JSON Schema expects either:
         - cache omitted entirely, or
         - cache: null, or
         - cache: <string>, or
         - cache: {module: <string>, config: <object>}
 
-        To keep validation aligned with runtime behavior, treat:
-        - cache: {module: null, config: {}} as "cache omitted"
-        - cache: {module: null, config: {...}} as "module=in_memory_ttl".
+        To keep validation aligned with runtime behavior, treat an explicit
+        null cache module value as if the user had configured `module=none`.
     """
 
     cache_cfg = cfg.get("cache")
@@ -60,8 +60,8 @@ def _normalize_cache_config_for_validation(cfg: Dict[str, Any]) -> None:
         module = None
 
     # If cache.module is explicitly null, interpret it as the "none" cache
-    # plugin alias (i.e., disable caching). This keeps behavior aligned with the
-    # NullCache documentation which uses `module: null`.
+    # plugin alias (i.e., disable caching). This keeps schema validation aligned
+    # with runtime behavior even when YAML templating emits an explicit null.
     if "module" in cache_cfg and cache_cfg.get("module") is None:
         cache_cfg["module"] = "none"
         module = "none"

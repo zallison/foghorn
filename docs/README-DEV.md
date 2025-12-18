@@ -54,7 +54,7 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
 - Listeners under `listen.{udp,tcp,dot,doh}` with `enabled`, `host`, `port`. DoT/DoH accept `cert_file` and `key_file` (optional for DoH if plain HTTP is desired). The DoH listener is implemented via `foghorn.doh_api.start_doh_server` and shares the same resolver/plugin pipeline as UDP/TCP/DoT.
 - Upstreams accept optional `transport: udp|tcp|dot|doh`. For DoT set `tls.server_name`, `tls.verify`. For DoH set `url`, optional `method`, `headers`, and `tls.verify`/`tls.ca_file`.
 - `dnssec.mode: ignore|passthrough|validate`, `dnssec.validation: upstream_ad|local|local_extended` (local* are experimental), `dnssec.udp_payload_size` (default 1232).
-- Cache TTL flooring is configured via the cache plugin: `cache.config.min_cache_ttl` (seconds). Set `cache.module: none` (or `cache.module: null` as an alias) to disable caching.
+- Cache TTL flooring is configured via the cache plugin: `cache.config.min_cache_ttl` (seconds). Set `cache.module: none` to disable caching.
 
 ## Config JSON Schema and plugin schemas
 

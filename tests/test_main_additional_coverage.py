@@ -19,6 +19,7 @@ from unittest.mock import mock_open, patch
 import pytest
 
 import foghorn.main as main_mod
+from foghorn.cache_plugins.none import NullCache
 from foghorn.config_parser import normalize_upstream_config
 from foghorn.main import _clear_lru_caches, run_setup_plugins
 from foghorn.plugins.base import BasePlugin
@@ -177,6 +178,53 @@ def test_main_returns_one_when_run_setup_plugins_fails(monkeypatch, caplog):
 
     assert rc == 1
     assert any("Plugin setup failed" in r.message for r in caplog.records)
+
+
+def test_main_installs_cache_plugin_without_udp_listener(monkeypatch) -> None:
+    """Brief: main() installs cache.module even when listen.udp.enabled=false.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts global DNS_CACHE is a NullCache instance.
+    """
+
+    yaml_data = (
+        "listen:\n"
+        "  udp:\n"
+        "    enabled: false\n"
+        "upstreams:\n"
+        "  - host: 1.1.1.1\n"
+        "    port: 53\n"
+        "cache:\n"
+        "  module: none\n"
+        "  config: {}\n"
+        "plugins: []\n"
+        "webserver:\n"
+        "  enabled: false\n"
+    )
+
+    # Avoid spinning up real webserver components during this unit test.
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **kw: None)
+
+    # Force the keepalive loop to exit promptly when no listeners are enabled.
+    import time as _time
+
+    def _boom(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_time, "sleep", _boom)
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        rc = main_mod.main(["--config", "no_udp.yaml"])
+
+    assert rc == 0
+
+    from foghorn.plugins import base as plugin_base
+
+    assert isinstance(plugin_base.DNS_CACHE, NullCache)
 
 
 def _capture_sig_handlers() -> Dict[str, Any]:

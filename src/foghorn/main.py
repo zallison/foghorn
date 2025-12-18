@@ -312,6 +312,16 @@ def main(argv: List[str] | None = None) -> int:
     except Exception:
         cache_plugin = None
 
+    # Install the configured cache plugin globally so all transports (UDP/TCP/DoT/DoH)
+    # share it, even when the UDP DNSServer is not started.
+    if cache_plugin is not None:
+        try:
+            from foghorn.plugins import base as plugin_base
+
+            plugin_base.DNS_CACHE = cache_plugin  # type: ignore[assignment]
+        except Exception:
+            pass
+
     # Cache TTL floor (applied to cache expiry, not the on-wire DNS TTL) is now
     # configured via the cache plugin.
     min_cache_ttl = 0

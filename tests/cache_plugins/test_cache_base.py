@@ -24,7 +24,7 @@ def test_cache_aliases_decorator_sets_aliases_and_returns_class() -> None:
       - None; asserts the aliases attribute is set and decorator returns the class.
     """
 
-    @cache_aliases("none", "null")
+    @cache_aliases("none", "off")
     class C(CachePlugin):
         def get(self, key):  # type: ignore[no-untyped-def]
             return None
@@ -38,7 +38,7 @@ def test_cache_aliases_decorator_sets_aliases_and_returns_class() -> None:
         def purge(self) -> int:
             return 0
 
-    assert C.aliases == ("none", "null")
+    assert C.aliases == ("none", "off")
 
 
 def test_cache_aliases_decorator_empty_produces_empty_tuple() -> None:
