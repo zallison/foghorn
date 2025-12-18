@@ -1,4 +1,4 @@
-"""Brief: Unit tests for foghorn.cache_plugins.null.NullCache.
+"""Brief: Unit tests for the `none` cache plugin (NullCache implementation).
 
 Inputs:
   - None
@@ -9,7 +9,7 @@ Outputs:
 
 import pytest
 
-from foghorn.cache_plugins.null import NullCache
+from foghorn.cache_plugins.none import NullCache
 from foghorn.cache_plugins.registry import load_cache_plugin
 
 
@@ -32,7 +32,7 @@ def test_null_cache_always_misses_and_noops() -> None:
     assert c.purge() == 0
 
 
-@pytest.mark.parametrize("ident", ["null", "none", "disabled", "no_cache"])
+@pytest.mark.parametrize("ident", ["none", "disabled", "no_cache"])
 def test_registry_loads_null_cache_aliases(ident: str) -> None:
     """Brief: load_cache_plugin resolves NullCache via supported aliases.
 
@@ -57,5 +57,5 @@ def test_registry_loads_null_cache_from_mapping() -> None:
       - None; asserts returned instance type.
     """
 
-    inst = load_cache_plugin({"module": "null", "config": {"ignored": True}})
+    inst = load_cache_plugin({"module": "none", "config": {"ignored": True}})
     assert isinstance(inst, NullCache)
