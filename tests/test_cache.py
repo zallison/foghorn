@@ -126,3 +126,29 @@ def test_cache_thread_safety_basic():
 
     assert c.get(k1) in (b"a", None)
     assert c.get(k2) in (b"b", None)
+
+
+def test_cache_namespace_isolation_shared_store() -> None:
+    """Brief: Namespaced views share backing store but do not collide.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts same key under different namespaces does not collide.
+    """
+
+    base = FoghornTTLCache()
+    a = base.with_namespace("a")
+    b = base.with_namespace("b")
+
+    k = ("example.com", 1)
+    a.set(k, 60, b"A")
+    b.set(k, 60, b"B")
+
+    assert a.get(k) == b"A"
+    assert b.get(k) == b"B"
+
+    # Purging within one namespace should not affect the other.
+    assert a.purge_expired() >= 0
+    assert b.get(k) == b"B"

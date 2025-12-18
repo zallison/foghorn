@@ -18,7 +18,7 @@ from dnslib import A as RDATA_A
 from dnslib import DNSRecord
 from pydantic import BaseModel, Field
 
-from foghorn.cache import FoghornTTLCache
+from foghorn.current_cache import get_current_namespaced_cache, module_namespace
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
@@ -154,7 +154,10 @@ class FilterPlugin(BasePlugin):
               last-writer-wins semantics apply.
         """
         # super().__init__(**config)
-        self._domain_cache = FoghornTTLCache()
+        self._domain_cache = get_current_namespaced_cache(
+            namespace=module_namespace(__file__),
+            cache_plugin=self.config.get("cache"),
+        )
         # Serialize SQLite access across ThreadingUDPServer handler threads to
         # avoid "InterfaceError: bad parameter or other API misuse" from
         # concurrent use of a single connection.

@@ -28,6 +28,9 @@ from .config_schema import validate_config
 from .plugins.base import BasePlugin
 from .plugins.registry import discover_plugins, get_plugin_class
 
+# Cache plugin loader is used both for the global cache and for per-plugin cache overrides.
+from .cache_plugins.registry import load_cache_plugin
+
 
 def _is_var_key(key: str) -> bool:
     """Brief: Validate whether a string is a supported variable key name.
@@ -388,6 +391,19 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
             setup_priority = generic_priority
 
         plugin_specific_config = dict(raw_config)
+
+        # Per-plugin cache selection.
+        #
+        # Brief:
+        #   Plugins may opt into their own cache instance with custom settings.
+        #   When omitted, the global resolver cache is used.
+        #
+        # Supported forms for `cache`:
+        #   - omitted / null: use global cache
+        #   - str: cache plugin alias or dotted path
+        #   - dict: {module: <alias|path>, config: <dict>}
+        cache_cfg = plugin_specific_config.pop("cache", None)
+
         for k in (
             "enabled",
             "comment",
@@ -400,6 +416,26 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
 
         plugin_cls = get_plugin_class(module_path, alias_registry)
         validated_config = _validate_plugin_config(plugin_cls, plugin_specific_config)
+
+        # Resolve cache instance and inject into plugin configuration.
+        try:
+            from foghorn.plugins import base as plugin_base
+
+            global_cache = getattr(plugin_base, "DNS_CACHE", None)
+        except Exception:
+            global_cache = None
+
+        cache_instance = global_cache
+        if cache_cfg is not None:
+            try:
+                cache_instance = load_cache_plugin(cache_cfg)
+            except Exception as exc:
+                raise ValueError(
+                    f"Invalid cache configuration for plugin {module_path}: {exc}"
+                ) from exc
+
+        if cache_instance is not None:
+            validated_config["cache"] = cache_instance
 
         if pre_priority is not None:
             validated_config["pre_priority"] = pre_priority

@@ -9,7 +9,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from foghorn.cache import FoghornTTLCache
+from foghorn.current_cache import get_current_namespaced_cache, module_namespace
 from foghorn.plugins.base import BasePlugin, PluginContext, PluginDecision
 
 log = logging.getLogger(__name__)
@@ -88,7 +88,10 @@ class GreylistPlugin(BasePlugin):
 
         self._lock = threading.Lock()
         self._db_init()
-        self._cache = FoghornTTLCache()
+        self._cache = get_current_namespaced_cache(
+            namespace=module_namespace(__file__),
+            cache_plugin=self.config.get("cache"),
+        )
 
     def _db_init(self):
         """

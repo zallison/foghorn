@@ -11,8 +11,15 @@ class FoghornTTLCache:
     """
     Thread-safe in-memory cache with individual Time-To-Live (TTL) support.
 
+    Brief:
+        In addition to basic TTL caching, this cache can optionally be
+        namespaced. Namespacing allows multiple subsystems to share a single
+        backing store without key collisions.
+
     Inputs:
-        None (constructor)
+        - namespace: Optional string namespace. When set, all keys are stored
+          internally under (namespace, key).
+
     Outputs:
         FoghornTTLCache instance
 
@@ -33,12 +40,21 @@ class FoghornTTLCache:
         >>> # cache.get(key) is None
     """
 
-    def __init__(self) -> None:
-        """
-        Initializes the FoghornTTLCache.
+    def __init__(
+        self,
+        namespace: str | None = None,
+        *,
+        _store: Optional[Dict[Tuple[object, object], Tuple[float, Any]]] = None,
+        _ttls: Optional[Dict[Tuple[object, object], int]] = None,
+        _lock: Optional[threading.RLock] = None,
+    ) -> None:
+        """Initializes the FoghornTTLCache.
 
         Inputs:
-            None
+            namespace: Optional namespace string. When set, all cache operations
+                are isolated to this namespace and keys are stored internally as
+                (namespace, key).
+
         Outputs:
             None
 
@@ -47,12 +63,53 @@ class FoghornTTLCache:
             >>> cache._store
             {}
         """
-        self._store: Dict[Tuple[str, int], Tuple[float, Any]] = {}
+        ns = None
+        if namespace is not None:
+            s = str(namespace).strip()
+            ns = s if s else None
+        self.namespace: str | None = ns
+
+        # Backing store is optionally injected so callers can create namespaced
+        # views that share the same underlying store and lock.
+        self._store: Dict[Tuple[object, object], Tuple[float, Any]] = (
+            {} if _store is None else _store
+        )
         # Track original TTLs separately so callers interested in cache
         # prefetch / stale-while-revalidate behaviour can reason about the
         # configured lifetime without changing the existing get()/set() API.
-        self._ttls: Dict[Tuple[str, int], int] = {}
-        self._lock = threading.RLock()
+        self._ttls: Dict[Tuple[object, object], int] = {} if _ttls is None else _ttls
+        self._lock = threading.RLock() if _lock is None else _lock
+
+    def _ns_key(self, key: Tuple[str, int]) -> Tuple[object, object]:
+        """Brief: Build an internal namespaced key.
+
+        Inputs:
+            key: External cache key.
+
+        Outputs:
+            Tuple used as the internal key in backing dictionaries.
+        """
+
+        if self.namespace is None:
+            return key  # type: ignore[return-value]
+        return (self.namespace, key)
+
+    def with_namespace(self, namespace: str) -> "FoghornTTLCache":
+        """Brief: Return a namespaced view sharing the same backing store.
+
+        Inputs:
+            namespace: Namespace identifier.
+
+        Outputs:
+            FoghornTTLCache view that shares backing store and lock.
+        """
+
+        return FoghornTTLCache(
+            namespace=namespace,
+            _store=self._store,
+            _ttls=self._ttls,
+            _lock=self._lock,
+        )
 
     def get(self, key: Tuple[str, int]) -> Any | None:
         """
@@ -72,15 +129,16 @@ class FoghornTTLCache:
             b'data'
         """
         now = time.time()
+        ns_key = self._ns_key(key)
         with self._lock:
-            entry = self._store.get(key)
+            entry = self._store.get(ns_key)
             if not entry:
                 return None
             expiry, data = entry
             # Check if the entry has expired.
             if now >= expiry:
-                self._store.pop(key, None)
-                self._ttls.pop(key, None)
+                self._store.pop(ns_key, None)
+                self._ttls.pop(ns_key, None)
                 return None
             return data
 
@@ -103,11 +161,12 @@ class FoghornTTLCache:
         """
         ttl_int = max(0, int(ttl))
         expiry = time.time() + ttl_int
+        ns_key = self._ns_key(key)
         with self._lock:
-            self._store[key] = (expiry, data)
-            self._ttls[key] = ttl_int
-            # Opportunistic cleanup
-            self._purge_expired_locked(now=time.time())
+            self._store[ns_key] = (expiry, data)
+            self._ttls[ns_key] = ttl_int
+            # Opportunistic cleanup (respect namespace isolation when set).
+            self._purge_expired_locked(now=time.time(), namespace=self.namespace)
 
     def purge_expired(self) -> int:
         """Remove all expired entries.
@@ -122,9 +181,9 @@ class FoghornTTLCache:
             >>> removed = cache.purge_expired()
         """
         with self._lock:
-            return self._purge_expired_locked(now=time.time())
+            return self._purge_expired_locked(now=time.time(), namespace=self.namespace)
 
-    def _purge_expired_locked(self, now: float) -> int:
+    def _purge_expired_locked(self, now: float, namespace: str | None = None) -> int:
         """Remove expired entries while holding the lock.
 
         Inputs:
@@ -135,6 +194,10 @@ class FoghornTTLCache:
         removed = 0
         # Iterate on a list of items to avoid runtime dict size change issues
         for k, (exp, _) in list(self._store.items()):
+            if namespace is not None:
+                # Only purge entries within the requested namespace.
+                if not (isinstance(k, tuple) and len(k) == 2 and k[0] == namespace):
+                    continue
             if exp <= now:
                 del self._store[k]
                 # Keep TTL metadata in sync with store removals.
@@ -159,13 +222,14 @@ class FoghornTTLCache:
               acceptable based on the returned seconds_remaining value.
         """
         now = time.time()
+        ns_key = self._ns_key(key)
         with self._lock:
-            entry = self._store.get(key)
+            entry = self._store.get(ns_key)
             if not entry:
                 return None, None, None
             expiry, data = entry
             seconds_remaining = float(expiry - now)
-            ttl = self._ttls.get(key)
+            ttl = self._ttls.get(ns_key)
             return (
                 data,
                 seconds_remaining,
