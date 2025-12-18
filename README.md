@@ -841,6 +841,64 @@ Notes:
 
 ------
 
+## Cache plugins
+Foghorn caches DNS responses via a configurable *cache plugin* under the top-level `cache:` key.
+
+Built-in cache plugins:
+- `in_memory_ttl` (default): in-process TTL cache
+- `sqlite3`: persistent on-disk TTL cache (SQLite)
+- `redis` / `valkey`: Redis-compatible remote cache (requires the optional Python dependency `redis`)
+- `none`: disables caching
+
+Examples (complete runnable configs) are available in:
+- `example_configs/cache_in_memory_ttl.yaml`
+- `example_configs/cache_sqlite3.yaml`
+- `example_configs/cache_redis.yaml`
+- `example_configs/cache_none.yaml`
+
+Minimal config snippets:
+
+`in_memory_ttl` (default):
+
+```yaml
+cache:
+  module: in_memory_ttl
+  config:
+    min_cache_ttl: 60
+```
+
+`sqlite3` (persistent on-disk cache):
+
+```yaml
+cache:
+  module: sqlite3
+  config:
+    db_path: ./config/var/dbs/dns_cache.db
+    namespace: dns_cache
+    min_cache_ttl: 60
+```
+
+`redis` / `valkey` (remote cache):
+
+```yaml
+cache:
+  module: redis
+  config:
+    url: redis://127.0.0.1:6379/0
+    namespace: foghorn:dns_cache:
+    min_cache_ttl: 60
+```
+
+`none` (disable caching):
+
+```yaml
+cache:
+  module: none
+```
+
+Notes:
+- `min_cache_ttl` is a cache-expiry floor used by the resolver; it does not rewrite TTLs inside DNS answers.
+
 ## Complete `config.yaml` Example
 
 Here is a complete `config.yaml` file that uses the modern configuration format and shows how plugin priorities (including `setup_priority`) work:
