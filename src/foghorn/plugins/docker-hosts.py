@@ -15,7 +15,7 @@ import logging
 import threading
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from dnslib import AAAA, PTR, QTYPE, RR, A, DNSHeader, DNSRecord
+from dnslib import AAAA, PTR, QTYPE, RR, A, DNSHeader, DNSRecord, TXT
 from pydantic import BaseModel, Field
 
 from foghorn.plugins.base import (
@@ -89,6 +89,12 @@ class DockerHostsConfig(BaseModel):
             endpoint.
       - ttl: Plugin-level DNS answer TTL in seconds used when an endpoint does
         not specify its own ttl.
+      - health: List of acceptable container health/status values. Supported:
+        "starting", "healthy", "running", "unhealthy". Default:
+        ["healthy", "running"].
+      - aggregate_record: When true, publish a TXT record at
+        "_docker.<suffix>" (or "_docker" when no suffix is configured)
+        containing container summary lines.
 
     Outputs:
       - DockerHostsConfig instance with normalized field types.
@@ -96,6 +102,8 @@ class DockerHostsConfig(BaseModel):
 
     endpoints: List[DockerEndpointConfig] = Field(default_factory=list)
     ttl: int = Field(default=300, ge=0)
+    health: List[str] = Field(default_factory=lambda: ["healthy", "running"])
+    aggregate_record: bool = Field(default=False)
 
     class Config:
         extra = "allow"
@@ -131,16 +139,50 @@ class DockerHosts(BasePlugin):
 
         Inputs:
           - endpoints: Optional list of Docker endpoints in the plugin config.
-          - docker_binary: Optional Docker CLI path or name.
           - ttl: Optional DNS TTL for answers.
+          - health: Optional list of acceptable container health/status values.
+          - aggregate_record: Optional bool to publish a "_docker" TXT record.
 
         Outputs:
-          - None; populates in-memory forward and reverse maps based on current
-            Docker containers for all configured endpoints.
+          - None; populates in-memory forward/reverse maps and (optionally)
+            aggregate TXT entries based on current Docker containers.
         """
 
         # Runtime configuration
         self._ttl = int(self.config.get("ttl", 300))
+
+        # Health/status allowlist. Containers whose effective health/status is
+        # not in this list are skipped.
+        raw_health = self.config.get("health")
+        if raw_health is None:
+            health_items: List[str] = ["healthy", "running"]
+        elif isinstance(raw_health, str):
+            health_items = [raw_health]
+        elif isinstance(raw_health, list):
+            health_items = [str(x) for x in raw_health]
+        else:
+            health_items = [str(raw_health)]
+
+        allowed = {"starting", "healthy", "running", "unhealthy"}
+        health_norm: List[str] = []
+        for item in health_items:
+            key = str(item).strip().lower()
+            if not key:
+                continue
+            if key not in allowed:
+                logger.warning(
+                    "DockerHosts: ignoring unsupported health status %r (supported: %s)",
+                    item,
+                    ",".join(sorted(allowed)),
+                )
+                continue
+            if key not in health_norm:
+                health_norm.append(key)
+        self._health_allowlist = health_norm
+
+        # When true, publish a TXT record at _docker.<suffix> (or _docker when
+        # no suffix is set).
+        self._aggregate_record = bool(self.config.get("aggregate_record", False))
 
         # Optional default suffix applied to container names when no
         # per-endpoint suffix is provided, e.g. "docker.mycorp" so that a
@@ -272,6 +314,8 @@ class DockerHosts(BasePlugin):
         self._ttl_v4: Dict[str, int] = {}
         self._ttl_v6: Dict[str, int] = {}
         self._ttl_ptr: Dict[str, int] = {}
+        self._aggregate_txt: Dict[str, List[str]] = {}
+        self._ttl_txt: Dict[str, int] = {}
 
         # Docker clients per endpoint URL (when docker SDK is available)
         self._clients: Dict[str, object] = {}
@@ -296,16 +340,6 @@ class DockerHosts(BasePlugin):
             float(ep["interval"]) for ep in self._endpoints if float(ep["interval"]) > 0
         ]
         self._reload_interval = min(positive_intervals) if positive_intervals else 0.0
-
-        # Initial population from Docker.
-        self._reload_from_docker()
-
-        # Shared state protected by a re-entrant lock so future refresh hooks can
-        # safely update mappings.
-        self._lock = threading.RLock()
-        self._forward_v4: Dict[str, List[str]] = {}
-        self._forward_v6: Dict[str, List[str]] = {}
-        self._reverse: Dict[str, str] = {}
 
         # Initial population from Docker.
         self._reload_from_docker()
@@ -382,10 +416,11 @@ class DockerHosts(BasePlugin):
         """Brief: Rebuild in-memory host/IP maps by inspecting all containers.
 
         Inputs:
-          - None (uses self._endpoints and Docker CLI).
+          - None (uses self._endpoints).
 
         Outputs:
-          - None; updates self._forward_v4/self._forward_v6/self._reverse.
+          - None; updates self._forward_v4/self._forward_v6/self._reverse and
+            (optionally) self._aggregate_txt.
         """
 
         new_v4: Dict[str, List[str]] = {}
@@ -394,6 +429,8 @@ class DockerHosts(BasePlugin):
         new_ttl_v4: Dict[str, int] = {}
         new_ttl_v6: Dict[str, int] = {}
         new_ttl_ptr: Dict[str, int] = {}
+        new_txt: Dict[str, List[str]] = {}
+        new_ttl_txt: Dict[str, int] = {}
 
         total_containers = 0
         mapped_containers = 0
@@ -417,13 +454,23 @@ class DockerHosts(BasePlugin):
 
             total_containers += len(containers)
             for container in containers:
-                hostname, v4_list, v6_list = self._extract_container_network_data(
-                    container
+                # Filter by configured container health/status.
+                effective_health = self._container_effective_health(container)
+                if (
+                    self._health_allowlist
+                    and effective_health not in self._health_allowlist
+                ):
+                    continue
+
+                hostname, internal_v4, internal_v6 = (
+                    self._extract_container_network_data(container)
                 )
 
                 # When configured, prefer the host's IPs over per-container
                 # addresses for that family so that all traffic for container
                 # hostnames is directed at the host.
+                v4_list = list(internal_v4)
+                v6_list = list(internal_v6)
                 host_ipv4 = endpoint.get("host_ipv4")
                 host_ipv6 = endpoint.get("host_ipv6")
                 if host_ipv4 is not None:
@@ -455,16 +502,42 @@ class DockerHosts(BasePlugin):
                 # - Docker Name (without leading '/')
                 # - Config.Hostname (from _extract)
                 # - Container ID as a last-resort alias
+                # - Optional project name label (when distinct from name/image)
                 raw_name = str(container.get("Name") or "").strip()
                 if raw_name.startswith("/"):
                     raw_name = raw_name[1:]
                 container_id = str(container.get("Id") or "").strip()
+
+                cfg = container.get("Config") or {}
+                labels = cfg.get("Labels") if isinstance(cfg, dict) else None
+                if not isinstance(labels, dict):
+                    labels = {}
+
+                project_name_raw = labels.get(
+                    "com.docker.compose.project"
+                ) or labels.get("io.kubernetes.pod.namespace")
+                project_name = str(project_name_raw).strip() if project_name_raw else ""
+
+                image_raw = ""
+                if isinstance(cfg, dict):
+                    image_raw = str(cfg.get("Image") or "").strip()
+                image_norm = image_raw.lower()
+                image_repo = image_norm.split("@")[0].split(":")[0]
+
+                def _norm_ident(value: str) -> str:
+                    return str(value).strip().rstrip(".").lower()
 
                 candidate_names: List[str] = []
                 if raw_name:
                     candidate_names.append(raw_name)
                 if hostname and hostname != raw_name:
                     candidate_names.append(hostname)
+                if project_name:
+                    pn = _norm_ident(project_name)
+                    rn = _norm_ident(raw_name)
+                    hn = _norm_ident(hostname or "")
+                    if pn and pn not in {rn, hn} and pn not in {image_norm, image_repo}:
+                        candidate_names.append(project_name)
                 if container_id:
                     # Include both short and full IDs so lookups by abbreviated
                     # container ID work when rendered into hosts-style records
@@ -481,7 +554,9 @@ class DockerHosts(BasePlugin):
                     seen.add(key)
                     normalized_names.append(key)
 
-                if not normalized_names:
+                if (
+                    not normalized_names
+                ):  # pragma: no cover - unreachable (container_id or hostname always yields at least one name)
                     # No usable names even though we have IPs; fall back to
                     # container ID if possible, otherwise skip.
                     if container_id:
@@ -515,7 +590,7 @@ class DockerHosts(BasePlugin):
                     base_canonical = raw_name.rstrip(".").lower()
                 elif hostname:
                     base_canonical = str(hostname).rstrip(".").lower()
-                else:
+                else:  # pragma: no cover - unreachable because containers without hostname are skipped above
                     base_canonical = container_id or normalized_names[0]
 
                 if ep_suffix:
@@ -566,6 +641,26 @@ class DockerHosts(BasePlugin):
                                     ptr_canonical,
                                 )
 
+                # Optional aggregate TXT record.
+                if self._aggregate_record:
+                    record_owner = self._aggregate_owner_for_suffix(
+                        str(ep_suffix or "").strip()
+                    )
+                    line = self._format_aggregate_line(
+                        container=container,
+                        canonical=ptr_canonical,
+                        aliases=names_for_mapping,
+                        endpoint_url=str(endpoint.get("url")),
+                        effective_health=effective_health,
+                        project_name=project_name,
+                        internal_v4=internal_v4,
+                        internal_v6=internal_v6,
+                        answer_v4=v4_list,
+                        answer_v6=v6_list,
+                    )
+                    new_txt.setdefault(record_owner, []).append(line)
+                    new_ttl_txt[record_owner] = int(self._ttl)
+
                 # Debug: show the effective mapping for this container after
                 # per-endpoint overrides have been applied.
                 if v4_list or v6_list:
@@ -587,6 +682,11 @@ class DockerHosts(BasePlugin):
                 "DockerHosts: no hostname/IP mappings were added from any endpoint (no running containers or all were skipped)",
             )
 
+        # Prepend a header line to each aggregate TXT record (if enabled).
+        if new_txt:
+            for owner, lines in new_txt.items():
+                lines.insert(0, f"containers={len(lines)}")
+
         # Swap mappings under lock so readers always see a consistent view.
         with self._lock:
             self._forward_v4 = new_v4
@@ -595,6 +695,180 @@ class DockerHosts(BasePlugin):
             self._ttl_v4 = new_ttl_v4
             self._ttl_v6 = new_ttl_v6
             self._ttl_ptr = new_ttl_ptr
+            self._aggregate_txt = new_txt
+            self._ttl_txt = new_ttl_txt
+
+    @staticmethod
+    def _container_effective_health(container: Dict) -> str:
+        """Brief: Determine the effective health/status string for a container.
+
+        Inputs:
+          - container: Docker inspect-style dict.
+
+        Outputs:
+          - One of: "starting", "healthy", "unhealthy", "running".
+
+        Notes:
+          - If Docker health checks are present, this prefers
+            container["State"]["Health"]["Status"].
+          - Otherwise it falls back to container["State"]["Status"], and then to
+            "running" when status is missing.
+        """
+
+        state = container.get("State") or {}
+        if isinstance(state, dict):
+            health = state.get("Health") or {}
+            if isinstance(health, dict):
+                hs = health.get("Status")
+                if hs:
+                    return str(hs).strip().lower()
+            s = state.get("Status")
+            if s:
+                return str(s).strip().lower()
+        return "running"
+
+    @staticmethod
+    def _aggregate_owner_for_suffix(suffix: str) -> str:
+        """Brief: Build the aggregate TXT record owner name for a suffix.
+
+        Inputs:
+          - suffix: DNS suffix (may be empty, may contain trailing dots).
+
+        Outputs:
+          - Normalized owner name for the aggregate TXT record.
+            - With suffix: "_docker.<suffix>"
+            - Without suffix: "_docker"
+        """
+
+        suf = str(suffix).strip().strip(".").lower()
+        if suf:
+            return f"_docker.{suf}"
+        return "_docker"
+
+    @staticmethod
+    def _format_aggregate_line(
+        *,
+        container: Dict,
+        canonical: str,
+        aliases: List[str],
+        endpoint_url: str,
+        effective_health: str,
+        project_name: str,
+        internal_v4: List[str],
+        internal_v6: List[str],
+        answer_v4: List[str],
+        answer_v6: List[str],
+        max_len: int = 240,
+    ) -> str:
+        """Brief: Build a compact, single-string summary for the aggregate TXT record.
+
+        Inputs:
+          - container: Docker inspect-style dict.
+          - canonical: Canonical published name for PTRs.
+          - aliases: All published aliases for the container.
+          - endpoint_url: Docker endpoint URL for this container.
+          - effective_health: Effective health/status string.
+          - project_name: Project/stack name (best-effort label-derived string).
+          - internal_v4/internal_v6: Container IPs discovered from inspect.
+          - answer_v4/answer_v6: IPs that DockerHosts will actually answer with
+            (after host overrides).
+          - max_len: Maximum length for the returned TXT chunk.
+
+        Outputs:
+          - A string suitable for inclusion as one TXT "character-string".
+        """
+
+        cfg = container.get("Config") or {}
+        labels = cfg.get("Labels") if isinstance(cfg, dict) else None
+        if not isinstance(labels, dict):
+            labels = {}
+
+        svc = labels.get("com.docker.compose.service") or labels.get(
+            "io.kubernetes.container.name"
+        )
+        proj = str(project_name).strip() if project_name else ""
+
+        def _join(items: List[str], limit: int = 4) -> str:
+            vals = [str(x) for x in items if str(x).strip()]
+            if len(vals) > limit:
+                return ",".join(vals[:limit]) + f"+{len(vals) - limit}"
+            return ",".join(vals)
+
+        def _is_full_container_id(name: str) -> bool:
+            # Docker container IDs are typically 64 hex characters.
+            token = str(name).strip().split(".", 1)[0].lower()
+            if len(token) != 64:
+                return False
+            return all(c in "0123456789abcdef" for c in token)
+
+        # Filter aliases for aggregate TXT: omit full container IDs.
+        filtered_aliases = [a for a in aliases if a and not _is_full_container_id(a)]
+
+        # Collect HostPorts (bindings) for a compact summary.
+        ports = (container.get("NetworkSettings") or {}).get("Ports") or {}
+        hostports: List[str] = []
+        if isinstance(ports, dict):
+            for _port_key, bindings in ports.items():
+                if not bindings:
+                    continue
+                if isinstance(bindings, list):
+                    for b in bindings:
+                        if not isinstance(b, dict):
+                            continue
+                        hp = str(b.get("HostPort") or "").strip()
+                        if hp and hp not in hostports:
+                            hostports.append(hp)
+
+        # Additional network summaries (best-effort; keep short).
+        nets = (container.get("NetworkSettings") or {}).get("Networks") or {}
+        net_parts: List[str] = []
+        if isinstance(nets, dict):
+            for net_name, net in nets.items():
+                if not isinstance(net, dict):
+                    continue
+                ip4 = str(net.get("IPAddress") or "").strip()
+                ip6 = str(net.get("GlobalIPv6Address") or "").strip()
+                if not ip4 and not ip6:
+                    continue
+                seg = f"{net_name}:{ip4 or '-'}"
+                if ip6:
+                    seg += f"/{ip6}"
+                net_parts.append(seg)
+
+        # Ordering requested:
+        # name, ans4/ans6, endpoint, HostPorts used, then everything else.
+        pieces: List[str] = []
+        if canonical:
+            pieces.append(f"name={canonical}")
+        if answer_v4:
+            pieces.append(f"ans4={_join(answer_v4)}")
+        if answer_v6:
+            pieces.append(f"ans6={_join(answer_v6)}")
+        if endpoint_url:
+            pieces.append(f"endpoint={endpoint_url}")
+        if hostports:
+            pieces.append(f"hostports={_join(hostports)}")
+
+        # Remaining fields (omit empties).
+        if effective_health:
+            pieces.append(f"health={effective_health}")
+        if proj:
+            pieces.append(f"project-name={proj}")
+        if svc:
+            pieces.append(f"service={svc}")
+        if filtered_aliases:
+            pieces.append(f"aliases={_join(filtered_aliases, limit=3)}")
+        if internal_v4:
+            pieces.append(f"int4={_join(internal_v4)}")
+        if internal_v6:
+            pieces.append(f"int6={_join(internal_v6)}")
+        if net_parts:
+            pieces.append(f"nets={_join(net_parts, limit=3)}")
+
+        s = " ".join(pieces)
+        if len(s) > max_len:
+            return s[: max_len - 3] + "..."
+        return s
 
     @staticmethod
     def _extract_container_network_data(
@@ -656,7 +930,7 @@ class DockerHosts(BasePlugin):
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
-        """Brief: Answer A/AAAA/PTR queries using Docker hostname/IP mappings.
+        """Brief: Answer A/AAAA/PTR (and optional TXT) queries using Docker mappings.
 
         Inputs:
           - qname: The queried domain name.
@@ -691,6 +965,37 @@ class DockerHosts(BasePlugin):
                 return None
             wire = self._make_ip_response(qname, QTYPE.AAAA, req, candidates, ttl)
             return PluginDecision(action="override", response=wire)
+
+        if qtype == QTYPE.TXT:
+            with self._lock:
+                txts = list(self._aggregate_txt.get(name, []))
+                ttl = int(self._ttl_txt.get(name, self._ttl))
+            if not txts:
+                return None
+
+            try:
+                request = DNSRecord.parse(req)
+            except Exception as exc:
+                logger.warning("DockerHosts: parse failure for TXT %s: %s", qname, exc)
+                return PluginDecision(action="override", response=None)
+
+            reply = DNSRecord(
+                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+            )
+
+            # One TXT RR per container summary line (plus any header line).
+            for line in txts:
+                reply.add_answer(
+                    RR(
+                        rname=request.q.qname,
+                        rtype=QTYPE.TXT,
+                        rclass=1,
+                        ttl=ttl,
+                        rdata=TXT([str(line)]),
+                    )
+                )
+
+            return PluginDecision(action="override", response=reply.pack())
 
         if qtype == QTYPE.PTR:
             with self._lock:
