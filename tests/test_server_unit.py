@@ -1,5 +1,5 @@
 """
-Brief: Focused unit tests for foghorn.server helpers to ensure coverage.
+Brief: Focused unit tests for foghorn.servers.server helpers to ensure coverage.
 
 Inputs:
   - None
