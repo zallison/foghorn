@@ -1,4 +1,4 @@
-"""Brief: Unit tests for foghorn.dnssec_validate helpers.
+"""Brief: Unit tests for foghorn.dnssec.dnssec_validate helpers.
 
 Inputs:
   - None
@@ -12,7 +12,7 @@ import dns.name
 import dns.rcode
 import pytest
 
-import foghorn.dnssec_validate as dval
+import foghorn.dnssec.dnssec_validate as dval
 
 
 def test_resolver_sets_do_and_lifetime():
@@ -232,12 +232,14 @@ def test_validate_response_local_positive_and_negative_paths(monkeypatch):
         assert keymap
 
     monkeypatch.setattr(
-        "foghorn.dnssec_validate.dns.message.from_wire", _fake_from_wire
+        "foghorn.dnssec.dnssec_validate.dns.message.from_wire", _fake_from_wire
     )
     monkeypatch.setattr(dval, "_collect_positive_rrsets", _fake_collect)
     monkeypatch.setattr(dval, "_find_zone_apex_cached", _fake_apex_cached)
     monkeypatch.setattr(dval, "_validate_chain_cached", _fake_chain_cached)
-    monkeypatch.setattr("foghorn.dnssec_validate.dns.dnssec.validate", _fake_validate)
+    monkeypatch.setattr(
+        "foghorn.dnssec.dnssec_validate.dns.dnssec.validate", _fake_validate
+    )
 
     ok = dval.validate_response_local(qname_text, rdtype, b"wire")
     assert ok is True
@@ -275,7 +277,9 @@ def test_validate_response_local_positive_and_negative_paths(monkeypatch):
     def _msg_servfail(wire):
         return _Msg(dns.rcode.SERVFAIL)
 
-    monkeypatch.setattr("foghorn.dnssec_validate.dns.message.from_wire", _msg_servfail)
+    monkeypatch.setattr(
+        "foghorn.dnssec.dnssec_validate.dns.message.from_wire", _msg_servfail
+    )
     unsupported = dval.validate_response_local(qname_text, rdtype, b"wire")
     assert unsupported is False
 
@@ -284,7 +288,7 @@ def test_validate_response_local_positive_and_negative_paths(monkeypatch):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(
-        "foghorn.dnssec_validate.dns.message.from_wire", _boom_from_wire
+        "foghorn.dnssec.dnssec_validate.dns.message.from_wire", _boom_from_wire
     )
     failed = dval.validate_response_local(qname_text, rdtype, b"wire")
     assert failed is False
@@ -321,7 +325,7 @@ def test_validate_response_local_positive_apex_and_authority_failures(monkeypatc
         return None
 
     monkeypatch.setattr(
-        "foghorn.dnssec_validate.dns.message.from_wire", _from_wire_noerror
+        "foghorn.dnssec.dnssec_validate.dns.message.from_wire", _from_wire_noerror
     )
     monkeypatch.setattr(dval, "_collect_positive_rrsets", _collect_positive)
     monkeypatch.setattr(dval, "_find_zone_apex_cached", _apex_none)
@@ -344,7 +348,7 @@ def test_validate_response_local_positive_apex_and_authority_failures(monkeypatc
     monkeypatch.setattr(dval, "_find_zone_apex_cached", _apex_ok)
     monkeypatch.setattr(dval, "_validate_chain_cached", _zone_dnskey)
     monkeypatch.setattr(
-        "foghorn.dnssec_validate.dns.dnssec.validate",
+        "foghorn.dnssec.dnssec_validate.dns.dnssec.validate",
         lambda *_a, **_k: None,
     )
     monkeypatch.setattr(dval, "_validate_authority_rrsets", _auth_fail)
@@ -362,7 +366,7 @@ def test_validate_response_local_positive_apex_and_authority_failures(monkeypatc
         return None
 
     monkeypatch.setattr(
-        "foghorn.dnssec_validate.dns.message.from_wire", _from_wire_nxdomain
+        "foghorn.dnssec.dnssec_validate.dns.message.from_wire", _from_wire_nxdomain
     )
     monkeypatch.setattr(dval, "_collect_positive_rrsets", _no_chain)
     monkeypatch.setattr(dval, "_find_zone_apex_cached", _apex_none_neg)
@@ -439,7 +443,7 @@ def test_classify_dnssec_local_extended_zone_chain_without_rrsig(monkeypatch):
       - validation='local_extended' -> dnssec_ext_secure
     """
 
-    from foghorn import dnssec_validate as dv
+    import foghorn.dnssec.dnssec_validate as dv
 
     qname_text = "www.example.test."
     qname = dns.name.from_text(qname_text)
@@ -641,7 +645,9 @@ def test_validate_negative_response_nxdomain_and_nodata(monkeypatch):
     def _fake_validate(rrset, sig_rrset, keymap):
         assert keymap
 
-    monkeypatch.setattr("foghorn.dnssec_validate.dns.dnssec.validate", _fake_validate)
+    monkeypatch.setattr(
+        "foghorn.dnssec.dnssec_validate.dns.dnssec.validate", _fake_validate
+    )
 
     apex = dns.name.from_text("example.")
     zone_dnskey = object()
@@ -771,7 +777,9 @@ def test_classify_dnssec_local_variants(monkeypatch):
         return msg._has_dnssec
 
     # Secure when validate_response_local returns True.
-    monkeypatch.setattr("foghorn.dnssec_validate.dns.message.from_wire", fake_from_wire)
+    monkeypatch.setattr(
+        "foghorn.dnssec.dnssec_validate.dns.message.from_wire", fake_from_wire
+    )
     monkeypatch.setattr(dval, "_message_has_dnssec_rr", fake_has_dnssec_rr)
     monkeypatch.setattr(dval, "validate_response_local", lambda *a, **k: True)
 
@@ -792,7 +800,7 @@ def test_classify_dnssec_local_variants(monkeypatch):
         return _Msg(has_dnssec=False)
 
     monkeypatch.setattr(
-        "foghorn.dnssec_validate.dns.message.from_wire", fake_from_wire_unsigned
+        "foghorn.dnssec.dnssec_validate.dns.message.from_wire", fake_from_wire_unsigned
     )
     assert (
         dval._classify_dnssec_local(qname_text, qtype, wire, udp_payload_size=1232)
@@ -804,7 +812,7 @@ def test_classify_dnssec_local_variants(monkeypatch):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(
-        "foghorn.dnssec_validate.dns.message.from_wire", _boom_from_wire
+        "foghorn.dnssec.dnssec_validate.dns.message.from_wire", _boom_from_wire
     )
     assert (
         dval._classify_dnssec_local(qname_text, qtype, wire, udp_payload_size=1232)
@@ -861,7 +869,9 @@ def test_validate_authority_rrsets_behaviour(monkeypatch):
     def _boom_validate(rrset, sig_rrset, keymap):  # noqa: D401, ANN001
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("foghorn.dnssec_validate.dns.dnssec.validate", _boom_validate)
+    monkeypatch.setattr(
+        "foghorn.dnssec.dnssec_validate.dns.dnssec.validate", _boom_validate
+    )
     assert dval._validate_authority_rrsets(msg4, apex, 1, apex, zone_dnskey) is False
 
 
@@ -956,7 +966,9 @@ def test_classify_dnssec_local_extended_additional_paths(monkeypatch):
     monkeypatch.setattr(
         dval, "_classify_dnssec_local", lambda *_a, **_k: "dnssec_unsigned"
     )
-    monkeypatch.setattr("foghorn.dnssec_validate.dns.message.from_wire", fake_from_wire)
+    monkeypatch.setattr(
+        "foghorn.dnssec.dnssec_validate.dns.message.from_wire", fake_from_wire
+    )
     monkeypatch.setattr(dval, "_message_has_dnssec_rr", fake_has_dnssec_rr)
 
     out2 = dval._classify_dnssec_local_extended(
@@ -969,7 +981,7 @@ def test_classify_dnssec_local_extended_additional_paths(monkeypatch):
         return _Msg(has_dnssec=False)
 
     monkeypatch.setattr(
-        "foghorn.dnssec_validate.dns.message.from_wire", fake_from_wire_unsigned
+        "foghorn.dnssec.dnssec_validate.dns.message.from_wire", fake_from_wire_unsigned
     )
 
     monkeypatch.setattr(dval, "_find_zone_apex_cached", lambda *_a, **_k: None)
@@ -1035,7 +1047,7 @@ def test_classify_dnssec_status_modes_and_errors(monkeypatch):
             raise RuntimeError("boom")
 
     monkeypatch.setattr(
-        "foghorn.dnssec_validate.DNSRecord", _FakeDNSRecord, raising=False
+        "foghorn.dnssec.dnssec_validate.DNSRecord", _FakeDNSRecord, raising=False
     )
     assert (
         dval.classify_dnssec_status(
@@ -1295,7 +1307,9 @@ def test_nsec3_common_params_and_helpers(monkeypatch):
     def fake_hash(qname, alg, iters, s):  # noqa: D401, ANN001
         return b"digest-bytes"
 
-    monkeypatch.setattr("foghorn.dnssec_validate.dns.dnssec.nsec3_hash", fake_hash)
+    monkeypatch.setattr(
+        "foghorn.dnssec.dnssec_validate.dns.dnssec.nsec3_hash", fake_hash
+    )
 
     qname = dns.name.from_text("name.example.")
 
