@@ -37,6 +37,7 @@ class FilterConfig(BaseModel):
       - ttl: TTL for synthesized responses.
       - deny_response: Policy for deny responses.
       - deny_response_ip4 / deny_response_ip6: Optional IPs for IP-mode denies.
+      - allow_qtypes / deny_qtypes: Optional lists of DNS qtype names to allow or deny.
       - blocklist_files / allowlist_files / *_domains_files: List paths.
       - blocked_domains / allowed_domains: Inline domain lists.
       - blocked_patterns / blocked_patterns_files: Regexes.
@@ -184,6 +185,53 @@ class FilterPlugin(BasePlugin):
         ).lower()
         self.deny_response_ip4: Optional[str] = self.config.get("deny_response_ip4")
         self.deny_response_ip6: Optional[str] = self.config.get("deny_response_ip6")
+
+        # Optional per-query-type allow/deny controls.
+        #
+        # Inputs:
+        #   - allow_qtypes: list[str] of qtype names (e.g. ["A", "AAAA"]). When set,
+        #     qtypes not in the set are denied.
+        #   - deny_qtypes: list[str] of qtype names to deny.
+        #
+        # Outputs:
+        #   - self._allow_qtypes / self._deny_qtypes: set[int] of dnslib QTYPE values.
+        def _qtype_names_to_ints(values: object) -> Set[int]:
+            """Brief: Convert qtype name list (e.g. ["A"]) into dnslib QTYPE ints.
+
+            Inputs:
+              - values: object expected to be list/tuple/set[str] of qtype names.
+
+            Outputs:
+              - set[int]: Set of QTYPE integer codes.
+            """
+
+            if not isinstance(values, (list, tuple, set)):
+                return set()
+            out: Set[int] = set()
+            for v in values:
+                if not isinstance(v, str):
+                    continue
+                name = v.strip().upper()
+                if not name:
+                    continue
+                # dnslib exposes QTYPE.<NAME> integer attributes.
+                val = getattr(QTYPE, name, None)
+                if val is None:
+                    # Allow numeric qtype strings as a fallback.
+                    try:
+                        val = int(name)
+                    except Exception:
+                        val = None
+                if isinstance(val, int):
+                    out.add(int(val))
+            return out
+
+        self._allow_qtypes: Set[int] = _qtype_names_to_ints(
+            self.config.get("allow_qtypes")
+        )
+        self._deny_qtypes: Set[int] = _qtype_names_to_ints(
+            self.config.get("deny_qtypes")
+        )
 
         valid_deny_responses = {
             "nxdomain",
@@ -341,17 +389,18 @@ class FilterPlugin(BasePlugin):
             self._load_blocked_ips_from_file(ipfile)
 
     def add_to_cache(self, key: any, allowed: bool):
-        """
-        Add a domain decision to the TTL cache.
+        """Brief: Add a pre-resolve decision to the TTL cache.
 
         Inputs:
-            key: Domain cache key. Accepts a domain string or (domain, 0) tuple.
-            allowed: True if allowed, False if denied.
+          - key: Cache key. Accepts a domain string or (domain, qtype) tuple.
+          - allowed: True if allowed, False if denied.
+
         Outputs:
-            None
+          - None
         """
         try:
-            # Normalize to (domain, 0) cache key
+            # Normalize to (domain, qtype) cache key. qtype=0 is a legacy default
+            # for callers that only pass a domain.
             if not isinstance(key, tuple):
                 norm_key = (str(key).rstrip(".").lower(), 0)
             else:
@@ -386,9 +435,23 @@ class FilterPlugin(BasePlugin):
             return None
 
         domain = qname.lower()
-        key = (str(domain).rstrip(".").lower(), 0)
+        # Cache keys:
+        #  - (domain, 0): legacy "domain-wide" decision (applies to all qtypes)
+        #  - (domain, qtype): qtype-specific decision (used for allow_qtypes/deny_qtypes)
+        domain_key = (str(domain).rstrip(".").lower(), 0)
+        qtype_key = (str(domain).rstrip(".").lower(), int(qtype))
 
-        cached = self._domain_cache.get(key)
+        # Enforce query-type allow/deny before any domain-based checks.
+        if self._allow_qtypes and int(qtype) not in self._allow_qtypes:
+            self.add_to_cache(qtype_key, False)
+            return self._build_deny_decision_pre(qname, qtype, req, ctx)
+        if self._deny_qtypes and int(qtype) in self._deny_qtypes:
+            self.add_to_cache(qtype_key, False)
+            return self._build_deny_decision_pre(qname, qtype, req, ctx)
+
+        cached = self._domain_cache.get(qtype_key)
+        if cached is None:
+            cached = self._domain_cache.get(domain_key)
         if cached is not None:
             try:
                 if cached == b"1":
@@ -402,7 +465,7 @@ class FilterPlugin(BasePlugin):
 
         if not self.is_allowed(str(domain).rstrip(".")):
             logger.debug("Domain '%s' blocked (exact match)", qname)
-            self.add_to_cache(key, False)
+            self.add_to_cache(domain_key, False)
             return self._build_deny_decision_pre(qname, qtype, req, ctx)
 
         # Check keyword filtering
@@ -411,7 +474,7 @@ class FilterPlugin(BasePlugin):
                 logger.debug(
                     "Domain '%s' blocked (contains keyword '%s')", qname, keyword
                 )
-                self.add_to_cache(key, False)
+                self.add_to_cache(domain_key, False)
                 return self._build_deny_decision_pre(qname, qtype, req, ctx)
 
         # Check regex patterns
@@ -420,11 +483,11 @@ class FilterPlugin(BasePlugin):
                 logger.debug(
                     "Domain '%s' blocked (matches pattern '%s')", qname, pattern.pattern
                 )
-                self.add_to_cache(key, False)
+                self.add_to_cache(domain_key, False)
                 return self._build_deny_decision_pre(qname, qtype, req, ctx)
 
         logger.debug("Domain '%s' allowed", qname)
-        self.add_to_cache(key, True)
+        self.add_to_cache(domain_key, True)
 
         return PluginDecision(action="skip")
 
