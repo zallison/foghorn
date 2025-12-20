@@ -12,9 +12,9 @@ from unittest.mock import mock_open, patch
 
 import pytest
 
-import foghorn.config_parser as parser_mod
+import foghorn.config.config_parser as parser_mod
 import foghorn.main as main_mod
-from foghorn.config_parser import load_plugins, normalize_upstream_config
+from foghorn.config.config_parser import load_plugins, normalize_upstream_config
 from foghorn.main import main
 
 
