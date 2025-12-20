@@ -1,4 +1,4 @@
-"""Tests for the FastAPI-based admin HTTP server in foghorn.webserver.
+"""Tests for the FastAPI-based admin HTTP server in foghorn.servers.webserver.
 
 Inputs:
   - pytest fixtures and FastAPI TestClient
@@ -501,7 +501,7 @@ def test_stats_debug_timings_emit_log_when_enabled(caplog) -> None:
       - FastAPI app created with webserver.debug_timings set to True.
 
     Outputs:
-      - A DEBUG log line from foghorn.webserver containing the timings prefix.
+      - A DEBUG log line from foghorn.servers.webserver containing the timings prefix.
     """
 
     collector = StatsCollector(
@@ -2675,6 +2675,7 @@ def test_collect_rate_limit_stats_handles_empty_and_populated_dbs(
     """
 
     import sqlite3
+    from contextlib import closing
 
     import foghorn.servers.webserver as web_mod
 
@@ -2691,8 +2692,7 @@ def test_collect_rate_limit_stats_handles_empty_and_populated_dbs(
             ],
         ),
     ]:
-        conn = sqlite3.connect(db_path)
-        try:
+        with closing(sqlite3.connect(db_path)) as conn:
             conn.execute(
                 "CREATE TABLE rate_profiles (key TEXT, avg_rps REAL, max_rps REAL, samples INTEGER, last_update INTEGER)"
             )
@@ -2701,8 +2701,6 @@ def test_collect_rate_limit_stats_handles_empty_and_populated_dbs(
                 rows,
             )
             conn.commit()
-        finally:
-            conn.close()
 
     cfg = {
         "plugins": [
