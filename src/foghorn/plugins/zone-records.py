@@ -97,9 +97,12 @@ class ZoneRecords(BasePlugin):
         """
 
         # Normalize configuration into a list of paths.
-        legacy = self.config.get("file_path")
+        if "file_path" in self.config:
+            raise ValueError(
+                "ZoneRecords config must use 'file_paths' (list) instead of legacy 'file_path'"
+            )
         provided = self.config.get("file_paths")
-        self.file_paths: List[str] = self._normalize_paths(provided, legacy)
+        self.file_paths: List[str] = self._normalize_paths(provided, None)
 
         # Internal synchronization and state
         self._records_lock = threading.RLock()
@@ -180,7 +183,8 @@ class ZoneRecords(BasePlugin):
             for p in file_paths:
                 paths.append(os.path.expanduser(str(p)))
         if legacy:
-            # Include legacy file_path in the set of file paths
+            # legacy is kept only for the internal API; external configs must use
+            # file_paths and should never set legacy.
             paths.append(os.path.expanduser(str(legacy)))
         if not paths:
             raise ValueError(f"No paths given {self.config}")

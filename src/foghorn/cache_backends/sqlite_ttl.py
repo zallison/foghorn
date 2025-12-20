@@ -66,10 +66,6 @@ class SQLite3TTLCache:
 
         self.db_path = str(db_path)
 
-        # Back-compat: `table` was the original name for this concept. Prefer the
-        # newer `namespace` name but accept `table` when provided.
-        if table is not None:
-            namespace = str(table)
         self.namespace = str(namespace or "ttl_cache")
         self.journal_mode = str(journal_mode or "WAL")
         self.create_dir = bool(create_dir)

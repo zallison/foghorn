@@ -42,8 +42,6 @@ class FlakyServerConfig(BaseModel):
       - FlakyServerConfig instance with normalized field types.
     """
 
-    servfail_one_in: int = Field(default=4, ge=1)
-    nxdomain_one_in: int = Field(default=10, ge=1)
     servfail_percent: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     nxdomain_percent: Optional[float] = Field(default=None, ge=0.0, le=100.0)
     timeout_percent: float = Field(default=0.0, ge=0.0, le=100.0)
@@ -163,17 +161,18 @@ class FlakyServer(BasePlugin):
                 "FlakyServer: no BasePlugin targets configured; plugin will be a no-op"
             )
 
-        # Percent-based probabilities with backwards-compatible 1-in-N fallback.
+        # Percent-based probabilities only; legacy 1-in-N fields are no longer
+        # supported. Configs must use explicit percent values.
         self.servfail_prob = self._compute_probability(
             percent=config.get("servfail_percent"),
-            one_in=config.get("servfail_one_in", 4),
+            one_in=None,
             percent_key="servfail_percent",
             one_in_key="servfail_one_in",
             default_percent=25.0,
         )
         self.nxdomain_prob = self._compute_probability(
             percent=config.get("nxdomain_percent"),
-            one_in=config.get("nxdomain_one_in", 10),
+            one_in=None,
             percent_key="nxdomain_percent",
             one_in_key="nxdomain_one_in",
             default_percent=10.0,

@@ -31,7 +31,7 @@ def test_etc_hosts_ipv4_entry_does_not_answer_aaaa(tmp_path):
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("192.0.2.10 v4only.local\n")
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
@@ -56,7 +56,7 @@ def test_etc_hosts_ipv6_entry_does_not_answer_a(tmp_path):
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("2001:db8::1 v6only.local\n")
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 

@@ -4,8 +4,8 @@ import os
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
-from foghorn.cache import FoghornTTLCache
-from foghorn.sqlite_cache import SQLite3TTLCache
+from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
+from foghorn.cache_backends.sqlite_ttl import SQLite3TTLCache
 
 
 class TTLCacheAdapter:

@@ -66,10 +66,6 @@ def _normalize_cache_config_for_validation(cfg: Dict[str, Any]) -> None:
         cache_cfg["module"] = "none"
         module = "none"
 
-    # Support legacy/alternate keys used elsewhere in the config.
-    if module is None:
-        module = cache_cfg.get("class") or cache_cfg.get("type")
-
     subcfg = cache_cfg.get("config")
     if subcfg is None:
         # Schema expects an object when present; keep validation permissive.
@@ -244,9 +240,6 @@ def _normalize_dnssec_config_for_validation(cfg: Dict[str, Any]) -> None:
     def _normalize_dnssec_block(block: Any) -> None:
         if not isinstance(block, dict):
             return
-
-        if "validation" not in block and "validate" in block:
-            block["validation"] = block.pop("validate")
 
         validation = block.get("validation")
         if isinstance(validation, str):

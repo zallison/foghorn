@@ -549,14 +549,9 @@ def main(argv: List[str] | None = None) -> int:
         try:
             s_cfg = (cfg.get("statistics") or {}) if isinstance(cfg, dict) else {}
             enabled = bool(s_cfg.get("enabled", False))
-            # reset_on_sigusr1 is treated as a backwards-compatible alias for
-            # sigusr2_resets_stats so existing configs continue to work.
-            reset_flag = bool(
-                s_cfg.get(
-                    "sigusr2_resets_stats",
-                    s_cfg.get("reset_on_sigusr1", False),
-                )
-            )
+            # Only sigusr2_resets_stats is supported; legacy reset_on_sigusr1 is
+            # no longer accepted to keep configuration semantics explicit.
+            reset_flag = bool(s_cfg.get("sigusr2_resets_stats", False))
             if enabled and reset_flag:
                 if stats_collector is not None:
                     try:

@@ -460,8 +460,8 @@ def test_init_files_and_invalid_ips_and_actions(tmp_path):
     p = FilterPlugin(
         db_path=str(tmp_path / "bl.db"),
         default="allow",
-        allowlist_files=[str(allowf)],
-        blocklist_files=[str(blockf)],
+        allowed_domains_files=[str(allowf)],
+        blocked_domains_files=[str(blockf)],
         blocked_ips=[
             123,  # invalid entry format
             {"ip": "1.1.1.1", "action": "UNKNOWN"},  # defaults to deny
@@ -723,8 +723,8 @@ def test_glob_expansion_for_blocklist_and_allowlist_files(tmp_path):
     p = FilterPlugin(
         db_path=str(tmp_path / "bl.db"),
         default="deny",
-        allowlist_files=[str(allow_dir / "*.txt")],
-        blocklist_files=[str(block_dir / "*.txt")],
+        allowed_domains_files=[str(allow_dir / "*.txt")],
+        blocked_domains_files=[str(block_dir / "*.txt")],
     )
     plugin = p
     plugin.setup()

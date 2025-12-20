@@ -34,7 +34,7 @@ def test_pre_resolve_override_response_id_matches(tmp_path):
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("10.0.0.1 example.local\n")
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
@@ -63,7 +63,7 @@ def test_pre_resolve_parse_failure_returns_override_with_none_response(tmp_path)
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("192.0.2.1 broken.local\n")
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
@@ -119,7 +119,7 @@ def test_load_hosts_valueerror_in_reverse_mapping_is_ignored(tmp_path):
         encoding="utf-8",
     )
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
 
     # Forward mappings are still populated.
@@ -352,7 +352,7 @@ def test_setup_enables_polling_when_interval_configured(tmp_path):
     hosts_file.write_text("127.0.0.1 polling.local\n", encoding="utf-8")
 
     plugin = EtcHosts(
-        file_path=str(hosts_file),
+        file_paths=[str(hosts_file)],
         watchdog_enabled=False,
         watchdog_poll_interval_seconds=0.01,
     )
@@ -381,7 +381,7 @@ def test_start_polling_variants_for_etc_hosts(tmp_path):
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("127.0.0.1 polling2.local\n", encoding="utf-8")
 
-    plugin = EtcHosts(file_path=str(hosts_file), watchdog_enabled=False)
+    plugin = EtcHosts(file_paths=[str(hosts_file)], watchdog_enabled=False)
     plugin.setup()
 
     # Disabled polling: interval <= 0
@@ -422,7 +422,7 @@ def test_poll_loop_early_return_and_iteration(tmp_path):
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("127.0.0.1 poll.local\n", encoding="utf-8")
 
-    plugin = EtcHosts(file_path=str(hosts_file), watchdog_enabled=False)
+    plugin = EtcHosts(file_paths=[str(hosts_file)], watchdog_enabled=False)
     plugin.setup()
 
     # Early return when stop_event is None.
@@ -460,7 +460,7 @@ def test_have_files_changed_handles_missing_and_oserror(monkeypatch, tmp_path):
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("127.0.0.1 existing.local\n", encoding="utf-8")
 
-    plugin = EtcHosts(file_path=str(hosts_file), watchdog_enabled=False)
+    plugin = EtcHosts(file_paths=[str(hosts_file)], watchdog_enabled=False)
     plugin.setup()
 
     missing = tmp_path / "missing"
@@ -505,7 +505,7 @@ def test_etc_hosts_pre_resolve_ptr_from_ipv4(tmp_path):
     hostname = "ptrhost.local"
     hosts_file.write_text(f"{ip} {hostname}\n", encoding="utf-8")
 
-    plugin = EtcHosts(file_path=str(hosts_file), watchdog_enabled=False)
+    plugin = EtcHosts(file_paths=[str(hosts_file)], watchdog_enabled=False)
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
