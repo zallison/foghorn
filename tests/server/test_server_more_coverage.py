@@ -1,5 +1,5 @@
 """
-Brief: Additional coverage for foghorn.server to target 100% line coverage of src/foghorn/server.py.
+Brief: Additional coverage for foghorn.servers.server.
 
 Inputs:
   - None (pytest harness)
@@ -246,7 +246,7 @@ def test_handle_pre_deny_sends_nxdomain_and_returns(monkeypatch):
     assert DNSRecord.parse(sock.sent[0][0]).header.rcode == RCODE.NXDOMAIN
 
 
-def test_dnssec_validate_mode_upstream_ad_and_local_paths(monkeypatch):
+def testfoghorn_dnssec_dnssec_validate_mode_upstream_ad_and_local_paths(monkeypatch):
     """Brief: dnssec_mode=validate enforces AD bit with upstream/local validation.
 
     Inputs:
@@ -421,13 +421,15 @@ def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch):
     import sys
     import types
 
-    fake_mod2 = types.ModuleType("foghorn.dnssec_validate")
+    fake_mod2 = types.ModuleType("foghorn.dnssecfoghorn.dnssec.dnssec_validate")
 
     def _raise(*a, **k):
         raise RuntimeError("boom")
 
     fake_mod2.validate_response_local = _raise
-    monkeypatch.setitem(sys.modules, "foghorn.dnssec_validate", fake_mod2)
+    monkeypatch.setitem(
+        sys.modules, "foghorn.dnssecfoghorn.dnssec.dnssec_validate", fake_mod2
+    )
     monkeypatch.setattr(
         srv.DNSUDPHandler, "_forward_with_failover_helper", fake_forward_noad
     )

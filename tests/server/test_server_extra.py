@@ -1,5 +1,5 @@
 """
-Brief: Additional coverage for foghorn.server helpers and edge paths.
+Brief: Additional coverage for foghorn.servers.server helpers and edge paths.
 
 Inputs:
   - None
