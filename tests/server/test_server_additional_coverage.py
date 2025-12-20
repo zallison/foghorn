@@ -1,5 +1,5 @@
 """
-Brief: Additional targeted tests to raise coverage for foghorn.server.
+Brief: Additional targeted tests to raise coverage for foghorn.servers.server.
 
 Inputs:
   - None
@@ -336,7 +336,7 @@ def test_handle_all_failed_with_stats_records_upstream_rcode(monkeypatch):
 
 
 # ---- DNSSEC validate branches ----
-def test_dnssec_validate_upstream_ad_pass(monkeypatch):
+def testfoghorn_dnssec_dnssec_validate_upstream_ad_pass(monkeypatch):
     DNSUDPHandler.plugins = []
     DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
 
@@ -367,7 +367,7 @@ def test_dnssec_validate_upstream_ad_pass(monkeypatch):
     assert r1.header.rcode == RCODE.NOERROR
 
 
-def test_dnssec_validate_local_true(monkeypatch):
+def testfoghorn_dnssec_dnssec_validate_local_true(monkeypatch):
     DNSUDPHandler.plugins = []
     DNSUDPHandler.upstream_addrs = [{"host": "9.9.9.9", "port": 53}]
     monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **k: None)
@@ -388,7 +388,7 @@ def test_dnssec_validate_local_true(monkeypatch):
 
     # Short-circuit local DNSSEC classification to "secure" without performing
     # real DNSSEC validation network fetches.
-    import foghorn.dnssec_validate as dval
+    import foghorn.dnssec.dnssec_validate as dval
 
     monkeypatch.setattr(
         dval,

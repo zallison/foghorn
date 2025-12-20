@@ -1,5 +1,5 @@
 """
-Brief: Comprehensive path tests for foghorn.server.DNSUDPHandler.handle and helpers.
+Brief: Comprehensive path tests for foghorn.servers.server.DNSUDPHandler.handle and helpers.
 
 Inputs:
   - None
