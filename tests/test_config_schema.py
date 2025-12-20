@@ -17,8 +17,8 @@ import yaml
 
 pytest.importorskip("jsonschema")
 
-import foghorn.config_schema as config_schema_mod
-from foghorn.config_schema import get_default_schema_path, validate_config
+import foghorn.config.config_schema as config_schema_mod
+from foghorn.config.config_schema import get_default_schema_path, validate_config
 
 EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "example_configs"
 
@@ -174,7 +174,7 @@ def test_validate_config_schema_loading_errors_are_best_effort(
 
     fake_schema_path = config_schema_mod.Path("/nonexistent/schema.json")
 
-    with caplog.at_level("WARNING", logger="foghorn.config_schema"):
+    with caplog.at_level("WARNING", logger="foghorn.config.config_schema"):
         # Should not raise despite schema loading failure; behaviour is
         # best-effort with a warning and skipped validation.
         validate_config({}, schema_path=fake_schema_path, config_path="cfg.yaml")
