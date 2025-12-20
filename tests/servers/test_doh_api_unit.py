@@ -1,5 +1,5 @@
 """
-Brief: Unit tests for internal behaviors of foghorn.doh_api.
+Brief: Unit tests for internal behaviors of foghorn.api.doh_api.
 
 Inputs:
   - None
