@@ -20,7 +20,7 @@ import pytest
 
 import foghorn.main as main_mod
 from foghorn.cache_plugins.none import NullCache
-from foghorn.config_parser import normalize_upstream_config
+from foghorn.config.config_parser import normalize_upstream_config
 from foghorn.main import _clear_lru_caches, run_setup_plugins
 from foghorn.plugins.base import BasePlugin
 
