@@ -12,6 +12,7 @@ license = { text = "MIT" }
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "zeroconf",
   "PyYAML>=6.0.1",
   "cachetools",
   "coverage",
