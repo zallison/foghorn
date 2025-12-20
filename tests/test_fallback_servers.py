@@ -20,9 +20,12 @@ from typing import Any
 
 import pytest
 
+# DNS-over-HTTP(s) - Provide cert and key to enable HTTPS, otherwise use an ssl terminator
 from foghorn.servers import doh_api as doh_mod
-from foghorn.servers import webserver as web_mod
 from foghorn.servers.doh_api import DoHServerHandle, start_doh_server
+
+# API / index.html / stats
+from foghorn.servers import webserver as web_mod
 from foghorn.servers.webserver import RingBuffer, WebServerHandle, start_webserver
 from foghorn.stats import StatsCollector, StatsSQLiteStore
 

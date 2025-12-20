@@ -253,7 +253,7 @@ def test_resolve_query_bytes_recursive_mode_uses_recursive_resolver(
             r.add_answer(RR("rec.example.", QTYPE.A, rdata=A("192.0.2.1"), ttl=60))
             return r.pack(), "fake-auth:53"
 
-    # Patch RecursiveResolver used inside foghorn.server._resolve_core
+    # Patch RecursiveResolver used inside foghorn.servers.server._resolve_core
     monkeypatch.setattr(server_mod, "RecursiveResolver", _FakeRecursiveResolver)
 
     # Blow up if the forwarder path is accidentally used in recursive mode.
