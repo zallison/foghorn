@@ -6,7 +6,7 @@ import dns.rdataclass
 import dns.rdatatype
 import dns.rrset
 
-from foghorn import trust_anchors as ta
+from foghorn.dnssec import trust_anchors as ta
 
 
 def _make_dnskey(flags: int, algorithm: int, pub_b64: str) -> dns.rdata.Rdata:

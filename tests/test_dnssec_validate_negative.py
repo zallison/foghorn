@@ -7,7 +7,7 @@ import dns.rdatatype
 import dns.rrset
 import pytest
 
-from foghorn.dnssec_validate import (
+from foghorn.dnssec.dnssec_validate import (
     classify_dnssec_status,
     validate_response_local,
 )
@@ -114,7 +114,7 @@ def test_dnssec_negative_secure_nodata(monkeypatch, monkeypatched_validate, apex
     Ensures that when an NSEC at the exact owner shows the queried RR type is
     absent from the bitmap, local validation marks the response as secure.
     """
-    from foghorn import dnssec_validate as dv
+    import foghorn.dnssec.dnssec_validate as dv
 
     def fake_find_zone_apex_cached(qname_text: str, udp_payload_size: int):
         return dns.name.from_text(apex_name)
@@ -163,7 +163,7 @@ def test_dnssec_negative_nxdomain_without_nsec(
     Verifies that in the absence of any NSEC-based proof, local validation
     returns False and classification is 'insecure'.
     """
-    from foghorn import dnssec_validate as dv
+    import foghorn.dnssec.dnssec_validate as dv
 
     def fake_find_zone_apex_cached(qname_text: str, udp_payload_size: int):
         return dns.name.from_text(apex_name)
@@ -236,7 +236,7 @@ def test_validate_negative_response_missing_rrsig_and_validate_error(
         ],
     )
     msg = _Msg([nsec_only], dns.rcode.NXDOMAIN)
-    from foghorn import dnssec_validate as dv
+    import foghorn.dnssec.dnssec_validate as dv
 
     assert (
         dv._validate_negative_response(msg, owner, dns.rdatatype.A, apex, zone_dnskey)
@@ -257,7 +257,9 @@ def test_validate_negative_response_missing_rrsig_and_validate_error(
     def _boom_validate(*_a, **_k):  # pragma: no cover - simple error stub
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("foghorn.dnssec_validate.dns.dnssec.validate", _boom_validate)
+    monkeypatch.setattr(
+        "foghorn.dnssec.dnssec_validate.dns.dnssec.validate", _boom_validate
+    )
     assert (
         dv._validate_negative_response(msg2, owner, dns.rdatatype.A, apex, zone_dnskey)
         is False
@@ -272,7 +274,7 @@ def test_dnssec_negative_nodata_with_type_present(
     Checks that when the NSEC bitmap lists the queried type, the response is
     not treated as a secure NODATA proof.
     """
-    from foghorn import dnssec_validate as dv
+    import foghorn.dnssec.dnssec_validate as dv
 
     def fake_find_zone_apex_cached(qname_text: str, udp_payload_size: int):
         return dns.name.from_text(apex_name)
@@ -324,7 +326,7 @@ def test_dnssec_negative_apex_dnskey_mismatch_in_authority(
     validate_response_local() should return False and classification should be
     'insecure'.
     """
-    from foghorn import dnssec_validate as dv
+    import foghorn.dnssec.dnssec_validate as dv
 
     def fake_find_zone_apex_cached(qname_text: str, udp_payload_size: int):
         return dns.name.from_text(apex_name)
@@ -397,7 +399,7 @@ def test_dnssec_negative_nsec3_secure_nxdomain(
     Uses a synthetic NSEC3 RRset and monkeypatched nsec3_hash so that the
     hashed qname falls within the NSEC3 interval.
     """
-    from foghorn import dnssec_validate as dv
+    import foghorn.dnssec.dnssec_validate as dv
 
     def fake_find_zone_apex_cached(qname_text: str, udp_payload_size: int):
         return dns.name.from_text(apex_name)

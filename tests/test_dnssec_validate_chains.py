@@ -5,7 +5,7 @@ import dns.rdatatype
 import dns.rrset
 import pytest
 
-from foghorn.dnssec_validate import (
+from foghorn.dnssec.dnssec_validate import (
     classify_dnssec_status,
     validate_response_local,
 )
@@ -67,7 +67,7 @@ def test_dnssec_cname_chain_secure(monkeypatch, monkeypatched_validate, apex_nam
     qname to the final owner and that classify_dnssec_status() reports 'secure'
     when all RRsets in the chain are signed.
     """
-    from foghorn import dnssec_validate as dv
+    import foghorn.dnssec.dnssec_validate as dv
 
     def fake_find_zone_apex_cached(qname_text: str, udp_payload_size: int):
         return dns.name.from_text(apex_name)
@@ -141,7 +141,7 @@ def test_dnssec_cname_chain_missing_rrsig(
     If either the CNAME or the final answer lacks an RRSIG, the chain should
     not validate and should be classified as 'insecure'.
     """
-    from foghorn import dnssec_validate as dv
+    import foghorn.dnssec.dnssec_validate as dv
 
     def fake_find_zone_apex_cached(qname_text: str, udp_payload_size: int):
         return dns.name.from_text(apex_name)
@@ -208,7 +208,7 @@ def test_dnssec_dname_chain_secure(monkeypatch, monkeypatched_validate, apex_nam
     target owner has a signed answer RRset, local validation succeeds and the
     response is classified as 'secure'.
     """
-    from foghorn import dnssec_validate as dv
+    import foghorn.dnssec.dnssec_validate as dv
 
     def fake_find_zone_apex_cached(qname_text: str, udp_payload_size: int):
         return dns.name.from_text(apex_name)
