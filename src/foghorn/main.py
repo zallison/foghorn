@@ -9,9 +9,13 @@ import signal
 import threading
 from typing import List, Optional
 
-from .config_parser import load_plugins, normalize_upstream_config, parse_config_file
-from .dnssec_validate import configure_dnssec_resolver
-from .logging_config import init_logging
+from .config.config_parser import (
+    load_plugins,
+    normalize_upstream_config,
+    parse_config_file,
+)
+from foghorn.dnssec.dnssec_validate import configure_dnssec_resolver
+from .config.logging_config import init_logging
 from .plugins.base import BasePlugin
 from .servers.doh_api import start_doh_server
 from .servers.server import DNSServer
@@ -174,13 +178,11 @@ def main(argv: List[str] | None = None) -> int:
         print(str(exc))
         return 1
 
-    # Initialize logging before any other operations. Prefer nested
-    # foghorn.logging but fall back to root-level logging for backward
-    # compatibility with older config layouts.
+    # Initialize logging before any other operations.
     foghorn_for_logging = cfg.get("foghorn") or {}
     if not isinstance(foghorn_for_logging, dict):
         foghorn_for_logging = {}
-    logging_cfg = foghorn_for_logging.get("logging") or cfg.get("logging")
+    logging_cfg = foghorn_for_logging.get("logging")
     init_logging(logging_cfg)
     logger = logging.getLogger("foghorn.main")
     logger.info("Loaded config from %s", args.config)
@@ -751,7 +753,7 @@ def main(argv: List[str] | None = None) -> int:
             ]
             configure_dnssec_resolver(upstream_hosts or None)
         else:
-            # Empty list is a sentinel telling dnssec_validate to use
+            # Empty list is a sentinel tellingfoghorn.dnssec.dnssec_validate to use
             # RecursiveResolver for all validation lookups.
             configure_dnssec_resolver([])
     else:
