@@ -24,10 +24,24 @@ from dnslib import (  # noqa: F401 - imports are for implementations of this cla
     DNSRecord,
 )
 
-from foghorn.cache import FoghornTTLCache
+from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
 from foghorn.cache_plugins.base import CachePlugin
 from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
-from foghorn.logging_config import BracketLevelFormatter, SyslogFormatter
+from foghorn.config.logging_config import BracketLevelFormatter, SyslogFormatter
+
+# Canonical DNS response cache used by the resolver.
+#
+# Brief:
+#   This is intentionally defined at module scope so the core resolver
+#   (foghorn.server.resolve_query_bytes) and all transports share a single
+#   cache object.
+#
+# Inputs:
+#   - None
+#
+# Outputs:
+#   - DNS_CACHE: CachePlugin instance
+DNS_CACHE: CachePlugin = InMemoryTTLCachePlugin()
 
 # Canonical DNS response cache used by the resolver.
 #
