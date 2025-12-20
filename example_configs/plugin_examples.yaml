@@ -26,7 +26,8 @@ logging:
   level: info
 
 plugins:
-  # Example: expose mDNS/DNS-SD as DNS records (PTR/SRV/TXT/A/AAAA) under .local and .mdns
+  # Example: expose mDNS/DNS-SD as DNS records (PTR/SRV/TXT/A/AAAA) under a DNS suffix
+  # (default: .mdns) derived from the mDNS `.local` namespace.
   # - module: mdns
   #   config:
   #     ttl: 60
