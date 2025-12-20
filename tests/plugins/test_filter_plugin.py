@@ -136,6 +136,71 @@ def test_pre_resolve_deny_response_ip_override(tmp_path):
         assert str(reply.rr[0].rdata) == "192.0.2.55"
 
 
+def test_pre_resolve_qtype_allowlist_denies_unlisted_qtypes(tmp_path):
+    """Brief: allow_qtypes denies qtypes not explicitly allowed.
+
+    Inputs:
+      - allow_qtypes: ["A"]
+      - deny_response: "refused"
+
+    Outputs:
+      - None: Asserts MX is denied with REFUSED and A is allowed to proceed.
+    """
+    db = tmp_path / "bl_qtypes_allow.db"
+    p = FilterPlugin(
+        db_path=str(db),
+        default="allow",
+        allow_qtypes=["A"],
+        deny_response="refused",
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+
+    q_mx, wire_mx = _mk_query("ok.com", "MX")
+
+    with closing(p.conn):
+        dec_mx = p.pre_resolve("ok.com", QTYPE.MX, wire_mx, ctx)
+        assert isinstance(dec_mx, PluginDecision)
+        assert dec_mx.action == "override"
+        reply = DNSRecord.parse(dec_mx.response)
+        assert reply.header.rcode == RCODE.REFUSED
+
+        dec_a = p.pre_resolve("ok.com", QTYPE.A, b"", ctx)
+        assert isinstance(dec_a, PluginDecision)
+        assert dec_a.action == "skip"
+
+
+def test_pre_resolve_qtype_denylist_takes_precedence(tmp_path):
+    """Brief: deny_qtypes overrides allow_qtypes for conflicting entries.
+
+    Inputs:
+      - allow_qtypes: ["A", "MX"]
+      - deny_qtypes: ["MX"]
+
+    Outputs:
+      - None: Asserts MX is denied and A is allowed.
+    """
+    db = tmp_path / "bl_qtypes_deny.db"
+    p = FilterPlugin(
+        db_path=str(db),
+        default="allow",
+        allow_qtypes=["A", "MX"],
+        deny_qtypes=["MX"],
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+    q_mx, wire_mx = _mk_query("ok.com", "MX")
+
+    with closing(p.conn):
+        dec_mx = p.pre_resolve("ok.com", QTYPE.MX, wire_mx, ctx)
+        assert isinstance(dec_mx, PluginDecision)
+        assert dec_mx.action == "deny"
+
+        dec_a = p.pre_resolve("ok.com", QTYPE.A, b"", ctx)
+        assert isinstance(dec_a, PluginDecision)
+        assert dec_a.action == "skip"
+
+
 def test_pre_resolve_allow_keyword_and_pattern(tmp_path, caplog):
     """
     Brief: Allowed domain passes; keyword and regex pattern rules deny.
