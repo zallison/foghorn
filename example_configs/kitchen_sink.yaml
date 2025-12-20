@@ -154,6 +154,15 @@ plugins:
       # use_ipv4: 192.0.2.10
       # use_ipv6: 2001:db8::10
 
+      # Optional: filter containers by Docker health/state.
+      # Supported: starting, healthy, running, unhealthy
+      # Default: [healthy, running]
+      # health: [healthy, running]
+
+      # Optional: publish an aggregate TXT record at _docker.<suffix>
+      # (or _docker when no suffix is configured).
+      # aggregate_record: true
+
   # 2) /etc/hosts resolver – answers from hosts files first when possible
   - module: hosts
     pre_priority: 10           # run after DockerHosts
