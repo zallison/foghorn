@@ -149,7 +149,7 @@ def test_send_query_with_failover_parse_error_then_success(monkeypatch, caplog):
 
 
 def test_send_query_with_failover_udp_legacy_send_path(monkeypatch):
-    """Brief: UDP legacy path uses query.send() when .pack is not callable.
+    """Brief: UDP path supports objects without callable pack() by using send().
 
     Inputs:
       - Query object with .send() only.

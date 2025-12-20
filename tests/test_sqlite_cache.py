@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from foghorn.sqlite_cache import SQLite3TTLCache
+from foghorn.cache_backends.sqlite_ttl import SQLite3TTLCache
 
 
 def test_sqlite_ttl_cache_roundtrip_arbitrary_key_and_value(tmp_path) -> None:

@@ -56,7 +56,7 @@ def test_load_records_uniques_and_preserves_order_single_file(
     mod = importlib.import_module("foghorn.plugins.zone-records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
     key = ("example.com", int(QTYPE.A))
@@ -145,7 +145,7 @@ def test_pre_resolve_uses_value_order_from_config(tmp_path: pathlib.Path) -> Non
     mod = importlib.import_module("foghorn.plugins.zone-records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
     ctx = PluginContext(client_ip="127.0.0.1")
@@ -204,7 +204,7 @@ def test_load_records_skips_blank_and_comment_lines(tmp_path: pathlib.Path) -> N
     mod = importlib.import_module("foghorn.plugins.zone-records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
     key = ("example.com", int(QTYPE.A))
@@ -229,7 +229,7 @@ def test_load_records_malformed_line_wrong_field_count(tmp_path: pathlib.Path) -
     mod = importlib.import_module("foghorn.plugins.zone-records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     with pytest.raises(ValueError):
         plugin.setup()
 
@@ -250,7 +250,7 @@ def test_load_records_malformed_line_empty_field(tmp_path: pathlib.Path) -> None
     mod = importlib.import_module("foghorn.plugins.zone-records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     with pytest.raises(ValueError):
         plugin.setup()
 
@@ -270,7 +270,7 @@ def test_load_records_qtype_numeric_and_negative_ttl(tmp_path: pathlib.Path) -> 
     mod = importlib.import_module("foghorn.plugins.zone-records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     with pytest.raises(ValueError):
         plugin.setup()
 
@@ -290,7 +290,7 @@ def test_load_records_invalid_ttl_non_integer(tmp_path: pathlib.Path) -> None:
     mod = importlib.import_module("foghorn.plugins.zone-records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     with pytest.raises(ValueError):
         plugin.setup()
 
@@ -322,7 +322,7 @@ def test_load_records_qtype_fallback_to_get_int(
     monkeypatch.setattr(mod, "QTYPE", DummyQType())
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
     key = ("example.com", 42)
@@ -374,7 +374,7 @@ def test_load_records_assigns_without_lock(tmp_path: pathlib.Path) -> None:
     mod = importlib.import_module("foghorn.plugins.zone-records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
     # Remove the lock and force a reload to exercise the lock-is-None path.
@@ -399,7 +399,7 @@ def test_pre_resolve_no_entry_and_no_lock(tmp_path: pathlib.Path) -> None:
     mod = importlib.import_module("foghorn.plugins.zone-records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
     # Remove lock so we exercise the lock-is-None branch.
@@ -430,7 +430,7 @@ def test_pre_resolve_returns_none_when_rr_parsing_fails(
     mod = importlib.import_module("foghorn.plugins.zone-records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
     # Force RR.fromZone to fail so that no answers are added.
@@ -540,7 +540,7 @@ def test_start_watchdog_observer_none(monkeypatch, tmp_path: pathlib.Path) -> No
     records_file = tmp_path / "records.txt"
     records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
 
-    plugin = ZoneRecords(file_path=str(records_file), watchdog_enabled=False)
+    plugin = ZoneRecords(file_paths=[str(records_file)], watchdog_enabled=False)
     plugin.setup()
 
     # Force Observer to be treated as unavailable.
@@ -599,7 +599,7 @@ def test_start_polling_configuration(monkeypatch, tmp_path: pathlib.Path) -> Non
     records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
 
     # Disabled polling: interval <= 0
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
     plugin._poll_interval = 0.0  # type: ignore[assignment]
     plugin._poll_stop = threading.Event()
@@ -607,7 +607,7 @@ def test_start_polling_configuration(monkeypatch, tmp_path: pathlib.Path) -> Non
     assert getattr(plugin, "_poll_thread", None) is None
 
     # Interval set but no stop_event configured -> no thread
-    plugin2 = ZoneRecords(file_path=str(records_file))
+    plugin2 = ZoneRecords(file_paths=[str(records_file)])
     plugin2.setup()
     plugin2._poll_interval = 0.1  # type: ignore[assignment]
     plugin2._poll_stop = None  # type: ignore[assignment]
@@ -616,7 +616,7 @@ def test_start_polling_configuration(monkeypatch, tmp_path: pathlib.Path) -> Non
 
     # Proper configuration starts a polling thread.
     plugin3 = ZoneRecords(
-        file_path=str(records_file), watchdog_poll_interval_seconds=0.01
+        file_paths=[str(records_file)], watchdog_poll_interval_seconds=0.01
     )
     plugin3.setup()
     assert getattr(plugin3, "_poll_thread", None) is not None
@@ -638,7 +638,7 @@ def test_poll_loop_early_return_and_iteration(tmp_path: pathlib.Path) -> None:
     records_file = tmp_path / "records.txt"
     records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
     # Early return when stop_event is None.
@@ -677,7 +677,7 @@ def test_have_files_changed_tracks_snapshot(
     records_file = tmp_path / "records.txt"
     records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
     missing = tmp_path / "missing.txt"
@@ -722,7 +722,7 @@ def test_schedule_debounced_reload_variants(
     records_file = tmp_path / "records.txt"
     records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
     called = {"count": 0}
@@ -737,7 +737,7 @@ def test_schedule_debounced_reload_variants(
     assert called["count"] == 1
 
     # No lock configured -> no scheduling.
-    plugin2 = ZoneRecords(file_path=str(records_file))
+    plugin2 = ZoneRecords(file_paths=[str(records_file)])
     plugin2.setup()
     plugin2._reload_records_from_watchdog = fake_reload  # type: ignore[assignment]
     plugin2._reload_timer_lock = None  # type: ignore[assignment]
@@ -749,7 +749,7 @@ def test_schedule_debounced_reload_variants(
         def is_alive(self) -> bool:  # pragma: no cover - trivial.
             return True
 
-    plugin3 = ZoneRecords(file_path=str(records_file))
+    plugin3 = ZoneRecords(file_paths=[str(records_file)])
     plugin3.setup()
     plugin3._reload_records_from_watchdog = fake_reload  # type: ignore[assignment]
     plugin3._reload_timer_lock = threading.Lock()  # type: ignore[assignment]
@@ -785,7 +785,7 @@ def test_schedule_debounced_reload_variants(
 
     monkeypatch.setattr(mod.threading, "Timer", make_timer)
 
-    plugin4 = ZoneRecords(file_path=str(records_file))
+    plugin4 = ZoneRecords(file_paths=[str(records_file)])
     plugin4.setup()
     plugin4._reload_records_from_watchdog = fake_reload  # type: ignore[assignment]
     plugin4._reload_timer_lock = threading.Lock()  # type: ignore[assignment]
@@ -813,7 +813,7 @@ def test_reload_records_from_watchdog_deferred_and_immediate(
     records_file = tmp_path / "records.txt"
     records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
     # Deferred path: elapsed < min_interval. Use a fixed time source for determinism.
@@ -936,11 +936,13 @@ def test_setup_watchdog_enabled_flag_controls_start(
     monkeypatch.setattr(ZoneRecords, "_start_watchdog", fake_start, raising=False)
 
     # Explicitly disabled -> no call.
-    plugin_disabled = ZoneRecords(file_path=str(records_file), watchdog_enabled=False)
+    plugin_disabled = ZoneRecords(
+        file_paths=[str(records_file)], watchdog_enabled=False
+    )
     plugin_disabled.setup()
 
     # Truthy non-bool value -> treated as True and calls _start_watchdog.
-    plugin_enabled = ZoneRecords(file_path=str(records_file), watchdog_enabled="yes")
+    plugin_enabled = ZoneRecords(file_paths=[str(records_file)], watchdog_enabled="yes")
     plugin_enabled.setup()
 
     assert calls["start"] == 1
@@ -977,7 +979,7 @@ def test_authoritative_zone_nxdomain_and_nodata(tmp_path: pathlib.Path) -> None:
     mod = importlib.import_module("foghorn.plugins.zone-records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
     ctx = PluginContext(client_ip="127.0.0.1")
@@ -1037,7 +1039,7 @@ def test_authoritative_cname_and_any_semantics(tmp_path: pathlib.Path) -> None:
     mod = importlib.import_module("foghorn.plugins.zone-records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
     ctx = PluginContext(client_ip="127.0.0.1")

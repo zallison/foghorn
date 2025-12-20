@@ -168,8 +168,8 @@ plugins:
     pre_priority: 10           # run after DockerHosts
     config:
       allow: ["192.0.2.0/24", "2001:db8::/32"]
-      servfail_one_in: 20
-      nxdomain_one_in: 50
+      servfail_percent: 5.0
+      nxdomain_percent: 2.0
       apply_to_qtypes: ["A", "AAAA"]
       # seed: 42
 
@@ -255,8 +255,10 @@ plugins:
   # 7) Local overrides from hosts file (A-only)
   - module: etc-hosts
     pre_priority: 55
-    config: {}
-    # file_path: /etc/hosts
+    config:
+      # Use file_paths (list) for hosts files; legacy file_path is no longer supported.
+      file_paths:
+        - /etc/hosts
 
   # 3) Upstream router – send certain suffixes to specific upstreams
   - module: router

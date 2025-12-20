@@ -666,12 +666,6 @@
 			  "title": "Noerror Empty Percent",
 			  "type": "number"
 			},
-			"nxdomain_one_in": {
-			  "default": 10,
-			  "minimum": 1,
-			  "title": "Nxdomain One In",
-			  "type": "integer"
-			},
 			"nxdomain_percent": {
 			  "anyOf": [
 				{
@@ -697,12 +691,6 @@
 			  ],
 			  "default": null,
 			  "title": "Seed"
-			},
-			"servfail_one_in": {
-			  "default": 4,
-			  "minimum": 1,
-			  "title": "Servfail One In",
-			  "type": "integer"
 			},
 			"servfail_percent": {
 			  "anyOf": [

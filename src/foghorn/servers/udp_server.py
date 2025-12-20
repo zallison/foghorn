@@ -20,10 +20,11 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
     Outputs:
       - bytes: response with corrected ID
 
-    This helper now delegates to the shared implementation in foghorn.server
-    so that ID-rewrite behaviour is consistent across UDP and non-UDP paths.
+    This helper now delegates to the shared implementation in
+    foghorn.servers.server so that ID-rewrite behaviour is consistent across UDP
+    and non-UDP paths.
     """
-    from .. import server as _server_mod
+    from . import server as _server_mod
 
     return _server_mod._set_response_id(wire, req_id)
 
@@ -213,7 +214,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                     qtype,
                 )
             else:
-                from ..server import compute_effective_ttl as _compute_effective_ttl
+                from .server import compute_effective_ttl as _compute_effective_ttl
 
                 effective_ttl = _compute_effective_ttl(r, self.min_cache_ttl)
                 if effective_ttl > 0:
@@ -410,8 +411,8 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         # are expected to pass dict-like configs.
         safe_upstreams = [u for u in (upstreams or []) if isinstance(u, dict)]
         # Try upstreams with failover, always resolving send_query_with_failover
-        # via foghorn.server so test monkeypatches on server_mod apply.
-        from .. import server as _server_mod
+        # via foghorn.servers.server so test monkeypatches on server_mod apply.
+        from . import server as _server_mod
 
         try:
             max_concurrent = int(getattr(self, "upstream_max_concurrent", 1) or 1)

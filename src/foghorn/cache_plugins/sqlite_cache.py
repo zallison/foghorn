@@ -64,9 +64,11 @@ class SQLite3CachePlugin(CachePlugin):
         self.db_path: str = os.path.abspath(os.path.expanduser(str(db_path)))
         self.min_cache_ttl: int = max(0, int(config.get("min_cache_ttl", 0) or 0))
 
-        namespace = config.get("namespace")
+        namespace = config.get("namespace", "dns_cache")
         if not isinstance(namespace, str) or not namespace.strip():
-            namespace = config.get("table", "dns_cache")
+            raise ValueError(
+                "sqlite cache config requires a non-empty 'namespace' field"
+            )
         journal_mode = config.get("journal_mode", "WAL")
 
         self._cache = SQLite3TTLCache(

@@ -71,7 +71,7 @@ def test__make_response_error_path_returns_none(monkeypatch):
     Outputs:
       - None; asserts no exception and None decision
     """
-    p = FlakyServer(targets=["192.0.2.55"], servfail_one_in=1, seed=1)
+    p = FlakyServer(targets=["192.0.2.55"], servfail_percent=100.0, seed=1)
     # Feed invalid wire to _make_response directly
     assert p._make_response(b"\x00", RCODE.SERVFAIL) is None
     # In pre_resolve path with invalid wire, errors should be swallowed and return None
@@ -92,8 +92,8 @@ def test_seed_bad_value_falls_back_to_systemrandom(caplog):
     assert any("bad seed" in r.message for r in caplog.records)
 
 
-def test_percent_fields_override_one_in_behavior():
-    """Brief: servfail_percent/nxdomain_percent force deterministic overrides.
+def test_percent_fields_control_probabilities():
+    """Brief: servfail_percent/nxdomain_percent control behaviour deterministically.
 
     Inputs:
       - None; constructs FlakyServer with 100% probabilities.

@@ -1106,7 +1106,10 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
         # consistent "secure"/"insecure" status when dnssec.mode is 'validate'.
         dnssec_status = None
         try:
-            from ..dnssec_validate import classify_dnssec_status
+            # Use the same DNSSEC classification helper as the UDP handler so
+            # non-UDP callers (TCP/DoT/DoH and tests using _resolve_core
+            # directly) see consistent dnssec_status values.
+            from ..dnssec.dnssec_validate import classify_dnssec_status
 
             mode = str(getattr(DNSUDPHandler, "dnssec_mode", "ignore"))
             validation = str(getattr(DNSUDPHandler, "dnssec_validation", "upstream_ad"))

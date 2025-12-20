@@ -104,10 +104,13 @@ class EtcHosts(BasePlugin):
             EtcHosts(file_paths=["/etc/hosts", "/etc/hosts.d/extra"], inotify_enabled=True)
         """
 
-        # Normalize configuration into a list of paths. Default to /etc/hosts
-        legacy = self.config.get("file_path")
+        # Normalize configuration into a list of paths. Default to /etc/hosts.
+        if "file_path" in self.config:
+            raise ValueError(
+                "EtcHosts config must use 'file_paths' (list) instead of legacy 'file_path'"
+            )
         provided = self.config.get("file_paths")
-        self.file_paths: List[str] = self._normalize_paths(provided, legacy)
+        self.file_paths: List[str] = self._normalize_paths(provided, None)
 
         # Internal synchronization and state
         self._hosts_lock = threading.RLock()

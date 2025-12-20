@@ -35,7 +35,7 @@ def test_etc_hosts_pre_resolve_ipv6_answer(tmp_path):
     ipv6 = "2001:db8::42"
     hosts_file.write_text(f"{ipv6} v6host.local\n")
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 

@@ -248,14 +248,19 @@ class FilterPlugin(BasePlugin):
             )
             self.deny_response = "nxdomain"
 
-        # Back-compat keep existing keys, add new *_domains_files keys
+        # Enforce new *_domains_files keys; legacy blocklist_files/allowlist_files
+        # are no longer accepted so configuration remains unambiguous.
+        if "blocklist_files" in self.config or "allowlist_files" in self.config:
+            raise ValueError(
+                "FilterPlugin config must use 'blocked_domains_files' / 'allowed_domains_files' "
+                "instead of legacy 'blocklist_files' / 'allowlist_files'"
+            )
+
         self.blocklist_files: List[str] = self._expand_globs(
-            list(self.config.get("blocklist_files", []))
-            + list(self.config.get("blocked_domains_files", []))
+            list(self.config.get("blocked_domains_files", []))
         )
         self.allowlist_files: List[str] = self._expand_globs(
-            list(self.config.get("allowlist_files", []))
-            + list(self.config.get("allowed_domains_files", []))
+            list(self.config.get("allowed_domains_files", []))
         )
 
         self.blocklist = self.config.get("blocked_domains", [])

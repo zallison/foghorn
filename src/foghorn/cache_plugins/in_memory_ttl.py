@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Optional, Tuple
 
-from foghorn.cache import FoghornTTLCache
+from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
 
 from .base import CachePlugin, cache_aliases
 

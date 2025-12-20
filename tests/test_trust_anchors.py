@@ -19,8 +19,8 @@ import dns.rdataclass
 import dns.rdatatype
 import dns.rrset
 
-from foghorn import dnssec_validate as dval
-from foghorn import trust_anchors as ta
+from foghorn.dnssec import dnssec_validate as dval
+from foghorn.dnssec import trust_anchors as ta
 
 
 def _root_dnskey_rrset() -> dns.rrset.RRset:

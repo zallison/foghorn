@@ -69,10 +69,10 @@ def test_no_targets_is_noop():
 
 def test_client_ip_targets_only_that_ip():
     p = FlakyServer(
-        targets=["192.0.2.55"], servfail_one_in=1, nxdomain_one_in=999, seed=1
+        targets=["192.0.2.55"], servfail_percent=100.0, nxdomain_percent=0.0, seed=1
     )
     q, wire = _mk_query()
-    # Target IP should be affected (SERVFAIL forced by 1-in-1)
+    # Target IP should be affected (SERVFAIL forced by 100% probability)
     dec = p.pre_resolve("example.com", QTYPE.A, wire, PluginContext("192.0.2.55"))
     assert dec is not None
     resp = DNSRecord.parse(dec.response)
@@ -84,7 +84,7 @@ def test_client_ip_targets_only_that_ip():
 
 def test_allow_list_targets_cidr_and_single():
     p = FlakyServer(
-        targets=["192.0.2.0/24", "198.51.100.10"], servfail_one_in=1, seed=2
+        targets=["192.0.2.0/24", "198.51.100.10"], servfail_percent=100.0, seed=2
     )
     q, wire = _mk_query()
     assert p.pre_resolve("ex", QTYPE.A, wire, PluginContext("192.0.2.99")) is not None
@@ -97,7 +97,7 @@ def test_allow_list_targets_cidr_and_single():
 
 def test_servfail_precedence_over_nxdomain():
     p = FlakyServer(
-        targets=["192.0.2.55"], servfail_one_in=1, nxdomain_one_in=1, seed=3
+        targets=["192.0.2.55"], servfail_percent=100.0, nxdomain_percent=100.0, seed=3
     )
     q, wire = _mk_query()
     dec = p.pre_resolve("ex", QTYPE.A, wire, PluginContext("192.0.2.55"))
@@ -126,7 +126,7 @@ def test_qtype_filtering_only_A():
 def test_invalid_targets_entries_do_not_crash(caplog):
     caplog.set_level("WARNING")
     p = FlakyServer(
-        targets=["not-an-ip", "300.300.300.300/33"], servfail_one_in=1, seed=5
+        targets=["not-an-ip", "300.300.300.300/33"], servfail_percent=100.0, seed=5
     )
     q, wire = _mk_query()
     # With no valid targets, BasePlugin will ignore them and FlakyServer is a no-op
