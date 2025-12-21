@@ -82,12 +82,11 @@ class EtcHosts(BasePlugin):
         Brief: Initialize the plugin, load host mappings, and configure watchers.
 
         Inputs:
-          - file_path (str, optional): Single hosts file path (legacy, preserved)
           - file_paths (list[str], optional): List of hosts file paths
-            to load and merge in order (later overrides earlier)
+            to load and merge in order (later overrides earlier). When omitted,
+            defaults to ["/etc/hosts"].
           - watchdog_enabled (bool, optional): When True (default), start a
             watchdog-based observer to reload files automatically on change.
-            The legacy option inotify_enabled is still accepted as an alias.
           - watchdog_poll_interval_seconds (float, optional): When greater than
             zero, enable a stat-based polling loop to detect changes even when
             filesystem events are not delivered (for example in some container
@@ -97,18 +96,11 @@ class EtcHosts(BasePlugin):
           - None
 
         Example:
-          Legacy single file:
-            EtcHosts(file_path="/custom/hosts")
-
-          Multiple files (preferred):
-            EtcHosts(file_paths=["/etc/hosts", "/etc/hosts.d/extra"], inotify_enabled=True)
+          Multiple files:
+            EtcHosts(file_paths=["/etc/hosts", "/etc/hosts.d/extra"], watchdog_enabled=True)
         """
 
         # Normalize configuration into a list of paths. Default to /etc/hosts.
-        if "file_path" in self.config:
-            raise ValueError(
-                "EtcHosts config must use 'file_paths' (list) instead of legacy 'file_path'"
-            )
         provided = self.config.get("file_paths")
         self.file_paths: List[str] = self._normalize_paths(provided, None)
 
