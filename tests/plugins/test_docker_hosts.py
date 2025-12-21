@@ -517,13 +517,21 @@ def test_docker_hosts_iter_containers_returns_empty_when_no_client(monkeypatch):
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None; asserts empty iterable.
+      - None; asserts empty iterable when the docker SDK is unavailable and no
+        client can be created for the endpoint.
     """
 
     mod = importlib.import_module("foghorn.plugins.docker-hosts")
     DockerHosts = mod.DockerHosts
 
+    # Simulate an environment without the docker SDK so that
+    # _iter_containers_for_endpoint sees client is None *and* docker is None and
+    # returns an empty list without ever talking to a real Docker daemon.
+    monkeypatch.setattr(mod, "docker", None, raising=True)
+
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+    # Avoid any docker-dependent reload behaviour in setup.
+    monkeypatch.setattr(plugin, "_reload_from_docker", lambda: None)
     plugin.setup()
 
     # Ensure _clients is empty for this URL.
@@ -949,6 +957,62 @@ def test_docker_hosts_health_filter_can_include_unhealthy(monkeypatch):
 
     assert "unhealthy" in plugin._forward_v4  # type: ignore[attr-defined]
     assert "nohealth" not in plugin._forward_v4  # type: ignore[attr-defined]
+
+
+def test_docker_hosts_unreachable_endpoint_omits_hosts_txt(monkeypatch, caplog):
+    """Brief: Endpoints that raise DockerException do not emit _hosts.* TXT, and are retried.
+
+    Inputs:
+      - monkeypatch/caplog: pytest fixtures.
+
+    Outputs:
+      - None; asserts that _hosts.<suffix> TXT is not created when an endpoint
+        repeatedly fails with a DockerException, while still logging the
+        connection failure.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    DockerHosts = mod.DockerHosts
+
+    # Use discovery so that _hosts.<suffix> TXT would normally be published.
+    plugin = DockerHosts(  # type: ignore[arg-type]
+        suffix="docker.mycorp",
+        discovery=True,
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+
+    # Force _iter_containers_for_endpoint to simulate an unreachable endpoint
+    # by returning an empty iterable every time.
+    monkeypatch.setattr(plugin, "_iter_containers_for_endpoint", lambda _ep: [])
+
+    caplog.set_level("WARNING", logger=mod.__name__)
+    plugin.setup()
+
+    # After setup + reload, no _hosts.* TXT records should exist because the
+    # endpoint never yielded any containers.
+    assert plugin._aggregate_txt == {}  # type: ignore[attr-defined]
+
+    # Now simulate a DockerException path inside _iter_containers_for_endpoint by
+    # using a dummy client whose containers.list() always raises.
+    class DummyDockerExc(Exception):
+        pass
+
+    class BadContainers:
+        def list(self):  # noqa: D401
+            """Always raise to exercise the DockerException path."""
+
+            raise DummyDockerExc("boom")
+
+    bad_client = types.SimpleNamespace(containers=BadContainers())
+
+    monkeypatch.setattr(mod, "DockerException", DummyDockerExc, raising=True)
+    plugin._clients = {"unix:///var/run/docker.sock": bad_client}  # type: ignore[attr-defined]
+
+    # Trigger another reload; even when the endpoint client raises an error,
+    # we should still avoid publishing any _hosts.* TXT owners for it.
+    plugin._reload_from_docker()
+
+    assert plugin._aggregate_txt == {}  # type: ignore[attr-defined]
 
 
 def test_docker_hosts_discovery_publishes_txt(monkeypatch):
