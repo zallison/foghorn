@@ -1712,6 +1712,7 @@ def create_app(
     log_buffer: Optional[RingBuffer] = None,
     config_path: str | None = None,
     runtime_state: RuntimeState | None = None,
+    plugins: list[object] | None = None,
 ) -> FastAPI:
     """Create and configure FastAPI app exposing Foghorn admin endpoints.
 
@@ -1787,6 +1788,9 @@ def create_app(
     app.state.www_root = www_root
     app.state.debug_stats_timings = bool(web_cfg.get("debug_timings", False))
     app.state.runtime_state = runtime_state
+    # Expose loaded plugin instances so plugin-aware endpoints (such as
+    # DockerHosts UI helpers) can look up instances by their configured name.
+    app.state.plugins = list(plugins or [])
 
     # Best-effort: register the webserver as enabled. The thread/handle liveness
     # is tracked by foghorn.main when runtime_state is provided.
@@ -2555,6 +2559,51 @@ def create_app(
             )
         return FileResponse(index_path)
 
+    @app.get(
+        "/api/v1/plugins/{plugin_name}/docker_hosts", dependencies=[Depends(auth_dep)]
+    )
+    async def get_docker_hosts_snapshot(plugin_name: str) -> Dict[str, Any]:
+        """Return a JSON-safe snapshot for a DockerHosts plugin instance.
+
+        Inputs:
+          - plugin_name: Instance name from the configuration (plugins[].name or
+            plugins[].module when name is omitted).
+
+        Outputs:
+          - Dict with server_time, plugin, and data keys. data is the
+            get_http_snapshot() result when available.
+        """
+
+        plugins_list = getattr(app.state, "plugins", []) or []
+        target = None
+        for p in plugins_list:
+            try:
+                if getattr(p, "name", None) == plugin_name:
+                    target = p
+                    break
+            except Exception:
+                continue
+
+        if target is None or not hasattr(target, "get_http_snapshot"):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="plugin not found or does not expose get_http_snapshot",
+            )
+
+        try:
+            snapshot = target.get_http_snapshot()  # type: ignore[call-arg]
+        except Exception as exc:  # pragma: no cover - defensive: plugin-specific
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"failed to build DockerHosts snapshot: {exc}",
+            ) from exc
+
+        return {
+            "server_time": _utc_now_iso(),
+            "plugin": plugin_name,
+            "data": _json_safe(snapshot),
+        }
+
     @app.get("/{path:path}")
     async def static_www(path: str) -> Any:
         """Serve files from the project-level html/ directory when they exist.
@@ -2632,6 +2681,7 @@ class _AdminHTTPServer(http.server.ThreadingHTTPServer):
         log_buffer: Optional[RingBuffer],
         config_path: str | None = None,
         runtime_state: RuntimeState | None = None,
+        plugins: list[object] | None = None,
     ) -> None:
         """Initialize admin HTTP server with shared state and host metadata.
 
@@ -2655,6 +2705,9 @@ class _AdminHTTPServer(http.server.ThreadingHTTPServer):
         self.log_buffer = log_buffer
         self.config_path = config_path
         self.runtime_state = runtime_state
+        # Preserve the plugin list so threaded handlers can look up plugin
+        # instances by name when serving plugin-specific pages or APIs.
+        self.plugins = list(plugins or [])
 
         if runtime_state is not None:
             runtime_state.set_listener("webserver", enabled=True, thread=None)
@@ -3878,6 +3931,53 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             data = _collect_rate_limit_stats(cfg)
             data["server_time"] = _utc_now_iso()
             self._send_json(200, data)
+        elif path.startswith("/api/v1/plugins/") and path.endswith("/docker_hosts"):
+            # Threaded fallback for the DockerHosts admin snapshot endpoint mirrors
+            # the FastAPI route at /api/v1/plugins/{plugin_name}/docker_hosts.
+            if not self._require_auth():
+                return
+            # Extract plugin_name between the fixed prefix and suffix.
+            prefix = "/api/v1/plugins/"
+            suffix = "/docker_hosts"
+            raw_segment = path[len(prefix) : -len(suffix)]
+            plugin_name = raw_segment.strip("/")
+            plugins_list = getattr(self._server(), "plugins", []) or []
+            target = None
+            for p in plugins_list:
+                try:
+                    if getattr(p, "name", None) == plugin_name:
+                        target = p
+                        break
+                except Exception:
+                    continue
+            if target is None or not hasattr(target, "get_http_snapshot"):
+                self._send_json(
+                    404,
+                    {
+                        "detail": "plugin not found or does not expose get_http_snapshot",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+            try:
+                snapshot = target.get_http_snapshot()  # type: ignore[call-arg]
+            except Exception as exc:
+                self._send_json(
+                    500,
+                    {
+                        "detail": f"failed to build DockerHosts snapshot: {exc}",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+            self._send_json(
+                200,
+                {
+                    "server_time": _utc_now_iso(),
+                    "plugin": plugin_name,
+                    "data": _json_safe(snapshot),
+                },
+            )
         elif path in {"/", "/index.html"}:
             self._handle_index()
         else:
@@ -3954,6 +4054,7 @@ def _start_admin_server_threaded(
     log_buffer: Optional[RingBuffer],
     config_path: str | None = None,
     runtime_state: RuntimeState | None = None,
+    plugins: list[object] | None = None,
 ) -> Optional[
     "WebServerHandle"
 ]:  # pragma: no cover - environment-dependent threaded fallback; exercised via start_webserver tests
@@ -3987,6 +4088,7 @@ def _start_admin_server_threaded(
             log_buffer=log_buffer,
             config_path=config_path,
             runtime_state=runtime_state,
+            plugins=plugins,
         )
     except (
         OSError
@@ -4089,6 +4191,7 @@ def start_webserver(
     log_buffer: Optional[RingBuffer] = None,
     config_path: str | None = None,
     runtime_state: RuntimeState | None = None,
+    plugins: list[object] | None = None,
 ) -> Optional[WebServerHandle]:
     """Start admin HTTP server, preferring uvicorn but falling back to threaded HTTP.
 
@@ -4119,6 +4222,43 @@ def start_webserver(
 
     foghorn_cfg = (config.get("foghorn") or {}) if isinstance(config, dict) else {}
     use_asyncio = bool(foghorn_cfg.get("use_asyncio", True))
+
+    # Helper: call the threaded fallback in a way that remains compatible with
+    # legacy tests that monkeypatch _start_admin_server_threaded() with a
+    # simplified signature. When the real implementation is present, we pass
+    # plugins/runtime_state so that threaded and uvicorn paths see the same
+    # plugin instances.
+    def _call_threaded(
+        *,
+        stats_obj: Optional[StatsCollector],
+        cfg_obj: Dict[str, Any],
+        buf_obj: Optional[RingBuffer],
+        cfg_path_obj: str | None,
+        rt_state: RuntimeState | None,
+        plugins_obj: list[object] | None,
+    ) -> Optional["WebServerHandle"]:
+        try:
+            import inspect as _inspect  # local import to avoid module-level cost
+
+            fn = _start_admin_server_threaded
+            sig = _inspect.signature(fn)
+            params = sig.parameters
+            kwargs: Dict[str, Any] = {}
+            if "config_path" in params:
+                kwargs["config_path"] = cfg_path_obj
+            if rt_state is not None and "runtime_state" in params:
+                kwargs["runtime_state"] = rt_state
+            if "plugins" in params:
+                kwargs["plugins"] = plugins_obj
+            return fn(stats_obj, cfg_obj, buf_obj, **kwargs)
+        except Exception:
+            # Best-effort fallback: use the original minimal calling convention.
+            return _start_admin_server_threaded(
+                stats_obj,
+                cfg_obj,
+                buf_obj,
+                config_path=cfg_path_obj,
+            )
 
     # Detect restricted environments where asyncio cannot create its self-pipe
     # and skip uvicorn entirely in that case, or when explicitly disabled via
@@ -4153,22 +4293,16 @@ def start_webserver(
             can_use_asyncio = use_asyncio
 
     if not can_use_asyncio:
-        if runtime_state is None:
-            return _start_admin_server_threaded(
-                stats,
-                config,
-                log_buffer,
-                config_path=config_path,
-            )
-
-        handle = _start_admin_server_threaded(
-            stats,
-            config,
-            log_buffer,
-            config_path=config_path,
-            runtime_state=runtime_state,
+        handle = _call_threaded(
+            stats_obj=stats,
+            cfg_obj=config,
+            buf_obj=log_buffer,
+            cfg_path_obj=config_path,
+            rt_state=runtime_state,
+            plugins_obj=plugins,
         )
-        runtime_state.set_listener("webserver", enabled=True, thread=handle)
+        if runtime_state is not None and handle is not None:
+            runtime_state.set_listener("webserver", enabled=True, thread=handle)
         return handle
 
     try:
@@ -4178,22 +4312,16 @@ def start_webserver(
             "webserver.enabled=true but uvicorn is not available: %s; using threaded fallback",
             exc,
         )
-        if runtime_state is None:
-            return _start_admin_server_threaded(
-                stats,
-                config,
-                log_buffer,
-                config_path=config_path,
-            )
-
-        handle = _start_admin_server_threaded(
-            stats,
-            config,
-            log_buffer,
-            config_path=config_path,
-            runtime_state=runtime_state,
+        handle = _call_threaded(
+            stats_obj=stats,
+            cfg_obj=config,
+            buf_obj=log_buffer,
+            cfg_path_obj=config_path,
+            rt_state=runtime_state,
+            plugins_obj=plugins,
         )
-        runtime_state.set_listener("webserver", enabled=True, thread=handle)
+        if runtime_state is not None and handle is not None:
+            runtime_state.set_listener("webserver", enabled=True, thread=handle)
         return handle
 
     host = str(web_cfg.get("host", "127.0.0.1"))
@@ -4214,6 +4342,7 @@ def start_webserver(
         log_buffer,
         config_path=config_path,
         runtime_state=runtime_state,
+        plugins=plugins,
     )
 
     config_uvicorn = uvicorn.Config(app, host=host, port=port, log_level="info")

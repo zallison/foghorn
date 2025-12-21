@@ -1012,6 +1012,7 @@ def main(argv: List[str] | None = None) -> int:
             log_buffer=web_log_buffer,
             config_path=cfg_path,
             runtime_state=runtime_state,
+            plugins=plugins,
         )
     except (
         Exception
