@@ -805,6 +805,103 @@ class DockerHosts(BasePlugin):
             self._aggregate_txt = new_txt
             self._ttl_txt = new_ttl_txt
 
+    def get_http_snapshot(self) -> Dict[str, object]:
+        """Brief: Summarize current DockerHosts mappings for the admin web UI.
+
+        Inputs:
+          - None (uses in-memory forward/reverse maps under a lock).
+
+        Outputs:
+          - dict with keys:
+              * summary: high-level counts and endpoint metadata.
+              * containers: list of per-name mappings including IPs and TXT lines.
+
+        Notes:
+          - This helper is intentionally read-only and JSON-safe so that it can
+            be exposed directly via the admin HTTP API without additional
+            transformation.
+        """
+
+        with self._lock:
+            containers: List[Dict[str, object]] = []
+            # Use the union of v4/v6 keys so names with only one family are included.
+            all_names = set(self._forward_v4.keys()) | set(self._forward_v6.keys())
+
+            def _is_sha1_like(label: str) -> bool:
+                """Return True for hash-like labels (12–64 hex characters).
+
+                Inputs:
+                  - label: Hostname or owner name; only the left-most label is
+                    inspected so "<hash>.example" still counts as hash-like.
+
+                Outputs:
+                  - bool: True when the first label looks like a short/long hash.
+
+                Notes:
+                  - This covers docker short IDs (12 hex), sha1-style names
+                    (40 hex), and longer hex-ish labels that may have been
+                    truncated when rendered in UIs.
+                """
+
+                token = str(label).split(".", 1)[0].lower().strip()
+                if not token:
+                    return False
+                # Treat any 12–64 character all-hex label as hash-like so
+                # truncated or extended hashes (e.g. HSTS pins) are pushed to
+                # the bottom of admin snapshots.
+                if len(token) < 12 or len(token) > 64:
+                    return False
+                for ch in token:
+                    if ch not in "0123456789abcdef":
+                        return False
+                return True
+
+            def _sort_key(name: str) -> tuple[int, str]:
+                # Regular, human-readable names (non-hash) should come first;
+                # sha1/short-hash style names are pushed to the bottom while still
+                # being sorted alphabetically within their group.
+                return (1 if _is_sha1_like(name) else 0, str(name))
+
+            for name in sorted(all_names, key=_sort_key):
+                v4_list = list(self._forward_v4.get(name, []))
+                v6_list = list(self._forward_v6.get(name, []))
+                txts = list(self._aggregate_txt.get(name, []))
+                ttl_v4 = int(self._ttl_v4.get(name, self._ttl))
+                ttl_v6 = int(self._ttl_v6.get(name, self._ttl))
+                containers.append(
+                    {
+                        "name": str(name),
+                        "ipv4": v4_list,
+                        "ipv6": v6_list,
+                        "ttl_v4": ttl_v4,
+                        "ttl_v6": ttl_v6,
+                        "txt": txts,
+                    }
+                )
+
+            # Summarize endpoint configuration for quick inspection.
+            endpoints_view: List[Dict[str, object]] = []
+            for ep in getattr(self, "_endpoints", []):
+                if not isinstance(ep, dict):
+                    continue
+                endpoints_view.append(
+                    {
+                        "url": str(ep.get("url", "")),
+                        "interval": float(ep.get("interval", 0.0) or 0.0),
+                        "host_ipv4": ep.get("host_ipv4"),
+                        "host_ipv6": ep.get("host_ipv6"),
+                        "suffix": ep.get("suffix"),
+                    }
+                )
+
+            summary: Dict[str, object] = {
+                "total_containers": len(containers),
+                "endpoints": endpoints_view,
+                "reload_interval": float(getattr(self, "_reload_interval", 0.0) or 0.0),
+            }
+
+        return {"summary": summary, "containers": containers}
+
     @staticmethod
     def _container_effective_health(container: Dict) -> str:
         """Brief: Determine the effective health/status string for a container.
