@@ -225,14 +225,46 @@ def main(argv: List[str] | None = None) -> int:
         return out
 
     # Get listeners configs
+    #
+    # Semantics:
+    #   - UDP remains enabled by default, even when listen.udp is omitted, to
+    #     preserve long-standing behaviour.
+    #   - For TCP/DoT/DoH, presence of a listener subsection implies that the
+    #     listener should be enabled by default unless an explicit
+    #     enabled: false override is provided. This makes configurations like
+    #
+    #         listen:
+    #           tcp:
+    #             host: 0.0.0.0
+    #             port: 5353
+    #
+    #     behave as expected without requiring an explicit enabled: true.
     udp_cfg = _sub(
         "udp", {"enabled": True, "host": default_host, "port": default_port or 5333}
     )
+
+    tcp_section = listen_cfg.get("tcp")
+    tcp_default_enabled = True if isinstance(tcp_section, dict) else False
     tcp_cfg = _sub(
-        "tcp", {"enabled": False, "host": default_host, "port": default_port or 5333}
+        "tcp",
+        {
+            "enabled": tcp_default_enabled,
+            "host": default_host,
+            "port": default_port or 5333,
+        },
     )
-    dot_cfg = _sub("dot", {"enabled": False, "host": default_host, "port": 853})
-    doh_cfg = _sub("doh", {"enabled": False, "host": default_host, "port": 1443})
+
+    dot_section = listen_cfg.get("dot")
+    dot_default_enabled = True if isinstance(dot_section, dict) else False
+    dot_cfg = _sub(
+        "dot", {"enabled": dot_default_enabled, "host": default_host, "port": 853}
+    )
+
+    doh_section = listen_cfg.get("doh")
+    doh_default_enabled = True if isinstance(doh_section, dict) else False
+    doh_cfg = _sub(
+        "doh", {"enabled": doh_default_enabled, "host": default_host, "port": 1443}
+    )
 
     # Seed readiness state with expected listeners. The thread/handle references
     # are filled in later once each listener is started.

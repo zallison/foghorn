@@ -269,6 +269,16 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         """
         # Pre-resolve plugin checks in priority order
         for p in sorted(self.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
+            # Skip plugins that do not target this qtype when they opt in via
+            # BasePlugin.target_qtypes.
+            try:
+                if hasattr(p, "targets_qtype") and not p.targets_qtype(qtype):
+                    continue
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                pass
+
             decision = p.pre_resolve(qname, qtype, data, ctx)
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":
@@ -473,6 +483,16 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
         # Post-resolve plugin hooks in priority order
         for p in sorted(self.plugins, key=lambda p: getattr(p, "post_priority", 50)):
+            # Skip plugins that do not target this qtype when they opt in via
+            # BasePlugin.target_qtypes.
+            try:
+                if hasattr(p, "targets_qtype") and not p.targets_qtype(qtype):
+                    continue
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                pass
+
             decision = p.post_resolve(qname, qtype, reply, ctx)
             if isinstance(decision, PluginDecision):
                 if decision.action == "deny":

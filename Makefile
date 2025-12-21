@@ -77,7 +77,7 @@ clean:
 docker: clean docker-build docker-run docker-logs
 
 .PHONY: docker-build
-docker-build: $(VENV)/bin/foghorn
+docker-build:
 	rsync -qr --exclude='*/__pycache__/*' --delete-during LICENSE.txt ./entrypoint.sh ./src ./html ./pyproject.toml ./Dockerfile ./docker-compose.yaml ./assets ./docs ./scripts docker-build/
 	docker build ./docker-build -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
@@ -89,7 +89,16 @@ docker-clean:
 .PHONY: docker-run
 docker-run: docker-build
 	docker rm -f foghorn
-	docker run --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ -d -p ${UDPPORT}:5333/udp -p ${TCPPORT}:5333/tcp -p ${ADMINPORT}:8053/tcp -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker run -d --privileged --net=host --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ \
+		 -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
+
+# Port forwarding
+.PHONY: docker-run-not-host
+docker-run-not-host: docker-build
+	docker rm -f foghorn
+	docker run -d --privileged --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ \
+		-p 5353:5353 -p ${UDPPORT}:5333/udp -p ${TCPPORT}:5333/tcp -p ${ADMINPORT}:8053/tcp \
+	 	-v /etc/hosts:/etc/hosts:ro --restart unless-stopped ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-logs
 docker-logs:

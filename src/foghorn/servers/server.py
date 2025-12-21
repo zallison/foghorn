@@ -537,6 +537,18 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
         for p in sorted(
             DNSUDPHandler.plugins, key=lambda p: getattr(p, "pre_priority", 50)
         ):
+            # Skip plugins that do not target this qtype when they opt in via
+            # BasePlugin.target_qtypes.
+            try:
+                if hasattr(p, "targets_qtype") and not p.targets_qtype(qtype):
+                    continue
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                # On failure, fall back to running the plugin to avoid hiding
+                # errors behind targeting decisions.
+                pass
+
             decision = p.pre_resolve(qname, qtype, data, ctx)
             if isinstance(decision, PluginDecision):
                 if decision.action == "drop":
@@ -1074,6 +1086,16 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
         for p in sorted(
             DNSUDPHandler.plugins, key=lambda p: getattr(p, "post_priority", 50)
         ):
+            # Skip plugins that do not target this qtype when they opt in via
+            # BasePlugin.target_qtypes.
+            try:
+                if hasattr(p, "targets_qtype") and not p.targets_qtype(qtype):
+                    continue
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                pass
+
             decision = p.post_resolve(qname, qtype, out, ctx2)
             if isinstance(decision, PluginDecision):
                 if decision.action == "drop":
