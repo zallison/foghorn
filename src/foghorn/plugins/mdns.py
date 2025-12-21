@@ -9,6 +9,24 @@ from typing import Dict, List, Optional, Set, Tuple
 from dnslib import A, AAAA, PTR, QTYPE, RR, SRV, TXT, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field, validator
 
+try:  # cachetools is an optional dependency; fall back to no-op cache when missing.
+    from cachetools import TTLCache, cached  # type: ignore[import]
+except Exception:  # pragma: no cover - defensive optional dependency handling
+
+    class TTLCache(dict):  # type: ignore[override]
+        def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - simple shim
+            """Lightweight TTLCache shim when cachetools is unavailable."""
+            super().__init__()
+
+    def cached(*, cache, **kwargs):  # type: ignore[no-redef]
+        """No-op cached decorator used when cachetools is unavailable."""
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+
 from foghorn.plugins.base import (
     BasePlugin,
     PluginContext,
@@ -17,6 +35,18 @@ from foghorn.plugins.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of PTR targets for which we will synthesize additional
+# host A/AAAA glue records. When a PTR response has more than this many
+# targets, the answer will contain only PTRs to avoid overly large
+# responses and surprising behavior.
+PTR_ADDITIONAL_HOST_LIMIT = 2
+
+# Short-lived caches for hot, pure-ish helper methods. These are strictly
+# internal to the plugin and do not affect resolver statistics semantics.
+_MDNS_NORMALIZE_OWNER_CACHE: TTLCache = TTLCache(maxsize=4096, ttl=30)
+_MDNS_MIRROR_SUFFIXES_CACHE: TTLCache = TTLCache(maxsize=4096, ttl=30)
+_MDNS_SANITIZE_QNAME_CACHE: TTLCache = TTLCache(maxsize=2048, ttl=30)
 
 
 class MdnsBridgeConfig(BaseModel):
@@ -47,9 +77,6 @@ class MdnsBridgeConfig(BaseModel):
 
     domain: str = Field(default=".local")
     ttl: int = Field(default=300, ge=0)
-    # Default to "default" rather than "all" to avoid attempting multicast
-    # operations on non-standard interfaces (VPN/tunnels/containers) which can
-    # yield EPERM on some systems.
     zeroconf_interfaces: object = Field(default="default")
     zeroconf_ip_version: Optional[str] = Field(default=None)
     zeroconf_unicast: bool = False
@@ -224,11 +251,32 @@ class MdnsBridgePlugin(BasePlugin):
         )
 
         # mDNS itself always uses `.local`, but we may *serve* the discovered data
-        # under a different DNS suffix.
+        # under one or more DNS suffixes.
         self._mdns_domain = ".local"
 
-        # domain is stored normalized as ".suffix" with no trailing dot.
+        # Primary DNS domain is stored normalized as ".suffix" with no trailing dot.
         self._dns_domain = str(self._config_model.domain or ".local")
+
+        # Optional: allow additional DNS domains via config key `domains`, which may
+        # be a string or list of strings. Each value is normalized to ".suffix".
+        dns_domains: Set[str] = {self._dns_domain}
+        extra_domains = getattr(self._config_model, "domains", None)
+        if isinstance(extra_domains, str):
+            extra_domains = [extra_domains]
+        if isinstance(extra_domains, (list, tuple, set)):
+            for dom in extra_domains:
+                s = str(dom or "").strip()
+                if not s:
+                    continue
+                if not s.startswith("."):
+                    s = "." + s
+                s = s.rstrip(".")
+                dns_domains.add(s)
+        self._dns_domains: Set[str] = dns_domains
+
+        # For safety, require an explicit opt-in before serving answers under
+        # `.local` as the DNS domain. This prevents accidental shadowing of the
+        # host's own mDNS namespace.
 
         # Records are stored keyed by *lowercased* owner name without trailing dot.
         self._ptr: Dict[str, Set[str]] = {}
@@ -346,7 +394,7 @@ class MdnsBridgePlugin(BasePlugin):
         # In that case, configure `service_types` to browse known types directly.
         try:
             browse_name = f"_services._dns-sd._udp{self._mdns_domain}."
-            log.info("MdnsBridgePlugin: starting ServiceBrowser for %s", browse_name)
+            log.debug("MdnsBridgePlugin: starting ServiceBrowser for %s", browse_name)
             self._browsers.append(
                 ServiceBrowser(
                     self._zc,
@@ -354,7 +402,7 @@ class MdnsBridgePlugin(BasePlugin):
                     handlers=[self._on_service_type_event],
                 )
             )
-            log.info("MdnsBridgePlugin: ServiceBrowser started")
+            log.debug("MdnsBridgePlugin: ServiceBrowser started")
         except PermissionError as exc:
             log.error(
                 "MdnsBridgePlugin: ServiceBrowser failed with EPERM while starting mDNS browsing",
@@ -389,6 +437,7 @@ class MdnsBridgePlugin(BasePlugin):
                     exc_info=True,
                 )
 
+    @cached(cache=_MDNS_NORMALIZE_OWNER_CACHE)
     def _normalize_owner(self, name: str) -> str:
         """Brief: Normalize a DNS owner name for internal dict keys.
 
@@ -425,62 +474,51 @@ class MdnsBridgePlugin(BasePlugin):
             return base[: -len(self._mdns_domain)] + self._dns_domain
         return base
 
+    @cached(cache=_MDNS_MIRROR_SUFFIXES_CACHE)
     def _mirror_suffixes(self, fqdn: str) -> List[str]:
-        """Brief: Return internal key variants for a name.
+        """Brief: Map an mDNS/DNS-SD name into the configured DNS domain(s).
 
         Inputs:
           - fqdn: FQDN (may or may not end with a trailing dot).
 
         Outputs:
-          - list[str]: One or more names (without trailing dot) suitable for use as
-            internal dict keys.
+          - list[str]: A single normalized name (without trailing dot) suitable
+            for use as an internal dict key and for answers under the configured
+            DNS suffix.
 
         Notes:
-          - mDNS discovery happens under `.local`.
-          - When serving discovered mDNS data under a configured DNS domain
-            (e.g., `.example`), we also serve the same records under the
-            canonical `.local` namespace.
-            So for mDNS names, this returns variants for:
-              - `.local`
-              - the configured dns domain (self._dns_domain)
+          - mDNS discovery always happens under `.local`, but this bridge only
+            *serves* records under the configured DNS domain (`self._dns_domain`).
+          - `.local` never appears in synthesized answers unless
+            `self._dns_domain` is explicitly configured as `.local`.
         """
 
         base = self._normalize_owner(fqdn)
 
-        dns_dom = str(getattr(self, "_dns_domain", ".local") or ".local").lower()
-        if not dns_dom.startswith("."):
-            dns_dom = "." + dns_dom
-        dns_dom = dns_dom.rstrip(".")
+        primary_dom = str(getattr(self, "_dns_domain", ".local") or ".local").lower()
+        if not primary_dom.startswith("."):
+            primary_dom = "." + primary_dom
+        primary_dom = primary_dom.rstrip(".")
 
-        def _add_unique(out: list[str], item: str) -> None:
-            if item in out:
-                return
-            out.append(item)
+        dns_doms = getattr(self, "_dns_domains", {primary_dom}) or {primary_dom}
+        dns_doms = {d.lower() for d in dns_doms}
 
-        local_base: str | None = None
-        input_is_dns = False
-
-        if base.endswith(".local"):
-            local_base = base
-        elif dns_dom != ".local" and base.endswith(dns_dom):
-            input_is_dns = True
-            local_base = base[: -len(dns_dom)] + ".local"
-
-        if local_base is not None:
-            dns_variant = local_base
-            if dns_dom != ".local":
-                dns_variant = local_base[: -len(".local")] + dns_dom
-
-            out: list[str] = []
-            if input_is_dns:
-                _add_unique(out, dns_variant)
-                _add_unique(out, local_base)
-            else:
-                _add_unique(out, local_base)
-                _add_unique(out, dns_variant)
-
+        if base.endswith(".local") and any(d != ".local" for d in dns_doms):
+            out: List[str] = []
+            for d in sorted(dns_doms):
+                if d == ".local":
+                    out.append(base)
+                else:
+                    out.append(base[: -len(".local")] + d)
             return out
 
+        # If the name is already using one of the configured DNS suffixes, keep it.
+        for d in dns_doms:
+            if d != ".local" and base.endswith(d):
+                return [base]
+
+        # For all other names (including when every configured domain is `.local`),
+        # return the normalized base unchanged.
         return [base]
 
     def _ptr_add(self, owner: str, target: str) -> None:
@@ -566,7 +604,7 @@ class MdnsBridgePlugin(BasePlugin):
         return f"{st_prefix}.{h}"
 
     def _index_ptrs_for_service_host(self, *, service_type: str, host: str) -> None:
-        """Brief: Maintain PTR indexes that map service types to hostnames.
+        """Brief: Maintain host-related PTR indexes for mDNS-discovered services.
 
         Inputs:
           - service_type: Service type name (e.g., `_spotify-connect._tcp.local.`).
@@ -576,13 +614,13 @@ class MdnsBridgePlugin(BasePlugin):
           - None.
 
         Behavior:
-          - PTR `<service_type>.<suffix>` -> `<host>.<suffix>`
-          - PTR `_hosts.<suffix>` -> `<host>.<suffix>`
+          - PTR `_mdns.<suffix>` -> `<host>.<suffix>`
           - PTR `_services.<suffix>` -> `<service_type>.<host>.<suffix>`
 
         Notes:
-          - This intentionally returns hostnames (not instance names) for PTR
-            queries on service types.
+          - Service type PTRs themselves are primarily mapped to synthetic
+            instance names; host mappings are exposed via `_mdns` and
+            `_services` helper namespaces.
         """
 
         st_norm = self._normalize_owner(service_type)
@@ -596,13 +634,9 @@ class MdnsBridgePlugin(BasePlugin):
         if not host_norm.endswith(".local"):
             return
 
-        # Ensure we index the canonical `.local` form and the configured DNS domain form.
-        # `_ptr_add()` uses `_mirror_suffixes()` to create both suffix variants.
-        self._ptr_add(st_norm, host_norm)
-        self._ptr_add("_hosts.local", host_norm)
-
         service_node = self._service_node_name(st_norm, host_norm)
         self._ptr_add("_services.local", service_node)
+        self._ptr_add("_services._dns-sd._udp.local", service_node)
 
     def _start_type_browser(self, service_type: str) -> None:
         """Brief: Start a ServiceBrowser for a specific mDNS service type.
@@ -629,15 +663,6 @@ class MdnsBridgePlugin(BasePlugin):
             return
         if not t.endswith("."):
             t = t + "."
-
-        # Browsing happens under `.local`.
-        tl = t.lower()
-        if tl.endswith(".mdns."):
-            log.warning(
-                "MdnsBridgePlugin: service_types should use .local; normalizing %s -> .local",
-                t,
-            )
-            t = t[: -len(".mdns.")] + ".local."
 
         key = self._normalize_owner(t)
         with self._lock:
@@ -794,9 +819,81 @@ class MdnsBridgePlugin(BasePlugin):
                 exc_info=True,
             )
 
-        self._ingest_service_info(info)
+        # Additionally, maintain a more traditional DNS-SD style index that maps
+        # service types to *instance* names using a DNS-safe, synthetic label
+        # derived from the instance name. This allows callers to follow the
+        # usual PTR -> SRV/TXT chain with names like
+        # "roku_ultra._airplay._tcp.zaa" instead of raw mDNS instance labels.
+        try:
+            safe_label = self._sanitize_qname(name)
+            st_norm = self._normalize_owner(service_type)
+            canonical_instance = f"{safe_label}.{st_norm}"
+            self._ptr_add(service_type, canonical_instance)
+        except Exception:
+            log.debug(
+                "MdnsBridgePlugin: failed to index PTR for service_type=%s instance=%s",
+                service_type,
+                name,
+                exc_info=True,
+            )
 
-    def _ingest_service_info(self, info) -> None:  # type: ignore[no-untyped-def]
+        self._ingest_service_info(info, canonical_instance_name=canonical_instance)
+
+    @cached(cache=_MDNS_SANITIZE_QNAME_CACHE)
+    def _sanitize_qname(self, name: str) -> str:
+        """Brief: Derive a DNS-safe, synthetic hostname from an mDNS instance.
+
+        Inputs:
+          - name: Raw instance name (e.g., "[LG] Living Room TV._airplay._tcp.local").
+
+        Outputs:
+          - str: Lowercased name derived from the instance label (portion before
+            the first dot) where any character outside ``[A-Za-z0-9]`` is
+            replaced with ``_``, and multiple consecutive ``_`` are collapsed to
+            a single ``_``. A leading ``_`` will naturally appear only when the
+            original first character is invalid.
+
+        Example:
+          - "[LG] Living Room TV._airplay._tcp.local" -> "_LG_LIVING_ROOM_TV".
+        """
+
+        try:
+            s = str(name).rstrip(".")
+        except Exception:
+            s = repr(name)
+
+        # Only consider the instance label, not the service type suffix.
+        label = s.split(".", 1)[0]
+
+        # Normalize to lower-case and replace invalid characters.
+        out_chars: list[str] = []
+        for ch in label.lower():
+            if "a" <= ch <= "z" or "0" <= ch <= "9":
+                out_chars.append(ch)
+            else:
+                out_chars.append("_")
+
+        # Collapse multiple underscores and trim leading/trailing ones.
+        collapsed: list[str] = []
+        prev_us = False
+        for ch in out_chars:
+            if ch == "_":
+                if prev_us:
+                    continue
+                prev_us = True
+                collapsed.append(ch)
+            else:
+                prev_us = False
+                collapsed.append(ch)
+
+        # Strip leading/trailing underscores; if the instance label was entirely
+        # invalid, fall back to a single underscore.
+        core = "".join(collapsed).strip("_")
+        if not core:
+            return "_"
+        return core
+
+    def _ingest_service_info(self, info, canonical_instance_name: Optional[str] = None) -> None:  # type: ignore[no-untyped-def]
         """Brief: Convert a zeroconf ServiceInfo into DNS RRset caches.
 
         Inputs:
@@ -811,7 +908,8 @@ class MdnsBridgePlugin(BasePlugin):
         """
 
         try:
-            instance_name = getattr(info, "name", None)
+            raw_instance_name = getattr(info, "name", None)
+            instance_name = canonical_instance_name or raw_instance_name
             server = getattr(info, "server", None)
             port = int(getattr(info, "port", 0) or 0)
             priority = int(getattr(info, "priority", 0) or 0)
@@ -889,6 +987,37 @@ class MdnsBridgePlugin(BasePlugin):
         with self._lock:
             host_variants = self._mirror_suffixes(server)
 
+            # Also synthesize a "friendly" host name derived from the instance
+            # label (e.g. `epson_wf_4830_series.zaa`) that shares the same
+            # addresses as the underlying mDNS host (e.g. `epson977fa9.zaa`).
+            friendly_hosts: Set[str] = set()
+            try:
+                safe_label = self._sanitize_qname(raw_instance_name or instance_name)
+                for hv in host_variants:
+                    parts = hv.split(".", 1)
+                    if len(parts) == 2 and parts[1]:
+                        friendly_hosts.add(f"{safe_label}.{parts[1]}")
+            except Exception:
+                friendly_hosts = set()
+
+            # Additionally, build "service-node" names of the form
+            # `<service>.<proto>.<host>.<suffix>` that correspond to the
+            # `_services` index entries (e.g. `_airplay._tcp.yj006n170656.zaa`).
+            # These will share TXT and A/AAAA with the underlying host so that a
+            # PTR answer from `_services` can be followed directly to useful
+            # metadata and addresses.
+            service_nodes: Set[str] = set()
+            try:
+                service_type = getattr(info, "type", None)
+                st_norm = self._normalize_owner(service_type or "")
+                host_norm = self._normalize_owner(server)
+                if st_norm.endswith(".local") and host_norm.endswith(".local"):
+                    service_node_local = self._service_node_name(st_norm, host_norm)
+                    for sn in self._mirror_suffixes(service_node_local):
+                        service_nodes.add(sn)
+            except Exception:
+                service_nodes = set()
+
             for inst in self._mirror_suffixes(instance_name):
                 # Pick an SRV target that matches the instance's suffix.
                 target_host = (
@@ -916,8 +1045,23 @@ class MdnsBridgePlugin(BasePlugin):
                 else:
                     self._txt.pop(inst, None)
 
-            # Host addresses for the SRV target.
-            for host in self._mirror_suffixes(server):
+            # Attach TXT (when present) to each service-node name as well so that
+            # callers following `_services` PTRs can read metadata directly.
+            if txt_values:
+                for sn in service_nodes:
+                    self._txt[sn] = list(txt_values)
+            else:
+                for sn in service_nodes:
+                    self._txt.pop(sn, None)
+
+            # Host addresses for the SRV target, plus any friendly hostnames
+            # derived from the instance label, plus the service-node labels
+            # used in `_services`.
+            all_hosts: Set[str] = set(self._mirror_suffixes(server))
+            all_hosts.update(friendly_hosts)
+            all_hosts.update(service_nodes)
+
+            for host in all_hosts:
                 if self._include_ipv4:
                     v4 = self._a.setdefault(host, set())
                     for ip in ips:
@@ -961,9 +1105,8 @@ class MdnsBridgePlugin(BasePlugin):
 
         name_norm = self._normalize_owner(qname)
 
-        # Serve both the canonical `.local` namespace and the configured DNS
-        # suffix (e.g. `.example`).
-        allowed_suffixes = {self._dns_domain, ".local"}
+        # Serve only the configured DNS suffix(es) (e.g. `.example`, `.mdns`, `.tld`).
+        allowed_suffixes = getattr(self, "_dns_domains", {self._dns_domain})
 
         if not any(name_norm.endswith(suf) for suf in allowed_suffixes):
             return None
@@ -982,12 +1125,117 @@ class MdnsBridgePlugin(BasePlugin):
         def _added_any() -> bool:
             return len(reply.rr) > 0
 
+        def _append_host_additionals(host_name: str) -> None:
+            """Brief: Add A/AAAA additionals for a given host when cached.
+
+            Inputs:
+              - host_name: Normalized owner name for the host (no trailing dot).
+
+            Outputs:
+              - None; conditionally appends A/AAAA RRs to `reply`.
+            """
+
+            if not host_name:
+                return
+            # Only append if the host is inside one of the configured suffixes; this
+            # avoids surprising cross-domain glue.
+            allowed_suffixes = getattr(self, "_dns_domains", {self._dns_domain})
+            if not any(host_name.endswith(suf) for suf in allowed_suffixes):
+                return
+
+            if self._include_ipv4:
+                ips4 = self._a.get(host_name)
+                if ips4:
+                    for ip in sorted(ips4):
+                        reply.add_answer(
+                            RR(
+                                rname=host_name + ".",
+                                rtype=QTYPE.A,
+                                rclass=1,
+                                ttl=self._ttl,
+                                rdata=A(ip),
+                            ),
+                        )
+
+            if self._include_ipv6:
+                ips6 = self._aaaa.get(host_name)
+                if ips6:
+                    for ip in sorted(ips6):
+                        reply.add_answer(
+                            RR(
+                                rname=host_name + ".",
+                                rtype=QTYPE.AAAA,
+                                rclass=1,
+                                ttl=self._ttl,
+                                rdata=AAAA(ip),
+                            ),
+                        )
+
+        def _service_node_host_name(owner: str) -> Optional[str]:
+            """Brief: Infer the underlying host name from a service-node owner.
+
+            Inputs:
+              - owner: Normalized owner name (no trailing dot).
+
+            Outputs:
+              - Optional[str]: Host owner name (no trailing dot) or None.
+            """
+
+            if not owner:
+                return None
+
+            allowed_suffixes = getattr(self, "_dns_domains", {self._dns_domain})
+            matched_suffix: Optional[str] = None
+            for suf in sorted(allowed_suffixes, key=len, reverse=True):
+                if owner.endswith(suf):
+                    matched_suffix = suf
+                    break
+
+            if not matched_suffix:
+                return None
+
+            base = owner[: -len(matched_suffix)]
+            if base.endswith("."):
+                base = base[:-1]
+
+            labels = base.split(".")
+            if (
+                len(labels) < 3
+                or not labels[0].startswith("_")
+                or labels[1] not in {"_tcp", "_udp"}
+            ):
+                return None
+
+            host_label = labels[2]
+            if not host_label:
+                return None
+
+            return f"{host_label}{matched_suffix}"
+
         with self._lock:
+            service_node_host = _service_node_host_name(name_norm)
             # PTR
             if qtype_int in {int(QTYPE.PTR), int(QTYPE.ANY)}:
-                targets = self._ptr.get(name_norm)
-                if targets:
-                    for t in sorted(targets):
+                ptr_targets = self._ptr.get(name_norm)
+                host_additionals: Set[str] = set()
+
+                # When querying a service type like `_app._proto.tld`, only return
+                # PTR targets that live under the *same* configured suffix as the
+                # owner (so `.zaa` does not return `.local` targets and vice versa).
+                owner_suffix: Optional[str] = None
+                allowed_suffixes = getattr(self, "_dns_domains", {self._dns_domain})
+                if ptr_targets:
+                    for suf in allowed_suffixes:
+                        if name_norm.endswith(suf):
+                            owner_suffix = suf
+                            break
+                    if owner_suffix:
+                        filtered = {t for t in ptr_targets if t.endswith(owner_suffix)}
+                        if filtered:
+                            ptr_targets = filtered
+
+                if ptr_targets:
+                    for t in sorted(ptr_targets):
                         reply.add_answer(
                             RR(
                                 rname=owner_wire,
@@ -995,8 +1243,58 @@ class MdnsBridgePlugin(BasePlugin):
                                 rclass=1,
                                 ttl=self._ttl,
                                 rdata=PTR(t + "."),
-                            )
+                            ),
                         )
+
+                    # Rule #2: when there are relatively few PTR targets, attempt to
+                    # infer the corresponding host(s) and include their A/AAAA as
+                    # additional records.
+                    if (
+                        0 < len(ptr_targets) <= PTR_ADDITIONAL_HOST_LIMIT
+                        and owner_suffix
+                    ):
+                        for target in ptr_targets:
+                            # If we have TXT for the PTR target (e.g. an instance
+                            # name like `roku_ultra._airplay._tcp.zaa`), include it
+                            # as an additional so a single PTR query can reveal
+                            # both the instance metadata and the host addresses.
+                            txts_for_target = self._txt.get(target)
+                            if txts_for_target:
+                                reply.add_answer(
+                                    RR(
+                                        rname=target + ".",
+                                        rtype=QTYPE.TXT,
+                                        rclass=1,
+                                        ttl=self._ttl,
+                                        rdata=TXT(list(txts_for_target)),
+                                    ),
+                                )
+
+                            # Patterns we understand for mapping PTR target ->
+                            # host name:
+                            #   - host._service._proto.<suffix>
+                            #   - host.<suffix>
+                            labels = target.split(".")
+                            if not target.endswith(owner_suffix):
+                                continue
+                            # Strip the matched suffix (and any dot before it) to
+                            # get the prefix labels.
+                            base = target[: -len(owner_suffix)]
+                            if base.endswith("."):
+                                base = base[:-1]
+                            if not base:
+                                continue
+                            labels = base.split(".")
+                            if len(labels) >= 2:
+                                # host._service._proto.<suffix> -> host.<suffix>
+                                host_label = labels[0]
+                                host_additionals.add(f"{host_label}{owner_suffix}")
+                            else:
+                                # host.<suffix>
+                                host_additionals.add(target)
+
+                for host_name in sorted(host_additionals):
+                    _append_host_additionals(host_name)
 
             # SRV
             if qtype_int in {int(QTYPE.SRV), int(QTYPE.ANY)}:
@@ -1014,7 +1312,7 @@ class MdnsBridgePlugin(BasePlugin):
                                 srv.port,
                                 srv.target,
                             ),
-                        )
+                        ),
                     )
 
             # TXT
@@ -1028,8 +1326,16 @@ class MdnsBridgePlugin(BasePlugin):
                             rclass=1,
                             ttl=self._ttl,
                             rdata=TXT(list(txts)),
-                        )
+                        ),
                     )
+
+                    # Rule #1: TXT on a service-node like
+                    # `<service>.<proto>.<host>.<suffix>`. When such a name is
+                    # queried, also include `host.<suffix>` A/AAAA as
+                    # additionals when present so callers can get addresses
+                    # alongside metadata.
+                    if service_node_host:
+                        _append_host_additionals(service_node_host)
 
             # A / AAAA
             if self._include_ipv4 and qtype_int in {int(QTYPE.A), int(QTYPE.ANY)}:
@@ -1045,6 +1351,48 @@ class MdnsBridgePlugin(BasePlugin):
                                 rdata=A(ip),
                             )
                         )
+                elif qtype_int == int(QTYPE.A):
+                    # Allow service-type A queries (e.g. `_http._tcp.example`) to
+                    # behave like PTR lookups when we have cached PTR data for the
+                    # same owner. This helps clients that mistakenly issue A
+                    # queries for `_service._proto` names discover available
+                    # instances.
+                    labels = name_norm.split(".")
+                    if (
+                        len(labels) >= 3
+                        and labels[0].startswith("_")
+                        and labels[1] in {"_tcp", "_udp"}
+                    ):
+                        ptr_targets = self._ptr.get(name_norm)
+                        if ptr_targets:
+                            for t in sorted(ptr_targets):
+                                reply.add_answer(
+                                    RR(
+                                        rname=owner_wire,
+                                        rtype=QTYPE.PTR,
+                                        rclass=1,
+                                        ttl=self._ttl,
+                                        rdata=PTR(t + "."),
+                                    ),
+                                )
+
+                if qtype_int == int(QTYPE.A) and service_node_host:
+                    # When querying A for a service-node name, also return TXT
+                    # for the service itself and the underlying host A/AAAA as
+                    # additionals so callers get both metadata and addresses
+                    # via a single lookup.
+                    txts_for_service = self._txt.get(name_norm)
+                    if txts_for_service:
+                        reply.add_answer(
+                            RR(
+                                rname=owner_wire,
+                                rtype=QTYPE.TXT,
+                                rclass=1,
+                                ttl=self._ttl,
+                                rdata=TXT(list(txts_for_service)),
+                            ),
+                        )
+                    _append_host_additionals(service_node_host)
 
             if self._include_ipv6 and qtype_int in {int(QTYPE.AAAA), int(QTYPE.ANY)}:
                 ips6 = self._aaaa.get(name_norm)
@@ -1059,6 +1407,26 @@ class MdnsBridgePlugin(BasePlugin):
                                 rdata=AAAA(ip),
                             )
                         )
+                elif qtype_int == int(QTYPE.AAAA):
+                    # Same behavior for AAAA queries to service-type names.
+                    labels = name_norm.split(".")
+                    if (
+                        len(labels) >= 3
+                        and labels[0].startswith("_")
+                        and labels[1] in {"_tcp", "_udp"}
+                    ):
+                        ptr_targets = self._ptr.get(name_norm)
+                        if ptr_targets:
+                            for t in sorted(ptr_targets):
+                                reply.add_answer(
+                                    RR(
+                                        rname=owner_wire,
+                                        rtype=QTYPE.PTR,
+                                        rclass=1,
+                                        ttl=self._ttl,
+                                        rdata=PTR(t + "."),
+                                    ),
+                                )
 
         if not _added_any():
             return None
