@@ -55,6 +55,9 @@
 		<button id="btn-tab-edit" class="fh-theme-btn" type="button" role="tab" aria-selected="false">
 			Advanced/Config
 		</button>
+		<button id="btn-tab-docker" class="fh-theme-btn" type="button" role="tab" aria-selected="false">
+			Docker Hosts
+		</button>
 	</div>
 	<main class="fh-main" id="page2">
 		<section class="fh-pane fh-pane-left">
@@ -119,6 +122,27 @@
 			</div>
 		</section>
 	</main>
+	<main class="fh-main fh-main-docker" id="page-docker">
+
+		<section class="fh-pane fh-pane-docker">
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title">Docker Hosts</h2>
+				<p class="fh-pane-help">Containers and hosts discovered by the DockerHosts plugin.</p>
+			</div>
+			<div id="docker-hosts-summary" class="fh-stats-groups"></div>
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title">Containers</h2>
+				<p class="fh-pane-help">Live snapshot from <code>/api/v1/plugins/docker/docker_hosts</code>.</p>
+			</div>
+			<div class="fh-docker-controls">
+				<label class="fh-toggle-hash">
+					<input type="checkbox" id="docker-show-hash" />
+					<span>Show hash-like hostnames (IDs / pins)</span>
+				</label>
+			</div>
+			<div id="docker-hosts-table" class="fh-stats-groups"></div>
+		</section>
+	</main>
 
 	<footer class="fh-footer">
 		Foghorn&copy; 2025, Zack Allison. GitHub:
@@ -140,6 +164,7 @@
 			var configViewContainer = document.getElementById('config-view-container');
 			var configEditContainer = document.getElementById('config-edit-container');
 			var msgEl = document.getElementById('config-messages');
+			var dockerShowHashEl = document.getElementById('docker-show-hash');
 			if (msgEl) {
 				msgEl.style.display = 'none';
 			}
@@ -158,8 +183,12 @@
 			var btnThemeLight = document.getElementById('btn-theme-light');
 			var page1 = document.getElementById('page1');
 			var page2 = document.getElementById('page2');
+			var pageDocker = document.getElementById('page-docker');
 			var btnTabStats = document.getElementById('btn-tab-stats');
 			var btnTabEdit = document.getElementById('btn-tab-edit');
+			var btnTabDocker = document.getElementById('btn-tab-docker');
+			// Effective instance name for the DockerHosts plugin as configured in config/config.yaml.
+			var DOCKER_HOSTS_PLUGIN_NAME = 'docker';
 
 			var currentSource = 'disk'; // 'disk' only
 			var lastDiskConfigObj = null;
@@ -1348,6 +1377,157 @@
 					});
 			}
 
+			function renderDockerHostsSummary(root, summary) {
+				if (!root) {
+					return;
+				}
+				root.textContent = '';
+				summary = summary || {};
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = 'Summary';
+				group.appendChild(heading);
+				var dl = document.createElement('dl');
+				dl.className = 'fh-kv-list';
+				function addRow(label, value) {
+					var dt = document.createElement('dt');
+					dt.textContent = label;
+					var dd = document.createElement('dd');
+					dd.textContent = value;
+					dl.appendChild(dt);
+					dl.appendChild(dd);
+				}
+				var total = summary.total_containers != null ? summary.total_containers : 0;
+				addRow('Containers', formatNumber(total));
+				var eps = Array.isArray(summary.endpoints) ? summary.endpoints.length : 0;
+				addRow('Endpoints', formatNumber(eps));
+				if (summary.reload_interval != null) {
+					addRow('Reload interval (s)', formatNumber(summary.reload_interval));
+				}
+				group.appendChild(dl);
+				root.appendChild(group);
+			}
+
+			function renderDockerHostsTable(root, containers) {
+				if (!root) {
+					return;
+				}
+				root.textContent = '';
+				containers = Array.isArray(containers) ? containers : [];
+				var showHash = dockerShowHashEl && dockerShowHashEl.checked;
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = 'Containers';
+				group.appendChild(heading);
+				if (!containers.length) {
+					var p = document.createElement('p');
+					p.className = 'fh-pane-help';
+					p.textContent = 'No containers discovered by DockerHosts.';
+					group.appendChild(p);
+					root.appendChild(group);
+					return;
+				}
+				var table = document.createElement('table');
+				table.className = 'fh-table fh-table-upstreams';
+				var thead = document.createElement('thead');
+				var hrow = document.createElement('tr');
+				['Name', 'IPv4', 'IPv6', 'TXT / Info'].forEach(function (label) {
+					var th = document.createElement('th');
+					th.textContent = label;
+					hrow.appendChild(th);
+				});
+				thead.appendChild(hrow);
+				table.appendChild(thead);
+				var tbody = document.createElement('tbody');
+				var MAX_NAME = 40;
+				var MAX_IP = 40;
+				var MAX_TXT = 80;
+				function truncateCell(td, full, max) {
+					var text = typeof full === 'string' ? full : String(full || '');
+					if (text.length > max) {
+						td.textContent = text.slice(0, max - 1) + '\u2026';
+						td.title = text;
+					} else {
+						td.textContent = text;
+					}
+				}
+				containers.forEach(function (c) {
+					if (!c || typeof c !== 'object') {
+						return;
+					}
+					// Hide hash-like hostnames when the toggle is off. We rely on
+					// the backend to sort hash-style names to the bottom already; the
+					// toggle simply filters them out of the visible table by default.
+					if (!showHash && typeof c.name === 'string') {
+						var token = c.name.split('.')[0].toLowerCase().trim();
+						if (token && token.length >= 12 && token.length <= 64) {
+							var allHex = true;
+							for (var i = 0; i < token.length; i++) {
+								var ch = token.charAt(i);
+								if ('0123456789abcdef'.indexOf(ch) === -1) {
+									allHex = false;
+									break;
+								}
+							}
+							if (allHex) {
+								return;
+							}
+						}
+					}
+					var tr = document.createElement('tr');
+					var tdName = document.createElement('td');
+					truncateCell(tdName, c.name || '', MAX_NAME);
+					var tdV4 = document.createElement('td');
+					var fullV4 = Array.isArray(c.ipv4) ? c.ipv4.join(', ') : '';
+					truncateCell(tdV4, fullV4, MAX_IP);
+					var tdV6 = document.createElement('td');
+					var fullV6 = Array.isArray(c.ipv6) ? c.ipv6.join(', ') : '';
+					truncateCell(tdV6, fullV6, MAX_IP);
+					var tdTxt = document.createElement('td');
+					var txts = Array.isArray(c.txt) ? c.txt : [];
+					var fullTxt = txts.join(' | ');
+					truncateCell(tdTxt, fullTxt, MAX_TXT);
+					tr.appendChild(tdName);
+					tr.appendChild(tdV4);
+					tr.appendChild(tdV6);
+					tr.appendChild(tdTxt);
+					tbody.appendChild(tr);
+				});
+				table.appendChild(tbody);
+				group.appendChild(table);
+				root.appendChild(group);
+			}
+
+			function loadDockerHosts() {
+				var summaryEl = document.getElementById('docker-hosts-summary');
+				var tableEl = document.getElementById('docker-hosts-table');
+				if (!summaryEl || !tableEl) {
+					return;
+				}
+				summaryEl.textContent = '';
+				tableEl.textContent = '';
+				var url = '/api/v1/plugins/' + encodeURIComponent(DOCKER_HOSTS_PLUGIN_NAME) + '/docker_hosts';
+				fetchJson(url)
+					.then(function (payload) {
+						var data = payload && payload.data ? payload.data : {};
+						renderDockerHostsSummary(summaryEl, data.summary || {});
+						renderDockerHostsTable(tableEl, data.containers || []);
+					})
+					.catch(function (err) {
+						var group = document.createElement('section');
+						group.className = 'fh-stats-group';
+						var pre = document.createElement('pre');
+						pre.className = 'fh-pre fh-pre-compact';
+						pre.textContent = 'Failed to load DockerHosts data: ' + err.message;
+						group.appendChild(pre);
+						tableEl.appendChild(group);
+					});
+			}
+
 			function loadDiskConfig(raw) {
 				if (raw === undefined) {
 					raw = 0;
@@ -1508,26 +1688,101 @@
 				}
 			}
 
+			function detectDockerTabVisibility() {
+				if (!btnTabDocker && !pageDocker) {
+					return;
+				}
+				fetchJson('/api/v1/config.json')
+					.then(function (payload) {
+						var cfg = payload && payload.config ? payload.config : payload;
+						if (!cfg || typeof cfg !== 'object') {
+							return;
+						}
+						var plugins = cfg.plugins;
+						if (!Array.isArray(plugins)) {
+							return;
+						}
+						var show = plugins.some(function (spec) {
+							if (!spec || typeof spec !== 'object') {
+								return false;
+							}
+							var moduleName = String(spec.module || '').toLowerCase();
+							if (!moduleName) {
+								return false;
+							}
+							// Support both full and short module forms.
+							if (
+								moduleName !== 'docker-hosts' &&
+								moduleName !== 'foghorn.plugins.docker-hosts'
+							) {
+								return false;
+							}
+							var specEnabled = spec.enabled;
+							var cfgEnabled = spec.config && spec.config.enabled;
+							var enabled = true;
+							if (specEnabled !== undefined && specEnabled !== null) {
+								enabled = Boolean(specEnabled);
+							}
+							if (cfgEnabled !== undefined && cfgEnabled !== null) {
+								enabled = Boolean(cfgEnabled);
+							}
+							return enabled;
+						});
+						if (!show) {
+							if (btnTabDocker) {
+								btnTabDocker.style.display = 'none';
+							}
+							if (pageDocker) {
+								pageDocker.style.display = 'none';
+							}
+						}
+					})
+					.catch(function () {
+						// On failure, leave Docker tab visible; other parts of the UI still work.
+					});
+			}
+
 			function applyTab(tab) {
 				var isStats = tab === 'stats';
+				var isEdit = tab === 'edit';
+				var isDocker = tab === 'docker';
+
 				if (page1) {
 					// When Stats is selected, page1 should be hidden and page2 shown.
-					page1.style.display = isStats ? 'none' : '';
+					page1.style.display = isStats ? 'none' : (isEdit ? '' : 'none');
 				}
 				if (page2) {
 					page2.style.display = isStats ? '' : 'none';
 				}
-				if (btnTabStats && btnTabEdit) {
+				if (pageDocker) {
+					pageDocker.style.display = isDocker ? '' : 'none';
+				}
+
+				if (btnTabStats) {
 					if (isStats) {
 						btnTabStats.classList.add('fh-theme-btn-active');
 						btnTabStats.setAttribute('aria-selected', 'true');
-						btnTabEdit.classList.remove('fh-theme-btn-active');
-						btnTabEdit.setAttribute('aria-selected', 'false');
 					} else {
-						btnTabEdit.classList.add('fh-theme-btn-active');
-						btnTabEdit.setAttribute('aria-selected', 'true');
 						btnTabStats.classList.remove('fh-theme-btn-active');
 						btnTabStats.setAttribute('aria-selected', 'false');
+					}
+				}
+				if (btnTabEdit) {
+					if (isEdit) {
+						btnTabEdit.classList.add('fh-theme-btn-active');
+						btnTabEdit.setAttribute('aria-selected', 'true');
+					} else {
+						btnTabEdit.classList.remove('fh-theme-btn-active');
+						btnTabEdit.setAttribute('aria-selected', 'false');
+					}
+				}
+				if (btnTabDocker) {
+					if (isDocker) {
+						btnTabDocker.classList.add('fh-theme-btn-active');
+						btnTabDocker.setAttribute('aria-selected', 'true');
+					} else {
+						btnTabDocker.classList.remove('fh-theme-btn-active');
+						btnTabDocker.setAttribute('aria-selected', 'false');
 					}
 				}
 			}
@@ -1569,14 +1824,34 @@
 					applyTab('edit');
 				});
 			}
+			if (btnTabDocker) {
+				btnTabDocker.addEventListener('click', function () {
+					applyTab('docker');
+					loadDockerHosts();
+				});
+			}
+			if (dockerShowHashEl) {
+				dockerShowHashEl.checked = false;
+				dockerShowHashEl.addEventListener('change', function () {
+					// Re-render the current snapshot when the toggle changes.
+					var tableEl = document.getElementById('docker-hosts-table');
+					if (!tableEl || !tableEl.firstChild) {
+						// No data yet; next loadDockerHosts() will respect the flag.
+						return;
+					}
+					// Easiest is to refetch; snapshot is cheap compared to Docker reload.
+					loadDockerHosts();
+				});
+			}
 
 			// Initial load
 			var initialTheme = root.getAttribute('data-theme') || 'dark';
 			applyTheme(initialTheme);
 			applyTab('stats');
 			loadStats();
-				setInterval(loadStats, 15000);
-				refreshDiskConfigView();
+			detectDockerTabVisibility();
+			setInterval(loadStats, 15000);
+			refreshDiskConfigView();
 			})();
 		</script>
 </body>
