@@ -71,36 +71,27 @@ class ZoneRecords(BasePlugin):
 
     def setup(self) -> None:
         """
-                Brief: Initialize the plugin, load record mappings, and configure watchers.
+        Brief: Initialize the plugin, load record mappings, and configure watchers.
 
-                Inputs:
-                  - file_path (str, optional): Single records file path (legacy, preserved)
-                  - file_paths (list[str], optional): List of records file paths
-                    to load and merge in order (later overrides earlier)
-        atchdog_enabled (bool, optional): When True (default), start a
-                    watchdog-based observer to reload files automatically on change.
-                    The legacy option inotify_enabled is still accepted as an alias.
-                  - watchdog_poll_interval_seconds (float, optional): When greater than
-                    zero, enable a stat-based polling loop to detect changes even when
-                    filesystem events are not delivered (for example in some container
-                    or read-only bind-mount setups).
+        Inputs:
+          - file_paths (list[str], optional): List of records file paths
+            to load and merge in order (later overrides earlier).
+          - watchdog_enabled (bool, optional): When True (default), start a
+            watchdog-based observer to reload files automatically on change.
+          - watchdog_poll_interval_seconds (float, optional): When greater than
+            zero, enable a stat-based polling loop to detect changes even when
+            filesystem events are not delivered (for example in some container
+            or read-only bind-mount setups).
 
-                Outputs:
-                  - None
+        Outputs:
+          - None
 
-                Example:
-                  Legacy single file:
-                    CustomRecords(file_path="/custom/records")
-
-                  Multiple files (preferred):
-                    CustomRecords(file_paths=["/foghorn/conf/var/records.txt", "/etc/records.d/extra.txt"], watchdog_enabled=True)
+        Example:
+          Multiple files:
+            ZoneRecords(file_paths=["/foghorn/conf/var/records.txt", "/etc/records.d/extra.txt"], watchdog_enabled=True)
         """
 
         # Normalize configuration into a list of paths.
-        if "file_path" in self.config:
-            raise ValueError(
-                "ZoneRecords config must use 'file_paths' (list) instead of legacy 'file_path'"
-            )
         provided = self.config.get("file_paths")
         self.file_paths: List[str] = self._normalize_paths(provided, None)
 
