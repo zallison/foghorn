@@ -1452,9 +1452,16 @@ class DNSServer:
             DNSUDPHandler.edns_udp_payload = max(512, int(edns_udp_payload))
         except Exception:
             DNSUDPHandler.edns_udp_payload = 1232
-        self.server = socketserver.ThreadingUDPServer(
-            (host, port), DNSUDPHandler
-        )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        try:
+            self.server = socketserver.ThreadingUDPServer((host, port), DNSUDPHandler)
+        except PermissionError as e:
+            logger.error(
+                "Permission denied when binding to %s:%d. Try a port >1024 or run with elevated privileges. Original error: %s",
+                host,
+                port,
+                e,
+            )
+            raise  # Re-raise the exception after logging
 
         # Ensure request handler threads do not block shutdown
         self.server.daemon_threads = True  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
