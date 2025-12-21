@@ -523,12 +523,19 @@ def _expected_listeners_from_config(config: Dict[str, Any] | None) -> Dict[str, 
             return bool(default)
         return bool(sub.get("enabled", default))
 
+    web_cfg = _get_web_cfg(cfg)
+    # If a webserver block exists, treat it as enabled by default unless
+    # explicitly disabled with enabled: false.
+    has_web_cfg = bool(web_cfg)
+    raw_web_enabled = web_cfg.get("enabled") if isinstance(web_cfg, dict) else None
+    web_enabled = bool(raw_web_enabled) if raw_web_enabled is not None else has_web_cfg
+
     return {
         "udp": _enabled("udp", True),
         "tcp": _enabled("tcp", False),
         "dot": _enabled("dot", False),
         "doh": _enabled("doh", False),
-        "webserver": bool((_get_web_cfg(cfg)).get("enabled", False)),
+        "webserver": web_enabled,
     }
 
 
@@ -4100,7 +4107,14 @@ def start_webserver(
     """
 
     web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
-    if not web_cfg.get("enabled"):
+
+    # Treat presence of a webserver block as enabled by default so that
+    # configurations that declare webserver: {} behave as "on" unless
+    # explicitly disabled with enabled: false.
+    has_web_cfg = bool(web_cfg)
+    raw_enabled = web_cfg.get("enabled") if isinstance(web_cfg, dict) else None
+    enabled = bool(raw_enabled) if raw_enabled is not None else has_web_cfg
+    if not enabled:
         return None
 
     foghorn_cfg = (config.get("foghorn") or {}) if isinstance(config, dict) else {}

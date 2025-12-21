@@ -530,14 +530,19 @@ def main(argv: List[str] | None = None) -> int:
 
     # Initialize webserver log buffer (shared with admin HTTP API)
     web_cfg = cfg.get("webserver", {}) or {}
-    if web_cfg.get("enabled", False):
+    # If a webserver block exists, default enabled to True unless explicitly
+    # disabled with enabled: false. This mirrors the listener expectations and
+    # start_webserver() behaviour.
+    has_web_cfg = bool(web_cfg)
+    raw_web_enabled = web_cfg.get("enabled") if isinstance(web_cfg, dict) else None
+    web_enabled = bool(raw_web_enabled) if raw_web_enabled is not None else has_web_cfg
+
+    if web_enabled:
         buffer_size = int((web_cfg.get("logs") or {}).get("buffer_size", 500))
         web_log_buffer = RingBuffer(capacity=buffer_size)
 
     # Seed webserver readiness expectation.
-    runtime_state.set_listener(
-        "webserver", enabled=bool(web_cfg.get("enabled", False)), thread=None
-    )
+    runtime_state.set_listener("webserver", enabled=web_enabled, thread=None)
 
     # --- Coordinated shutdown state ---
     # shutdown_event is set when a termination-like signal (KeyboardInterrupt,
@@ -1014,13 +1019,13 @@ def main(argv: List[str] | None = None) -> int:
         logger.error("Failed to start webserver: %s", e)
         return 1
 
-    if bool(web_cfg.get("enabled", False)) and web_handle is None:
+    if web_enabled and web_handle is None:
         runtime_state.set_listener_error("webserver", "start_webserver returned None")
         logger.error("Fatal: webserver.enabled=true but start_webserver returned None")
         return 1
 
     if web_handle is not None:
-        runtime_state.set_listener("webserver", enabled=True, thread=web_handle)
+        runtime_state.set_listener("webserver", enabled=web_enabled, thread=web_handle)
 
     runtime_state.mark_startup_complete()
     logger.info("Startup Completed")
