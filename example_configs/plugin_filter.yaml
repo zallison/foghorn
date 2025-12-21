@@ -75,9 +75,9 @@ plugins:
 
       # File-based lists (one domain per line; lines beginning with # are comments).
       # Uncomment to enable:
-      # blocklist_files:
+      # blocked_domains_files:
       #   - example_configs/lists/blocklist.txt
-      # allowlist_files:
+      # allowed_domains_files:
       #   - example_configs/lists/allowlist.txt
 
       # Notes:
