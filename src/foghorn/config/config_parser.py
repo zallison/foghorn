@@ -343,10 +343,14 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
       - When both explicit priority keys and `priority` are present, explicit
         keys win.
       - `Comment` is rejected; use `comment`.
+      - Each plugin instance must have a unique name. When a config entry omits
+        `name`, the module text is used as the instance name for consistency
+        with logging and HTTP routing.
     """
 
     alias_registry = discover_plugins()
     plugins: List[BasePlugin] = []
+    seen_names: set[str] = set()
 
     for spec in plugin_specs or []:
         module_path: Optional[str]
@@ -386,6 +390,24 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
 
         if not module_path:
             continue
+
+        # Determine effective instance name used for logging, statistics, and
+        # HTTP routing. When name is omitted, fall back to the module text.
+        effective_name_obj: object = (
+            plugin_name if plugin_name is not None else module_path
+        )
+        effective_name = str(effective_name_obj or "").strip()
+        if not effective_name:
+            raise ValueError(
+                "plugins[]: each entry must have a non-empty module or name"
+            )
+
+        if effective_name in seen_names:
+            raise ValueError(
+                "Duplicate plugin name '%s'. Each plugin must have a unique name; "
+                "set 'name' explicitly in plugins[] to disambiguate." % effective_name
+            )
+        seen_names.add(effective_name)
 
         cfg_enabled = raw_config.get("enabled")
         if "Comment" in raw_config:
@@ -463,10 +485,9 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         if setup_priority is not None:
             validated_config["setup_priority"] = setup_priority
 
-        if plugin_name is not None:
-            plugin = plugin_cls(name=str(plugin_name), **validated_config)
-        else:
-            plugin = plugin_cls(**validated_config)
+        # Always pass the effective instance name into the plugin constructor so
+        # BasePlugin.name is stable and unique, even when config omits name.
+        plugin = plugin_cls(name=effective_name, **validated_config)
         plugins.append(plugin)
 
     return plugins
