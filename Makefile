@@ -4,6 +4,7 @@ PREFIX ?= ${USER}
 CONTAINER_NAME ?= foghorn
 CONTAINER_DATA ?= ./.docker
 TAG ?= latest
+LISTEN ?= 0.0.0.0
 # Default ports
 ADMINPORT ?= 8053
 UDPPORT ?= 53
@@ -22,7 +23,7 @@ IGNORE_EXTS :=  .yaml .yml
 run: $(VENV)/bin/foghorn
 	. ${VENV}/bin/activate
 	mkdir var 2>/dev/null || true
-	${VENV}/bin/foghorn --config config/config.yaml
+	LISTEN=${LISTEN} ${VENV}/bin/foghorn --config config/config.yaml
 
 
 # ------------------------------------------------------------
