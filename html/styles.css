@@ -162,6 +162,32 @@ body {
     gap: 1.5rem;
 }
 
+/* Docker Hosts page: force a single full-width column */
+.fh-main-docker {
+    flex-direction: column;
+}
+
+.fh-pane-docker {
+    flex: 0 0 100%;
+    width: 100%;
+}
+
+.fh-docker-controls {
+    margin: 0 0 0.5rem 0;
+}
+
+.fh-toggle-hash {
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.fh-toggle-hash input[type='checkbox'] {
+    accent-color: var(--accent);
+}
+
 .fh-pane {
     flex: 1 1 0;
     min-width: 0;
@@ -239,8 +265,10 @@ table {
     font-size: 0.85rem;
 }
 
+.fh-table th,
 .fh-table td {
     padding: 0.15rem 0.25rem;
+    text-align: left;
 }
 
 /* Upstreams tables: match System section fonts and split integer/decimal columns */
