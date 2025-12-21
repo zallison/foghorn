@@ -102,7 +102,7 @@
 					<button id="btn-save" class="fh-btn fh-btn-primary" type="button">Save</button>
 				</div>
 			</div>
-			<div class="fh-warning" id="config-warning" style="display:hidden;">
+			<div class="fh-warning" id="config-warning">
 				<strong>Warning:</strong> Saving will overwrite <code>config.yaml</code>, then after a brief
 				delay send SIGHUP to the main process. Changes take effect after the server restarts;
 				SIGUSR1/SIGUSR2 only notify plugins and may reset statistics when configured.
@@ -464,15 +464,78 @@
 						return b.numeric - a.numeric;
 					});
 				} else {
-					entries.sort(function (a, b) {
-						if (a.key < b.key) return -1;
-						if (a.key > b.key) return 1;
-						return 0;
-					});
+					// For Meta, use a fixed display order for key fields and fall back
+					// to alphabetical ordering for any remaining keys.
+					if (title === 'Meta') {
+						// Meta ordering: host (combined row) is injected above via
+						// mapping.hostname/version/ip. Within the Meta group we want
+						// ip, created_at, uptime, domains, clients, with any other
+						// keys alphabetically in the middle.
+						var headOrder = ['ip', 'created_at'];
+						var tailOrder = ['uptime', 'domains', 'clients'];
+						entries.sort(function (a, b) {
+							var aHead = headOrder.indexOf(a.key);
+							var bHead = headOrder.indexOf(b.key);
+							var aTail = tailOrder.indexOf(a.key);
+							var bTail = tailOrder.indexOf(b.key);
+							// Head keys (hostname, version, ip) always first in fixed order.
+							if (aHead !== -1 || bHead !== -1) {
+								if (aHead === -1) return 1;
+								if (bHead === -1) return -1;
+								return aHead - bHead;
+							}
+							// Tail keys (domains, clients, uptime) always last in fixed order.
+							if (aTail !== -1 || bTail !== -1) {
+								if (aTail === -1) return -1;
+								if (bTail === -1) return 1;
+								return aTail - bTail;
+							}
+							// All other keys go in the middle, sorted alphabetically.
+							if (a.key < b.key) return -1;
+							if (a.key > b.key) return 1;
+							return 0;
+						});
+					} else {
+						entries.sort(function (a, b) {
+							if (a.key < b.key) return -1;
+							if (a.key > b.key) return 1;
+							return 0;
+						});
+					}
+				}
+
+				if (title === 'Meta') {
+					var host = mapping.hostname != null ? String(mapping.hostname) : '';
+					var ver = mapping.version != null ? String(mapping.version) : '';
+					var ip = mapping.ip != null ? String(mapping.ip) : '';
+					if (host || ver) {
+						var dtCombined = document.createElement('dt');
+						dtCombined.textContent = 'host';
+						var ddCombined = document.createElement('dd');
+						var text = '';
+						if (host) {
+							text += host;
+						}
+						if (ver) {
+							if (text) {
+								text += ' ';
+							}
+							text += 'v' + ver;
+						}
+						ddCombined.textContent = text;
+						dl.appendChild(dtCombined);
+						dl.appendChild(ddCombined);
+					}
 				}
 
 				entries.forEach(function (entry) {
 					var key = entry.key;
+					// Skip individual hostname/version keys in Meta now that we
+					// render them as a single combined "host" row. Keep ip as its
+					// own row directly beneath.
+					if (title === 'Meta' && (key === 'hostname' || key === 'version')) {
+						return;
+					}
 					var dt = document.createElement('dt');
 					dt.textContent = key;
 					if (Object.prototype.hasOwnProperty.call(STATS_TOOLTIPS, key)) {
@@ -1031,7 +1094,10 @@
 				if (!items || !Array.isArray(items) || !items.length) {
 					return;
 				}
-				var target = statsGroupsEl || statsGroupsRightEl;
+				var container = statsGroupsEl || statsGroupsRightEl;
+				if (!container) {
+					return;
+				}
 				var group = document.createElement('section');
 				group.className = 'fh-stats-group';
 
@@ -1053,6 +1119,7 @@
 				['Upstream', 'State', 'Failures', 'Backoff (s)'].forEach(function (label) {
 					var th = document.createElement('th');
 					th.textContent = label;
+					th.style.textAlign = 'left';
 					headRow.appendChild(th);
 				});
 				thead.appendChild(headRow);
@@ -1093,7 +1160,29 @@
 
 				table.appendChild(tbody);
 				group.appendChild(table);
-				target.appendChild(group);
+
+				// Try to insert directly after the "Upstreams" block when present so
+				// that health details visually follow aggregate upstream stats.
+				var anchor = null;
+				var sections = container.querySelectorAll('.fh-stats-group');
+				sections.forEach(function (sec) {
+					if (anchor !== null) {
+						return;
+					}
+					var h = sec.querySelector('h3');
+					if (h && h.textContent === 'Upstreams') {
+						anchor = sec;
+					}
+				});
+				if (anchor && anchor.parentNode === container) {
+					if (anchor.nextSibling) {
+						container.insertBefore(group, anchor.nextSibling);
+					} else {
+						container.appendChild(group);
+					}
+				} else {
+					container.appendChild(group);
+				}
 			}
 
 			function renderStats(data) {
@@ -1120,10 +1209,15 @@
 					return;
 				}
 
-				var createdFormatted =
-					data.created_at !== undefined && data.created_at !== null
-						? formatTimestamp(data.created_at)
-						: null;
+				// Prefer a created_at field from meta when present, falling back to
+				// a top-level created_at. Always format as "YYYY-MM-DD HH:MM:SS".
+				var rawCreatedAt = null;
+				if (data.meta && typeof data.meta === 'object' && data.meta.created_at != null) {
+					rawCreatedAt = data.meta.created_at;
+				} else if (data.created_at != null) {
+					rawCreatedAt = data.created_at;
+				}
+				var createdFormatted = rawCreatedAt != null ? formatTimestamp(rawCreatedAt) : null;
 
 				var meta = {};
 				if (data.meta && typeof data.meta === 'object') {
@@ -1137,9 +1231,38 @@
 					}
 				}
 
-				if (Object.keys(meta).length) {
-					appendDictGroup('Meta', meta);
+				// Ensure unique client/domain counts live in Meta, not Totals.
+				if (data.uniques && typeof data.uniques === 'object') {
+					if (data.uniques.clients != null && meta.clients == null) {
+						meta.clients = data.uniques.clients;
+					}
+					if (data.uniques.domains != null && meta.domains == null) {
+						meta.domains = data.uniques.domains;
+					}
 				}
+
+				if (Object.keys(meta).length) {
+					// Rebuild meta mapping so that clients/domains appear last in the
+					// Meta box for readability.
+					var metaForDisplay = {};
+					Object.keys(meta).forEach(function (key) {
+						if (key === 'clients' || key === 'domains') {
+							return;
+						}
+						metaForDisplay[key] = meta[key];
+					});
+					if (meta.clients != null) {
+						metaForDisplay.clients = meta.clients;
+					}
+					if (meta.domains != null) {
+						metaForDisplay.domains = meta.domains;
+					}
+					appendDictGroup('Meta', metaForDisplay);
+				}
+
+				// Show per-process stats immediately after Meta so they stay visually
+				// grouped near core host details.
+				appendProcessGroup(data.system);
 
 				// For Totals, hide certain internal-pre cache counters from the UI and
 				// peel off DNSSEC-specific counters into their own mapping.
@@ -1162,6 +1285,8 @@
 					});
 				}
 
+				// Surface unique client/domain counts only via Meta; Totals intentionally
+				// omits clients/domains so they are not duplicated.
 				appendDictGroup('Totals', totalsForDisplay);
 
 				// Prefer a dedicated dnssec object from the API when present; fall
@@ -1175,10 +1300,6 @@
 				if (dnssecMapping && Object.keys(dnssecMapping).length) {
 					appendDictGroup('DNSSEC', dnssecMapping);
 				}
-
-				// Show per-process stats immediately after Totals/DNSSEC so they stay
-				// visually grouped near core counters.
-				appendProcessGroup(data.system);
 
 				appendUpstreamsGroup(data.upstreams || {}, data.upstream_rcodes || {});
 				appendDictGroup('Query types', data.qtypes || {});
