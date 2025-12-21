@@ -354,7 +354,7 @@ def test_load_records_qtype_unknown_raises(monkeypatch, tmp_path: pathlib.Path) 
     monkeypatch.setattr(mod, "QTYPE", DummyQType())
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_path=str(records_file))
+    plugin = ZoneRecords(file_paths=[str(records_file)])
     with pytest.raises(ValueError):
         plugin.setup()
 
