@@ -200,6 +200,10 @@ class MdnsBridgePlugin(BasePlugin):
         services under the configured mDNS domain.
 
     Notes:
+      - mDNS discovery only works on the local L2 network segment. When running
+        Foghorn inside Docker, the container must share the host network (for
+        example, using `--net=host`) or the mDNS browser will not see any
+        services.
       - This plugin is intentionally best-effort: when a query is not known it
         returns None to allow normal upstream resolution.
     """

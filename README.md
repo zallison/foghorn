@@ -56,6 +56,7 @@ Release includes **55 commits** from `v0.4.6` (2025-12-07) to `v0.4.7` (2025-12-
 
 ### Plugins
 - **MdnsBridgePlugin**: bridges zeroconf/mDNS into standard DNS answering (PTR/SRV/TXT/A/AAAA), with example config added.
+  - **Networking requirement:** mDNS only works on the local L2 network. When running Foghorn in Docker and using this plugin, the container **must** use host networking (for example, `--net=host`); bridged Docker networks will not see mDNS traffic.
 - **DnsPrefetchPlugin**: background worker that prefetches hot domains (based on stats) to keep cache entries warm.
 - **EtcHosts plugin**: added PTR reverse-lookup support.
 - **DockerHosts plugin**: added support for a short container ID alias (first 12 chars) as an additional candidate name.
@@ -206,10 +207,18 @@ The server will start listening for DNS queries on the configured host and port.
 
 Foghorn is available on Docker Hub at `zallison/foghorn:latest`.
 
+> **Note about mDNS / MdnsBridgePlugin**
+> The mDNS bridge plugin (`MdnsBridgePlugin`, alias `mdns`) relies on multicast
+> DNS on the local layer‑2 network. When you run Foghorn inside Docker and want
+> mDNS discovery to work, the container **must** share the host network (for
+> example, `--net=host` on Linux). If you use the default bridged Docker
+> network, mDNS traffic will not be visible to the container and the plugin will
+> not see any services.
+
 **Using the pre-built image:**
 
 ```bash
-docker run -d -p 5353:5353/udp \
+docker run -d -p 5335:5335/udp \
   -v /path/to/your/config/:/foghorn/config/ \
   zallison/foghorn:latest
 ```
