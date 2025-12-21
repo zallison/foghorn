@@ -19,7 +19,7 @@ listen:
   doh:
     enabled: false
     host: 127.0.0.1
-    port: 8053
+    port: 5380
     # cert_file: /path/to/cert.pem
     # key_file: /path/to/key.pem
 
@@ -114,7 +114,7 @@ statistics:
 webserver:
   enabled: false
   host: 127.0.0.1
-  port: 8053
+  port: 5380
   logs:
     buffer_size: 500
   system_info_ttl_seconds: 2.0
@@ -161,7 +161,7 @@ plugins:
 
       # Optional: publish an aggregate TXT record at _docker.<suffix>
       # (or _docker when no suffix is configured).
-      # aggregate_record: true
+      # discovery: true
 
   # 2) /etc/hosts resolver – answers from hosts files first when possible
   - module: hosts
@@ -212,16 +212,14 @@ plugins:
         - { ip: "198.51.100.0/24", action: remove }
         - { ip: "203.0.113.5", action: replace, replace_with: "127.0.0.1" }
       # Enable external lists (downloaded above to ./config/var/lists/)
-      blocklist_files:
+      blocked_domains_files:
         - ./config/var/lists/AdguardDNS-*.txt
         - ./config/var/lists/Easylist-*.txt
         - ./config/var/lists/Prigent-Ads-*.txt
         - ./config/var/lists/Prigent-Malware-*.txt
         - ./config/block.txt
-      allowlist_files:
+      allowed_domains_files:
         - ./config/allow.txt
-      allowed_domains_files: []
-      blocked_domains_files: []
 
   # 4) Route certain domains to internal upstreams
   - module: upstream

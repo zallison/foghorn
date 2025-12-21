@@ -246,7 +246,7 @@ refresh loops rather than signal-triggered reloads. For those plugins,
 - Integration (manual):
   - TCP: `dig +tcp @127.0.0.1 -p 5353 example.com A`
   - DoT: `kdig +tls @127.0.0.1 -p 8853 example.com A`
-  - DoH: `curl -s -H 'accept: application/dns-message' --data-binary @query.bin http://127.0.0.1:8053/dns-query`
+  - DoH: `curl -s -H 'accept: application/dns-message' --data-binary @query.bin http://127.0.0.1:5380/dns-query`
   - DNSSEC passthrough: `kdig +dnssec @127.0.0.1 -p 5353 example.com A`
 
 ## Development
@@ -293,7 +293,7 @@ good.com
 ```
 
 Project-specific notes
-- FilterPlugin is the only component that reads JSONL from external files; specifically the file-backed input fields: allowed_domains_files, allowlist_files, blocked_domains_files, blocklist_files, blocked_patterns_files, blocked_keywords_files, blocked_ips_files
+- FilterPlugin is the only component that reads JSONL from external files; specifically the file-backed input fields: allowed_domains_files, blocked_domains_files, blocked_patterns_files, blocked_keywords_files, blocked_ips_files
 - Each FilterPlugin instance uses its own in-memory SQLite DB by default; a shared on-disk DB is only used when a non-empty db_path is explicitly configured for that instance.
 - The core YAML config does not accept JSONL; it only references which files to load
 - Statistics snapshots are logged as single-line JSON objects (conceptually JSONL when collected)
@@ -321,9 +321,7 @@ have the shape:
 
 Configuration:
 
-- `file_path`: legacy single records file (string)
-- `file_paths`: list of records files; when both are supplied the legacy
-  `file_path` is appended to the list
+- `file_paths`: list of records files. At least one path is required.
 - `watchdog_enabled` (default `True` when omitted): when truthy and
   `watchdog` is importable, start a per-directory observer that reloads
   records on writes/creates/moves
@@ -367,8 +365,8 @@ Helpers (in src/foghorn/plugins/filter.py):
   - Domains loader; accepts plain lines (domain) and JSON Lines {"domain": "...", "mode": "allow|deny"}; per-line mode overrides provided mode. Persists into SQLite table blocked_domains with last-write-wins semantics.
 
 Domain precedence (implemented in __init__ load order):
-1) allowed_domains_files / allowlist_files
-2) blocked_domains_files / blocklist_files
+1) allowed_domains_files
+2) blocked_domains_files
 3) inline allowed_domains
 4) inline blocked_domains
 

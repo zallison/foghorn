@@ -3969,7 +3969,7 @@ def _start_admin_server_threaded(
         return None
 
     host = str(web_cfg.get("host", "127.0.0.1"))
-    port = int(web_cfg.get("port", 8053))
+    port = int(web_cfg.get("port", 5380))
 
     try:
         httpd = _AdminHTTPServer(
@@ -4183,7 +4183,7 @@ def start_webserver(
         return handle
 
     host = str(web_cfg.get("host", "127.0.0.1"))
-    port = int(web_cfg.get("port", 8053))
+    port = int(web_cfg.get("port", 5380))
 
     # Warn if unauthenticated and binding to all interfaces
     auth_cfg = web_cfg.get("auth") or {}

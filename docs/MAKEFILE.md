@@ -38,7 +38,7 @@ The Makefile supports building and running directly, or via docker. The highligh
   docker         – Clean image, build it, run container, then follow logs
   docker-build   – Build docker image zack/foghorn:latest
   docker-clean   – Remove docker image zack/foghorn:latest
-  docker-run     – Run docker container (ports 53, 8053/tcp, 8153/tcp )
+  docker-run     – Run docker container (ports 53, 5380/tcp, 8153/tcp )
   docker-logs    – Follow docker container logs
   docker-dev-ship       – Clean, build, and push docker image to docker hub
 ```
@@ -309,7 +309,7 @@ docker-run:
     docker run --name foghorn -d \
         -p 53:5333/udp \
         -p 53:53/tcp \
-        -p 8053:8053/tcp \
+        -p 5380:5380/tcp \
         -v /etc/hosts:/etc/hosts:ro \
         --restart unless-stopped \
         ${PREFIX}/${CONTAINER_NAME}:${TAG}
@@ -388,7 +388,7 @@ help:
     @echo "  docker         – Clean image, build it, run container, then follow logs"
     @echo "  docker-build   – Build docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
     @echo "  docker-clean   – Remove docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
-    @echo "  docker-run     – Run docker container (ports 53/udp, 53/tcp, 8053/tcp)"
+    @echo "  docker-run     – Run docker container (ports 53/udp, 53/tcp, 5380/tcp)"
     @echo "  docker-logs    – Follow docker container logs"
     @echo "  docker-dev-ship       – Clean, build, and push docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
 ```
