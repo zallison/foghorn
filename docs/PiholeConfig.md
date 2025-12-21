@@ -111,7 +111,7 @@ plugins:
       post_priority: 20  # Run early in post-resolve to deny/modify responses
       default: allow
       deny_response: nxdomain
-      blocklist_files:
+      blocked_domains_files:
         # If using hashed filenames:
         - ./config/var/lists/hosts-*
         # If not using hashed filenames:
@@ -216,7 +216,7 @@ plugins:
       post_priority: 20
       default: allow
       deny_response: nxdomain
-      blocklist_files:
+      blocked_domains_files:
         - ./config/var/lists/hosts-*
 ```
 

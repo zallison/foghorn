@@ -447,7 +447,7 @@ def test_init_files_and_invalid_ips_and_actions(tmp_path):
     Brief: Initialization loads allow/block files and handles invalid IP configs.
 
     Inputs:
-      - allowlist_files, blocklist_files, blocked_ips entries with invalid formats/actions
+      - allowed_domains_files, blocked_domains_files, blocked_ips entries with invalid formats/actions
 
     Outputs:
       - None: Asserts is_allowed for files and deny default on unknown action
@@ -695,13 +695,13 @@ def test_post_resolve_unmatched_and_non_ip_records(tmp_path):
         assert dec2.action == "skip"
 
 
-def test_glob_expansion_for_blocklist_and_allowlist_files(tmp_path):
+def test_glob_expansion_for_allowed_and_blocked_domain_files(tmp_path):
     """
-    Brief: Glob patterns in blocklist_files and allowlist_files are expanded to load multiple files.
+    Brief: Glob patterns in allowed_domains_files and blocked_domains_files are expanded to load multiple files.
 
     Inputs:
-      - allowlist_files: glob pattern matching multiple files
-      - blocklist_files: glob pattern matching multiple files
+      - allowed_domains_files: glob pattern matching multiple files
+      - blocked_domains_files: glob pattern matching multiple files
 
     Outputs:
       - None: Asserts domains from expanded files are correctly allowed/denied
@@ -740,6 +740,43 @@ def test_glob_expansion_for_blocklist_and_allowlist_files(tmp_path):
 
         # Check default deny for unknown domains
         assert plugin.is_allowed("unknown.com") is False
+
+
+def test_legacy_file_keys_are_ignored_when_new_keys_used(tmp_path):
+    """Brief: Legacy blocklist_files/allowlist_files keys are ignored when new *_domains_files are present.
+
+    Inputs:
+      - tmp_path: temporary directory.
+
+    Outputs:
+      - None: Asserts that invalid legacy file paths do not affect behavior when
+        allowed_domains_files/blocked_domains_files are configured.
+    """
+    allowf = tmp_path / "allow-legacy.txt"
+    blockf = tmp_path / "block-legacy.txt"
+    allowf.write_text("allow-legacy.com\n")
+    blockf.write_text("block-legacy.com\n")
+
+    # blocklist_files / allowlist_files are not part of the public schema
+    # anymore; when passed directly to the plugin they should be ignored
+    # entirely rather than causing migration errors or file lookups.
+    p = FilterPlugin(
+        db_path=str(tmp_path / "bl_legacy_ignored.db"),
+        # Deliberately bogus legacy paths: if these were ever used, FileNotFoundError
+        # would be raised by _expand_globs.
+        blocklist_files=["./definitely/missing-block.txt"],
+        allowlist_files=["./definitely/missing-allow.txt"],
+        # New-style configuration actually used for loading.
+        allowed_domains_files=[str(allowf)],
+        blocked_domains_files=[str(blockf)],
+        default="deny",
+    )
+    plugin = p
+    plugin.setup()
+
+    with closing(plugin.conn):
+        assert plugin.is_allowed("allow-legacy.com") is True
+        assert plugin.is_allowed("block-legacy.com") is False
 
 
 def test_multiple_filter_instances_use_isolated_dbs_by_default(tmp_path):

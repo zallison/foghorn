@@ -38,7 +38,7 @@ class FilterConfig(BaseModel):
       - deny_response: Policy for deny responses.
       - deny_response_ip4 / deny_response_ip6: Optional IPs for IP-mode denies.
       - allow_qtypes / deny_qtypes: Optional lists of DNS qtype names to allow or deny.
-      - blocklist_files / allowlist_files / *_domains_files: List paths.
+      - *_domains_files: List paths for loading allow/block lists from files.
       - blocked_domains / allowed_domains: Inline domain lists.
       - blocked_patterns / blocked_patterns_files: Regexes.
       - blocked_keywords / blocked_keywords_files: Keywords.
@@ -56,8 +56,6 @@ class FilterConfig(BaseModel):
     deny_response_ip4: Optional[str] = None
     deny_response_ip6: Optional[str] = None
 
-    blocklist_files: List[str] = Field(default_factory=list)
-    allowlist_files: List[str] = Field(default_factory=list)
     blocked_domains_files: List[str] = Field(default_factory=list)
     allowed_domains_files: List[str] = Field(default_factory=list)
 
@@ -247,14 +245,6 @@ class FilterPlugin(BasePlugin):
                 self.deny_response,
             )
             self.deny_response = "nxdomain"
-
-        # Enforce new *_domains_files keys; legacy blocklist_files/allowlist_files
-        # are no longer accepted so configuration remains unambiguous.
-        if "blocklist_files" in self.config or "allowlist_files" in self.config:
-            raise ValueError(
-                "FilterPlugin config must use 'blocked_domains_files' / 'allowed_domains_files' "
-                "instead of legacy 'blocklist_files' / 'allowlist_files'"
-            )
 
         self.blocklist_files: List[str] = self._expand_globs(
             list(self.config.get("blocked_domains_files", []))
