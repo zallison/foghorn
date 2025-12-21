@@ -394,7 +394,8 @@ def test_docker_hosts_multiple_ips_in_answer(monkeypatch):
     assert dec_a is not None and dec_a.response is not None
     resp_a = DNSRecord.parse(dec_a.response)
 
-    answers = sorted(str(rr.rdata) for rr in resp_a.rr)
+    # Only consider A records; responses may also include TXT metadata.
+    answers = sorted(str(rr.rdata) for rr in resp_a.rr if rr.rtype == QTYPE.A)
     assert answers == ["172.17.0.5", "172.17.0.6"]
 
 
@@ -950,8 +951,8 @@ def test_docker_hosts_health_filter_can_include_unhealthy(monkeypatch):
     assert "nohealth" not in plugin._forward_v4  # type: ignore[attr-defined]
 
 
-def test_docker_hosts_aggregate_record_publishes_txt(monkeypatch):
-    """Brief: aggregate_record publishes a _docker.<suffix> TXT record.
+def test_docker_hosts_discovery_publishes_txt(monkeypatch):
+    """Brief: discovery publishes a _docker.<suffix> TXT record.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
@@ -966,7 +967,7 @@ def test_docker_hosts_aggregate_record_publishes_txt(monkeypatch):
 
     plugin = DockerHosts(  # type: ignore[arg-type]
         suffix="docker.mycorp",
-        aggregate_record=True,
+        discovery=True,
         endpoints=[{"url": "unix:///var/run/docker.sock"}],
     )
 
@@ -999,7 +1000,7 @@ def test_docker_hosts_aggregate_record_publishes_txt(monkeypatch):
     plugin.setup()
 
     ctx = PluginContext(client_ip="127.0.0.1")
-    owner = "_docker.docker.mycorp"
+    owner = "_containers.docker.mycorp"
     q_txt = DNSRecord.question(owner, "TXT")
     dec = plugin.pre_resolve(owner, QTYPE.TXT, q_txt.pack(), ctx)
     assert dec is not None and dec.response is not None

@@ -18,6 +18,24 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from dnslib import AAAA, PTR, QTYPE, RR, A, DNSHeader, DNSRecord, TXT
 from pydantic import BaseModel, Field
 
+try:  # cachetools is an optional dependency; fall back to no-op cache when missing.
+    from cachetools import TTLCache, cached  # type: ignore[import]
+except Exception:  # pragma: no cover - defensive optional dependency handling
+
+    class TTLCache(dict):  # type: ignore[override]
+        def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - simple shim
+            """Lightweight TTLCache shim when cachetools is unavailable."""
+            super().__init__()
+
+    def cached(*, cache, **kwargs):  # type: ignore[no-redef]
+        """No-op cached decorator used when cachetools is unavailable."""
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+
 from foghorn.plugins.base import (
     BasePlugin,
     PluginContext,
@@ -38,6 +56,11 @@ except Exception:  # pragma: no cover - environment without docker SDK installed
 
 
 logger = logging.getLogger(__name__)
+
+# Short-lived caches for suffix owner helpers. These are pure string transforms
+# used during periodic reload and do not affect resolver statistics semantics.
+_DOCKER_AGG_OWNER_CACHE: TTLCache = TTLCache(maxsize=1024, ttl=30)
+_DOCKER_HOSTS_OWNER_CACHE: TTLCache = TTLCache(maxsize=1024, ttl=30)
 
 
 class DockerEndpointConfig(BaseModel):
@@ -92,9 +115,10 @@ class DockerHostsConfig(BaseModel):
       - health: List of acceptable container health/status values. Supported:
         "starting", "healthy", "running", "unhealthy". Default:
         ["healthy", "running"].
-      - aggregate_record: When true, publish a TXT record at
-        "_docker.<suffix>" (or "_docker" when no suffix is configured)
-        containing container summary lines.
+      - discovery: When true, publish a TXT record at
+        "_containers.<suffix>" (or "_containers" when no suffix is configured)
+        containing container summary lines, plus a host-level summary under
+        "_hosts.<suffix>" (or "_hosts").
 
     Outputs:
       - DockerHostsConfig instance with normalized field types.
@@ -103,7 +127,7 @@ class DockerHostsConfig(BaseModel):
     endpoints: List[DockerEndpointConfig] = Field(default_factory=list)
     ttl: int = Field(default=300, ge=0)
     health: List[str] = Field(default_factory=lambda: ["healthy", "running"])
-    aggregate_record: bool = Field(default=False)
+    discovery: bool = Field(default=False)
 
     class Config:
         extra = "allow"
@@ -141,7 +165,7 @@ class DockerHosts(BasePlugin):
           - endpoints: Optional list of Docker endpoints in the plugin config.
           - ttl: Optional DNS TTL for answers.
           - health: Optional list of acceptable container health/status values.
-          - aggregate_record: Optional bool to publish a "_docker" TXT record.
+          - discovery: Optional bool to publish a "_docker" TXT record.
 
         Outputs:
           - None; populates in-memory forward/reverse maps and (optionally)
@@ -180,9 +204,10 @@ class DockerHosts(BasePlugin):
                 health_norm.append(key)
         self._health_allowlist = health_norm
 
-        # When true, publish a TXT record at _docker.<suffix> (or _docker when
-        # no suffix is set).
-        self._aggregate_record = bool(self.config.get("aggregate_record", False))
+        # When true, publish a TXT record at _containers.<suffix> (or
+        # _containers when no suffix is set) plus a host-level summary at
+        # _hosts.<suffix> (or _hosts).
+        self._discovery = bool(self.config.get("discovery", False))
 
         # Optional default suffix applied to container names when no
         # per-endpoint suffix is provided, e.g. "docker.mycorp" so that a
@@ -190,7 +215,13 @@ class DockerHosts(BasePlugin):
         suffix_raw = self.config.get("suffix")
         if suffix_raw:
             base_suffix = str(suffix_raw).strip().strip(".")
-            self._suffix = base_suffix.lower() if base_suffix else ""
+            if base_suffix:
+                # Normalize any internal runs of dots and remove empty labels so
+                # values like "docker..zaa" become "docker.zaa".
+                parts = [p for p in base_suffix.split(".") if p]
+                self._suffix = ".".join(parts).lower() if parts else ""
+            else:
+                self._suffix = ""
         else:
             self._suffix = ""
 
@@ -276,7 +307,11 @@ class DockerHosts(BasePlugin):
             ep_suffix_raw = item.get("suffix")
             if ep_suffix_raw:
                 ep_suffix_base = str(ep_suffix_raw).strip().strip(".")
-                ep_suffix = ep_suffix_base.lower() if ep_suffix_base else ""
+                if ep_suffix_base:
+                    parts = [p for p in ep_suffix_base.split(".") if p]
+                    ep_suffix = ".".join(parts).lower() if parts else ""
+                else:
+                    ep_suffix = ""
             else:
                 ep_suffix = ""
 
@@ -436,6 +471,28 @@ class DockerHosts(BasePlugin):
         mapped_containers = 0
 
         for endpoint in self._endpoints:
+            # When discovery is enabled, emit a host-level TXT summary
+            # for each endpoint under _hosts.<suffix> (or _hosts).
+            if self._discovery:
+                ep_suffix = endpoint.get("suffix") or getattr(self, "_suffix", "")
+                record_owner = self._hosts_owner_for_suffix(
+                    str(ep_suffix or "").strip()
+                )
+                host_ipv4 = endpoint.get("host_ipv4") or ""
+                host_ipv6 = endpoint.get("host_ipv6") or ""
+                parts: List[str] = []
+                url = str(endpoint.get("url"))
+                if url:
+                    parts.append(f"endpoint={url}")
+                if host_ipv4:
+                    parts.append(f"ans4={host_ipv4}")
+                if host_ipv6:
+                    parts.append(f"ans6={host_ipv6}")
+                line = " ".join(parts)
+                if line:
+                    new_txt.setdefault(record_owner, []).append(line)
+                    new_ttl_txt[record_owner] = int(self._ttl)
+
             containers = self._iter_containers_for_endpoint(endpoint)
             containers = list(containers)
             if not containers:
@@ -525,7 +582,9 @@ class DockerHosts(BasePlugin):
                 image_repo = image_norm.split("@")[0].split(":")[0]
 
                 def _norm_ident(value: str) -> str:
-                    return str(value).strip().rstrip(".").lower()
+                    # Normalize identifiers used as DNS labels so they never
+                    # begin or end with a dot and are case-insensitive.
+                    return str(value).strip().strip(".").lower()
 
                 candidate_names: List[str] = []
                 if raw_name:
@@ -548,7 +607,10 @@ class DockerHosts(BasePlugin):
                 normalized_names: List[str] = []
                 seen: set[str] = set()
                 for n in candidate_names:
-                    key = n.rstrip(".").lower()
+                    # Ensure normalized names do not retain any leading or
+                    # trailing dots so we never publish names that begin with
+                    # ".".
+                    key = n.strip(".").lower()
                     if not key or key in seen:
                         continue
                     seen.add(key)
@@ -577,8 +639,15 @@ class DockerHosts(BasePlugin):
                     # plugin level), publish only suffixed names for this
                     # instance. Tests expect that unsuffixed hostnames are not
                     # exposed in forward mappings when a suffix is present.
-                    ep_suffix = str(ep_suffix).strip().strip(".").lower()
-                    names_for_mapping = [f"{n}.{ep_suffix}" for n in normalized_names]
+                    raw_suffix = str(ep_suffix).strip().strip(".")
+                    parts = [p for p in raw_suffix.split(".") if p]
+                    ep_suffix = ".".join(parts).lower() if parts else ""
+                    if ep_suffix:
+                        names_for_mapping = [
+                            f"{n}.{ep_suffix}" for n in normalized_names
+                        ]
+                    else:
+                        names_for_mapping = list(normalized_names)
                 else:
                     # No suffix configured: publish raw normalized names.
                     names_for_mapping = list(normalized_names)
@@ -587,9 +656,9 @@ class DockerHosts(BasePlugin):
                 # Name, then the extracted hostname, then the container ID, and
                 # apply the same suffix (if any).
                 if raw_name:
-                    base_canonical = raw_name.rstrip(".").lower()
+                    base_canonical = raw_name.strip(".").lower()
                 elif hostname:
-                    base_canonical = str(hostname).rstrip(".").lower()
+                    base_canonical = str(hostname).strip(".").lower()
                 else:  # pragma: no cover - unreachable because containers without hostname are skipped above
                     base_canonical = container_id or normalized_names[0]
 
@@ -641,22 +710,33 @@ class DockerHosts(BasePlugin):
                                     ptr_canonical,
                                 )
 
-                # Optional aggregate TXT record.
-                if self._aggregate_record:
+                # Build a summary line for this container.
+                line = self._format_aggregate_line(
+                    container=container,
+                    canonical=ptr_canonical,
+                    aliases=names_for_mapping,
+                    endpoint_url=str(endpoint.get("url")),
+                    effective_health=effective_health,
+                    project_name=project_name,
+                    internal_v4=internal_v4,
+                    internal_v6=internal_v6,
+                    answer_v4=v4_list,
+                    answer_v6=v6_list,
+                )
+
+                # Per-container TXT records: publish a TXT record at each
+                # published hostname containing the same information that would
+                # appear in the aggregate _containers TXT, but scoped to this
+                # container.
+                for owner in names_for_mapping:
+                    new_txt.setdefault(owner, []).append(line)
+                    new_ttl_txt[owner] = ep_ttl
+
+                # Optional aggregate TXT record (_containers.<suffix>) that
+                # summarizes all containers.
+                if self._discovery:
                     record_owner = self._aggregate_owner_for_suffix(
                         str(ep_suffix or "").strip()
-                    )
-                    line = self._format_aggregate_line(
-                        container=container,
-                        canonical=ptr_canonical,
-                        aliases=names_for_mapping,
-                        endpoint_url=str(endpoint.get("url")),
-                        effective_health=effective_health,
-                        project_name=project_name,
-                        internal_v4=internal_v4,
-                        internal_v6=internal_v6,
-                        answer_v4=v4_list,
-                        answer_v6=v6_list,
                     )
                     new_txt.setdefault(record_owner, []).append(line)
                     new_ttl_txt[record_owner] = int(self._ttl)
@@ -682,10 +762,15 @@ class DockerHosts(BasePlugin):
                 "DockerHosts: no hostname/IP mappings were added from any endpoint (no running containers or all were skipped)",
             )
 
-        # Prepend a header line to each aggregate TXT record (if enabled).
+        # Prepend a header line to each TXT record collection (if enabled).
         if new_txt:
             for owner, lines in new_txt.items():
-                lines.insert(0, f"containers={len(lines)}")
+                # For container- and aggregate-level owners, containers==len(lines).
+                # For host-level owners (_hosts.*), use hosts==len(lines).
+                if owner.startswith("_hosts"):
+                    lines.insert(0, f"hosts={len(lines)}")
+                else:
+                    lines.insert(0, f"containers={len(lines)}")
 
         # Swap mappings under lock so readers always see a consistent view.
         with self._lock:
@@ -728,22 +813,48 @@ class DockerHosts(BasePlugin):
         return "running"
 
     @staticmethod
+    @cached(cache=_DOCKER_AGG_OWNER_CACHE)
     def _aggregate_owner_for_suffix(suffix: str) -> str:
-        """Brief: Build the aggregate TXT record owner name for a suffix.
+        """Brief: Build the container aggregate TXT owner name for a suffix.
 
         Inputs:
           - suffix: DNS suffix (may be empty, may contain trailing dots).
 
         Outputs:
           - Normalized owner name for the aggregate TXT record.
-            - With suffix: "_docker.<suffix>"
-            - Without suffix: "_docker"
+            - With suffix: "_containers.<suffix>"
+            - Without suffix: "_containers"
         """
 
-        suf = str(suffix).strip().strip(".").lower()
+        # Normalize suffix so that it never begins or ends with a dot and
+        # collapse any repeated dots (e.g. "docker..zaa" -> "docker.zaa").
+        raw = str(suffix).strip().strip(".")
+        parts = [p for p in raw.split(".") if p]
+        suf = ".".join(parts).lower()
         if suf:
-            return f"_docker.{suf}"
-        return "_docker"
+            return f"_containers.{suf}"
+        return "_containers"
+
+    @staticmethod
+    @cached(cache=_DOCKER_HOSTS_OWNER_CACHE)
+    def _hosts_owner_for_suffix(suffix: str) -> str:
+        """Brief: Build the host-level TXT owner name for a suffix.
+
+        Inputs:
+          - suffix: DNS suffix (may be empty, may contain trailing dots).
+
+        Outputs:
+          - Normalized owner name for the host summary TXT record.
+            - With suffix: "_hosts.<suffix>"
+            - Without suffix: "_hosts"
+        """
+
+        raw = str(suffix).strip().strip(".")
+        parts = [p for p in raw.split(".") if p]
+        suf = ".".join(parts).lower()
+        if suf:
+            return f"_hosts.{suf}"
+        return "_hosts"
 
     @staticmethod
     def _format_aggregate_line(
@@ -927,6 +1038,72 @@ class DockerHosts(BasePlugin):
 
         return hostname, v4_set, v6_set
 
+    def _make_ip_response(
+        self,
+        qname: str,
+        qtype: int,
+        req: bytes,
+        addrs: List[str],
+        ttl: int,
+    ) -> Optional[bytes]:
+        """Brief: Build a minimal A/AAAA DNS response for a single owner.
+
+        Inputs:
+          - qname: Owner name for the DNS question (as a string).
+          - qtype: Numeric QTYPE (typically QTYPE.A or QTYPE.AAAA).
+          - req: Raw DNS request wire bytes.
+          - addrs: List of IP address strings to include as answers.
+          - ttl: Integer TTL (seconds) to apply to each answer RR.
+
+        Outputs:
+          - Optional[bytes]: Packed DNS response bytes on success, or None when
+            the incoming packet cannot be parsed.
+
+        Notes:
+          - This helper is used by tests to exercise parse-failure behaviour and
+            keeps the response-building logic in one place.
+        """
+
+        try:
+            request = DNSRecord.parse(req)
+        except Exception as exc:
+            log = getattr(self, "logger", logger)
+            log.warning(
+                "DockerHosts: parse failure building response for %s %s: %s",
+                qname,
+                QTYPE.get(qtype, str(qtype)),
+                exc,
+            )
+            return None
+
+        reply = DNSRecord(
+            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+        )
+
+        if not addrs:
+            return reply.pack()
+
+        for ipaddr in addrs:
+            if qtype == QTYPE.AAAA:
+                rdata = AAAA(ipaddr)
+                rtype = QTYPE.AAAA
+            else:
+                # Default to A for unknown/other qtypes; callers only use A/AAAA.
+                rdata = A(ipaddr)
+                rtype = QTYPE.A
+
+            reply.add_answer(
+                RR(
+                    rname=request.q.qname,
+                    rtype=rtype,
+                    rclass=1,
+                    ttl=int(ttl),
+                    rdata=rdata,
+                )
+            )
+
+        return reply.pack()
+
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
@@ -946,31 +1123,114 @@ class DockerHosts(BasePlugin):
         if not self.targets(ctx):
             return None
 
-        name = qname.rstrip(".").lower()
+        # Normalize queried name: trim leading/trailing dots and lowercase so
+        # that stray leading dots do not prevent lookups (e.g. ".foo.example").
+        name = qname.strip(".").lower()
 
         if qtype == QTYPE.A:
+            # For docker hostnames, answer A queries and also include any
+            # per-host TXT summaries in the same reply.
             with self._lock:
-                candidates = list(self._forward_v4.get(name, []))
-                ttl = int(self._ttl_v4.get(name, self._ttl))
-            if not candidates:
+                a_candidates = list(self._forward_v4.get(name, []))
+                a_ttl = int(self._ttl_v4.get(name, self._ttl))
+                txts = list(self._aggregate_txt.get(name, []))
+                txt_ttl = int(self._ttl_txt.get(name, self._ttl))
+
+            if not a_candidates and not txts:
                 return None
-            wire = self._make_ip_response(qname, QTYPE.A, req, candidates, ttl)
-            return PluginDecision(action="override", response=wire)
+
+            try:
+                request = DNSRecord.parse(req)
+            except Exception as exc:
+                logger.warning("DockerHosts: parse failure for A %s: %s", qname, exc)
+                return PluginDecision(action="override", response=None)
+
+            reply = DNSRecord(
+                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+            )
+
+            for ipaddr in a_candidates:
+                reply.add_answer(
+                    RR(
+                        rname=request.q.qname,
+                        rtype=QTYPE.A,
+                        rclass=1,
+                        ttl=a_ttl,
+                        rdata=A(ipaddr),
+                    )
+                )
+
+            for line in txts:
+                reply.add_answer(
+                    RR(
+                        rname=request.q.qname,
+                        rtype=QTYPE.TXT,
+                        rclass=1,
+                        ttl=txt_ttl,
+                        rdata=TXT([str(line)]),
+                    )
+                )
+
+            return PluginDecision(action="override", response=reply.pack())
 
         if qtype == QTYPE.AAAA:
+            # For docker hostnames, answer AAAA queries and also include any
+            # per-host TXT summaries in the same reply.
             with self._lock:
-                candidates = list(self._forward_v6.get(name, []))
-                ttl = int(self._ttl_v6.get(name, self._ttl))
-            if not candidates:
+                aaaa_candidates = list(self._forward_v6.get(name, []))
+                aaaa_ttl = int(self._ttl_v6.get(name, self._ttl))
+                txts = list(self._aggregate_txt.get(name, []))
+                txt_ttl = int(self._ttl_txt.get(name, self._ttl))
+
+            if not aaaa_candidates and not txts:
                 return None
-            wire = self._make_ip_response(qname, QTYPE.AAAA, req, candidates, ttl)
-            return PluginDecision(action="override", response=wire)
+
+            try:
+                request = DNSRecord.parse(req)
+            except Exception as exc:
+                logger.warning("DockerHosts: parse failure for AAAA %s: %s", qname, exc)
+                return PluginDecision(action="override", response=None)
+
+            reply = DNSRecord(
+                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+            )
+
+            for ipaddr in aaaa_candidates:
+                reply.add_answer(
+                    RR(
+                        rname=request.q.qname,
+                        rtype=QTYPE.AAAA,
+                        rclass=1,
+                        ttl=aaaa_ttl,
+                        rdata=AAAA(ipaddr),
+                    )
+                )
+
+            for line in txts:
+                reply.add_answer(
+                    RR(
+                        rname=request.q.qname,
+                        rtype=QTYPE.TXT,
+                        rclass=1,
+                        ttl=txt_ttl,
+                        rdata=TXT([str(line)]),
+                    )
+                )
+
+            return PluginDecision(action="override", response=reply.pack())
 
         if qtype == QTYPE.TXT:
+            # When TXT is requested for a docker host, also include any A/AAAA
+            # records for that host in the same response.
             with self._lock:
                 txts = list(self._aggregate_txt.get(name, []))
-                ttl = int(self._ttl_txt.get(name, self._ttl))
-            if not txts:
+                txt_ttl = int(self._ttl_txt.get(name, self._ttl))
+                a_candidates = list(self._forward_v4.get(name, []))
+                a_ttl = int(self._ttl_v4.get(name, self._ttl))
+                aaaa_candidates = list(self._forward_v6.get(name, []))
+                aaaa_ttl = int(self._ttl_v6.get(name, self._ttl))
+
+            if not txts and not a_candidates and not aaaa_candidates:
                 return None
 
             try:
@@ -983,15 +1243,36 @@ class DockerHosts(BasePlugin):
                 DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
             )
 
-            # One TXT RR per container summary line (plus any header line).
             for line in txts:
                 reply.add_answer(
                     RR(
                         rname=request.q.qname,
                         rtype=QTYPE.TXT,
                         rclass=1,
-                        ttl=ttl,
+                        ttl=txt_ttl,
                         rdata=TXT([str(line)]),
+                    )
+                )
+
+            for ipaddr in a_candidates:
+                reply.add_answer(
+                    RR(
+                        rname=request.q.qname,
+                        rtype=QTYPE.A,
+                        rclass=1,
+                        ttl=a_ttl,
+                        rdata=A(ipaddr),
+                    )
+                )
+
+            for ipaddr in aaaa_candidates:
+                reply.add_answer(
+                    RR(
+                        rname=request.q.qname,
+                        rtype=QTYPE.AAAA,
+                        rclass=1,
+                        ttl=aaaa_ttl,
+                        rdata=AAAA(ipaddr),
                     )
                 )
 
@@ -1025,60 +1306,3 @@ class DockerHosts(BasePlugin):
             return PluginDecision(action="override", response=reply.pack())
 
         return None
-
-    def _make_ip_response(
-        self,
-        qname: str,
-        query_type: int,
-        raw_req: bytes,
-        ipaddrs: List[str],
-        ttl: int,
-    ) -> Optional[bytes]:
-        """Brief: Build an A/AAAA response with a specific TTL.
-
-        Inputs:
-          - qname: Queried name (unused; kept for symmetry).
-          - query_type: QTYPE.A or QTYPE.AAAA.
-          - raw_req: Original DNS request wire.
-          - ipaddrs: List of IPv4/IPv6 strings to place in the answer.
-          - ttl: TTL to apply to the answer records.
-
-        Outputs:
-          - Packed DNS response bytes containing one RR per IP, or None on
-            parse failure.
-        """
-
-        try:
-            request = DNSRecord.parse(raw_req)
-        except Exception as exc:
-            logger.warning("DockerHosts: parse failure building response: %s", exc)
-            return None
-
-        reply = DNSRecord(
-            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
-        )
-
-        if query_type == QTYPE.A:
-            for ipaddr in ipaddrs:
-                reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.A,
-                        rclass=1,
-                        ttl=ttl,
-                        rdata=A(ipaddr),
-                    )
-                )
-        elif query_type == QTYPE.AAAA:
-            for ipaddr in ipaddrs:
-                reply.add_answer(
-                    RR(
-                        rname=request.q.qname,
-                        rtype=QTYPE.AAAA,
-                        rclass=1,
-                        ttl=ttl,
-                        rdata=AAAA(ipaddr),
-                    )
-                )
-
-        return reply.pack()
