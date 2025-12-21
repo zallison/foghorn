@@ -433,7 +433,24 @@ class DockerHosts(BasePlugin):
 
         url = str(endpoint["url"])
         client = self._clients.get(url)
-        if client is None:
+
+        # Lazily create a client for this endpoint so that connection failures
+        # during setup do not permanently disable refreshes. Each reload cycle
+        # can retry endpoints that were previously unreachable.
+        if client is None and docker is not None:
+            try:
+                client = docker.DockerClient(base_url=url)
+            except DockerException as exc:  # pragma: no cover - connection errors
+                logger.warning(
+                    "DockerHosts: failed to create client for %s during reload: %s",
+                    url,
+                    exc,
+                )
+                return []
+            else:
+                self._clients[url] = client
+        elif client is None:
+            # docker SDK is unavailable; nothing to do for this endpoint.
             return []
 
         try:
@@ -471,8 +488,18 @@ class DockerHosts(BasePlugin):
         mapped_containers = 0
 
         for endpoint in self._endpoints:
-            # When discovery is enabled, emit a host-level TXT summary
-            # for each endpoint under _hosts.<suffix> (or _hosts).
+            containers = self._iter_containers_for_endpoint(endpoint)
+            containers = list(containers)
+            if not containers:
+                # If we cannot reach the endpoint or there are no running
+                # containers, avoid publishing any _hosts TXT for it this
+                # cycle so that unreachable hosts disappear from discovery
+                # results. Next reload will retry the connection.
+                continue
+
+            # When discovery is enabled and we have successfully listed
+            # containers for this endpoint, emit a host-level TXT summary for
+            # the endpoint under _hosts.<suffix> (or _hosts).
             if self._discovery:
                 ep_suffix = endpoint.get("suffix") or getattr(self, "_suffix", "")
                 record_owner = self._hosts_owner_for_suffix(
@@ -492,11 +519,6 @@ class DockerHosts(BasePlugin):
                 if line:
                     new_txt.setdefault(record_owner, []).append(line)
                     new_ttl_txt[record_owner] = int(self._ttl)
-
-            containers = self._iter_containers_for_endpoint(endpoint)
-            containers = list(containers)
-            if not containers:
-                continue
 
             # Determine the effective TTL for records sourced from this endpoint.
             ep_ttl_override = endpoint.get("ttl")
