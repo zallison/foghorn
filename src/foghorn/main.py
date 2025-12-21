@@ -212,7 +212,7 @@ def main(argv: List[str] | None = None) -> int:
     # If listen.udp is present, prefer it; otherwise fall back to legacy listen.host/port.
     listen_cfg = cfg.get("listen", {}) or {}
     default_host = str(listen_cfg.get("host", "127.0.0.1"))
-    default_port = int(listen_cfg.get("port", 5333))
+    default_port = int(listen_cfg.get("port", 5335))
 
     # Global foghorn runtime options (timeouts, strategy, asyncio usage).
     foghorn_cfg = cfg.get("foghorn") or {}
@@ -240,7 +240,7 @@ def main(argv: List[str] | None = None) -> int:
     #
     #     behave as expected without requiring an explicit enabled: true.
     udp_cfg = _sub(
-        "udp", {"enabled": True, "host": default_host, "port": default_port or 5333}
+        "udp", {"enabled": True, "host": default_host, "port": default_port or 5335}
     )
 
     tcp_section = listen_cfg.get("tcp")
@@ -250,7 +250,7 @@ def main(argv: List[str] | None = None) -> int:
         {
             "enabled": tcp_default_enabled,
             "host": default_host,
-            "port": default_port or 5333,
+            "port": default_port or 5335,
         },
     )
 

@@ -21,7 +21,7 @@ listen:
   udp:
     enabled: true
     host: 0.0.0.0
-    port: 5333
+    port: 5335
 
 upstreams:
   - host: 8.8.8.8
@@ -31,11 +31,11 @@ upstreams:
 
 ### What this does
 
-Foghorn listens on UDP port `5333` and forwards all DNS queries to Google DNS.
+Foghorn listens on UDP port `5335` and forwards all DNS queries to Google DNS.
 
 ```
 +--------+    +-----------+    +------------+
-| Client | →  | UDP :5333 | -> | 8.8.8.8:53 |
+| Client | →  | UDP :5335 | -> | 8.8.8.8:53 |
 +--------+    +-----------+    +------------+
 ```
 
