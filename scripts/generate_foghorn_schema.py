@@ -25,11 +25,19 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Type
 
 from foghorn.plugins.base import BasePlugin
 from foghorn.plugins import registry as plugin_registry
+
+# Add the 'src' directory to sys.path to resolve 'foghorn' module imports
+script_dir = Path(__file__).resolve().parent
+project_root = script_dir.parent
+src_dir = project_root / "src"
+if src_dir.is_dir() and str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
 
 logger = logging.getLogger(__name__)
 

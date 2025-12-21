@@ -244,48 +244,78 @@ def _validate_plugin_config(plugin_cls: type[BasePlugin], config: dict | None) -
 
     Outputs:
       - dict: Validated/normalized config mapping to be passed into plugin_cls.
+
+    Notes:
+      - The optional "logging" sub-config is treated as a BasePlugin-level option
+        and preserved verbatim across validation so that per-plugin logging
+        continues to work even when plugins use typed config models.
     """
 
-    cfg = config or {}
+    # Preserve a shallow copy so we can safely pop meta-keys like "logging"
+    # without mutating the caller's dictionary.
+    base_cfg: dict = dict(config or {})
+
+    # "logging" is consumed by BasePlugin to configure a per-plugin logger.
+    # It is intentionally excluded from plugin-specific validation and
+    # re-attached to the validated mapping before returning.
+    logging_cfg = base_cfg.pop("logging", None)
+
+    cfg = base_cfg
 
     get_model = getattr(plugin_cls, "get_config_model", None)
     if callable(get_model):  # pragma: no cover
         model_cls = get_model()
         if model_cls is None:
-            return cfg
-        try:
-            model_instance = model_cls(**cfg)
-        except Exception as exc:  # pragma: no cover
-            raise ValueError(
-                f"Invalid configuration for plugin {plugin_cls.__name__}: {exc}"
-            ) from exc
+            validated: dict = cfg
+        else:
+            try:
+                model_instance = model_cls(**cfg)
+            except Exception as exc:  # pragma: no cover
+                raise ValueError(
+                    f"Invalid configuration for plugin {plugin_cls.__name__}: {exc}"
+                ) from exc
 
-        for attr in ("dict", "model_dump"):
-            method = getattr(model_instance, attr, None)
-            if callable(method):
+            validated = cfg
+            for attr in ("dict", "model_dump"):
+                method = getattr(model_instance, attr, None)
+                if callable(method):
+                    try:
+                        validated = dict(method())
+                        break
+                    except Exception:  # pragma: no cover
+                        continue
+            else:  # pragma: no cover
                 try:
-                    return dict(method())
-                except Exception:  # pragma: no cover
-                    break
-        try:
-            return dict(model_instance)
-        except Exception:  # pragma: no cover
-            return cfg
+                    validated = dict(model_instance)
+                except Exception:
+                    validated = cfg
+
+        if logging_cfg is not None and "logging" not in validated:
+            validated["logging"] = logging_cfg
+        return validated
 
     get_schema = getattr(plugin_cls, "get_config_schema", None)
     if callable(get_schema):  # pragma: no cover
         schema = get_schema()
         if schema is None:
-            return cfg
-        try:
-            from jsonschema import validate as _js_validate  # type: ignore
+            validated_schema_cfg = cfg
+        else:
+            try:
+                from jsonschema import validate as _js_validate  # type: ignore
 
-            _js_validate(instance=cfg, schema=schema)
-        except Exception as exc:  # pragma: no cover
-            raise ValueError(
-                f"Invalid configuration for plugin {plugin_cls.__name__}: {exc}"
-            ) from exc
+                _js_validate(instance=cfg, schema=schema)
+                validated_schema_cfg = cfg
+            except Exception as exc:
+                raise ValueError(
+                    f"Invalid configuration for plugin {plugin_cls.__name__}: {exc}"
+                ) from exc
 
+        if logging_cfg is not None and "logging" not in validated_schema_cfg:
+            validated_schema_cfg["logging"] = logging_cfg
+        return validated_schema_cfg
+
+    if logging_cfg is not None and "logging" not in cfg:
+        cfg["logging"] = logging_cfg
     return cfg
 
 
