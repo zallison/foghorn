@@ -231,7 +231,7 @@ docker run -d \
   -p 5353:5353/udp \
   -p 5353:5353/tcp \
   -p 8853:8853/tcp \
-  -p 8053:8053/tcp \
+  -p 5380:5380/tcp \
   -v /path/to/your/config.yaml:/foghorn/config/config.yaml \
   zallison/foghorn:latest
 ```
@@ -270,6 +270,8 @@ The `foghorn` section also exposes optional cache prefetch / stale‑while‑rev
 
 You can enable one or more `listener`s. `UDP` is enabled by default; `TCP`, `DoT`, and `DoH` are optional and supported.
 
+The default ports (UDP/TCP 5333, DoT 8853, DoH 5380, admin webserver 5380) are chosen to be above 1024 so that Foghorn can be run as a non-root user without special capabilities.
+
 ```yaml
 listen:
   udp:
@@ -289,7 +291,7 @@ listen:
   doh:
 	enabled: false
 	host: 127.0.0.1
-	port: 8053
+	port: 5380
 	# Optional TLS
 	# cert_file: /path/to/cert.pem
 	# key_file: /path/to/key.pem
@@ -379,6 +381,45 @@ These knobs are honored by core plugins such as AccessControl, Filter,
 Greylist, NewDomainFilter, UpstreamRouter, FlakyServer, Examples, and
 EtcHosts. See `example_configs/` (for example `kitchen_sink.yaml` and
 `plugin_rate_limit.yaml`) for usage patterns.
+
+A minimal plugin entry using all common BasePlugin-wide options looks like:
+
+```yaml
+plugins:
+  - module: foghorn.plugins.filter.FilterPlugin
+    name: example_filter
+    enabled: true
+    comment: "Demo plugin using common BasePlugin options"
+    pre_priority: 40
+    post_priority: 60
+    setup_priority: 50
+    config:
+      # BasePlugin-wide options
+      logging:
+        level: debug
+        stderr: true
+        file: ./logs/example_filter.log
+        syslog:
+          address: /dev/log
+          facility: user
+
+      targets:
+        - 10.0.0.0/8
+        - 192.0.2.1
+      targets_ignore:
+        - 10.0.5.0/24
+      targets_cache_ttl_seconds: 600
+
+      target_qtypes:
+        - A
+        - AAAA
+
+      abort_on_failure: true  # used by some plugins during setup()
+
+      # Plugin-specific options (FilterPlugin here)
+      default: deny
+      cache_ttl_seconds: 600
+```
 
 #### Plugin priorities and `setup_priority`
 
@@ -550,7 +591,7 @@ This plugin provides flexible filtering of DNS queries based on domain names, pa
 - blocked_ips: list of IP addresses or CIDR ranges to control post‑resolution behavior; each entry supports action deny, remove, or replace (with replace_with).
 
 File-backed inputs (support globs):
-- allowed_domains_files, blocked_domains_files (aliases also supported: allowlist_files, blocklist_files)
+- allowed_domains_files, blocked_domains_files
 - blocked_patterns_files
 - blocked_keywords_files
 - blocked_ips_files
@@ -566,8 +607,8 @@ Formats supported per file (auto-detected line-by-line):
 Note: JSONL is only supported in FilterPlugin file-backed inputs (the *_files keys above). The core YAML config does not accept JSONL.
 
 Load order and precedence for domains (last write wins):
-1) allowed_domains_files/allowlist_files
-2) blocked_domains_files/blocklist_files
+1) allowed_domains_files
+2) blocked_domains_files
 3) inline allowed_domains
 4) inline blocked_domains
 
@@ -786,11 +827,10 @@ first-seen ordering. This ordering is reflected in the final DNS answer.
 plugins:
   - module: zone
 	config:
-	  # Use either a single file_path (legacy) or a list of file_paths
-	  # (preferred). When both are given, the legacy path is added to
-	  # the list; later files extend earlier ones.
-	  file_path: ./config/custom-records.txt        # optional
-	  file_paths:                                   # optional
+	  # Provide one or more records files; lines use:
+	  #   <domain>|<qtype>|<ttl>|<value>
+	  # example.com|A|300|192.0.2.10
+	  file_paths:
 		- ./config/custom-records.txt
 		- ./config/custom-records-extra.txt
 
@@ -924,7 +964,7 @@ listen:
   doh:
 	enabled: false
 	host: 127.0.0.1
-	port: 8053
+	port: 5380
 	# Optional TLS for DoH
 	# cert_file: /path/to/cert.pem
 	# key_file: /path/to/key.pem
@@ -1061,11 +1101,11 @@ plugins:
 	  urls:
 		- https://v.firebog.net/hosts/AdguardDNS.txt
 		- https://v.firebog.net/hosts/Easylist.txt
+		- https://v.firebog.net/hosts/Prigent-Ads.txt
+		- https://v.firebog.net/hosts/Prigent-Malware.txt
 
-  # Filter plugin: loads allowlists/blocklists and applies domain/IP filtering.
+  # Filter plugin: loads domain lists and applies domain/IP filtering.
   - module: filter
-	config:
-	  # setup_priority controls when setup() runs. When omitted, it falls back to
 	  # pre_priority for setupable plugins, or to the class default (50).
 	  setup_priority: 20
 
@@ -1087,11 +1127,11 @@ plugins:
 		- "malware"
 		- "phishing"
 
-	  # Optional: file-backed allowlist/blocklist inputs (globs allowed)
-	  # allowlist_files:
+	  # Optional: file-backed allow/block inputs (globs allowed)
+	  # allowed_domains_files:
 	  #   - config/allow.txt
 	  #   - config/allow.d/*.list
-	  # blocklist_files:
+	  # blocked_domains_files:
 	  #   - config/block.txt
 	  #   - config/block.d/*.txt
 	  # blocked_patterns_files:
