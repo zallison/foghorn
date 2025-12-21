@@ -215,6 +215,10 @@ class BasePlugin:
     post_priority: ClassVar[int] = 100
     setup_priority: ClassVar[int] = 100
     aliases: ClassVar[Sequence[str]] = ()
+    # Query-type targeting: plugins may override this at the class level to
+    # restrict which qtypes they apply to. By default, all qtypes are targeted
+    # via the "*" wildcard.
+    target_qtypes: ClassVar[Sequence[str]] = ("*",)
 
     @classmethod
     def get_aliases(cls) -> Sequence[str]:
@@ -327,6 +331,14 @@ class BasePlugin:
         self._targets_cache_ttl: int = int(config.get("targets_cache_ttl_seconds", 300))
         self._targets_cache: FoghornTTLCache = FoghornTTLCache()
 
+        # Optional qtype targeting: normalize configured target_qtypes into
+        # uppercase mnemonic values (e.g., ["A", "AAAA"], or ["*"]). When the
+        # resolved list is empty or contains "*", all qtypes are targeted.
+        raw_qtypes = config.get(
+            "target_qtypes", getattr(self.__class__, "target_qtypes", ("*",))
+        )
+        self._target_qtypes = self._normalize_qtype_list(raw_qtypes)
+
     def _init_instance_logger(self, logging_cfg: Dict[str, object]) -> None:
         """Brief: Configure an optional per-plugin logger from a logging config block.
 
@@ -408,6 +420,45 @@ class BasePlugin:
         plugin_logger.propagate = False
 
         self.logger = plugin_logger
+
+    @staticmethod
+    def _normalize_qtype_list(raw: object) -> List[str]:
+        """Brief: Normalize a raw target_qtypes config value into qtype names.
+
+        Inputs:
+          - raw: Configuration value for target_qtypes. May be None, a
+            single string, or a list/tuple of strings or string-like objects
+            representing qtype mnemonics (e.g., "A", "AAAA") or "*".
+
+        Outputs:
+          - list[str]: Uppercase qtype names; empty when no valid entries are
+            provided. The wildcard "*" is preserved when present.
+        """
+        if raw is None:
+            return ["*"]
+
+        if isinstance(raw, str):
+            entries = [raw]
+        elif isinstance(raw, (list, tuple)):
+            entries = [str(x) for x in raw]
+        else:
+            logger.warning(
+                "BasePlugin: ignoring invalid target_qtypes value %r (expected str or list)",
+                raw,
+            )
+            return ["*"]
+
+        normalized: List[str] = []
+        for entry in entries:
+            text = str(entry).strip()
+            if not text:
+                continue
+            if text == "*":
+                # Wildcard applies to all qtypes; no need to collect others.
+                return ["*"]
+            normalized.append(text.upper())
+
+        return normalized or ["*"]
 
     @staticmethod
     def _parse_priority_value(value: object, key: str, logger: logging.Logger) -> int:
@@ -574,6 +625,39 @@ class BasePlugin:
             pass
 
         return result
+
+    def targets_qtype(self, qtype: Union[int, str]) -> bool:
+        """Brief: Determine whether this plugin targets the given DNS qtype.
+
+        Inputs:
+          - qtype: DNS RR type, as an integer code or mnemonic string.
+
+        Outputs:
+          - bool: True if the plugin should run for this qtype based on its
+            target_qtypes configuration; False otherwise.
+
+        Behavior:
+          - When target_qtypes is omitted or contains "*", all qtypes are
+            targeted.
+          - Otherwise, the qtype name (e.g., "A") must be present in the
+            normalized _target_qtypes list.
+        """
+        # Fast path: wildcard or empty list means "all qtypes".
+        try:
+            qtypes = list(getattr(self, "_target_qtypes", ["*"]))
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+            qtypes = ["*"]
+
+        if not qtypes or "*" in qtypes:
+            return True
+
+        if isinstance(qtype, int):
+            name = QTYPE.get(qtype, str(qtype))
+        else:
+            name = str(qtype)
+        return str(name).upper() in {qt.upper() for qt in qtypes}
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext

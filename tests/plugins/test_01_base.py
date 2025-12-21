@@ -361,7 +361,7 @@ def test_base_plugin_targets_default_all_clients():
     assert plugin.targets(ctx2) is True
 
 
-def test_base_plugin_targets_cidr_includes_only_matches():
+def test_base_plugin_targets_matches_only_configured_targets():
     """Brief: targets() restricts matches to configured CIDR ranges.
 
     Inputs:
@@ -551,3 +551,38 @@ def test_make_a_response_builds_aaaa_record_with_fixed_ttl():
     assert str(answers[0].rdata) == "2001:db8::1"
     # TTL for AAAA answers is hard-coded to 60 seconds in _make_a_response.
     assert answers[0].ttl == 60
+
+
+def test_base_plugin_targets_qtype_defaults_to_all():
+    """Brief: target_qtypes defaults to all qtypes via wildcard.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts that targets_qtype returns True for arbitrary qtypes
+        when no explicit target_qtypes override is provided.
+    """
+    plugin = BasePlugin()
+    plugin.setup()
+
+    assert plugin.targets_qtype(int(QTYPE.A)) is True
+    assert plugin.targets_qtype(int(QTYPE.AAAA)) is True
+    assert plugin.targets_qtype(int(QTYPE.MX)) is True
+
+
+def test_base_plugin_targets_qtype_respects_explicit_list():
+    """Brief: target_qtypes restricts plugin execution to configured qtypes.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts that only configured qtypes are targeted.
+    """
+    plugin = BasePlugin(target_qtypes=["A", "AAAA"])
+    plugin.setup()
+
+    assert plugin.targets_qtype(int(QTYPE.A)) is True
+    assert plugin.targets_qtype(int(QTYPE.AAAA)) is True
+    assert plugin.targets_qtype(int(QTYPE.MX)) is False
