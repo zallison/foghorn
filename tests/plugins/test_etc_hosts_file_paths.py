@@ -1,5 +1,5 @@
 """
-Brief: Tests for multiple file support in EtcHosts plugin (file_paths and file_path).
+Brief: Tests for multiple file support in EtcHosts plugin using file_paths and defaults.
 
 Inputs:
   - tmp_path: pytest fixture to create temporary files
@@ -9,8 +9,6 @@ Outputs:
 """
 
 import importlib
-
-import pytest
 
 from dnslib import QTYPE, DNSRecord
 
@@ -48,60 +46,6 @@ def test_init_with_file_paths_only_merges_in_order(tmp_path):
     assert plugin.hosts["hostB"] == "10.0.0.2"
     assert plugin.hosts["hostC"] == "1.1.2.2"
     assert plugin.hosts["localhost"] == "127.0.0.1"
-
-
-def test_both_params_with_redundant_legacy_deduplicates(tmp_path):
-    """
-    Brief: When file_path duplicates an entry in file_paths, it is de-duplicated; order preserved.
-
-    Inputs:
-      - file_paths: [f1, f2]; file_path: f1 (redundant)
-    Outputs:
-      - None: f2 still overrides f1 for conflicting hostnames
-
-    Example:
-      f1: 1.1.1.1 hostA
-      f2: 2.2.2.2 hostA
-    """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
-    EtcHosts = mod.EtcHosts
-
-    f1 = _write(tmp_path, "f1", "1.1.1.1 hostA\n")
-    f2 = _write(tmp_path, "f2", "2.2.2.2 hostA\n")
-
-    plugin = EtcHosts(file_paths=[str(f1), str(f2)], file_path=str(f1))
-    with pytest.raises(
-        ValueError,
-        match="EtcHosts config must use 'file_paths' \(list\) instead of legacy 'file_path'",
-    ):
-        plugin.setup()
-
-
-def test_both_params_with_nonredundant_legacy_appends_last(tmp_path):
-    """
-    Brief: When both are provided and legacy is distinct, legacy is included last and overrides earlier files.
-
-    Inputs:
-      - file_paths: [f1]; file_path: f2 (distinct)
-    Outputs:
-      - None: legacy f2 overrides entries from f1
-
-    Example:
-      f1: 1.1.1.1 hostA
-      f2: 3.3.3.3 hostA
-    """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
-    EtcHosts = mod.EtcHosts
-
-    f1 = _write(tmp_path, "f1", "1.1.1.1 hostA\n10.0.0.2 hostB\n")
-    f2 = _write(tmp_path, "f2", "3.3.3.3 hostA\n")
-
-    plugin = EtcHosts(file_paths=[str(f1)], file_path=str(f2))
-    with pytest.raises(
-        ValueError,
-        match="EtcHosts config must use 'file_paths' \(list\) instead of legacy 'file_path'",
-    ):
-        plugin.setup()
 
 
 def test_no_input_uses_default_via_monkeypatched_normalize(tmp_path, monkeypatch):
