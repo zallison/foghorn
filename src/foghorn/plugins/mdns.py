@@ -36,6 +36,108 @@ from foghorn.plugins.base import (
 
 logger = logging.getLogger(__name__)
 
+# Default service types to browse when `service_types` is omitted from the
+# MdnsBridgePlugin config. This mirrors the curated list shipped in
+# `config/config.yaml` so that, in the common case, users can omit the
+# field and still get rich discovery.
+DEFAULT_MDNS_SERVICE_TYPES: List[str] = [
+    "_services._dns-sd._udp.local",  # Everything
+    "_services._dns-sd._tcp.local",  # Everything (non-standard)
+    "_1password._tcp.local",
+    "_a-d-sync._tcp.local",
+    "_adb-tls-pairing._tcp.local",
+    "_addressbook._tcp.local",
+    "_adpro-setup._tcp.local",
+    "_aecoretech._tcp.local",
+    "_aeroflex._tcp.local",
+    "_afpovertcp._tcp.local",
+    "_airplay._tcp.local",
+    "_airport._tcp.local",
+    "_apple-sasl-2._tcp.local",
+    "_apple-sasl._tcp.local",
+    "_appletv-v2._tcp.local",
+    "_appletv-v3._tcp.local",
+    "_axis-video._tcp.local",
+    "_bacnet._ip.local",
+    "_bond._tcp.local",
+    "_cups._tcp.local",
+    "_daap._tcp.local",
+    "_dhcp._udp.local",
+    "_dns-sd._udp.local",
+    "_elg._tcp.local",
+    "_eppc._tcp.local",
+    "_esxi._tcp.local",
+    "_gameport._tcp.local",
+    "_googlecast._tcp.local",
+    "_hap._tcp.local",
+    "_hap._udp.local",
+    "_homekit._tcp.local",
+    "_http-alt._tcp.local",
+    "_http._tcp.local",
+    "_https._tcp.local",
+    "_ipp-usb._tcp.local",
+    "_ipp._tcp.local",
+    "_jedilib._tcp.local",
+    "_kftp._tcp.local",
+    "_khttp._tcp.local",
+    "_khttps._tcp.local",
+    "_kshell._tcp.local",
+    "_ldap._tcp.local",
+    "_macstadium._tcp.local",
+    "_matlab-http._tcp.local",
+    "_matter._tcp.local",
+    "_matterc._udp.local",
+    "_mediaremotetv._tcp.local",
+    "_microsoft-ds._tcp.local",
+    "_mobilinux._tcp.local",
+    "_nchan._tcp.local",
+    "_netware._ip.local",
+    "_nfs._tcp.local",
+    "_ni-virtins._tcp.local",
+    "_ni-visa._tcp.local",
+    "_nut._tcp.local",
+    "_obex._tcp.local",
+    "_pdl-datastream._tcp.local",
+    "_pdl-service._tcp.local",
+    "_presence._tcp.local",
+    "_presence._ucp.local",
+    "_printer._tcp.local",
+    "_ps._tcp.local",
+    "_qsync._tcp.local",
+    "_raop._tcp.local",
+    "_rdm._tcp.local",
+    "_rtspu._udp.local",
+    "_sane._tcp.local",
+    "_services._dns-sd._udp.local",
+    "_sips._tcp.local",
+    "_slp._udp.local",
+    "_smb._tcp.local",
+    "_spotify-connect._tcp.local",
+    "_ssh._tcp.local",
+    "_stun-behavior._udp.local",
+    "_stun-tls._tcp.local",
+    "_stun._udp.local",
+    "_sub._tcp.local",
+    "_targus._tcp.local",
+    "_telnet._tcp.local",
+    "_tftp._udp.local",
+    "_time._tcp.local",
+    "_touch-able._tcp.local",
+    "_upnp._tcp.local",
+    "_uscan._tcp.local",
+    "_vnc._tcp.local",
+    "_vscp._tcp.local",
+    "_waste._tcp.local",
+    "_webdav._tcp.local",
+    "_webdavs._tcp.local",
+    "_webex._tcp.local",
+    "_wled._tcp.local",
+    "_workstation._tcp.local",
+    "_xbox._tcp.local",
+    "_xserveraid._tcp.local",
+    "_zenginkyo-1._tcp.local",
+]
+
 # Maximum number of PTR targets for which we will synthesize additional
 # host A/AAAA glue records. When a PTR response has more than this many
 # targets, the answer will contain only PTRs to avoid overly large
@@ -428,10 +530,21 @@ class MdnsBridgePlugin(BasePlugin):
                 "Try setting zeroconf_interfaces to a specific LAN interface IP and zeroconf_ip_version=v4."
             ) from exc
 
-        # Optional: directly browse configured service types.
-        for service_type in list(
-            getattr(self._config_model, "service_types", []) or []
-        ):
+        # Optional: directly browse configured service types. When no list is
+        # provided, fall back to a curated default set so users can omit the
+        # field entirely with sane defaults.
+        configured_types = list(getattr(self._config_model, "service_types", []) or [])
+        effective_service_types = configured_types
+        if not effective_service_types:
+            try:
+                from foghorn.plugins.mdns import (
+                    DEFAULT_MDNS_SERVICE_TYPES,
+                )  # local import to avoid cycles
+            except Exception:  # pragma: no cover - defensive fallback
+                DEFAULT_MDNS_SERVICE_TYPES = []  # type: ignore[assignment]
+            effective_service_types = list(DEFAULT_MDNS_SERVICE_TYPES)
+
+        for service_type in effective_service_types:
             try:
                 self._start_type_browser(str(service_type))
             except Exception:
