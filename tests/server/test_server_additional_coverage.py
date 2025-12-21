@@ -28,7 +28,7 @@ def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
     h = DNSUDPHandler.__new__(DNSUDPHandler)
     sock = _Sock()
     h.request = (query_wire, sock)
-    h.client_address = (client_ip, 55333)
+    h.client_address = (client_ip, 55335)
     return h, sock
 
 

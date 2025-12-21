@@ -307,7 +307,7 @@ make docker-clean
 docker-run:
     docker rm -f foghorn 2> /dev/null
     docker run --name foghorn -d \
-        -p 53:5333/udp \
+        -p 53:5335/udp \
         -p 53:53/tcp \
         -p 5380:5380/tcp \
         -v /etc/hosts:/etc/hosts:ro \
@@ -320,7 +320,7 @@ docker-run:
 - Removes any existing container named `foghorn`.
 - Starts a new detached container named `foghorn` from the image `${PREFIX}/${CONTAINER_NAME}:${TAG}`.
 - Port mappings:
-  - `-p 53:5333/udp` – host UDP port 53 → container UDP 5333 (DNS listener).
+  - `-p 53:5335/udp` – host UDP port 53 → container UDP 5335 (DNS listener).
   - `-p 53:53/tcp` – host TCP port 53 → container TCP 53 (TCP DNS, if used).
   - `-p 8053:8053/tcp` – host TCP port 8053 → container TCP 8053 (admin/web server).
 - Mounts `/etc/hosts` read-only into the container.

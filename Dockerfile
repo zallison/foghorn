@@ -31,7 +31,7 @@ RUN pip install --root-user-action=ignore "."
 # Expose: Internal Port
 
 # 53 # Standard UDP/TCP
-EXPOSE 5333
+EXPOSE 5335
 
 # 853  # DNS-over-TLS
 EXPOSE 1853
