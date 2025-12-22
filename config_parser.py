@@ -291,6 +291,77 @@ def _validate_plugin_config(plugin_cls: type[BasePlugin], config: dict | None) -
     return cfg
 
 
+def _derive_plugin_instance_name(
+    *,
+    plugin_cls: type[BasePlugin],
+    module_path: str,
+    explicit_name: object | None,
+    used_names: set[str],
+) -> str:
+    """Brief: Compute a stable, unique plugin instance name with auto-suffixing.
+
+    Inputs:
+      - plugin_cls: Resolved BasePlugin subclass.
+      - module_path: Original module/alias text from the configuration.
+      - explicit_name: Optional explicit name from the config entry.
+      - used_names: Set of names already assigned to earlier plugin instances.
+
+    Outputs:
+      - str: Unique instance name. When explicit_name is non-empty and not
+        already present in used_names, it is used as-is. When explicit_name is
+        omitted or empty, a base name is derived from the plugin's aliases,
+        falling back to the final segment of module_path, and a numeric suffix
+        ("2", "3", ...) is appended when needed to avoid collisions.
+    """
+
+    if explicit_name is not None:
+        base = str(explicit_name).strip()
+        if not base:
+            raise ValueError(
+                "plugins[]: explicit 'name' must not be empty when provided"
+            )
+        if base in used_names:
+            raise ValueError(
+                "Duplicate plugin name '%s'. Each plugin must have a unique name; "
+                "set a different 'name' value in plugins[] to disambiguate." % base
+            )
+        used_names.add(base)
+        return base
+
+    try:
+        raw_aliases = list(getattr(plugin_cls, "get_aliases", lambda: [])())
+    except Exception:
+        raw_aliases = []
+
+    aliases = [str(a or "").strip() for a in raw_aliases if str(a or "").strip()]
+
+    if aliases:
+        simple_candidates = [a for a in aliases if "-" not in a and "_" not in a]
+        if simple_candidates:
+            root = simple_candidates[0]
+        else:
+            root = aliases[0]
+    else:
+        module_tail = str(module_path or "").strip().split(".")[-1]
+        root = module_tail or getattr(plugin_cls, "__name__", "plugin")
+
+    if not root:
+        root = getattr(plugin_cls, "__name__", "plugin")
+
+    base_name = str(root).strip()
+    if base_name not in used_names:
+        used_names.add(base_name)
+        return base_name
+
+    idx = 2
+    while True:
+        candidate = f"{base_name}{idx}"
+        if candidate not in used_names:
+            used_names.add(candidate)
+            return candidate
+        idx += 1
+
+
 def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
     """Brief: Load and initialize plugins from config plugin specifications.
 
@@ -319,6 +390,7 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
 
     alias_registry = discover_plugins()
     plugins: List[BasePlugin] = []
+    seen_names: set[str] = set()
 
     for spec in plugin_specs or []:
         module_path: Optional[str]
@@ -392,6 +464,18 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
 
         plugin_specific_config = dict(raw_config)
 
+        # Resolve plugin class eagerly so we can derive a stable, human-friendly
+        # instance name when the config omits "name". The effective instance
+        # name is used for logging, statistics, and HTTP routing.
+        plugin_cls = get_plugin_class(module_path, alias_registry)
+
+        effective_name = _derive_plugin_instance_name(
+            plugin_cls=plugin_cls,
+            module_path=module_path,
+            explicit_name=plugin_name,
+            used_names=seen_names,
+        )
+
         # Per-plugin cache selection.
         #
         # Brief:
@@ -414,7 +498,6 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         ):
             plugin_specific_config.pop(k, None)
 
-        plugin_cls = get_plugin_class(module_path, alias_registry)
         validated_config = _validate_plugin_config(plugin_cls, plugin_specific_config)
 
         # Resolve cache instance and inject into plugin configuration.
@@ -444,10 +527,9 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         if setup_priority is not None:
             validated_config["setup_priority"] = setup_priority
 
-        if plugin_name is not None:
-            plugin = plugin_cls(name=str(plugin_name), **validated_config)
-        else:
-            plugin = plugin_cls(**validated_config)
+        # Always pass the effective instance name into the plugin constructor so
+        # BasePlugin.name is stable and unique, even when config omits name.
+        plugin = plugin_cls(name=effective_name, **validated_config)
         plugins.append(plugin)
 
     return plugins
