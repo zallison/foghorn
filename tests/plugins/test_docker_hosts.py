@@ -1,5 +1,5 @@
 """
-Brief: Tests for foghorn.plugins.docker-hosts DockerHosts plugin.
+Brief: Tests for foghorn.plugins.docker_hosts DockerHosts plugin.
 
 Inputs:
   - None
@@ -53,8 +53,8 @@ def test_docker_hosts_module_imports():
       - None; asserts module name.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
-    assert mod.__name__ == "foghorn.plugins.docker-hosts"
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
+    assert mod.__name__ == "foghorn.plugins.docker_hosts"
 
 
 def test_docker_hosts_builds_mappings_from_inspect(monkeypatch):
@@ -67,7 +67,7 @@ def test_docker_hosts_builds_mappings_from_inspect(monkeypatch):
       - None; asserts hostname and reverse mappings are populated.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
@@ -105,7 +105,7 @@ def test_docker_hosts_pre_resolve_a_aaaa_ptr(monkeypatch):
       - None; asserts override decisions and expected DNS answers.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
@@ -160,7 +160,7 @@ def test_docker_hosts_use_host_ip_override(monkeypatch):
         for both forward and reverse lookups.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     host_v4 = "192.0.2.10"
@@ -228,7 +228,7 @@ def test_docker_hosts_warns_on_missing_hostname_or_ip(monkeypatch, caplog):
       - None; asserts warning messages and empty mappings.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
@@ -273,7 +273,7 @@ def test_docker_hosts_suffix_per_instance(monkeypatch):
         that unsuffixed names are not published.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(  # type: ignore[arg-type]
@@ -309,7 +309,7 @@ def test_docker_hosts_suffix_per_endpoint(monkeypatch):
       - None; asserts that endpoint suffix is applied to mappings when set.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(  # type: ignore[arg-type]
@@ -351,7 +351,7 @@ def test_docker_hosts_multiple_ips_in_answer(monkeypatch):
         with more than one IPv4 address.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
@@ -409,7 +409,7 @@ def test_docker_hosts_get_config_model_returns_pydantic_model():
       - None; asserts returned model class name.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     model = DockerHosts.get_config_model()
@@ -426,7 +426,7 @@ def test_docker_hosts_setup_normalizes_endpoints_and_falls_back_default(caplog):
       - None; asserts warning messages and that a default unix socket endpoint is used.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     # All endpoint entries are invalid -> triggers default endpoint insertion.
@@ -464,7 +464,7 @@ def test_docker_hosts_setup_parses_endpoint_fields_and_logs_warnings(caplog):
       - None; asserts that invalid intervals/IPs/TTLs are handled.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(  # type: ignore[arg-type]
@@ -521,7 +521,7 @@ def test_docker_hosts_iter_containers_returns_empty_when_no_client(monkeypatch):
         client can be created for the endpoint.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     # Simulate an environment without the docker SDK so that
@@ -553,7 +553,7 @@ def test_docker_hosts_iter_containers_logs_and_returns_empty_on_exception(caplog
       - None; asserts warning log and empty return.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
@@ -593,7 +593,7 @@ def test_docker_hosts_reload_from_docker_logs_when_no_containers(monkeypatch, ca
       - None; asserts warning log and empty mappings.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
@@ -626,7 +626,7 @@ def test_docker_hosts_reload_from_docker_ttl_cast_fallback_and_invalid_reverse_p
       - None; asserts warnings for invalid IP reverse pointers and that forward mappings still include the raw strings.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
@@ -683,7 +683,7 @@ def test_docker_hosts_pre_resolve_returns_none_when_not_targeted(monkeypatch):
       - None; asserts None decision.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     # Target only 192.0.2.0/24; ctx uses 127.0.0.1.
@@ -710,7 +710,7 @@ def test_docker_hosts_pre_resolve_missing_mappings_and_parse_failure(
       - None; asserts None for missing mappings and override decision with None response on parse failure.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
@@ -755,7 +755,7 @@ def test_docker_hosts_make_ip_response_returns_none_on_parse_failure(
       - None; asserts return None and warning log.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
@@ -779,7 +779,7 @@ def test_docker_hosts_setup_logs_when_docker_sdk_missing(monkeypatch, caplog):
       - None; asserts missing-SDK warning is logged.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     monkeypatch.setattr(mod, "docker", None, raising=True)
@@ -804,7 +804,7 @@ def test_docker_hosts_setup_handles_docker_client_creation_failure(monkeypatch, 
       - None; asserts warning about Docker client creation failure.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     class DummyDockerExc(Exception):
@@ -838,7 +838,7 @@ def test_docker_hosts_reload_loop_executes_reload_once(monkeypatch):
       - None; asserts _reload_from_docker called at least once.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
@@ -884,7 +884,7 @@ def test_docker_hosts_health_filter_default_skips_unhealthy(monkeypatch):
       - None; asserts unhealthy containers are skipped by default.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
@@ -929,7 +929,7 @@ def test_docker_hosts_health_filter_can_include_unhealthy(monkeypatch):
       - None; asserts unhealthy containers are included when configured.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(  # type: ignore[arg-type]
@@ -971,7 +971,7 @@ def test_docker_hosts_unreachable_endpoint_omits_hosts_txt(monkeypatch, caplog):
         connection failure.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     # Use discovery so that _hosts.<suffix> TXT would normally be published.
@@ -1026,7 +1026,7 @@ def test_docker_hosts_discovery_publishes_txt(monkeypatch):
         include full container IDs in TXT text.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(  # type: ignore[arg-type]
@@ -1082,15 +1082,15 @@ def test_docker_hosts_discovery_publishes_txt(monkeypatch):
             break
     assert container_txt is not None
 
-    # Ordering: name, ans4/ans6, endpoint, hostports, then remainder.
-    assert container_txt.find("name=") < container_txt.find("ans4=")
-    assert container_txt.find("ans4=") < container_txt.find("endpoint=")
-    assert container_txt.find("endpoint=") < container_txt.find("hostports=")
+    # Ordering: name first, endpoint last; metadata fields appear in between.
+    assert container_txt.find("name=") != -1
+    assert container_txt.find("endpoint=") != -1
+    assert container_txt.find("name=") < container_txt.find("endpoint=")
 
-    assert "name=web.docker.mycorp" in container_txt
-    assert "ans4=172.17.0.5" in container_txt
+    assert "name=web" in container_txt
+    assert "int4=172.17.0.5" in container_txt
+    assert "nets=bridge:172.17.0.5" in container_txt
     assert "endpoint=unix:///var/run/docker.sock" in container_txt
-    assert "hostports=8080,8443" in container_txt
     assert "health=running" in container_txt
     assert "project-name=myproj" in container_txt
 
@@ -1099,7 +1099,7 @@ def test_docker_hosts_discovery_publishes_txt(monkeypatch):
 
 
 def test_docker_hosts_project_name_publishes_a_record(monkeypatch):
-    """Brief: DockerHosts publishes A/AAAA records for project name when distinct.
+    """Brief: DockerHosts keeps project name as metadata, not a separate label.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
@@ -1108,7 +1108,7 @@ def test_docker_hosts_project_name_publishes_a_record(monkeypatch):
       - None; asserts project name becomes a forward-mapped alias.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
@@ -1131,8 +1131,9 @@ def test_docker_hosts_project_name_publishes_a_record(monkeypatch):
     plugin.setup()
 
     assert "web" in plugin._forward_v4  # type: ignore[attr-defined]
-    assert "myproj" in plugin._forward_v4  # type: ignore[attr-defined]
-    assert plugin._forward_v4["myproj"] == ["172.17.0.5"]  # type: ignore[attr-defined,index]
+    # Project name is now used only in TXT/Info metadata and should not publish
+    # a separate DNS label.
+    assert "myproj" not in plugin._forward_v4  # type: ignore[attr-defined]
 
 
 def test_docker_hosts_project_name_not_added_when_same_as_image(monkeypatch):
@@ -1145,7 +1146,7 @@ def test_docker_hosts_project_name_not_added_when_same_as_image(monkeypatch):
       - None; asserts project name alias is omitted for image-equal project names.
     """
 
-    mod = importlib.import_module("foghorn.plugins.docker-hosts")
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]

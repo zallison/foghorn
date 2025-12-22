@@ -18,8 +18,9 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from dnslib import AAAA, PTR, QTYPE, RR, A, DNSHeader, DNSRecord, TXT
 from pydantic import BaseModel, Field
 
-try:  # cachetools is an optional dependency; fall back to no-op cache when missing.
-    from cachetools import TTLCache, cached  # type: ignore[import]
+try:  # cachetools is an optional dependency; fall back to shim when missing.
+    from cachetools import TTLCache  # type: ignore[import]
+    from foghorn.utils.cache_registry import registered_cached
 except Exception:  # pragma: no cover - defensive optional dependency handling
 
     class TTLCache(dict):  # type: ignore[override]
@@ -27,8 +28,8 @@ except Exception:  # pragma: no cover - defensive optional dependency handling
             """Lightweight TTLCache shim when cachetools is unavailable."""
             super().__init__()
 
-    def cached(*, cache, **kwargs):  # type: ignore[no-redef]
-        """No-op cached decorator used when cachetools is unavailable."""
+    def registered_cached(*, cache, **kwargs):  # type: ignore[no-redef]
+        """No-op registered_cached decorator used when cachetools is unavailable."""
 
         def decorator(func):
             return func
@@ -37,6 +38,7 @@ except Exception:  # pragma: no cover - defensive optional dependency handling
 
 
 from foghorn.plugins.base import (
+    AdminPageSpec,
     BasePlugin,
     PluginContext,
     PluginDecision,
@@ -351,6 +353,8 @@ class DockerHosts(BasePlugin):
         self._ttl_ptr: Dict[str, int] = {}
         self._aggregate_txt: Dict[str, List[str]] = {}
         self._ttl_txt: Dict[str, int] = {}
+        # Per-host exported ports (hostports) for admin UI display.
+        self._hostports: Dict[str, List[str]] = {}
 
         # Docker clients per endpoint URL (when docker SDK is available)
         self._clients: Dict[str, object] = {}
@@ -483,9 +487,15 @@ class DockerHosts(BasePlugin):
         new_ttl_ptr: Dict[str, int] = {}
         new_txt: Dict[str, List[str]] = {}
         new_ttl_txt: Dict[str, int] = {}
+        new_hostports: Dict[str, List[str]] = {}
 
         total_containers = 0
         mapped_containers = 0
+
+        # Accumulate aliases per canonical container name so that containers
+        # sharing the same canonical name end up with a single unified alias
+        # set in TXT/Info (front-end groups by TXT).
+        canonical_aliases: Dict[str, set[str]] = {}
 
         for endpoint in self._endpoints:
             containers = self._iter_containers_for_endpoint(endpoint)
@@ -497,25 +507,32 @@ class DockerHosts(BasePlugin):
                 # results. Next reload will retry the connection.
                 continue
 
-            # When discovery is enabled and we have successfully listed
-            # containers for this endpoint, emit a host-level TXT summary for
-            # the endpoint under _hosts.<suffix> (or _hosts).
-            if self._discovery:
-                ep_suffix = endpoint.get("suffix") or getattr(self, "_suffix", "")
-                record_owner = self._hosts_owner_for_suffix(
-                    str(ep_suffix or "").strip()
-                )
-                host_ipv4 = endpoint.get("host_ipv4") or ""
-                host_ipv6 = endpoint.get("host_ipv6") or ""
-                parts: List[str] = []
-                url = str(endpoint.get("url"))
-                if url:
-                    parts.append(f"endpoint={url}")
-                if host_ipv4:
-                    parts.append(f"ans4={host_ipv4}")
-                if host_ipv6:
-                    parts.append(f"ans6={host_ipv6}")
-                line = " ".join(parts)
+                # When discovery is enabled and we have successfully listed
+                # containers for this endpoint, emit a host-level TXT summary for
+                # the endpoint under _hosts.<suffix> (or _hosts).
+                if self._discovery:
+                    ep_suffix = endpoint.get("suffix") or getattr(self, "_suffix", "")
+                    record_owner = self._hosts_owner_for_suffix(
+                        str(ep_suffix or "").strip()
+                    )
+                    host_ipv4 = endpoint.get("host_ipv4") or ""
+                    host_ipv6 = endpoint.get("host_ipv6") or ""
+                    parts: List[str] = []
+                    url = str(endpoint.get("url"))
+                    if url:
+                        # For display, shorten tcp://host:port endpoints to just
+                        # the host name so TXT/Info stays compact. Other schemes
+                        # (e.g. unix://) are left as-is.
+                        if url.startswith("tcp://"):
+                            disp = url[len("tcp://") :]
+                            # Strip :port when present.
+                            host_only = disp.split(":", 1)[0]
+                            parts.append(f"endpoint={host_only}")
+                        else:
+                            parts.append(f"endpoint={url}")
+                    if host_ipv6:
+                        parts.append(f"ans6={host_ipv6}")
+                    line = " ".join(parts)
                 if line:
                     new_txt.setdefault(record_owner, []).append(line)
                     new_ttl_txt[record_owner] = int(self._ttl)
@@ -597,28 +614,38 @@ class DockerHosts(BasePlugin):
                 ) or labels.get("io.kubernetes.pod.namespace")
                 project_name = str(project_name_raw).strip() if project_name_raw else ""
 
-                image_raw = ""
                 if isinstance(cfg, dict):
-                    image_raw = str(cfg.get("Image") or "").strip()
-                image_norm = image_raw.lower()
-                image_repo = image_norm.split("@")[0].split(":")[0]
+                    _ = str(cfg.get("Image") or "").strip()
+
+                def _strip_env_domain(value: str) -> str:
+                    # Best-effort: strip compose-style domain placeholder suffixes
+                    # like "${DOMAIN}" or ".${DOMAIN}" from names before using
+                    # them as DNS labels.
+                    s = str(value or "").strip()
+                    if not s:
+                        return s
+                    for suf in (".${DOMAIN}", "${DOMAIN}"):
+                        if s.endswith(suf):
+                            s = s[: -len(suf)]
+                            break
+                    return s
 
                 def _norm_ident(value: str) -> str:
                     # Normalize identifiers used as DNS labels so they never
                     # begin or end with a dot and are case-insensitive.
-                    return str(value).strip().strip(".").lower()
+                    return _strip_env_domain(str(value)).strip().strip(".").lower()
+
+                # Apply ${DOMAIN} stripping to primary docker names as well.
+                raw_name = _strip_env_domain(raw_name)
+                hostname = _strip_env_domain(hostname) if hostname else hostname
 
                 candidate_names: List[str] = []
                 if raw_name:
                     candidate_names.append(raw_name)
                 if hostname and hostname != raw_name:
                     candidate_names.append(hostname)
-                if project_name:
-                    pn = _norm_ident(project_name)
-                    rn = _norm_ident(raw_name)
-                    hn = _norm_ident(hostname or "")
-                    if pn and pn not in {rn, hn} and pn not in {image_norm, image_repo}:
-                        candidate_names.append(project_name)
+                # Note: project-name is no longer used as a DNS label source; it is
+                # retained only for metadata in TXT/Info summaries.
                 if container_id:
                     # Include both short and full IDs so lookups by abbreviated
                     # container ID work when rendered into hosts-style records
@@ -689,6 +716,12 @@ class DockerHosts(BasePlugin):
                 else:
                     ptr_canonical = base_canonical
 
+                # Merge aliases for this canonical name across all containers so
+                # that TXT/Info can present a single record per name.
+                alias_set = canonical_aliases.setdefault(ptr_canonical, set())
+                for n in names_for_mapping:
+                    alias_set.add(n)
+
                 mapped_containers += 1
 
                 # Record per-name TTLs for this endpoint; later endpoints win on
@@ -732,11 +765,13 @@ class DockerHosts(BasePlugin):
                                     ptr_canonical,
                                 )
 
-                # Build a summary line for this container.
-                line = self._format_aggregate_line(
+                # Build a summary line for this container and capture hostports
+                # for admin display. Aliases passed here are the union for the
+                # canonical name, not just this specific instance.
+                line, hostports = self._format_aggregate_line(
                     container=container,
                     canonical=ptr_canonical,
-                    aliases=names_for_mapping,
+                    aliases=sorted(canonical_aliases.get(ptr_canonical, set())),
                     endpoint_url=str(endpoint.get("url")),
                     effective_health=effective_health,
                     project_name=project_name,
@@ -753,6 +788,10 @@ class DockerHosts(BasePlugin):
                 for owner in names_for_mapping:
                     new_txt.setdefault(owner, []).append(line)
                     new_ttl_txt[owner] = ep_ttl
+                    # Track hostports per exported owner for admin UI; a later
+                    # container with the same owner will overwrite, which is fine
+                    # since they share the same mapping.
+                    new_hostports[owner] = list(hostports)
 
                 # Optional aggregate TXT record (_containers.<suffix>) that
                 # summarizes all containers.
@@ -804,6 +843,117 @@ class DockerHosts(BasePlugin):
             self._ttl_ptr = new_ttl_ptr
             self._aggregate_txt = new_txt
             self._ttl_txt = new_ttl_txt
+            self._hostports = new_hostports
+
+    def get_admin_pages(self) -> List[AdminPageSpec]:
+        """Brief: Describe the DockerHosts admin page for the web UI.
+
+        Inputs:
+          - None; uses the plugin instance name for routing.
+
+        Outputs:
+          - list[AdminPageSpec]: A single page descriptor for Docker hosts.
+        """
+
+        return [
+            AdminPageSpec(
+                slug="docker-hosts",
+                title="Docker",
+                description=(
+                    "Containers and hosts discovered by the DockerHosts plugin "
+                    "(uses /api/v1/plugins/{name}/docker_hosts for data)."
+                ),
+                layout="one_column",
+                kind="docker_hosts",
+            )
+        ]
+
+    def get_admin_ui_descriptor(self) -> Dict[str, object]:
+        """Brief: Describe DockerHosts admin UI using a generic snapshot layout.
+
+        Inputs:
+          - None (uses the plugin instance name and admin page spec for routing).
+
+        Outputs:
+          - dict with keys:
+              * name: Effective plugin instance name.
+              * title: Human-friendly tab title.
+              * order: Integer ordering hint among plugin tabs.
+              * endpoints: Mapping with at least a "snapshot" URL.
+              * layout: Generic section/column description for the frontend.
+        """
+
+        plugin_name = getattr(self, "name", "docker")
+        try:
+            pages = self.get_admin_pages()
+        except Exception:
+            pages = []
+        page = pages[0] if pages else None
+        base_title = getattr(page, "title", None) or "Docker"
+        # When multiple DockerHosts instances are configured, include the
+        # instance name in the tab title so operators can distinguish them.
+        if plugin_name:
+            title = f"{base_title} ({plugin_name})"
+        else:
+            title = base_title
+
+        snapshot_url = f"/api/v1/plugins/{plugin_name}/docker_hosts"
+        layout: Dict[str, object] = {
+            "sections": [
+                {
+                    "id": "summary",
+                    "title": "Summary",
+                    "type": "kv",
+                    "path": "summary",
+                    "rows": [
+                        {"key": "total_containers", "label": "Containers"},
+                        {"key": "suffix", "label": "Domain"},
+                        {"key": "reload_interval", "label": "Reload interval (s)"},
+                    ],
+                },
+                {
+                    "id": "endpoints",
+                    "title": "Endpoints",
+                    "type": "table",
+                    "path": "summary.endpoints",
+                    "columns": [
+                        {"key": "url", "label": "URL"},
+                        {"key": "interval", "label": "Interval (s)"},
+                        {"key": "host_ipv4", "label": "Host IPv4"},
+                        {"key": "host_ipv6", "label": "Host IPv6"},
+                        {"key": "suffix", "label": "Suffix"},
+                    ],
+                },
+                {
+                    "id": "containers",
+                    "title": "Containers",
+                    "type": "table",
+                    "path": "containers",
+                    "columns": [
+                        {"key": "name", "label": "Name"},
+                        {"key": "ipv4", "label": "IPv4", "join": ", "},
+                        {"key": "ports", "label": "Ports", "join": ", "},
+                        {"key": "txt", "label": "TXT / Info", "html": True},
+                    ],
+                    # Frontend hint: expose a checkbox to hide hash-like
+                    # hostnames (full/short container IDs) in the table.
+                    "filters": [
+                        {"id": "hide_hash_like", "label": "Hide hash-like hostnames"}
+                    ],
+                    # Frontend style hint: group rows by identical TXT summaries
+                    # and render canonical name plus aliases.
+                    "style": "docker_group_by_txt",
+                },
+            ]
+        }
+
+        return {
+            "name": str(plugin_name),
+            "title": str(title),
+            "order": 50,
+            "endpoints": {"snapshot": snapshot_url},
+            "layout": layout,
+        }
 
     def get_http_snapshot(self) -> Dict[str, object]:
         """Brief: Summarize current DockerHosts mappings for the admin web UI.
@@ -826,6 +976,7 @@ class DockerHosts(BasePlugin):
             containers: List[Dict[str, object]] = []
             # Use the union of v4/v6 keys so names with only one family are included.
             all_names = set(self._forward_v4.keys()) | set(self._forward_v6.keys())
+            hostports_map = {k: list(v) for k, v in self._hostports.items()}
 
             def _is_sha1_like(label: str) -> bool:
                 """Return True for hash-like labels (12–64 hex characters).
@@ -862,17 +1013,35 @@ class DockerHosts(BasePlugin):
                 # being sorted alphabetically within their group.
                 return (1 if _is_sha1_like(name) else 0, str(name))
 
+            # For display, strip a shared plugin-level suffix from container
+            # names so that "calibre.docker.zaa" becomes "calibre" in the
+            # table, while the full owner names remain unchanged in the
+            # underlying resolver maps.
+            plugin_suffix = str(getattr(self, "_suffix", "") or "")
+            dot_suffix = None
+            if plugin_suffix:
+                # Normalise suffix used for matching so that leading/trailing
+                # dots in configuration do not affect detection.
+                parts = [p for p in plugin_suffix.strip().strip(".").split(".") if p]
+                if parts:
+                    dot_suffix = "." + ".".join(parts).lower()
+
             for name in sorted(all_names, key=_sort_key):
                 v4_list = list(self._forward_v4.get(name, []))
-                v6_list = list(self._forward_v6.get(name, []))
                 txts = list(self._aggregate_txt.get(name, []))
                 ttl_v4 = int(self._ttl_v4.get(name, self._ttl))
                 ttl_v6 = int(self._ttl_v6.get(name, self._ttl))
+                ports_list = hostports_map.get(name, [])
+
+                display_name = str(name)
+                if dot_suffix and display_name.lower().endswith(dot_suffix):
+                    display_name = display_name[: -len(dot_suffix)] or display_name
+
                 containers.append(
                     {
-                        "name": str(name),
+                        "name": display_name,
                         "ipv4": v4_list,
-                        "ipv6": v6_list,
+                        "ports": ports_list,
                         "ttl_v4": ttl_v4,
                         "ttl_v6": ttl_v6,
                         "txt": txts,
@@ -894,10 +1063,32 @@ class DockerHosts(BasePlugin):
                     }
                 )
 
+            # Compute the number of effective backends as the number of unique
+            # TXT/Info groups. All rows that share an identical TXT payload are
+            # considered aliases for the same logical container.
+            unique_txt_keys: set[str] = set()
+            for row in containers:
+                txts = row.get("txt")
+                # Use repr() to generate a stable, JSON-like key without
+                # requiring the json module; this is sufficient for grouping
+                # containers that share identical TXT payloads.
+                try:
+                    key = repr(sorted(txts)) if isinstance(txts, list) else repr(txts)
+                except Exception:
+                    key = repr(txts)
+                unique_txt_keys.add(key)
+
+            # Plugin-level DNS suffix (domain) used when no per-endpoint suffix
+            # is configured. This is exposed in the summary so that container
+            # display names can omit the common domain while still making it
+            # visible to operators.
+            plugin_suffix = str(getattr(self, "_suffix", "") or "")
+
             summary: Dict[str, object] = {
-                "total_containers": len(containers),
+                "total_containers": len(unique_txt_keys),
                 "endpoints": endpoints_view,
                 "reload_interval": float(getattr(self, "_reload_interval", 0.0) or 0.0),
+                "suffix": plugin_suffix or None,
             }
 
         return {"summary": summary, "containers": containers}
@@ -932,7 +1123,7 @@ class DockerHosts(BasePlugin):
         return "running"
 
     @staticmethod
-    @cached(cache=_DOCKER_AGG_OWNER_CACHE)
+    @registered_cached(cache=_DOCKER_AGG_OWNER_CACHE)
     def _aggregate_owner_for_suffix(suffix: str) -> str:
         """Brief: Build the container aggregate TXT owner name for a suffix.
 
@@ -955,7 +1146,7 @@ class DockerHosts(BasePlugin):
         return "_containers"
 
     @staticmethod
-    @cached(cache=_DOCKER_HOSTS_OWNER_CACHE)
+    @registered_cached(cache=_DOCKER_HOSTS_OWNER_CACHE)
     def _hosts_owner_for_suffix(suffix: str) -> str:
         """Brief: Build the host-level TXT owner name for a suffix.
 
@@ -989,7 +1180,7 @@ class DockerHosts(BasePlugin):
         answer_v4: List[str],
         answer_v6: List[str],
         max_len: int = 240,
-    ) -> str:
+    ) -> Tuple[str, List[str]]:
         """Brief: Build a compact, single-string summary for the aggregate TXT record.
 
         Inputs:
@@ -1031,6 +1222,19 @@ class DockerHosts(BasePlugin):
                 return False
             return all(c in "0123456789abcdef" for c in token)
 
+        def _strip_domain_suffix(label: str) -> str:
+            """Return the left-most DNS label, dropping any domain suffix.
+
+            This keeps TXT/Info names compact (e.g. "calibre-web.docker.zaa" ->
+            "calibre-web") while the full domain is shown separately in the
+            summary table.
+            """
+
+            s = str(label or "").strip().strip(".")
+            if not s:
+                return s
+            return s.split(".", 1)[0]
+
         # Filter aliases for aggregate TXT: omit full container IDs.
         filtered_aliases = [a for a in aliases if a and not _is_full_container_id(a)]
 
@@ -1066,39 +1270,50 @@ class DockerHosts(BasePlugin):
                 net_parts.append(seg)
 
         # Ordering requested:
-        # name, ans4/ans6, endpoint, HostPorts used, then everything else.
+        # name, ans6, other metadata, and endpoint last. Host ports are returned
+        # out-of-band for admin display and omitted from TXT for brevity.
         pieces: List[str] = []
-        if canonical:
-            pieces.append(f"name={canonical}")
-        if answer_v4:
-            pieces.append(f"ans4={_join(answer_v4)}")
+
+        # For display, drop domain suffixes so TXT names/aliases stay short. The
+        # full domain is already shown in the summary table.
+        display_name = _strip_domain_suffix(canonical) if canonical else ""
+        display_aliases = [_strip_domain_suffix(a) for a in filtered_aliases]
+
+        if display_name:
+            pieces.append(f"name={display_name}")
+        # IPv4 answers are implied by the A records for this owner; keep only
+        # ans6 in TXT/Info to reduce visual noise.
         if answer_v6:
             pieces.append(f"ans6={_join(answer_v6)}")
-        if endpoint_url:
-            pieces.append(f"endpoint={endpoint_url}")
-        if hostports:
-            pieces.append(f"hostports={_join(hostports)}")
 
-        # Remaining fields (omit empties).
+        # Remaining fields (omit empties), keeping endpoint= last.
         if effective_health:
             pieces.append(f"health={effective_health}")
         if proj:
             pieces.append(f"project-name={proj}")
         if svc:
             pieces.append(f"service={svc}")
-        if filtered_aliases:
-            pieces.append(f"aliases={_join(filtered_aliases, limit=3)}")
+        if display_aliases:
+            pieces.append(f"aliases={_join(display_aliases, limit=3)}")
         if internal_v4:
             pieces.append(f"int4={_join(internal_v4)}")
         if internal_v6:
             pieces.append(f"int6={_join(internal_v6)}")
         if net_parts:
             pieces.append(f"nets={_join(net_parts, limit=3)}")
+        if endpoint_url:
+            # For display, shorten tcp://host:port endpoints to just the host
+            # name so TXT/Info stays compact.
+            disp_endpoint = endpoint_url
+            if endpoint_url.startswith("tcp://"):
+                disp = endpoint_url[len("tcp://") :]
+                disp_endpoint = disp.split(":", 1)[0]
+            pieces.append(f"endpoint={disp_endpoint}")
 
         s = " ".join(pieces)
         if len(s) > max_len:
-            return s[: max_len - 3] + "..."
-        return s
+            s = s[: max_len - 3] + "..."
+        return s, hostports
 
     @staticmethod
     def _extract_container_network_data(
