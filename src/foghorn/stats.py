@@ -1386,7 +1386,7 @@ class StatsSQLiteStore:
 
                     if dnssec_status in {
                         "dnssec_secure",
-                        "dnssec_ext_secure",
+                        "dnssec_zone_secure",
                         "dnssec_unsigned",
                         "dnssec_bogus",
                         "dnssec_indeterminate",
