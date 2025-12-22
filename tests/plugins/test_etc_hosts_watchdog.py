@@ -58,7 +58,7 @@ def test_watchdog_reload_on_modify(tmp_path):
     """
     import importlib
 
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts = tmp_path / "hosts"
@@ -101,7 +101,7 @@ def test_watchdog_reload_on_atomic_replace(tmp_path):
     """
     import importlib
 
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts = tmp_path / "hosts"
@@ -143,7 +143,7 @@ def test_watchdog_reload_entry_removal(tmp_path):
     """
     import importlib
 
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts = tmp_path / "hosts"
@@ -187,7 +187,7 @@ def test_watchdog_disabled_no_reload(tmp_path):
     """
     import importlib
 
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts = tmp_path / "hosts"
@@ -229,7 +229,7 @@ def test_watchdog_multiple_files(tmp_path):
     """
     import importlib
 
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     f1 = tmp_path / "hosts1"

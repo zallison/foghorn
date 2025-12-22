@@ -25,7 +25,7 @@ def test_etc_hosts_ipv4_entry_does_not_answer_aaaa(tmp_path):
     Outputs:
       - None: Asserts pre_resolve returns None for AAAA
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
@@ -50,7 +50,7 @@ def test_etc_hosts_ipv6_entry_does_not_answer_a(tmp_path):
     Outputs:
       - None: Asserts pre_resolve returns None for A
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
