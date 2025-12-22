@@ -71,6 +71,44 @@ _PLUGIN_LOG_LEVELS = {
 
 
 @dataclass
+class AdminPageSpec:
+    """Brief: Describe a plugin-contributed admin web UI page.
+
+    Inputs (constructor fields):
+      - slug: Short, URL-safe identifier for the page (e.g. "docker-hosts").
+      - title: Human-friendly page title shown in the UI tab.
+      - description: Optional short help text for the page.
+      - layout: Optional layout hint; "one_column" or "two_column". Defaults
+        to "one_column" when omitted or unknown.
+      - kind: Optional implementation hint used by the core UI for
+        well-known page types (for example, "docker_hosts"). Custom plugins can
+        leave this unset.
+      - html_left: Optional HTML fragment rendered into the left admin column
+        when layout == "two_column" or the primary column when layout is
+        "one_column".
+      - html_right: Optional HTML fragment rendered into the right admin column
+        when layout == "two_column".
+
+    Outputs:
+      - AdminPageSpec instance suitable for JSON-serialization via a simple
+        dataclasses.asdict() or attribute inspection.
+
+    Example:
+      >>> page = AdminPageSpec(slug="docker-hosts", title="Docker Hosts")
+      >>> page.layout
+      'one_column'
+    """
+
+    slug: str
+    title: str
+    description: Optional[str] = None
+    layout: str = "one_column"
+    kind: Optional[str] = None
+    html_left: Optional[str] = None
+    html_right: Optional[str] = None
+
+
+@dataclass
 class PluginDecision:
     """
     Brief: Represents a decision made by a plugin.
@@ -635,12 +673,6 @@ class BasePlugin:
         Outputs:
           - bool: True if the plugin should run for this qtype based on its
             target_qtypes configuration; False otherwise.
-
-        Behavior:
-          - When target_qtypes is omitted or contains "*", all qtypes are
-            targeted.
-          - Otherwise, the qtype name (e.g., "A") must be present in the
-            normalized _target_qtypes list.
         """
         # Fast path: wildcard or empty list means "all qtypes".
         try:
@@ -658,6 +690,34 @@ class BasePlugin:
         else:
             name = str(qtype)
         return str(name).upper() in {qt.upper() for qt in qtypes}
+
+    def get_admin_ui_descriptor(self) -> Optional[Dict[str, object]]:
+        """Brief: Describe this plugin's admin web UI surface (if any).
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - Optional[dict]: Minimal metadata describing this plugin's admin UI,
+            or None when the plugin does not contribute any admin UI.
+
+        Notes:
+          - Subclasses that expose admin web pages should override this method
+            and return a JSON-serializable mapping. Common keys include:
+
+              * name (str): Effective plugin instance name used for routing.
+              * title (str): Human-friendly tab title for the admin UI.
+              * kind (str): Short identifier used by the frontend to pick a
+                renderer (for example, "docker_hosts" or "mdns_services").
+              * order (int): Optional ordering hint (lower appears earlier).
+              * endpoints (dict): Optional mapping of logical endpoint names to
+                URLs (for example, {"snapshot": "/api/v1/plugins/{name}/..."}).
+
+          - The base implementation returns None so plugins without admin UI do
+            not appear in generic discovery responses.
+        """
+
+        return None
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
