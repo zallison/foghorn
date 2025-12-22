@@ -28,7 +28,7 @@ def test_etc_hosts_pre_resolve_ipv6_answer(tmp_path):
     Example:
       2001:db8::42 v6host.local
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"

@@ -18,6 +18,7 @@ except Exception:  # pragma: no cover - defensive fallback when watchdog is unav
     Observer = None  # type: ignore[assignment]
 
 from foghorn.plugins.base import (
+    AdminPageSpec,
     BasePlugin,
     PluginContext,
     PluginDecision,
@@ -53,7 +54,7 @@ class EtcHostsConfig(BaseModel):
         extra = "allow"
 
 
-@plugin_aliases("hosts", "etc-hosts", "/etc/hosts")
+@plugin_aliases("hosts", "hostfile", "etc-hosts", "etc_hosts", "etchosts", "/etc/hosts")
 class EtcHosts(BasePlugin):
     """
     Brief: Resolve A/AAAA/PTR queries from one or more hosts files.
@@ -107,6 +108,8 @@ class EtcHosts(BasePlugin):
         # Internal synchronization and state
         self._hosts_lock = threading.RLock()
         self.hosts: Dict[str, str] = {}
+        # Optional per-entry source tracking for admin snapshots: name -> file path.
+        self._entry_sources: Dict[str, str] = {}
         self._observer = None
 
         # Watchdog reload debouncing: avoid tight reload loops when a single
@@ -196,7 +199,7 @@ class EtcHosts(BasePlugin):
 
     def _load_hosts(self) -> None:
         """
-        Brief: Read hosts files and build a mapping of domain -> IP.
+        Brief: Read hosts files and build a mapping of domain -> IP (and sources).
 
         - Supports comments beginning with '#', including inline comments.
         - Requires at least one hostname after the IP on each non-comment line.
@@ -210,6 +213,7 @@ class EtcHosts(BasePlugin):
           - None (populates self.hosts: Dict[str, str])
         """
         mapping: Dict[str, str] = {}
+        entry_sources: Dict[str, str] = {}
 
         for fp in self.file_paths:
             logging.debug(f"reading hostfile: {fp}")
@@ -247,15 +251,165 @@ class EtcHosts(BasePlugin):
                     for domain in parts[1:]:
                         # Later entries override earlier ones by assignment
                         mapping[domain] = ip
+                        entry_sources[domain] = fp
                         if reverse_name:
                             mapping[reverse_name] = domain
+                            entry_sources[reverse_name] = fp
 
         lock = getattr(self, "_hosts_lock", None)
         if lock is None:
             self.hosts = mapping
+            self._entry_sources = entry_sources
         else:
             with lock:
                 self.hosts = mapping
+                self._entry_sources = entry_sources
+
+    def get_http_snapshot(self) -> Dict[str, object]:
+        """Brief: Summarize current EtcHosts mappings for the admin web UI.
+
+        Inputs:
+          - None (uses in-memory hosts mapping under a lock).
+
+        Outputs:
+          - dict with keys:
+              * summary: high-level counts.
+              * entries: list of per-host mappings including IPv4/IPv6 classification
+                and, when available, the source file path for each entry.
+        """
+
+        lock = getattr(self, "_hosts_lock", None)
+        if lock is None:
+            mapping = dict(self.hosts or {})
+            src_map = dict(getattr(self, "_entry_sources", {}) or {})
+        else:
+            with lock:
+                mapping = dict(self.hosts or {})
+                src_map = dict(getattr(self, "_entry_sources", {}) or {})
+
+        entries: List[Dict[str, object]] = []
+        v4_count = 0
+        v6_count = 0
+        ptr_count = 0
+
+        # Sort entries so that forward records appear first and reverse
+        # (PTR-style) names are pushed to the bottom of the admin view.
+        def _sort_key(item: tuple[str, str]) -> tuple[int, str]:
+            n, _v = item
+            is_ptr = n.endswith(".in-addr.arpa") or n.endswith(".ip6.arpa")
+            return (1 if is_ptr else 0, n)
+
+        for name, value in sorted(mapping.items(), key=_sort_key):
+            ip = str(value)
+            source_path = src_map.get(name)
+            is_ptr = name.endswith(".in-addr.arpa") or name.endswith(".ip6.arpa")
+            is_v6 = ":" in ip
+            is_v4 = "." in ip and not is_v6
+            if is_ptr:
+                ptr_count += 1
+            elif is_v6:
+                v6_count += 1
+            elif is_v4:
+                v4_count += 1
+
+            entries.append(
+                {
+                    "name": name,
+                    "value": ip,
+                    "is_reverse": bool(is_ptr),
+                    "family": "ipv6" if is_v6 else "ipv4" if is_v4 else "other",
+                    "source": str(source_path) if source_path is not None else None,
+                }
+            )
+
+        summary: Dict[str, object] = {
+            "total_entries": len(entries),
+            "ipv4_entries": v4_count,
+            "ipv6_entries": v6_count,
+            "reverse_entries": ptr_count,
+        }
+
+        return {"summary": summary, "entries": entries}
+
+    def get_admin_pages(self) -> List[AdminPageSpec]:
+        """Brief: Describe the EtcHosts admin page for the web UI.
+
+        Inputs:
+          - None; uses the plugin instance name for routing and data lookups.
+
+        Outputs:
+          - list[AdminPageSpec]: A single page descriptor for hosts mappings.
+        """
+
+        return [
+            AdminPageSpec(
+                slug="etc-hosts",
+                title=f"Hosts {self.name}",
+                description=(
+                    "Static host mappings loaded by the EtcHosts plugin "
+                    "(mirrors /etc/hosts-style files)."
+                ),
+                layout="one_column",
+                kind="etc_hosts",
+            )
+        ]
+
+    def get_admin_ui_descriptor(self) -> Dict[str, object]:
+        """Brief: Describe EtcHosts admin UI using a generic snapshot layout.
+
+        Inputs:
+          - None (uses the plugin instance name for routing).
+
+        Outputs:
+          - dict with keys:
+              * name: Effective plugin instance name.
+              * title: Human-friendly tab title.
+              * order: Integer ordering hint among plugin tabs.
+              * endpoints: Mapping with at least a "snapshot" URL.
+              * layout: Generic section/column description for the frontend.
+        """
+
+        plugin_name = getattr(self, "name", "etc_hosts")
+        snapshot_url = f"/api/v1/plugins/{plugin_name}/etc_hosts"
+        base_title = "Hosts"
+        title = f"{base_title} ({plugin_name})" if plugin_name else base_title
+        layout: Dict[str, object] = {
+            "sections": [
+                {
+                    "id": "summary",
+                    "title": "Summary",
+                    "type": "kv",
+                    "path": "summary",
+                    "rows": [
+                        {"key": "total_entries", "label": "Total entries"},
+                        {"key": "ipv4_entries", "label": "IPv4 entries"},
+                        {"key": "ipv6_entries", "label": "IPv6 entries"},
+                        {"key": "reverse_entries", "label": "Reverse entries"},
+                    ],
+                },
+                {
+                    "id": "entries",
+                    "title": "Entries",
+                    "type": "table",
+                    "path": "entries",
+                    "columns": [
+                        {"key": "name", "label": "Name"},
+                        {"key": "value", "label": "Value"},
+                        {"key": "family", "label": "Family"},
+                        {"key": "is_reverse", "label": "Reverse"},
+                        {"key": "source", "label": "Source"},
+                    ],
+                },
+            ]
+        }
+
+        return {
+            "name": str(plugin_name),
+            "title": str(title),
+            "order": 70,
+            "endpoints": {"snapshot": snapshot_url},
+            "layout": layout,
+        }
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
