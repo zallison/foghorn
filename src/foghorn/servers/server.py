@@ -13,6 +13,9 @@ from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
     DNSRecord,
 )
 
+from cachetools import TTLCache
+
+from foghorn.utils.cache_registry import registered_cached
 from ..plugins import base as plugin_base
 from ..plugins.base import BasePlugin, PluginContext, PluginDecision
 from ..recursive_resolver import RecursiveResolver
@@ -67,6 +70,10 @@ def _schedule_cache_refresh(data: bytes, client_ip: str) -> None:
         logger.debug("Failed to start cache refresh thread", exc_info=True)
 
 
+@registered_cached(
+    cache=TTLCache(maxsize=1024, ttl=60),
+    key=lambda resp, min_cache_ttl: (id(resp), int(min_cache_ttl)),
+)
 def compute_effective_ttl(resp: DNSRecord, min_cache_ttl: int) -> int:
     """
     Computes cache TTL with min floor applied for any DNS response.
