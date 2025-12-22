@@ -27,12 +27,13 @@ import time
 import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-from cachetools import TTLCache, cached
+from cachetools import TTLCache
+
+from foghorn.utils.cache_registry import registered_cached
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
@@ -45,6 +46,7 @@ from pydantic import BaseModel
 
 from ..stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 from .udp_server import DNSUDPHandler
+from ..plugins.base import AdminPageSpec
 
 try:
     import psutil  # type: ignore[import]
@@ -62,7 +64,7 @@ except Exception:  # pragma: no cover - defensive fallback
 logger = logging.getLogger("foghorn.webserver")
 
 # Lightweight cache for expensive system metrics to keep /stats fast under load.
-_SYSTEM_INFO_CACHE_TTL_SECONDS = 2.0
+_SYSTEM_INFO_CACHE_TTL_SECONDS = 5.0
 _SYSTEM_INFO_CACHE_LOCK = threading.Lock()
 _last_system_info: Dict[str, Any] | None = None
 _last_system_info_ts: float = 0.0
@@ -71,7 +73,7 @@ _SYSTEM_INFO_DETAIL_MODE = "full"  # "full" or "basic"
 # Short-lived cache for expensive statistics snapshots shared by /stats and
 # /traffic handlers. This keeps repeated polls from re-snapshotting the
 # StatsCollector multiple times per second.
-_STATS_SNAPSHOT_CACHE_TTL_SECONDS = 1.0
+_STATS_SNAPSHOT_CACHE_TTL_SECONDS = 5.0
 _STATS_SNAPSHOT_CACHE_LOCK = threading.Lock()
 # Map id(StatsCollector) -> (StatsSnapshot, timestamp)
 _last_stats_snapshots: Dict[int, tuple[StatsSnapshot, float]] = {}
@@ -79,7 +81,7 @@ _last_stats_snapshots: Dict[int, tuple[StatsSnapshot, float]] = {}
 # Short-lived cache for RateLimitPlugin statistics derived from its SQLite
 # profile database(s). This keeps /api/v1/ratelimit lightweight even when
 # rate_profiles contains many entries.
-_RATE_LIMIT_CACHE_TTL_SECONDS = 2.0
+_RATE_LIMIT_CACHE_TTL_SECONDS = 5.0
 _RATE_LIMIT_CACHE_LOCK = threading.Lock()
 _last_rate_limit_snapshot: Dict[str, Any] | None = None
 _last_rate_limit_snapshot_ts: float = 0.0
@@ -224,7 +226,7 @@ class RingBuffer:
                 if overflow > 0:
                     self._items = self._items[overflow:]
 
-    @cached(cache=TTLCache(maxsize=10, ttl=2))
+    @registered_cached(cache=TTLCache(maxsize=10, ttl=2))
     def snapshot(self, limit: Optional[int] = None) -> List[Any]:
         """Return a copy of buffered items, optionally truncated to newest N.
 
@@ -415,7 +417,6 @@ def _thread_is_alive(obj: Any | None) -> bool:
     return False
 
 
-@lru_cache(maxsize=1)
 def _get_package_build_info() -> Dict[str, Any]:
     """Brief: Best-effort build metadata (commit, VCS url, etc.) from packaging.
 
@@ -981,7 +982,7 @@ _YAML_LIST_KEY_LINE_RE = re.compile(r"^(\s*)-\s*([^:\s][^:]*)\s*:(.*)$")
 _YAML_LIST_LINE_RE = re.compile(r"^(\s*)-\s*(.*)$")
 
 
-@cached(cache=TTLCache(maxsize=1024, ttl=30))
+@registered_cached(cache=TTLCache(maxsize=1024, ttl=30))
 def _split_yaml_value_and_comment(rest: str) -> tuple[str, str]:
     """Split the portion of a YAML line after ':' or '-' into value and comment.
 
@@ -1353,7 +1354,7 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-@cached(cache=TTLCache(maxsize=1, ttl=2))
+@registered_cached(cache=TTLCache(maxsize=1, ttl=2))
 def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
     """Brief: Parse a /proc/meminfo-style file into byte counts.
 
@@ -2508,6 +2509,463 @@ def create_app(
             "items": items,
         }
 
+    def _collect_admin_pages_for_response() -> list[dict[str, Any]]:
+        """Brief: Build a JSON-safe list of admin pages contributed by plugins.
+
+        Inputs:
+          - None (uses app.state.plugins).
+
+        Outputs:
+          - list[dict]: Each entry describes a page with keys:
+            plugin, slug, title, description, layout, kind.
+        """
+
+        plugins_list = getattr(app.state, "plugins", []) or []
+        pages: list[dict[str, Any]] = []
+
+        for plugin in plugins_list:
+            try:
+                plugin_name = getattr(plugin, "name", None)
+            except Exception:
+                plugin_name = None
+            if not plugin_name:
+                continue
+
+            get_pages = getattr(plugin, "get_admin_pages", None)
+            if not callable(get_pages):
+                continue
+
+            try:
+                specs = get_pages()
+            except Exception:
+                logger.debug(
+                    "webserver: get_admin_pages() failed for plugin %r",
+                    plugin_name,
+                    exc_info=True,
+                )
+                continue
+
+            for spec in specs or []:
+                slug = None
+                title = None
+                description = None
+                layout = None
+                kind = None
+                try:
+                    if isinstance(spec, AdminPageSpec):
+                        slug = spec.slug
+                        title = spec.title
+                        description = spec.description
+                        layout = spec.layout or "one_column"
+                        kind = spec.kind
+                    elif isinstance(spec, dict):
+                        slug = spec.get("slug")
+                        title = spec.get("title")
+                        description = spec.get("description")
+                        layout = spec.get("layout") or "one_column"
+                        kind = spec.get("kind")
+                    else:
+                        slug = getattr(spec, "slug", None)
+                        title = getattr(spec, "title", None)
+                        description = getattr(spec, "description", None)
+                        layout = getattr(spec, "layout", "one_column")
+                        kind = getattr(spec, "kind", None)
+                except Exception:
+                    continue
+
+                slug_str = str(slug or "").strip()
+                title_str = str(title or "").strip()
+                if not slug_str or not title_str:
+                    continue
+
+                layout_str = str(layout or "one_column").strip().lower()
+                if layout_str not in {"one_column", "two_column"}:
+                    layout_str = "one_column"
+
+                pages.append(
+                    {
+                        "plugin": str(plugin_name),
+                        "slug": slug_str,
+                        "title": title_str,
+                        "description": (
+                            str(description) if description is not None else None
+                        ),
+                        "layout": layout_str,
+                        "kind": str(kind) if kind is not None else None,
+                    }
+                )
+
+        return pages
+
+    def _find_admin_page_detail(
+        plugin_name: str, page_slug: str
+    ) -> dict[str, Any] | None:
+        """Brief: Look up a specific admin page spec for a plugin.
+
+        Inputs:
+          - plugin_name: Instance name from configuration.
+          - page_slug: Page slug from the URL path.
+
+        Outputs:
+          - dict describing the page including HTML fragments when found; None otherwise.
+        """
+
+        plugins_list = getattr(app.state, "plugins", []) or []
+        target = None
+        for plugin in plugins_list:
+            try:
+                if getattr(plugin, "name", None) == plugin_name:
+                    target = plugin
+                    break
+            except Exception:
+                continue
+        if target is None:
+            return None
+
+        get_pages = getattr(target, "get_admin_pages", None)
+        if not callable(get_pages):
+            return None
+
+        try:
+            specs = get_pages()
+        except Exception:
+            logger.debug(
+                "webserver: get_admin_pages() failed for plugin %r",
+                plugin_name,
+                exc_info=True,
+            )
+            return None
+
+        for spec in specs or []:
+            slug = None
+            title = None
+            description = None
+            layout = None
+            kind = None
+            html_left = None
+            html_right = None
+            try:
+                if isinstance(spec, AdminPageSpec):
+                    slug = spec.slug
+                    title = spec.title
+                    description = spec.description
+                    layout = spec.layout or "one_column"
+                    kind = spec.kind
+                    html_left = spec.html_left
+                    html_right = spec.html_right
+                elif isinstance(spec, dict):
+                    slug = spec.get("slug")
+                    title = spec.get("title")
+                    description = spec.get("description")
+                    layout = spec.get("layout") or "one_column"
+                    kind = spec.get("kind")
+                    html_left = spec.get("html_left")
+                    html_right = spec.get("html_right")
+                else:
+                    slug = getattr(spec, "slug", None)
+                    title = getattr(spec, "title", None)
+                    description = getattr(spec, "description", None)
+                    layout = getattr(spec, "layout", "one_column")
+                    kind = getattr(spec, "kind", None)
+                    html_left = getattr(spec, "html_left", None)
+                    html_right = getattr(spec, "html_right", None)
+            except Exception:
+                continue
+
+            slug_str = str(slug or "").strip()
+            if slug_str != page_slug:
+                continue
+
+            title_str = str(title or "").strip()
+            if not title_str:
+                continue
+
+            layout_str = str(layout or "one_column").strip().lower()
+            if layout_str not in {"one_column", "two_column"}:
+                layout_str = "one_column"
+
+            return {
+                "plugin": str(plugin_name),
+                "slug": slug_str,
+                "title": title_str,
+                "description": str(description) if description is not None else None,
+                "layout": layout_str,
+                "kind": str(kind) if kind is not None else None,
+                "html_left": str(html_left) if html_left is not None else None,
+                "html_right": str(html_right) if html_right is not None else None,
+            }
+
+        return None
+
+    def _collect_plugin_ui_descriptors() -> list[dict[str, Any]]:
+        """Brief: Collect generic admin UI descriptors from configured plugins.
+
+        Inputs:
+          - None (uses app.state.plugins and the global DNS cache).
+
+        Outputs:
+          - list[dict]: One entry per plugin/cache that exposes
+            get_admin_ui_descriptor().
+        """
+
+        def _normalise_descriptor(
+            source: object, desc: dict[str, Any]
+        ) -> dict[str, Any] | None:
+            """Brief: Normalise a raw admin UI descriptor.
+
+            Inputs:
+              - source: Underlying plugin or cache object.
+              - desc: Raw descriptor mapping.
+
+            Outputs:
+              - dict with normalised name/title/kind/order, or None when invalid.
+            """
+
+            if not isinstance(desc, dict):
+                return None
+
+            name = str(desc.get("name") or getattr(source, "name", "")).strip()
+            title = str(desc.get("title") or name).strip()
+            if not name or not title:
+                return None
+
+            kind = desc.get("kind")
+            order_val = desc.get("order")
+            try:
+                order = int(order_val) if order_val is not None else 100
+            except Exception:
+                order = 100
+
+            item: dict[str, Any] = dict(desc)
+            item["name"] = name
+            item["title"] = title
+            item["kind"] = str(kind) if kind is not None else None
+            item["order"] = order
+            return item
+
+        plugins_list = getattr(app.state, "plugins", []) or []
+        items: list[dict[str, Any]] = []
+        for plugin in plugins_list:
+            try:
+                get_desc = getattr(plugin, "get_admin_ui_descriptor", None)
+            except Exception:
+                continue
+            if not callable(get_desc):
+                continue
+            try:
+                desc = get_desc()
+            except Exception:
+                logger.debug(
+                    "webserver: get_admin_ui_descriptor() failed for %r",
+                    plugin,
+                    exc_info=True,
+                )
+                continue
+
+            item = _normalise_descriptor(plugin, desc)  # type: ignore[arg-type]
+            if item is not None:
+                items.append(item)
+
+        # Also surface the global DNS cache plugin when it exposes admin UI.
+        try:
+            from ..plugins import base as plugin_base
+
+            cache = getattr(plugin_base, "DNS_CACHE", None)
+        except Exception:
+            cache = None
+
+        if cache is not None:
+            try:
+                get_desc = getattr(cache, "get_admin_ui_descriptor", None)
+            except Exception:
+                get_desc = None
+            if callable(get_desc):
+                try:
+                    desc = get_desc()
+                except Exception:
+                    logger.debug(
+                        "webserver: get_admin_ui_descriptor() failed for cache %r",
+                        cache,
+                        exc_info=True,
+                    )
+                    desc = None
+                if isinstance(desc, dict):
+                    item = _normalise_descriptor(cache, desc)  # type: ignore[arg-type]
+                    if item is not None:
+                        items.append(item)
+
+        # Normalise titles so that:
+        #   - Single-instance plugins keep a clean base title like "Docker".
+        #   - When multiple instances share the same base title, we suffix each
+        #     tab with the instance name, e.g. "Docker (docker2)".
+        #
+        # Many plugins already include " (name)" in their raw descriptor title.
+        # We treat that as decoration and strip it back to a base title when the
+        # parenthesised portion matches the instance name; grouping and
+        # disambiguation is done on that base title.
+        title_counts: dict[str, int] = {}
+        for it in items:
+            raw_title = str(it.get("title", ""))
+            name = str(it.get("name", ""))
+            base_title = raw_title
+            if raw_title and name and raw_title.endswith(f" ({name})"):
+                base_title = raw_title[: -len(f" ({name})")]
+            it["_base_title"] = base_title
+            if base_title:
+                title_counts[base_title] = title_counts.get(base_title, 0) + 1
+
+        for it in items:
+            base_title = str(it.get("_base_title", ""))
+            name = str(it.get("name", ""))
+            if not base_title:
+                continue
+            if title_counts.get(base_title, 0) > 1 and name:
+                it["title"] = f"{base_title} ({name})"
+            else:
+                it["title"] = base_title
+            it.pop("_base_title", None)
+
+        # Sort by order then title for stable presentation.
+        items.sort(
+            key=lambda d: (int(d.get("order", 100) or 100), str(d.get("title", "")))
+        )
+        return items
+
+        # Normalise titles so that:
+        #   - Single-instance plugins keep a clean base title like "Docker".
+        #   - When multiple instances share the same base title, we suffix each
+        #     tab with the instance name, e.g. "Docker (docker2)".
+        #
+        # Many plugins already include " (name)" in their raw descriptor title.
+        # We treat that as decoration and strip it back to a base title when the
+        # parenthesised portion matches the instance name; grouping and
+        # disambiguation is done on that base title.
+        title_counts: dict[str, int] = {}
+        for it in items:
+            raw_title = str(it.get("title", ""))
+            name = str(it.get("name", ""))
+            base_title = raw_title
+            if raw_title and name and raw_title.endswith(f" ({name})"):
+                base_title = raw_title[: -len(f" ({name})")]
+            it["_base_title"] = base_title
+            if base_title:
+                title_counts[base_title] = title_counts.get(base_title, 0) + 1
+
+        for it in items:
+            base_title = str(it.get("_base_title", ""))
+            name = str(it.get("name", ""))
+            if not base_title:
+                continue
+            if title_counts.get(base_title, 0) > 1 and name:
+                it["title"] = f"{base_title} ({name})"
+            else:
+                it["title"] = base_title
+            it.pop("_base_title", None)
+
+        # Sort by order then title for stable presentation.
+        items.sort(
+            key=lambda d: (int(d.get("order", 100) or 100), str(d.get("title", "")))
+        )
+        return items
+
+    @app.get("/api/v1/plugin_pages", dependencies=[Depends(auth_dep)])
+    async def list_plugin_pages() -> Dict[str, Any]:
+        """Brief: Enumerate admin pages contributed by configured plugins.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - Dict with server_time and pages list.
+        """
+
+        pages = _collect_admin_pages_for_response()
+        return {"server_time": _utc_now_iso(), "pages": _json_safe(pages)}
+
+    @app.get("/api/v1/plugins/ui", dependencies=[Depends(auth_dep)])
+    async def list_plugin_ui_descriptors() -> Dict[str, Any]:
+        """Brief: Enumerate generic admin UI descriptors for configured plugins.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - Dict with server_time and items list suitable for building plugin tabs.
+        """
+
+        items = _collect_plugin_ui_descriptors()
+        return {"server_time": _utc_now_iso(), "items": _json_safe(items)}
+
+    @app.get("/api/v1/cache", dependencies=[Depends(auth_dep)])
+    async def get_cache_snapshot() -> Dict[str, Any]:
+        """Brief: Return a JSON-safe snapshot for the active DNS cache plugin.
+
+        Inputs:
+          - None (uses foghorn.plugins.base.DNS_CACHE).
+
+        Outputs:
+          - Dict with server_time and data keys when the active cache exposes a
+            get_http_snapshot() helper; otherwise 404.
+        """
+
+        try:
+            from ..plugins import base as plugin_base
+
+            cache = getattr(plugin_base, "DNS_CACHE", None)
+        except Exception:
+            cache = None
+
+        if cache is None or not hasattr(cache, "get_http_snapshot"):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="cache plugin not found or does not expose get_http_snapshot",
+            )
+
+        try:
+            snapshot = cache.get_http_snapshot()  # type: ignore[call-arg]
+        except Exception as exc:  # pragma: no cover - defensive: cache-specific
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"failed to build cache snapshot: {exc}",
+            ) from exc
+
+        cache_name = getattr(cache, "name", None) or cache.__class__.__name__
+
+        return {
+            "server_time": _utc_now_iso(),
+            "cache": str(cache_name),
+            "data": _json_safe(snapshot),
+        }
+
+    @app.get(
+        "/api/v1/plugin_pages/{plugin_name}/{page_slug}",
+        dependencies=[Depends(auth_dep)],
+    )
+    async def get_plugin_page_detail(
+        plugin_name: str, page_slug: str
+    ) -> Dict[str, Any]:
+        """Brief: Return full details for a single plugin admin page.
+
+        Inputs:
+          - plugin_name: Plugin instance name.
+          - page_slug: Page slug.
+
+        Outputs:
+          - Dict with server_time and page fields, or 404 when not found.
+        """
+
+        detail = _find_admin_page_detail(plugin_name, page_slug)
+        if detail is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="plugin page not found",
+            )
+        out: Dict[str, Any] = {
+            "server_time": _utc_now_iso(),
+            "page": _json_safe(detail),
+        }
+        return out
+
     @app.get("/api/v1/logs", dependencies=[Depends(auth_dep)])
     @app.get("/logs", dependencies=[Depends(auth_dep)])
     async def get_logs(limit: int = 100) -> Dict[str, Any]:
@@ -2596,6 +3054,94 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"failed to build DockerHosts snapshot: {exc}",
+            ) from exc
+
+        return {
+            "server_time": _utc_now_iso(),
+            "plugin": plugin_name,
+            "data": _json_safe(snapshot),
+        }
+
+    @app.get(
+        "/api/v1/plugins/{plugin_name}/etc_hosts", dependencies=[Depends(auth_dep)]
+    )
+    async def get_etc_hosts_snapshot(plugin_name: str) -> Dict[str, Any]:
+        """Return a JSON-safe snapshot for an EtcHosts plugin instance.
+
+        Inputs:
+          - plugin_name: Instance name from the configuration (plugins[].name or
+            plugins[].module when name is omitted).
+
+        Outputs:
+          - Dict with server_time, plugin, and data keys. data is the
+            get_http_snapshot() result when available.
+        """
+
+        plugins_list = getattr(app.state, "plugins", []) or []
+        target = None
+        for p in plugins_list:
+            try:
+                if getattr(p, "name", None) == plugin_name:
+                    target = p
+                    break
+            except Exception:
+                continue
+
+        if target is None or not hasattr(target, "get_http_snapshot"):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="plugin not found or does not expose get_http_snapshot",
+            )
+
+        try:
+            snapshot = target.get_http_snapshot()  # type: ignore[call-arg]
+        except Exception as exc:  # pragma: no cover - defensive: plugin-specific
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"failed to build EtcHosts snapshot: {exc}",
+            ) from exc
+
+        return {
+            "server_time": _utc_now_iso(),
+            "plugin": plugin_name,
+            "data": _json_safe(snapshot),
+        }
+
+    @app.get("/api/v1/plugins/{plugin_name}/mdns", dependencies=[Depends(auth_dep)])
+    async def get_mdns_snapshot(plugin_name: str) -> Dict[str, Any]:
+        """Return a JSON-safe snapshot for an MdnsBridgePlugin instance.
+
+        Inputs:
+          - plugin_name: Instance name from the configuration (plugins[].name or
+            plugins[].module when name is omitted).
+
+        Outputs:
+          - Dict with server_time, plugin, and data keys. data is the
+            get_http_snapshot() result when available.
+        """
+
+        plugins_list = getattr(app.state, "plugins", []) or []
+        target = None
+        for p in plugins_list:
+            try:
+                if getattr(p, "name", None) == plugin_name:
+                    target = p
+                    break
+            except Exception:
+                continue
+
+        if target is None or not hasattr(target, "get_http_snapshot"):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="plugin not found or does not expose get_http_snapshot",
+            )
+
+        try:
+            snapshot = target.get_http_snapshot()  # type: ignore[call-arg]
+        except Exception as exc:  # pragma: no cover - defensive: plugin-specific
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"failed to build MdnsBridgePlugin snapshot: {exc}",
             ) from exc
 
         return {
@@ -3931,6 +4477,317 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             data = _collect_rate_limit_stats(cfg)
             data["server_time"] = _utc_now_iso()
             self._send_json(200, data)
+        elif path == "/api/v1/plugin_pages":
+            pages = []
+            plugins_list = getattr(self._server(), "plugins", []) or []
+            for plugin in plugins_list:
+                try:
+                    plugin_name = getattr(plugin, "name", None)
+                except Exception:
+                    plugin_name = None
+                if not plugin_name:
+                    continue
+                get_pages = getattr(plugin, "get_admin_pages", None)
+                if not callable(get_pages):
+                    continue
+                try:
+                    specs = get_pages()
+                except Exception:
+                    logger.debug(
+                        "threaded webserver: get_admin_pages() failed for plugin %r",
+                        plugin_name,
+                        exc_info=True,
+                    )
+                    continue
+                for spec in specs or []:
+                    try:
+                        if isinstance(spec, AdminPageSpec):
+                            slug = spec.slug
+                            title = spec.title
+                            description = spec.description
+                            layout = spec.layout or "one_column"
+                            kind = spec.kind
+                        elif isinstance(spec, dict):
+                            slug = spec.get("slug")
+                            title = spec.get("title")
+                            description = spec.get("description")
+                            layout = spec.get("layout") or "one_column"
+                            kind = spec.get("kind")
+                        else:
+                            slug = getattr(spec, "slug", None)
+                            title = getattr(spec, "title", None)
+                            description = getattr(spec, "description", None)
+                            layout = getattr(spec, "layout", "one_column")
+                            kind = getattr(spec, "kind", None)
+                    except Exception:
+                        continue
+
+                    slug_str = str(slug or "").strip()
+                    title_str = str(title or "").strip()
+                    if not slug_str or not title_str:
+                        continue
+
+                    layout_str = str(layout or "one_column").strip().lower()
+                    if layout_str not in {"one_column", "two_column"}:
+                        layout_str = "one_column"
+
+                    pages.append(
+                        {
+                            "plugin": str(plugin_name),
+                            "slug": slug_str,
+                            "title": title_str,
+                            "description": (
+                                str(description) if description is not None else None
+                            ),
+                            "layout": layout_str,
+                            "kind": str(kind) if kind is not None else None,
+                        }
+                    )
+
+            self._send_json(
+                200,
+                {
+                    "server_time": _utc_now_iso(),
+                    "pages": _json_safe(pages),
+                },
+            )
+        elif path == "/api/v1/plugins/ui":
+            # Generic plugin UI discovery for the threaded admin server mirrors the
+            # FastAPI /api/v1/plugins/ui endpoint and also surfaces the active
+            # DNS cache plugin when it advertises admin UI metadata.
+            if not self._require_auth():
+                return
+            plugins_list = getattr(self._server(), "plugins", []) or []
+            items: list[dict[str, Any]] = []
+
+            def _normalise_descriptor(
+                source: object, desc: dict[str, Any]
+            ) -> dict[str, Any] | None:
+                if not isinstance(desc, dict):
+                    return None
+                name = str(desc.get("name") or getattr(source, "name", "")).strip()
+                title = str(desc.get("title") or name).strip()
+                if not name or not title:
+                    return None
+                kind = desc.get("kind")
+                order_val = desc.get("order")
+                try:
+                    order = int(order_val) if order_val is not None else 100
+                except Exception:
+                    order = 100
+                item = dict(desc)
+                item["name"] = name
+                item["title"] = title
+                item["kind"] = str(kind) if kind is not None else None
+                item["order"] = order
+                return item
+
+            for plugin in plugins_list:
+                try:
+                    get_desc = getattr(plugin, "get_admin_ui_descriptor", None)
+                except Exception:
+                    continue
+                if not callable(get_desc):
+                    continue
+                try:
+                    desc = get_desc()
+                except Exception:
+                    continue
+                item = _normalise_descriptor(plugin, desc)  # type: ignore[arg-type]
+                if item is not None:
+                    items.append(item)
+
+            # Also surface the global DNS cache plugin when it exposes admin UI.
+            try:
+                from ..plugins import base as plugin_base
+
+                cache = getattr(plugin_base, "DNS_CACHE", None)
+            except Exception:
+                cache = None
+
+            if cache is not None:
+                try:
+                    get_desc = getattr(cache, "get_admin_ui_descriptor", None)
+                except Exception:
+                    get_desc = None
+                if callable(get_desc):
+                    try:
+                        desc = get_desc()
+                    except Exception:
+                        desc = None
+                    if isinstance(desc, dict):
+                        item = _normalise_descriptor(cache, desc)  # type: ignore[arg-type]
+                        if item is not None:
+                            items.append(item)
+
+            # Apply the same multi-instance title normalisation as the FastAPI
+            # endpoint. We group on a base title that strips a trailing
+            # " (name)" when it matches the instance name, then only append the
+            # suffix when there are multiple instances for that base title.
+            title_counts: dict[str, int] = {}
+            for it in items:
+                raw_title = str(it.get("title", ""))
+                name = str(it.get("name", ""))
+                base_title = raw_title
+                if raw_title and name and raw_title.endswith(f" ({name})"):
+                    base_title = raw_title[: -len(f" ({name})")]
+                it["_base_title"] = base_title
+                if base_title:
+                    title_counts[base_title] = title_counts.get(base_title, 0) + 1
+
+            for it in items:
+                base_title = str(it.get("_base_title", ""))
+                name = str(it.get("name", ""))
+                if not base_title:
+                    continue
+                if title_counts.get(base_title, 0) > 1 and name:
+                    it["title"] = f"{base_title} ({name})"
+                else:
+                    it["title"] = base_title
+                it.pop("_base_title", None)
+            items.sort(
+                key=lambda d: (int(d.get("order", 100) or 100), str(d.get("title", "")))
+            )
+            self._send_json(
+                200,
+                {
+                    "server_time": _utc_now_iso(),
+                    "items": _json_safe(items),
+                },
+            )
+        elif path.startswith("/api/v1/plugin_pages/"):
+            # /api/v1/plugin_pages/{plugin_name}/{page_slug}
+            if not self._require_auth():
+                return
+            prefix = "/api/v1/plugin_pages/"
+            raw_segment = path[len(prefix) :]
+            parts = [p for p in raw_segment.split("/", 1) if p]
+            if len(parts) != 2:
+                self._send_json(
+                    404,
+                    {
+                        "detail": "plugin page not found",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+            plugin_name, page_slug = parts[0], parts[1]
+
+            plugins_list = getattr(self._server(), "plugins", []) or []
+            target = None
+            for plugin in plugins_list:
+                try:
+                    if getattr(plugin, "name", None) == plugin_name:
+                        target = plugin
+                        break
+                except Exception:
+                    continue
+
+            if target is None:
+                self._send_json(
+                    404,
+                    {
+                        "detail": "plugin page not found",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+
+            get_pages = getattr(target, "get_admin_pages", None)
+            if not callable(get_pages):
+                self._send_json(
+                    404,
+                    {
+                        "detail": "plugin page not found",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+
+            try:
+                specs = get_pages()
+            except Exception:
+                self._send_json(
+                    500,
+                    {
+                        "detail": "failed to build plugin page list",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+
+            detail = None
+            for spec in specs or []:
+                try:
+                    if isinstance(spec, AdminPageSpec):
+                        slug = spec.slug
+                        title = spec.title
+                        description = spec.description
+                        layout = spec.layout or "one_column"
+                        kind = spec.kind
+                        html_left = spec.html_left
+                        html_right = spec.html_right
+                    elif isinstance(spec, dict):
+                        slug = spec.get("slug")
+                        title = spec.get("title")
+                        description = spec.get("description")
+                        layout = spec.get("layout") or "one_column"
+                        kind = spec.get("kind")
+                        html_left = spec.get("html_left")
+                        html_right = spec.get("html_right")
+                    else:
+                        slug = getattr(spec, "slug", None)
+                        title = getattr(spec, "title", None)
+                        description = getattr(spec, "description", None)
+                        layout = getattr(spec, "layout", "one_column")
+                        kind = getattr(spec, "kind", None)
+                        html_left = getattr(spec, "html_left", None)
+                        html_right = getattr(spec, "html_right", None)
+                except Exception:
+                    continue
+
+                slug_str = str(slug or "").strip()
+                if slug_str != page_slug:
+                    continue
+                title_str = str(title or "").strip()
+                if not title_str:
+                    continue
+
+                layout_str = str(layout or "one_column").strip().lower()
+                if layout_str not in {"one_column", "two_column"}:
+                    layout_str = "one_column"
+
+                detail = {
+                    "plugin": str(plugin_name),
+                    "slug": slug_str,
+                    "title": title_str,
+                    "description": (
+                        str(description) if description is not None else None
+                    ),
+                    "layout": layout_str,
+                    "kind": str(kind) if kind is not None else None,
+                    "html_left": str(html_left) if html_left is not None else None,
+                    "html_right": str(html_right) if html_right is not None else None,
+                }
+                break
+
+            if detail is None:
+                self._send_json(
+                    404,
+                    {
+                        "detail": "plugin page not found",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+
+            self._send_json(
+                200,
+                {
+                    "server_time": _utc_now_iso(),
+                    "page": _json_safe(detail),
+                },
+            )
         elif path.startswith("/api/v1/plugins/") and path.endswith("/docker_hosts"):
             # Threaded fallback for the DockerHosts admin snapshot endpoint mirrors
             # the FastAPI route at /api/v1/plugins/{plugin_name}/docker_hosts.
@@ -3966,6 +4823,98 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                     500,
                     {
                         "detail": f"failed to build DockerHosts snapshot: {exc}",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+            self._send_json(
+                200,
+                {
+                    "server_time": _utc_now_iso(),
+                    "plugin": plugin_name,
+                    "data": _json_safe(snapshot),
+                },
+            )
+        elif path.startswith("/api/v1/plugins/") and path.endswith("/mdns"):
+            # Threaded fallback for the MdnsBridgePlugin admin snapshot endpoint mirrors
+            # the FastAPI route at /api/v1/plugins/{plugin_name}/mdns.
+            if not self._require_auth():
+                return
+            prefix = "/api/v1/plugins/"
+            suffix = "/mdns"
+            raw_segment = path[len(prefix) : -len(suffix)]
+            plugin_name = raw_segment.strip("/")
+            plugins_list = getattr(self._server(), "plugins", []) or []
+            target = None
+            for p in plugins_list:
+                try:
+                    if getattr(p, "name", None) == plugin_name:
+                        target = p
+                        break
+                except Exception:
+                    continue
+            if target is None or not hasattr(target, "get_http_snapshot"):
+                self._send_json(
+                    404,
+                    {
+                        "detail": "plugin not found or does not expose get_http_snapshot",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+            try:
+                snapshot = target.get_http_snapshot()  # type: ignore[call-arg]
+            except Exception as exc:
+                self._send_json(
+                    500,
+                    {
+                        "detail": f"failed to build MdnsBridgePlugin snapshot: {exc}",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+            self._send_json(
+                200,
+                {
+                    "server_time": _utc_now_iso(),
+                    "plugin": plugin_name,
+                    "data": _json_safe(snapshot),
+                },
+            )
+        elif path.startswith("/api/v1/plugins/") and path.endswith("/etc_hosts"):
+            # Threaded fallback for the EtcHosts admin snapshot endpoint mirrors
+            # the FastAPI route at /api/v1/plugins/{plugin_name}/etc_hosts.
+            if not self._require_auth():
+                return
+            prefix = "/api/v1/plugins/"
+            suffix = "/etc_hosts"
+            raw_segment = path[len(prefix) : -len(suffix)]
+            plugin_name = raw_segment.strip("/")
+            plugins_list = getattr(self._server(), "plugins", []) or []
+            target = None
+            for p in plugins_list:
+                try:
+                    if getattr(p, "name", None) == plugin_name:
+                        target = p
+                        break
+                except Exception:
+                    continue
+            if target is None or not hasattr(target, "get_http_snapshot"):
+                self._send_json(
+                    404,
+                    {
+                        "detail": "plugin not found or does not expose get_http_snapshot",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+            try:
+                snapshot = target.get_http_snapshot()  # type: ignore[call-arg]
+            except Exception as exc:
+                self._send_json(
+                    500,
+                    {
+                        "detail": f"failed to build EtcHosts snapshot: {exc}",
                         "server_time": _utc_now_iso(),
                     },
                 )

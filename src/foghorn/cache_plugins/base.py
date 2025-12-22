@@ -44,6 +44,39 @@ class CachePlugin:
 
     aliases: tuple[str, ...] = ()
 
+    def get_admin_ui_descriptor(self) -> Optional[dict[str, object]]:
+        """Brief: Describe this cache plugin's admin web UI surface (if any).
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - Optional[dict]: Minimal metadata describing this cache plugin's
+            admin UI, or None when the cache does not contribute any admin UI.
+
+        Notes:
+          - Cache plugins that expose admin web pages should override this
+            method and return a JSON-serializable mapping.
+
+          - The returned mapping follows the same conventions as
+            foghorn.plugins.base.BasePlugin.get_admin_ui_descriptor(), with
+            common keys including:
+
+              * name (str): Effective instance name used for routing and
+                tab selection.
+              * title (str): Human-friendly tab title for the admin UI.
+              * kind (str): Short identifier used by the frontend to pick a
+                renderer when needed.
+              * order (int): Optional ordering hint (lower appears earlier).
+              * endpoints (dict): Optional mapping of logical endpoint names to
+                URLs (for example, {"snapshot": "/api/v1/cache"}).
+
+          - The base implementation returns None so cache implementations
+            without admin UI do not appear in generic discovery responses.
+        """
+
+        return None
+
     def get(self, key: Tuple[str, int]) -> Any | None:
         """Brief: Lookup a cached entry.
 
