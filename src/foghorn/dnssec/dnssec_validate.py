@@ -24,7 +24,9 @@ import dns.message
 import dns.name
 import dns.rdatatype
 import dns.resolver
-from cachetools import TTLCache, cached
+from cachetools import TTLCache
+
+from foghorn.utils.cache_registry import registered_cached
 
 
 def _parse_resolv_conf_nameservers(path: str = "/etc/resolv.conf") -> list[str]:
@@ -275,7 +277,7 @@ def _fetch(r: dns.resolver.Resolver, name: dns.name.Name, rdtype: str):
     return r.resolve(name, rdtype, raise_on_no_answer=True)
 
 
-@cached(cache=TTLCache(maxsize=16, ttl=86400))
+@registered_cached(cache=TTLCache(maxsize=16, ttl=86400))
 def _root_dnskey_rrset() -> Optional[dns.rrset.RRset]:
     """Return the current root trust anchor DNSKEY RRset.
 
@@ -552,7 +554,7 @@ def _validate_chain(
         return None
 
 
-@cached(cache=TTLCache(maxsize=1024, ttl=120))
+@registered_cached(cache=TTLCache(maxsize=1024, ttl=120))
 def _find_zone_apex_cached(
     qname_text: str, udp_payload_size: int
 ) -> Optional[dns.name.Name]:
@@ -573,7 +575,7 @@ def _find_zone_apex_cached(
         return None
 
 
-@cached(cache=TTLCache(maxsize=4096, ttl=900))
+@registered_cached(cache=TTLCache(maxsize=4096, ttl=900))
 def _validate_chain_cached(
     apex_text: str, udp_payload_size: int
 ) -> Optional[dns.rrset.RRset]:
@@ -1301,9 +1303,9 @@ def _classify_dnssec_local_extended(
         enriched_msg = answer.response
     except Exception as e:  # pragma: no cover - defensive networking path
         logger.debug("Extended local DNSSEC: fetch of RRset failed: %s", e)
-        # We still know the zone's keys are valid even if we could not obtain a
-        # DNSSEC-signed RRset; treat as extended secure.
-        return "dnssec_ext_secure"
+        # Could not obtain an enriched response; without a signed RRset,
+        # keep the baseline unsigned/bogus classification.
+        return base_status
 
     # Look for a matching RRset and its covering RRSIG in the enriched answer.
     try:
@@ -1318,7 +1320,9 @@ def _classify_dnssec_local_extended(
         if rrset is not None and sig_rrset is not None:
             try:
                 dns.dnssec.validate(rrset, sig_rrset, {apex: zone_dnskey})
-                return "dnssec_secure"
+                # Extended path: we obtained and validated an RRSIG for the
+                # RRset, upgrading an otherwise unsigned-looking response.
+                return "dnssec_zone_secure"
             except Exception:
                 # The RRset is claimed to be signed but does not validate.
                 return "dnssec_bogus"
@@ -1326,13 +1330,11 @@ def _classify_dnssec_local_extended(
         logger.debug(
             "Extended local DNSSEC: error while inspecting enriched RRset: %s", e
         )
-        # Fall through to extended secure if the chain is valid.
+        # Fall back to the baseline classification if inspection fails.
 
-    # No usable RRSIG for the specific RRset, but we have a validated
-    # DNSKEY/DS chain for the zone. Surface this as an "extended" secure
-    # result: the zone is DNSSEC-secure even if the particular RRset is
-    # effectively unsigned by the upstream.
-    return "dnssec_ext_secure"
+    # No usable RRSIG for the specific RRset; even though the zone's
+    # DNSKEY/DS chain is valid, we treat the answer as effectively unsigned.
+    return base_status
 
 
 def classify_dnssec_status(
@@ -1357,11 +1359,12 @@ def classify_dnssec_status(
 
     Outputs:
       - 'dnssec_secure' when the specific RRset (or negative response) has been
-        fully validated using DNSSEC, including an appropriate RRSIG.
-      - 'dnssec_ext_secure' when the DNSKEY/DS chain for the zone has been
-        successfully validated via extended lookups, but the particular RRset
-        could not be directly verified (e.g. the upstream does not return an
-        RRSIG for the answer while still publishing signed DNSKEY/DS).
+        fully validated using DNSSEC, including an appropriate RRSIG from the
+        original upstream response.
+      - 'dnssec_zone_secure' when extended local validation (mode
+        'local_extended') performs an extra DO=1 lookup, obtains an RRSIG for
+        the RRset, and successfully validates it even though the original
+        response appeared unsigned.
       - 'dnssec_unsigned' when the response appears to come from an unsigned
         context (no DNSSEC material available and/or no validated chain).
       - 'dnssec_bogus' when the response carries DNSSEC material that fails

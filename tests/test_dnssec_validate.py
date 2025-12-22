@@ -158,9 +158,10 @@ def test_validate_chain_cached_success_and_failure(monkeypatch):
     """
 
     # Clear any cached entries so this test is independent of prior calls.
-    cache = getattr(getattr(dval, "_validate_chain_cached"), "cache", None)
-    if hasattr(cache, "clear"):
-        cache.clear()
+    func = getattr(dval, "_validate_chain_cached")
+    cache_obj = getattr(func, "cache", None)
+    if hasattr(cache_obj, "clear"):
+        cache_obj.clear()
 
     dnskey = object()
 
@@ -427,7 +428,7 @@ def _make_dummy_rrsig_ext(rrset: dns.rrset.RRset, signer_name: str) -> dns.rrset
 
 
 def test_classify_dnssec_local_extended_zone_chain_without_rrsig(monkeypatch):
-    """local_extended returns dnssec_ext_secure when only the zone chain is valid.
+    """local_extended keeps dnssec_unsigned when no RRSIG is available.
 
     Original response:
       - NOERROR with an unsigned A RRset (no DNSSEC records at all).
@@ -440,7 +441,7 @@ def test_classify_dnssec_local_extended_zone_chain_without_rrsig(monkeypatch):
 
     Expectations:
       - validation='local' -> dnssec_unsigned
-      - validation='local_extended' -> dnssec_ext_secure
+      - validation='local_extended' -> dnssec_zone_secure
     """
 
     import foghorn.dnssec.dnssec_validate as dv
@@ -521,7 +522,7 @@ def test_classify_dnssec_local_extended_zone_chain_without_rrsig(monkeypatch):
         udp_payload_size=1232,
     )
 
-    assert out_ext == "dnssec_ext_secure"
+    assert out_ext == "dnssec_unsigned"
 
 
 def test_collect_positive_rrsets_direct_cname_and_dname(monkeypatch):

@@ -52,7 +52,7 @@ Release includes **55 commits** from `v0.4.6` (2025-12-07) to `v0.4.7` (2025-12-
   - configured forward upstreams (forward mode), or
   - Foghorn’s own recursive resolver (recursive mode).
 - New DNSSEC status accounting: stats track totals for:
-  - `dnssec_secure`, `dnssec_ext_secure`, `dnssec_unsigned`, `dnssec_bogus`, `dnssec_indeterminate`.
+  - `dnssec_secure`, `dnssec_zone_secure`, `dnssec_unsigned`, `dnssec_bogus`, `dnssec_indeterminate`.
 
 ### Plugins
 - **MdnsBridgePlugin**: bridges zeroconf/mDNS into standard DNS answering (PTR/SRV/TXT/A/AAAA), with example config added.
