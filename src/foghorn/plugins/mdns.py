@@ -9,8 +9,9 @@ from typing import Dict, List, Optional, Set, Tuple
 from dnslib import A, AAAA, PTR, QTYPE, RR, SRV, TXT, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field, validator
 
-try:  # cachetools is an optional dependency; fall back to no-op cache when missing.
-    from cachetools import TTLCache, cached  # type: ignore[import]
+try:  # cachetools is an optional dependency; fall back to shim when missing.
+    from cachetools import TTLCache  # type: ignore[import]
+    from foghorn.utils.cache_registry import registered_cached
 except Exception:  # pragma: no cover - defensive optional dependency handling
 
     class TTLCache(dict):  # type: ignore[override]
@@ -18,8 +19,8 @@ except Exception:  # pragma: no cover - defensive optional dependency handling
             """Lightweight TTLCache shim when cachetools is unavailable."""
             super().__init__()
 
-    def cached(*, cache, **kwargs):  # type: ignore[no-redef]
-        """No-op cached decorator used when cachetools is unavailable."""
+    def registered_cached(*, cache, **kwargs):  # type: ignore[no-redef]
+        """No-op registered_cached decorator used when cachetools is unavailable."""
 
         def decorator(func):
             return func
@@ -28,6 +29,7 @@ except Exception:  # pragma: no cover - defensive optional dependency handling
 
 
 from foghorn.plugins.base import (
+    AdminPageSpec,
     BasePlugin,
     PluginContext,
     PluginDecision,
@@ -146,9 +148,9 @@ PTR_ADDITIONAL_HOST_LIMIT = 2
 
 # Short-lived caches for hot, pure-ish helper methods. These are strictly
 # internal to the plugin and do not affect resolver statistics semantics.
-_MDNS_NORMALIZE_OWNER_CACHE: TTLCache = TTLCache(maxsize=4096, ttl=30)
-_MDNS_MIRROR_SUFFIXES_CACHE: TTLCache = TTLCache(maxsize=4096, ttl=30)
-_MDNS_SANITIZE_QNAME_CACHE: TTLCache = TTLCache(maxsize=2048, ttl=30)
+_MDNS_NORMALIZE_OWNER_CACHE: TTLCache = TTLCache(maxsize=4096, ttl=3600)
+_MDNS_MIRROR_SUFFIXES_CACHE: TTLCache = TTLCache(maxsize=4096, ttl=3600)
+_MDNS_SANITIZE_QNAME_CACHE: TTLCache = TTLCache(maxsize=2048, ttl=3600)
 
 
 class MdnsBridgeConfig(BaseModel):
@@ -558,7 +560,7 @@ class MdnsBridgePlugin(BasePlugin):
                     exc_info=True,
                 )
 
-    @cached(cache=_MDNS_NORMALIZE_OWNER_CACHE)
+    @registered_cached(cache=_MDNS_NORMALIZE_OWNER_CACHE)
     def _normalize_owner(
         self, name: str
     ) -> str:  # pragma: nocover defensive normalization
@@ -597,7 +599,7 @@ class MdnsBridgePlugin(BasePlugin):
             return base[: -len(self._mdns_domain)] + self._dns_domain
         return base
 
-    @cached(cache=_MDNS_MIRROR_SUFFIXES_CACHE)
+    @registered_cached(cache=_MDNS_MIRROR_SUFFIXES_CACHE)
     def _mirror_suffixes(
         self, fqdn: str
     ) -> List[str]:  # pragma: nocover suffix mapping helper
@@ -972,7 +974,7 @@ class MdnsBridgePlugin(BasePlugin):
 
         self._ingest_service_info(info, canonical_instance_name=canonical_instance)
 
-    @cached(cache=_MDNS_SANITIZE_QNAME_CACHE)
+    @registered_cached(cache=_MDNS_SANITIZE_QNAME_CACHE)
     def _sanitize_qname(
         self, name: str
     ) -> str:  # pragma: nocover string sanitization helper
@@ -1569,6 +1571,175 @@ class MdnsBridgePlugin(BasePlugin):
             return None
 
         return PluginDecision(action="override", response=reply.pack())
+
+    def get_admin_pages(self) -> List[AdminPageSpec]:
+        """Brief: Describe the MdnsBridgePlugin admin page for the web UI.
+
+        Inputs:
+          - None; uses the plugin instance name for routing and data lookups.
+
+        Outputs:
+          - list[AdminPageSpec]: A single page descriptor for mDNS / DNS-SD
+            discovery state.
+        """
+
+        return [
+            AdminPageSpec(
+                slug="mdns",
+                title="mDNS",
+                description=(
+                    "Services and hosts discovered by the MdnsBridgePlugin. "
+                    "Intended to be paired with JSON data from a future "
+                    "/api/v1/plugins/{name}/mdns endpoint."
+                ),
+                layout="one_column",
+                kind="mdns",
+            )
+        ]
+
+    def get_admin_ui_descriptor(self) -> Dict[str, object]:
+        """Brief: Describe mDNS admin UI using a generic snapshot layout.
+
+        Inputs:
+          - None (uses the plugin instance name for routing).
+
+        Outputs:
+          - dict with keys:
+              * name: Effective plugin instance name.
+              * title: Human-friendly tab title.
+              * order: Integer ordering hint among plugin tabs.
+              * endpoints: Mapping with at least a "snapshot" URL.
+              * layout: Generic section/column description for the frontend.
+        """
+
+        plugin_name = getattr(self, "name", "mdns")
+        snapshot_url = f"/api/v1/plugins/{plugin_name}/mdns"
+        base_title = "mDNS"
+        title = f"{base_title} ({plugin_name})" if plugin_name else base_title
+        layout: Dict[str, object] = {
+            "sections": [
+                {
+                    "id": "summary",
+                    "title": "Summary",
+                    "type": "kv",
+                    "path": "summary",
+                    "rows": [
+                        {"key": "total_services", "label": "Services"},
+                        {"key": "total_hosts", "label": "Hosts"},
+                        {"key": "domains", "label": "Domains", "join": ", "},
+                    ],
+                },
+                {
+                    "id": "services",
+                    "title": "Services",
+                    "type": "table",
+                    "path": "services",
+                    "columns": [
+                        {"key": "instance", "label": "Instance"},
+                        {"key": "type", "label": "Type"},
+                        {"key": "host", "label": "Host"},
+                        {"key": "ipv4", "label": "IPv4", "join": ", "},
+                        {"key": "ipv6", "label": "IPv6", "join": ", "},
+                    ],
+                },
+            ]
+        }
+
+        return {
+            "name": str(plugin_name),
+            "title": str(title),
+            "order": 60,
+            "endpoints": {"snapshot": snapshot_url},
+            "layout": layout,
+        }
+
+    def get_http_snapshot(self) -> Dict[str, object]:
+        """Brief: Summarize current mDNS services and hosts for the admin web UI.
+
+        Inputs:
+          - None (uses in-memory SRV/A/AAAA caches under a lock).
+
+        Outputs:
+          - dict with keys:
+              * summary: High-level counts for total services and hosts.
+              * services: List of objects with per-service details:
+                  - instance: Canonical instance owner name (no trailing dot).
+                  - type: Service type portion of the name when derivable.
+                  - host: SRV target hostname (no trailing dot) when available.
+                  - ipv4: List of IPv4 addresses for the host (may be empty).
+                  - ipv6: List of IPv6 addresses for the host (may be empty).
+        """
+
+        services: List[Dict[str, object]] = []
+        hosts_seen: set[str] = set()
+
+        with self._lock:
+            # Snapshot SRV and address mappings so callers get a consistent view.
+            srv_items = list(self._srv.items())
+            a_map = {k: set(v) for k, v in self._a.items()}
+            aaaa_map = {k: set(v) for k, v in self._aaaa.items()}
+            dns_doms = getattr(self, "_dns_domains", {self._dns_domain}) or {
+                self._dns_domain
+            }
+
+        # Limit the snapshot to names that still live in the `.local` mDNS
+        # namespace so the admin view remains focused on what the plugin is
+        # *discovering*, not every DNS suffix it might be serving under.
+        for owner, srv in sorted(srv_items, key=lambda item: item[0]):
+            owner_name = str(owner or "").strip().lower()
+            if not owner_name or not owner_name.endswith(".local"):
+                continue
+
+            # Derive a human-friendly service type by dropping the first label
+            # (synthetic instance label) when possible.
+            parts = owner_name.split(".")
+            if len(parts) > 1:
+                service_type = ".".join(parts[1:])
+            else:
+                service_type = ""
+
+            # Present a cleaner service type to the admin UI by stripping the
+            # mDNS suffix; the discovery namespace is already implied.
+            if service_type.endswith(".local"):
+                service_type = service_type[: -len(".local")]
+
+            host_name = str(getattr(srv, "target", "") or "").rstrip(".").lower()
+            # Only report host entries that remain in the `.local` namespace to
+            # keep the view consistent with the service filter above.
+            if host_name and not host_name.endswith(".local"):
+                host_name = ""
+
+            ipv4_list: List[str] = []
+            ipv6_list: List[str] = []
+            if host_name:
+                hosts_seen.add(host_name)
+                v4 = a_map.get(host_name) or set()
+                v6 = aaaa_map.get(host_name) or set()
+                ipv4_list = sorted(str(ip) for ip in v4)
+                ipv6_list = sorted(str(ip) for ip in v6)
+
+            services.append(
+                {
+                    "instance": owner_name,
+                    "type": service_type,
+                    "host": host_name,
+                    "ipv4": ipv4_list,
+                    "ipv6": ipv6_list,
+                }
+            )
+
+        # Summarize counts plus the configured DNS domains this plugin is
+        # serving under so that operators can see both the discovery namespace
+        # (.local) and any mapped DNS suffixes (for example, .zaa).
+        domains_list = sorted({str(d) for d in dns_doms})
+
+        summary: Dict[str, object] = {
+            "total_services": len(services),
+            "total_hosts": len(hosts_seen) if hosts_seen else 0,
+            "domains": domains_list,
+        }
+
+        return {"summary": summary, "services": services}
 
     def close(self) -> None:  # pragma: nocover best-effort shutdown
         """Brief: Best-effort shutdown for zeroconf resources.
