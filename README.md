@@ -18,6 +18,46 @@ For developer documentation (architecture, transports, plugin internals, testing
 
 ----
 
+## [0.5.0] - 2025-12-22
+
+### Added
+- Introduced core admin web UI primitives and backend endpoints for management pages.
+- Added frontend admin UI scaffolding for plugin and cache pages.
+- Added admin page and HTTP snapshot endpoints for the mDNS plugin.
+- Added admin snapshots and UI descriptors for cache plugins.
+- Added DockerHosts HTTP snapshot helper and admin UI integration.
+- Added DockerHosts admin UI page and bumped version as part of 0.5.0 beta releases.
+- Introduced a cache registry and wired it into the server TTL cache.
+- Added per-backend cache hit/miss counters and cache statistics.
+- Added webserver build-info caching and exposed cache metrics.
+- Extended `BasePlugin` helper APIs to support richer plugin behaviors.
+- Added support for inline zone records in plugin configuration.
+- Introduced a default set of mDNS services to browse.
+- Added the ability to override the DNS listen address via the `LISTEN` Makefile variable.
+- Added utilities and scripts around pruning branches and other development tooling.
+
+### Changed
+- Modernized the DockerHosts plugin implementation and aligned associated tests.
+- Refactored the EtcHosts plugin and updated its tests.
+- Consolidated the config parser into a single module and added a CLI helper for configuration.
+- Normalized the `git prune-branches` script naming.
+- Wired plugins into the admin webserver and exposed the DockerHosts API.
+- Aligned webserver enablement defaults with configuration values.
+- Wired DNSSEC validation into the cache registry and renamed zone-secure status representation.
+- Adjusted default DNS port settings (e.g., defaulting to 5335 to better align with unbound usage).
+- Performed multiple version and dependency bumps across the admin UI, cache registry, and plugins during the 0.5.0 beta cycle.
+
+### Fixed
+- Improved error handling when binding the DNS UDP socket.
+- Hardened DockerHosts endpoint handling and container discovery.
+- Refined web UI stats layout and configuration warnings.
+- Removed a duplicate dependency from the project.
+
+### Documentation
+- Documented mDNS networking requirements, including Docker host-networking needs for discovery.
+- Clarified Docker/mDNS behavior and configuration expectations in the docs.
+- Updated documentation around configuration, admin UI features, and new cache behavior where relevant.
+
 ## v0.4.7 (2025-12-12)
 
 Release includes **55 commits** from `v0.4.6` (2025-12-07) to `v0.4.7` (2025-12-12).
@@ -144,14 +184,14 @@ Release includes **55 commits** from `v0.4.6` (2025-12-07) to `v0.4.7` (2025-12-
   - [`listen`](#listen)
   - [`upstreams`](#upstreams)
   - [`plugins`](#plugins)
- 	- [AccessControlPlugin](#accesscontrolplugin)
- 	- [NewDomainFilterPlugin](#newdomainfilterplugin)
- 	- [RateLimitPlugin](#ratelimitplugin)
- 	- [UpstreamRouterPlugin](#upstreamrouterplugin)
- 	- [FilterPlugin](#filterplugin)
- 	- [FileDownloader plugin](#listdownloader-plugin)
- 	- [ZoneRecords plugin](#zonerecords-plugin)
- 	- [DnsPrefetchPlugin](#dnsprefetchplugin)
+	- [AccessControlPlugin](#accesscontrolplugin)
+	- [NewDomainFilterPlugin](#newdomainfilterplugin)
+	- [RateLimitPlugin](#ratelimitplugin)
+	- [UpstreamRouterPlugin](#upstreamrouterplugin)
+	- [FilterPlugin](#filterplugin)
+	- [FileDownloader plugin](#listdownloader-plugin)
+	- [ZoneRecords plugin](#zonerecords-plugin)
+	- [DnsPrefetchPlugin](#dnsprefetchplugin)
   - [Complete `config.yaml` Example](#complete-configyaml-example)
 - [Logging](#logging)
 - [License](#license)
@@ -396,38 +436,38 @@ A minimal plugin entry using all common BasePlugin-wide options looks like:
 ```yaml
 plugins:
   - module: foghorn.plugins.filter.FilterPlugin
-    name: example_filter
-    enabled: true
-    comment: "Demo plugin using common BasePlugin options"
-    pre_priority: 40
-    post_priority: 60
-    setup_priority: 50
-    config:
-      # BasePlugin-wide options
-      logging:
-        level: debug
-        stderr: true
-        file: ./logs/example_filter.log
-        syslog:
-          address: /dev/log
-          facility: user
+	name: example_filter
+	enabled: true
+	comment: "Demo plugin using common BasePlugin options"
+	pre_priority: 40
+	post_priority: 60
+	setup_priority: 50
+	config:
+	  # BasePlugin-wide options
+	  logging:
+		level: debug
+		stderr: true
+		file: ./logs/example_filter.log
+		syslog:
+		  address: /dev/log
+		  facility: user
 
-      targets:
-        - 10.0.0.0/8
-        - 192.0.2.1
-      targets_ignore:
-        - 10.0.5.0/24
-      targets_cache_ttl_seconds: 600
+	  targets:
+		- 10.0.0.0/8
+		- 192.0.2.1
+	  targets_ignore:
+		- 10.0.5.0/24
+	  targets_cache_ttl_seconds: 600
 
-      target_qtypes:
-        - A
-        - AAAA
+	  target_qtypes:
+		- A
+		- AAAA
 
-      abort_on_failure: true  # used by some plugins during setup()
+	  abort_on_failure: true  # used by some plugins during setup()
 
-      # Plugin-specific options (FilterPlugin here)
-      default: deny
-      cache_ttl_seconds: 600
+	  # Plugin-specific options (FilterPlugin here)
+	  default: deny
+	  cache_ttl_seconds: 600
 ```
 
 #### Plugin priorities and `setup_priority`
@@ -882,11 +922,11 @@ entries stay warm.
 ```yaml
 plugins:
   - module: dns_prefetch
-    config:
-      interval_seconds: 60        # how often to run a prefetch cycle
-      prefetch_top_n: 100         # max domains considered each cycle
-      max_consecutive_misses: 5   # stop prefetching if no hits are ever seen
-      qtypes: ["A", "AAAA"]       # record types to prefetch
+	config:
+	  interval_seconds: 60        # how often to run a prefetch cycle
+	  prefetch_top_n: 100         # max domains considered each cycle
+	  max_consecutive_misses: 5   # stop prefetching if no hits are ever seen
+	  qtypes: ["A", "AAAA"]       # record types to prefetch
 ```
 
 Notes:
@@ -920,7 +960,7 @@ Minimal config snippets:
 cache:
   module: in_memory_ttl
   config:
-    min_cache_ttl: 60
+	min_cache_ttl: 60
 ```
 
 `sqlite3` (persistent on-disk cache):
@@ -929,9 +969,9 @@ cache:
 cache:
   module: sqlite3
   config:
-    db_path: ./config/var/dbs/dns_cache.db
-    namespace: dns_cache
-    min_cache_ttl: 60
+	db_path: ./config/var/dbs/dns_cache.db
+	namespace: dns_cache
+	min_cache_ttl: 60
 ```
 
 `redis` / `valkey` (remote cache):
@@ -940,9 +980,9 @@ cache:
 cache:
   module: redis
   config:
-    url: redis://127.0.0.1:6379/0
-    namespace: foghorn:dns_cache:
-    min_cache_ttl: 60
+	url: redis://127.0.0.1:6379/0
+	namespace: foghorn:dns_cache:
+	min_cache_ttl: 60
 ```
 
 `none` (disable caching):
@@ -1017,11 +1057,11 @@ foghorn:
 cache:
   module: in_memory_ttl
   config:
-    # Minimum cache TTL (in seconds) applied to ***all*** cached responses.
-    # - For NOERROR with answers: cache TTL = max(min(answer TTLs), min_cache_ttl)
-    # - For NOERROR with no answers, NXDOMAIN, and SERVFAIL: cache TTL = min_cache_ttl
-    # Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
-    min_cache_ttl: 60
+	# Minimum cache TTL (in seconds) applied to ***all*** cached responses.
+	# - For NOERROR with answers: cache TTL = max(min(answer TTLs), min_cache_ttl)
+	# - For NOERROR with no answers, NXDOMAIN, and SERVFAIL: cache TTL = min_cache_ttl
+	# Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
+	min_cache_ttl: 60
 
 # Optional DNSSEC configuration
 # dnssec:
