@@ -162,6 +162,84 @@ def test_pre_resolve_uses_value_order_from_config(tmp_path: pathlib.Path) -> Non
     assert ips == ["2.2.2.2", "1.1.1.1"]
 
 
+def test_inline_records_config_only() -> None:
+    """Brief: ZoneRecords can load and answer from inline records in config.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that an inline record defined via the `records` config field is
+        present in plugin.records and used by pre_resolve().
+    """
+    mod = importlib.import_module("foghorn.plugins.zone-records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(records=["inline.example|A|300|203.0.113.10"])
+    plugin.setup()
+
+    key = ("inline.example", int(QTYPE.A))
+    ttl, values = plugin.records[key]
+
+    assert ttl == 300
+    assert values == ["203.0.113.10"]
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req_bytes = _make_query("inline.example", int(QTYPE.A))
+
+    decision = plugin.pre_resolve("inline.example", int(QTYPE.A), req_bytes, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+
+    response = DNSRecord.parse(decision.response)
+    ips = [str(a.rdata) for a in response.rr if a.rtype == QTYPE.A]
+
+    assert ips == ["203.0.113.10"]
+
+
+def test_inline_records_merge_after_files(tmp_path: pathlib.Path) -> None:
+    """Brief: Inline records are merged after file-backed ones with deduplication.
+
+    Inputs:
+      - tmp_path: pytest-provided temporary directory.
+
+    Outputs:
+      - Asserts that TTL comes from the first occurrence and that values from
+        inline records are appended in first-seen order with duplicates
+        ignored.
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                "example.com|A|100|1.1.1.1",
+                "example.com|A|100|2.2.2.2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.zone-records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        records=[
+            "example.com|A|400|3.3.3.3",
+            # Duplicate value with a different TTL; should be ignored.
+            "example.com|A|500|2.2.2.2",
+        ],
+    )
+    plugin.setup()
+
+    key = ("example.com", int(QTYPE.A))
+    ttl, values = plugin.records[key]
+
+    assert ttl == 100
+    assert values == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
+
+
 def test_normalize_paths_raises_when_no_paths(tmp_path: pathlib.Path) -> None:
     """Brief: _normalize_paths and setup() fail when neither file_path nor file_paths are provided.
 
