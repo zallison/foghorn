@@ -225,12 +225,27 @@ class SQLite3CachePlugin(CachePlugin):
                     inner_store
                 )  # type: ignore[arg-type]
 
+            # Compute hit percentage when we have both hit/miss counters.
+            hit_pct_local: object = None
+            try:
+                if isinstance(cache_hits_local, int) and isinstance(
+                    cache_misses_local, int
+                ):
+                    total_local = cache_hits_local + cache_misses_local
+                    if total_local > 0:
+                        hit_pct_local = round(
+                            (cache_hits_local / total_local) * 100.0, 1
+                        )
+            except Exception:
+                hit_pct_local = None
+
             row: dict[str, object] = {
                 "label": str(label),
                 "backend": "in_memory_ttl",
                 "entries": int(entries_total),
                 "live_entries": int(entries_live),
                 "expired_entries": int(entries_expired),
+                "hit_pct": hit_pct_local,
             }
             if isinstance(calls_total_local, int):
                 row["calls_total"] = int(calls_total_local)
@@ -241,12 +256,29 @@ class SQLite3CachePlugin(CachePlugin):
             return row
 
         # Primary DNS cache (this plugin instance)
+        # Compute hit percentage for the primary cache when counters are present.
+        hit_pct_primary: object = None
+        try:
+            cache_hits_summary = summary.get("cache_hits")
+            cache_misses_summary = summary.get("cache_misses")
+            if isinstance(cache_hits_summary, int) and isinstance(
+                cache_misses_summary, int
+            ):
+                total_primary = cache_hits_summary + cache_misses_summary
+                if total_primary > 0:
+                    hit_pct_primary = round(
+                        (cache_hits_summary / total_primary) * 100.0, 1
+                    )
+        except Exception:
+            hit_pct_primary = None
+
         primary_row: dict[str, object] = {
             "label": "dns_cache (primary)",
             "backend": "sqlite3",
             "entries": summary["total_entries"],
             "live_entries": summary["live_entries"],
             "expired_entries": summary["expired_entries"],
+            "hit_pct": hit_pct_primary,
         }
         for key in ("calls_total", "cache_hits", "cache_misses"):
             if key in summary:
@@ -401,6 +433,7 @@ class SQLite3CachePlugin(CachePlugin):
                         {"key": "calls_total", "label": "Calls", "align": "right"},
                         {"key": "cache_hits", "label": "Hits", "align": "right"},
                         {"key": "cache_misses", "label": "Misses", "align": "right"},
+                        {"key": "hit_pct", "label": "Hit %", "align": "right"},
                     ],
                 },
                 {
