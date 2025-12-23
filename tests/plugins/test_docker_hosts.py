@@ -1098,6 +1098,66 @@ def test_docker_hosts_discovery_publishes_txt(monkeypatch):
     assert full_id not in container_txt
 
 
+def test_docker_hosts_http_snapshot_counts_unique_human_names(monkeypatch):
+    """Brief: get_http_snapshot summary counts human-readable names once.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that total_containers reflects unique non-hash names, not
+        hash-like aliases.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+
+    # Two containers with human-friendly names plus hash-like ID aliases.
+    containers = [
+        {
+            "Id": "deadbeef" * 8,  # 64 hex chars -> full container ID
+            "Name": "/web",
+            "Config": {"Hostname": "web"},
+            "State": {"Status": "running"},
+            "NetworkSettings": {
+                "Networks": {"bridge": {"IPAddress": "172.17.0.5"}},
+            },
+        },
+        {
+            "Id": "cafebabe" * 8,
+            "Name": "/db",
+            "Config": {"Hostname": "db"},
+            "State": {"Status": "running"},
+            "NetworkSettings": {
+                "Networks": {"bridge": {"IPAddress": "172.17.0.6"}},
+            },
+        },
+    ]
+
+    monkeypatch.setattr(plugin, "_iter_containers_for_endpoint", lambda _ep: containers)
+    plugin.setup()
+
+    snapshot = plugin.get_http_snapshot()
+    summary = snapshot["summary"]
+    rows = snapshot["containers"]
+
+    # Sanity: the table should include both human names and hash-like aliases.
+    names = {str(row["name"]) for row in rows}
+    assert "web" in names
+    assert "db" in names
+    # At least one alias should look hash-like (12+ hex characters).
+    assert any(
+        len(n) >= 12 and all(c in "0123456789abcdef" for c in n.lower()) for n in names
+    )
+
+    # total_containers should count only the distinct human-readable names.
+    assert summary["total_containers"] == 2
+    # And it should be less than the number of rows when aliases exist.
+    assert summary["total_containers"] < len(rows)
+
+
 def test_docker_hosts_project_name_publishes_a_record(monkeypatch):
     """Brief: DockerHosts keeps project name as metadata, not a separate label.
 
