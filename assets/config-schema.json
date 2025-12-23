@@ -252,12 +252,14 @@
           "title": "DockerHostsConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.docker-hosts.DockerHosts"
+        "module": "foghorn.plugins.docker_hosts.DockerHosts"
       },
       "etc_hosts": {
         "aliases": [
           "/etc/hosts",
           "etc_hosts",
+          "etchosts",
+          "hostfile",
           "hosts"
         ],
         "config_schema": {
@@ -325,7 +327,7 @@
           "title": "EtcHostsConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.etc-hosts.EtcHosts"
+        "module": "foghorn.plugins.etc_hosts.EtcHosts"
       },
       "examples": {
         "aliases": [
@@ -1105,7 +1107,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_path: Legacy single records file path.\n  - file_paths: Preferred list of records file paths.\n  - records: Optional list of inline records using <domain>|<qtype>|<ttl>|<value> format.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_path: Legacy single records file path.\n  - file_paths: Preferred list of records file paths.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
           "properties": {
             "file_path": {
               "anyOf": [
@@ -1135,11 +1137,19 @@
               "title": "File Paths"
             },
             "records": {
-              "items": {
-                "type": "string"
-              },
-              "title": "Records",
-              "type": "array"
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Records"
             },
             "ttl": {
               "default": 300,
