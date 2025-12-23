@@ -1064,19 +1064,28 @@ class DockerHosts(BasePlugin):
                 )
 
             # Compute the number of effective backends as the number of unique
-            # TXT/Info groups. All rows that share an identical TXT payload are
-            # considered aliases for the same logical container.
-            unique_txt_keys: set[str] = set()
+            # human-readable hostnames. Hash-like labels (short/full container
+            # IDs) are treated as aliases and do not contribute additional
+            # container slots to the summary count.
+            readable_names: set[str] = set()
             for row in containers:
-                txts = row.get("txt")
-                # Use repr() to generate a stable, JSON-like key without
-                # requiring the json module; this is sufficient for grouping
-                # containers that share identical TXT payloads.
                 try:
-                    key = repr(sorted(txts)) if isinstance(txts, list) else repr(txts)
+                    name_val = str(row.get("name", "")).strip()
                 except Exception:
-                    key = repr(txts)
-                unique_txt_keys.add(key)
+                    continue
+                if not name_val:
+                    continue
+                if _is_sha1_like(name_val):
+                    # Treat hash-like labels as aliases for display purposes.
+                    continue
+                readable_names.add(name_val)
+
+            # Fallback: if every row looks hash-like (for example, when Docker
+            # assigns only IDs and no human-friendly names), fall back to the raw
+            # row count so that operators still see a non-zero container total.
+            total_containers = (
+                len(readable_names) if readable_names else len(containers)
+            )
 
             # Plugin-level DNS suffix (domain) used when no per-endpoint suffix
             # is configured. This is exposed in the summary so that container
@@ -1085,7 +1094,7 @@ class DockerHosts(BasePlugin):
             plugin_suffix = str(getattr(self, "_suffix", "") or "")
 
             summary: Dict[str, object] = {
-                "total_containers": len(unique_txt_keys),
+                "total_containers": total_containers,
                 "endpoints": endpoints_view,
                 "reload_interval": float(getattr(self, "_reload_interval", 0.0) or 0.0),
                 "suffix": plugin_suffix or None,
