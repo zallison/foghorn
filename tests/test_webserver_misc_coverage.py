@@ -38,7 +38,13 @@ def test_get_package_build_info_pep610_commit_id_path(
       - info['git_sha'] is populated from commit_id.
     """
 
-    web_mod._get_package_build_info.cache_clear()
+    # Newer implementations of _get_package_build_info may not be wrapped in
+    # functools.lru_cache; guard cache_clear() so the test stays compatible with
+    # both cached and non-cached designs.
+    cache_clear = getattr(web_mod._get_package_build_info, "cache_clear", None)
+    if callable(cache_clear):  # pragma: no cover - compatibility path
+        cache_clear()
+
     monkeypatch.delenv("FOGHORN_GIT_SHA", raising=False)
     monkeypatch.delenv("GIT_SHA", raising=False)
 
