@@ -70,8 +70,12 @@ def test_get_package_build_info_env_pep610_and_exception(
       - On distribution() error, function still returns a dict without raising.
     """
 
-    # Ensure a clean cache between scenarios.
-    web_mod._get_package_build_info.cache_clear()
+    # Ensure a clean cache between scenarios. Newer implementations of
+    # _get_package_build_info may not use functools.lru_cache, so guard this
+    # call to support both cached and non-cached designs.
+    cache_clear = getattr(web_mod._get_package_build_info, "cache_clear", None)
+    if callable(cache_clear):  # pragma: no cover - compatibility path
+        cache_clear()
 
     monkeypatch.setenv("FOGHORN_GIT_SHA", "env-sha")
     monkeypatch.setenv("FOGHORN_BUILD_ID", "env-build")
@@ -103,8 +107,11 @@ def test_get_package_build_info_env_pep610_and_exception(
     assert info["vcs_url"] == "https://example.invalid/repo.git"
     assert info["requested_revision"] == "main"
 
-    # Now exercise the exception path.
-    web_mod._get_package_build_info.cache_clear()
+    # Now exercise the exception path, again tolerating implementations that
+    # are not cache-wrapped.
+    cache_clear = getattr(web_mod._get_package_build_info, "cache_clear", None)
+    if callable(cache_clear):  # pragma: no cover - compatibility path
+        cache_clear()
     monkeypatch.setattr(
         web_mod.importlib_metadata,
         "distribution",

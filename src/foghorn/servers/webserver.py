@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 from cachetools import TTLCache
 
-from foghorn.utils.cache_registry import registered_cached
+from foghorn.utils.cache_registry import registered_cached, registered_lru_cached
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
@@ -417,9 +417,9 @@ def _thread_is_alive(obj: Any | None) -> bool:
     return False
 
 
+@registered_lru_cached(maxsize=1)
 def _get_package_build_info() -> Dict[str, Any]:
     """Brief: Best-effort build metadata (commit, VCS url, etc.) from packaging.
-
     Inputs: none
 
     Outputs:
