@@ -843,6 +843,13 @@ plugins:
 		- ./config/custom-records.txt
 		- ./config/custom-records-extra.txt
 
+	  # Optional: add or override entries directly in config using the same
+	  # line format; these are merged after file-backed records with
+	  # first-TTL-wins and de-duplicated values.
+	  # records:
+	  #   - example.com|A|300|192.0.2.20
+	  #   - www.example.com|CNAME|300|example.com.
+
 	  # Optional: control how filesystem changes are detected
 	  watchdog_enabled: true                        # default true when omitted
 	  watchdog_min_interval_seconds: 1.0            # minimum time between reloads
