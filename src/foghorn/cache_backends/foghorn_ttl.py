@@ -80,6 +80,12 @@ class FoghornTTLCache:
         self._ttls: Dict[Tuple[object, object], int] = {} if _ttls is None else _ttls
         self._lock = threading.RLock() if _lock is None else _lock
 
+        # Per-cache access counters used by admin snapshots. These are best-effort
+        # only and do not affect core cache semantics.
+        self.calls_total: int = 0
+        self.cache_hits: int = 0
+        self.cache_misses: int = 0
+
     def _ns_key(self, key: Tuple[str, int]) -> Tuple[object, object]:
         """Brief: Build an internal namespaced key.
 
@@ -131,15 +137,25 @@ class FoghornTTLCache:
         now = time.time()
         ns_key = self._ns_key(key)
         with self._lock:
+            self.calls_total += 1
+
             entry = self._store.get(ns_key)
             if not entry:
+                self.cache_misses += 1
                 return None
+
             expiry, data = entry
             # Check if the entry has expired.
             if now >= expiry:
                 self._store.pop(ns_key, None)
                 self._ttls.pop(ns_key, None)
+                self.cache_misses += 1
                 return None
+
+            try:
+                self.cache_hits += 1
+            except Exception:  # pragma: no cover - defensive only
+                pass
             return data
 
     def set(self, key: Tuple[str, int], ttl: int, data: Any) -> None:
@@ -224,12 +240,25 @@ class FoghornTTLCache:
         now = time.time()
         ns_key = self._ns_key(key)
         with self._lock:
+            self.calls_total += 1
+
             entry = self._store.get(ns_key)
             if not entry:
+                try:
+                    self.cache_misses += 1
+                except Exception:  # pragma: no cover - defensive only
+                    pass
                 return None, None, None
+
             expiry, data = entry
             seconds_remaining = float(expiry - now)
             ttl = self._ttls.get(ns_key)
+
+            if seconds_remaining >= 0:
+                self.cache_hits += 1
+            else:
+                self.cache_misses += 1
+
             return (
                 data,
                 seconds_remaining,

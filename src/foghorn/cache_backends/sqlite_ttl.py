@@ -70,6 +70,12 @@ class SQLite3TTLCache:
         self.journal_mode = str(journal_mode or "WAL")
         self.create_dir = bool(create_dir)
 
+        # Per-cache access counters used by admin snapshots. These are best-effort
+        # only and do not affect core cache semantics.
+        self.calls_total: int = 0
+        self.cache_hits: int = 0
+        self.cache_misses: int = 0
+
         self._lock = threading.RLock()
         self._conn = self._init_connection()
 
@@ -166,6 +172,8 @@ class SQLite3TTLCache:
 
         table = self.namespace
         with self._lock:
+            self.calls_total += 1
+
             cur = self._conn.cursor()
             cur.execute(
                 f"SELECT value_blob, value_is_pickle, expiry FROM {table} WHERE key_blob=? AND key_is_pickle=?",
@@ -174,18 +182,20 @@ class SQLite3TTLCache:
             row = cur.fetchone()
 
             if not row:
+                self.cache_misses += 1
                 return None
 
             value_blob, value_is_pickle, expiry = row
             try:
                 expiry_f = float(expiry)
             except Exception:
-                # Malformed row: drop it.
+                # Malformed row: drop it and treat as a miss for diagnostics.
                 cur.execute(
                     f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
                     (key_blob, int(key_is_pickle)),
                 )
                 self._conn.commit()
+                self.cache_misses += 1
                 return None
 
             if now >= expiry_f:
@@ -194,17 +204,22 @@ class SQLite3TTLCache:
                     (key_blob, int(key_is_pickle)),
                 )
                 self._conn.commit()
+                self.cache_misses += 1
                 return None
 
             try:
-                return self._decode(bytes(value_blob), int(value_is_pickle))
+                value = self._decode(bytes(value_blob), int(value_is_pickle))
             except Exception:
                 cur.execute(
                     f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
                     (key_blob, int(key_is_pickle)),
                 )
                 self._conn.commit()
+                self.cache_misses += 1
                 return None
+
+            self.cache_hits += 1
+            return value
 
     def get_with_meta(
         self, key: Any
@@ -226,6 +241,7 @@ class SQLite3TTLCache:
 
         table = self.namespace
         with self._lock:
+            self.calls_total += 1
             cur = self._conn.cursor()
             cur.execute(
                 f"SELECT value_blob, value_is_pickle, expiry, ttl FROM {table} WHERE key_blob=? AND key_is_pickle=?",
@@ -234,20 +250,34 @@ class SQLite3TTLCache:
             row = cur.fetchone()
 
         if not row:
+            self.cache_misses += 1
             return None, None, None
 
         value_blob, value_is_pickle, expiry, ttl = row
+
         try:
             expiry_f = float(expiry)
             ttl_i = int(ttl)
             remaining = float(expiry_f - now)
         except Exception:
+            self.cache_misses += 1
             return None, None, None
 
         try:
             value = self._decode(bytes(value_blob), int(value_is_pickle))
         except Exception:
+            try:
+                self.cache_misses += 1
+            except Exception:  # pragma: no cover - defensive only
+                pass
             return None, None, None
+
+        # get_with_meta intentionally does not purge expired rows, but we still
+        # classify them as misses for diagnostics when remaining < 0.
+        if remaining >= 0:
+            self.cache_hits += 1
+        else:
+            self.cache_misses += 1
 
         return value, remaining, ttl_i
 
