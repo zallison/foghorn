@@ -255,7 +255,8 @@ class LatencyHistogram:
         return self.max_ms or 0.0  # pragma: no cover - defensive fallback
 
 
-TOPK_CAPACITY_FACTOR = 4
+TOPK_CAPACITY_FACTOR = 100
+TOPK_MIN_CAPACITY = 1024
 
 
 class TopK:
@@ -550,6 +551,34 @@ class StatsSQLiteStore:
         conn.commit()
         return conn
 
+    def health_check(self) -> bool:
+        """Brief: Return True when the underlying SQLite store is usable.
+
+        Inputs: none
+
+        Outputs:
+            bool: True when a trivial query succeeds, else False.
+
+        Notes:
+            - This is intended for readiness probes (e.g., /ready) and should be
+              very lightweight.
+            - The method uses the store lock to avoid racing with batched writes.
+
+        Example:
+            >>> store = StatsSQLiteStore(":memory:")
+            >>> store.health_check()
+            True
+        """
+
+        try:
+            with self._lock:
+                cur = self._conn.cursor()
+                cur.execute("SELECT 1")
+                cur.fetchone()
+            return True
+        except Exception:
+            return False
+
     # ------------------------------------------------------------------
     # Low-level execution helpers
     # ------------------------------------------------------------------
@@ -728,6 +757,391 @@ class StatsSQLiteStore:
             logger.error(
                 "StatsSQLiteStore insert_query_log error: %s", exc, exc_info=True
             )
+
+    def select_query_log(
+        self,
+        client_ip: Optional[str] = None,
+        qtype: Optional[str] = None,
+        qname: Optional[str] = None,
+        rcode: Optional[str] = None,
+        start_ts: Optional[float] = None,
+        end_ts: Optional[float] = None,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> Dict[str, Any]:
+        """Select query_log rows with basic filtering and pagination.
+
+        Brief:
+            Returns rows from the SQLite-backed query_log table, filtered by
+            client_ip, qtype, qname, and rcode, and paginated by (page, page_size).
+
+        Inputs:
+            client_ip: Optional client IP filter (exact match).
+            qtype: Optional qtype filter (case-insensitive; stored values are typically uppercase).
+            qname: Optional qname filter (case-insensitive; compared against normalized stored name).
+            rcode: Optional rcode filter (case-insensitive; stored values are typically uppercase).
+            start_ts: Optional inclusive start timestamp (Unix seconds).
+            end_ts: Optional exclusive end timestamp (Unix seconds).
+            page: 1-based page number (defaults to 1).
+            page_size: Max rows per page (defaults to 100).
+
+        Outputs:
+            Dict with keys:
+              - total: total matching row count
+              - page: current page (1-based)
+              - page_size: page size
+              - total_pages: total pages
+              - items: list[dict] of query_log rows
+
+        Notes:
+            - Results are ordered newest-first by (ts DESC, id DESC).
+            - result_json is decoded into a dict under the "result" key.
+        """
+
+        # Defensive normalization
+        try:
+            page_i = int(page)
+        except (TypeError, ValueError):
+            page_i = 1
+        if page_i < 1:
+            page_i = 1
+
+        try:
+            page_size_i = int(page_size)
+        except (TypeError, ValueError):
+            page_size_i = 100
+        if page_size_i < 1:
+            page_size_i = 1
+
+        client_ip_s = str(client_ip).strip() if client_ip is not None else None
+        qtype_s = str(qtype).strip().upper() if qtype is not None else None
+        rcode_s = str(rcode).strip().upper() if rcode is not None else None
+        qname_s = None
+        if qname is not None:
+            qname_s = str(qname).strip().rstrip(".").lower()
+
+        where: List[str] = []
+        params: List[Any] = []
+
+        if client_ip_s:
+            where.append("client_ip = ?")
+            params.append(client_ip_s)
+        if qtype_s:
+            where.append("qtype = ?")
+            params.append(qtype_s)
+        if qname_s:
+            where.append("name = ?")
+            params.append(qname_s)
+        if rcode_s:
+            where.append("rcode = ?")
+            params.append(rcode_s)
+        if isinstance(start_ts, (int, float)):
+            where.append("ts >= ?")
+            params.append(float(start_ts))
+        if isinstance(end_ts, (int, float)):
+            where.append("ts < ?")
+            params.append(float(end_ts))
+
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+        # Reads should include any queued batched ops.
+        if self._batch_writes:
+            with self._lock:
+                self._flush_locked()
+
+        total = 0
+        try:
+            cur = self._conn.execute(
+                f"SELECT COUNT(1) FROM query_log{where_sql}", tuple(params)
+            )  # type: ignore[attr-defined]
+            row = cur.fetchone()
+            total = int(row[0]) if row else 0
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "StatsSQLiteStore select_query_log count error: %s", exc, exc_info=True
+            )
+            total = 0
+
+        offset = (page_i - 1) * page_size_i
+        items: List[Dict[str, Any]] = []
+        try:
+            sql = (
+                "SELECT id, ts, client_ip, name, qtype, upstream_id, rcode, status, error, first, result_json "
+                f"FROM query_log{where_sql} "
+                "ORDER BY ts DESC, id DESC "
+                "LIMIT ? OFFSET ?"
+            )
+            cur2 = self._conn.execute(
+                sql, tuple(params + [page_size_i, offset])
+            )  # type: ignore[attr-defined]
+            for (
+                row_id,
+                ts,
+                client_ip_row,
+                name,
+                qtype_row,
+                upstream_id,
+                rcode_row,
+                status_row,
+                error_row,
+                first_row,
+                result_json,
+            ) in cur2:
+                try:
+                    result_obj = json.loads(result_json or "{}")
+                    if not isinstance(result_obj, dict):
+                        result_obj = {"value": result_obj}
+                except Exception:
+                    result_obj = {}
+
+                items.append(
+                    {
+                        "id": int(row_id),
+                        "ts": float(ts),
+                        "client_ip": str(client_ip_row),
+                        "qname": str(name),
+                        "qtype": str(qtype_row),
+                        "upstream_id": (
+                            str(upstream_id) if upstream_id is not None else None
+                        ),
+                        "rcode": str(rcode_row) if rcode_row is not None else None,
+                        "status": str(status_row) if status_row is not None else None,
+                        "error": str(error_row) if error_row is not None else None,
+                        "first": str(first_row) if first_row is not None else None,
+                        "result": result_obj,
+                    }
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "StatsSQLiteStore select_query_log rows error: %s", exc, exc_info=True
+            )
+
+        total_pages = 0
+        if page_size_i > 0:
+            total_pages = (total + page_size_i - 1) // page_size_i
+
+        return {
+            "total": total,
+            "page": page_i,
+            "page_size": page_size_i,
+            "total_pages": total_pages,
+            "items": items,
+        }
+
+    def aggregate_query_log_counts(
+        self,
+        start_ts: float,
+        end_ts: float,
+        interval_seconds: int,
+        client_ip: Optional[str] = None,
+        qtype: Optional[str] = None,
+        qname: Optional[str] = None,
+        rcode: Optional[str] = None,
+        group_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Aggregate query_log counts into fixed time buckets.
+
+        Brief:
+            Produces counts over the query_log table grouped by a fixed interval
+            (bucket width) between start_ts and end_ts.
+
+        Inputs:
+            start_ts: Inclusive start timestamp (Unix seconds).
+            end_ts: Exclusive end timestamp (Unix seconds).
+            interval_seconds: Bucket size in seconds (must be > 0).
+            client_ip: Optional client IP filter (exact match).
+            qtype: Optional qtype filter (case-insensitive).
+            qname: Optional qname filter (case-insensitive).
+            rcode: Optional rcode filter (case-insensitive).
+            group_by: Optional grouping dimension; one of
+                {"client_ip", "qtype", "qname", "rcode"}. When provided, results
+                are returned as sparse rows keyed by (bucket_start_ts, group).
+
+        Outputs:
+            Dict with keys:
+              - start_ts: float
+              - end_ts: float
+              - interval_seconds: int
+              - items: list of bucket results
+
+        Notes:
+            - When group_by is None, this returns a dense list that includes zero
+              counts for buckets with no matching rows.
+            - When group_by is set, this returns sparse rows (no zero-fill).
+        """
+
+        try:
+            start_f = float(start_ts)
+            end_f = float(end_ts)
+        except (TypeError, ValueError):
+            start_f = 0.0
+            end_f = 0.0
+
+        try:
+            interval_i = int(interval_seconds)
+        except (TypeError, ValueError):
+            interval_i = 0
+
+        if interval_i <= 0 or end_f <= start_f:
+            return {
+                "start_ts": start_f,
+                "end_ts": end_f,
+                "interval_seconds": interval_i,
+                "items": [],
+            }
+
+        client_ip_s = str(client_ip).strip() if client_ip is not None else None
+        qtype_s = str(qtype).strip().upper() if qtype is not None else None
+        rcode_s = str(rcode).strip().upper() if rcode is not None else None
+        qname_s = None
+        if qname is not None:
+            qname_s = str(qname).strip().rstrip(".").lower()
+
+        where: List[str] = ["ts >= ?", "ts < ?"]
+        params: List[Any] = [start_f, end_f]
+
+        if client_ip_s:
+            where.append("client_ip = ?")
+            params.append(client_ip_s)
+        if qtype_s:
+            where.append("qtype = ?")
+            params.append(qtype_s)
+        if qname_s:
+            where.append("name = ?")
+            params.append(qname_s)
+        if rcode_s:
+            where.append("rcode = ?")
+            params.append(rcode_s)
+
+        where_sql = " WHERE " + " AND ".join(where)
+
+        group_col = None
+        group_label = None
+        if group_by:
+            gb = str(group_by).strip().lower()
+            mapping = {
+                "client_ip": "client_ip",
+                "qtype": "qtype",
+                "qname": "name",
+                "rcode": "rcode",
+            }
+            if gb in mapping:
+                group_col = mapping[gb]
+                group_label = gb
+
+        # Reads should include any queued batched ops.
+        if self._batch_writes:
+            with self._lock:
+                self._flush_locked()
+
+        rows: List[Tuple[int, Optional[str], int]] = []
+        try:
+            if group_col:
+                sql = (
+                    "SELECT CAST(((ts - ?) / ?) AS INTEGER) AS bucket, "
+                    f"{group_col} AS group_value, "
+                    "COUNT(1) AS c "
+                    f"FROM query_log{where_sql} "
+                    "GROUP BY bucket, group_value "
+                    "ORDER BY bucket ASC"
+                )
+                cur = self._conn.execute(
+                    sql, tuple([start_f, interval_i] + params)
+                )  # type: ignore[attr-defined]
+                for bucket, group_value, c in cur:
+                    try:
+                        b_i = int(bucket)
+                    except Exception:
+                        continue
+                    try:
+                        c_i = int(c)
+                    except Exception:
+                        c_i = 0
+                    rows.append(
+                        (
+                            b_i,
+                            str(group_value) if group_value is not None else None,
+                            c_i,
+                        )
+                    )
+            else:
+                sql = (
+                    "SELECT CAST(((ts - ?) / ?) AS INTEGER) AS bucket, COUNT(1) AS c "
+                    f"FROM query_log{where_sql} "
+                    "GROUP BY bucket "
+                    "ORDER BY bucket ASC"
+                )
+                cur = self._conn.execute(
+                    sql, tuple([start_f, interval_i] + params)
+                )  # type: ignore[attr-defined]
+                for bucket, c in cur:
+                    try:
+                        b_i = int(bucket)
+                    except Exception:
+                        continue
+                    try:
+                        c_i = int(c)
+                    except Exception:
+                        c_i = 0
+                    rows.append((b_i, None, c_i))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "StatsSQLiteStore aggregate_query_log_counts error: %s",
+                exc,
+                exc_info=True,
+            )
+            rows = []
+
+        # Dense fill for the common single-series case.
+        if not group_col:
+            import math
+
+            num = int(math.ceil((end_f - start_f) / float(interval_i)))
+            if num < 0:
+                num = 0
+
+            by_bucket = {b: c for (b, _g, c) in rows}
+            items: List[Dict[str, Any]] = []
+            for b in range(num):
+                b_start = start_f + (b * interval_i)
+                b_end = min(end_f, b_start + interval_i)
+                items.append(
+                    {
+                        "bucket": b,
+                        "bucket_start_ts": b_start,
+                        "bucket_end_ts": b_end,
+                        "count": int(by_bucket.get(b, 0)),
+                    }
+                )
+            return {
+                "start_ts": start_f,
+                "end_ts": end_f,
+                "interval_seconds": interval_i,
+                "items": items,
+            }
+
+        # Sparse grouped results.
+        items2: List[Dict[str, Any]] = []
+        for b, g, c in rows:
+            b_start = start_f + (b * interval_i)
+            b_end = min(end_f, b_start + interval_i)
+            items2.append(
+                {
+                    "bucket": int(b),
+                    "bucket_start_ts": b_start,
+                    "bucket_end_ts": b_end,
+                    "group_by": group_label,
+                    "group": g,
+                    "count": int(c),
+                }
+            )
+
+        return {
+            "start_ts": start_f,
+            "end_ts": end_f,
+            "interval_seconds": interval_i,
+            "items": items2,
+        }
 
     # ------------------------------------------------------------------
     # Rebuild and inspection helpers
@@ -972,7 +1386,7 @@ class StatsSQLiteStore:
 
                     if dnssec_status in {
                         "dnssec_secure",
-                        "dnssec_ext_secure",
+                        "dnssec_zone_secure",
                         "dnssec_unsigned",
                         "dnssec_bogus",
                         "dnssec_indeterminate",
@@ -1109,6 +1523,7 @@ class StatsCollector:
         ignore_domains_as_suffix: bool = False,
         ignore_subdomains_as_suffix: bool = False,
         ignore_single_host: bool = False,
+        include_ignored_in_stats: bool = True,
     ) -> None:
         """Initialize statistics collector with configuration flags.
 
@@ -1129,6 +1544,10 @@ class StatsCollector:
             ignore_subdomains_as_suffix: When True, treat ignore_top_subdomains
                 entries (or the fallback domain set) as suffixes when matching
                 top_subdomains.
+            include_ignored_in_stats: When True (default), ignore filters only
+                affect display/exported top lists. When False, entries matching
+                ignore filters are excluded from aggregation (totals/uniques/topk)
+                but are still written to the persistent query_log.
 
         Outputs:
             None
@@ -1144,6 +1563,9 @@ class StatsCollector:
         self.track_latency = track_latency
         # Display-only flag for hiding single-label hosts from top lists
         self.ignore_single_host = bool(ignore_single_host)
+
+        # Control whether ignore filters exclude entries from aggregation.
+        self.include_ignored_in_stats = bool(include_ignored_in_stats)
 
         # Optional persistent store for long-lived aggregates and query logs
         self._store: Optional[StatsSQLiteStore] = stats_store
@@ -1185,10 +1607,13 @@ class StatsCollector:
         self._unique_clients: Optional[Set[str]] = set() if track_uniques else None
         self._unique_domains: Optional[Set[str]] = set() if track_uniques else None
 
-        # Optional: top-K trackers. Use a slightly larger internal capacity so
-        # that display-only ignore filters applied at snapshot time have enough
-        # headroom to still return up to top_n visible entries.
-        internal_capacity = max(1, self.top_n * TOPK_CAPACITY_FACTOR)
+        # Optional: top-K trackers. Use a larger internal capacity so that
+        # display-only filters and downstream consumers (such as prefetching
+        # logic) can work with deeper top lists than the default display size.
+        # By default we keep up to max(top_n * TOPK_CAPACITY_FACTOR, TOPK_MIN_CAPACITY)
+        # entries in memory.
+        internal_capacity = max(TOPK_MIN_CAPACITY, self.top_n * TOPK_CAPACITY_FACTOR)
+        self._top_capacity: int = internal_capacity
 
         self._top_clients: Optional[TopK] = (
             TopK(capacity=internal_capacity) if include_top_clients else None
@@ -1236,7 +1661,15 @@ class StatsCollector:
             LatencyHistogram() if track_latency else None
         )
 
-        # Display-only ignore filters for top lists
+        # Ignore filters.
+        #
+        # Brief:
+        #   By default (include_ignored_in_stats=True), these filters are
+        #   display-only (they hide entries from exported top lists but do not
+        #   affect totals/uniques).
+        #   When include_ignored_in_stats=False, matching entries are excluded
+        #   from aggregation (totals/uniques/topk) while leaving the persistent
+        #   query log untouched.
         self._ignore_top_client_networks: List[ipaddress._BaseNetwork] = []
         self._ignore_top_domains: Set[str] = set()
         self._ignore_top_subdomains: Set[str] = set()
@@ -1248,6 +1681,93 @@ class StatsCollector:
             ignore_top_domains or [],
             ignore_top_subdomains or [],
         )
+
+    def _client_is_ignored_locked(self, client_ip: str) -> bool:
+        """Brief: Return True if the client IP matches ignore_top_clients.
+
+        Inputs:
+          - client_ip: Client IP string.
+
+        Outputs:
+          - bool
+        """
+
+        if not client_ip or not self._ignore_top_client_networks:
+            return False
+        try:
+            addr = ipaddress.ip_address(str(client_ip))
+        except Exception:
+            return False
+        return any(addr in net for net in self._ignore_top_client_networks)
+
+    def _base_domain_is_ignored_locked(self, base_domain: str) -> bool:
+        """Brief: Return True if base domain matches ignore_top_domains.
+
+        Inputs:
+          - base_domain: Normalized base domain (typically last two labels).
+
+        Outputs:
+          - bool
+        """
+
+        norm = _normalize_domain(str(base_domain or ""))
+        if not norm or not self._ignore_top_domains:
+            return False
+        if self._ignore_domains_as_suffix:
+            return any(
+                norm == ig or norm.endswith("." + ig) for ig in self._ignore_top_domains
+            )
+        return norm in self._ignore_top_domains
+
+    def _qname_is_ignored_locked(self, qname: str) -> bool:
+        """Brief: Return True if full qname matches ignore_top_subdomains.
+
+        Inputs:
+          - qname: Normalized qname.
+
+        Outputs:
+          - bool
+        """
+
+        norm = _normalize_domain(str(qname or ""))
+        if not norm:
+            return False
+
+        active: Set[str]
+        if self._ignore_top_subdomains:
+            active = self._ignore_top_subdomains
+        else:
+            # Fallback to domain ignore set when subdomain ignore set is empty.
+            active = self._ignore_top_domains
+
+        if not active:
+            return False
+
+        if self._ignore_subdomains_as_suffix:
+            return any(norm == ig or norm.endswith("." + ig) for ig in active)
+        return norm in active
+
+    def _should_ignore_query_locked(
+        self, client_ip: str, domain: str, base: str
+    ) -> bool:
+        """Brief: Return True if a query should be excluded from aggregation.
+
+        Inputs:
+          - client_ip: Client IP string.
+          - domain: Normalized qname.
+          - base: Normalized base domain.
+
+        Outputs:
+          - bool
+        """
+
+        if self._client_is_ignored_locked(client_ip):
+            return True
+        if base and self._base_domain_is_ignored_locked(base):
+            return True
+        if domain and self._qname_is_ignored_locked(domain):
+            return True
+        return False
 
     def record_query(self, client_ip: str, qname: str, qtype: str) -> None:
         """Record an incoming DNS query.
@@ -1266,7 +1786,19 @@ class StatsCollector:
         """
         domain = _normalize_domain(qname)
 
+        # Compute base domain once so it can be reused for top_domains and persistence.
+        parts = domain.split(".") if domain else []
+        base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
+
         with self._lock:
+            # When include_ignored_in_stats is False, ignore filters exclude
+            # entries from aggregation but do not affect persistent query logging
+            # (record_query_result).
+            if not self.include_ignored_in_stats and self._should_ignore_query_locked(
+                client_ip, domain, base
+            ):
+                return
+
             self._totals["total_queries"] += 1
 
             if self.include_qtype_breakdown:
@@ -1281,12 +1813,6 @@ class StatsCollector:
             if self._top_clients is not None:
                 self._top_clients.add(client_ip)
 
-            # Compute base domain once so it can be reused for top_domains and
-            # persistence. The base domain is always the last two labels of the
-            # normalized name when available.
-            parts = domain.split(".") if domain else []
-            base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
-
             if self._top_subdomains is not None and _is_subdomain(domain):
                 self._top_subdomains.add(domain)
 
@@ -1298,7 +1824,7 @@ class StatsCollector:
             if self.include_top_domains and qtype:
                 tracker = self._top_qtype_qnames.get(qtype)
                 if tracker is None:
-                    tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                    tracker = TopK(capacity=self._top_capacity)
                     self._top_qtype_qnames[qtype] = tracker
                 tracker.add(domain)
 
@@ -1313,14 +1839,10 @@ class StatsCollector:
                         self._store.increment_count("sub_domains", domain)
                     if base:
                         self._store.increment_count("domains", base)
-                    # Persist per-qtype domain counts as "qtype|domain" so they
-                    # can be reconstructed on warm-load and via rebuild scripts.
                     if qtype and domain:
                         qkey = f"{qtype}|{domain}"
                         self._store.increment_count("qtype_qnames", qkey)
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                except Exception:  # pragma: no cover
                     logger.debug(
                         "StatsCollector: failed to persist query counters",
                         exc_info=True,
@@ -1347,6 +1869,12 @@ class StatsCollector:
         base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
 
         with self._lock:
+            if not self.include_ignored_in_stats:
+                if base and self._base_domain_is_ignored_locked(base):
+                    return
+                if domain and self._qname_is_ignored_locked(domain):
+                    return
+
             self._totals["cache_hits"] += 1
 
             if self._top_cache_hit_domains is not None and base:
@@ -1393,6 +1921,12 @@ class StatsCollector:
         base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
 
         with self._lock:
+            if not self.include_ignored_in_stats:
+                if base and self._base_domain_is_ignored_locked(base):
+                    return
+                if domain and self._qname_is_ignored_locked(domain):
+                    return
+
             self._totals["cache_misses"] += 1
 
             if self._top_cache_miss_domains is not None and base:
@@ -1438,9 +1972,17 @@ class StatsCollector:
             >>> collector = StatsCollector()
             >>> collector.record_cache_null("example.com")
         """
-        _normalize_domain(qname)
+        domain = _normalize_domain(qname)
+        parts = domain.split(".") if domain else []
+        base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
 
         with self._lock:
+            if not self.include_ignored_in_stats:
+                if base and self._base_domain_is_ignored_locked(base):
+                    return
+                if domain and self._qname_is_ignored_locked(domain):
+                    return
+
             self._totals["cache_null"] += 1
 
             # When the cache-null event is caused by a pre-plugin deny/override
@@ -1573,7 +2115,7 @@ class StatsCollector:
         domains_as_suffix: Optional[bool] = None,
         subdomains_as_suffix: Optional[bool] = None,
     ) -> None:
-        """Update display-only ignore filters for top statistics lists.
+        """Update ignore filters for statistics aggregation.
 
         Inputs:
             clients: Optional list of client IPs or CIDR strings to hide from
@@ -1601,8 +2143,8 @@ class StatsCollector:
                 When None, the existing setting is preserved.
 
         Outputs:
-            None (updates internal ignore sets used only when exporting
-            snapshot top lists; counters and TopK data are unchanged).
+            None (updates internal ignore sets used during aggregation in
+            record_query/record_cache_* and when exporting snapshots).
 
         Example:
             >>> collector = StatsCollector(include_top_clients=True)
@@ -1613,8 +2155,8 @@ class StatsCollector:
             ...     domains_as_suffix=True,
             ... )
             >>> snap = collector.snapshot(reset=False)
-            >>> # top_clients/top_domains/top_subdomains will omit matching
-            >>> # entries, but totals["total_queries"] counts all queries.
+            >>> # Matching entries will not be counted in totals/top lists,
+            >>> # but queries are still written to the persistent query_log.
         """
         clients = clients or []
         domains = domains or []
@@ -1822,6 +2364,12 @@ class StatsCollector:
             base = ".".join(parts[-2:]) if len(parts) >= 2 else domain
 
         with self._lock:
+            if not self.include_ignored_in_stats:
+                if base and self._base_domain_is_ignored_locked(base):
+                    return
+                if domain and self._qname_is_ignored_locked(domain):
+                    return
+
             self._rcodes[rcode] += 1
 
             # Track per-rcode top base domains when domain information is
@@ -1838,7 +2386,7 @@ class StatsCollector:
                 if domain and domain != base:
                     sub_tracker = self._top_rcode_subdomains.get(rcode)
                     if sub_tracker is None:
-                        sub_tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                        sub_tracker = TopK(capacity=self._top_capacity)
                         self._top_rcode_subdomains[rcode] = sub_tracker
                     sub_tracker.add(domain)
 
@@ -2059,9 +2607,9 @@ class StatsCollector:
                     filtered_clients.append((client, count))
                 top_clients = filtered_clients
 
-            # Always truncate exported top lists to the configured display size.
-            if top_clients is not None:
-                top_clients = top_clients[: self.top_n]
+            # Do not truncate here; export the full internal capacity so callers
+            # (including HTTP APIs and prefetch logic) can decide how many items
+            # to display or consume.
 
             if top_domains is not None:
                 filtered_domains: List[Tuple[str, int]] = []
@@ -2083,8 +2631,8 @@ class StatsCollector:
                     filtered_domains.append((domain, count))
                 top_domains = filtered_domains
 
-            if top_domains is not None:
-                top_domains = top_domains[: self.top_n]
+            # Leave top_domains at full internal capacity; downstream code can
+            # apply its own view-specific limits.
 
             if top_subdomains is not None:
                 # Fallback: if no explicit subdomain ignore list is configured,
@@ -2120,8 +2668,8 @@ class StatsCollector:
                     filtered_subdomains.append((name, count))
                 top_subdomains = filtered_subdomains
 
-            if top_subdomains is not None:
-                top_subdomains = top_subdomains[: self.top_n]
+            # Leave top_subdomains at full internal capacity; downstream code
+            # (e.g. HTTP APIs) is responsible for applying any display limits.
 
             # Per-qtype top domains (full qnames) for configured qtypes.
             qtype_qnames: Optional[Dict[str, List[Tuple[str, int]]]] = None
@@ -2165,7 +2713,7 @@ class StatsCollector:
                         entries = filtered_entries
 
                     if entries:
-                        qtype_qnames[qtype_name] = entries[: self.top_n]
+                        qtype_qnames[qtype_name] = entries
 
                 if not qtype_qnames:
                     qtype_qnames = None
@@ -2200,7 +2748,7 @@ class StatsCollector:
                     if not filtered_entries:
                         continue  # pragma: no cover - no visible entries after filtering
 
-                    rcode_domains[rcode_name] = filtered_entries[: self.top_n]
+                    rcode_domains[rcode_name] = filtered_entries
 
                 if not rcode_domains:
                     rcode_domains = (
@@ -2246,7 +2794,7 @@ class StatsCollector:
                     if not filtered_entries:
                         continue
 
-                    rcode_subdomains[rcode_name] = filtered_entries[: self.top_n]
+                    rcode_subdomains[rcode_name] = filtered_entries
 
                 if not rcode_subdomains:
                     rcode_subdomains = None
@@ -2276,7 +2824,7 @@ class StatsCollector:
                                     continue  # pragma: no cover - ignore filter branch
                         filtered_entries.append((domain, count))
                     if filtered_entries:
-                        cache_hit_domains = filtered_entries[: self.top_n]
+                        cache_hit_domains = filtered_entries
 
             cache_miss_domains: Optional[List[Tuple[str, int]]] = None
             if self._top_cache_miss_domains is not None:
@@ -2302,7 +2850,7 @@ class StatsCollector:
                                     continue  # pragma: no cover - ignore filter branch
                         filtered_entries.append((domain, count))
                     if filtered_entries:
-                        cache_miss_domains = filtered_entries[: self.top_n]
+                        cache_miss_domains = filtered_entries
 
             # Top subdomain names (full qnames) for cache outcome restricted to
             # subdomain queries only (qname != base). Only true subdomains are
@@ -2335,7 +2883,7 @@ class StatsCollector:
                                     continue  # pragma: no cover - ignore filter branch
                         filtered_entries.append((domain, count))
                     if filtered_entries:
-                        cache_hit_subdomains = filtered_entries[: self.top_n]
+                        cache_hit_subdomains = filtered_entries
 
             cache_miss_subdomains: Optional[List[Tuple[str, int]]] = None
             if self._top_cache_miss_subdomains is not None:
@@ -2362,7 +2910,7 @@ class StatsCollector:
                                     continue  # pragma: no cover - ignore filter branch
                         filtered_entries.append((domain, count))
                     if filtered_entries:
-                        cache_miss_subdomains = filtered_entries[: self.top_n]
+                        cache_miss_subdomains = filtered_entries
 
             # Latency
             latency_stats = None
@@ -2807,7 +3355,7 @@ class StatsCollector:
                         key=lambda kv: kv[1],
                         reverse=True,
                     )
-                    tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                    tracker = TopK(capacity=self._top_capacity)
                     tracker.counts = dict(items[: tracker.capacity])
                     self._top_qtype_qnames[qtype_name] = tracker
 
@@ -2820,7 +3368,7 @@ class StatsCollector:
                         key=lambda kv: kv[1],
                         reverse=True,
                     )
-                    tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                    tracker = TopK(capacity=self._top_capacity)
                     tracker.counts = dict(items[: tracker.capacity])
                     self._top_rcode_domains[rcode_name] = tracker
 
@@ -2834,7 +3382,7 @@ class StatsCollector:
                         key=lambda kv: kv[1],
                         reverse=True,
                     )
-                    tracker = TopK(capacity=self.top_n * TOPK_CAPACITY_FACTOR)
+                    tracker = TopK(capacity=self._top_capacity)
                     tracker.counts = dict(items[: tracker.capacity])
                     self._top_rcode_subdomains[rcode_name] = tracker
 

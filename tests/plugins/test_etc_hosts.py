@@ -1,5 +1,5 @@
 """
-Brief: Tests for foghorn.plugins.etc-hosts module.
+Brief: Tests for foghorn.plugins.etc_hosts module.
 
 Inputs:
   - None
@@ -25,8 +25,8 @@ def test_etc_hosts_module_import():
     Outputs:
       - None: Asserts module name
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
-    assert mod.__name__ == "foghorn.plugins.etc-hosts"
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    assert mod.__name__ == "foghorn.plugins.etc_hosts"
 
 
 def test_etc_hosts_init_with_custom_file(tmp_path):
@@ -40,13 +40,13 @@ def test_etc_hosts_init_with_custom_file(tmp_path):
     Outputs:
       - None: Asserts file loaded
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("127.0.0.1 localhost\n192.168.1.1 router.local\n")
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
     assert "localhost" in plugin.hosts
     assert plugin.hosts["localhost"] == "127.0.0.1"
@@ -64,13 +64,13 @@ def test_etc_hosts_parses_multiple_aliases(tmp_path):
     Outputs:
       - None: Asserts all aliases mapped
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("127.0.0.1 localhost local host1 host2\n")
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
     assert plugin.hosts["localhost"] == "127.0.0.1"
     assert plugin.hosts["local"] == "127.0.0.1"
@@ -88,13 +88,13 @@ def test_etc_hosts_ignores_comments(tmp_path):
     Outputs:
       - None: Asserts comments not parsed
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("# Comment line\n127.0.0.1 localhost\n# Another comment\n")
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
     assert len(plugin.hosts) == 2  # 127.0.0.1 and 1.0.0.124.in-addr.arpa
     assert "localhost" in plugin.hosts
@@ -110,13 +110,13 @@ def test_etc_hosts_ignores_empty_lines(tmp_path):
     Outputs:
       - None: Asserts empty lines skipped
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("\n\n127.0.0.1 localhost\n\n")
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
     assert len(plugin.hosts) == 2
 
@@ -132,13 +132,13 @@ def test_etc_hosts_pre_resolve_matched_a_record(tmp_path):
     Outputs:
       - None: Asserts override decision with correct IP
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("192.168.1.100 myhost.local\n")
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
@@ -165,13 +165,13 @@ def test_etc_hosts_pre_resolve_no_match(tmp_path):
     Outputs:
       - None: Asserts None returned
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("127.0.0.1 localhost\n")
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
@@ -190,13 +190,13 @@ def test_etc_hosts_pre_resolve_ignores_non_a_aaaa(tmp_path):
     Outputs:
       - None: Asserts None returned
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("127.0.0.1 localhost\n")
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
@@ -216,13 +216,13 @@ def test_etc_hosts_respects_baseplugin_targets(tmp_path):
       - None; asserts pre_resolve returns None even when qname matches hosts
         entry.
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("127.0.0.1 localhost\n", encoding="utf-8")
 
-    plugin = EtcHosts(file_path=str(hosts_file), targets=["10.0.0.0/8"])
+    plugin = EtcHosts(file_paths=[str(hosts_file)], targets=["10.0.0.0/8"])
     plugin.setup()
     ctx = PluginContext(client_ip="192.0.2.1")
 
@@ -241,13 +241,13 @@ def test_etc_hosts_pre_resolve_strips_trailing_dot(tmp_path):
     Outputs:
       - None: Asserts match works without trailing dot
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("127.0.0.1 localhost\n")
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
@@ -267,13 +267,13 @@ def test_etc_hosts_ipv6_support(tmp_path):
     Outputs:
       - None: Asserts IPv6 parsed and returned
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("::1 localhost6\n2001:db8::1 ipv6host\n")
 
-    plugin = EtcHosts(file_path=str(hosts_file))
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
     plugin.setup()
     assert "localhost6" in plugin.hosts
     assert plugin.hosts["localhost6"] == "::1"
@@ -290,14 +290,14 @@ def test_etc_hosts_polling_detects_file_changes(tmp_path):
       - None: Asserts that _have_files_changed() returns True on initial
         snapshot and after a subsequent modification.
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("127.0.0.1 localhost\n")
 
     # Disable watchdog to focus this test purely on the polling helper.
-    plugin = EtcHosts(file_path=str(hosts_file), watchdog_enabled=False)
+    plugin = EtcHosts(file_paths=[str(hosts_file)], watchdog_enabled=False)
     plugin.setup()
 
     # First call should treat the baseline snapshot as a change.

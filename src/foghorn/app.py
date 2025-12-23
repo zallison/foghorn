@@ -1,7 +1,7 @@
 """Compatibility module exposing the FastAPI app instance for uvicorn.
 
 This module simply re-exports a FastAPI application created by
-foghorn.webserver.create_app so that command-line tools like uvicorn can
+foghorn.servers.webserver.create_app so that command-line tools like uvicorn can
 run "foghorn.app:app" directly in addition to the in-process webserver
 integration used by foghorn.main.
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .webserver import RingBuffer, create_app
+from .servers.webserver import RingBuffer, create_app
 
 
 def _empty_config() -> Dict[str, Any]:

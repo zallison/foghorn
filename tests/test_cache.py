@@ -1,5 +1,5 @@
 """
-Brief: Tests for foghorn.cache.FoghornTTLCache functionality.
+Brief: Tests for foghorn.cache_backends.foghorn_ttl.FoghornTTLCache functionality.
 
 Inputs:
   - None
@@ -10,7 +10,7 @@ Outputs:
 
 import threading
 
-from foghorn.cache import FoghornTTLCache
+from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
 
 
 def test_cache_set_and_get_basic():
@@ -60,8 +60,8 @@ def test_cache_expiry_and_purge(monkeypatch):
     c.set(k, 1, b"x")
 
     # Advance cache's notion of time without real sleeping by monkeypatching
-    # the time module used inside foghorn.cache.
-    import foghorn.cache as cache_mod
+    # the time module used inside foghorn.cache_backends.foghorn_ttl.
+    import foghorn.cache_backends.foghorn_ttl as cache_mod
 
     base = cache_mod.time.time()
 
@@ -126,3 +126,65 @@ def test_cache_thread_safety_basic():
 
     assert c.get(k1) in (b"a", None)
     assert c.get(k2) in (b"b", None)
+
+
+def test_cache_namespace_isolation_shared_store() -> None:
+    """Brief: Namespaced views share backing store but do not collide.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts same key under different namespaces does not collide.
+    """
+
+    base = FoghornTTLCache()
+    a = base.with_namespace("a")
+    b = base.with_namespace("b")
+
+    k = ("example.com", 1)
+    a.set(k, 60, b"A")
+    b.set(k, 60, b"B")
+
+    assert a.get(k) == b"A"
+    assert b.get(k) == b"B"
+
+    # Purging within one namespace should not affect the other.
+    assert a.purge_expired() >= 0
+    assert b.get(k) == b"B"
+
+
+def test_cache_counters_increment_on_hits_and_misses() -> None:
+    """Brief: FoghornTTLCache exposes best-effort calls_total/hits/misses counters.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts counters move in the expected direction for hits/misses.
+    """
+
+    c = FoghornTTLCache()
+    key_hit = ("hit.example", 1)
+    key_miss = ("miss.example", 1)
+
+    # Initial counters default to zero.
+    assert getattr(c, "calls_total", 0) == 0
+    assert getattr(c, "cache_hits", 0) == 0
+    assert getattr(c, "cache_misses", 0) == 0
+
+    # Insert a single entry and perform a hit and a miss.
+    c.set(key_hit, 60, b"v")
+    assert c.get(key_hit) == b"v"  # hit
+    assert c.get(key_miss) is None  # miss
+
+    # Best-effort expectations: total calls equals two and hits/misses are
+    # non-decreasing and sum to at most calls_total.
+    calls_total = getattr(c, "calls_total", 0)
+    cache_hits = getattr(c, "cache_hits", 0)
+    cache_misses = getattr(c, "cache_misses", 0)
+
+    assert calls_total >= 2
+    assert cache_hits >= 1
+    assert cache_misses >= 1
+    assert cache_hits + cache_misses <= calls_total

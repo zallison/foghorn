@@ -1,4 +1,4 @@
-"""Tests for the FastAPI-based admin HTTP server in foghorn.webserver.
+"""Tests for the FastAPI-based admin HTTP server in foghorn.servers.webserver.
 
 Inputs:
   - pytest fixtures and FastAPI TestClient
@@ -21,9 +21,10 @@ import threading
 import yaml
 from fastapi.testclient import TestClient
 
-from foghorn.stats import StatsCollector
-from foghorn.webserver import (
+from foghorn.stats import StatsCollector, StatsSQLiteStore
+from foghorn.servers.webserver import (
     RingBuffer,
+    RuntimeState,
     WebServerHandle,
     _read_proc_meminfo,
     _redact_yaml_text_preserving_layout,
@@ -61,6 +62,101 @@ def test_sanitize_config_redacts_simple_keys() -> None:
     assert auth["user"] == "u"
     # Original dict is unmodified
     assert cfg["webserver"]["auth"]["token"] == "abc"
+
+
+def test_about_endpoint_includes_version_and_github_url() -> None:
+    """Brief: /api/v1/about returns version/build info plus github_url.
+
+    Inputs:
+      - App created with minimal config.
+
+    Outputs:
+      - JSON body contains version (string) and github_url with the repo link.
+    """
+
+    cfg = {
+        "webserver": {"enabled": True},
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    resp = client.get("/api/v1/about")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert isinstance(body.get("version"), str)
+    assert body.get("github_url") == "https://github.com/zallison/foghorn"
+
+
+def test_ready_endpoint_503_when_startup_incomplete() -> None:
+    """Brief: /ready returns 503 and explains missing readiness requirements.
+
+    Inputs:
+      - runtime_state marked startup_complete=False.
+
+    Outputs:
+      - HTTP 503 and JSON body includes not_ready list containing 'startup not complete'.
+    """
+
+    cfg = {
+        "webserver": {"enabled": True},
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    state = RuntimeState(startup_complete=False)
+    app = create_app(
+        stats=None, config=cfg, log_buffer=RingBuffer(), runtime_state=state
+    )
+
+    class Alive:
+        def is_alive(self) -> bool:
+            return True
+
+    # create_app registers webserver with thread=None; update after construction.
+    state.set_listener("webserver", enabled=True, thread=Alive())
+
+    client = TestClient(app)
+    resp = client.get("/ready")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["ready"] is False
+    assert "startup not complete" in (body.get("not_ready") or [])
+
+
+def test_ready_endpoint_200_when_requirements_met() -> None:
+    """Brief: /ready returns 200 when readiness requirements are satisfied.
+
+    Inputs:
+      - runtime_state marked startup_complete=True and webserver running.
+      - config disables UDP so only webserver readiness is required.
+
+    Outputs:
+      - HTTP 200 and ready == True.
+    """
+
+    cfg = {
+        "webserver": {"enabled": True},
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    state = RuntimeState(startup_complete=True)
+    app = create_app(
+        stats=None, config=cfg, log_buffer=RingBuffer(), runtime_state=state
+    )
+
+    class Alive:
+        def is_alive(self) -> bool:
+            return True
+
+    state.set_listener("webserver", enabled=True, thread=Alive())
+
+    client = TestClient(app)
+    resp = client.get("/api/v1/ready")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ready"] is True
+    assert body.get("not_ready") == []
 
 
 def test_health_endpoint_returns_ok() -> None:
@@ -117,7 +213,12 @@ def test_get_system_info_uses_meminfo_and_load(monkeypatch) -> None:
         process RSS keys present.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
+
+    # Ensure this test is deterministic even if earlier tests populated the
+    # module-level system info cache.
+    web_mod._last_system_info = None
+    web_mod._last_system_info_ts = 0.0
 
     def fake_getloadavg() -> tuple[float, float, float]:
         return (1.0, 2.0, 3.0)
@@ -155,7 +256,7 @@ def test_stats_includes_system_section(monkeypatch) -> None:
       - JSON body of /stats contains a "system" key with stubbed values.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     collector = StatsCollector(
         track_uniques=True, include_qtype_breakdown=True, track_latency=True
@@ -288,7 +389,7 @@ def test_stats_fastapi_and_threaded_payloads_match(monkeypatch) -> None:
         differences (e.g., server_time timestamp field).
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     # Build a collector with enough data to exercise the rich stats fields.
     collector = StatsCollector(
@@ -400,7 +501,7 @@ def test_stats_debug_timings_emit_log_when_enabled(caplog) -> None:
       - FastAPI app created with webserver.debug_timings set to True.
 
     Outputs:
-      - A DEBUG log line from foghorn.webserver containing the timings prefix.
+      - A DEBUG log line from foghorn.servers.webserver containing the timings prefix.
     """
 
     collector = StatsCollector(
@@ -431,7 +532,7 @@ def test_stats_snapshot_cache_avoids_multiple_snapshot_calls(monkeypatch) -> Non
         StatsCollector.snapshot() call; a reset=True request forces another.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     collector = StatsCollector(
         track_uniques=False,
@@ -568,7 +669,7 @@ def test_config_yaml_cache_reuses_body_within_ttl(monkeypatch) -> None:
         yaml.safe_dump only once; changing redact_keys causes a new dump.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     cfg = {"webserver": {"enabled": True}}
     calls = {"dump": 0}
@@ -714,6 +815,157 @@ def test_logs_endpoint_returns_entries_from_ringbuffer() -> None:
     assert len(entries) == 3
     assert entries[0]["n"] == 2
     assert entries[-1]["n"] == 4
+
+
+def test_query_log_endpoint_paginates_and_filters(tmp_path) -> None:
+    """Brief: /api/v1/query_log returns paginated rows and supports basic filters.
+
+    Inputs:
+      - StatsCollector backed by a StatsSQLiteStore with several query_log rows.
+
+    Outputs:
+      - Response contains total/page/page_size metadata.
+      - Results are ordered newest-first and can be filtered by rcode.
+    """
+
+    store = StatsSQLiteStore(str(tmp_path / "stats.db"))
+    collector = StatsCollector(stats_store=store)
+
+    # Insert a few rows at deterministic timestamps.
+    collector.record_query_result(
+        client_ip="192.0.2.1",
+        qname="example.com",
+        qtype="A",
+        rcode="NOERROR",
+        upstream_id="8.8.8.8:53",
+        status="ok",
+        error=None,
+        first="1.2.3.4",
+        result={"source": "upstream"},
+        ts=1000.0,
+    )
+    collector.record_query_result(
+        client_ip="192.0.2.2",
+        qname="example.com",
+        qtype="AAAA",
+        rcode="NXDOMAIN",
+        upstream_id="8.8.8.8:53",
+        status="error",
+        error=None,
+        first=None,
+        result={"source": "upstream"},
+        ts=1001.0,
+    )
+    collector.record_query_result(
+        client_ip="192.0.2.3",
+        qname="other.example.com",
+        qtype="A",
+        rcode="NXDOMAIN",
+        upstream_id="1.1.1.1:53",
+        status="error",
+        error=None,
+        first=None,
+        result={"source": "upstream"},
+        ts=1002.0,
+    )
+
+    app = create_app(
+        stats=collector,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+    )
+    client = TestClient(app)
+
+    # Page 1, size 2 -> newest two rows.
+    resp = client.get("/api/v1/query_log", params={"page": 1, "page_size": 2})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 3
+    assert data["page"] == 1
+    assert data["page_size"] == 2
+    assert data["total_pages"] == 2
+    assert len(data["items"]) == 2
+
+    # Ordered newest-first: ts 1002 then 1001
+    assert data["items"][0]["ts"] == 1002.0
+    assert data["items"][1]["ts"] == 1001.0
+
+    # Filter by rcode
+    resp2 = client.get("/api/v1/query_log", params={"rcode": "NXDOMAIN"})
+    assert resp2.status_code == 200
+    data2 = resp2.json()
+    assert data2["total"] == 2
+    assert all(item.get("rcode") == "NXDOMAIN" for item in data2["items"])
+
+
+def test_query_log_aggregate_fills_zero_buckets(tmp_path) -> None:
+    """Brief: /api/v1/query_log/aggregate returns a dense series (including zeros).
+
+    Inputs:
+      - StatsCollector backed by a StatsSQLiteStore with a few REFUSED rows.
+
+    Outputs:
+      - Buckets cover the full [start, end) range and include zero-count buckets.
+    """
+
+    store = StatsSQLiteStore(str(tmp_path / "stats2.db"))
+    collector = StatsCollector(stats_store=store)
+
+    # Range: 2025-12-10 01:00:00Z to 02:00:00Z, 15-minute buckets.
+    from datetime import datetime, timezone
+
+    start_dt = datetime(2025, 12, 10, 1, 0, 0, tzinfo=timezone.utc)
+
+    # Two REFUSED events at 01:05 and 01:35.
+    collector.record_query_result(
+        client_ip="192.0.2.1",
+        qname="example.com",
+        qtype="A",
+        rcode="REFUSED",
+        upstream_id=None,
+        status="error",
+        error=None,
+        first=None,
+        result={"source": "server"},
+        ts=start_dt.timestamp() + 5 * 60,
+    )
+    collector.record_query_result(
+        client_ip="192.0.2.1",
+        qname="example.com",
+        qtype="A",
+        rcode="REFUSED",
+        upstream_id=None,
+        status="error",
+        error=None,
+        first=None,
+        result={"source": "server"},
+        ts=start_dt.timestamp() + 35 * 60,
+    )
+
+    app = create_app(
+        stats=collector,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+    )
+    client = TestClient(app)
+
+    resp = client.get(
+        "/api/v1/query_log/aggregate",
+        params={
+            "rcode": "REFUSED",
+            "interval": 15,
+            "interval_units": "minutes",
+            "start": "2025-12-10 01:00:00",
+            "end": "2025-12-10 02:00:00",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    items = data["items"]
+    assert len(items) == 4
+    counts = [it["count"] for it in items]
+    assert counts == [1, 0, 1, 0]
 
 
 def test_suppress2xx_filter_handles_status_attribute() -> None:
@@ -929,7 +1181,7 @@ def test_token_auth_blocks_unauthorized_and_allows_with_token() -> None:
       - webserver config with auth.mode=token and a fixed token value.
 
     Outputs:
-      - /stats returns 403 without token.
+      - /stats returns 401 without token and includes WWW-Authenticate header.
       - /stats returns 200 when valid token is supplied.
     """
 
@@ -944,9 +1196,10 @@ def test_token_auth_blocks_unauthorized_and_allows_with_token() -> None:
     app = create_app(stats=collector, config=cfg, log_buffer=RingBuffer())
     client = TestClient(app)
 
-    # No token -> forbidden
+    # No token -> unauthorized
     resp_no_auth = client.get("/stats")
-    assert resp_no_auth.status_code == 403
+    assert resp_no_auth.status_code == 401
+    assert "bearer" in (resp_no_auth.headers.get("www-authenticate") or "").lower()
 
     # Bearer token
     resp_bearer = client.get("/stats", headers={"Authorization": "Bearer secret-token"})
@@ -1000,7 +1253,7 @@ def test_resolve_www_root_prefers_config_then_env_then_cwd(
 
     import os
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     # 1) Config override takes precedence when directory exists
     cfg_root = tmp_path / "cfg_html"
@@ -1059,8 +1312,10 @@ def test_static_www_serves_files_and_blocks_traversal(monkeypatch, tmp_path) -> 
     assert resp_ok.status_code == 200
     assert "body { background: #000; }" in resp_ok.text
 
-    # Attempted traversal outside www_root is rejected
-    resp_traversal = client.get("/../secret.txt")
+    # Attempted traversal outside www_root is rejected.
+    # Note: some client stacks normalize raw "../" segments early; use a percent-encoded
+    # traversal so the FastAPI route sees it and our path-safety guard executes.
+    resp_traversal = client.get("/..%2Fsecret.txt")
     assert resp_traversal.status_code == 404
 
     # Non-existent file under www_root also 404s
@@ -1188,7 +1443,7 @@ def test_config_json_fastapi_and_threaded_payloads_match() -> None:
 
     import http.client
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     cfg = {
         "webserver": {
@@ -1265,7 +1520,7 @@ def test_config_raw_threaded_endpoint_returns_plain_yaml(tmp_path) -> None:
 
     import http.client
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     cfg_path = tmp_path / "config.yaml"
     yaml_text = "webserver:\n  enabled: true\nanswer: 42\n"
@@ -1323,7 +1578,7 @@ def test_config_raw_json_threaded_endpoint_reads_from_disk(tmp_path) -> None:
 
     import http.client
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     cfg_path = tmp_path / "config.yaml"
     yaml_text = "webserver:\n  enabled: true\nanswer: 42\n"
@@ -1382,7 +1637,7 @@ def test_save_config_persists_raw_yaml_and_signals(monkeypatch, tmp_path) -> Non
 
     import os
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text("initial: 1\n", encoding="utf-8")
@@ -1481,7 +1736,7 @@ def test_get_system_info_handles_missing_psutil(monkeypatch) -> None:
       - Returned dict still contains process_* keys but values may be None.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     monkeypatch.setattr(web_mod, "psutil", None)
 
@@ -1688,7 +1943,7 @@ def test_json_safe_handles_exceptions_and_custom_objects() -> None:
       - Exception represented as {"type", "message"}; custom object as string.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     class Custom:
         def __str__(self) -> str:  # noqa: D401
@@ -1717,7 +1972,7 @@ def test_get_system_info_swallows_psutil_exceptions(monkeypatch) -> None:
 
     import types
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     class DummyMemInfo:
         def __init__(self) -> None:
@@ -1778,7 +2033,7 @@ def test_resolve_www_root_falls_back_to_package_html(monkeypatch, tmp_path) -> N
 
     import os
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     # Ensure no env override and a CWD without html/ directory
     empty_root = tmp_path / "no_html_here"
@@ -2123,7 +2378,7 @@ def test_start_webserver_permission_error_uses_threaded_fallback(monkeypatch) ->
     import asyncio
     import threading
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     def boom_new_loop() -> None:
         raise PermissionError("no self-pipe")
@@ -2267,7 +2522,7 @@ def test_split_yaml_value_and_comment_with_and_without_comment() -> None:
       - Tuple where the value is stripped and the comment suffix preserves ' #'.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     value, comment = web_mod._split_yaml_value_and_comment(" value  # inline comment")
     # Leading whitespace from the original rest segment is preserved.
@@ -2292,7 +2547,7 @@ def test_redact_yaml_preserving_layout_covers_lists_and_blank_lines() -> None:
       - Redacted YAML preserves layout/comments and replaces values with '***'.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     yaml_text = (
         "auth:\n"
@@ -2342,7 +2597,7 @@ def test_redact_yaml_preserving_layout_early_return_on_empty_input() -> None:
       - Function returns the original raw_yaml without modification.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     assert web_mod._redact_yaml_text_preserving_layout("", ["token"]) == ""
     assert (
@@ -2360,7 +2615,7 @@ def test_get_sanitized_config_yaml_cached_uses_config_path(tmp_path) -> None:
       - Returned YAML body preserves structure while redacting the token value.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     cfg_text = "webserver:\n  enabled: true\n  auth:\n    token: secret-token\n"
     cfg_file = tmp_path / "config.yaml"
@@ -2386,7 +2641,7 @@ def test_find_rate_limit_db_paths_from_config_extracts_db_paths() -> None:
       - Sorted list of db_path values for rate_limit plugins only.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     cfg = {
         "plugins": [
@@ -2420,8 +2675,9 @@ def test_collect_rate_limit_stats_handles_empty_and_populated_dbs(
     """
 
     import sqlite3
+    from contextlib import closing
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     empty_db = tmp_path / "empty.db"
     populated_db = tmp_path / "profiles.db"
@@ -2436,8 +2692,7 @@ def test_collect_rate_limit_stats_handles_empty_and_populated_dbs(
             ],
         ),
     ]:
-        conn = sqlite3.connect(db_path)
-        try:
+        with closing(sqlite3.connect(db_path)) as conn:
             conn.execute(
                 "CREATE TABLE rate_profiles (key TEXT, avg_rps REAL, max_rps REAL, samples INTEGER, last_update INTEGER)"
             )
@@ -2446,8 +2701,6 @@ def test_collect_rate_limit_stats_handles_empty_and_populated_dbs(
                 rows,
             )
             conn.commit()
-        finally:
-            conn.close()
 
     cfg = {
         "plugins": [
@@ -2494,7 +2747,7 @@ def test_schedule_sighup_after_config_save_zero_delay_calls_kill(monkeypatch) ->
 
     import os
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     calls: list[tuple[int, int]] = []
 
@@ -2521,7 +2774,7 @@ def test_config_cache_ttl_overridden_by_web_cfg(monkeypatch) -> None:
       - After create_app(), the TTL global reflects the configured value.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     original_ttl = getattr(web_mod, "_CONFIG_TEXT_CACHE_TTL_SECONDS")
     try:
@@ -2568,7 +2821,7 @@ def test_rate_limit_endpoint_wraps_collect_rate_limit_stats(monkeypatch) -> None
       - Endpoint returns JSON including server_time and the sentinel payload.
     """
 
-    import foghorn.webserver as web_mod
+    import foghorn.servers.webserver as web_mod
 
     called: dict[str, object] = {}
 
@@ -2597,3 +2850,201 @@ def test_rate_limit_endpoint_wraps_collect_rate_limit_stats(monkeypatch) -> None
 
     asyncio.run(run())
     assert called["config"] is cfg
+
+
+def test_upstream_status_endpoint_returns_configured_and_health_only_entries(
+    monkeypatch,
+) -> None:
+    """Brief: /api/v1/upstream_status includes configured upstreams and health-only items.
+
+    Inputs:
+      - App config with a configured upstream.
+      - Monkeypatched DNSUDPHandler upstream_* attributes with extra health-only entry.
+
+    Outputs:
+      - Response contains both configured upstream entry (with config subset)
+        and the extra health-only entry.
+    """
+
+    import asyncio
+
+    import foghorn.servers.webserver as web_mod
+
+    # One configured upstream.
+    up = {"host": "1.1.1.1", "port": 53, "transport": "udp"}
+    cfg = {"webserver": {"enabled": True}, "upstreams": [up]}
+
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+
+    # Inject handler state for the endpoint to read.
+    up_id = web_mod.DNSUDPHandler._upstream_id(up)
+    other_id = "health-only"
+
+    monkeypatch.setattr(
+        web_mod.DNSUDPHandler, "upstream_strategy", "failover", raising=False
+    )
+    monkeypatch.setattr(
+        web_mod.DNSUDPHandler, "upstream_max_concurrent", "bad", raising=False
+    )
+    monkeypatch.setattr(
+        web_mod.DNSUDPHandler,
+        "upstream_health",
+        {
+            up_id: {"fail_count": "bad", "down_until": "bad"},
+            other_id: {"fail_count": 2, "down_until": 0.0},
+        },
+        raising=False,
+    )
+
+    route = next(
+        r
+        for r in app.router.routes
+        if getattr(r, "path", None) == "/api/v1/upstream_status"
+    )
+
+    async def run() -> None:
+        body = await route.endpoint()  # type: ignore[func-returns-value]
+        assert body["strategy"] == "failover"
+        # bad max_concurrent coerces to 1
+        assert body["max_concurrent"] == 1
+
+        items = body["items"]
+        ids = {it["id"] for it in items}
+        assert up_id in ids
+        assert other_id in ids
+
+        configured = next(it for it in items if it["id"] == up_id)
+        assert configured["config"]["host"] == "1.1.1.1"
+
+        health_only = next(it for it in items if it["id"] == other_id)
+        assert health_only["config"] == {}
+
+    asyncio.run(run())
+
+
+def test_stats_and_traffic_defensive_top_cast_paths(monkeypatch) -> None:
+    """Brief: /stats and /traffic include defensive casts for top when called directly.
+
+    Inputs:
+      - App with a StatsCollector.
+      - Direct route.endpoint() calls passing non-int and non-positive top values.
+
+    Outputs:
+      - Endpoints return a payload without raising.
+    """
+
+    import asyncio
+
+    from foghorn.stats import StatsCollector
+
+    collector = StatsCollector(track_uniques=False, include_qtype_breakdown=False)
+    collector.record_query("192.0.2.1", "example.com", "A")
+
+    cfg = {"webserver": {"enabled": True}}
+    app = create_app(stats=collector, config=cfg, log_buffer=RingBuffer())
+
+    stats_route = next(
+        r for r in app.router.routes if getattr(r, "path", None) == "/stats"
+    )
+    traffic_route = next(
+        r for r in app.router.routes if getattr(r, "path", None) == "/traffic"
+    )
+
+    async def run() -> None:
+        body1 = await stats_route.endpoint(reset=False, top="bad")  # type: ignore[arg-type]
+        assert "server_time" in body1
+
+        body2 = await stats_route.endpoint(reset=False, top=0)  # type: ignore[arg-type]
+        assert "server_time" in body2
+
+        body3 = await traffic_route.endpoint(top="bad")  # type: ignore[arg-type]
+        assert "server_time" in body3
+
+        body4 = await traffic_route.endpoint(top=0)  # type: ignore[arg-type]
+        assert "server_time" in body4
+
+    asyncio.run(run())
+
+
+def test_query_log_fastapi_defensive_parsing_by_direct_calls() -> None:
+    """Brief: Query log endpoints include defensive parsing that is unreachable via FastAPI validation.
+
+    Inputs:
+      - App whose StatsCollector has a dummy store implementation.
+      - Direct route.endpoint() calls supplying invalid page/page_size/interval values.
+
+    Outputs:
+      - Asserts the defensive branches execute without FastAPI validation.
+    """
+
+    import asyncio
+
+    import pytest
+    from fastapi import HTTPException
+    from foghorn.stats import StatsCollector
+
+    class DummyStore:
+        def select_query_log(self, **_kw):  # noqa: ANN003
+            # Intentionally omit page/page_size so the endpoint's defensive parsing
+            # and defaults are reflected in the response.
+            return {"items": [{"ts": 0.0}], "total": 1, "total_pages": 1}
+
+        def aggregate_query_log_counts(self, **_kw):  # noqa: ANN003
+            return {"items": []}
+
+    collector = StatsCollector(track_uniques=False)
+    # Attach dummy store to satisfy the endpoint's store lookup.
+    collector._store = DummyStore()  # type: ignore[attr-defined]
+
+    cfg = {"webserver": {"enabled": True}}
+    app = create_app(stats=collector, config=cfg, log_buffer=RingBuffer())
+
+    ql_route = next(
+        r for r in app.router.routes if getattr(r, "path", None) == "/api/v1/query_log"
+    )
+    agg_route = next(
+        r
+        for r in app.router.routes
+        if getattr(r, "path", None) == "/api/v1/query_log/aggregate"
+    )
+
+    async def run() -> None:
+        # page_size parsing/clamping
+        body1 = await ql_route.endpoint(page=1, page_size="bad")  # type: ignore[arg-type]
+        assert body1["page_size"] == 100
+
+        body2 = await ql_route.endpoint(page=1, page_size=-1)  # type: ignore[arg-type]
+        assert body2["page_size"] == 100
+
+        body3 = await ql_route.endpoint(page=1, page_size=2001)  # type: ignore[arg-type]
+        assert body3["page_size"] == 1000
+
+        # start/end parsing errors
+        with pytest.raises(HTTPException):
+            await ql_route.endpoint(page=1, page_size=1, start="bad")
+        with pytest.raises(HTTPException):
+            await ql_route.endpoint(page=1, page_size=1, end="bad")
+
+        # aggregate: invalid start/end
+        with pytest.raises(HTTPException):
+            await agg_route.endpoint(
+                interval=15,
+                interval_units="minutes",
+                start="bad",
+                end="2025-12-10 02:00:00",
+            )
+
+        # aggregate: invalid interval cast
+        with pytest.raises(HTTPException):
+            await agg_route.endpoint(interval="bad", interval_units="minutes", start="2025-12-10 01:00:00", end="2025-12-10 02:00:00")  # type: ignore[arg-type]
+
+        # aggregate: invalid units
+        with pytest.raises(HTTPException):
+            await agg_route.endpoint(
+                interval=15,
+                interval_units="weeks",
+                start="2025-12-10 01:00:00",
+                end="2025-12-10 02:00:00",
+            )
+
+    asyncio.run(run())

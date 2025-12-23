@@ -33,6 +33,43 @@ def _snapshot_dict(collector: StatsCollector) -> Dict[str, object]:
     }
 
 
+def test_include_ignored_in_stats_default_true_counts_totals_but_hides_top_lists() -> (
+    None
+):
+    """Brief: Default include_ignored_in_stats=True keeps totals but hides ignored entries from top lists.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts totals include ignored queries while top_clients/top_domains omit them.
+    """
+
+    collector = StatsCollector(
+        include_top_clients=True,
+        include_top_domains=True,
+        ignore_top_clients=["10.0.0.0/8"],
+        ignore_top_domains=["example.com"],
+        # include_ignored_in_stats intentionally omitted (defaults to True)
+    )
+
+    collector.record_query("10.1.2.3", "example.com", "A")
+    collector.record_query("1.2.3.4", "allowed.test", "A")
+
+    snap = collector.snapshot(reset=False)
+    assert snap.totals["total_queries"] == 2
+
+    assert snap.top_clients is not None
+    clients = {c for c, _ in snap.top_clients}
+    assert "10.1.2.3" not in clients
+    assert "1.2.3.4" in clients
+
+    assert snap.top_domains is not None
+    domains = {d for d, _ in snap.top_domains}
+    assert "example.com" not in domains
+    assert "allowed.test" in domains
+
+
 def test_ignore_top_clients_cidr() -> None:
     """Brief: Clients matching an IP/CIDR ignore rule do not appear in top_clients.
 
@@ -40,13 +77,14 @@ def test_ignore_top_clients_cidr() -> None:
       - None (uses in-memory StatsCollector only).
 
     Outputs:
-      - Asserts that ignored clients are absent from top_clients but counted in totals.
+      - Asserts that ignored clients are absent from top_clients and excluded from totals.
     """
 
     collector = StatsCollector(
         include_top_clients=True,
         include_top_domains=False,
         ignore_top_clients=["10.0.0.0/8"],
+        include_ignored_in_stats=False,
     )
 
     # First query from an ignored CIDR, second from allowed IP
@@ -54,7 +92,7 @@ def test_ignore_top_clients_cidr() -> None:
     collector.record_query("1.2.3.4", "example.com", "A")
 
     snap = collector.snapshot(reset=False)
-    assert snap.totals["total_queries"] == 2
+    assert snap.totals["total_queries"] == 1
 
     # Only the non-ignored client should appear in top_clients
     assert snap.top_clients is not None
@@ -78,6 +116,7 @@ def test_ignore_top_subdomains_exact_match_and_fallback() -> None:
     collector = StatsCollector(
         include_top_domains=True,
         ignore_top_subdomains=["example.com"],
+        include_ignored_in_stats=False,
     )
 
     collector.record_query("192.0.2.1", "example.com", "A")
@@ -96,21 +135,20 @@ def test_ignore_top_subdomains_exact_match_and_fallback() -> None:
     assert "a.example.com" in subs
     assert "allowed.test" not in subs
 
-    # When ignore_top_subdomains is empty, ignore_top_domains acts as fallback
+    # When ignore_top_subdomains is empty, ignore_top_domains acts as fallback.
+    # With aggregation semantics, this excludes *all* queries whose base domain
+    # matches the ignore list (including subdomains that collapse to that base).
     collector = StatsCollector(
         include_top_domains=True,
         ignore_top_domains=["example.com"],
         ignore_top_subdomains=[],
+        include_ignored_in_stats=False,
     )
     collector.record_query("192.0.2.1", "example.com", "A")
     collector.record_query("192.0.2.1", "a.example.com", "A")
     snap2 = collector.snapshot(reset=False)
-    assert snap2.top_subdomains is not None
-    subs2 = {d for d, _ in snap2.top_subdomains}
-    # Fallback uses exact-match semantics as well: example.com is hidden,
-    # a.example.com remains visible.
-    assert "example.com" not in subs2
-    assert "a.example.com" in subs2
+    assert snap2.totals.get("total_queries", 0) == 0
+    assert snap2.top_subdomains in (None, [])
 
 
 def test_ignore_top_domains_exact_match() -> None:
@@ -126,6 +164,7 @@ def test_ignore_top_domains_exact_match() -> None:
     collector = StatsCollector(
         include_top_domains=True,
         ignore_top_domains=["example.com"],
+        include_ignored_in_stats=False,
     )
 
     collector.record_query("192.0.2.1", "a.Example.com.", "A")
@@ -133,6 +172,7 @@ def test_ignore_top_domains_exact_match() -> None:
     collector.record_query("192.0.2.1", "b.example.net", "A")
 
     snap = collector.snapshot(reset=False)
+    assert snap.totals.get("total_queries", 0) == 1
 
     assert snap.top_domains is not None
     domains = {d for d, _ in snap.top_domains}
@@ -152,7 +192,11 @@ def test_set_ignore_filters_at_runtime() -> None:
       - Asserts that counters remain monotonic while top lists reflect new filters.
     """
 
-    collector = StatsCollector(include_top_clients=True, include_top_domains=True)
+    collector = StatsCollector(
+        include_top_clients=True,
+        include_top_domains=True,
+        include_ignored_in_stats=False,
+    )
 
     # Initial queries without ignore filters
     collector.record_query("10.1.2.3", "example.com", "A")
@@ -171,14 +215,15 @@ def test_set_ignore_filters_at_runtime() -> None:
     collector.record_query("1.2.3.4", "example.net", "A")
 
     snap2 = collector.snapshot(reset=False)
-    # Totals include all four queries
-    assert snap2.totals["total_queries"] == 4
+    # Totals exclude ignored entries
+    assert snap2.totals["total_queries"] == 3
 
     # Top clients: 10.1.2.3 remains from pre-filter queries but is not
     # incremented for post-filter queries; 1.2.3.4 continues to accumulate.
     assert snap2.top_clients is not None
     client_counts = {c: n for c, n in snap2.top_clients}
     assert client_counts["1.2.3.4"] >= 2
+    assert "10.1.2.3" not in client_counts
 
     # Top domains: example.com should be ignored for new updates, while
     # example.net remains present.
@@ -195,7 +240,7 @@ def test_suffix_mode_for_domains_and_subdomains() -> None:
 
     Outputs:
       - Asserts that names ending in ignored suffixes are excluded from
-      - top_domains and top_subdomains while totals still count all queries.
+      - aggregation (totals/top lists).
     """
 
     collector = StatsCollector(
@@ -204,6 +249,7 @@ def test_suffix_mode_for_domains_and_subdomains() -> None:
         ignore_top_subdomains=[],
         ignore_domains_as_suffix=True,
         ignore_subdomains_as_suffix=True,
+        include_ignored_in_stats=False,
     )
 
     collector.record_query("192.0.2.1", "example.com", "A")
@@ -211,7 +257,7 @@ def test_suffix_mode_for_domains_and_subdomains() -> None:
     collector.record_query("192.0.2.1", "b.a.example.com", "A")
 
     snap = collector.snapshot(reset=False)
-    assert snap.totals["total_queries"] == 3
+    assert snap.totals.get("total_queries", 0) == 0
 
     assert snap.top_domains is not None
     domains = {d for d, _ in snap.top_domains}
@@ -242,6 +288,7 @@ def test_ignore_single_host_hides_single_label_domains() -> None:
     collector = StatsCollector(
         include_top_domains=True,
         ignore_single_host=True,
+        include_ignored_in_stats=False,
     )
 
     # Single-label hostnames
@@ -289,6 +336,7 @@ def test_co_uk_subdomain_label_rules() -> None:
 
     collector = StatsCollector(
         include_top_domains=True,
+        include_ignored_in_stats=False,
     )
 
     # Base domains
@@ -323,7 +371,11 @@ def test_set_ignore_filters_skips_empty_entries() -> None:
       - None; asserts no crash and ignore filters still apply to non-empty values.
     """
 
-    collector = StatsCollector(include_top_clients=True, include_top_domains=True)
+    collector = StatsCollector(
+        include_top_clients=True,
+        include_top_domains=True,
+        include_ignored_in_stats=False,
+    )
 
     # Include empty strings that should be skipped by the parser.
     collector.set_ignore_filters(
@@ -339,9 +391,8 @@ def test_set_ignore_filters_skips_empty_entries() -> None:
     collector.record_query("1.2.3.7", "fakeexample.com", "A")
 
     snap = collector.snapshot(reset=False)
-    # Totals include all five queries; ignore filters are display-only and do
-    # not affect core counters.
-    assert snap.totals["total_queries"] == 5
+    # Totals exclude ignored entries from aggregation.
+    assert snap.totals["total_queries"] == 3
 
     # Ignored client and domains should be filtered from top lists, ensuring
     # only the non-ignored entries remain visible.

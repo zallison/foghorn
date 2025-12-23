@@ -26,6 +26,15 @@ logging:
   level: info
 
 plugins:
+  # Example: expose mDNS/DNS-SD as DNS records (PTR/SRV/TXT/A/AAAA) under a DNS suffix
+  # (default: .mdns) derived from the mDNS `.local` namespace.
+  # - module: mdns
+  #   config:
+  #     ttl: 60
+  #     network_enabled: true
+  #     include_ipv4: true
+  #     include_ipv6: true
+  #     info_timeout_ms: 1500
   - module: examples  # ExamplesPlugin alias
     # pre_priority: 60
     # post_priority: 90  # optional: perform rewrites late

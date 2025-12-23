@@ -210,8 +210,8 @@ def test_base_plugin_priority_default():
     Outputs:
       - None: Asserts priority values
     """
-    assert BasePlugin.pre_priority == 50
-    assert BasePlugin.post_priority == 50
+    assert BasePlugin.pre_priority == 100
+    assert BasePlugin.post_priority == 100
 
 
 def test_base_plugin_subclass_inheritance():
@@ -285,9 +285,9 @@ def test_base_plugin_priority_from_config_and_fallback(caplog):
     assert p.post_priority == 200
     assert p.setup_priority == 10
 
-    # Invalid post_priority is logged and defaults to 50.
+    # Invalid post_priority is logged and defaults to 100.
     p2 = P(post_priority="not-an-int")
-    assert p2.post_priority == 50
+    assert p2.post_priority == 100
     assert any("Invalid post_priority" in r.message for r in caplog.records)
 
 
@@ -306,8 +306,8 @@ def test_parse_priority_value_valid_and_clamped(caplog):
     # Valid string value
     assert BasePlugin._parse_priority_value("25", "pre_priority", base_logger) == 25
 
-    # Invalid type falls back to default 50
-    assert BasePlugin._parse_priority_value("xx", "pre_priority", base_logger) == 50
+    # Invalid type falls back to default 100
+    assert BasePlugin._parse_priority_value("xx", "pre_priority", base_logger) == 100
     assert any("Invalid pre_priority" in r.message for r in caplog.records)
 
     # Below range clamps to 1
@@ -361,7 +361,7 @@ def test_base_plugin_targets_default_all_clients():
     assert plugin.targets(ctx2) is True
 
 
-def test_base_plugin_targets_cidr_includes_only_matches():
+def test_base_plugin_targets_matches_only_configured_targets():
     """Brief: targets() restricts matches to configured CIDR ranges.
 
     Inputs:
@@ -551,3 +551,38 @@ def test_make_a_response_builds_aaaa_record_with_fixed_ttl():
     assert str(answers[0].rdata) == "2001:db8::1"
     # TTL for AAAA answers is hard-coded to 60 seconds in _make_a_response.
     assert answers[0].ttl == 60
+
+
+def test_base_plugin_targets_qtype_defaults_to_all():
+    """Brief: target_qtypes defaults to all qtypes via wildcard.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts that targets_qtype returns True for arbitrary qtypes
+        when no explicit target_qtypes override is provided.
+    """
+    plugin = BasePlugin()
+    plugin.setup()
+
+    assert plugin.targets_qtype(int(QTYPE.A)) is True
+    assert plugin.targets_qtype(int(QTYPE.AAAA)) is True
+    assert plugin.targets_qtype(int(QTYPE.MX)) is True
+
+
+def test_base_plugin_targets_qtype_respects_explicit_list():
+    """Brief: target_qtypes restricts plugin execution to configured qtypes.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts that only configured qtypes are targeted.
+    """
+    plugin = BasePlugin(target_qtypes=["A", "AAAA"])
+    plugin.setup()
+
+    assert plugin.targets_qtype(int(QTYPE.A)) is True
+    assert plugin.targets_qtype(int(QTYPE.AAAA)) is True
+    assert plugin.targets_qtype(int(QTYPE.MX)) is False

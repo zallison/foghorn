@@ -1,5 +1,5 @@
 """
-Brief: Additional coverage for foghorn.server helpers and edge paths.
+Brief: Additional coverage for foghorn.servers.server helpers and edge paths.
 
 Inputs:
   - None
@@ -10,9 +10,10 @@ Outputs:
 
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
-import foghorn.server as srv
-from foghorn.cache import FoghornTTLCache
-from foghorn.udp_server import _set_response_id
+import foghorn.servers.server as srv
+from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins import base as plugin_base
+from foghorn.servers.udp_server import _set_response_id
 
 
 def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
@@ -36,12 +37,12 @@ def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
 
     sock = _Sock()
     h.request = (query_wire, sock)
-    h.client_address = (client_ip, 55333)
+    h.client_address = (client_ip, 55335)
     # Reset shared state to avoid leakage between tests
     srv.DNSUDPHandler.plugins = []
     srv.DNSUDPHandler.upstream_addrs = []
-    # Reset cache by swapping the instance (FoghornTTLCache has no clear())
-    srv.DNSUDPHandler.cache = FoghornTTLCache()
+    # Reset cache by swapping the instance.
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
     return h, sock
 
 
@@ -100,7 +101,7 @@ def test__ensure_edns_sets_do_bit_for_validate_mode():
     Outputs:
       - None; asserts DO bit mapping for dnssec_mode values.
     """
-    from foghorn.udp_server import _edns_flags_for_mode
+    from foghorn.servers.udp_server import _edns_flags_for_mode
 
     flags_ignore = _edns_flags_for_mode("ignore")
     flags_passthrough = _edns_flags_for_mode("passthrough")
@@ -138,7 +139,7 @@ def test_resolve_query_bytes_cache_store_variants(monkeypatch):
     r_sf.header.rcode = RCODE.SERVFAIL
 
     # Fresh cache and upstreams for this test
-    srv.DNSUDPHandler.cache = FoghornTTLCache()
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
     srv.DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
     srv.DNSUDPHandler.plugins = []
 
@@ -155,15 +156,15 @@ def test_resolve_query_bytes_cache_store_variants(monkeypatch):
 
     # 1) Positive NOERROR answer with TTL>0 is cached
     srv.resolve_query_bytes(q_ok.pack(), "127.0.0.1")
-    assert srv.DNSUDPHandler.cache.get((name_ok, QTYPE.A)) is not None
+    assert plugin_base.DNS_CACHE.get((name_ok, QTYPE.A)) is not None
 
     # 2) NOERROR answer with TTL=0 is not cached
     srv.resolve_query_bytes(q_zero.pack(), "127.0.0.1")
-    assert srv.DNSUDPHandler.cache.get((name_zero, QTYPE.A)) is None
+    assert plugin_base.DNS_CACHE.get((name_zero, QTYPE.A)) is None
 
     # 3) SERVFAIL response is not cached
     srv.resolve_query_bytes(q_sf.pack(), "127.0.0.1")
-    assert srv.DNSUDPHandler.cache.get((name_sf, QTYPE.A)) is None
+    assert plugin_base.DNS_CACHE.get((name_sf, QTYPE.A)) is None
 
 
 def test__apply_pre_plugins_override_short_circuits():
@@ -248,7 +249,7 @@ def test_resolve_query_bytes_end_to_end_paths(monkeypatch):
     q = DNSRecord.question("no-up.example", "A")
     srv.DNSUDPHandler.upstream_addrs = []
     srv.DNSUDPHandler.plugins = []
-    srv.DNSUDPHandler.cache = FoghornTTLCache()
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
     wire = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
     assert DNSRecord.parse(wire).header.rcode == RCODE.SERVFAIL
 

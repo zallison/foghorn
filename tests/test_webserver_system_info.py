@@ -2,9 +2,9 @@ import types
 
 import pytest
 
-import foghorn.webserver as webserver
+import foghorn.servers.webserver as webserver
 from foghorn.stats import StatsCollector
-from foghorn.webserver import RingBuffer, create_app
+from foghorn.servers.webserver import RingBuffer, create_app
 
 
 def _reset_system_info_cache() -> None:
@@ -14,7 +14,7 @@ def _reset_system_info_cache() -> None:
       - None.
 
     Outputs:
-      - None. Mutates module-level cache globals in foghorn.webserver.
+      - None. Mutates module-level cache globals in foghorn.servers.webserver.
     """
 
     webserver._last_system_info = None

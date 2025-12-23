@@ -9,7 +9,7 @@ listen:
   udp:
     enabled: true
     host: 127.0.0.1
-    port: 5333
+    port: 5335
 
 upstreams:
   - host: 1.1.1.1

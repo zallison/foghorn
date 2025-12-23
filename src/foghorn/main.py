@@ -7,19 +7,20 @@ import logging
 import os
 import signal
 import threading
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import List, Optional
 
-import yaml
-
-from .config_schema import validate_config
-from .dnssec_validate import configure_dnssec_resolver
-from .doh_api import start_doh_server
-from .logging_config import init_logging
+from .config.config_parser import (
+    load_plugins,
+    normalize_upstream_config,
+    parse_config_file,
+)
+from foghorn.dnssec.dnssec_validate import configure_dnssec_resolver
+from .config.logging_config import init_logging
 from .plugins.base import BasePlugin
-from .plugins.registry import discover_plugins, get_plugin_class
-from .server import DNSServer
+from .servers.doh_api import start_doh_server
+from .servers.server import DNSServer
+from .servers.webserver import RingBuffer, RuntimeState, start_webserver
 from .stats import StatsCollector, StatsReporter, StatsSQLiteStore
-from .webserver import RingBuffer, start_webserver
 
 
 def _clear_lru_caches(wrappers: Optional[List[object]]):
@@ -37,250 +38,14 @@ def _clear_lru_caches(wrappers: Optional[List[object]]):
         wrapper.cache_clear()
 
 
-def _get_min_cache_ttl(cfg: dict) -> int:
-    """Extract and sanitize ``min_cache_ttl`` from the loaded config.
-
-    Inputs:
-      - cfg: dict loaded from YAML (top-level config mapping).
-
-    Outputs:
-      - int: non-negative ``min_cache_ttl`` in seconds (default 0 when omitted).
-
-    The canonical location is now ``foghorn.min_cache_ttl``. For backward
-    compatibility, a root-level ``min_cache_ttl`` key is still honored when the
-    nested key is absent. Negative values and invalid types are clamped to 0.
-    """
-
-    foghorn_cfg = cfg.get("foghorn") or {}
-    if isinstance(foghorn_cfg, dict) and "min_cache_ttl" in foghorn_cfg:
-        raw_val = foghorn_cfg.get("min_cache_ttl")
-    else:
-        # Legacy root-level key (deprecated but still supported).
-        raw_val = cfg.get("min_cache_ttl", 0)
-
-    try:
-        ival = int(raw_val)
-    except (TypeError, ValueError):
-        ival = 0
-    return max(0, ival)
-
-
-def normalize_upstream_config(
-    cfg: Dict[str, Any],
-) -> Tuple[List[Dict[str, Union[str, int, dict]]], int]:
-    """
-    Brief: Normalize modern upstream configuration to a list-of-endpoints plus a timeout.
-
-    Inputs:
-      - cfg: dict containing parsed YAML. Supports only the modern form:
-          - cfg['upstreams'] as a list of upstream entries, each either:
-              * DoH entry: {'transport': 'doh', 'url': str, ...}
-              * host/port entry: {'host': str, 'port': int, ...}
-          - cfg['foghorn']['timeout_ms'] for the global upstream timeout.
-
-    Outputs:
-      - (upstreams, timeout_ms):
-          - upstreams: list[dict] with keys like {'host': str, 'port': int} or DoH metadata.
-          - timeout_ms: int timeout in milliseconds applied per upstream attempt (default 2000).
-
-    Legacy single-dict forms for cfg['upstreams'] and upstream.timeout_ms are no longer supported.
-    """
-    upstream_raw = cfg.get("upstreams")
-    if not isinstance(upstream_raw, list):
-        raise ValueError("config.upstreams must be a list of upstream definitions")
-
-    upstreams: List[Dict[str, Union[str, int, dict]]] = []
-    for u in upstream_raw:
-        if not isinstance(u, dict):
-            raise ValueError("each upstream entry must be a mapping")
-
-        # Normalize transport early so we can derive sensible defaults.
-        transport = str(u.get("transport", "udp")).lower()
-
-        # DoH entries using URL
-        if transport == "doh":
-            logger = logging.getLogger("foghorn.main.setup")
-            logger.debug(f"doh: {u}")
-            rec: Dict[str, Union[str, int, dict]] = {
-                "transport": "doh",
-                "url": str(u["url"]),
-            }
-            if "method" in u:
-                rec["method"] = str(u.get("method"))
-            if "headers" in u and isinstance(u["headers"], dict):
-                rec["headers"] = u["headers"]
-            if "tls" in u and isinstance(u["tls"], dict):
-                rec["tls"] = u["tls"]
-            upstreams.append(rec)
-            continue
-
-        # Host/port-based upstream (udp/tcp/dot)
-        if "host" not in u:
-            raise ValueError("each upstream entry must include 'host'")
-
-        # Default ports by transport: UDP/TCP -> 53, DoT -> 853.
-        default_port = 853 if transport == "dot" else 53
-
-        rec2: Dict[str, Union[str, int, dict]] = {
-            "host": str(u["host"]),
-            "port": int(u.get("port", default_port)),
-        }
-        if "transport" in u:
-            rec2["transport"] = transport
-        if "tls" in u and isinstance(u["tls"], dict):
-            rec2["tls"] = u["tls"]
-        if "pool" in u and isinstance(u["pool"], dict):
-            rec2["pool"] = u["pool"]
-        upstreams.append(rec2)
-
-    foghorn_cfg = cfg.get("foghorn") or {}
-    if not isinstance(foghorn_cfg, dict):
-        raise ValueError("config.foghorn must be a mapping when present")
-    try:
-        timeout_ms = int(foghorn_cfg.get("timeout_ms", 2000))
-    except (TypeError, ValueError):
-        timeout_ms = 2000
-    return upstreams, timeout_ms
-
-
-def _validate_plugin_config(plugin_cls: type[BasePlugin], config: dict | None) -> dict:
-    """Brief: Validate and normalize plugin configuration via optional schema hooks.
-
-    Inputs:
-      - plugin_cls: Plugin class (subclass of BasePlugin).
-      - config: Raw config mapping for this plugin (may be None).
-
-    Outputs:
-      - dict: Validated/normalized config mapping to be passed into plugin_cls.
-
-    Behavior:
-      - If plugin_cls exposes get_config_model() and it returns a model class,
-        the config is validated by instantiating the model; the resulting
-        mapping (model.dict() when available) is returned.
-      - If get_config_model() returns None, the config is accepted as-is.
-      - Otherwise, if plugin_cls exposes get_config_schema() and it returns a
-        JSON Schema dict, the config is validated using jsonschema; on success
-        the original config mapping is returned.
-      - If get_config_schema() returns None or no hooks are present, the config
-        is returned unchanged.
-    """
-
-    cfg = config or {}
-
-    # Prefer typed config models (e.g., Pydantic) when provided.
-    get_model = getattr(plugin_cls, "get_config_model", None)
-    if callable(get_model):  # pragma: no cover - exercised via plugin tests
-        model_cls = get_model()
-        if model_cls is None:
-            return cfg
-        try:
-            model_instance = model_cls(**cfg)
-        except Exception as exc:  # pragma: no cover - defensive, surfaced in tests
-            raise ValueError(
-                f"Invalid configuration for plugin {plugin_cls.__name__}: {exc}"
-            ) from exc
-
-        # Best-effort conversion back to a plain mapping so existing plugins
-        # that expect dict-like config continue to work.
-        for attr in ("dict", "model_dump"):
-            method = getattr(model_instance, attr, None)
-            if callable(method):
-                try:
-                    return dict(method())
-                except (
-                    Exception
-                ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                    break
-        try:
-            return dict(model_instance)
-        except (
-            Exception
-        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-            return cfg
-
-    # Fallback: JSON Schema-based per-plugin validation.
-    get_schema = getattr(plugin_cls, "get_config_schema", None)
-    if callable(get_schema):  # pragma: no cover - exercised via plugin tests
-        schema = get_schema()
-        if schema is None:
-            return cfg
-        try:
-            from jsonschema import validate as _js_validate  # type: ignore
-
-            _js_validate(instance=cfg, schema=schema)
-        except Exception as exc:  # pragma: no cover - defensive, surfaced in tests
-            raise ValueError(
-                f"Invalid configuration for plugin {plugin_cls.__name__}: {exc}"
-            ) from exc
-
-    return cfg
-
-
-def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
-    """
-    Loads and initializes plugins from a list of plugin specifications.
-
-    Supports either full dotted class paths or short aliases:
-    - access_control | acl -> foghorn.plugins.access_control.AccessControlPlugin
-    - new_domain_filter | new_domain -> foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
-    - upstream_router | router -> foghorn.plugins.upstream_router.UpstreamRouterPlugin
-
-    Args:
-        plugin_specs: A list where each item is either a dict with keys
-                      {"module": <path-or-alias>, "config": {...}, "name": "..."}
-                      or a string alias/dotted path. When provided, "name" is a
-                      human-friendly label used in place of the plugin class
-                      name when logging statistics or other plugin data.
-
-    Returns:
-        A list of initialized plugin instances.
-
-    Example use:
-        >>> from foghorn.plugins.base import BasePlugin
-        >>> class MyTestPlugin(BasePlugin):
-        ...     pass
-        >>> specs = [{"module": "__main__.MyTestPlugin", "name": "my_test"}]
-        >>> plugins = load_plugins(specs)
-        >>> isinstance(plugins[0], MyTestPlugin)
-        True
-        >>> plugins[0].name
-        'my_test'
-        >>> # Using aliases
-        >>> plugins = load_plugins(["acl", {"module": "router", "config": {}}])
-    """
-    alias_registry = discover_plugins()
-    plugins: List[BasePlugin] = []
-    for spec in plugin_specs or []:
-        if isinstance(spec, str):
-            module_path = spec
-            config = {}
-            plugin_name = None
-        else:
-            module_path = spec.get("module")
-            config = spec.get("config", {})
-            plugin_name = spec.get("name")
-        if not module_path:
-            continue
-
-        plugin_cls = get_plugin_class(module_path, alias_registry)
-        validated_config = _validate_plugin_config(plugin_cls, config)
-        if plugin_name is not None:
-            plugin = plugin_cls(name=str(plugin_name), **validated_config)
-        else:
-            plugin = plugin_cls(**validated_config)
-        plugins.append(plugin)
-    return plugins
-
-
 def _is_setup_plugin(plugin: BasePlugin) -> bool:
-    """
-    Determine whether a plugin overrides BasePlugin.setup and should
-    participate in the setup phase.
+    """Brief: Determine whether a plugin overrides BasePlugin.setup.
 
     Inputs:
       - plugin: BasePlugin instance.
+
     Outputs:
-      - bool: True if the plugin defines its own setup() implementation.
+      - bool: True when plugin defines its own setup() implementation.
 
     Example use:
       >>> from foghorn.plugins.base import BasePlugin
@@ -291,6 +56,7 @@ def _is_setup_plugin(plugin: BasePlugin) -> bool:
       >>> _is_setup_plugin(p)
       True
     """
+
     try:
         return plugin.__class__.setup is not BasePlugin.setup
     except Exception:
@@ -298,37 +64,32 @@ def _is_setup_plugin(plugin: BasePlugin) -> bool:
 
 
 def run_setup_plugins(plugins: List[BasePlugin]) -> None:
-    """
-    Run setup() on all setup-aware plugins in ascending setup_priority order.
+    """Brief: Run setup() on setup-aware plugins in ascending setup_priority order.
 
     Inputs:
       - plugins: List[BasePlugin] instances, typically from load_plugins().
+
     Outputs:
-      - None; raises RuntimeError if a setup plugin with abort_on_failure=True
-        fails.
+      - None; raises RuntimeError if a setup plugin with abort_on_failure=True fails.
 
-    Brief: This helper is invoked by main() after plugin instantiation but
-    before listeners start. Plugins that override BasePlugin.setup are
-    considered setup plugins. Their setup_priority attribute (or corresponding
-    config value) controls execution order.
-
-    Example use:
-      >>> plugins = load_plugins([])
-      >>> run_setup_plugins(plugins)  # no-op when there are no setup plugins
+    Notes:
+      - Plugins that override BasePlugin.setup are considered setup plugins.
+      - Execution order is controlled by each plugin's setup_priority attribute
+        (default 100).
     """
+
     logger = logging.getLogger("foghorn.main.setup")
-    # Collect (priority, plugin) pairs for setup-capable plugins
+
     setup_entries: List[tuple[int, BasePlugin]] = []
     for p in plugins or []:
         if not _is_setup_plugin(p):
             continue
         try:
-            prio = int(getattr(p, "setup_priority", 50))
+            prio = int(getattr(p, "setup_priority", 100))
         except Exception:
-            prio = 50
+            prio = 100
         setup_entries.append((prio, p))
 
-    # Stable sort by priority; list order is preserved for equal priorities
     setup_entries.sort(key=lambda item: item[0])
 
     for prio, plugin in setup_entries:
@@ -343,15 +104,12 @@ def run_setup_plugins(plugins: List[BasePlugin]) -> None:
         )
         try:
             plugin.setup()
-        except (
-            Exception
-        ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        except Exception as e:  # pragma: no cover
             logger.error("Setup for plugin %s failed: %s", name, e, exc_info=True)
             if abort_on_failure:
                 raise RuntimeError(f"Setup for plugin {name} failed") from e
             logger.warning(
-                "Continuing startup despite setup failure in plugin %s "
-                "because abort_on_failure is False",
+                "Continuing startup despite setup failure in plugin %s because abort_on_failure is False",
                 name,
             )
 
@@ -392,6 +150,16 @@ def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Caching DNS server with plugins")
     parser.add_argument("--config", default="config.yaml", help="Path to YAML config")
     parser.add_argument(
+        "-v",
+        "--var",
+        action="append",
+        default=[],
+        help=(
+            "Set a configuration variable (KEY=YAML). May be provided multiple times; "
+            "CLI overrides environment overrides config file variables."
+        ),
+    )
+    parser.add_argument(
         "--rebuild",
         action="store_true",
         help=(
@@ -401,18 +169,21 @@ def main(argv: List[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    with open(args.config, "r") as f:
-        cfg = yaml.safe_load(f) or {}
-
-    # Validate configuration against JSON Schema before proceeding.
+    # Load and validate configuration.
     try:
-        validate_config(cfg, config_path=args.config)
+        cfg = parse_config_file(
+            args.config, cli_vars=list(getattr(args, "var", []) or [])
+        )
     except ValueError as exc:
         print(str(exc))
         return 1
 
-    # Initialize logging before any other operations
-    init_logging(cfg.get("logging"))
+    # Initialize logging before any other operations.
+    foghorn_for_logging = cfg.get("foghorn") or {}
+    if not isinstance(foghorn_for_logging, dict):
+        foghorn_for_logging = {}
+    logging_cfg = foghorn_for_logging.get("logging")
+    init_logging(logging_cfg)
     logger = logging.getLogger("foghorn.main")
     logger.info("Loaded config from %s", args.config)
 
@@ -434,11 +205,14 @@ def main(argv: List[str] | None = None) -> int:
     # also used when starting the threaded admin HTTP fallback.
     web_log_buffer: Optional[RingBuffer] = None
 
+    # Runtime state used by /ready readiness probes exposed by the admin webserver.
+    runtime_state = RuntimeState(startup_complete=False)
+
     # Normalize listen configuration with backward compatibility.
     # If listen.udp is present, prefer it; otherwise fall back to legacy listen.host/port.
     listen_cfg = cfg.get("listen", {}) or {}
     default_host = str(listen_cfg.get("host", "127.0.0.1"))
-    default_port = int(listen_cfg.get("port", 5333))
+    default_port = int(listen_cfg.get("port", 5335))
 
     # Global foghorn runtime options (timeouts, strategy, asyncio usage).
     foghorn_cfg = cfg.get("foghorn") or {}
@@ -451,17 +225,98 @@ def main(argv: List[str] | None = None) -> int:
         return out
 
     # Get listeners configs
+    #
+    # Semantics:
+    #   - UDP remains enabled by default, even when listen.udp is omitted, to
+    #     preserve long-standing behaviour.
+    #   - For TCP/DoT/DoH, presence of a listener subsection implies that the
+    #     listener should be enabled by default unless an explicit
+    #     enabled: false override is provided. This makes configurations like
+    #
+    #         listen:
+    #           tcp:
+    #             host: 0.0.0.0
+    #             port: 5353
+    #
+    #     behave as expected without requiring an explicit enabled: true.
     udp_cfg = _sub(
-        "udp", {"enabled": True, "host": default_host, "port": default_port or 5333}
+        "udp", {"enabled": True, "host": default_host, "port": default_port or 5335}
     )
-    tcp_cfg = _sub(
-        "tcp", {"enabled": False, "host": default_host, "port": default_port or 5333}
-    )
-    dot_cfg = _sub("dot", {"enabled": False, "host": default_host, "port": 853})
-    doh_cfg = _sub("doh", {"enabled": False, "host": default_host, "port": 1443})
 
-    # Normalize upstream configuration
-    upstreams, timeout_ms = normalize_upstream_config(cfg)
+    tcp_section = listen_cfg.get("tcp")
+    tcp_default_enabled = True if isinstance(tcp_section, dict) else False
+    tcp_cfg = _sub(
+        "tcp",
+        {
+            "enabled": tcp_default_enabled,
+            "host": default_host,
+            "port": default_port or 5335,
+        },
+    )
+
+    dot_section = listen_cfg.get("dot")
+    dot_default_enabled = True if isinstance(dot_section, dict) else False
+    dot_cfg = _sub(
+        "dot", {"enabled": dot_default_enabled, "host": default_host, "port": 853}
+    )
+
+    doh_section = listen_cfg.get("doh")
+    doh_default_enabled = True if isinstance(doh_section, dict) else False
+    doh_cfg = _sub(
+        "doh", {"enabled": doh_default_enabled, "host": default_host, "port": 1443}
+    )
+
+    # Seed readiness state with expected listeners. The thread/handle references
+    # are filled in later once each listener is started.
+    runtime_state.set_listener(
+        "udp", enabled=bool(udp_cfg.get("enabled", True)), thread=None
+    )
+    runtime_state.set_listener(
+        "tcp", enabled=bool(tcp_cfg.get("enabled", False)), thread=None
+    )
+    runtime_state.set_listener(
+        "dot", enabled=bool(dot_cfg.get("enabled", False)), thread=None
+    )
+    runtime_state.set_listener(
+        "doh", enabled=bool(doh_cfg.get("enabled", False)), thread=None
+    )
+
+    # Resolver configuration (forward vs recursive) with conservative defaults.
+    resolver_cfg = (
+        foghorn_cfg.get("resolver") if isinstance(foghorn_cfg, dict) else None
+    )
+    if resolver_cfg is None:
+        resolver_cfg = cfg.get("resolver") or {}
+    if not isinstance(resolver_cfg, dict):
+        raise ValueError("config.resolver must be a mapping when present")
+
+    resolver_mode = str(resolver_cfg.get("mode", "forward")).lower()
+    try:
+        recursive_max_depth = int(resolver_cfg.get("max_depth", 16))
+    except (TypeError, ValueError):
+        recursive_max_depth = 16
+    try:
+        recursive_timeout_ms = int(
+            resolver_cfg.get("timeout_ms", foghorn_cfg.get("timeout_ms", 2000))
+        )
+    except (TypeError, ValueError):
+        recursive_timeout_ms = int(foghorn_cfg.get("timeout_ms", 2000) or 2000)
+    try:
+        recursive_per_try_timeout_ms = int(
+            resolver_cfg.get("per_try_timeout_ms", recursive_timeout_ms)
+        )
+    except (TypeError, ValueError):
+        recursive_per_try_timeout_ms = recursive_timeout_ms
+
+    # Normalize upstream configuration only in forwarder mode.
+    if resolver_mode == "forward":
+        upstreams, timeout_ms = normalize_upstream_config(cfg)
+    else:
+        upstreams = []
+        try:
+            timeout_ms = int(foghorn_cfg.get("timeout_ms", 2000))
+        except (TypeError, ValueError):
+            timeout_ms = 2000
 
     # Upstream selection strategy and concurrency controls
     upstream_strategy = str(foghorn_cfg.get("upstream_strategy", "failover")).lower()
@@ -473,10 +328,43 @@ def main(argv: List[str] | None = None) -> int:
     # environments. When false, threaded fallbacks are used where available.
     use_asyncio = bool(foghorn_cfg.get("use_asyncio", True))
 
-    # Resolver configuration (forward vs recursive) with conservative defaults.
+    # Cache plugin selection.
+    #
+    # Brief:
+    #   Cache is configured at the top-level `cache:` block so operators can
+    #   swap implementations without changing the resolver pipeline.
+    #
+    # Inputs:
+    #   - cfg['cache']: null | str | mapping
+    #
+    # Outputs:
+    #   - cache_plugin: CachePlugin instance
+    try:
+        from foghorn.cache_plugins.registry import load_cache_plugin
 
-    # Hold responses this long, even if the actual ttl is lower.
-    min_cache_ttl = _get_min_cache_ttl(cfg)
+        cache_plugin = load_cache_plugin(cfg.get("cache"))
+    except Exception:
+        cache_plugin = None
+
+    # Install the configured cache plugin globally so all transports (UDP/TCP/DoT/DoH)
+    # share it, even when the UDP DNSServer is not started.
+    if cache_plugin is not None:
+        try:
+            from foghorn.plugins import base as plugin_base
+
+            plugin_base.DNS_CACHE = cache_plugin  # type: ignore[assignment]
+        except Exception:
+            pass
+
+    # Cache TTL floor (applied to cache expiry, not the on-wire DNS TTL) is now
+    # configured via the cache plugin.
+    min_cache_ttl = 0
+    if cache_plugin is not None:
+        try:
+            min_cache_ttl = int(getattr(cache_plugin, "min_cache_ttl", 0) or 0)
+        except Exception:
+            min_cache_ttl = 0
+    min_cache_ttl = max(0, min_cache_ttl)
 
     plugins = load_plugins(cfg.get("plugins", []))
     logger.info(
@@ -586,6 +474,7 @@ def main(argv: List[str] | None = None) -> int:
         ignore_top_clients = list(ignore_cfg.get("top_clients", []) or [])
         ignore_top_domains = list(ignore_cfg.get("top_domains", []) or [])
         ignore_top_subdomains = list(ignore_cfg.get("top_subdomains", []) or [])
+        include_in_stats = bool(ignore_cfg.get("include_in_stats", True))
         domains_mode = str(ignore_cfg.get("top_domains_mode", "exact")).lower()
         subdomains_mode = str(ignore_cfg.get("top_subdomains_mode", "exact")).lower()
         ignore_domains_as_suffix = domains_mode == "suffix"
@@ -609,6 +498,7 @@ def main(argv: List[str] | None = None) -> int:
             ignore_domains_as_suffix=ignore_domains_as_suffix,
             ignore_subdomains_as_suffix=ignore_subdomains_as_suffix,
             ignore_single_host=ignore_single_host,
+            include_ignored_in_stats=include_in_stats,
         )
 
         # Best-effort warm-load of persisted aggregate counters on startup.
@@ -640,9 +530,19 @@ def main(argv: List[str] | None = None) -> int:
 
     # Initialize webserver log buffer (shared with admin HTTP API)
     web_cfg = cfg.get("webserver", {}) or {}
-    if web_cfg.get("enabled", False):
+    # If a webserver block exists, default enabled to True unless explicitly
+    # disabled with enabled: false. This mirrors the listener expectations and
+    # start_webserver() behaviour.
+    has_web_cfg = bool(web_cfg)
+    raw_web_enabled = web_cfg.get("enabled") if isinstance(web_cfg, dict) else None
+    web_enabled = bool(raw_web_enabled) if raw_web_enabled is not None else has_web_cfg
+
+    if web_enabled:
         buffer_size = int((web_cfg.get("logs") or {}).get("buffer_size", 500))
         web_log_buffer = RingBuffer(capacity=buffer_size)
+
+    # Seed webserver readiness expectation.
+    runtime_state.set_listener("webserver", enabled=web_enabled, thread=None)
 
     # --- Coordinated shutdown state ---
     # shutdown_event is set when a termination-like signal (KeyboardInterrupt,
@@ -686,14 +586,9 @@ def main(argv: List[str] | None = None) -> int:
         try:
             s_cfg = (cfg.get("statistics") or {}) if isinstance(cfg, dict) else {}
             enabled = bool(s_cfg.get("enabled", False))
-            # reset_on_sigusr1 is treated as a backwards-compatible alias for
-            # sigusr2_resets_stats so existing configs continue to work.
-            reset_flag = bool(
-                s_cfg.get(
-                    "sigusr2_resets_stats",
-                    s_cfg.get("reset_on_sigusr1", False),
-                )
-            )
+            # Only sigusr2_resets_stats is supported; legacy reset_on_sigusr1 is
+            # no longer accepted to keep configuration semantics explicit.
+            reset_flag = bool(s_cfg.get("sigusr2_resets_stats", False))
             if enabled and reset_flag:
                 if stats_collector is not None:
                     try:
@@ -865,8 +760,14 @@ def main(argv: List[str] | None = None) -> int:
     ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
         logger.warning("Could not install SIGINT handler on this platform")
 
-    # DNSSEC config (ignore|passthrough|validate)
-    dnssec_cfg = cfg.get("dnssec", {}) or {}
+    # DNSSEC config (ignore|passthrough|validate). Prefer nested
+    # foghorn.dnssec but fall back to root-level dnssec for backward
+    # compatibility.
+    dnssec_cfg = foghorn_cfg.get("dnssec") if isinstance(foghorn_cfg, dict) else None
+    if dnssec_cfg is None:
+        dnssec_cfg = cfg.get("dnssec", {}) or {}
+    if not isinstance(dnssec_cfg, dict):
+        dnssec_cfg = {}
     dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()
     edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
     dnssec_validation = str(dnssec_cfg.get("validation", "upstream_ad")).lower()
@@ -874,13 +775,19 @@ def main(argv: List[str] | None = None) -> int:
     # When performing local DNSSEC validation (including local_extended), point
     # the validator's internal resolver at the configured upstream hosts so that
     # chain validation and extended lookups use the same recursive resolvers as
-    # normal forwarding. DoH-style upstreams identified only by URL are ignored
-    # here; only host-based upstreams (udp/tcp/dot) participate.
+    # normal forwarding. In recursive mode there are no forwarder upstreams; in
+    # that case, route all DNSSEC helper lookups through Foghorn's own
+    # RecursiveResolver rather than the system resolver.
     if dnssec_mode == "validate" and dnssec_validation in {"local", "local_extended"}:
-        upstream_hosts = [
-            str(u["host"]) for u in upstreams if isinstance(u, dict) and "host" in u
-        ]
-        configure_dnssec_resolver(upstream_hosts or None)
+        if resolver_mode == "forward":
+            upstream_hosts = [
+                str(u["host"]) for u in upstreams if isinstance(u, dict) and "host" in u
+            ]
+            configure_dnssec_resolver(upstream_hosts or None)
+        else:
+            # Empty list is a sentinel tellingfoghorn.dnssec.dnssec_validate to use
+            # RecursiveResolver for all validation lookups.
+            configure_dnssec_resolver([])
     else:
         # For non-validating modes or upstream_ad, fall back to system resolver
         # configuration inside the DNSSEC validator.
@@ -904,19 +811,31 @@ def main(argv: List[str] | None = None) -> int:
             timeout_ms=timeout_ms,
             min_cache_ttl=min_cache_ttl,
             stats_collector=stats_collector,
+            cache=cache_plugin,
             dnssec_mode=dnssec_mode,
             edns_udp_payload=edns_payload,
             dnssec_validation=dnssec_validation,
             upstream_strategy=upstream_strategy,
             upstream_max_concurrent=upstream_max_concurrent,
+            resolver_mode=resolver_mode,
+            recursive_max_depth=recursive_max_depth,
+            recursive_timeout_ms=recursive_timeout_ms,
+            recursive_per_try_timeout_ms=recursive_per_try_timeout_ms,
         )
 
     # Log startup info
-    upstream_info = ", ".join(
-        [f"{u['url']}" if "url" in u else f"{u['host']}:{u['port']}" for u in upstreams]
-    )
+    if resolver_mode == "forward":
+        upstream_info = ", ".join(
+            [
+                f"{u['url']}" if "url" in u else f"{u['host']}:{u['port']}"
+                for u in upstreams
+            ]
+        )
+    else:
+        upstream_info = "(recursive mode; no forward upstreams)"
     logger.info(
-        "Upstreams: [%s], timeout: %dms",
+        "Resolver mode=%s, upstreams: [%s], timeout: %dms",
+        resolver_mode,
         upstream_info,
         timeout_ms,
     )
@@ -931,6 +850,7 @@ def main(argv: List[str] | None = None) -> int:
                 server.serve_forever()
             except Exception as e:  # pragma: no cover - propagated via udp_error
                 udp_error = e
+                runtime_state.set_listener_error("udp", e)
 
         logger.info(
             "Starting UDP listener on %s:%d",
@@ -945,6 +865,7 @@ def main(argv: List[str] | None = None) -> int:
         )
         udp_thread.start()
         loop_threads.append(udp_thread)
+        runtime_state.set_listener("udp", enabled=True, thread=udp_thread)
     else:
         # When no UDP listener is configured, the main thread still enters the
         # keepalive loop below so that TCP/DoT/DoH listeners (or tests that
@@ -958,9 +879,15 @@ def main(argv: List[str] | None = None) -> int:
     # Resolver adapter for TCP/DoT servers
     import asyncio
 
-    from .server import resolve_query_bytes
+    from .servers.server import resolve_query_bytes
 
-    def _start_asyncio_server(coro_factory, name: str, *, on_permission_error=None):
+    def _start_asyncio_server(
+        coro_factory,
+        name: str,
+        *,
+        listener_key: str,
+        on_permission_error=None,
+    ):
         def runner():
             try:
                 asyncio.set_event_loop(asyncio.new_event_loop())
@@ -969,15 +896,20 @@ def main(argv: List[str] | None = None) -> int:
                     loop.run_until_complete(coro_factory())
                 finally:
                     loop.close()
-            except PermissionError:
+            except PermissionError as e:
                 # Environment forbids creating asyncio self-pipe/socketpair (e.g., restricted seccomp).
+                # When a fallback is provided, treat it as a successful start and
+                # do not mark the listener as failed.
                 if callable(on_permission_error):
                     on_permission_error()
                 else:
+                    runtime_state.set_listener_error(listener_key, e)
                     logging.getLogger("foghorn.main").error(
                         "Asyncio loop creation failed with PermissionError for %s; no fallback provided",
                         name,
                     )
+            except Exception as e:  # pragma: no cover - best-effort readiness tracking
+                runtime_state.set_listener_error(listener_key, e)
 
         # Import threading dynamically so tests can monkeypatch via sys.modules
         import importlib as _importlib
@@ -986,9 +918,11 @@ def main(argv: List[str] | None = None) -> int:
         t = _threading.Thread(target=runner, name=name, daemon=True)
         t.start()
         loop_threads.append(t)
+        runtime_state.set_listener(listener_key, enabled=True, thread=t)
+        return t
 
     if bool(tcp_cfg.get("enabled", False)):
-        from .tcp_server import serve_tcp, serve_tcp_threaded
+        from .servers.tcp_server import serve_tcp, serve_tcp_threaded
 
         thost = str(tcp_cfg.get("host", default_host))
         tport = int(tcp_cfg.get("port", 53))
@@ -997,6 +931,7 @@ def main(argv: List[str] | None = None) -> int:
             _start_asyncio_server(
                 lambda: serve_tcp(thost, tport, resolve_query_bytes),
                 name="foghorn-tcp",
+                listener_key="tcp",
                 on_permission_error=lambda: serve_tcp_threaded(
                     thost, tport, resolve_query_bytes
                 ),
@@ -1010,9 +945,10 @@ def main(argv: List[str] | None = None) -> int:
             )
             t.start()
             loop_threads.append(t)
+            runtime_state.set_listener("tcp", enabled=True, thread=t)
 
     if bool(dot_cfg.get("enabled", False)):
-        from .dot_server import serve_dot
+        from .servers.dot_server import serve_dot
 
         dhost = str(dot_cfg.get("host", default_host))
         dport = int(dot_cfg.get("port", 853))
@@ -1033,6 +969,7 @@ def main(argv: List[str] | None = None) -> int:
                     key_file=key_file,
                 ),
                 name="foghorn-dot",
+                listener_key="dot",
             )
 
     if bool(doh_cfg.get("enabled", False)):
@@ -1052,13 +989,17 @@ def main(argv: List[str] | None = None) -> int:
                 use_asyncio=use_asyncio,
             )
         except Exception as e:
+            runtime_state.set_listener_error("doh", e)
             logger.error("Failed to start DoH server: %s", e)
             return 1
         if doh_handle is None:
+            runtime_state.set_listener_error("doh", "start_doh_server returned None")
             logger.error(
                 "Fatal: listen.doh.enabled=true but start_doh_server returned None"
             )
             return 1
+
+        runtime_state.set_listener("doh", enabled=True, thread=doh_handle)
 
     # Start admin HTTP webserver (FastAPI) and treat None handle as fatal when
     # webserver.enabled is true. Tests and production code both rely on a
@@ -1070,6 +1011,8 @@ def main(argv: List[str] | None = None) -> int:
             cfg,
             log_buffer=web_log_buffer,
             config_path=cfg_path,
+            runtime_state=runtime_state,
+            plugins=plugins,
         )
     except (
         Exception
@@ -1077,10 +1020,15 @@ def main(argv: List[str] | None = None) -> int:
         logger.error("Failed to start webserver: %s", e)
         return 1
 
-    if bool(web_cfg.get("enabled", False)) and web_handle is None:
+    if web_enabled and web_handle is None:
+        runtime_state.set_listener_error("webserver", "start_webserver returned None")
         logger.error("Fatal: webserver.enabled=true but start_webserver returned None")
         return 1
 
+    if web_handle is not None:
+        runtime_state.set_listener("webserver", enabled=web_enabled, thread=web_handle)
+
+    runtime_state.mark_startup_complete()
     logger.info("Startup Completed")
 
     try:

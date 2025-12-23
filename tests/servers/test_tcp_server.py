@@ -17,8 +17,8 @@ import pytest
 
 pytestmark = pytest.mark.slow
 
-import foghorn.tcp_server as tcp_server_mod
-from foghorn.tcp_server import serve_tcp, serve_tcp_threaded
+import foghorn.servers.tcp_server as tcp_server_mod
+from foghorn.servers.tcp_server import serve_tcp, serve_tcp_threaded
 
 
 def test__handle_conn_breaks_on_short_body(monkeypatch) -> None:

@@ -5,11 +5,11 @@ listen:
   udp:
     enabled: true
     host: 127.0.0.1
-    port: 5333
+    port: 5335
   tcp:
     enabled: false
     host: 127.0.0.1
-    port: 5333
+    port: 5335
   dot:
     enabled: false
     host: 127.0.0.1
@@ -19,7 +19,7 @@ listen:
   doh:
     enabled: false
     host: 127.0.0.1
-    port: 8053
+    port: 5380
     # cert_file: /path/to/cert.pem
     # key_file: /path/to/key.pem
 
@@ -59,12 +59,16 @@ upstreams:
       verify: true
       # ca_file: /etc/ssl/certs/ca-certificates.crt
 
+cache:
+  module: in_memory_ttl
+  config:
+    min_cache_ttl: 60
+
 foghorn:
   timeout_ms: 2000
   upstream_strategy: failover
   upstream_max_concurrent: 1
   use_asyncio: true
-  min_cache_ttl: 60
 dnssec:
   mode: ignore
   validation: upstream_ad
@@ -110,7 +114,7 @@ statistics:
 webserver:
   enabled: false
   host: 127.0.0.1
-  port: 8053
+  port: 5380
   logs:
     buffer_size: 500
   system_info_ttl_seconds: 2.0
@@ -150,13 +154,22 @@ plugins:
       # use_ipv4: 192.0.2.10
       # use_ipv6: 2001:db8::10
 
+      # Optional: filter containers by Docker health/state.
+      # Supported: starting, healthy, running, unhealthy
+      # Default: [healthy, running]
+      # health: [healthy, running]
+
+      # Optional: publish an aggregate TXT record at _docker.<suffix>
+      # (or _docker when no suffix is configured).
+      # discovery: true
+
   # 2) /etc/hosts resolver – answers from hosts files first when possible
   - module: hosts
     pre_priority: 10           # run after DockerHosts
     config:
       allow: ["192.0.2.0/24", "2001:db8::/32"]
-      servfail_one_in: 20
-      nxdomain_one_in: 50
+      servfail_percent: 5.0
+      nxdomain_percent: 2.0
       apply_to_qtypes: ["A", "AAAA"]
       # seed: 42
 
@@ -199,16 +212,14 @@ plugins:
         - { ip: "198.51.100.0/24", action: remove }
         - { ip: "203.0.113.5", action: replace, replace_with: "127.0.0.1" }
       # Enable external lists (downloaded above to ./config/var/lists/)
-      blocklist_files:
+      blocked_domains_files:
         - ./config/var/lists/AdguardDNS-*.txt
         - ./config/var/lists/Easylist-*.txt
         - ./config/var/lists/Prigent-Ads-*.txt
         - ./config/var/lists/Prigent-Malware-*.txt
         - ./config/block.txt
-      allowlist_files:
+      allowed_domains_files:
         - ./config/allow.txt
-      allowed_domains_files: []
-      blocked_domains_files: []
 
   # 4) Route certain domains to internal upstreams
   - module: upstream
@@ -242,8 +253,10 @@ plugins:
   # 7) Local overrides from hosts file (A-only)
   - module: etc-hosts
     pre_priority: 55
-    config: {}
-    # file_path: /etc/hosts
+    config:
+      # Use file_paths (list) for hosts files; legacy file_path is no longer supported.
+      file_paths:
+        - /etc/hosts
 
   # 3) Upstream router – send certain suffixes to specific upstreams
   - module: router

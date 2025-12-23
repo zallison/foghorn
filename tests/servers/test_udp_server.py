@@ -15,7 +15,7 @@ import time
 import pytest
 from dnslib import DNSRecord, QTYPE, RCODE
 
-from foghorn.udp_server import DNSUDPHandler, serve_udp
+from foghorn.servers.udp_server import DNSUDPHandler, serve_udp
 from foghorn.plugins.base import PluginContext, PluginDecision
 
 
@@ -120,7 +120,7 @@ def test_mark_upstreams_down_backoff(monkeypatch):
     Outputs: Ensure health state is updated with growing fail_count and delay.
     """
 
-    from foghorn import udp_server as udp_mod
+    from foghorn.servers import udp_server as udp_mod
 
     monkeypatch.setattr(udp_mod.time, "time", lambda: 1000.0)
     DNSUDPHandler.upstream_health.clear()
@@ -271,7 +271,7 @@ def test_choose_upstreams_filters_down(monkeypatch):
     up_down = {"host": "9.9.9.9", "port": 53}
     handler.upstream_addrs = [up_good, up_down]
 
-    from foghorn import udp_server as udp_mod
+    from foghorn.servers import udp_server as udp_mod
 
     monkeypatch.setattr(udp_mod.time, "time", lambda: 1000.0)
     DNSUDPHandler.upstream_health.clear()
@@ -298,7 +298,7 @@ def test_choose_upstreams_round_robin(monkeypatch):
     up3 = {"host": "3.3.3.3", "port": 53}
     handler.upstream_addrs = [up1, up2, up3]
 
-    from foghorn import udp_server as udp_mod
+    from foghorn.servers import udp_server as udp_mod
 
     monkeypatch.setattr(udp_mod.time, "time", lambda: 1000.0)
     DNSUDPHandler.upstream_health.clear()
@@ -326,7 +326,7 @@ def test_choose_upstreams_random_strategy_handles_shuffle_error(monkeypatch):
     up2 = {"host": "2.2.2.2", "port": 53}
     handler.upstream_addrs = [up1, up2]
 
-    from foghorn import udp_server as udp_mod
+    from foghorn.servers import udp_server as udp_mod
 
     monkeypatch.setattr(udp_mod.time, "time", lambda: 1000.0)
     DNSUDPHandler.upstream_health.clear()
@@ -354,7 +354,7 @@ def test_forward_with_failover_invalid_concurrency(monkeypatch):
     handler = _make_handler()
     handler.upstream_max_concurrent = object()
 
-    from foghorn import server as server_mod
+    import foghorn.servers.server as server_mod
 
     captured = {}
 
@@ -403,7 +403,7 @@ def test_forward_with_failover_all_failed_marks_down(monkeypatch):
     handler = _make_handler()
     handler.upstream_max_concurrent = 0
 
-    from foghorn import server as server_mod
+    import foghorn.servers.server as server_mod
 
     def _fake_send(
         query, upstreams, timeout_ms, qname, qtype, max_concurrent

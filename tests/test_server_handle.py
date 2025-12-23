@@ -10,8 +10,9 @@ Outputs:
 
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
+from foghorn.plugins import base as plugin_base
 from foghorn.plugins.base import BasePlugin, PluginDecision
-from foghorn.server import DNSUDPHandler
+from foghorn.servers.server import DNSUDPHandler
 
 
 class FakeSock:
@@ -118,7 +119,7 @@ def test_handle_cache_hit_short_circuits_response(monkeypatch):
 
     # Pre-populate cache
     cache_key = ("cached.com", QTYPE.A)
-    DNSUDPHandler.cache.set(cache_key, 60, b"\x00\x01cached-bytes")
+    plugin_base.DNS_CACHE.set(cache_key, 60, b"\x00\x01cached-bytes")
 
     h = _mk_handler(data, sock)
     h.handle()
@@ -173,7 +174,7 @@ def test_handle_upstream_all_failed_sends_single_servfail(monkeypatch):
 
     # Force the shared resolver path (used by UDP and other transports) to
     # behave as if all upstreams failed.
-    import foghorn.server as srv_mod
+    import foghorn.servers.server as srv_mod
 
     monkeypatch.setattr(
         srv_mod,
@@ -219,7 +220,7 @@ def test_handle_success_with_post_override(monkeypatch):
 
     # Force the shared resolver to return the upstream_reply bytes so the
     # post-resolve override plugin can replace them.
-    import foghorn.server as srv_mod
+    import foghorn.servers.server as srv_mod
 
     monkeypatch.setattr(
         srv_mod,
@@ -255,7 +256,7 @@ def test_handle_exception_path_sends_servfail(monkeypatch):
 
     # Force the shared resolver used by DNSUDPHandler.handle to raise so that
     # the handler's outer exception guard synthesizes a SERVFAIL.
-    import foghorn.server as srv_mod
+    import foghorn.servers.server as srv_mod
 
     monkeypatch.setattr(
         srv_mod,

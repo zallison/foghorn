@@ -1,5 +1,5 @@
 """
-Brief: Comprehensive path tests for foghorn.server.DNSUDPHandler.handle and helpers.
+Brief: Comprehensive path tests for foghorn.servers.server.DNSUDPHandler.handle and helpers.
 
 Inputs:
   - None
@@ -10,7 +10,7 @@ Outputs:
 
 from dnslib import RCODE, DNSRecord
 
-import foghorn.server as srv
+import foghorn.servers.server as srv
 
 
 def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
@@ -26,7 +26,7 @@ def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
 
     sock = _Sock()
     h.request = (query_wire, sock)
-    h.client_address = (client_ip, 55333)
+    h.client_address = (client_ip, 55335)
     return h, sock
 
 

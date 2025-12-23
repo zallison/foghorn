@@ -16,8 +16,8 @@ import pytest
 
 pytestmark = pytest.mark.slow
 
-from foghorn.doh_api import start_doh_server
-from foghorn.server import resolve_query_bytes
+from foghorn.servers.doh_api import start_doh_server
+from foghorn.servers.server import resolve_query_bytes
 
 
 def _echo(q: bytes, ip: str) -> bytes:
