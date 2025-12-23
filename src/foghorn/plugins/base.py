@@ -370,12 +370,19 @@ class BasePlugin:
         self._targets_cache: FoghornTTLCache = FoghornTTLCache()
 
         # Optional qtype targeting: normalize configured target_qtypes into
-        # uppercase mnemonic values (e.g., ["A", "AAAA"], or ["*"]). When the
+        # uppercase mnemonic values (e.g., ["A", "AAAA"], or ["*."]). When the
         # resolved list is empty or contains "*", all qtypes are targeted.
-        raw_qtypes = config.get(
-            "target_qtypes", getattr(self.__class__, "target_qtypes", ("*",))
-        )
-        self._target_qtypes = self._normalize_qtype_list(raw_qtypes)
+        #
+        # For backwards compatibility with older plugins, allow an
+        # `apply_to_qtypes` config key as an alias for `target_qtypes` when the
+        # latter is not explicitly provided.
+        raw_qtypes_cfg = config.get("target_qtypes")
+        if raw_qtypes_cfg is None:
+            raw_qtypes_cfg = config.get(
+                "apply_to_qtypes",
+                getattr(self.__class__, "target_qtypes", ("*",)),
+            )
+        self._target_qtypes = self._normalize_qtype_list(raw_qtypes_cfg)
 
     def _init_instance_logger(self, logging_cfg: Dict[str, object]) -> None:
         """Brief: Configure an optional per-plugin logger from a logging config block.
@@ -685,11 +692,80 @@ class BasePlugin:
         if not qtypes or "*" in qtypes:
             return True
 
-        if isinstance(qtype, int):
-            name = QTYPE.get(qtype, str(qtype))
-        else:
-            name = str(qtype)
+        name = self.qtype_name(qtype)
         return str(name).upper() in {qt.upper() for qt in qtypes}
+
+    @staticmethod
+    def qtype_name(qtype: Union[int, str]) -> str:
+        """Brief: Normalize a DNS qtype value to its uppercase mnemonic.
+
+        Inputs:
+          - qtype: DNS RR type as an integer code (e.g. 1) or mnemonic string
+            (e.g. "A", "AAAA").
+
+        Outputs:
+          - str: Uppercase qtype name when resolvable, or stringified value
+            when the code is unknown.
+        """
+        if isinstance(qtype, int):
+            try:
+                name = QTYPE.get(qtype, str(qtype))
+            except Exception:  # pragma: no cover - defensive
+                name = str(qtype)
+            return str(name).upper()
+        return str(qtype).upper()
+
+    @staticmethod
+    def normalize_qname(
+        qname: object,
+        *,
+        lower: bool = True,
+        strip_trailing_dot: bool = True,
+    ) -> str:
+        """Brief: Normalize a qname-like value into a DNS name string.
+
+        Inputs:
+          - qname: Value representing a domain name (string or dnslib QNAME).
+          - lower: When True (default), lower-case the result.
+          - strip_trailing_dot: When True (default), remove a final trailing
+            dot while preserving interior dots.
+
+        Outputs:
+          - str: Normalized domain name string (may be empty when input is
+            empty or cannot be coerced).
+        """
+        try:
+            text = str(qname)
+        except Exception:  # pragma: no cover - defensive
+            text = ""
+
+        if strip_trailing_dot:
+            text = text.rstrip(".")
+        if lower:
+            text = text.lower()
+        return text
+
+    @staticmethod
+    def base_domain(qname: object, base_labels: int = 2) -> str:
+        """Brief: Extract a base domain using the last N labels from qname.
+
+        Inputs:
+          - qname: Domain name-like value; may include a trailing dot.
+          - base_labels: Number of rightmost labels that define the base
+            domain (default 2, e.g. "example.com").
+
+        Outputs:
+          - str: Base domain string such as 'example.com' for
+            'a.b.example.com.', or the normalized name itself when it has
+            fewer than base_labels labels.
+        """
+        name = BasePlugin.normalize_qname(qname, lower=True, strip_trailing_dot=True)
+        if not name:
+            return ""
+        labels = [p for p in name.split(".") if p]
+        if len(labels) >= int(base_labels):
+            return ".".join(labels[-int(base_labels) :])
+        return name
 
     def get_admin_ui_descriptor(self) -> Optional[Dict[str, object]]:
         """Brief: Describe this plugin's admin web UI surface (if any).
