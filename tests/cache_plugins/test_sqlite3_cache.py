@@ -78,6 +78,43 @@ def test_sqlite3_cache_roundtrip_bytes(tmp_path, monkeypatch) -> None:
     assert plugin.get(key) is None
 
 
+def test_sqlite3_cache_snapshot_includes_counters(tmp_path) -> None:
+    """Brief: get_http_snapshot exposes per-cache counters in caches/summary.
+
+    Inputs:
+      - tmp_path: pytest temporary path fixture.
+
+    Outputs:
+      - None; asserts snapshot contains counter keys for the primary cache.
+    """
+
+    db_path = tmp_path / "dns_cache.db"
+    plugin = SQLite3CachePlugin(db_path=str(db_path))
+
+    # Exercise the cache a bit so counters are non-zero.
+    key = ("example.com", 1)
+    plugin.set(key, 60, b"wire-bytes")
+    assert plugin.get(key) == b"wire-bytes"
+    assert plugin.get(("other.com", 1)) is None
+
+    snap = plugin.get_http_snapshot()
+    assert "summary" in snap
+    assert "caches" in snap
+
+    summary = snap["summary"]
+    assert isinstance(summary, dict)
+    # Counter keys should be present when the backend exposes them.
+    assert "calls_total" in summary
+    assert "cache_hits" in summary
+    assert "cache_misses" in summary
+
+    caches = snap["caches"]
+    assert isinstance(caches, list) and caches
+    primary = caches[0]
+    assert "label" in primary and "dns_cache" in primary["label"]
+    assert "calls_total" in primary
+
+
 @pytest.mark.parametrize(
     "value",
     [

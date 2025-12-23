@@ -147,6 +147,11 @@ class InMemoryTTLCachePlugin(CachePlugin):
         else:
             total_entries, live_entries, expired_entries = _compute_counts(store)  # type: ignore[arg-type]
 
+        # Global counters from the primary cache backend, when available.
+        calls_total = getattr(self._cache, "calls_total", None)
+        cache_hits = getattr(self._cache, "cache_hits", None)
+        cache_misses = getattr(self._cache, "cache_misses", None)
+
         summary: dict[str, object] = {
             "backend": "in_memory",
             "namespace": getattr(self._cache, "namespace", None) or "default",
@@ -155,6 +160,12 @@ class InMemoryTTLCachePlugin(CachePlugin):
             "expired_entries": int(expired_entries),
             "min_cache_ttl": int(self.min_cache_ttl),
         }
+        if isinstance(calls_total, int):
+            summary["calls_total"] = int(calls_total)
+        if isinstance(cache_hits, int):
+            summary["cache_hits"] = int(cache_hits)
+        if isinstance(cache_misses, int):
+            summary["cache_misses"] = int(cache_misses)
 
         # Build a static list of caches to summarize. Today this includes the
         # primary DNS cache plus per-plugin targeting caches when available.
@@ -181,6 +192,17 @@ class InMemoryTTLCachePlugin(CachePlugin):
             entries_total = 0
             entries_live = 0
             entries_expired = 0
+            calls_total_local: object = None
+            cache_hits_local: object = None
+            cache_misses_local: object = None
+            # Pull best-effort counters from the backend when present.
+            try:
+                calls_total_local = getattr(cache_obj, "calls_total", None)
+                cache_hits_local = getattr(cache_obj, "cache_hits", None)
+                cache_misses_local = getattr(cache_obj, "cache_misses", None)
+            except Exception:  # pragma: no cover - defensive only
+                calls_total_local = cache_hits_local = cache_misses_local = None
+
             if inner_lock is not None:
                 try:
                     with inner_lock:
@@ -202,24 +224,33 @@ class InMemoryTTLCachePlugin(CachePlugin):
                     inner_store
                 )  # type: ignore[arg-type]
 
-            return {
+            row: dict[str, object] = {
                 "label": str(label),
                 "backend": "in_memory_ttl",
                 "entries": int(entries_total),
                 "live_entries": int(entries_live),
                 "expired_entries": int(entries_expired),
             }
+            if isinstance(calls_total_local, int):
+                row["calls_total"] = int(calls_total_local)
+            if isinstance(cache_hits_local, int):
+                row["cache_hits"] = int(cache_hits_local)
+            if isinstance(cache_misses_local, int):
+                row["cache_misses"] = int(cache_misses_local)
+            return row
 
         # Primary DNS cache (this plugin instance)
-        caches.append(
-            {
-                "label": "dns_cache (primary)",
-                "backend": summary["backend"],
-                "entries": summary["total_entries"],
-                "live_entries": summary["live_entries"],
-                "expired_entries": summary["expired_entries"],
-            }
-        )
+        primary_row: dict[str, object] = {
+            "label": "dns_cache (primary)",
+            "backend": summary["backend"],
+            "entries": summary["total_entries"],
+            "live_entries": summary["live_entries"],
+            "expired_entries": summary["expired_entries"],
+        }
+        for key in ("calls_total", "cache_hits", "cache_misses"):
+            if key in summary:
+                primary_row[key] = summary[key]
+        caches.append(primary_row)
 
         # Per-plugin target caches (BasePlugin._targets_cache) when available via
         # the UDP handler's plugin list.
@@ -346,6 +377,9 @@ class InMemoryTTLCachePlugin(CachePlugin):
                         {"key": "total_entries", "label": "Total entries"},
                         {"key": "live_entries", "label": "Live entries"},
                         {"key": "expired_entries", "label": "Expired entries"},
+                        {"key": "calls_total", "label": "Calls"},
+                        {"key": "cache_hits", "label": "Hits"},
+                        {"key": "cache_misses", "label": "Misses"},
                     ],
                 },
                 {
@@ -356,9 +390,16 @@ class InMemoryTTLCachePlugin(CachePlugin):
                     "columns": [
                         {"key": "label", "label": "Cache"},
                         {"key": "backend", "label": "Backend"},
-                        {"key": "entries", "label": "Entries"},
-                        {"key": "live_entries", "label": "Live"},
-                        {"key": "expired_entries", "label": "Expired"},
+                        {"key": "entries", "label": "Entries", "align": "right"},
+                        {"key": "live_entries", "label": "Live", "align": "right"},
+                        {
+                            "key": "expired_entries",
+                            "label": "Expired",
+                            "align": "right",
+                        },
+                        {"key": "calls_total", "label": "Calls", "align": "right"},
+                        {"key": "cache_hits", "label": "Hits", "align": "right"},
+                        {"key": "cache_misses", "label": "Misses", "align": "right"},
                     ],
                 },
                 {
