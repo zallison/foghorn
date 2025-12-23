@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Foghorn"
-version = "0.4.7"
-description = "Swiss army knife Caching DNS server with plugin-based controls. DoT, DoH, ACL, query filters, etc."
+version = "0.5.0"
+description = "**Foghorn** is a fast, pluggable DNS server that caches, filters, routes, and bends DNS to your will. Up- and down-stream UDP, TCP, DoT, and DoH. DNSEC. Because DNS should do what *you* want."
 
 authors = [ { name = "Zack Allison", email = "zack@zackallison.com" } ]
 license = { text = "MIT" }
@@ -13,12 +13,15 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "PyYAML>=6.0.1",
-  "jsonschema>=4.17.3",
   "cachetools",
+  "coverage",
+  "cryptography",
   "dnslib>=0.9.24",
   "dnspython>=2.6.1",
+  "docker>=7.0.0",
   "fastapi>=0.111.0",
   "httpx",
+  "jsonschema>=4.17.3",
   "psutil",
   "pytest",
   "pytest-cov",
@@ -26,9 +29,7 @@ dependencies = [
   "uvicorn>=0.30.0",
   "watchdog",
   "whois",
-  "coverage",
-  "docker>=7.0.0",
-  "cryptography",
+  "zeroconf"
 ]
 
 [optional-dependencies]

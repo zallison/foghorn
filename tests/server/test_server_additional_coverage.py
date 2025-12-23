@@ -1,5 +1,5 @@
 """
-Brief: Additional targeted tests to raise coverage for foghorn.server.
+Brief: Additional targeted tests to raise coverage for foghorn.servers.server.
 
 Inputs:
   - None
@@ -11,8 +11,9 @@ Outputs:
 import pytest
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
-import foghorn.server as srv
-from foghorn.server import DNSUDPHandler, send_query_with_failover
+import foghorn.servers.server as srv
+from foghorn.plugins import base as plugin_base
+from foghorn.servers.server import DNSUDPHandler, send_query_with_failover
 
 
 class _Sock:
@@ -27,7 +28,7 @@ def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
     h = DNSUDPHandler.__new__(DNSUDPHandler)
     sock = _Sock()
     h.request = (query_wire, sock)
-    h.client_address = (client_ip, 55333)
+    h.client_address = (client_ip, 55335)
     return h, sock
 
 
@@ -83,13 +84,21 @@ def test_stats_hooks_are_called(monkeypatch, path):
     DNSUDPHandler.plugins = []
     DNSUDPHandler.upstream_addrs = [{"host": "h", "port": 53}]
 
+    # Be explicit about cache isolation for this parametrized test.
+    try:
+        from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+
+        plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+    except Exception:  # pragma: no cover
+        pass
+
     # ensure no pre plugins
     monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **k: None)
 
     # cache priming when needed
     cache_key = ("stats.example", QTYPE.A)
     if path == "cache_hit":
-        DNSUDPHandler.cache.set(cache_key, 30, _mk_ok_reply(q))
+        plugin_base.DNS_CACHE.set(cache_key, 30, _mk_ok_reply(q))
 
     # forwarding behavior
     if path == "upstream_ok":
@@ -180,7 +189,7 @@ def test_handle_pre_deny_records_stats_and_query_result():
       - None; asserts NXDOMAIN and key stats calls are present.
     """
 
-    from foghorn.server import PluginDecision
+    from foghorn.servers.server import PluginDecision
 
     class _PreDeny:
         def pre_resolve(self, qname, qtype, data, ctx):
@@ -221,7 +230,7 @@ def test_handle_pre_override_records_stats_and_query_result():
       - None; asserts stats calls present for override path.
     """
 
-    from foghorn.server import PluginDecision
+    from foghorn.servers.server import PluginDecision
 
     class _PreOverride:
         def pre_resolve(self, qname, qtype, data, ctx):
@@ -327,7 +336,7 @@ def test_handle_all_failed_with_stats_records_upstream_rcode(monkeypatch):
 
 
 # ---- DNSSEC validate branches ----
-def test_dnssec_validate_upstream_ad_pass(monkeypatch):
+def testfoghorn_dnssec_dnssec_validate_upstream_ad_pass(monkeypatch):
     DNSUDPHandler.plugins = []
     DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
 
@@ -358,7 +367,7 @@ def test_dnssec_validate_upstream_ad_pass(monkeypatch):
     assert r1.header.rcode == RCODE.NOERROR
 
 
-def test_dnssec_validate_local_true(monkeypatch):
+def testfoghorn_dnssec_dnssec_validate_local_true(monkeypatch):
     DNSUDPHandler.plugins = []
     DNSUDPHandler.upstream_addrs = [{"host": "9.9.9.9", "port": 53}]
     monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **k: None)
@@ -379,7 +388,7 @@ def test_dnssec_validate_local_true(monkeypatch):
 
     # Short-circuit local DNSSEC classification to "secure" without performing
     # real DNSSEC validation network fetches.
-    import foghorn.dnssec_validate as dval
+    import foghorn.dnssec.dnssec_validate as dval
 
     monkeypatch.setattr(
         dval,

@@ -14,6 +14,7 @@ from contextlib import closing
 import pytest
 from dnslib import AAAA, QTYPE, RR, TXT, A, DNSRecord, RCODE
 
+from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
 from foghorn.plugins.base import PluginContext, PluginDecision
 from foghorn.plugins.filter import FilterConfig, FilterPlugin
 
@@ -133,6 +134,71 @@ def test_pre_resolve_deny_response_ip_override(tmp_path):
         assert reply.header.rcode == RCODE.NOERROR
         assert reply.rr
         assert str(reply.rr[0].rdata) == "192.0.2.55"
+
+
+def test_pre_resolve_qtype_allowlist_denies_unlisted_qtypes(tmp_path):
+    """Brief: allow_qtypes denies qtypes not explicitly allowed.
+
+    Inputs:
+      - allow_qtypes: ["A"]
+      - deny_response: "refused"
+
+    Outputs:
+      - None: Asserts MX is denied with REFUSED and A is allowed to proceed.
+    """
+    db = tmp_path / "bl_qtypes_allow.db"
+    p = FilterPlugin(
+        db_path=str(db),
+        default="allow",
+        allow_qtypes=["A"],
+        deny_response="refused",
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+
+    q_mx, wire_mx = _mk_query("ok.com", "MX")
+
+    with closing(p.conn):
+        dec_mx = p.pre_resolve("ok.com", QTYPE.MX, wire_mx, ctx)
+        assert isinstance(dec_mx, PluginDecision)
+        assert dec_mx.action == "override"
+        reply = DNSRecord.parse(dec_mx.response)
+        assert reply.header.rcode == RCODE.REFUSED
+
+        dec_a = p.pre_resolve("ok.com", QTYPE.A, b"", ctx)
+        assert isinstance(dec_a, PluginDecision)
+        assert dec_a.action == "skip"
+
+
+def test_pre_resolve_qtype_denylist_takes_precedence(tmp_path):
+    """Brief: deny_qtypes overrides allow_qtypes for conflicting entries.
+
+    Inputs:
+      - allow_qtypes: ["A", "MX"]
+      - deny_qtypes: ["MX"]
+
+    Outputs:
+      - None: Asserts MX is denied and A is allowed.
+    """
+    db = tmp_path / "bl_qtypes_deny.db"
+    p = FilterPlugin(
+        db_path=str(db),
+        default="allow",
+        allow_qtypes=["A", "MX"],
+        deny_qtypes=["MX"],
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+    q_mx, wire_mx = _mk_query("ok.com", "MX")
+
+    with closing(p.conn):
+        dec_mx = p.pre_resolve("ok.com", QTYPE.MX, wire_mx, ctx)
+        assert isinstance(dec_mx, PluginDecision)
+        assert dec_mx.action == "deny"
+
+        dec_a = p.pre_resolve("ok.com", QTYPE.A, b"", ctx)
+        assert isinstance(dec_a, PluginDecision)
+        assert dec_a.action == "skip"
 
 
 def test_pre_resolve_allow_keyword_and_pattern(tmp_path, caplog):
@@ -381,7 +447,7 @@ def test_init_files_and_invalid_ips_and_actions(tmp_path):
     Brief: Initialization loads allow/block files and handles invalid IP configs.
 
     Inputs:
-      - allowlist_files, blocklist_files, blocked_ips entries with invalid formats/actions
+      - allowed_domains_files, blocked_domains_files, blocked_ips entries with invalid formats/actions
 
     Outputs:
       - None: Asserts is_allowed for files and deny default on unknown action
@@ -394,8 +460,8 @@ def test_init_files_and_invalid_ips_and_actions(tmp_path):
     p = FilterPlugin(
         db_path=str(tmp_path / "bl.db"),
         default="allow",
-        allowlist_files=[str(allowf)],
-        blocklist_files=[str(blockf)],
+        allowed_domains_files=[str(allowf)],
+        blocked_domains_files=[str(blockf)],
         blocked_ips=[
             123,  # invalid entry format
             {"ip": "1.1.1.1", "action": "UNKNOWN"},  # defaults to deny
@@ -629,13 +695,13 @@ def test_post_resolve_unmatched_and_non_ip_records(tmp_path):
         assert dec2.action == "skip"
 
 
-def test_glob_expansion_for_blocklist_and_allowlist_files(tmp_path):
+def test_glob_expansion_for_allowed_and_blocked_domain_files(tmp_path):
     """
-    Brief: Glob patterns in blocklist_files and allowlist_files are expanded to load multiple files.
+    Brief: Glob patterns in allowed_domains_files and blocked_domains_files are expanded to load multiple files.
 
     Inputs:
-      - allowlist_files: glob pattern matching multiple files
-      - blocklist_files: glob pattern matching multiple files
+      - allowed_domains_files: glob pattern matching multiple files
+      - blocked_domains_files: glob pattern matching multiple files
 
     Outputs:
       - None: Asserts domains from expanded files are correctly allowed/denied
@@ -657,8 +723,8 @@ def test_glob_expansion_for_blocklist_and_allowlist_files(tmp_path):
     p = FilterPlugin(
         db_path=str(tmp_path / "bl.db"),
         default="deny",
-        allowlist_files=[str(allow_dir / "*.txt")],
-        blocklist_files=[str(block_dir / "*.txt")],
+        allowed_domains_files=[str(allow_dir / "*.txt")],
+        blocked_domains_files=[str(block_dir / "*.txt")],
     )
     plugin = p
     plugin.setup()
@@ -676,8 +742,45 @@ def test_glob_expansion_for_blocklist_and_allowlist_files(tmp_path):
         assert plugin.is_allowed("unknown.com") is False
 
 
+def test_legacy_file_keys_are_ignored_when_new_keys_used(tmp_path):
+    """Brief: Legacy blocklist_files/allowlist_files keys are ignored when new *_domains_files are present.
+
+    Inputs:
+      - tmp_path: temporary directory.
+
+    Outputs:
+      - None: Asserts that invalid legacy file paths do not affect behavior when
+        allowed_domains_files/blocked_domains_files are configured.
+    """
+    allowf = tmp_path / "allow-legacy.txt"
+    blockf = tmp_path / "block-legacy.txt"
+    allowf.write_text("allow-legacy.com\n")
+    blockf.write_text("block-legacy.com\n")
+
+    # blocklist_files / allowlist_files are not part of the public schema
+    # anymore; when passed directly to the plugin they should be ignored
+    # entirely rather than causing migration errors or file lookups.
+    p = FilterPlugin(
+        db_path=str(tmp_path / "bl_legacy_ignored.db"),
+        # Deliberately bogus legacy paths: if these were ever used, FileNotFoundError
+        # would be raised by _expand_globs.
+        blocklist_files=["./definitely/missing-block.txt"],
+        allowlist_files=["./definitely/missing-allow.txt"],
+        # New-style configuration actually used for loading.
+        allowed_domains_files=[str(allowf)],
+        blocked_domains_files=[str(blockf)],
+        default="deny",
+    )
+    plugin = p
+    plugin.setup()
+
+    with closing(plugin.conn):
+        assert plugin.is_allowed("allow-legacy.com") is True
+        assert plugin.is_allowed("block-legacy.com") is False
+
+
 def test_multiple_filter_instances_use_isolated_dbs_by_default(tmp_path):
-    """Brief: Default db_path uses per-instance in-memory DB, so instances do not share state.
+    """Brief: Instances do not share state when using per-instance cache overrides.
 
     Inputs:
       - tmp_path: temporary directory (unused, kept for symmetry with other tests).
@@ -686,12 +789,20 @@ def test_multiple_filter_instances_use_isolated_dbs_by_default(tmp_path):
       - None: Asserts that two FilterPlugin instances block only their own domains.
     """
     # First plugin blocks p1-block.com only.
-    p1 = FilterPlugin(default="allow", blocked_domains=["p1-block.com"])
+    p1 = FilterPlugin(
+        default="allow",
+        blocked_domains=["p1-block.com"],
+        cache=InMemoryTTLCachePlugin(),
+    )
     p1.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     # Second plugin blocks p2-block.com only.
-    p2 = FilterPlugin(default="allow", blocked_domains=["p2-block.com"])
+    p2 = FilterPlugin(
+        default="allow",
+        blocked_domains=["p2-block.com"],
+        cache=InMemoryTTLCachePlugin(),
+    )
     p2.setup()
 
     # p1 sees its own blocked domain but not p2's.

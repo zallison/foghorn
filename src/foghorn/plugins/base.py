@@ -24,8 +24,38 @@ from dnslib import (  # noqa: F401 - imports are for implementations of this cla
     DNSRecord,
 )
 
-from foghorn.cache import FoghornTTLCache
-from foghorn.logging_config import BracketLevelFormatter, SyslogFormatter
+from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
+from foghorn.cache_plugins.base import CachePlugin
+from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.config.logging_config import BracketLevelFormatter, SyslogFormatter
+
+# Canonical DNS response cache used by the resolver.
+#
+# Brief:
+#   This is intentionally defined at module scope so the core resolver
+#   (foghorn.server.resolve_query_bytes) and all transports share a single
+#   cache object.
+#
+# Inputs:
+#   - None
+#
+# Outputs:
+#   - DNS_CACHE: CachePlugin instance
+DNS_CACHE: CachePlugin = InMemoryTTLCachePlugin()
+
+# Canonical DNS response cache used by the resolver.
+#
+# Brief:
+#   This is intentionally defined at module scope so the core resolver
+#   (foghorn.server.resolve_query_bytes) and all transports share a single
+#   cache object.
+#
+# Inputs:
+#   - None
+#
+# Outputs:
+#   - DNS_CACHE: CachePlugin instance
+DNS_CACHE: CachePlugin = InMemoryTTLCachePlugin()
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +68,44 @@ _PLUGIN_LOG_LEVELS = {
     "crit": logging.CRITICAL,
     "critical": logging.CRITICAL,
 }
+
+
+@dataclass
+class AdminPageSpec:
+    """Brief: Describe a plugin-contributed admin web UI page.
+
+    Inputs (constructor fields):
+      - slug: Short, URL-safe identifier for the page (e.g. "docker-hosts").
+      - title: Human-friendly page title shown in the UI tab.
+      - description: Optional short help text for the page.
+      - layout: Optional layout hint; "one_column" or "two_column". Defaults
+        to "one_column" when omitted or unknown.
+      - kind: Optional implementation hint used by the core UI for
+        well-known page types (for example, "docker_hosts"). Custom plugins can
+        leave this unset.
+      - html_left: Optional HTML fragment rendered into the left admin column
+        when layout == "two_column" or the primary column when layout is
+        "one_column".
+      - html_right: Optional HTML fragment rendered into the right admin column
+        when layout == "two_column".
+
+    Outputs:
+      - AdminPageSpec instance suitable for JSON-serialization via a simple
+        dataclasses.asdict() or attribute inspection.
+
+    Example:
+      >>> page = AdminPageSpec(slug="docker-hosts", title="Docker Hosts")
+      >>> page.layout
+      'one_column'
+    """
+
+    slug: str
+    title: str
+    description: Optional[str] = None
+    layout: str = "one_column"
+    kind: Optional[str] = None
+    html_left: Optional[str] = None
+    html_right: Optional[str] = None
 
 
 @dataclass
@@ -181,10 +249,14 @@ class BasePlugin:
 
     ttl: ClassVar[int] = 300
 
-    pre_priority: ClassVar[int] = 50
-    post_priority: ClassVar[int] = 50
-    setup_priority: ClassVar[int] = 50
+    pre_priority: ClassVar[int] = 100
+    post_priority: ClassVar[int] = 100
+    setup_priority: ClassVar[int] = 100
     aliases: ClassVar[Sequence[str]] = ()
+    # Query-type targeting: plugins may override this at the class level to
+    # restrict which qtypes they apply to. By default, all qtypes are targeted
+    # via the "*" wildcard.
+    target_qtypes: ClassVar[Sequence[str]] = ("*",)
 
     @classmethod
     def get_aliases(cls) -> Sequence[str]:
@@ -278,7 +350,7 @@ class BasePlugin:
         # config as a fallback, then class default.
         raw_setup = config.get(
             "setup_priority",
-            config.get("pre_priority", getattr(self.__class__, "setup_priority", 50)),
+            config.get("pre_priority", getattr(self.__class__, "setup_priority", 100)),
         )
         self.setup_priority = self._parse_priority_value(
             raw_setup,
@@ -296,6 +368,21 @@ class BasePlugin:
         # The TTL is configurable via targets_cache_ttl_seconds (default 300s).
         self._targets_cache_ttl: int = int(config.get("targets_cache_ttl_seconds", 300))
         self._targets_cache: FoghornTTLCache = FoghornTTLCache()
+
+        # Optional qtype targeting: normalize configured target_qtypes into
+        # uppercase mnemonic values (e.g., ["A", "AAAA"], or ["*."]). When the
+        # resolved list is empty or contains "*", all qtypes are targeted.
+        #
+        # For backwards compatibility with older plugins, allow an
+        # `apply_to_qtypes` config key as an alias for `target_qtypes` when the
+        # latter is not explicitly provided.
+        raw_qtypes_cfg = config.get("target_qtypes")
+        if raw_qtypes_cfg is None:
+            raw_qtypes_cfg = config.get(
+                "apply_to_qtypes",
+                getattr(self.__class__, "target_qtypes", ("*",)),
+            )
+        self._target_qtypes = self._normalize_qtype_list(raw_qtypes_cfg)
 
     def _init_instance_logger(self, logging_cfg: Dict[str, object]) -> None:
         """Brief: Configure an optional per-plugin logger from a logging config block.
@@ -380,6 +467,45 @@ class BasePlugin:
         self.logger = plugin_logger
 
     @staticmethod
+    def _normalize_qtype_list(raw: object) -> List[str]:
+        """Brief: Normalize a raw target_qtypes config value into qtype names.
+
+        Inputs:
+          - raw: Configuration value for target_qtypes. May be None, a
+            single string, or a list/tuple of strings or string-like objects
+            representing qtype mnemonics (e.g., "A", "AAAA") or "*".
+
+        Outputs:
+          - list[str]: Uppercase qtype names; empty when no valid entries are
+            provided. The wildcard "*" is preserved when present.
+        """
+        if raw is None:
+            return ["*"]
+
+        if isinstance(raw, str):
+            entries = [raw]
+        elif isinstance(raw, (list, tuple)):
+            entries = [str(x) for x in raw]
+        else:
+            logger.warning(
+                "BasePlugin: ignoring invalid target_qtypes value %r (expected str or list)",
+                raw,
+            )
+            return ["*"]
+
+        normalized: List[str] = []
+        for entry in entries:
+            text = str(entry).strip()
+            if not text:
+                continue
+            if text == "*":
+                # Wildcard applies to all qtypes; no need to collect others.
+                return ["*"]
+            normalized.append(text.upper())
+
+        return normalized or ["*"]
+
+    @staticmethod
     def _parse_priority_value(value: object, key: str, logger: logging.Logger) -> int:
         """Brief: Parse and clamp a priority value to the inclusive range [1, 255].
 
@@ -389,7 +515,7 @@ class BasePlugin:
           - logger: Logger instance for warnings.
 
         Outputs:
-          - int: Clamped priority value in range [1, 255]; defaults to 50 on invalid input.
+          - int: Clamped priority value in range [1, 255]; defaults to 100 on invalid input.
 
         Example:
             >>> BasePlugin._parse_priority_value("25", "pre_priority", logger)
@@ -397,7 +523,7 @@ class BasePlugin:
             >>> BasePlugin._parse_priority_value(300, "post_priority", logger)
             255
         """
-        default = 50
+        default = 100
         try:
             val = int(value)  # type: ignore[arg-type]
         except (ValueError, TypeError):
@@ -544,6 +670,130 @@ class BasePlugin:
             pass
 
         return result
+
+    def targets_qtype(self, qtype: Union[int, str]) -> bool:
+        """Brief: Determine whether this plugin targets the given DNS qtype.
+
+        Inputs:
+          - qtype: DNS RR type, as an integer code or mnemonic string.
+
+        Outputs:
+          - bool: True if the plugin should run for this qtype based on its
+            target_qtypes configuration; False otherwise.
+        """
+        # Fast path: wildcard or empty list means "all qtypes".
+        try:
+            qtypes = list(getattr(self, "_target_qtypes", ["*"]))
+        except (
+            Exception
+        ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+            qtypes = ["*"]
+
+        if not qtypes or "*" in qtypes:
+            return True
+
+        name = self.qtype_name(qtype)
+        return str(name).upper() in {qt.upper() for qt in qtypes}
+
+    @staticmethod
+    def qtype_name(qtype: Union[int, str]) -> str:
+        """Brief: Normalize a DNS qtype value to its uppercase mnemonic.
+
+        Inputs:
+          - qtype: DNS RR type as an integer code (e.g. 1) or mnemonic string
+            (e.g. "A", "AAAA").
+
+        Outputs:
+          - str: Uppercase qtype name when resolvable, or stringified value
+            when the code is unknown.
+        """
+        if isinstance(qtype, int):
+            try:
+                name = QTYPE.get(qtype, str(qtype))
+            except Exception:  # pragma: no cover - defensive
+                name = str(qtype)
+            return str(name).upper()
+        return str(qtype).upper()
+
+    @staticmethod
+    def normalize_qname(
+        qname: object,
+        *,
+        lower: bool = True,
+        strip_trailing_dot: bool = True,
+    ) -> str:
+        """Brief: Normalize a qname-like value into a DNS name string.
+
+        Inputs:
+          - qname: Value representing a domain name (string or dnslib QNAME).
+          - lower: When True (default), lower-case the result.
+          - strip_trailing_dot: When True (default), remove a final trailing
+            dot while preserving interior dots.
+
+        Outputs:
+          - str: Normalized domain name string (may be empty when input is
+            empty or cannot be coerced).
+        """
+        try:
+            text = str(qname)
+        except Exception:  # pragma: no cover - defensive
+            text = ""
+
+        if strip_trailing_dot:
+            text = text.rstrip(".")
+        if lower:
+            text = text.lower()
+        return text
+
+    @staticmethod
+    def base_domain(qname: object, base_labels: int = 2) -> str:
+        """Brief: Extract a base domain using the last N labels from qname.
+
+        Inputs:
+          - qname: Domain name-like value; may include a trailing dot.
+          - base_labels: Number of rightmost labels that define the base
+            domain (default 2, e.g. "example.com").
+
+        Outputs:
+          - str: Base domain string such as 'example.com' for
+            'a.b.example.com.', or the normalized name itself when it has
+            fewer than base_labels labels.
+        """
+        name = BasePlugin.normalize_qname(qname, lower=True, strip_trailing_dot=True)
+        if not name:
+            return ""
+        labels = [p for p in name.split(".") if p]
+        if len(labels) >= int(base_labels):
+            return ".".join(labels[-int(base_labels) :])
+        return name
+
+    def get_admin_ui_descriptor(self) -> Optional[Dict[str, object]]:
+        """Brief: Describe this plugin's admin web UI surface (if any).
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - Optional[dict]: Minimal metadata describing this plugin's admin UI,
+            or None when the plugin does not contribute any admin UI.
+
+        Notes:
+          - Subclasses that expose admin web pages should override this method
+            and return a JSON-serializable mapping. Common keys include:
+
+              * name (str): Effective plugin instance name used for routing.
+              * title (str): Human-friendly tab title for the admin UI.
+              * kind (str): Short identifier used by the frontend to pick a
+                renderer (for example, "docker_hosts" or "mdns_services").
+              * order (int): Optional ordering hint (lower appears earlier).
+              * endpoints (dict): Optional mapping of logical endpoint names to
+                URLs (for example, {"snapshot": "/api/v1/plugins/{name}/..."}).
+
+          - The base implementation returns None so plugins without admin UI do
+            not appear in generic discovery responses.
+        """
+
+        return None
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext

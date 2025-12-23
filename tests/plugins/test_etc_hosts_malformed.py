@@ -27,12 +27,12 @@ def test_etc_hosts_load_hosts_malformed_single_entry_with_comment(tmp_path):
       127.0.0.1 home
       192.168.88.3       # <-- invalid
     """
-    mod = importlib.import_module("foghorn.plugins.etc-hosts")
+    mod = importlib.import_module("foghorn.plugins.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
     hosts_file.write_text("127.0.0.1 home\n192.168.88.3       # <-- invalid\n")
 
     with pytest.raises(ValueError):
-        plugin = EtcHosts(file_path=str(hosts_file))
+        plugin = EtcHosts(file_paths=[str(hosts_file)])
         plugin.setup()

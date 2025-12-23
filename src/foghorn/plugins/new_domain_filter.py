@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from foghorn.cache import FoghornTTLCache
+from foghorn.current_cache import get_current_namespaced_cache, module_namespace
 
 # Try to import popular whois libraries in a robust way
 try:
@@ -112,7 +112,10 @@ class NewDomainFilterPlugin(BasePlugin):
         )
 
         # In-memory cache and persistent DB for WHOIS results
-        self._whois_cache = FoghornTTLCache()
+        self._whois_cache = get_current_namespaced_cache(
+            namespace=module_namespace(__file__),
+            cache_plugin=self.config.get("cache"),
+        )
         self._db_lock = threading.Lock()
         self._db_init()
 

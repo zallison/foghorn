@@ -13,22 +13,22 @@ import logging
 from foghorn.plugins.base import BasePlugin, PluginContext
 
 
-def test_default_priorities_are_50():
+def test_default_priorities_are_100():
     """
-    Brief: Verify BasePlugin defaults to pre_priority=50 and post_priority=50.
+    Brief: Verify BasePlugin defaults to pre_priority=100 and post_priority=100.
 
     Inputs:
       - None
 
     Outputs:
-      - None: Asserts class and instance default priorities are 50
+      - None: Asserts class and instance default priorities are 100
     """
-    assert BasePlugin.pre_priority == 50
-    assert BasePlugin.post_priority == 50
+    assert BasePlugin.pre_priority == 100
+    assert BasePlugin.post_priority == 100
 
     plugin = BasePlugin()
-    assert plugin.pre_priority == 50
-    assert plugin.post_priority == 50
+    assert plugin.pre_priority == 100
+    assert plugin.post_priority == 100
 
 
 def test_class_attribute_defaults_respected():
@@ -52,9 +52,9 @@ def test_class_attribute_defaults_respected():
     b = PluginB()
 
     assert a.pre_priority == 10
-    assert a.post_priority == 50  # default
+    assert a.post_priority == 100  # default
     assert b.pre_priority == 100
-    assert b.post_priority == 50  # default
+    assert b.post_priority == 100  # default
 
 
 def test_yaml_config_overrides_class_defaults():
@@ -121,12 +121,12 @@ def test_invalid_type_uses_default(caplog):
       - Config: pre_priority="abc", post_priority=None
 
     Outputs:
-      - None: Asserts pre=50, post=50 (defaults); warning logged for "abc"
+      - None: Asserts pre=100, post=100 (defaults); warning logged for "abc"
     """
     with caplog.at_level(logging.WARNING):
         plugin = BasePlugin(pre_priority="abc")
 
-    assert plugin.pre_priority == 50  # fallback to class default
+    assert plugin.pre_priority == 100  # fallback to class default
     assert any("Invalid pre_priority" in rec.message for rec in caplog.records)
 
 
@@ -135,7 +135,7 @@ def test_stable_ties_preserve_registration_order():
     Brief: Plugins with equal priorities execute in registration order (stable sort).
 
     Inputs:
-      - Three plugins all with pre_priority=50 (default)
+      - Three plugins all with equal default pre_priority.
 
     Outputs:
       - None: Asserts sorted order equals original order
@@ -254,7 +254,7 @@ def test_mixed_priorities_and_defaults():
     Brief: Mix of explicit and default priorities sorts correctly.
 
     Inputs:
-      - PluginA pre=1, PluginB pre=default(50), PluginC pre=100
+      - PluginA pre=1, PluginB pre=default(100), PluginC pre=200
 
     Outputs:
       - None: Asserts execution order A -> B -> C
@@ -264,10 +264,10 @@ def test_mixed_priorities_and_defaults():
         pre_priority = 1
 
     class PluginB(BasePlugin):
-        pass  # defaults to 50
+        pass  # defaults to 100
 
     class PluginC(BasePlugin):
-        pre_priority = 100
+        pre_priority = 200
 
     plugins = [PluginC(), PluginB(), PluginA()]
     sorted_plugins = sorted(plugins, key=lambda p: getattr(p, "pre_priority", 50))

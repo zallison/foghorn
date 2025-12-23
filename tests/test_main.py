@@ -12,37 +12,10 @@ from unittest.mock import mock_open, patch
 
 import pytest
 
+import foghorn.config.config_parser as parser_mod
 import foghorn.main as main_mod
-from foghorn.main import (
-    _get_min_cache_ttl,
-    load_plugins,
-    main,
-    normalize_upstream_config,
-)
-
-
-def test_get_min_cache_ttl_various_inputs():
-    """
-    Brief: _get_min_cache_ttl clamps negatives and handles bad types.
-
-    Inputs:
-      - cfg: dict with min_cache_ttl values
-
-    Outputs:
-      - None: Asserts sanitized integer result
-    """
-    # Root-level (legacy) placement
-    assert _get_min_cache_ttl({"min_cache_ttl": 10}) == 10
-    assert _get_min_cache_ttl({"min_cache_ttl": -5}) == 0
-    assert _get_min_cache_ttl({"min_cache_ttl": "abc"}) == 0
-    assert _get_min_cache_ttl({}) == 0
-
-    # New canonical placement under foghorn
-    assert _get_min_cache_ttl({"foghorn": {"min_cache_ttl": 42}}) == 42
-    # Nested value should override a conflicting root-level value
-    assert (
-        _get_min_cache_ttl({"min_cache_ttl": 5, "foghorn": {"min_cache_ttl": 9}}) == 9
-    )
+from foghorn.config.config_parser import load_plugins, normalize_upstream_config
+from foghorn.main import main
 
 
 def test_normalize_upstream_config_list_only_and_timeout_default():
@@ -109,13 +82,44 @@ def test_load_plugins_uses_registry(monkeypatch):
             alias_map.get(identifier, alias_map["a"]) if identifier in alias_map else P2
         )
 
-    monkeypatch.setattr(main_mod, "discover_plugins", fake_discover)
-    monkeypatch.setattr(main_mod, "get_plugin_class", fake_get)
+    monkeypatch.setattr(parser_mod, "discover_plugins", fake_discover)
+    monkeypatch.setattr(parser_mod, "get_plugin_class", fake_get)
 
-    plugins = load_plugins(["a", {"module": "pkg.P2", "config": {"x": 1}}])
+    # Patch global cache and cache loader so load_plugins injects a cache instance.
+    import foghorn.plugins.base as plugin_base
+
+    global_cache = object()
+    plugin_base.DNS_CACHE = global_cache  # type: ignore[assignment]
+
+    custom_cache = object()
+
+    def fake_load_cache_plugin(cfg):  # type: ignore[no-untyped-def]
+        assert cfg == {"module": "none"}
+        return custom_cache
+
+    monkeypatch.setattr(
+        parser_mod,
+        "load_cache_plugin",
+        fake_load_cache_plugin,
+        raising=False,
+    )
+
+    plugins = load_plugins(
+        [
+            "a",
+            {"module": "pkg.P2", "config": {"x": 1, "cache": {"module": "none"}}},
+        ]
+    )
     assert type(plugins[0]).__name__ == "P1"
     assert type(plugins[1]).__name__ == "P2"
-    assert plugins[1].kw == {"x": 1}
+
+    # Plugin 1: no cache selected -> global cache injected.
+    assert plugins[0].kw.get("cache") is global_cache
+
+    # Plugin 2: explicit cache config -> custom cache injected; raw cache config removed.
+    assert plugins[1].kw.get("cache") is custom_cache
+    assert plugins[1].kw.get("x") == 1
+    assert not isinstance(plugins[1].kw.get("cache"), dict)
 
 
 def test_normalize_upstream_config_rejects_non_list():
@@ -165,7 +169,8 @@ def test_main_starts_server_and_handles_keyboardinterrupt(monkeypatch):
         "upstreams:\n"
         "  - host: 1.1.1.1\n"
         "    port: 53\n"
-        "foghorn:\n  timeout_ms: 777\n  min_cache_ttl: 33\n"
+        "cache:\n  module: in_memory_ttl\n  config:\n    min_cache_ttl: 33\n"
+        "foghorn:\n  timeout_ms: 777\n"
         "plugins: []\n"
     )
 

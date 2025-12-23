@@ -1,5 +1,5 @@
 """
-Brief: Unit tests for internal behaviors of foghorn.doh_api.
+Brief: Unit tests for internal behaviors of foghorn.api.doh_api.
 
 Inputs:
   - None
@@ -28,7 +28,7 @@ except (
         allow_module_level=True,
     )
 
-import foghorn.doh_api as doh_api
+import foghorn.servers.doh_api as doh_api
 
 
 def test_b64url_decode_nopad_non_str_raises_valueerror() -> None:

@@ -4,7 +4,9 @@ from unittest.mock import Mock, patch
 
 from dnslib import QTYPE, DNSRecord
 
-from foghorn.server import DNSUDPHandler
+from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins import base as plugin_base
+from foghorn.servers.server import DNSUDPHandler
 from foghorn.stats import StatsCollector
 
 
@@ -15,7 +17,7 @@ def test_stats_collected_on_query():
 
     # Attach to handler
     DNSUDPHandler.stats_collector = collector
-    DNSUDPHandler.cache.purge_expired()  # Clear cache
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()  # Clear cache
     DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
     DNSUDPHandler.plugins = []
 
@@ -77,7 +79,7 @@ def test_stats_cache_hit():
     response = query.reply()
     response_wire = response.pack()
     cache_key = ("cached.example.com", QTYPE.A)
-    DNSUDPHandler.cache.set(cache_key, 300, response_wire)
+    plugin_base.DNS_CACHE.set(cache_key, 300, response_wire)
 
     # Create handler without calling __init__
     handler = DNSUDPHandler.__new__(DNSUDPHandler)

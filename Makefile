@@ -4,7 +4,11 @@ PREFIX ?= ${USER}
 CONTAINER_NAME ?= foghorn
 CONTAINER_DATA ?= ./.docker
 TAG ?= latest
+LISTEN ?= 0.0.0.0
+# Default ports
 ADMINPORT ?= 8053
+UDPPORT ?= 53
+TCPPORT ?= 53
 # Files/folders that should NOT be deleted by `clean`
 # (Keep YAML files, so we exclude *.yaml and *.yml from the delete patterns)
 IGNORE_EXTS :=  .yaml .yml
@@ -19,7 +23,7 @@ IGNORE_EXTS :=  .yaml .yml
 run: $(VENV)/bin/foghorn
 	. ${VENV}/bin/activate
 	mkdir var 2>/dev/null || true
-	${VENV}/bin/foghorn --config config/config.yaml
+	LISTEN=${LISTEN} ${VENV}/bin/foghorn --config config/config.yaml
 
 
 # ------------------------------------------------------------
@@ -74,8 +78,8 @@ clean:
 docker: clean docker-build docker-run docker-logs
 
 .PHONY: docker-build
-docker-build: $(VENV)/bin/foghorn
-	rsync -qr --exclude='*/__pycache__/*' --delete-during ./entrypoint.sh ./*md ./src ./html ./Makefile ./pyproject.toml ./Dockerfile ./docker-compose.yaml ./assets docker-build/
+docker-build:
+	rsync -qr --exclude='*/__pycache__/*' --delete-during LICENSE.txt ./entrypoint.sh ./src ./html ./pyproject.toml ./Dockerfile ./docker-compose.yaml ./assets ./docs ./scripts docker-build/
 	docker build ./docker-build -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-clean
@@ -86,7 +90,16 @@ docker-clean:
 .PHONY: docker-run
 docker-run: docker-build
 	docker rm -f foghorn
-	docker run --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ -d -p 53:5333/udp -p 53:5333/tcp -p ${ADMINPORT}:8053/tcp -p 853:1853/tcp -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker run -d --privileged --net=host --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ \
+		 -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
+
+# Port forwarding
+.PHONY: docker-run-not-host
+docker-run-not-host: docker-build
+	docker rm -f foghorn
+	docker run -d --privileged --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ \
+		-p 5353:5353 -p ${UDPPORT}:5333/udp -p ${TCPPORT}:5333/tcp -p ${ADMINPORT}:8053/tcp \
+	 	-v /etc/hosts:/etc/hosts:ro --restart unless-stopped ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-logs
 docker-logs:
@@ -102,12 +115,12 @@ dev-ship: clean docker-build
 .PHONY: help
 help:
 	@echo "Makefile targets:"
-	@echo "  run	        – Execute foghorn --config config/config.yaml (depends on build)"
-	@echo "  env	        – Create virtual environment in $(VENV)"
+	@echo "  run	         – Execute foghorn --config config/config.yaml (depends on build)"
+	@echo "  env	         – Create virtual environment in $(VENV)"
 	@echo "  build          – Install project in editable mode (with dev dependencies) into $(VENV)"
-	@echo "  test	        – Run pytest with coverage"
-	@echo "  clean	        – Remove venv/, var/, build/, and temp files"
-	@echo "  docker	        – Clean image, build it, run container, then follow logs"
+	@echo "  test	         – Run pytest with coverage"
+	@echo "  clean	         – Remove venv/, var/, build/, and temp files"
+	@echo "  docker         – Clean image, build it, run container, then follow logs"
 	@echo "  docker-build   – Build docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
 	@echo "  docker-clean   – Remove docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
 	@echo "  docker-run     – Run docker container (ports 53/udp, 53/tcp, 8053/tcp)"

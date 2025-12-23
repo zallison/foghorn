@@ -46,20 +46,6 @@ def test__clamp_one_in_non_int_and_lt1(caplog):
     )
 
 
-def test__is_target_client_invalid_ip_and_no_targets():
-    """
-    Brief: _is_target_client returns False for invalid ctx IP and when no targets configured.
-
-    Inputs:
-      - None
-    Outputs:
-      - None; asserts False in both conditions
-    """
-    p = FlakyServer()  # no allow/client_ip
-    assert p._is_target_client("not-an-ip") is False
-    assert p._is_target_client("192.0.2.55") is False
-
-
 def test__is_target_qtype_with_int_and_unknown():
     """
     Brief: _is_target_qtype handles int qtype values and unknown names.
@@ -69,7 +55,7 @@ def test__is_target_qtype_with_int_and_unknown():
     Outputs:
       - None; asserts matching and non-matching correctly
     """
-    p = FlakyServer(allow=["192.0.2.0/24"], apply_to_qtypes=["A"])  # focuses A only
+    p = FlakyServer(apply_to_qtypes=["A"])  # focuses A only
     assert p._is_target_qtype(QTYPE.A) is True
     assert p._is_target_qtype(QTYPE.AAAA) is False
     # Unknown literal name should not match
@@ -85,7 +71,7 @@ def test__make_response_error_path_returns_none(monkeypatch):
     Outputs:
       - None; asserts no exception and None decision
     """
-    p = FlakyServer(client_ip="192.0.2.55", servfail_one_in=1, seed=1)
+    p = FlakyServer(targets=["192.0.2.55"], servfail_percent=100.0, seed=1)
     # Feed invalid wire to _make_response directly
     assert p._make_response(b"\x00", RCODE.SERVFAIL) is None
     # In pre_resolve path with invalid wire, errors should be swallowed and return None
@@ -104,3 +90,144 @@ def test_seed_bad_value_falls_back_to_systemrandom(caplog):
     caplog.set_level("WARNING")
     _ = FlakyServer(seed="not-int")
     assert any("bad seed" in r.message for r in caplog.records)
+
+
+def test_percent_fields_control_probabilities():
+    """Brief: servfail_percent/nxdomain_percent control behaviour deterministically.
+
+    Inputs:
+      - None; constructs FlakyServer with 100% probabilities.
+    Outputs:
+      - None; asserts SERVFAIL and NXDOMAIN are produced for targeted client.
+    """
+    q, wire = _mk_query()
+
+    # 100% SERVFAIL with zero NXDOMAIN probability.
+    p_serv = FlakyServer(
+        targets=["192.0.2.55"],
+        servfail_percent=100.0,
+        nxdomain_percent=0.0,
+        seed=1,
+    )
+    dec1 = p_serv.pre_resolve("example.com", QTYPE.A, wire, PluginContext("192.0.2.55"))
+    assert dec1 is not None
+    resp1 = DNSRecord.parse(dec1.response)
+    assert resp1.header.rcode == RCODE.SERVFAIL
+
+    # 100% NXDOMAIN with zero SERVFAIL probability.
+    p_nx = FlakyServer(
+        targets=["192.0.2.55"],
+        servfail_percent=0.0,
+        nxdomain_percent=100.0,
+        seed=1,
+    )
+    dec2 = p_nx.pre_resolve("example.com", QTYPE.A, wire, PluginContext("192.0.2.55"))
+    assert dec2 is not None
+    resp2 = DNSRecord.parse(dec2.response)
+    assert resp2.header.rcode == RCODE.NXDOMAIN
+
+
+def test_timeout_formerr_and_noerror_empty_decisions():
+    """Brief: timeout/formerr/noerror_empty paths return expected actions/rcodes.
+
+    Inputs:
+      - FlakyServer configured with 100% probabilities for each behavior.
+    Outputs:
+      - None; asserts drop/formerr/noerror-empty behaviours.
+    """
+    q, wire = _mk_query()
+
+    # Timeout -> drop decision, no response bytes.
+    p_timeout = FlakyServer(
+        targets=["192.0.2.55"],
+        timeout_percent=100.0,
+        servfail_percent=0.0,
+        nxdomain_percent=0.0,
+        formerr_percent=0.0,
+        noerror_empty_percent=0.0,
+        seed=1,
+    )
+    dec_t = p_timeout.pre_resolve(
+        "example.com", QTYPE.A, wire, PluginContext("192.0.2.55")
+    )
+    assert dec_t is not None
+    assert dec_t.action == "drop"
+
+    # FORMERR.
+    p_formerr = FlakyServer(
+        targets=["192.0.2.55"],
+        timeout_percent=0.0,
+        servfail_percent=0.0,
+        nxdomain_percent=0.0,
+        formerr_percent=100.0,
+        noerror_empty_percent=0.0,
+        seed=1,
+    )
+    dec_f = p_formerr.pre_resolve(
+        "example.com", QTYPE.A, wire, PluginContext("192.0.2.55")
+    )
+    assert dec_f is not None
+    resp_f = DNSRecord.parse(dec_f.response)
+    assert resp_f.header.rcode == RCODE.FORMERR
+
+    # NOERROR empty.
+    p_no = FlakyServer(
+        targets=["192.0.2.55"],
+        timeout_percent=0.0,
+        servfail_percent=0.0,
+        nxdomain_percent=0.0,
+        formerr_percent=0.0,
+        noerror_empty_percent=100.0,
+        seed=1,
+    )
+    dec_n = p_no.pre_resolve("example.com", QTYPE.A, wire, PluginContext("192.0.2.55"))
+    assert dec_n is not None
+    resp_n = DNSRecord.parse(dec_n.response)
+    assert resp_n.header.rcode == RCODE.NOERROR
+    assert not resp_n.rr  # empty answer section
+
+
+def test_post_resolve_fuzz_and_wrong_qtype():
+    """Brief: post_resolve can fuzz bytes and rewrite question qtype.
+
+    Inputs:
+      - None; uses 100%% fuzz and wrong_qtype probabilities.
+    Outputs:
+      - None; asserts response is mutated and qtype can change.
+    """
+    q, wire = _mk_query()
+    base_resp = q.reply().pack()
+
+    # Pure fuzzing: bytes change but length stays the same.
+    p_fuzz = FlakyServer(
+        targets=["192.0.2.55"],
+        servfail_percent=0.0,
+        nxdomain_percent=0.0,
+        fuzz_percent=100.0,
+        min_fuzz_bytes=1,
+        max_fuzz_bytes=4,
+        seed=1,
+    )
+    dec_fuzz = p_fuzz.post_resolve(
+        "example.com", QTYPE.A, base_resp, PluginContext("192.0.2.55")
+    )
+    assert dec_fuzz is not None
+    assert dec_fuzz.action == "override"
+    assert dec_fuzz.response != base_resp
+    assert len(dec_fuzz.response) == len(base_resp)
+
+    # Wrong-qtype mutation: question qtype changes from original.
+    p_qtype = FlakyServer(
+        targets=["192.0.2.55"],
+        servfail_percent=0.0,
+        nxdomain_percent=0.0,
+        wrong_qtype_percent=100.0,
+        seed=2,
+    )
+    dec_q = p_qtype.post_resolve(
+        "example.com", QTYPE.A, base_resp, PluginContext("192.0.2.55")
+    )
+    assert dec_q is not None
+    mutated = DNSRecord.parse(dec_q.response)
+    assert mutated.questions
+    assert mutated.questions[0].qtype != QTYPE.A

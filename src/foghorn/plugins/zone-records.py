@@ -33,6 +33,8 @@ class ZoneRecordsConfig(BaseModel):
     Inputs:
       - file_path: Legacy single records file path.
       - file_paths: Preferred list of records file paths.
+      - records: Optional list of inline records using
+        ``<domain>|<qtype>|<ttl>|<value>`` format.
       - watchdog_enabled: Enable watchdog-based reloads.
       - watchdog_min_interval_seconds: Minimum seconds between reloads.
       - watchdog_poll_interval_seconds: Optional polling interval.
@@ -44,6 +46,7 @@ class ZoneRecordsConfig(BaseModel):
 
     file_path: Optional[str] = None
     file_paths: Optional[List[str]] = None
+    records: Optional[List[str]] = None
     watchdog_enabled: Optional[bool] = None
     watchdog_min_interval_seconds: float = Field(default=1.0, ge=0)
     watchdog_poll_interval_seconds: float = Field(default=0.0, ge=0)
@@ -71,35 +74,51 @@ class ZoneRecords(BasePlugin):
 
     def setup(self) -> None:
         """
-                Brief: Initialize the plugin, load record mappings, and configure watchers.
+        Brief: Initialize the plugin, load record mappings, and configure watchers.
 
-                Inputs:
-                  - file_path (str, optional): Single records file path (legacy, preserved)
-                  - file_paths (list[str], optional): List of records file paths
-                    to load and merge in order (later overrides earlier)
-        atchdog_enabled (bool, optional): When True (default), start a
-                    watchdog-based observer to reload files automatically on change.
-                    The legacy option inotify_enabled is still accepted as an alias.
-                  - watchdog_poll_interval_seconds (float, optional): When greater than
-                    zero, enable a stat-based polling loop to detect changes even when
-                    filesystem events are not delivered (for example in some container
-                    or read-only bind-mount setups).
+        Inputs:
+          - file_paths (list[str], optional): List of records file paths
+            to load and merge in order (later overrides earlier).
+          - file_path (str, optional): Legacy single records file path.
+          - records (list[str], optional): Inline records using
+            ``<domain>|<qtype>|<ttl>|<value>`` format; merged after any
+            file-backed records.
+          - watchdog_enabled (bool, optional): When True (default), start a
+            watchdog-based observer to reload files automatically on change.
+          - watchdog_poll_interval_seconds (float, optional): When greater than
+            zero, enable a stat-based polling loop to detect changes even when
+            filesystem events are not delivered (for example in some container
+            or read-only bind-mount setups).
 
-                Outputs:
-                  - None
+        Outputs:
+          - None
 
-                Example:
-                  Legacy single file:
-                    CustomRecords(file_path="/custom/records")
-
-                  Multiple files (preferred):
-                    CustomRecords(file_paths=["/foghorn/conf/var/records.txt", "/etc/records.d/extra.txt"], watchdog_enabled=True)
+        Example:
+          Multiple files:
+            ZoneRecords(file_paths=["/foghorn/conf/var/records.txt", "/etc/records.d/extra.txt"], watchdog_enabled=True)
         """
 
-        # Normalize configuration into a list of paths.
-        legacy = self.config.get("file_path")
-        provided = self.config.get("file_paths")
-        self.file_paths: List[str] = self._normalize_paths(provided, legacy)
+        # Normalize configuration into a list of paths, allowing either
+        # file_paths or legacy file_path. When neither is provided but inline
+        # records are configured, file-backed paths remain empty.
+        provided_paths = self.config.get("file_paths")
+        legacy_path = self.config.get("file_path")
+        inline_records_cfg = self.config.get("records")
+
+        if provided_paths is not None or legacy_path is not None:
+            self.file_paths = self._normalize_paths(provided_paths, legacy_path)
+        elif inline_records_cfg:
+            # Inline-only configuration; no file-backed records.
+            self.file_paths = []
+        else:
+            # Preserve historical behaviour: fail fast when no sources are set.
+            self.file_paths = self._normalize_paths(None, None)
+
+        # Cache inline records (if any) for use by _load_records().
+        try:
+            self._inline_records = list(inline_records_cfg or [])
+        except Exception:  # pragma: no cover - defensive: config may be non-iterable
+            self._inline_records = []
 
         # Internal synchronization and state
         self._records_lock = threading.RLock()
@@ -180,7 +199,8 @@ class ZoneRecords(BasePlugin):
             for p in file_paths:
                 paths.append(os.path.expanduser(str(p)))
         if legacy:
-            # Include legacy file_path in the set of file paths
+            # legacy is kept only for the internal API; external configs must use
+            # file_paths and should never set legacy.
             paths.append(os.path.expanduser(str(legacy)))
         if not paths:
             raise ValueError(f"No paths given {self.config}")
@@ -192,7 +212,7 @@ class ZoneRecords(BasePlugin):
         """Brief: Read custom records files and build lookup structures.
 
         Inputs:
-          - None (uses self.file_paths)
+          - None (uses self.file_paths and any inline records from config).
 
         Outputs:
           - None (populates:
@@ -235,94 +255,125 @@ class ZoneRecords(BasePlugin):
         ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             soa_code = None
 
+        def _process_line(raw_line: str, source_label: str, lineno: int) -> None:
+            """Brief: Parse a single record line and merge it into mappings.
+
+            Inputs:
+              - raw_line: Original line text including any comments.
+              - source_label: Human-readable source identifier (file path or
+                inline config label).
+              - lineno: 1-based line number within the source.
+
+            Outputs:
+              - None; updates mapping, name_index, and zone_soa in-place.
+            """
+            # Remove inline comments and surrounding whitespace
+            line = raw_line.split("#", 1)[0].strip()
+            if not line:
+                return
+
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) != 4:
+                raise ValueError(
+                    f"Source {source_label} malformed line {lineno}: "
+                    f"expected <domain>|<qtype>|<ttl>|<value>, got {raw_line!r}"
+                )
+
+            domain_raw, qtype_raw, ttl_raw, value_raw = parts
+            if not domain_raw or not qtype_raw or not ttl_raw or not value_raw:
+                raise ValueError(
+                    f"Source {source_label} malformed line {lineno}: "
+                    f"empty field in {raw_line!r}"
+                )
+
+            domain = domain_raw.rstrip(".").lower()
+
+            # Parse qtype as number or mnemonic (e.g., "A", "AAAA").
+            qtype_code: Optional[int]
+            if qtype_raw.isdigit():
+                qtype_code = int(qtype_raw)
+            else:
+                name = qtype_raw.upper()
+                try:
+                    qtype_code = int(getattr(QTYPE, name))
+                except AttributeError:
+                    qtype_val = QTYPE.get(name, None)
+                    qtype_code = int(qtype_val) if isinstance(qtype_val, int) else None
+            if qtype_code is None:
+                raise ValueError(
+                    f"Source {source_label} malformed line {lineno}: "
+                    f"unknown qtype {qtype_raw!r}"
+                )
+
+            try:
+                ttl = int(ttl_raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Source {source_label} malformed line {lineno}: "
+                    f"invalid ttl {ttl_raw!r}"
+                ) from exc
+            if ttl < 0:
+                raise ValueError(
+                    f"Source {source_label} malformed line {lineno}: "
+                    f"negative ttl {ttl}"
+                )
+
+            value = value_raw
+
+            key = (domain, int(qtype_code))
+            existing = mapping.get(key)
+
+            if existing is None:
+                # First occurrence for this (domain, qtype): start a new
+                # ordered list of values and remember its TTL.
+                stored_ttl = ttl
+                values: List[str] = []
+            else:
+                # Subsequent occurrences: extend the list, but only with
+                # values we have not seen before. The TTL from the first
+                # occurrence is retained and later duplicates are
+                # dropped entirely.
+                stored_ttl, values = existing
+
+            if value not in values:
+                values.append(value)
+
+            mapping[key] = (stored_ttl, values)
+
+            # Populate per-name index for authoritative semantics.
+            per_name = name_index.setdefault(domain, {})
+            per_name[int(qtype_code)] = (stored_ttl, values)
+
+            # Track SOA records as zone apexes for authoritative zones.
+            if (
+                soa_code is not None
+                and int(qtype_code) == int(soa_code)
+                and domain not in zone_soa
+            ):
+                zone_soa[domain] = (stored_ttl, values)
+
+        # First, process any configured records files.
         for fp in self.file_paths:
             logger.debug("reading recordfile: %s", fp)
             records_path = pathlib.Path(fp)
             with records_path.open("r", encoding="utf-8") as f:
                 for lineno, raw_line in enumerate(f, start=1):
-                    # Remove inline comments and surrounding whitespace
-                    line = raw_line.split("#", 1)[0].strip()
-                    if not line:
-                        continue
+                    _process_line(raw_line, str(records_path), lineno)
 
-                    parts = [p.strip() for p in line.split("|")]
-                    if len(parts) != 4:
-                        raise ValueError(
-                            f"File {records_path} malformed line {lineno}: "
-                            f"expected <domain>|<qtype>|<ttl>|<value>, got {raw_line!r}"
-                        )
-
-                    domain_raw, qtype_raw, ttl_raw, value_raw = parts
-                    if not domain_raw or not qtype_raw or not ttl_raw or not value_raw:
-                        raise ValueError(
-                            f"File {records_path} malformed line {lineno}: "
-                            f"empty field in {raw_line!r}"
-                        )
-
-                    domain = domain_raw.rstrip(".").lower()
-
-                    # Parse qtype as number or mnemonic (e.g., "A", "AAAA").
-                    qtype_code: Optional[int]
-                    if qtype_raw.isdigit():
-                        qtype_code = int(qtype_raw)
-                    else:
-                        name = qtype_raw.upper()
-                        try:
-                            qtype_code = int(getattr(QTYPE, name))
-                        except AttributeError:
-                            qtype_val = QTYPE.get(name, None)
-                            qtype_code = (
-                                int(qtype_val) if isinstance(qtype_val, int) else None
-                            )
-                    if qtype_code is None:
-                        raise ValueError(
-                            f"File {records_path} malformed line {lineno}: unknown qtype {qtype_raw!r}"
-                        )
-
-                    try:
-                        ttl = int(ttl_raw)
-                    except ValueError as exc:
-                        raise ValueError(
-                            f"File {records_path} malformed line {lineno}: invalid ttl {ttl_raw!r}"
-                        ) from exc
-                    if ttl < 0:
-                        raise ValueError(
-                            f"File {records_path} malformed line {lineno}: negative ttl {ttl}"
-                        )
-
-                    value = value_raw
-
-                    key = (domain, int(qtype_code))
-                    existing = mapping.get(key)
-
-                    if existing is None:
-                        # First occurrence for this (domain, qtype): start a new
-                        # ordered list of values and remember its TTL.
-                        stored_ttl = ttl
-                        values: List[str] = []
-                    else:
-                        # Subsequent occurrences: extend the list, but only with
-                        # values we have not seen before. The TTL from the first
-                        # occurrence is retained and later duplicates are
-                        # dropped entirely.
-                        stored_ttl, values = existing
-
-                    if value not in values:
-                        values.append(value)
-
-                    mapping[key] = (stored_ttl, values)
-
-                    # Populate per-name index for authoritative semantics.
-                    per_name = name_index.setdefault(domain, {})
-                    per_name[int(qtype_code)] = (stored_ttl, values)
-
-                    # Track SOA records as zone apexes for authoritative zones.
-                    if (
-                        soa_code is not None
-                        and int(qtype_code) == int(soa_code)
-                        and domain not in zone_soa
-                    ):
-                        zone_soa[domain] = (stored_ttl, values)
+        # Next, merge any inline records from plugin configuration.
+        inline_records = getattr(self, "_inline_records", None) or []
+        for lineno, raw_line in enumerate(inline_records, start=1):
+            try:
+                text = str(raw_line)
+            except Exception as exc:  # pragma: no cover - defensive: log and skip
+                logger.warning(
+                    "Skipping non-string inline record at index %d: %r (%s)",
+                    lineno,
+                    raw_line,
+                    exc,
+                )
+                continue
+            _process_line(text, "inline-config-records", lineno)
 
         lock = getattr(self, "_records_lock", None)
 

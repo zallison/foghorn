@@ -57,7 +57,7 @@ plugins:
 
       # Domain lists produced by the downloader above. AdguardDNS uses a
       # non-hashed filename; the others are hashed, so we use simple globs.
-      blocklist_files:
+      blocked_domains_files:
         - ./config/var/lists/AdguardDNS.txt
         - ./config/var/lists/Easylist-*.txt
         - ./config/var/lists/Prigent-Ads-*.txt

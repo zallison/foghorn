@@ -9,11 +9,13 @@ Outputs:
 """
 
 import pytest
-from dnslib import QTYPE, RCODE, DNSRecord
+from dnslib import QTYPE, RCODE, DNSRecord, RR, A
 
-import foghorn.server as server_mod
+import foghorn.servers.server as server_mod
+from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins import base as plugin_base
 from foghorn.plugins.base import BasePlugin, PluginContext, PluginDecision
-from foghorn.server import DNSUDPHandler, resolve_query_bytes
+from foghorn.servers.server import DNSUDPHandler, resolve_query_bytes
 
 
 class _DenyPlugin(BasePlugin):
@@ -54,7 +56,7 @@ def test_resolve_query_bytes_cache_hit():
     DNSUDPHandler.plugins = []
     q = DNSRecord.question("cache.example", "A")
     r = q.reply()
-    DNSUDPHandler.cache.set(("cache.example", QTYPE.A), 10, r.pack())
+    plugin_base.DNS_CACHE.set(("cache.example", QTYPE.A), 10, r.pack())
     resp = resolve_query_bytes(q.pack(), "127.0.0.1")
     out = DNSRecord.parse(resp)
     assert out.header.rcode == RCODE.NOERROR
@@ -70,7 +72,7 @@ def test_resolve_query_bytes_stats_pre_deny_and_override():
       - None; asserts key stats hooks are called for deny/override.
     """
 
-    DNSUDPHandler.cache = DNSUDPHandler.cache  # reuse existing cache
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
 
     stats = _Stats()
     DNSUDPHandler.stats_collector = stats
@@ -110,11 +112,11 @@ def test_resolve_query_bytes_stats_cache_and_no_upstreams():
     DNSUDPHandler.plugins = []
     q = DNSRecord.question("cache-stats.example", "A")
     r = q.reply()
-    DNSUDPHandler.cache.set(("cache-stats.example", QTYPE.A), 10, r.pack())
+    plugin_base.DNS_CACHE.set(("cache-stats.example", QTYPE.A), 10, r.pack())
     resolve_query_bytes(q.pack(), "127.0.0.1")
 
     # No upstreams: clear cache and ensure no upstreams configured
-    DNSUDPHandler.cache._store = {}
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
     DNSUDPHandler.upstream_addrs = []
     q2 = DNSRecord.question("no-upstreams-stats.example", "A")
     resolve_query_bytes(q2.pack(), "127.0.0.1")
@@ -189,7 +191,7 @@ def test_resolve_query_bytes_stats_outer_exception(
     stats = _Stats()
     DNSUDPHandler.stats_collector = stats
     DNSUDPHandler.plugins = []
-    DNSUDPHandler.cache._store = {}
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
     DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
 
     def _boom_send(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
@@ -210,3 +212,79 @@ def test_resolve_query_bytes_stats_outer_exception(
     assert "record_response_rcode" in kinds
     assert "record_query_result" in kinds
     assert "record_latency" in kinds
+
+
+def test_resolve_query_bytes_recursive_mode_uses_recursive_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: recursive resolver mode uses RecursiveResolver and still caches.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Ensures RecursiveResolver.resolve() is called once and results are
+        cached so the second query does not invoke it again.
+    """
+
+    calls = {"n": 0}
+
+    class _FakeRecursiveResolver:
+        def __init__(
+            self,
+            *,
+            cache,
+            stats,
+            max_depth: int = 16,
+            timeout_ms: int = 2000,
+            per_try_timeout_ms: int = 2000,
+        ) -> None:
+            self.cache = cache
+            self.stats = stats
+            self.max_depth = max_depth
+            self.timeout_ms = timeout_ms
+            self.per_try_timeout_ms = per_try_timeout_ms
+
+        def resolve(self, req: DNSRecord):  # noqa: D401
+            """Resolve via fake recursive path, returning a fixed A answer."""
+
+            calls["n"] += 1
+            r = req.reply()
+            r.add_answer(RR("rec.example.", QTYPE.A, rdata=A("192.0.2.1"), ttl=60))
+            return r.pack(), "fake-auth:53"
+
+    # Patch RecursiveResolver used inside foghorn.servers.server._resolve_core
+    monkeypatch.setattr(server_mod, "RecursiveResolver", _FakeRecursiveResolver)
+
+    # Blow up if the forwarder path is accidentally used in recursive mode.
+    def _boom_send_recursive(*_a, **_k):  # noqa: ANN001
+        raise AssertionError(
+            "send_query_with_failover should not be called in recursive mode"
+        )
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _boom_send_recursive)
+
+    # Configure handler state for recursive mode.
+    DNSUDPHandler.plugins = []
+    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+    DNSUDPHandler.resolver_mode = "recursive"
+    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+
+    q = DNSRecord.question("rec.example.", "A")
+
+    # First query should go through the fake resolver.
+    resp1 = resolve_query_bytes(q.pack(), "127.0.0.1")
+    out1 = DNSRecord.parse(resp1)
+    assert out1.header.rcode == RCODE.NOERROR
+    assert any(rr.rdata == A("192.0.2.1") for rr in out1.rr)
+
+    # Second query should be served from cache with no extra resolver calls.
+    resp2 = resolve_query_bytes(q.pack(), "127.0.0.1")
+    out2 = DNSRecord.parse(resp2)
+    assert out2.header.rcode == RCODE.NOERROR
+    assert any(rr.rdata == A("192.0.2.1") for rr in out2.rr)
+
+    assert calls["n"] == 1
+
+    # Restore resolver_mode so other tests see default behaviour.
+    DNSUDPHandler.resolver_mode = "forward"

@@ -53,8 +53,9 @@
 			Stats
 		</button>
 		<button id="btn-tab-edit" class="fh-theme-btn" type="button" role="tab" aria-selected="false">
-			Advanced/Config
+			JSON & Config
 		</button>
+		<span id="plugin-tabs-root"></span>
 	</div>
 	<main class="fh-main" id="page2">
 		<section class="fh-pane fh-pane-left">
@@ -102,7 +103,7 @@
 					<button id="btn-save" class="fh-btn fh-btn-primary" type="button">Save</button>
 				</div>
 			</div>
-			<div class="fh-warning" id="config-warning" style="display:hidden;">
+			<div class="fh-warning" id="config-warning">
 				<strong>Warning:</strong> Saving will overwrite <code>config.yaml</code>, then after a brief
 				delay send SIGHUP to the main process. Changes take effect after the server restarts;
 				SIGUSR1/SIGUSR2 only notify plugins and may reset statistics when configured.
@@ -140,6 +141,7 @@
 			var configViewContainer = document.getElementById('config-view-container');
 			var configEditContainer = document.getElementById('config-edit-container');
 			var msgEl = document.getElementById('config-messages');
+			var dockerShowHashEl = null;
 			if (msgEl) {
 				msgEl.style.display = 'none';
 			}
@@ -160,8 +162,12 @@
 			var page2 = document.getElementById('page2');
 			var btnTabStats = document.getElementById('btn-tab-stats');
 			var btnTabEdit = document.getElementById('btn-tab-edit');
+			var pluginTabsRoot = document.getElementById('plugin-tabs-root');
+			var pluginUiPages = {};
+			var pluginRefreshTimers = {};
+			var activePluginName = null;
 
-			var currentSource = 'disk'; // 'disk' or 'memory'
+			var currentSource = 'disk'; // 'disk' only
 			var lastDiskConfigObj = null;
 			var lastDiskRawYaml = null;
 			var isEditing = false;
@@ -190,7 +196,40 @@
 				load_5m: 'System load average over the last 5 minutes.',
 				load_15m: 'System load average over the last 15 minutes.',
 				dnssec_secure: 'Responses that validated successfully against DNSSEC trust anchors (secure).',
-				dnssec_ext_secure: 'Responses treated as DNSSEC-secure based on extended upstream signals (for example, AD bit).',
+				dnssec_zone_secure: 'Responses treated as DNSSEC-secure based on extended upstream signals (for example, AD bit).',
+				dnssec_unsigned: 'Responses from zones that are not signed with DNSSEC (unsigned but not an error).',
+				dnssec_bogus: 'Responses that failed DNSSEC validation (bogus).',
+				dnssec_indeterminate: 'Responses where DNSSEC status could not be determined (indeterminate).',
+			};
+			var lastDiskConfigObj = null;
+			var lastDiskRawYaml = null;
+			var isEditing = false;
+
+			// Client-side JSON Schema validation (Ajv from CDN). We prefer window.ajv7.Ajv
+			// when available, falling back to window.Ajv when present. When Ajv is
+			// missing, validation becomes a no-op and server-side validation still
+			// enforces correctness on save/startup.
+			var AjvCtor = (window.ajv7 && window.ajv7.Ajv) || window.Ajv || null;
+			var configSchemaValidator = null;
+
+			var STATS_TOOLTIPS = {
+				total_queries: 'Total DNS queries handled since the collector started or was last reset.',
+				cache_hits: 'Queries answered directly from the cache.',
+				cache_misses: 'Queries that required contacting upstream servers.',
+				cache_null: 'Responses generated directly by plugins before cache or upstream lookup.',
+				cache_deny_pre: 'Pre-plugin deny decisions that bypassed cache (e.g., filtering plugins).',
+				cache_override_pre: 'Pre-plugin overrides that bypassed cache (e.g., synthetic responses from plugins).',
+				min_ms: 'Fastest observed query latency in milliseconds.',
+				max_ms: 'Slowest observed query latency in milliseconds.',
+				avg_ms: 'Average (mean) query latency in milliseconds.',
+				p50_ms: 'Median (50th percentile) query latency in milliseconds.',
+				p90_ms: '90th percentile query latency in milliseconds.',
+				p99_ms: '99th percentile query latency in milliseconds.',
+				load_1m: 'System load average over the last 1 minute.',
+				load_5m: 'System load average over the last 5 minutes.',
+				load_15m: 'System load average over the last 15 minutes.',
+				dnssec_secure: 'Responses that validated successfully against DNSSEC trust anchors (secure).',
+				dnssec_zone_secure: 'Responses treated as DNSSEC-secure based on extended upstream signals (for example, AD bit).',
 				dnssec_unsigned: 'Responses from zones that are not signed with DNSSEC (unsigned but not an error).',
 				dnssec_bogus: 'Responses that failed DNSSEC validation (bogus).',
 				dnssec_indeterminate: 'Responses where DNSSEC status could not be determined (indeterminate).',
@@ -241,10 +280,10 @@
 				if (configSchemaValidator) {
 					return Promise.resolve(configSchemaValidator);
 				}
-				return fetch('/config-yaml.schema', { cache: 'no-store' })
+				return fetch('/config-schema.json', { cache: 'no-store' })
 					.then(function (resp) {
 						if (!resp.ok) {
-							throw new Error('HTTP ' + resp.status + ' from /config-yaml.schema');
+							throw new Error('HTTP ' + resp.status + ' from /config-schema.json');
 						}
 						return resp.json();
 					})
@@ -431,15 +470,78 @@
 						return b.numeric - a.numeric;
 					});
 				} else {
-					entries.sort(function (a, b) {
-						if (a.key < b.key) return -1;
-						if (a.key > b.key) return 1;
-						return 0;
-					});
+					// For Meta, use a fixed display order for key fields and fall back
+					// to alphabetical ordering for any remaining keys.
+					if (title === 'Meta') {
+						// Meta ordering: host (combined row) is injected above via
+						// mapping.hostname/version/ip. Within the Meta group we want
+						// ip, created_at, uptime, domains, clients, with any other
+						// keys alphabetically in the middle.
+						var headOrder = ['ip', 'created_at'];
+						var tailOrder = ['uptime', 'domains', 'clients'];
+						entries.sort(function (a, b) {
+							var aHead = headOrder.indexOf(a.key);
+							var bHead = headOrder.indexOf(b.key);
+							var aTail = tailOrder.indexOf(a.key);
+							var bTail = tailOrder.indexOf(b.key);
+							// Head keys (hostname, version, ip) always first in fixed order.
+							if (aHead !== -1 || bHead !== -1) {
+								if (aHead === -1) return 1;
+								if (bHead === -1) return -1;
+								return aHead - bHead;
+							}
+							// Tail keys (domains, clients, uptime) always last in fixed order.
+							if (aTail !== -1 || bTail !== -1) {
+								if (aTail === -1) return -1;
+								if (bTail === -1) return 1;
+								return aTail - bTail;
+							}
+							// All other keys go in the middle, sorted alphabetically.
+							if (a.key < b.key) return -1;
+							if (a.key > b.key) return 1;
+							return 0;
+						});
+					} else {
+						entries.sort(function (a, b) {
+							if (a.key < b.key) return -1;
+							if (a.key > b.key) return 1;
+							return 0;
+						});
+					}
+				}
+
+				if (title === 'Meta') {
+					var host = mapping.hostname != null ? String(mapping.hostname) : '';
+					var ver = mapping.version != null ? String(mapping.version) : '';
+					var ip = mapping.ip != null ? String(mapping.ip) : '';
+					if (host || ver) {
+						var dtCombined = document.createElement('dt');
+						dtCombined.textContent = 'host';
+						var ddCombined = document.createElement('dd');
+						var text = '';
+						if (host) {
+							text += host;
+						}
+						if (ver) {
+							if (text) {
+								text += ' ';
+							}
+							text += 'v' + ver;
+						}
+						ddCombined.textContent = text;
+						dl.appendChild(dtCombined);
+						dl.appendChild(ddCombined);
+					}
 				}
 
 				entries.forEach(function (entry) {
 					var key = entry.key;
+					// Skip individual hostname/version keys in Meta now that we
+					// render them as a single combined "host" row. Keep ip as its
+					// own row directly beneath.
+					if (title === 'Meta' && (key === 'hostname' || key === 'version')) {
+						return;
+					}
 					var dt = document.createElement('dt');
 					dt.textContent = key;
 					if (Object.prototype.hasOwnProperty.call(STATS_TOOLTIPS, key)) {
@@ -998,7 +1100,10 @@
 				if (!items || !Array.isArray(items) || !items.length) {
 					return;
 				}
-				var target = statsGroupsEl || statsGroupsRightEl;
+				var container = statsGroupsEl || statsGroupsRightEl;
+				if (!container) {
+					return;
+				}
 				var group = document.createElement('section');
 				group.className = 'fh-stats-group';
 
@@ -1020,6 +1125,7 @@
 				['Upstream', 'State', 'Failures', 'Backoff (s)'].forEach(function (label) {
 					var th = document.createElement('th');
 					th.textContent = label;
+					th.style.textAlign = 'left';
 					headRow.appendChild(th);
 				});
 				thead.appendChild(headRow);
@@ -1060,7 +1166,29 @@
 
 				table.appendChild(tbody);
 				group.appendChild(table);
-				target.appendChild(group);
+
+				// Try to insert directly after the "Upstreams" block when present so
+				// that health details visually follow aggregate upstream stats.
+				var anchor = null;
+				var sections = container.querySelectorAll('.fh-stats-group');
+				sections.forEach(function (sec) {
+					if (anchor !== null) {
+						return;
+					}
+					var h = sec.querySelector('h3');
+					if (h && h.textContent === 'Upstreams') {
+						anchor = sec;
+					}
+				});
+				if (anchor && anchor.parentNode === container) {
+					if (anchor.nextSibling) {
+						container.insertBefore(group, anchor.nextSibling);
+					} else {
+						container.appendChild(group);
+					}
+				} else {
+					container.appendChild(group);
+				}
 			}
 
 			function renderStats(data) {
@@ -1087,10 +1215,15 @@
 					return;
 				}
 
-				var createdFormatted =
-					data.created_at !== undefined && data.created_at !== null
-						? formatTimestamp(data.created_at)
-						: null;
+				// Prefer a created_at field from meta when present, falling back to
+				// a top-level created_at. Always format as "YYYY-MM-DD HH:MM:SS".
+				var rawCreatedAt = null;
+				if (data.meta && typeof data.meta === 'object' && data.meta.created_at != null) {
+					rawCreatedAt = data.meta.created_at;
+				} else if (data.created_at != null) {
+					rawCreatedAt = data.created_at;
+				}
+				var createdFormatted = rawCreatedAt != null ? formatTimestamp(rawCreatedAt) : null;
 
 				var meta = {};
 				if (data.meta && typeof data.meta === 'object') {
@@ -1104,9 +1237,38 @@
 					}
 				}
 
-				if (Object.keys(meta).length) {
-					appendDictGroup('Meta', meta);
+				// Ensure unique client/domain counts live in Meta, not Totals.
+				if (data.uniques && typeof data.uniques === 'object') {
+					if (data.uniques.clients != null && meta.clients == null) {
+						meta.clients = data.uniques.clients;
+					}
+					if (data.uniques.domains != null && meta.domains == null) {
+						meta.domains = data.uniques.domains;
+					}
 				}
+
+				if (Object.keys(meta).length) {
+					// Rebuild meta mapping so that clients/domains appear last in the
+					// Meta box for readability.
+					var metaForDisplay = {};
+					Object.keys(meta).forEach(function (key) {
+						if (key === 'clients' || key === 'domains') {
+							return;
+						}
+						metaForDisplay[key] = meta[key];
+					});
+					if (meta.clients != null) {
+						metaForDisplay.clients = meta.clients;
+					}
+					if (meta.domains != null) {
+						metaForDisplay.domains = meta.domains;
+					}
+					appendDictGroup('Meta', metaForDisplay);
+				}
+
+				// Show per-process stats immediately after Meta so they stay visually
+				// grouped near core host details.
+				appendProcessGroup(data.system);
 
 				// For Totals, hide certain internal-pre cache counters from the UI and
 				// peel off DNSSEC-specific counters into their own mapping.
@@ -1129,6 +1291,8 @@
 					});
 				}
 
+				// Surface unique client/domain counts only via Meta; Totals intentionally
+				// omits clients/domains so they are not duplicated.
 				appendDictGroup('Totals', totalsForDisplay);
 
 				// Prefer a dedicated dnssec object from the API when present; fall
@@ -1142,10 +1306,6 @@
 				if (dnssecMapping && Object.keys(dnssecMapping).length) {
 					appendDictGroup('DNSSEC', dnssecMapping);
 				}
-
-				// Show per-process stats immediately after Totals/DNSSEC so they stay
-				// visually grouped near core counters.
-				appendProcessGroup(data.system);
 
 				appendUpstreamsGroup(data.upstreams || {}, data.upstream_rcodes || {});
 				appendDictGroup('Query types', data.qtypes || {});
@@ -1194,6 +1354,828 @@
 					});
 			}
 
+			// Generic helpers for plugin admin pages driven by JSON snapshots.
+			// Plugins describe their UI in get_admin_ui_descriptor() using a
+			// "layout" object; the frontend renders sections and tables based on
+			// that metadata instead of hard-coding per-plugin logic.
+			function resolvePath(obj, path) {
+				if (!obj || !path) {
+					return obj;
+				}
+				var parts = String(path).split('.');
+				var cur = obj;
+				for (var i = 0; i < parts.length; i++) {
+					if (!cur || typeof cur !== 'object') {
+						return undefined;
+					}
+					var key = parts[i];
+					if (!Object.prototype.hasOwnProperty.call(cur, key)) {
+						return undefined;
+					}
+					cur = cur[key];
+				}
+				return cur;
+			}
+
+			function escapeHtml(text) {
+				if (text == null) {
+					return '';
+				}
+				return String(text)
+					.replace(/&/g, '&amp;')
+					.replace(/</g, '&lt;')
+					.replace(/>/g, '&gt;')
+					.replace(/"/g, '&quot;')
+					.replace(/'/g, '&#39;');
+			}
+
+			function renderKvSection(root, valueMap, section) {
+				if (!root) {
+					return;
+				}
+				root.textContent = '';
+				var title = section && section.title ? section.title : 'Stats';
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = title;
+				group.appendChild(heading);
+				valueMap = valueMap && typeof valueMap === 'object' ? valueMap : {};
+				var specRows = Array.isArray(section && section.rows) ? section.rows : [];
+				// If the section did not declare explicit rows, synthesize them from
+				// the value mapping keys so KV sections still render something useful.
+				if (!specRows.length) {
+					Object.keys(valueMap).sort().forEach(function (k) {
+						specRows.push({ key: k, label: k });
+					});
+				}
+				if (!specRows.length) {
+					var p = document.createElement('p');
+					p.className = 'fh-pane-help';
+					p.textContent = 'No data.';
+					group.appendChild(p);
+					root.appendChild(group);
+					return;
+				}
+				// Special-case the summary section so it renders as a compact
+				// two-column table instead of a definition list. Sections may opt in
+				// to right-aligned values by setting section.align === 'right'.
+				if (section && section.id === 'summary') {
+					var table = document.createElement('table');
+					table.className = 'fh-table fh-table-upstreams';
+					var tbody = document.createElement('tbody');
+					var alignRight = section && section.align === 'right';
+					if (alignRight) {
+						// Use auto width for right-aligned summary tables so the key
+						// and value columns sit closer together instead of stretching
+						// across the full pane width.
+						table.style.width = 'auto';
+					}
+					specRows.forEach(function (row) {
+						if (!row || typeof row !== 'object') {
+							return;
+						}
+						var key = row.key != null ? String(row.key) : '';
+						var value = key && Object.prototype.hasOwnProperty.call(valueMap, key)
+							? valueMap[key]
+							: row.value;
+						var text = '';
+						if (value == null) {
+							text = '';
+						} else if (Array.isArray(value)) {
+							text = value.join(', ');
+						} else if (typeof value === 'boolean') {
+							text = value ? 'yes' : '';
+						} else if (typeof value === 'number') {
+							text = formatNumber(value);
+						} else {
+							text = String(value);
+						}
+						var lowerKey = key.toLowerCase();
+						// Domain/suffix: show a friendly marker when empty.
+						if (lowerKey === 'suffix' && !text) {
+							text = '(none)';
+						}
+						// Reload interval: append a unit suffix.
+						if (lowerKey.indexOf('interval') !== -1 && text) {
+							text = text + ' s';
+						}
+						var tr = document.createElement('tr');
+						var tdKey = document.createElement('td');
+						var tdVal = document.createElement('td');
+						// Use the row label when present; fall back to the raw key.
+						tdKey.textContent = row.label || key;
+						tdVal.textContent = text;
+						if (alignRight) {
+							tdVal.style.textAlign = 'right';
+						}
+						tr.appendChild(tdKey);
+						tr.appendChild(tdVal);
+						tbody.appendChild(tr);
+					});
+					table.appendChild(tbody);
+					group.appendChild(table);
+				} else {
+					var dl = document.createElement('dl');
+					specRows.forEach(function (row) {
+						if (!row || typeof row !== 'object') {
+							return;
+						}
+						var key = row.key != null ? String(row.key) : '';
+						var value = key && Object.prototype.hasOwnProperty.call(valueMap, key)
+							? valueMap[key]
+							: row.value;
+						var dt = document.createElement('dt');
+						dt.textContent = key;
+						var dd = document.createElement('dd');
+						var text = '';
+						if (value == null) {
+							text = '';
+						} else if (Array.isArray(value)) {
+							text = value.join(', ');
+						} else if (typeof value === 'boolean') {
+							text = value ? 'yes' : '';
+						} else if (typeof value === 'number') {
+							text = formatNumber(value);
+						} else {
+							text = String(value);
+						}
+						dd.textContent = text;
+						dl.appendChild(dt);
+						dl.appendChild(dd);
+					});
+					group.appendChild(dl);
+				}
+				root.appendChild(group);
+			}
+
+			function isHashLikeLabel(label) {
+				// Treat 12–64 character all-hex labels (first DNS label) as hash-like,
+				// which covers docker short IDs and SHA-style names.
+				if (!label) {
+					return false;
+				}
+				var token = String(label).split('.', 1)[0].toLowerCase().trim();
+				if (!token) {
+					return false;
+				}
+				if (token.length < 12 || token.length > 64) {
+					return false;
+				}
+				for (var i = 0; i < token.length; i++) {
+					var ch = token.charAt(i);
+					if ('0123456789abcdef'.indexOf(ch) === -1) {
+						return false;
+					}
+				}
+				return true;
+			}
+
+			function buildDockerGroupsByTxt(rows, section) {
+				rows = Array.isArray(rows) ? rows : [];
+				if (!rows.length) {
+					return rows;
+				}
+				// Optional domain suffix (e.g. "docker.zaa") provided by the backend
+				// via data.summary.suffix and plumbed into section._domainSuffix so
+				// that we can hide it from display names while still showing it in
+				// the Summary table.
+				var domainSuffix = '';
+				if (section && section._domainSuffix) {
+					var raw = String(section._domainSuffix).toLowerCase().trim();
+					if (raw) {
+						// Strip leading/trailing dots and collapse repeats.
+						var parts = raw.replace(/^\.+|\.+$/g, '').split('.');
+						var clean = [];
+						for (var pi = 0; pi < parts.length; pi++) {
+							if (parts[pi]) {
+								clean.push(parts[pi]);
+							}
+						}
+						if (clean.length) {
+							domainSuffix = clean.join('.');
+						}
+					}
+				}
+				function stripSuffix(name) {
+					if (!domainSuffix) {
+						return name;
+					}
+					var text = String(name || '').trim();
+					if (!text) {
+						return text;
+					}
+					var lower = text.toLowerCase();
+					var suf = '.' + domainSuffix;
+					if (lower.endsWith(suf)) {
+						return text.slice(0, text.length - suf.length) || text;
+					}
+					return text;
+				}
+				// First, group rows by identical TXT payload so that aliases for the
+				// same TXT summary are collapsed. Later we will further aggregate by
+				// short (non-hash) names so that only one visual row appears per
+				// logical name.
+				var groups = Object.create(null);
+				rows.forEach(function (row) {
+					if (!row || typeof row !== 'object') {
+						return;
+					}
+					var txt = row.txt;
+					var key;
+					if (Array.isArray(txt)) {
+						try {
+							key = JSON.stringify(txt);
+						} catch (e) {
+							key = String(txt);
+						}
+					} else {
+						key = String(txt);
+					}
+					if (!groups[key]) {
+						groups[key] = { rows: [], txt: Array.isArray(txt) ? txt.slice() : (txt != null ? [String(txt)] : []) };
+					}
+					groups[key].rows.push(row);
+				});
+				// Build a per-TXT group descriptor with display name, aliases, tooltip,
+				// and a containers count (parsed from the header line). These group
+				// objects will then be aggregated by short name so that only one
+				// visual row appears per short name.
+				var groupObjects = [];
+				Object.keys(groups).forEach(function (gkey) {
+					var group = groups[gkey];
+					var txtLines = group.txt;
+					if (!txtLines.length) {
+						// No TXT/Info; just collapse to first row.
+						groupObjects.push({
+							base: group.rows[0],
+							primaryName: group.rows[0] && group.rows[0].name ? String(group.rows[0].name) : '',
+							aliases: [],
+							fullIds: [],
+							cleanedLines: [],
+							containersCount: 0,
+						});
+						return;
+					}
+					// Tooltip starts as the full TXT payload joined with newlines; we
+					// will append any full container IDs so they are still visible even
+					// when not rendered in the alias list.
+					var primaryName = '';
+					var aliasSet = Object.create(null);
+					var fullIdAliases = [];
+					var containersCount = 0;
+					// Parse containers= header when present so that when an alias points
+					// to multiple servers, we can treat the TXT with the highest
+					// container count as the "main".
+					for (var hi = 0; hi < txtLines.length; hi++) {
+						var headerLine = String(txtLines[hi] || '');
+						if (headerLine.indexOf('containers=') === 0) {
+							var numStr = headerLine.substring('containers='.length).trim();
+							var numVal = parseInt(numStr, 10);
+							if (!isNaN(numVal) && numVal > 0) {
+								containersCount = numVal;
+							}
+							break;
+						}
+					}
+					function isFullId(name) {
+						var token = String(name).split('.', 1)[0].toLowerCase().trim();
+						if (token.length !== 64) {
+							return false;
+						}
+						for (var i = 0; i < token.length; i++) {
+							var ch = token.charAt(i);
+							if ('0123456789abcdef'.indexOf(ch) === -1) {
+								return false;
+							}
+						}
+						return true;
+					}
+					// Helper to record alias names (deduplicated). Full 64-char IDs are
+					// not added to aliasSet; instead they are only exposed via tooltip.
+					function addAlias(name) {
+						if (!name) {
+							return;
+						}
+						var k = String(name).trim();
+						if (!k) {
+							return;
+						}
+						if (isFullId(k)) {
+							if (fullIdAliases.indexOf(k) === -1) {
+								fullIdAliases.push(k);
+							}
+							return;
+						}
+						aliasSet[k] = true;
+					}
+					// Parse name=/aliases= from the first non-header line.
+					for (var i = 0; i < txtLines.length; i++) {
+						var line = String(txtLines[i]);
+						if (!line || line.indexOf('=') === -1) {
+							continue;
+						}
+						if (line.indexOf('containers=') === 0 || line.indexOf('hosts=') === 0) {
+							continue;
+						}
+						var parts = line.split(/\s+/);
+						for (var j = 0; j < parts.length; j++) {
+							var part = parts[j];
+							if (part.indexOf('name=') === 0 && !primaryName) {
+								primaryName = part.substring('name='.length);
+							} else if (part.indexOf('aliases=') === 0) {
+								var rawAliases = part.substring('aliases='.length).split(',');
+								rawAliases.forEach(function (a) {
+									addAlias(a);
+								});
+							}
+						}
+						if (primaryName) {
+							break;
+						}
+					}
+					// Also treat the per-row display names as aliases.
+					group.rows.forEach(function (row) {
+						if (row && row.name) {
+							addAlias(row.name);
+						}
+					});
+					if (!primaryName && group.rows[0] && group.rows[0].name) {
+						primaryName = String(group.rows[0].name);
+					}
+					// Clean TXT text for display: strip name=/aliases= tokens but keep others.
+					var cleanedLines = [];
+					txtLines.forEach(function (line) {
+						var text = String(line || '');
+						if (!text) {
+							return;
+						}
+						if (text.indexOf('containers=') === 0 || text.indexOf('hosts=') === 0) {
+							// Keep header line as-is.
+							cleanedLines.push(text);
+							return;
+						}
+						var parts = text.split(/\s+/);
+						var kept = [];
+						for (var j = 0; j < parts.length; j++) {
+							var part = parts[j];
+							if (part.indexOf('name=') === 0 || part.indexOf('aliases=') === 0) {
+								continue;
+							}
+							kept.push(part);
+						}
+						cleanedLines.push(kept.join(' '));
+					});
+					groupObjects.push({
+						base: group.rows[0],
+						primaryName: primaryName,
+						aliases: Object.keys(aliasSet),
+						fullIds: fullIdAliases.slice(),
+						cleanedLines: cleanedLines,
+						containersCount: containersCount,
+						allTxtLines: txtLines.slice(),
+					});
+				});
+				// Next, aggregate by short (non-hash) name. When an alias maps to
+				// multiple TXT groups, choose the group with the largest containers
+				// count as the "main". Hash-like labels (short/long hex) are never
+				// chosen as the primary when a non-hash alternative exists.
+				var bestByShortName = Object.create(null);
+				groupObjects.forEach(function (g) {
+					// Candidate keys: primaryName plus all aliases.
+					var candidates = [];
+					if (g.primaryName) {
+						candidates.push(g.primaryName);
+					}
+					g.aliases.forEach(function (a) {
+						if (candidates.indexOf(a) === -1) {
+							candidates.push(a);
+						}
+					});
+					candidates.forEach(function (rawName) {
+						if (!rawName) {
+							return;
+						}
+						// Prefer non-hash labels; hash-like labels become aliases.
+						if (isHashLikeLabel(rawName)) {
+							return;
+						}
+						var shortName = stripSuffix(rawName);
+						if (!shortName) {
+							return;
+						}
+						var existing = bestByShortName[shortName];
+						if (!existing || (g.containersCount || 0) > (existing.containersCount || 0)) {
+							bestByShortName[shortName] = g;
+						}
+					});
+				});
+				// Any groups that are only referenced by hash-like names (no
+				// non-hash alias) should still be visible; treat their primary name
+				// (possibly hash-like) as the key.
+				groupObjects.forEach(function (g) {
+					if (!g.primaryName) {
+						return;
+					}
+					var shortName = stripSuffix(g.primaryName);
+					if (!shortName) {
+						return;
+					}
+					if (!bestByShortName[shortName]) {
+						bestByShortName[shortName] = g;
+					}
+				});
+				// Finally, materialize rows: one visual row per short name, with the
+				// chosen main group providing TXT/Info and aliases.
+				var result = [];
+				Object.keys(bestByShortName).forEach(function (shortName) {
+					var g = bestByShortName[shortName];
+					// Build HTML for the Name column: main short name, then aliases
+					// (including hash-like) indented 2em.
+					var nameHtml = '';
+					nameHtml += '<div>' + escapeHtml(stripSuffix(shortName)) + '</div>';
+					// Merge aliases from *all* TXT groups that share this short
+					// name so that per-container short hashes (sha1[:12]) for every
+					// backend appear as aliases, not just those from the chosen main
+					// group.
+					var aliasSet = Object.create(null);
+					groupObjects.forEach(function (g2) {
+						// Determine whether this group contributes to this shortName.
+						var candidates2 = [];
+						if (g2.primaryName) {
+							candidates2.push(g2.primaryName);
+						}
+						g2.aliases.forEach(function (a) {
+							if (candidates2.indexOf(a) === -1) {
+								candidates2.push(a);
+							}
+						});
+						var contributes = false;
+						candidates2.forEach(function (rawName2) {
+							if (!rawName2) {
+								return;
+							}
+							var sn2 = stripSuffix(rawName2);
+							if (sn2 && sn2 === shortName) {
+								contributes = true;
+							}
+						});
+						if (!contributes) {
+							return;
+						}
+						// Collect this group's aliases (including hash-like ones) as
+						// display aliases for the shortName.
+						g2.aliases.forEach(function (a) {
+							if (!a) {
+								return;
+							}
+							var disp = stripSuffix(a);
+							if (!disp || disp === shortName) {
+								return;
+							}
+							aliasSet[disp] = true;
+						});
+					});
+					Object.keys(aliasSet).forEach(function (alias) {
+						nameHtml += '<div style="margin-left:2em">' + escapeHtml(alias) + '</div>';
+					});
+					// Render cleaned TXT lines with indentation, as before.
+					var cleanedLines = g.cleanedLines || [];
+					var txtHtml = escapeHtml((cleanedLines[0] || ''));
+					for (var ci = 1; ci < cleanedLines.length; ci++) {
+						var seg = cleanedLines[ci];
+						if (!seg) {
+							continue;
+						}
+						txtHtml += '<br>&nbsp;&nbsp;&nbsp;&nbsp;' + escapeHtml(seg);
+					}
+					// Add a small spacer at the bottom of each row so Docker entries
+					// do not visually run together in the admin table.
+					nameHtml += '<div style="margin-top:0.35em"></div>';
+					txtHtml += '<br>&nbsp;';
+					var base = Object.assign({}, g.base);
+					base.name = nameHtml;
+					base.txt = txtHtml;
+					// Tooltip: original TXT plus any full 64-char IDs.
+					var tooltipParts = (g.allTxtLines || []).slice();
+					(g.fullIds || []).forEach(function (fid) {
+						tooltipParts.push('full_id=' + String(fid));
+					});
+					base._txtTooltip = tooltipParts.join('\n');
+					result.push(base);
+				});
+				// Mark the Name column as HTML-capable so nameHtml is not escaped.
+				if (section && Array.isArray(section.columns)) {
+					section.columns = section.columns.map(function (col) {
+						if (col && col.key === 'name') {
+							var copy = Object.assign({}, col);
+							copy.html = true;
+							return copy;
+						}
+						return col;
+					});
+				}
+				return result;
+			}
+
+			function renderTableSection(root, rows, section) {
+				if (!root) {
+					return;
+				}
+				root.textContent = '';
+				rows = Array.isArray(rows) ? rows : [];
+				// For DockerHosts containers, group rows by identical TXT/Info payloads
+				// so that aliases for the same container are rendered together.
+				if (section && section.style === 'docker_group_by_txt') {
+					rows = buildDockerGroupsByTxt(rows, section);
+				}
+				// Optional sort hint: for decorated caches, sort by calls_total
+				// descending so the busiest caches appear first.
+				if (section && section.sort === 'by_calls') {
+					rows = rows.slice().sort(function (a, b) {
+						var ac = (a && typeof a.calls_total === 'number') ? a.calls_total : 0;
+						var bc = (b && typeof b.calls_total === 'number') ? b.calls_total : 0;
+						if (bc === ac) {
+							var an = (a && a.qualname) ? String(a.qualname) : '';
+							var bn = (b && b.qualname) ? String(b.qualname) : '';
+							if (an < bn) return -1;
+							if (an > bn) return 1;
+							return 0;
+						}
+						return bc - ac;
+					});
+				}
+				var columns = Array.isArray(section && section.columns) ? section.columns : [];
+				var title = section && section.title ? section.title : 'Items';
+				if (!columns.length) {
+					return;
+				}
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = title;
+				group.appendChild(heading);
+
+				// Optional filters (e.g. hide_zero_calls for decorated caches).
+				var filterIds = Array.isArray(section && section.filters)
+					? section.filters.map(function (f) { return f && f.id; })
+					: [];
+				var controlsDiv = null;
+				if (filterIds.indexOf('hide_zero_calls') !== -1) {
+					controlsDiv = document.createElement('div');
+					controlsDiv.className = 'fh-pane-controls';
+					var label = document.createElement('label');
+					label.style.fontSize = '0.9em';
+					var cb = document.createElement('input');
+					cb.type = 'checkbox';
+					cb.checked = true;
+					cb.setAttribute('data-filter-id', 'hide_zero_calls');
+					label.appendChild(cb);
+					label.appendChild(document.createTextNode(' Hide zero-call caches'));
+					controlsDiv.appendChild(label);
+					group.appendChild(controlsDiv);
+				}
+				if (!rows.length) {
+					var p = document.createElement('p');
+					p.className = 'fh-pane-help';
+					p.textContent = 'No data.';
+					group.appendChild(p);
+					root.appendChild(group);
+					return;
+				}
+				var table = document.createElement('table');
+				table.className = 'fh-table fh-table-upstreams';
+				// Attach a data attribute so filter handlers can locate this table.
+				table.setAttribute('data-section-id', section && section.id ? String(section.id) : '');
+				var thead = document.createElement('thead');
+				var hrow = document.createElement('tr');
+				columns.forEach(function (col) {
+					var th = document.createElement('th');
+					th.textContent = col.label || String(col.key || '');
+					// Optional alignment hint for numeric-heavy columns such as TTL
+					// and Max size in cache tables.
+					if (col.align === 'right') {
+						th.style.textAlign = 'right';
+					}
+					hrow.appendChild(th);
+				});
+				thead.appendChild(hrow);
+				table.appendChild(thead);
+				var tbody = document.createElement('tbody');
+				rows.forEach(function (rowData) {
+					if (!rowData || typeof rowData !== 'object') {
+						return;
+					}
+					var tr = document.createElement('tr');
+					// Tag each row with calls_total when available so filters can
+					// hide zero-call entries for decorated caches.
+					if (rowData && typeof rowData.calls_total === 'number') {
+						tr.setAttribute('data-calls-total', String(rowData.calls_total));
+					}
+					columns.forEach(function (col) {
+						var key = col.key;
+						var joiner = col.join || null;
+						var raw = key ? resolvePath(rowData, key) : null;
+						var td = document.createElement('td');
+						if (col.align === 'right') {
+							td.style.textAlign = 'right';
+						}
+						var text = '';
+						if (raw == null) {
+							text = '';
+						} else if (Array.isArray(raw) && joiner) {
+							text = raw.join(String(joiner));
+						} else if (typeof raw === 'boolean') {
+							text = raw ? 'yes' : '';
+						} else if (typeof raw === 'number') {
+							text = formatNumber(raw);
+						} else {
+							text = String(raw);
+						}
+						if (col.html) {
+							td.innerHTML = text;
+						} else {
+							td.textContent = text;
+						}
+						// For Docker TXT/Info cells, expose the full raw TXT payload as a tooltip.
+						if (col.key === 'txt' && rowData && rowData._txtTooltip) {
+							td.title = String(rowData._txtTooltip);
+						}
+						tr.appendChild(td);
+					});
+					tbody.appendChild(tr);
+				});
+				table.appendChild(tbody);
+				group.appendChild(table);
+
+				// Wire up hide_zero_calls filter, if present.
+				if (controlsDiv) {
+					var cbHide = controlsDiv.querySelector('input[data-filter-id="hide_zero_calls"]');
+					if (cbHide) {
+						var applyHideFilter = function () {
+							var hide = cbHide.checked;
+							var rowsEls = tbody.querySelectorAll('tr');
+							rowsEls.forEach(function (trEl) {
+								var callsAttr = trEl.getAttribute('data-calls-total');
+								var calls = callsAttr ? parseInt(callsAttr, 10) : NaN;
+								if (hide && callsAttr !== null && !isNaN(calls) && calls === 0) {
+									trEl.style.display = 'none';
+								} else {
+									trEl.style.display = '';
+								}
+							});
+						};
+						cbHide.addEventListener('change', applyHideFilter);
+						// Apply initial state.
+						applyHideFilter();
+					}
+				}
+
+				root.appendChild(group);
+			}
+
+			function initSnapshotPageV1(pageEl, desc) {
+				if (!pageEl) {
+					return;
+				}
+				pageEl.textContent = '';
+				pageEl.className = 'fh-main fh-main-plugin';
+				var section = document.createElement('section');
+				section.className = 'fh-pane fh-pane-plugin';
+				var header = document.createElement('div');
+				header.className = 'fh-pane-header';
+				var h2 = document.createElement('h2');
+				h2.className = 'fh-pane-title';
+				h2.textContent = desc && desc.title ? desc.title : 'Plugin';
+				header.appendChild(h2);
+				if (desc && desc.description) {
+					var pHelp = document.createElement('p');
+					pHelp.className = 'fh-pane-help';
+					pHelp.textContent = String(desc.description);
+					header.appendChild(pHelp);
+				}
+				section.appendChild(header);
+				var body = document.createElement('div');
+				body.className = 'fh-stats-groups';
+				body.setAttribute('data-role', 'plugin-snapshot-body');
+				section.appendChild(body);
+				pageEl.appendChild(section);
+			}
+
+			function clearPluginRefreshTimer(name) {
+				if (!name || !pluginRefreshTimers) {
+					return;
+				}
+				var t = pluginRefreshTimers[name];
+				if (t) {
+					clearInterval(t);
+					delete pluginRefreshTimers[name];
+				}
+			}
+
+			function clearAllPluginRefreshTimers() {
+				if (!pluginRefreshTimers) {
+					return;
+				}
+				Object.keys(pluginRefreshTimers).forEach(function (name) {
+					clearPluginRefreshTimer(name);
+				});
+			}
+
+			function loadSnapshotPageV1(pageEl, desc) {
+				if (!pageEl) {
+					return;
+				}
+				var endpoint = desc && desc.endpoints && desc.endpoints.snapshot;
+				var body = pageEl.querySelector('[data-role="plugin-snapshot-body"]');
+				if (!endpoint || !body) {
+					return;
+				}
+				body.textContent = '';
+				fetchJson(endpoint)
+					.then(function (payload) {
+						var data = payload && payload.data ? payload.data : {};
+						var layout = desc && desc.layout ? desc.layout : {};
+						var sections = Array.isArray(layout.sections) ? layout.sections : [];
+						var pluginName = desc && desc.name ? String(desc.name) : null;
+						if (!sections.length) {
+							// Fallback: pretty-print the raw payload.
+							var group = document.createElement('section');
+							group.className = 'fh-stats-group';
+							var pre = document.createElement('pre');
+							pre.className = 'fh-pre';
+							pre.textContent = pretty(data);
+							group.appendChild(pre);
+							body.appendChild(group);
+							return;
+						}
+						sections.forEach(function (section) {
+							// Plumb plugin-level metadata (like domain suffix) into the
+							// section descriptor so renderers can use it without needing
+							// to know about the full payload shape.
+							if (section && layout && layout.summary && layout.summary.suffix && !section._domainSuffix) {
+								section._domainSuffix = layout.summary.suffix;
+							}
+							if (!section || typeof section !== 'object') {
+								return;
+							}
+							var type = section.type || 'kv';
+							var path = section.path || '';
+							var sectionRoot = document.createElement('div');
+							body.appendChild(sectionRoot);
+							var value = path ? resolvePath(data, path) : data;
+							if (type === 'table') {
+								renderTableSection(sectionRoot, value, section);
+						} else {
+							// Default to key/value rendering using section.rows
+							// against the resolved value mapping.
+							if (value && typeof value === 'object') {
+								renderKvSection(sectionRoot, value, section);
+							}
+						}
+						});
+
+						// After a successful render, configure optional auto-refresh
+						// when the plugin (or descriptor) advertises a refresh interval.
+						var refreshSeconds = 0;
+						if (desc && typeof desc.refresh === 'number') {
+							refreshSeconds = desc.refresh;
+						} else if (payload && typeof payload.refresh === 'number') {
+							refreshSeconds = payload.refresh;
+						}
+						if (!pluginName || !refreshSeconds || refreshSeconds <= 0) {
+							clearPluginRefreshTimer(pluginName || '');
+							return;
+						}
+						// Do not schedule refreshes when the user is no longer on this
+						// plugin tab.
+						if (activePluginName !== pluginName) {
+							clearPluginRefreshTimer(pluginName);
+							return;
+						}
+						clearPluginRefreshTimer(pluginName);
+						pluginRefreshTimers[pluginName] = setInterval(function () {
+							// Stop refreshing if the user leaves this plugin tab.
+							if (activePluginName !== pluginName) {
+								clearPluginRefreshTimer(pluginName);
+								return;
+							}
+							loadSnapshotPageV1(pageEl, desc);
+						}, Math.max(1, refreshSeconds) * 1000);
+					})
+					.catch(function (err) {
+						var group = document.createElement('section');
+						group.className = 'fh-stats-group';
+						var pre = document.createElement('pre');
+						pre.className = 'fh-pre fh-pre-compact';
+						pre.textContent = 'Failed to load plugin data: ' + err.message;
+						group.appendChild(pre);
+						body.appendChild(group);
+					});
+			}
+
 			function loadDiskConfig(raw) {
 				if (raw === undefined) {
 					raw = 0;
@@ -1227,12 +2209,7 @@
 					});
 			}
 
-			// TODO: Remove legacy code.
-			function loadMemoryConfig() {
-				loadDiskConfig();
-			}
-
-			function setSource(newSource) {
+			function refreshDiskConfigView() {
 				loadDiskConfig();
 			}
 
@@ -1323,7 +2300,6 @@
 						setMessage('Configuration saved; restart requested via SIGHUP. Path: ' + (data.path || ''), 'success');
 						exitEditMode(true);
 						loadDiskConfig();
-						loadMemoryConfig();
 						loadStats();
 					})
 					.catch(function (err) {
@@ -1360,26 +2336,156 @@
 				}
 			}
 
+
+			function registerPluginTab(desc) {
+				if (!desc || typeof desc !== 'object') {
+					return;
+				}
+				var name = String(desc.name || '').trim();
+				var title = String(desc.title || name || '').trim();
+				if (!name || !title) {
+					return;
+				}
+				// All plugins currently use the same generic snapshot-based renderer;
+				// we intentionally do not switch on desc.kind so new plugins do not
+				// require changes to index.html.
+				var pageEl = document.createElement('main');
+				pageEl.id = 'page-plugin-' + name;
+				pageEl.className = 'fh-main fh-main-plugin';
+				pageEl.style.display = 'none';
+				initSnapshotPageV1(pageEl, desc);
+				var footer = document.querySelector('.fh-footer');
+				if (footer && footer.parentNode) {
+					footer.parentNode.insertBefore(pageEl, footer);
+				} else {
+					document.body.appendChild(pageEl);
+				}
+				var tabsContainer = pluginTabsRoot || document.querySelector('.fh-tabs');
+				if (tabsContainer && tabsContainer.tagName && tabsContainer.tagName.toLowerCase() === 'span') {
+					pluginTabsRoot = tabsContainer;
+				} else if (!pluginTabsRoot) {
+					pluginTabsRoot = document.getElementById('plugin-tabs-root');
+				}
+				var btn = document.createElement('button');
+				btn.type = 'button';
+				btn.className = 'fh-theme-btn';
+				btn.setAttribute('role', 'tab');
+				btn.setAttribute('aria-selected', 'false');
+				btn.textContent = title;
+				btn.addEventListener('click', function () {
+					applyTab('plugin:' + name);
+					loadSnapshotPageV1(pageEl, desc);
+				});
+				if (pluginTabsRoot) {
+					pluginTabsRoot.appendChild(btn);
+				}
+				pluginUiPages[name] = {
+					button: btn,
+					page: pageEl,
+					desc: desc,
+				};
+			}
+
+			function initPluginTabs() {
+				fetchJson('/api/v1/plugins/ui')
+					.then(function (payload) {
+						var items = payload && payload.items ? payload.items : [];
+						if (!Array.isArray(items) || !items.length) {
+							return;
+						}
+						items.forEach(registerPluginTab);
+						// After all plugin tabs are registered, if the last-selected tab
+						// was a plugin, re-apply it and trigger a snapshot load so the
+						// page is fully populated on reload.
+						try {
+							if (window.localStorage) {
+								var lastTab = localStorage.getItem('foghorn-last-tab');
+								if (lastTab && lastTab.indexOf('plugin:') === 0) {
+									var name = lastTab.slice('plugin:'.length);
+									var info = pluginUiPages[name];
+									// Simulate a user click on the plugin tab so that we
+									// both switch tabs and lazily fetch data only for that
+									// plugin, just like a normal click.
+									if (info && info.button && typeof info.button.click === 'function') {
+										info.button.click();
+									}
+								}
+							}
+						} catch (e) {}
+					})
+					.catch(function () {
+						// Older servers may not expose /api/v1/plugins/ui; fail soft.
+					});
+			}
+
 			function applyTab(tab) {
+				// Persist the last-selected tab in localStorage so reloads return to
+				// the same view when possible.
+				try {
+					if (window.localStorage && typeof tab === 'string') {
+						localStorage.setItem('foghorn-last-tab', tab);
+					}
+				} catch (e) {}
 				var isStats = tab === 'stats';
+				var isEdit = tab === 'edit';
+				var pluginName = null;
+				if (tab && tab.indexOf('plugin:') === 0) {
+					pluginName = tab.slice('plugin:'.length);
+				}
+				// Track the currently active plugin tab (if any) and cancel any
+				// existing auto-refresh timers when switching away.
+				if (!pluginName) {
+					activePluginName = null;
+					clearAllPluginRefreshTimers();
+				} else {
+					activePluginName = pluginName;
+				}
+
 				if (page1) {
-					// When Stats is selected, page1 should be hidden and page2 shown.
-					page1.style.display = isStats ? 'none' : '';
+					// When Stats is selected, page1 shows Advanced/Config; hide when Stats or a plugin tab is selected.
+					page1.style.display = isEdit ? '' : 'none';
 				}
 				if (page2) {
 					page2.style.display = isStats ? '' : 'none';
 				}
-				if (btnTabStats && btnTabEdit) {
+				if (pluginUiPages && typeof pluginUiPages === 'object') {
+					Object.keys(pluginUiPages).forEach(function (name) {
+						var info = pluginUiPages[name];
+						if (!info) {
+							return;
+						}
+						if (info.page) {
+							info.page.style.display = name === pluginName ? '' : 'none';
+						}
+						if (info.button) {
+							var isActive = name === pluginName;
+							if (isActive) {
+								info.button.classList.add('fh-theme-btn-active');
+								info.button.setAttribute('aria-selected', 'true');
+							} else {
+								info.button.classList.remove('fh-theme-btn-active');
+								info.button.setAttribute('aria-selected', 'false');
+							}
+						}
+					});
+				}
+
+				if (btnTabStats) {
 					if (isStats) {
 						btnTabStats.classList.add('fh-theme-btn-active');
 						btnTabStats.setAttribute('aria-selected', 'true');
-						btnTabEdit.classList.remove('fh-theme-btn-active');
-						btnTabEdit.setAttribute('aria-selected', 'false');
 					} else {
-						btnTabEdit.classList.add('fh-theme-btn-active');
-						btnTabEdit.setAttribute('aria-selected', 'true');
 						btnTabStats.classList.remove('fh-theme-btn-active');
 						btnTabStats.setAttribute('aria-selected', 'false');
+					}
+				}
+				if (btnTabEdit) {
+					if (isEdit) {
+						btnTabEdit.classList.add('fh-theme-btn-active');
+						btnTabEdit.setAttribute('aria-selected', 'true');
+					} else {
+						btnTabEdit.classList.remove('fh-theme-btn-active');
+						btnTabEdit.setAttribute('aria-selected', 'false');
 					}
 				}
 			}
@@ -1425,12 +2531,22 @@
 			// Initial load
 			var initialTheme = root.getAttribute('data-theme') || 'dark';
 			applyTheme(initialTheme);
-			applyTab('stats');
+			var initialTab = 'stats';
+			try {
+				if (window.localStorage) {
+					var storedTab = localStorage.getItem('foghorn-last-tab');
+					if (storedTab === 'stats' || storedTab === 'edit' || (storedTab && storedTab.indexOf('plugin:') === 0)) {
+						initialTab = storedTab;
+					}
+				}
+			} catch (e) {}
+			applyTab(initialTab);
 			loadStats();
+			initPluginTabs();
 			setInterval(loadStats, 15000);
-			setSource('disk');
-		})();
-	</script>
+			refreshDiskConfigView();
+			})();
+		</script>
 </body>
 
 </html>

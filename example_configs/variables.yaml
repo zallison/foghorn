@@ -1,0 +1,75 @@
+# Example config demonstrating `variables:` substitution (strings + whole-node injection)
+# and list splicing via `- $VAR_NAME`.
+
+variables:
+  # Scalars (used inside strings)
+  BAD_DOMAIN: example.internal
+  TTL: 300
+  # Paths
+  DATABASES: ./config/var
+  # Reusable list of client CIDRs (whole-node injection)
+  STUDENTS:
+    - 192.168.1.0/24
+    - 10.0.0.0/8
+    - 2001:db8::/32
+  STAFF:
+    - 192.168.2.0/24
+    - 172.16.16.16/32
+  # Reusable list of rule objects (list splicing)
+  BLOCKED_IPS:
+    - ip: 192.168.27.0/24
+      action: remove
+    - ip: 1.2.3.4
+      action: replace
+      replace_with: 127.0.0.1
+
+listen:
+  udp:
+    enabled: true
+    host: 127.0.0.1
+    port: 5353
+
+upstreams:
+  - { host: 1.1.1.1, port: 53 }
+  - { host: 8.8.8.8, port: 53 }
+
+plugins:
+  # Disabled plugin example (skipped entirely)
+  - module: greylist
+    enabled: false
+    comment: "Temporarily disabled"
+    config:
+      db_path: ${DATABASES}/greylist.db
+
+  # Variables used in strings + scalar injection
+
+  # Two modules of the same priority targeting different CIDRs
+  - module: filter
+    comment: "Filter plugin for Staff, only block malware"
+    priority: 20
+    config:
+      # Whole-node injection: targets becomes the list from $STAFF
+      targets: $STAFF
+      db_path: ${DATABASES}/malware-blocklist.db
+      ttl: ${TTL}
+
+  - module: filter
+    comment: "Filter plugin using variables for db_path, ttl, and embedded domain strings"
+    priority: 20
+    config:
+      # Whole-node injection: targets becomes the list from CLIENT_CIDRS
+      targets: $STUDENTS
+
+      db_path: ${DATABASES}/strict-blocklist.db
+      ttl: ${TTL}
+
+      # `${DOMAIN}` inside strings
+      blocked_domains:
+        - ads.${BAD_DOMAIN}
+        - tracker.${BAD_DOMAIN}
+
+      # List splicing: expand BLOCKED_IPS then add one more entry
+      blocked_ips:
+        - $BLOCKED_IPS
+        - ip: 4.3.2.1
+          action: remove

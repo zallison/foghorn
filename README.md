@@ -18,65 +18,158 @@ For developer documentation (architecture, transports, plugin internals, testing
 
 ----
 
-# New in 0.4.6 (since dev/0.4.3)
+## [0.5.0] - 2025-12-22
 
-## DNSSEC & Resolver Pipeline
-- Enhanced DNSSEC validation, including RFC5011-style trust anchors and NSEC3 support.
-- Hardened local DNSSEC validation and added unit/chain/negative tests.
-- Added a shared in-memory cache implementation and stabilized cache-related stats keys.
+### Added
+- Introduced core admin web UI primitives and backend endpoints for management pages.
+- Added frontend admin UI scaffolding for plugin and cache pages.
+- Added admin page and HTTP snapshot endpoints for the mDNS plugin.
+- Added admin snapshots and UI descriptors for cache plugins.
+- Added DockerHosts HTTP snapshot helper and admin UI integration.
+- Added DockerHosts admin UI page and bumped version as part of 0.5.0 beta releases.
+- Introduced a cache registry and wired it into the server TTL cache.
+- Added per-backend cache hit/miss counters and cache statistics.
+- Added webserver build-info caching and exposed cache metrics.
+- Extended `BasePlugin` helper APIs to support richer plugin behaviors.
+- Added support for inline zone records in plugin configuration.
+- Introduced a default set of mDNS services to browse.
+- Added the ability to override the DNS listen address via the `LISTEN` Makefile variable.
+- Added utilities and scripts around pruning branches and other development tooling.
 
-## Upstream Strategy, Health, and Concurrency
-- Added upstream strategy and concurrency options in config.
-- Implemented concurrent upstream failover with lazy health tracking.
-- Propagated upstream strategy/concurrency through DNSUDP handler and server pipeline.
-- Exposed upstream health/strategy via new `/api/v1/upstream_status` admin API and surfaced this in the UI.
+### Changed
+- Modernized the DockerHosts plugin implementation and aligned associated tests.
+- Refactored the EtcHosts plugin and updated its tests.
+- Consolidated the config parser into a single module and added a CLI helper for configuration.
+- Normalized the `git prune-branches` script naming.
+- Wired plugins into the admin webserver and exposed the DockerHosts API.
+- Aligned webserver enablement defaults with configuration values.
+- Wired DNSSEC validation into the cache registry and renamed zone-secure status representation.
+- Adjusted default DNS port settings (e.g., defaulting to 5335 to better align with unbound usage).
+- Performed multiple version and dependency bumps across the admin UI, cache registry, and plugins during the 0.5.0 beta cycle.
 
-## Plugins
-- **RateLimitPlugin**: sqlite-backed rate limiting with per-profile configuration and admin inspection.
-- **FileDownloader plugin**: replaced `ListDownloader` with a more flexible file-based downloader and tests.
-- **DockerHosts plugin**: new plugin for container-aware DNS resolution, wired into packaging, docs, and example configs.
-- Per-plugin logging enhancements and stricter plugin registry behavior (fail fast on import errors).
+### Fixed
+- Improved error handling when binding the DNS UDP socket.
+- Hardened DockerHosts endpoint handling and container discovery.
+- Refined web UI stats layout and configuration warnings.
+- Removed a duplicate dependency from the project.
 
-## Admin API & Stats
-- Added canonical `/api/v1` admin endpoints (including rate-limit inspection and upstream status).
-- Extended stats to track DNSSEC and rate-limit counters, with snapshot and persistent store support.
-- Persisted upstream rcodes and warm-loaded them from the stats store.
+### Documentation
+- Documented mDNS networking requirements, including Docker host-networking needs for discovery.
+- Clarified Docker/mDNS behavior and configuration expectations in the docs.
+- Updated documentation around configuration, admin UI features, and new cache behavior where relevant.
 
-## Runtime, Server, and Transport Changes
-- Generalized cache value types to support shared caches across components.
-- Refined upstream configuration semantics and DoH/TCP listener behavior.
-- Tightened DoH/admin webserver configuration and rate-limit behavior.
-- Treated UDP listener like TCP/DoT/DoH in main keepalive/shutdown handling.
-- Delegated `DNSUDPHandler.handle` to a shared resolver and pruned deprecated helpers.
-- Removed vestigial recursive server and remaining old UDP wiring in `main.py`/`server.py`.
+## v0.4.7 (2025-12-12)
 
-## Configuration, Docker, and Tooling
-- Synced `config.yaml` schema and examples with the 0.4.5/0.4.6 feature set.
-- Updated example configs for:
-  - FileDownloader plugin and per-URL options.
-  - New upstream strategy/concurrency options.
-- Aligned Docker image and Makefile with current ports/tooling; added `ADMINPORT` option.
-- Ensured Docker images don’t install dev dependencies by default.
+Release includes **55 commits** from `v0.4.6` (2025-12-07) to `v0.4.7` (2025-12-12).
 
-## Tests
-- Added comprehensive DNSSEC and resolver/forwarding path tests (unit and end-to-end).
-- Expanded UDP helper coverage and made DoH FastAPI tests optional.
-- Updated tests for new config fields, webserver behavior, and rate-limit paths.
-- Fixed stats tests for multiple rcodes and new snapshot keys.
+### Highlights
+- Added a full **recursive resolver mode** (iterative recursion with QNAME minimization) and wired it through UDP/TCP/DoT/DoH.
+- Introduced a **cache plugin system** (including a `none` cache plugin) and began moving caching to a shared, pluggable cache interface.
+- Expanded **DNSSEC validation** with a new `local_extended` strategy plus DNSSEC counters exposed in stats and the admin UI.
+- Added new plugins: **mDNS bridge** and **DNS prefetch**.
+
+---
+
+## Added
+
+### Resolver / core pipeline
+- **Recursive resolver mode** (`resolver.mode: recursive`) with:
+  - Iterative recursion with QNAME minimization.
+  - UDP queries with TCP fallback.
+  - Max depth and timeout budgeting (overall + per-try).
+- Support for a plugin **`drop` action** in the resolution pipeline (used to intentionally produce client-side timeouts by not responding).
+
+### Caching
+- New **cache plugin framework**:
+  - Cache plugin registry/loader supporting aliases, dotted paths, and `{module, config}` objects.
+  - New cache plugins under `src/foghorn/cache_plugins/` (including a **`none` cache** implementation).
+- Cache entries now expose TTL metadata via a new cache API helper (`get_with_meta()`), enabling richer cache behavior.
+- Server caching moved toward a shared global cache (`foghorn.plugins.base.DNS_CACHE`) rather than per-handler caches.
+
+### DNSSEC
+- New DNSSEC validation strategy: **`local_extended`** (in addition to `upstream_ad` and `local`).
+- DNSSEC validation can now route its internal lookups through:
+  - configured forward upstreams (forward mode), or
+  - Foghorn’s own recursive resolver (recursive mode).
+- New DNSSEC status accounting: stats track totals for:
+  - `dnssec_secure`, `dnssec_zone_secure`, `dnssec_unsigned`, `dnssec_bogus`, `dnssec_indeterminate`.
+
+### Plugins
+- **MdnsBridgePlugin**: bridges zeroconf/mDNS into standard DNS answering (PTR/SRV/TXT/A/AAAA), with example config added.
+  - **Networking requirement:** mDNS only works on the local L2 network. When running Foghorn in Docker and using this plugin, the container **must** use host networking (for example, `--net=host`); bridged Docker networks will not see mDNS traffic.
+- **DnsPrefetchPlugin**: background worker that prefetches hot domains (based on stats) to keep cache entries warm.
+- **EtcHosts plugin**: added PTR reverse-lookup support.
+- **DockerHosts plugin**: added support for a short container ID alias (first 12 chars) as an additional candidate name.
+
+### Observability / admin
+- `/stats`, `/api/v1/stats`, `/traffic`, `/api/v1/traffic` now accept a **`top`** query parameter to limit returned Top-N list sizes.
+- Admin dashboard updated to show DNSSEC counters.
+
+### Tooling
+- New generated JSON schema: `assets/config-schema.json` (replaces the old `assets/config-yaml.schema`).
+- New script: `scripts/generate_foghorn_schema.py` to generate a combined schema including plugin schemas.
+
+---
+
+## Changed
+
+### Configuration / schema
+- Schema file rename & format change:
+  - Removed: `assets/config-yaml.schema` and `html/config-yaml.schema`
+  - Added: `assets/config-schema.json` and `html/config-schema.json`
+  - Admin UI now fetches `/config-schema.json` and validates with Ajv.
+- Cache config is now modeled as a top-level `cache:` configuration (and `min_cache_ttl` moved under `cache.config` in examples/docs).
+
+### Plugins
+- Default plugin priority values increased from **50 → 100** (pre/post/setup), affecting ordering when priorities are omitted.
+
+### Stats behavior
+- Added an `include_in_stats` toggle for ignore filters, allowing ignored traffic to be excluded from aggregation while still being logged.
+- Increased internal Top-K capacity (keeps more candidates internally; truncation is applied at response time via the `top` query param).
+
+### DoH behavior & dependencies
+- DoH FastAPI usage is now more defensive:
+  - FastAPI imports are deferred; if unavailable, DoH starts in a threaded fallback mode.
+  - Empty resolver responses are treated as timeouts (e.g., FastAPI path returns HTTP 504; other paths effectively time out).
+
+---
+
+## Fixed / Hardening
+- DNSSEC local validation now fails fast with a clear error when `cryptography` is missing (instead of silently misbehaving).
+- Transport handlers (UDP/TCP/DoT) now consistently treat “no response” from the resolver as “don’t reply” (client timeout), aligning with the new drop/timeout semantics.
+
+---
+
+## Dependencies / Packaging
+- Added `cryptography` dependency (required for DNSSEC local validation).
+- Docker image install list updated to include `cryptography`.
+- JSON Schema validation is now optional at runtime (skips validation if `jsonschema` is not installed).
+
+---
 
 ## Documentation
-- Documented:
-  - Admin APIs and `/api/v1` endpoints.
-  - RateLimitPlugin behavior and configuration.
-  - FileDownloader and DockerHosts plugins, including example usage and updated configs.
-- Updated docs to reflect new ports, transports, and configuration knobs.
-- Version-bump and release notes aligned with 0.4.5 and 0.4.6 changes.
+- Updated docs and examples to reflect:
+  - new cache config layout (`cache.module`, `cache.config.min_cache_ttl`)
+  - new plugins (`dns_prefetch`, `mdns`)
+  - schema generation + using `assets/config-schema.json`
 
-## Bug Fixes and Hardening
-- Fixed stats loading for multiple rcode values.
-- Hardened RateLimitPlugin DB access and malformed row handling.
-- Tightened upstream and DoH transport behavior under edge cases.
-- Made plugin registry fail fast on import errors to avoid silent misconfiguration.
+---
+
+## Tests
+- Added/expanded coverage for:
+  - recursive resolver behavior (including transport helpers and QNAME minimization)
+  - DNSSEC extended local validation and trust anchor behavior
+  - new plugins (mDNS, DNS prefetch) and updated plugin behaviors
+  - cache plugin behavior (including the `none` cache)
+
+---
+
+## Notable PRs
+- Merged PR: **#20**
+
+---
+
+**Full Changelog:** `https://github.com/zallison/foghorn/compare/v0.4.6...v0.4.7`
 
 ----
 
@@ -98,13 +191,14 @@ For developer documentation (architecture, transports, plugin internals, testing
 	- [FilterPlugin](#filterplugin)
 	- [FileDownloader plugin](#listdownloader-plugin)
 	- [ZoneRecords plugin](#zonerecords-plugin)
+	- [DnsPrefetchPlugin](#dnsprefetchplugin)
   - [Complete `config.yaml` Example](#complete-configyaml-example)
 - [Logging](#logging)
 - [License](#license)
 
 ## Features
 
-*   **DNS Caching:** Speeds up DNS resolution by caching responses from upstream servers.
+*   **DNS Caching and Prefetch:** Speeds up DNS resolution by caching responses from upstream servers, with optional cache prefetch / stale‑while‑revalidate and a dns_prefetch plugin that keeps hot entries warm using statistics.
 *   **Extensible Plugin System:** Easily add custom logic to control DNS resolution.
 *   **Flexible Configuration:** Configure listeners, upstream resolvers (UDP/TCP/DoT/DoH), and plugins using YAML.
 *   **Built-in Plugins:**
@@ -153,10 +247,18 @@ The server will start listening for DNS queries on the configured host and port.
 
 Foghorn is available on Docker Hub at `zallison/foghorn:latest`.
 
+> **Note about mDNS / MdnsBridgePlugin**
+> The mDNS bridge plugin (`MdnsBridgePlugin`, alias `mdns`) relies on multicast
+> DNS on the local layer‑2 network. When you run Foghorn inside Docker and want
+> mDNS discovery to work, the container **must** share the host network (for
+> example, `--net=host` on Linux). If you use the default bridged Docker
+> network, mDNS traffic will not be visible to the container and the plugin will
+> not see any services.
+
 **Using the pre-built image:**
 
 ```bash
-docker run -d -p 5353:5353/udp \
+docker run -d -p 5335:5335/udp \
   -v /path/to/your/config/:/foghorn/config/ \
   zallison/foghorn:latest
 ```
@@ -178,7 +280,7 @@ docker run -d \
   -p 5353:5353/udp \
   -p 5353:5353/tcp \
   -p 8853:8853/tcp \
-  -p 8053:8053/tcp \
+  -p 5380:5380/tcp \
   -v /path/to/your/config.yaml:/foghorn/config/config.yaml \
   zallison/foghorn:latest
 ```
@@ -199,13 +301,25 @@ dnssec:
 
 ## Configuration
 
-Configuration is handled through a `config.yaml` file. The primary top-level sections are `listen`, `upstreams`, `foghorn`, and `plugins`.
+Configuration is handled through a `config.yaml` file. The primary top-level sections are `listen`, `upstreams`, `cache`, `foghorn`, and `plugins`.
+
+The `cache` section selects the DNS response cache implementation (default: in-memory TTL):
+
+```yaml
+cache:
+  module: in_memory_ttl
+  config: {}
+```
+
+The `foghorn` section also exposes optional cache prefetch / stale‑while‑revalidate knobs that work together with the shared resolver, and you can enable the `dns_prefetch` plugin to use statistics to keep frequently requested domains warm in cache.
 
 ------
 
 ## `listen`
 
 You can enable one or more `listener`s. `UDP` is enabled by default; `TCP`, `DoT`, and `DoH` are optional and supported.
+
+The default ports (UDP/TCP 5333, DoT 8853, DoH 5380, admin webserver 5380) are chosen to be above 1024 so that Foghorn can be run as a non-root user without special capabilities.
 
 ```yaml
 listen:
@@ -226,7 +340,7 @@ listen:
   doh:
 	enabled: false
 	host: 127.0.0.1
-	port: 8053
+	port: 5380
 	# Optional TLS
 	# cert_file: /path/to/cert.pem
 	# key_file: /path/to/key.pem
@@ -316,6 +430,45 @@ These knobs are honored by core plugins such as AccessControl, Filter,
 Greylist, NewDomainFilter, UpstreamRouter, FlakyServer, Examples, and
 EtcHosts. See `example_configs/` (for example `kitchen_sink.yaml` and
 `plugin_rate_limit.yaml`) for usage patterns.
+
+A minimal plugin entry using all common BasePlugin-wide options looks like:
+
+```yaml
+plugins:
+  - module: foghorn.plugins.filter.FilterPlugin
+	name: example_filter
+	enabled: true
+	comment: "Demo plugin using common BasePlugin options"
+	pre_priority: 40
+	post_priority: 60
+	setup_priority: 50
+	config:
+	  # BasePlugin-wide options
+	  logging:
+		level: debug
+		stderr: true
+		file: ./logs/example_filter.log
+		syslog:
+		  address: /dev/log
+		  facility: user
+
+	  targets:
+		- 10.0.0.0/8
+		- 192.0.2.1
+	  targets_ignore:
+		- 10.0.5.0/24
+	  targets_cache_ttl_seconds: 600
+
+	  target_qtypes:
+		- A
+		- AAAA
+
+	  abort_on_failure: true  # used by some plugins during setup()
+
+	  # Plugin-specific options (FilterPlugin here)
+	  default: deny
+	  cache_ttl_seconds: 600
+```
 
 #### Plugin priorities and `setup_priority`
 
@@ -487,7 +640,7 @@ This plugin provides flexible filtering of DNS queries based on domain names, pa
 - blocked_ips: list of IP addresses or CIDR ranges to control post‑resolution behavior; each entry supports action deny, remove, or replace (with replace_with).
 
 File-backed inputs (support globs):
-- allowed_domains_files, blocked_domains_files (aliases also supported: allowlist_files, blocklist_files)
+- allowed_domains_files, blocked_domains_files
 - blocked_patterns_files
 - blocked_keywords_files
 - blocked_ips_files
@@ -503,8 +656,8 @@ Formats supported per file (auto-detected line-by-line):
 Note: JSONL is only supported in FilterPlugin file-backed inputs (the *_files keys above). The core YAML config does not accept JSONL.
 
 Load order and precedence for domains (last write wins):
-1) allowed_domains_files/allowlist_files
-2) blocked_domains_files/blocklist_files
+1) allowed_domains_files
+2) blocked_domains_files
 3) inline allowed_domains
 4) inline blocked_domains
 
@@ -723,13 +876,19 @@ first-seen ordering. This ordering is reflected in the final DNS answer.
 plugins:
   - module: zone
 	config:
-	  # Use either a single file_path (legacy) or a list of file_paths
-	  # (preferred). When both are given, the legacy path is added to
-	  # the list; later files extend earlier ones.
-	  file_path: ./config/custom-records.txt        # optional
-	  file_paths:                                   # optional
+	  # Provide one or more records files; lines use:
+	  #   <domain>|<qtype>|<ttl>|<value>
+	  # example.com|A|300|192.0.2.10
+	  file_paths:
 		- ./config/custom-records.txt
 		- ./config/custom-records-extra.txt
+
+	  # Optional: add or override entries directly in config using the same
+	  # line format; these are merged after file-backed records with
+	  # first-TTL-wins and de-duplicated values.
+	  # records:
+	  #   - example.com|A|300|192.0.2.20
+	  #   - www.example.com|CNAME|300|example.com.
 
 	  # Optional: control how filesystem changes are detected
 	  watchdog_enabled: true                        # default true when omitted
@@ -750,6 +909,91 @@ filesystem events, which is useful in some container or network filesystem
 setups where file change notifications are unreliable.
 
 ------
+
+### DnsPrefetchPlugin
+
+The `DnsPrefetchPlugin` runs a background worker that periodically inspects
+statistics (primarily `cache_hit_domains`, with `top_domains` as a fallback) and
+issues synthetic DNS queries for the hottest domains and qtypes so that cache
+entries stay warm.
+
+**Configuration keys**
+
+```yaml
+plugins:
+  - module: dns_prefetch
+	config:
+	  interval_seconds: 60        # how often to run a prefetch cycle
+	  prefetch_top_n: 100         # max domains considered each cycle
+	  max_consecutive_misses: 5   # stop prefetching if no hits are ever seen
+	  qtypes: ["A", "AAAA"]       # record types to prefetch
+```
+
+Notes:
+- The plugin never modifies individual client queries; it only issues
+  background prefetches.
+- Statistics must be enabled for the plugin to be effective (see
+  `example_configs/prefetch.yaml` for a minimal example).
+
+------
+
+## Cache plugins
+Foghorn caches DNS responses via a configurable *cache plugin* under the top-level `cache:` key.
+
+Built-in cache plugins:
+- `in_memory_ttl` (default): in-process TTL cache
+- `sqlite3`: persistent on-disk TTL cache (SQLite)
+- `redis` / `valkey`: Redis-compatible remote cache (requires the optional Python dependency `redis`)
+- `none`: disables caching
+
+Examples (complete runnable configs) are available in:
+- `example_configs/cache_in_memory_ttl.yaml`
+- `example_configs/cache_sqlite3.yaml`
+- `example_configs/cache_redis.yaml`
+- `example_configs/cache_none.yaml`
+
+Minimal config snippets:
+
+`in_memory_ttl` (default):
+
+```yaml
+cache:
+  module: in_memory_ttl
+  config:
+	min_cache_ttl: 60
+```
+
+`sqlite3` (persistent on-disk cache):
+
+```yaml
+cache:
+  module: sqlite3
+  config:
+	db_path: ./config/var/dbs/dns_cache.db
+	namespace: dns_cache
+	min_cache_ttl: 60
+```
+
+`redis` / `valkey` (remote cache):
+
+```yaml
+cache:
+  module: redis
+  config:
+	url: redis://127.0.0.1:6379/0
+	namespace: foghorn:dns_cache:
+	min_cache_ttl: 60
+```
+
+`none` (disable caching):
+
+```yaml
+cache:
+  module: none
+```
+
+Notes:
+- `min_cache_ttl` is a cache-expiry floor used by the resolver; it does not rewrite TTLs inside DNS answers.
 
 ## Complete `config.yaml` Example
 
@@ -776,7 +1020,7 @@ listen:
   doh:
 	enabled: false
 	host: 127.0.0.1
-	port: 8053
+	port: 5380
 	# Optional TLS for DoH
 	# cert_file: /path/to/cert.pem
 	# key_file: /path/to/key.pem
@@ -809,11 +1053,15 @@ foghorn:
   upstream_strategy: failover
   upstream_max_concurrent: 1
   use_asyncio: true
-  # Minimum cache TTL (in seconds) applied to ***all*** cached responses.
-  # - For NOERROR with answers: cache TTL = max(min(answer TTLs), min_cache_ttl)
-  # - For NOERROR with no answers, NXDOMAIN, and SERVFAIL: cache TTL = min_cache_ttl
-  # Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
-  min_cache_ttl: 60
+# Cache configuration
+cache:
+  module: in_memory_ttl
+  config:
+	# Minimum cache TTL (in seconds) applied to ***all*** cached responses.
+	# - For NOERROR with answers: cache TTL = max(min(answer TTLs), min_cache_ttl)
+	# - For NOERROR with no answers, NXDOMAIN, and SERVFAIL: cache TTL = min_cache_ttl
+	# Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
+	min_cache_ttl: 60
 
 # Optional DNSSEC configuration
 # dnssec:
@@ -909,11 +1157,11 @@ plugins:
 	  urls:
 		- https://v.firebog.net/hosts/AdguardDNS.txt
 		- https://v.firebog.net/hosts/Easylist.txt
+		- https://v.firebog.net/hosts/Prigent-Ads.txt
+		- https://v.firebog.net/hosts/Prigent-Malware.txt
 
-  # Filter plugin: loads allowlists/blocklists and applies domain/IP filtering.
+  # Filter plugin: loads domain lists and applies domain/IP filtering.
   - module: filter
-	config:
-	  # setup_priority controls when setup() runs. When omitted, it falls back to
 	  # pre_priority for setupable plugins, or to the class default (50).
 	  setup_priority: 20
 
@@ -935,11 +1183,11 @@ plugins:
 		- "malware"
 		- "phishing"
 
-	  # Optional: file-backed allowlist/blocklist inputs (globs allowed)
-	  # allowlist_files:
+	  # Optional: file-backed allow/block inputs (globs allowed)
+	  # allowed_domains_files:
 	  #   - config/allow.txt
 	  #   - config/allow.d/*.list
-	  # blocklist_files:
+	  # blocked_domains_files:
 	  #   - config/block.txt
 	  #   - config/block.d/*.txt
 	  # blocked_patterns_files:
