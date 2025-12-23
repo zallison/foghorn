@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from foghorn.cache_plugins.base import CachePlugin, cache_aliases
+from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
 
 
 def test_cache_aliases_decorator_sets_aliases_and_returns_class() -> None:
@@ -104,3 +105,39 @@ def test_cache_plugin_methods_raise_not_implemented() -> None:
 
     with pytest.raises(NotImplementedError, match=r"CachePlugin\.purge\(\)"):
         c.purge()
+
+
+def test_in_memory_ttl_cache_snapshot_includes_counters() -> None:
+    """Brief: InMemoryTTLCachePlugin snapshot exposes per-cache counters.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts get_http_snapshot() returns counter fields for primary cache.
+    """
+
+    plugin = InMemoryTTLCachePlugin()
+
+    # Exercise the cache to ensure counters are non-zero.
+    key = ("example.com", 1)
+    plugin.set(key, 60, b"wire-bytes")
+    assert plugin.get(key) == b"wire-bytes"
+    assert plugin.get(("other.com", 1)) is None
+
+    snap = plugin.get_http_snapshot()
+    assert "summary" in snap
+    assert "caches" in snap
+
+    summary = snap["summary"]
+    assert isinstance(summary, dict)
+    # Counter keys should be present when the backend exposes them.
+    assert "calls_total" in summary
+    assert "cache_hits" in summary
+    assert "cache_misses" in summary
+
+    caches = snap["caches"]
+    assert isinstance(caches, list) and caches
+    primary = caches[0]
+    assert "label" in primary and "dns_cache" in primary["label"]
+    assert "calls_total" in primary

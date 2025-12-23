@@ -152,3 +152,39 @@ def test_cache_namespace_isolation_shared_store() -> None:
     # Purging within one namespace should not affect the other.
     assert a.purge_expired() >= 0
     assert b.get(k) == b"B"
+
+
+def test_cache_counters_increment_on_hits_and_misses() -> None:
+    """Brief: FoghornTTLCache exposes best-effort calls_total/hits/misses counters.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts counters move in the expected direction for hits/misses.
+    """
+
+    c = FoghornTTLCache()
+    key_hit = ("hit.example", 1)
+    key_miss = ("miss.example", 1)
+
+    # Initial counters default to zero.
+    assert getattr(c, "calls_total", 0) == 0
+    assert getattr(c, "cache_hits", 0) == 0
+    assert getattr(c, "cache_misses", 0) == 0
+
+    # Insert a single entry and perform a hit and a miss.
+    c.set(key_hit, 60, b"v")
+    assert c.get(key_hit) == b"v"  # hit
+    assert c.get(key_miss) is None  # miss
+
+    # Best-effort expectations: total calls equals two and hits/misses are
+    # non-decreasing and sum to at most calls_total.
+    calls_total = getattr(c, "calls_total", 0)
+    cache_hits = getattr(c, "cache_hits", 0)
+    cache_misses = getattr(c, "cache_misses", 0)
+
+    assert calls_total >= 2
+    assert cache_hits >= 1
+    assert cache_misses >= 1
+    assert cache_hits + cache_misses <= calls_total
