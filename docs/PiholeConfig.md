@@ -19,14 +19,14 @@ Minimal configuration:
 ```yaml
 listen:
   udp:
-    enabled: true
-    host: 0.0.0.0
-    port: 5335
+	enabled: true
+	host: 0.0.0.0
+	port: 5335
 
 upstreams:
   - host: 8.8.8.8
-    port: 53
-    transport: udp
+	port: 53
+	transport: udp
 ```
 
 ### What this does
@@ -73,13 +73,13 @@ Example configuration:
 ```yaml
 plugins:
   - module: file_downloader
-    config:
-      setup_priority: 10 # Run early so files are available for other plugins
-      download_path: ./config/var/lists
-      urls:
-        - https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
-      interval_days: 1
-      hash_filenames: true
+	config:
+	  setup_priority: 10 # Run early so files are available for other plugins
+	  download_path: ./config/var/lists
+	  urls:
+		- https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
+	  interval_days: 1
+	  hash_filenames: true
 ```
 
 ### What this does
@@ -87,9 +87,9 @@ plugins:
 - Downloads a hosts-style blocklist
 - Refreshes it every 24 hours
 - Stores it locally for other plugins to consume
-- What if I have multiple files named "hosts"?
+- What if I have multiple files named "hosts.txt"?
   See the option `hash_filenames`, which uses the first 12 digits of the sha1 of the url.
-  In our example here the url hashes to `b14d900f67a6.....` so the file will be saved as hosts-b14d900f67a6
+  In our example here the url hashes to `b14d900f67a6.....` so the file will be saved as "hosts-b14d900f67a6.txt"
 
 At this point, no domains are blocked yet; the data is only being fetched.
 
@@ -98,24 +98,26 @@ At this point, no domains are blocked yet; the data is only being fetched.
 ## 4. Blocking Domains with the Filter Plugin
 
 The `Filter` plugin evaluates every DNS query and decides whether it should be
-allowed, blocked, or forwarded upstream. Decisions are cachedRwe
+allowed, blocked, or forwarded upstream. Decisions are cached.
 
 Example configuration:
 
 ```yaml
 plugins:
   - module: filter
-    config:
-      setup_priority: 20 # Load after the files have been downloaded
-      pre_priority: 20   # Run early, before any other lookups happen
-      post_priority: 20  # Run early in post-resolve to deny/modify responses
-      default: allow
-      deny_response: nxdomain
-      blocked_domains_files:
-        # If using hashed filenames:
-        - ./config/var/lists/hosts-*
-        # If not using hashed filenames:
-        # - ./config/var/lists/hosts
+	config:
+	  # N.B. This could all just be "priority: 20"
+	  setup_priority: 20 # Load after the files have been downloaded
+	  pre_priority: 20   # Run early, before any other lookups happen
+	  post_priority: 20  # Run early in post-resolve to deny/modify responses
+	  default: allow
+	  deny_response: nxdomain
+	  blocked_domains_files:
+		./config/var/lists/* # Globs supported
+		# If using hashed filenames:
+		# - ./config/var/lists/hosts-....-.txt
+		# If not using hashed filenames:
+		# - ./config/var/lists/hosts.txt
 ```
 
 ### What this does
@@ -125,17 +127,17 @@ plugins:
 - Returns `NXDOMAIN` for blocked queries (similar to Pi-hole)
 - Next:
   - If desired add the `targets` option (available on all plugins).
-    This lets you choose which client IPs the filter applies to.
-  - Add more filter files
+	This lets you choose which client IPs the filter applies to.
+  - Add more filter files or rules
 
-DNS decision flow:
+DNS decision flow is now:
 
 ```
-+-------+    +---------+   +----------+
-+ Query | →  |  Filter | → | Upstream | → answer
-+-------+    +---------+   +----------+
-                |
-                +-- Blocked → NXDOMAIN
++-------+   +---------+   +----------+
++ Query | → |  Filter | → | Upstream | → answer
++-------+   +---------+   +----------+
+				|
+				+--→ Blocked → NXDOMAIN
 ```
 
 ---
@@ -150,10 +152,10 @@ Example configuration:
 ```yaml
 plugins:
   - module: etc-hosts
-    config: # Default values below
-      file_paths:
-        - /etc/hosts
-      ttl: 300
+	config: # Default values below
+	  file_paths:
+		- /etc/hosts
+	  ttl: 300
 ```
 
 ### What this does
@@ -183,46 +185,46 @@ filtering behavior.
 ```yaml
 listen:
   udp:
-    enabled: true
-    host: 0.0.0.0
-    port: 53
+	enabled: true
+	host: 0.0.0.0
+	port: 53
 
 upstreams:
   - host: 1.1.1.1
-    port: 53
-    transport: udp
+	port: 53
+	transport: udp
 
 plugins:
   - module: file_downloader
-    config:
-      setup_priority: 10
-      download_path: ./config/var/lists
-      urls:
-        - https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
-      interval_days: 1
-      hash_filenames: true
+	config:
+	  setup_priority: 10
+	  download_path: ./config/var/lists
+	  urls:
+		- https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
+	  interval_days: 1
+	  hash_filenames: true
 
   - module: etc-hosts
-    config:
-      pre_priority: 10 # Resolve local names first
-      file_paths:
-        - /etc/hosts
-      ttl: 300
+	config:
+	  pre_priority: 10 # Resolve local names first
+	  file_paths:
+		- /etc/hosts
+	  ttl: 300
 
   - module: filter
-    config:
-      setup_priority: 20
-      pre_priority: 20
-      post_priority: 20
-      default: allow
-      deny_response: nxdomain
-      blocked_domains_files:
-        - ./config/var/lists/hosts-*
+	config:
+	  setup_priority: 20
+	  pre_priority: 20
+	  post_priority: 20
+	  default: allow
+	  deny_response: nxdomain
+	  blocked_domains_files:
+		- ./config/var/lists/hosts-*
 ```
 
 ---
 
-## 7. [optional] DNS Resolution Flow
+## 7. DNS Resolution Flow
 
 With all plugins enabled (and with `EtcHosts` configured to run before `Filter`),
 DNS resolution works as follows:
@@ -231,11 +233,11 @@ DNS resolution works as follows:
  +----------+     +-------------+
  | EtcHosts |     | Block Lists |
  +----------+     +-------------+
-          ↓           ↓
+		  ↓           ↓
 Client → EtcHosts → Filter → Forward Upstream → Answer
-         |            |
-         |            +→ Query Blocked → NXDOMAIN+
-         +→ Answer
+		 |            |
+		 |            +→ Query Blocked → NXDOMAIN+
+		 +→ Answer
 
 ```
 
@@ -250,10 +252,10 @@ Example configuration:
 ```yaml
 plugins: # priorites defaults to 100 (out of 255),
   - module: zone
-    config:
-      file_paths:
-        - ./config/var/zone-records.txt
-      ttl: 300
+	config:
+	  file_paths:
+		- ./config/var/zone-records.txt
+	  ttl: 300
 ```
 
 Example `./config/var/zone-records.txt` entries:
@@ -269,11 +271,11 @@ override.some.domain|CNAME|60|my.other.domain
  +----------+     +-------------+  +--------------------+
  | EtcHosts |     | Block Lists |  | Zone Record / File |
  +----------+     +-------------+  +---------------------
-          ↓           ↓               ↓
+		  ↓           ↓               ↓
 Client → EtcHosts → Filter → Zone Records → Forward Upstream → Answer
-         |            |
-         |            +→ Query Blocked → NXDOMAIN
-         +→ Answer
+		 |            |
+		 |            +→ Query Blocked → NXDOMAIN
+		 +→ Answer
 ```
 
 ---
@@ -288,13 +290,13 @@ Example configuration:
 ```yaml
 plugins:
   - module: docker-hosts
-    config:
-      # Optional: append a suffix so container "web" becomes "web.docker.local".
-      suffix: docker.lan
-      endpoints:
-        - url: unix:///var/run/docker.sock
-          reload_interval_second: 30
-      ttl: 300
+	config:
+	  # Optional: append a suffix so container "web" becomes "web.docker.local".
+	  suffix: docker.lan
+	  endpoints:
+		- url: unix:///var/run/docker.sock
+		  reload_interval_second: 30
+	  ttl: 300
 ```
 
 ### What this does
@@ -316,10 +318,10 @@ If you want to use a different IP (for example, the host IP instead of the conta
  +-------------+   +------------+  +--------------------+
  | Block Lists |   | /etc/hosts |  | Docker instance(s) |
  +-------------+   +------------+  +--------------------+
-          ↓            ↓             ↓
+		  ↓            ↓             ↓
 Client → Filter → EtcHosts → DockerHosts → Upstream → Answer
-          |
-          +→ Blocked → NXDOMAIN
+		  |
+		  +→ Blocked → NXDOMAIN
 ```
 
 ---
@@ -343,6 +345,6 @@ schema-validated.
 ## Next Steps
 
 - Enable logging and metrics
-- Add TCP or TLS listeners
-- Implement split-horizon DNS
-- Create per-client filtering policies
+- Add DoT or DoH upstreams for encrypted DNS
+- Add TCP, DoT, or DoH downstreams
+- Create per-client / subnet filtering policies
