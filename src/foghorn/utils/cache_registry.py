@@ -63,7 +63,7 @@ def registered_cached(
         cache_obj: Optional[Any] = None
         if "cache" in c_kwargs:
             cache_obj = c_kwargs.get("cache")
-        elif c_args:
+        elif c_args:  # positional cache argument
             cache_obj = c_args[0]
 
         if isinstance(cache_obj, TTLCache):
@@ -74,7 +74,7 @@ def registered_cached(
                     entry["ttl"] = int(ttl_val)
                 if isinstance(maxsize_val, int):
                     entry["maxsize"] = maxsize_val
-            except Exception:
+            except Exception:  # pragma: nocover defensive cache introspection
                 # Never let registry introspection affect normal behavior.
                 pass
 
@@ -95,7 +95,7 @@ def registered_cached(
             # Update total call counter.
             try:
                 entry["calls_total"] += 1
-            except Exception:
+            except Exception:  # pragma: nocover defensive counter update
                 pass
 
             # Attempt to classify this call as a cache hit or miss by checking
@@ -106,7 +106,7 @@ def registered_cached(
                 try:
                     cache_key = key_func(*args, **kwargs)
                     had_key = cache_key in cache_obj  # type: ignore[operator]
-                except Exception:
+                except Exception:  # pragma: nocover defensive key computation
                     had_key = None
 
             result = wrapped(*args, **kwargs)
@@ -115,7 +115,7 @@ def registered_cached(
                 try:
                     cache_key_after = key_func(*args, **kwargs)
                     has_now = cache_key_after in cache_obj  # type: ignore[operator]
-                except Exception:
+                except Exception:  # pragma: nocover defensive key computation
                     has_now = None
 
                 try:
@@ -123,7 +123,7 @@ def registered_cached(
                         entry["cache_hits"] += 1
                     elif had_key is False and has_now:
                         entry["cache_misses"] += 1
-                except Exception:
+                except Exception:  # pragma: nocover defensive counter update
                     pass
 
             return result
@@ -134,12 +134,12 @@ def registered_cached(
             cache_attr = getattr(wrapped, "cache", None)
             if cache_attr is not None:
                 setattr(_wrapper, "cache", cache_attr)
-        except Exception:
+        except Exception:  # pragma: nocover defensive cache attribute preservation
             pass
 
         try:
             _REGISTERED_CACHED_FUNCS.append(entry)
-        except Exception:
+        except Exception:  # pragma: nocover defensive registry append
             # Best-effort only: registry failures must not affect normal behavior.
             pass
 
@@ -177,7 +177,7 @@ def registered_lru_cached(
         cache_ref: Optional[Any] = None
         try:
             cache_ref = getattr(wrapped, "cache", None)
-        except Exception:
+        except Exception:  # pragma: nocover defensive cache_ref lookup
             cache_ref = None
         if cache_ref is not None:
             entry["_cache_ref"] = cache_ref
@@ -185,7 +185,7 @@ def registered_lru_cached(
         def _wrapper(*args: Any, **kwargs: Any) -> Any:
             try:
                 entry["calls_total"] += 1
-            except Exception:
+            except Exception:  # pragma: nocover defensive counter update
                 pass
 
             # Best-effort: use lru_cache statistics when available to derive
@@ -196,7 +196,7 @@ def registered_lru_cached(
                 info = wrapped.cache_info()
                 before_hits = getattr(info, "hits", None)
                 before_misses = getattr(info, "misses", None)
-            except Exception:
+            except Exception:  # pragma: nocover defensive cache_info read
                 pass
 
             result = wrapped(*args, **kwargs)
@@ -205,7 +205,7 @@ def registered_lru_cached(
                 info2 = wrapped.cache_info()
                 after_hits = getattr(info2, "hits", None)
                 after_misses = getattr(info2, "misses", None)
-            except Exception:
+            except Exception:  # pragma: nocover defensive cache_info read
                 after_hits = after_misses = None
 
             try:
@@ -221,7 +221,7 @@ def registered_lru_cached(
                     and after_misses > before_misses
                 ):
                     entry["cache_misses"] += after_misses - before_misses
-            except Exception:
+            except Exception:  # pragma: nocover defensive counter update
                 pass
 
             return result
@@ -233,12 +233,12 @@ def registered_lru_cached(
                 val = getattr(wrapped, attr, None)
                 if val is not None:
                     setattr(_wrapper, attr, val)
-            except Exception:
+            except Exception:  # pragma: nocover defensive attribute preservation
                 continue
 
         try:
             _REGISTERED_CACHED_FUNCS.append(entry)
-        except Exception:
+        except Exception:  # pragma: nocover defensive registry append
             pass
 
         return _wrapper
@@ -265,7 +265,7 @@ def get_registered_cached() -> List[Dict[str, Any]]:
     for entry in _REGISTERED_CACHED_FUNCS:
         try:
             copy: Dict[str, Any] = dict(entry)
-        except Exception:
+        except Exception:  # pragma: nocover defensive snapshot copy
             continue
 
         cache_ref = copy.pop("_cache_ref", None)
@@ -273,7 +273,7 @@ def get_registered_cached() -> List[Dict[str, Any]]:
             try:
                 cur_size = len(cache_ref)  # type: ignore[arg-type]
                 copy["size_current"] = int(cur_size)
-            except Exception:
+            except Exception:  # pragma: nocover defensive size computation
                 # size_current is best-effort only.
                 pass
 
