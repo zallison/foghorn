@@ -516,3 +516,116 @@ def test_mdns_bridge_pre_resolve_uses_configured_ttl() -> None:
     answers = [rr for rr in resp.rr if rr.rtype == QTYPE.A]
     assert len(answers) == 1
     assert answers[0].ttl == 123
+
+
+def test_mdns_bridge_get_admin_pages_descriptor() -> None:
+    """Brief: get_admin_pages returns a single mDNS admin page spec.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts slug, title, and layout/kind fields.
+    """
+
+    from foghorn.plugins.mdns import MdnsBridgePlugin
+
+    plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
+    plugin.setup()
+
+    pages = plugin.get_admin_pages()
+    assert len(pages) == 1
+    page = pages[0]
+    assert page.slug == "mdns"
+    assert page.title == "mDNS"
+    assert page.layout == "one_column"
+    assert page.kind == "mdns"
+
+
+def test_mdns_bridge_get_admin_ui_descriptor_shape() -> None:
+    """Brief: get_admin_ui_descriptor describes the snapshot admin UI.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts descriptor keys, snapshot endpoint, and layout sections.
+    """
+
+    from foghorn.plugins.mdns import MdnsBridgePlugin
+
+    plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
+    plugin.setup()
+
+    desc = plugin.get_admin_ui_descriptor()
+
+    # Name and title should be strings; name should reflect the plugin name
+    # when present, falling back to "mdns".
+    plugin_name = getattr(plugin, "name", "mdns")
+    assert desc["name"] == str(plugin_name)
+    assert isinstance(desc["title"], str)
+
+    endpoints = desc["endpoints"]
+    assert isinstance(endpoints, dict)
+    assert endpoints.get("snapshot") == f"/api/v1/plugins/{plugin_name}/mdns"
+
+    layout = desc["layout"]
+    assert isinstance(layout, dict)
+    sections = layout.get("sections")
+    assert isinstance(sections, list) and sections
+
+    summary_section = next(s for s in sections if s["id"] == "summary")
+    assert summary_section["type"] == "kv"
+    services_section = next(s for s in sections if s["id"] == "services")
+    assert services_section["type"] == "table"
+
+
+def test_mdns_bridge_get_http_snapshot_summarizes_services_and_hosts() -> None:
+    """Brief: get_http_snapshot reports counts and per-service host addresses.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts summary totals and services entries reflect cached data.
+    """
+
+    from foghorn.plugins.mdns import MdnsBridgePlugin
+
+    plugin = MdnsBridgePlugin(
+        network_enabled=False,
+        domain=".local",
+        yes_i_really_mean_local=True,
+    )
+    plugin.setup()
+
+    # Seed a single service instance and host with both IPv4 and IPv6.
+    instance = "myservice._http._tcp.local."
+    host = "myhost.local."
+    plugin._test_seed_records(
+        srv={instance: (0, 0, 8080, host)},
+        a={host: ["192.0.2.10"]},
+        aaaa={host: ["2001:db8::10"]},
+    )
+
+    # Ensure the plugin also has an explicit DNS domain configured for summary.
+    plugin._dns_domains = {".zaa"}
+
+    snap = plugin.get_http_snapshot()
+
+    summary = snap["summary"]
+    services = snap["services"]
+
+    assert summary["total_services"] == 1
+    assert summary["total_hosts"] == 1
+    # Domains list should include the configured DNS domain.
+    assert ".zaa" in summary["domains"]
+
+    assert len(services) == 1
+    svc = services[0]
+    assert svc["instance"].endswith(".local")
+    # Service type should be derived from the owner name and strip `.local`.
+    assert svc["type"].endswith("_http._tcp")
+    assert svc["host"].endswith(".local")
+    assert "192.0.2.10" in svc["ipv4"]
+    assert "2001:db8::10" in svc["ipv6"]
