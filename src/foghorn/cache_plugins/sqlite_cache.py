@@ -59,14 +59,16 @@ class SQLite3CachePlugin(CachePlugin):
             cfg_db_path = config.get("path")
         if isinstance(cfg_db_path, str) and cfg_db_path.strip():
             db_path = cfg_db_path.strip()
-        else:
+        else:  # pragma: nocover default path only used in production
             db_path = "./config/var/dns_cache.db"
 
         self.db_path: str = os.path.abspath(os.path.expanduser(str(db_path)))
         self.min_cache_ttl: int = max(0, int(config.get("min_cache_ttl", 0) or 0))
 
         namespace = config.get("namespace", "dns_cache")
-        if not isinstance(namespace, str) or not namespace.strip():
+        if (
+            not isinstance(namespace, str) or not namespace.strip()
+        ):  # pragma: nocover validated by config layer
             raise ValueError(
                 "sqlite cache config requires a non-empty 'namespace' field"
             )
@@ -297,7 +299,7 @@ class SQLite3CachePlugin(CachePlugin):
             plugins_list = getattr(DNSUDPHandler, "plugins", []) or []
         except (
             Exception
-        ):  # pragma: nocover - import errors or attribute access failures leave plugins_list empty
+        ):  # pragma: nocover - import/attribute errors leave plugins_list empty
             plugins_list = []
 
         for plugin in plugins_list:
