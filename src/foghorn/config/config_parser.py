@@ -541,7 +541,9 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
             from foghorn.plugins import base as plugin_base
 
             global_cache = getattr(plugin_base, "DNS_CACHE", None)
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover defensive: import failure falls back to no global cache
             global_cache = None
 
         cache_instance = global_cache
