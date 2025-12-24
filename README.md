@@ -232,6 +232,7 @@ Release includes **55 commits** from `v0.4.6` (2025-12-07) to `v0.4.7` (2025-12-
   - [`upstreams`](#upstreams)
   - [`plugins`](#plugins)
   - [Complete `config.yaml` Example](#complete-configyaml-example)
+- [Use Cases](#use-cases)
 - [Logging](#logging)
 - [License](#license)
 
@@ -1286,6 +1287,56 @@ Foghorn includes configurable logging with bracketed level tags and UTC timestam
 ```
 
 See README-DEV.md for advanced logging and statistics options.
+
+## Use Cases
+
+1) Local development resolver
+  -  Serve only localhost.
+  -  Use DoT/DoH for upstream encrypted DNS.
+  -  Route VPN-only domains over the VPN.
+  -  Useful for dev machines that need split-horizon resolution.
+
+2) LAN resolver / name service
+  -  Serve the whole LAN.
+  -  Honor and serve entries from /etc/hosts or a centralized hosts file.
+  -  Optionally publish mDNS or integrate with local DHCP for dynamic names.
+
+3) Office caching recursive resolver
+  -  High-performance caching recursive resolver for an office.
+  -  Backed by Redis (or in-process cache) for TTL-sensitive caching.
+  -  Use DockerHosts to resolve container names to services in the office network.
+
+4) Authoritative DNS server
+  -  Serve authoritative records for one or more zones.
+  -  Stand-alone deployment recommended for reliability and security.
+  -  Useful for small orgs or lab domains.
+
+5) DNS-based load balancer / aggregator
+  -  Aggregate/cache results from multiple upstreams and upstream pools.
+  -  Implement simple health checks and weighted round-robin via plugins.
+  -  Reduce latency and offload upstream queries.
+
+6) Lab & resilience testing harness
+  -  Enable FlakyServer plugin to inject seedable, randomized failures (timeouts, malformed responses, truncated answers) and wire-level fuzzing.
+  -  Useful for testing client resilience, retries, and fallback behavior.
+
+7) Client access control & policy enforcement
+  -  Restrict query types (e.g., deny MX lookups for certain subnets).
+  -  Block or allow specific domains or categories (allowlist/blacklist semantics).
+  -  Force IPv6-only by denying A and allowing AAAA for specific clients or groups.
+  -  Limit new employees to a curated set of sites during onboarding.
+
+8) Custom behavior via plugins
+  -  Write plugins to transform queries/responses: redirect domains, synthesize records, perform per-client logic, integrate with external APIs (auth, telemetry, IP reputation).
+  -  Drop the "Plugin" suffix in names (e.g., UpstreamRouter → UpstreamRouter) if you prefer.
+
+9) Split-horizon / multi-homed environments
+  -  Serve different answers based on client subnet, VLAN, or AD site.
+  -  Route internal names to private IPs while exposing public records externally.
+
+10) Privacy-forward resolver for teams
+  -  Strip or minimize query metadata, forward queries via encrypted channels (DoH/DoT), and optionally log only aggregates to external telemetry.
+  -  Useful for remote teams with privacy requirements.
 
 ## License
 
