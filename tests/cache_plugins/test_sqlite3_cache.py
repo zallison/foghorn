@@ -284,3 +284,45 @@ def test_sqlite3_cache_purge_and_close_dont_raise(tmp_path, monkeypatch) -> None
     # Should not raise even though the underlying close() fails.
     plugin.close()
     plugin.__del__()
+
+
+def test_sqlite3_cache_snapshot_includes_decorated_registry(
+    monkeypatch, tmp_path
+) -> None:
+    """Brief: get_http_snapshot includes decorated cache registry entries.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - tmp_path: pytest temporary path fixture.
+
+    Outputs:
+      - None; asserts decorated rows reflect registry data and skip bad entries.
+    """
+
+    plugin = SQLite3CachePlugin(db_path=str(tmp_path / "dns_cache.db"))
+
+    # Fake two registry entries: one valid, one missing module/qualname.
+    good_entry = {
+        "module": "foghorn.example",
+        "qualname": "fn",
+        "ttl": 30,
+        "backend": "ttlcache",
+        "maxsize": 128,
+        "size_current": 10,
+        "calls_total": 5,
+        "cache_hits": 3,
+        "cache_misses": 2,
+    }
+    bad_entry = {"module": "", "qualname": ""}
+
+    def _fake_get_registered_cached():
+        return [good_entry, bad_entry]
+
+    # Import inside function, so patch on the module path used there.
+    import foghorn.utils.cache_registry as reg_mod
+
+    monkeypatch.setattr(reg_mod, "get_registered_cached", _fake_get_registered_cached)
+
+    snapshot = plugin.get_http_snapshot()
+    decorated = snapshot["decorated"]
+    assert any(row["module"] == "foghorn.example" for row in decorated)
