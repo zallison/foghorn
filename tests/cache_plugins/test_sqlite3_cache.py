@@ -254,3 +254,33 @@ def test_sqlite3_cache_purge_returns_int(tmp_path) -> None:
     db_path = tmp_path / "dns_cache.db"
     plugin = SQLite3CachePlugin(db_path=str(db_path))
     assert isinstance(plugin.purge(), int)
+
+
+def test_sqlite3_cache_purge_and_close_dont_raise(tmp_path, monkeypatch) -> None:
+    """Brief: purge() returns int and close() tolerates backend errors.
+
+    Inputs:
+      - tmp_path: pytest temporary path fixture.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts purge returns an int and close/__del__ swallow backend errors.
+    """
+
+    db_path = tmp_path / "dns_cache.db"
+    plugin = SQLite3CachePlugin(db_path=str(db_path))
+
+    # Ensure purge delegates to the backend and returns an int.
+    assert isinstance(plugin.purge(), int)
+
+    # Make backend.close() raise and ensure plugin.close()/__del__ ignore it.
+    backend = plugin._cache
+
+    def _boom() -> None:
+        raise RuntimeError("close failed")
+
+    monkeypatch.setattr(backend, "close", _boom)
+
+    # Should not raise even though the underlying close() fails.
+    plugin.close()
+    plugin.__del__()
