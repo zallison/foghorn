@@ -10,6 +10,8 @@ Outputs:
 from __future__ import annotations
 
 from typing import Any
+import threading
+import time
 
 import pytest
 
@@ -153,3 +155,102 @@ def test_registry_loads_sqlite3_cache_from_mapping(tmp_path) -> None:
     db_path = tmp_path / "dns_cache.db"
     inst = load_cache_plugin({"module": "sqlite3", "config": {"db_path": str(db_path)}})
     assert isinstance(inst, SQLite3CachePlugin)
+
+
+def test_sqlite3_cache_db_path_and_namespace_validation(tmp_path) -> None:
+    """Brief: __init__ falls back to path/default and validates namespace.
+
+    Inputs:
+      - tmp_path: pytest temporary path fixture.
+
+    Outputs:
+      - None; asserts path fallback and namespace ValueError.
+    """
+
+    # When only "path" is provided, db_path should resolve from it.
+    db_path = tmp_path / "via_path.db"
+    plugin = SQLite3CachePlugin(path=str(db_path))
+    assert plugin.db_path.endswith("via_path.db")
+
+    # When neither db_path nor path is provided, plugin should use the default.
+    plugin_default = SQLite3CachePlugin()
+    assert "dns_cache.db" in plugin_default.db_path
+
+    # Invalid/empty namespace should raise ValueError.
+    with pytest.raises(ValueError):
+        SQLite3CachePlugin(db_path=str(db_path), namespace="  ")
+
+
+def test_sqlite3_cache_targets_cache_summary(monkeypatch, tmp_path) -> None:
+    """Brief: get_http_snapshot summarizes BasePlugin._targets_cache via helper.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - tmp_path: pytest temporary path fixture.
+
+    Outputs:
+      - None; asserts a plugin_targets row is present for a fake plugin cache.
+    """
+
+    db_path = tmp_path / "dns_cache.db"
+    plugin = SQLite3CachePlugin(db_path=str(db_path))
+
+    class DummyCache:
+        def __init__(self) -> None:
+            # Single live entry and one expired to exercise counting.
+            now = time.time()
+            self._lock = threading.RLock()
+            self._store = {("k", 1): (now + 10.0, b"v"), ("k", 2): (now - 10.0, b"v2")}
+            self.calls_total = 3
+            self.cache_hits = 2
+            self.cache_misses = 1
+
+    class DummyPlugin:
+        def __init__(self) -> None:
+            self.name = "dummy"
+            self._targets_cache = DummyCache()
+
+    from foghorn.servers import udp_server as udp_mod
+
+    monkeypatch.setattr(udp_mod.DNSUDPHandler, "plugins", [DummyPlugin()])
+
+    snap = plugin.get_http_snapshot()
+    caches = snap["caches"]
+    assert any(row["label"] == "plugin_targets:dummy" for row in caches)
+
+
+def test_sqlite3_cache_admin_descriptor_shape(tmp_path) -> None:
+    """Brief: get_admin_ui_descriptor returns expected kind/layout structure.
+
+    Inputs:
+      - tmp_path: pytest temporary path fixture.
+
+    Outputs:
+      - None; asserts descriptor keys and section definitions.
+    """
+
+    db_path = tmp_path / "dns_cache.db"
+    plugin = SQLite3CachePlugin(db_path=str(db_path))
+    desc = plugin.get_admin_ui_descriptor()
+
+    assert desc["kind"] == "cache_sqlite"
+    assert isinstance(desc.get("name"), str)
+    layout = desc["layout"]
+    assert isinstance(layout, dict)
+    sections = layout.get("sections")
+    assert isinstance(sections, list) and sections
+
+
+def test_sqlite3_cache_purge_returns_int(tmp_path) -> None:
+    """Brief: purge() delegates to backend and returns an int.
+
+    Inputs:
+      - tmp_path: pytest temporary path fixture.
+
+    Outputs:
+      - None; asserts return type is int.
+    """
+
+    db_path = tmp_path / "dns_cache.db"
+    plugin = SQLite3CachePlugin(db_path=str(db_path))
+    assert isinstance(plugin.purge(), int)

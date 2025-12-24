@@ -112,7 +112,9 @@ class SQLite3CachePlugin(CachePlugin):
                 )
                 row2 = cur.fetchone()
                 expired_entries = int(row2[0]) if row2 and row2[0] is not None else 0
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive snapshot query handling; zero-fill on any failure
             # Best-effort only; fallback to zeros on any failure.
             total_entries = max(total_entries, 0)
             expired_entries = max(expired_entries, 0)
@@ -123,7 +125,7 @@ class SQLite3CachePlugin(CachePlugin):
         try:
             if os.path.isfile(self.db_path):
                 db_size_bytes = max(0, int(os.path.getsize(self.db_path)))
-        except Exception:
+        except Exception:  # pragma: nocover - filesystem errors treated as size=0
             db_size_bytes = 0
 
         # Global counters from the primary cache backend, when available.
@@ -201,7 +203,9 @@ class SQLite3CachePlugin(CachePlugin):
                 calls_total_local = getattr(cache_obj, "calls_total", None)
                 cache_hits_local = getattr(cache_obj, "cache_hits", None)
                 cache_misses_local = getattr(cache_obj, "cache_misses", None)
-            except Exception:  # pragma: no cover - defensive only
+            except (
+                Exception
+            ):  # pragma: nocover - defensive only; cache_obj may not expose counters
                 calls_total_local = cache_hits_local = cache_misses_local = None
 
             if inner_lock is not None:
@@ -236,7 +240,7 @@ class SQLite3CachePlugin(CachePlugin):
                         hit_pct_local = round(
                             (cache_hits_local / total_local) * 100.0, 1
                         )
-            except Exception:
+            except Exception:  # pragma: nocover - defensive percentage computation
                 hit_pct_local = None
 
             row: dict[str, object] = {
@@ -269,7 +273,7 @@ class SQLite3CachePlugin(CachePlugin):
                     hit_pct_primary = round(
                         (cache_hits_summary / total_primary) * 100.0, 1
                     )
-        except Exception:
+        except Exception:  # pragma: nocover - defensive percentage computation
             hit_pct_primary = None
 
         primary_row: dict[str, object] = {
@@ -291,19 +295,23 @@ class SQLite3CachePlugin(CachePlugin):
             from foghorn.servers.udp_server import DNSUDPHandler  # type: ignore[import]
 
             plugins_list = getattr(DNSUDPHandler, "plugins", []) or []
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - import errors or attribute access failures leave plugins_list empty
             plugins_list = []
 
         for plugin in plugins_list:
             try:
                 cache_obj = getattr(plugin, "_targets_cache", None)
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: nocover - defensive getattr on plugin._targets_cache
                 cache_obj = None
             if cache_obj is None:
                 continue
             try:
                 name = getattr(plugin, "name", None) or plugin.__class__.__name__
-            except Exception:
+            except Exception:  # pragma: nocover - defensive getattr on plugin.name
                 name = plugin.__class__.__name__
             label = f"plugin_targets:{name}"
             caches.append(_summarize_foghorn_ttl(label, cache_obj))
@@ -313,7 +321,7 @@ class SQLite3CachePlugin(CachePlugin):
             from foghorn.utils.cache_registry import get_registered_cached
 
             decorated = get_registered_cached()
-        except Exception:
+        except Exception:  # pragma: nocover - registry import failure is non-critical
             decorated = []
 
         decorated_rows: list[dict[str, object]] = []
@@ -328,7 +336,9 @@ class SQLite3CachePlugin(CachePlugin):
                 calls_total = entry.get("calls_total")
                 cache_hits = entry.get("cache_hits")
                 cache_misses = entry.get("cache_misses")
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: nocover - defensive against malformed registry entries
                 module = ""
                 qualname = ""
                 ttl_val = None
@@ -347,7 +357,7 @@ class SQLite3CachePlugin(CachePlugin):
                     total = cache_hits + cache_misses
                     if total > 0:
                         hit_pct = round((cache_hits / total) * 100.0, 1)
-            except Exception:
+            except Exception:  # pragma: nocover - defensive percentage computation
                 hit_pct = None
 
             decorated_rows.append(
@@ -534,11 +544,15 @@ class SQLite3CachePlugin(CachePlugin):
 
         try:
             self._cache.close()
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive close during interpreter shutdown
             pass
 
     def __del__(self) -> None:
         try:
             self.close()
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive __del__ during interpreter shutdown
             pass
