@@ -1504,7 +1504,11 @@ class DockerHosts(BasePlugin):
                 )
 
             for line in txts:
-                reply.add_answer(
+                # TXT summaries for docker hosts are ancillary metadata for A
+                # answers and belong in the ADDITIONAL section rather than the
+                # ANSWER section so that A responses remain strictly address-only
+                # from a DNS semantics perspective.
+                reply.add_ar(
                     RR(
                         rname=request.q.qname,
                         rtype=QTYPE.TXT,
@@ -1550,7 +1554,11 @@ class DockerHosts(BasePlugin):
                 )
 
             for line in txts:
-                reply.add_answer(
+                # TXT summaries for docker hosts are ancillary metadata for AAAA
+                # answers and belong in the ADDITIONAL section rather than the
+                # ANSWER section so that AAAA responses remain strictly
+                # address-only from a DNS semantics perspective.
+                reply.add_ar(
                     RR(
                         rname=request.q.qname,
                         rtype=QTYPE.TXT,
