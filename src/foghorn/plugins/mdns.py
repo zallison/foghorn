@@ -4,6 +4,7 @@ import ipaddress
 import logging
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
 from dnslib import A, AAAA, PTR, QTYPE, RR, SRV, TXT, DNSHeader, DNSRecord
@@ -291,6 +292,33 @@ class _SrvValue:
     target: str
 
 
+@dataclass
+class _ServiceState:
+    """Brief: Track last-seen timestamps, status, host, and uptime for mDNS services.
+
+    Inputs:
+      - status: Current status string (for example, ``"up"`` or ``"down"``).
+      - last_seen: ISO 8601 UTC timestamp for the most recent event affecting
+        the service.
+      - host: Last observed SRV target hostname for this service instance
+        (normalized, lowercased, no trailing dot). This is used so that the
+        admin UI can continue to show which host a service was last seen on
+        even after it goes down.
+      - up_since: ISO 8601 UTC timestamp marking the start of the current
+        "up" period. When status is ``"up"``, uptime is derived as
+        ``now - up_since``; when status is ``"down"``, this field is
+        preserved but not directly surfaced.
+
+    Outputs:
+      - _ServiceState instance.
+    """
+
+    status: str
+    last_seen: str
+    host: str = ""
+    up_since: str = ""
+
+
 @plugin_aliases("mdns", "zeroconf", "dns_sd", "dnssd", "bonjour")
 class MdnsBridgePlugin(BasePlugin):
     """Brief: Expose mDNS/DNS-SD (zeroconf) data as DNS records.
@@ -396,6 +424,7 @@ class MdnsBridgePlugin(BasePlugin):
         self._txt: Dict[str, List[str]] = {}
         self._a: Dict[str, Set[str]] = {}
         self._aaaa: Dict[str, Set[str]] = {}
+        self._service_state: Dict[str, _ServiceState] = {}
 
         self._ttl = int(self._config_model.ttl or 0)
         self._include_ipv4 = bool(self._config_model.include_ipv4)
@@ -771,6 +800,68 @@ class MdnsBridgePlugin(BasePlugin):
         self._ptr_add("_services.local", service_node)
         self._ptr_add("_services._dns-sd._udp.local", service_node)
 
+    def _update_service_state(
+        self, instance_name: str, status: str, host: Optional[str] = None
+    ) -> None:
+        """Brief: Update last-seen timestamp, status, and optional host.
+
+        Inputs:
+          - instance_name: Canonical instance owner name (any case, optional dot).
+          - status: New status string (for example, ``"up"`` or ``"down"``).
+          - host: Optional hostname (any case, optional trailing dot). When
+            provided, this value is normalized and recorded as the last host
+            where the service was seen. When omitted or empty, any previously
+            recorded host is preserved.
+
+        Outputs:
+          - None; internal `_service_state` mapping is updated in-place.
+        """
+
+        try:
+            base_name = self._normalize_owner(instance_name)
+        except Exception:
+            base_name = str(instance_name or "").rstrip(".").lower()
+
+        if not base_name:
+            return
+
+        try:
+            ts = datetime.now(timezone.utc).isoformat()
+        except Exception:
+            ts = ""
+
+        host_norm = ""
+        if host is not None:
+            try:
+                host_norm = self._normalize_owner(host)
+            except Exception:
+                host_norm = str(host or "").rstrip(".").lower()
+
+        variants = self._mirror_suffixes(base_name)
+        with self._lock:
+            for key in variants:
+                prev = self._service_state.get(key)
+                prev_host = getattr(prev, "host", "") if prev is not None else ""
+                prev_up_since = (
+                    getattr(prev, "up_since", "") if prev is not None else ""
+                )
+                new_host = host_norm or prev_host
+
+                status_norm = str(status).lower()
+                if status_norm == "up":
+                    # Preserve existing up_since when remaining up; start a new
+                    # up period only when transitioning from a non-up state.
+                    new_up_since = prev_up_since or ts
+                else:
+                    new_up_since = prev_up_since
+
+                self._service_state[key] = _ServiceState(
+                    status=str(status),
+                    last_seen=ts,
+                    host=new_host,
+                    up_since=new_up_since,
+                )
+
     def _start_type_browser(
         self, service_type: str
     ) -> None:  # pragma: nocover zeroconf browser wiring
@@ -880,6 +971,18 @@ class MdnsBridgePlugin(BasePlugin):
         """
 
         log = getattr(self, "logger", logger)
+
+        # Derive the canonical instance name used internally for SRV/TXT keys so
+        # that we can keep status tracking and cache cleanup consistent across
+        # add/update and remove events.
+        canonical_instance: Optional[str]
+        try:
+            safe_label = self._sanitize_qname(name)
+            st_norm = self._normalize_owner(service_type)
+            canonical_instance = f"{safe_label}.{st_norm}"
+        except Exception:
+            canonical_instance = None
+
         with self._lock:
             if getattr(state_change, "name", "") == "Removed":
                 log.debug(
@@ -893,6 +996,22 @@ class MdnsBridgePlugin(BasePlugin):
                 for k in self._mirror_suffixes(name):
                     self._srv.pop(k, None)
                     self._txt.pop(k, None)
+                if canonical_instance is not None:
+                    for k in self._mirror_suffixes(canonical_instance):
+                        self._srv.pop(k, None)
+                        self._txt.pop(k, None)
+                try:
+                    if canonical_instance is not None:
+                        # Preserve the last known host by omitting the host
+                        # argument on down transitions.
+                        self._update_service_state(canonical_instance, status="down")
+                except Exception:
+                    log.debug(
+                        "MdnsBridgePlugin: failed to update service state for removal: %s (type=%s)",
+                        name,
+                        service_type,
+                        exc_info=True,
+                    )
                 return
 
             # Record the instance event (PTRs are updated after we fetch ServiceInfo
@@ -960,9 +1079,10 @@ class MdnsBridgePlugin(BasePlugin):
         # usual PTR -> SRV/TXT chain with names like
         # "roku_ultra._airplay._tcp.zaa" instead of raw mDNS instance labels.
         try:
-            safe_label = self._sanitize_qname(name)
-            st_norm = self._normalize_owner(service_type)
-            canonical_instance = f"{safe_label}.{st_norm}"
+            if canonical_instance is None:
+                safe_label = self._sanitize_qname(name)
+                st_norm = self._normalize_owner(service_type)
+                canonical_instance = f"{safe_label}.{st_norm}"
             self._ptr_add(service_type, canonical_instance)
         except Exception:
             log.debug(
@@ -973,6 +1093,17 @@ class MdnsBridgePlugin(BasePlugin):
             )
 
         self._ingest_service_info(info, canonical_instance_name=canonical_instance)
+
+        try:
+            key_for_state = canonical_instance or getattr(info, "name", name)
+            self._update_service_state(key_for_state, status="up", host=host)
+        except Exception:
+            log.debug(
+                "MdnsBridgePlugin: failed to update service state for %s (type=%s)",
+                name,
+                service_type,
+                exc_info=True,
+            )
 
     @registered_cached(cache=_MDNS_SANITIZE_QNAME_CACHE)
     def _sanitize_qname(
@@ -1630,7 +1761,7 @@ class MdnsBridgePlugin(BasePlugin):
                     ],
                 },
                 {
-                    "id": "services",
+                    "id": "services_up",
                     "title": "Services",
                     "type": "table",
                     "path": "services",
@@ -1640,6 +1771,19 @@ class MdnsBridgePlugin(BasePlugin):
                         {"key": "host", "label": "Host"},
                         {"key": "ipv4", "label": "IPv4", "join": ", "},
                         {"key": "ipv6", "label": "IPv6", "join": ", "},
+                        {"key": "uptime", "label": "Uptime (s)", "align": "right"},
+                    ],
+                },
+                {
+                    "id": "services_down",
+                    "title": "Down services",
+                    "type": "table",
+                    "path": "down_services",
+                    "columns": [
+                        {"key": "instance", "label": "Instance"},
+                        {"key": "type", "label": "Type"},
+                        {"key": "host", "label": "Host"},
+                        {"key": "last_seen", "label": "Last seen"},
                     ],
                 },
             ]
@@ -1662,33 +1806,48 @@ class MdnsBridgePlugin(BasePlugin):
         Outputs:
           - dict with keys:
               * summary: High-level counts for total services and hosts.
-              * services: List of objects with per-service details:
-                  - instance: Canonical instance owner name (no trailing dot).
-                  - type: Service type portion of the name when derivable.
-                  - host: SRV target hostname (no trailing dot) when available.
-                  - ipv4: List of IPv4 addresses for the host (may be empty).
-                  - ipv6: List of IPv6 addresses for the host (may be empty).
+              * services: List of objects for currently up services. Each entry
+                includes an ``uptime`` field (seconds, float) derived from
+                the per-service ``up_since`` timestamp when available.
+              * down_services: List of objects for services marked down.
         """
 
-        services: List[Dict[str, object]] = []
+        services_up: List[Dict[str, object]] = []
+        services_down: List[Dict[str, object]] = []
         hosts_seen: set[str] = set()
 
+        # Capture a single reference time so uptime calculations within this
+        # snapshot are consistent across all services.
+        now_utc = datetime.now(timezone.utc)
+
         with self._lock:
-            # Snapshot SRV and address mappings so callers get a consistent view.
+            # Snapshot SRV, address mappings, and service state so callers get a
+            # consistent view.
             srv_items = list(self._srv.items())
             a_map = {k: set(v) for k, v in self._a.items()}
             aaaa_map = {k: set(v) for k, v in self._aaaa.items()}
             dns_doms = getattr(self, "_dns_domains", {self._dns_domain}) or {
                 self._dns_domain
             }
+            state_snapshot: Dict[str, _ServiceState] = dict(self._service_state)
 
-        # Limit the snapshot to names that still live in the `.local` mDNS
+        # Build a unified set of service owners limited to the `.local` mDNS
         # namespace so the admin view remains focused on what the plugin is
         # *discovering*, not every DNS suffix it might be serving under.
-        for owner, srv in sorted(srv_items, key=lambda item: item[0]):
+        srv_by_owner: Dict[str, _SrvValue] = {}
+        all_owner_names: Set[str] = set()
+        for owner, srv in srv_items:
             owner_name = str(owner or "").strip().lower()
-            if not owner_name or not owner_name.endswith(".local"):
-                continue
+            if owner_name and owner_name.endswith(".local"):
+                srv_by_owner[owner_name] = srv
+                all_owner_names.add(owner_name)
+        for owner in state_snapshot.keys():
+            owner_name = str(owner or "").strip().lower()
+            if owner_name and owner_name.endswith(".local"):
+                all_owner_names.add(owner_name)
+
+        for owner_name in sorted(all_owner_names):
+            srv = srv_by_owner.get(owner_name)
 
             # Derive a human-friendly service type by dropping the first label
             # (synthetic instance label) when possible.
@@ -1703,30 +1862,92 @@ class MdnsBridgePlugin(BasePlugin):
             if service_type.endswith(".local"):
                 service_type = service_type[: -len(".local")]
 
-            host_name = str(getattr(srv, "target", "") or "").rstrip(".").lower()
-            # Only report host entries that remain in the `.local` namespace to
-            # keep the view consistent with the service filter above.
-            if host_name and not host_name.endswith(".local"):
-                host_name = ""
+            state = state_snapshot.get(owner_name)
+            last_seen = state.last_seen if state is not None else ""
 
+            host_name = ""
             ipv4_list: List[str] = []
             ipv6_list: List[str] = []
-            if host_name:
-                hosts_seen.add(host_name)
-                v4 = a_map.get(host_name) or set()
-                v6 = aaaa_map.get(host_name) or set()
-                ipv4_list = sorted(str(ip) for ip in v4)
-                ipv6_list = sorted(str(ip) for ip in v6)
+            if srv is not None:
+                internal_host = (
+                    str(getattr(srv, "target", "") or "").rstrip(".").lower()
+                )
+                # Only report host entries that remain in the `.local` namespace to
+                # keep the view consistent with the service filter above.
+                if internal_host and not internal_host.endswith(".local"):
+                    internal_host = ""
 
-            services.append(
-                {
-                    "instance": owner_name,
-                    "type": service_type,
-                    "host": host_name,
-                    "ipv4": ipv4_list,
-                    "ipv6": ipv6_list,
-                }
-            )
+                if internal_host:
+                    hosts_seen.add(internal_host)
+                    v4 = a_map.get(internal_host) or set()
+                    v6 = aaaa_map.get(internal_host) or set()
+                    ipv4_list = sorted(str(ip) for ip in v4)
+                    ipv6_list = sorted(str(ip) for ip in v6)
+
+                    # For display purposes, strip the trailing `.local` suffix so
+                    # hostnames appear as simple labels (for example, "printer"
+                    # instead of "printer.local").
+                    host_name = internal_host
+                    if host_name.endswith(".local"):
+                        base = host_name[: -len(".local")]
+                        host_name = base or host_name
+
+            # When SRV data is no longer present (for example, a service has been
+            # removed from the network), fall back to the last recorded host from
+            # the per-instance service state so that the admin UI can still show
+            # where the service was last seen.
+            if not host_name and state is not None:
+                saved_host = getattr(state, "host", "") or ""
+                if saved_host:
+                    host_name = saved_host
+                    if host_name.endswith(".local"):
+                        base = host_name[: -len(".local")]
+                        host_name = base or host_name
+
+            if state is not None:
+                status = state.status
+            else:
+                # When no explicit state exists, treat cached SRV data as "up" and
+                # absent SRV data as "down" so callers can distinguish cases.
+                status = "up" if srv is not None else "down"
+
+            record: Dict[str, object] = {
+                "instance": owner_name,
+                "type": service_type,
+                "host": host_name,
+                "ipv4": ipv4_list,
+                "ipv6": ipv6_list,
+                "last_seen": last_seen,
+                "status": status,
+            }
+
+            # Derive an uptime (in whole seconds) for services that are currently
+            # up, based on the per-instance "up_since" timestamp when available.
+            if str(status).lower() == "up" and state is not None:
+                up_since_raw = getattr(state, "up_since", "") or last_seen
+                try:
+                    up_since_dt = datetime.fromisoformat(str(up_since_raw))
+                except Exception:
+                    up_since_dt = None  # type: ignore[assignment]
+                if up_since_dt is not None:
+                    try:
+                        uptime_seconds = (now_utc - up_since_dt).total_seconds()
+                        if uptime_seconds < 0:
+                            uptime_seconds = 0.0
+                        # Expose uptime as an integer number of seconds for
+                        # simplicity and easier sorting/aggregation on the
+                        # client side.
+                        record["uptime"] = int(uptime_seconds)
+                    except Exception:
+                        pass
+
+            if str(status).lower() == "down":
+                # Down hosts are reported without addresses for clarity in the UI.
+                record["ipv4"] = []
+                record["ipv6"] = []
+                services_down.append(record)
+            else:
+                services_up.append(record)
 
         # Summarize counts plus the configured DNS domains this plugin is
         # serving under so that operators can see both the discovery namespace
@@ -1734,12 +1955,16 @@ class MdnsBridgePlugin(BasePlugin):
         domains_list = sorted({str(d) for d in dns_doms})
 
         summary: Dict[str, object] = {
-            "total_services": len(services),
+            "total_services": len(services_up) + len(services_down),
             "total_hosts": len(hosts_seen) if hosts_seen else 0,
             "domains": domains_list,
         }
 
-        return {"summary": summary, "services": services}
+        return {
+            "summary": summary,
+            "services": services_up,
+            "down_services": services_down,
+        }
 
     def close(self) -> None:  # pragma: nocover best-effort shutdown
         """Brief: Best-effort shutdown for zeroconf resources.
