@@ -8,6 +8,8 @@ Supporting upstream **and** downstream in UDP, TCP, DoT, and DoH (HTTP or HTTPs 
 
 By default it acts as a caching forwarding DNS server with DNSSEC support.
 
+<img src="assets/screenshot-1.png" width=300px />
+
 Tons of knobs and settings to perfect it for your needs. You can tune upstream strategy, concurrency, and health behavior directly from configuration, while monitoring real-time upstream status and response codes via a versioned `/api/v1` admin API and associated UI. Foghorn exposes rich statistics for DNSSEC, rate limiting,  upstream health, and more, with both snapshot and persistent storage options.
 
 Configurations support variables which can be set in the command line, and environment variable, or the config file.  In that order of precendence. Variables can, for example, define your lan domain or define CIDRs so they can be referred to by name instead of copying the CIDR lists each time.
