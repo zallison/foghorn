@@ -4,7 +4,7 @@ import ipaddress
 import logging
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Set, Tuple
 
 from dnslib import A, AAAA, PTR, QTYPE, RR, SRV, TXT, DNSHeader, DNSRecord
@@ -1863,7 +1863,25 @@ class MdnsBridgePlugin(BasePlugin):
                 service_type = service_type[: -len(".local")]
 
             state = state_snapshot.get(owner_name)
-            last_seen = state.last_seen if state is not None else ""
+            raw_last_seen = state.last_seen if state is not None else ""
+
+            # Present last_seen in the local timezone and rounded to whole
+            # seconds so operators see human-friendly timestamps rather than raw
+            # UTC with sub-second precision.
+            last_seen = raw_last_seen
+            if raw_last_seen:
+                try:
+                    dt = datetime.fromisoformat(str(raw_last_seen))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    local_dt = dt.astimezone()
+                    # Round to the nearest whole second before rendering.
+                    if local_dt.microsecond >= 500_000:
+                        local_dt = local_dt + timedelta(seconds=1)
+                    local_dt = local_dt.replace(microsecond=0)
+                    last_seen = local_dt.isoformat()
+                except Exception:
+                    last_seen = raw_last_seen
 
             host_name = ""
             ipv4_list: List[str] = []
@@ -1924,7 +1942,9 @@ class MdnsBridgePlugin(BasePlugin):
             # Derive an uptime (in whole seconds) for services that are currently
             # up, based on the per-instance "up_since" timestamp when available.
             if str(status).lower() == "up" and state is not None:
-                up_since_raw = getattr(state, "up_since", "") or last_seen
+                # Use the raw UTC timestamp for uptime math so that local
+                # formatting of last_seen does not affect calculations.
+                up_since_raw = getattr(state, "up_since", "") or raw_last_seen
                 try:
                     up_since_dt = datetime.fromisoformat(str(up_since_raw))
                 except Exception:
