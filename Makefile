@@ -33,10 +33,10 @@ run: $(VENV)/bin/foghorn
 env:
 	@echo "=== Creating virtual environment ==="
 	[ -d ${VENV} ] || python -m venv $(VENV)
+	$(VENV)/bin/pip install "."
 
 $(VENV)/bin/foghorn: pyproject.toml
-	$(MAKE) env
-	$(VENV)/bin/pip install -e "."
+	$(MAKE) env-dev
 
 .PHONY: build
 build: $(VENV)/bin/foghorn ./scripts/generate_foghorn_schema.py
@@ -47,7 +47,7 @@ build: $(VENV)/bin/foghorn ./scripts/generate_foghorn_schema.py
 	echo >> assets/config-schema.json
 
 .PHONY: env-dev
-env-dev:
+env-dev: env
 	@echo "=== Installing project in editable mode ==="
 	$(VENV)/bin/pip install -e ".[dev]"
 
@@ -56,7 +56,7 @@ env-dev:
 # ------------------------------------------------------------
 .PHONY: test tests
 tests: test
-test: $(VENV)/bin/foghorn
+test: $(VENV)/bin/foghorn env-dev
 	@echo "=== Running tests (short) ==="
 	. ${VENV}/bin/activate
 	${VENV}/bin/pytest --cov=foghorn --disable-warnings tests
