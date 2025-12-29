@@ -3,7 +3,7 @@ image: python:3.12
 before_script:
   - python --version ; pip --version  # For debugging
   - pip install --upgrade pip
-  - pip install .
+  - pip install ".[dev]"
 
 test:
   script:
