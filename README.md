@@ -44,16 +44,20 @@ Each plugin can can be configured with:
 
 Foghorn comes with a fair amount of plugins by default:
 
-- `AccessControlPlugin` - CIDR based access
-- `EtcHosts` - map /etc/host (or other hostfiles) to DNS records, with reverse PTRs
-- `FileDownloader` - Download files (such as block lists).  Can renamed files to file-<sha1(url)[:12]>.ext so multiple "hosts" files can be used, for example.
-- `FilterPlugin` - Block ads and malware.  Block keywords, regexp, use files for block lists, filter on resolved IPs.
-- `RateLimitPlugin` - Dynamic or static rate limiting. Customize min, max.  Dynamic learns normal DNS volume and starts from there.  Set `alpha` and `alpha_down` to control how quickly it reacts to rate changes.
-- `MdnsBridgePlugin` - Rebroadcast mDNS (sd-dns, zeroconf, avahi, ".local") records over DNS. Enables services discovery and host records for non-mdns enable clients.  **Requires being on the host network, `--host=net` if using docker** (e.g.: `dig PTR _airplay._tcp.local` to find airplay hosts and `dig TXT host_name._airplay._tcp.local` for details.)
-- `UpstreamRouterPlugin` - Redirect queries based on domain names (e.g. ensure dns for `.mycorp` goes though the company vpn, `.lan` goes to the dhcp server, and ensure `.onion` never leaves the lan, etc)
-- `DockerHosts` - Automatically create dns names for docker containers.  Creates DNS entires based on name and short hash.  Monitor Docker health over DNS. Returns related docker TXT records (name, health, endpoint, and more). Polls for updates. Adds new container when started, removes containers that are stopped
-- `FlakyServer` cover access control, /etc-hosts mapping, domain/IP filtering, adaptive rate limiting, upstream routing, zone records, list downloads, Docker-aware name resolution, and chaos testing / packet fuzzing.
-- `ZoneRecords` - Override a single query or define an entire zone, can read bind9 zone files or a simple pipe delimited format.
+- `AccessControlPlugin` - CIDR based access control.
+- `DockerHosts` - Automatically create DNS names for Docker containers and expose container metadata over TXT records.
+- `DnsPrefetchPlugin` - Keep frequently requested names warm in the cache by issuing background prefetches.
+- `EtcHosts` - Map `/etc/hosts` (or other hostfiles) to DNS records, with reverse PTRs.
+- `ExamplesPlugin` - Demonstration policies and rewrites for learning and experimentation. (EXAMPLE, not for production.)
+- `FileDownloader` - Download block lists and other files so that other plugins (like Filter) can consume them from disk.
+- `FilterPlugin` - Block ads, malware, and other domains via inline or file-backed rules, keywords, regexps, and IP-based actions.
+- `FlakyServer` - Simulate unreliable upstreams with timeouts, malformed responses, and wire-level fuzzing for resilience testing.
+- `GreylistPlugin` - Temporarily delay or block newly seen domains. (EXAMPLE, not for production.)
+- `MdnsBridgePlugin` - Rebroadcast mDNS (sd-dns, zeroconf, avahi, ".local") records over DNS so non-mDNS clients can discover services. **Requires being on the host network, `--host=net` if using docker** (e.g.: `dig PTR _airplay._tcp.local` to find AirPlay hosts and `dig TXT host_name._airplay._tcp.local` for details.)
+- `NewDomainFilterPlugin` - Example plugin that blocks recently-registered domains using WHOIS metadata.
+- `RateLimitPlugin` - Dynamic or static rate limiting with learned baselines and per-key profiles.
+- `UpstreamRouterPlugin` - Redirect queries to different upstreams based on domain or suffix (for example, VPN-only or LAN-only zones).
+- `ZoneRecords` - Serve static records or authoritative zones from one or more local files.
 
 "Denied" queries can return be REFUSED, SERVFAIL, NODATA, or a specific ip (or invalid ip like 0.0.0.0)
 
@@ -120,16 +124,20 @@ Also thanks to my junior developer, `AI` via `warp.dev`, who keeps my docstrings
 *   **Extensible Plugin System:** Easily add custom logic to control DNS resolution.
 *   **Flexible Configuration:** Configure listeners, upstream resolvers (UDP/TCP/DoT/DoH), and plugins using YAML.
 *   **Built-in Plugins:**
-  *   **Access Control:** CIDR-based allow/deny (allowlist/blocklist terminology in docs).
-  *   **DockerHosts:** Create dns records for docker containers. Optional _containers PTR record for service discovery and health checks.
-  *   **EtcHosts:** Answer queries based on host file(s).
-  *   **FileDownloader:** Download files (such as block lists).
-  *   **FilterPlugin:** Block ads, malware, or anything else. Use inline domain names, keywords, regexp, or read the from files. Also filter on resolved IPs.
-  *   **FlakyServer**: Simulate a malfunction DNS server or DNS over a bad connection. Random (seedable) failures, connection drops, and/or on-wire fuzzed result (bit flips, etc).
-  *   **MdnsBridgePlugin**: Rebroadcast mDNS (sd-dns, zeroconf, avahi, ".local") records over DNS. Enables services discovery and host records for non-mdns enable clients. (Yes, the RFC supports this)  **Requires being on the host network**
-  *   **Rate Limit**: Adaptive or static rate limiting, by client, domain, or client-domain.  Prevent poorly configured devices from spamming upstream.
-  *   **Upstream Router:** Route queries to different upstream servers by domain/suffix.
-  *   **ZoneRecords** Serve static DNS records and authoritative zones from one or more files, with optional live reload on change.
+  *   **Access Control (AccessControlPlugin):** CIDR-based allow/deny (allowlist/blocklist terminology in docs).
+  *   **DockerHosts:** Create DNS records for Docker containers, reverse PTRs, and TXT metadata for service discovery and health checks.
+*   **DnsPrefetchPlugin (EXAMPLE, not for production):** Inspect cache statistics and prefetch hot domains so answers stay warm.
+  *   **EtcHosts:** Answer queries based on host file(s) such as `/etc/hosts`, including reverse PTRs.
+*   **ExamplesPlugin (EXAMPLE, not for production):** Demonstration policies and rewrites (length limits, subdomain caps, IP rewrites) for experimentation.
+  *   **FileDownloader:** Download block lists and related files for downstream plugins like Filter.
+  *   **FilterPlugin:** Block ads, malware, or anything else using inline or file-backed rules, regexps, keywords, and IP actions.
+  *   **FlakyServer:** Simulate a malfunctioning DNS server or bad network connection with configurable failures and fuzzed responses.
+*   **GreylistPlugin (EXAMPLE, not for production):** Temporarily greylist newly seen domains before allowing them.
+  *   **MdnsBridgePlugin:** Rebroadcast mDNS (sd-dns, zeroconf, avahi, ".local") over DNS so non-mDNS clients can discover services. **Requires being on the host network.**
+  *   **NewDomainFilterPlugin:** Example plugin that blocks recently-registered domains using WHOIS data.
+  *   **RateLimitPlugin:** Adaptive or static rate limiting, by client, domain, or client-domain.
+  *   **UpstreamRouterPlugin:** Route queries to different upstream servers by domain or suffix.
+  *   **ZoneRecords:** Serve static DNS records and authoritative zones from one or more files, with optional live reload on change.
 * **Examples**:
   *   **dnsprefetch**: Read statistics and try to keep the cache warm for oft accessed domains.
   *   **Examples:** Showcase of simple policies and rewrites.
@@ -200,8 +208,7 @@ If you need to expose additional listeners (TCP/DoT/DoH), add the corresponding 
 
 ```bash
 docker run -d \
-  -p 5335:5335/udp \
-  -p 5335:5335/tcp \
+  -p 5335:5335 \
   -p 8853:8853/tcp \
   -p 5380:5380/tcp \
   -v /path/to/your/config.yaml:/foghorn/config/config.yaml \
@@ -234,7 +241,7 @@ cache:
   config: {}
 ```
 
-The `foghorn` section also exposes optional cache prefetch / stale‑while‑revalidate knobs that work together with the shared resolver, and you can enable the `dns_prefetch` plugin to use statistics to keep frequently requested domains warm in cache.
+The `foghorn` section also exposes optional cache prefetch / stale‑while‑revalidate knobs that work together with the shared resolver.
 
 ------
 
@@ -263,7 +270,7 @@ listen:
   doh:
 	enabled: false
 	host: 127.0.0.1
-	port: 5380
+	port: 5443
 	# Optional TLS
 	# cert_file: /path/to/cert.pem
 	# key_file: /path/to/key.pem
@@ -358,8 +365,8 @@ A minimal plugin entry using all common BasePlugin-wide options looks like:
 
 ```yaml
 plugins:
-  - module: foghorn.plugins.filter.FilterPlugin
-	name: example_filter
+  - module: some_plugin
+	name: example_plugin
 	enabled: true
 	comment: "Demo plugin using common BasePlugin options"
 	pre_priority: 40
@@ -374,23 +381,17 @@ plugins:
 		syslog:
 		  address: /dev/log
 		  facility: user
-
 	  targets:
 		- 10.0.0.0/8
 		- 192.0.2.1
 	  targets_ignore:
 		- 10.0.5.0/24
 	  targets_cache_ttl_seconds: 600
-
 	  target_qtypes:
 		- A
 		- AAAA
 
 	  abort_on_failure: true  # used by some plugins during setup()
-
-	  # Plugin-specific options (FilterPlugin here)
-	  default: deny
-	  cache_ttl_seconds: 600
 ```
 
 #### Plugin priorities and `setup_priority`
@@ -448,7 +449,7 @@ plugins:
 
 ------
 
-### NewDomainFilterPlugin
+### NewDomainFilterPlugin (EXAMPLE, not for production)
 
 This plugin blocks domains that were registered recently by checking the domain's creation date using `whois`.
 
@@ -833,7 +834,7 @@ setups where file change notifications are unreliable.
 
 ------
 
-### DnsPrefetchPlugin
+### DnsPrefetchPlugin (EXAMPLE, not for production)
 
 The `DnsPrefetchPlugin` runs a background worker that periodically inspects
 statistics (primarily `cache_hit_domains`, with `top_domains` as a fallback) and
