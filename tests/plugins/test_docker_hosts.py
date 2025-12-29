@@ -1079,6 +1079,7 @@ def test_docker_hosts_discovery_publishes_txt(monkeypatch):
     )
 
     full_id = "deadbeef" * 8  # 64 hex chars
+    short_id = full_id[:12]
 
     containers = [
         {
@@ -1131,6 +1132,7 @@ def test_docker_hosts_discovery_publishes_txt(monkeypatch):
     assert container_txt.find("name=") < container_txt.find("endpoint=")
 
     assert "name=web" in container_txt
+    assert f"id={short_id}" in container_txt
     assert "int4=172.17.0.5" in container_txt
     assert "nets=bridge:172.17.0.5" in container_txt
     assert "endpoint=unix:///var/run/docker.sock" in container_txt
