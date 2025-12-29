@@ -1761,7 +1761,7 @@ class MdnsBridgePlugin(BasePlugin):
                     ],
                 },
                 {
-                    "id": "services_up",
+                    "id": "services",
                     "title": "Services",
                     "type": "table",
                     "path": "services",
@@ -1902,13 +1902,9 @@ class MdnsBridgePlugin(BasePlugin):
                     ipv4_list = sorted(str(ip) for ip in v4)
                     ipv6_list = sorted(str(ip) for ip in v6)
 
-                    # For display purposes, strip the trailing `.local` suffix so
-                    # hostnames appear as simple labels (for example, "printer"
-                    # instead of "printer.local").
+                    # Preserve the full mDNS hostname (including `.local`) so
+                    # callers can easily correlate with underlying mDNS records.
                     host_name = internal_host
-                    if host_name.endswith(".local"):
-                        base = host_name[: -len(".local")]
-                        host_name = base or host_name
 
             # When SRV data is no longer present (for example, a service has been
             # removed from the network), fall back to the last recorded host from
@@ -1917,10 +1913,10 @@ class MdnsBridgePlugin(BasePlugin):
             if not host_name and state is not None:
                 saved_host = getattr(state, "host", "") or ""
                 if saved_host:
+                    # When falling back to the last recorded host, preserve the
+                    # full hostname (including `.local`) for consistency with
+                    # the live SRV-derived path above.
                     host_name = saved_host
-                    if host_name.endswith(".local"):
-                        base = host_name[: -len(".local")]
-                        host_name = base or host_name
 
             if state is not None:
                 status = state.status
