@@ -1271,9 +1271,9 @@ class DockerHosts(BasePlugin):
                 net_parts.append(seg)
 
         # Ordering requested:
-        # name, ans4/ans6 (when present), other metadata, and endpoint last. Host
-        # ports are returned out-of-band for admin display and omitted from TXT
-        # for brevity.
+        # name, id (short hash when available), ans4/ans6 (when present), other
+        # metadata, and endpoint last. Host ports are returned out-of-band for
+        # admin display and omitted from TXT for brevity.
         pieces: List[str] = []
 
         # For display, drop domain suffixes so TXT names stay short. The full
@@ -1282,6 +1282,15 @@ class DockerHosts(BasePlugin):
 
         if display_name:
             pieces.append(f"name={display_name}")
+
+        # Include a short ID (first 12 hex characters) when the container Id
+        # looks hash-like so operators can correlate TXT/Info entries with
+        # docker CLI output without exposing the full ID in the record.
+        raw_id = str(container.get("Id") or "").strip()
+        short_id = raw_id[:12]
+        if short_id and all(c in "0123456789abcdefABCDEF" for c in short_id):
+            pieces.append(f"id={short_id.lower()}")
+
         # Include both IPv4 and IPv6 answers so that TXT/Info reflects the
         # effective reply addresses, including any use_ipv4/use_ipv6 overrides
         # configured for the endpoint.
