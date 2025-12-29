@@ -67,8 +67,33 @@ For developer documentation (architecture, transports, plugin internals, testing
 Also thanks to my junior developer, `AI` via `warp.dev`, who keeps my docstrings and unit tests up to date, creates good commit messages, and other janitorial tasks.  Also ~~a lot of help with~~ the HTML/JS.  Because I'm just not good at it.
 
 ----
-## Change Log
+## Change Log - 2025-12-28
 
+### Added
+- Docker TXT records now include both `sha1[:12]` as `short_id` identifiers for containers.
+- mDNS admin UI now tracks service state and exposes lists of up/down services.
+- mDNS TXT records now show the last scene in local time, rounded to the nearest second.
+- Docker-hosts TXT records now include endpoint IPs for services.
+- Expanded sqlite3 cache test coverage.
+
+### Changed
+- Docker-hosts TXT records no longer include the deprecated `"aliases"` field.
+
+### Fixed
+- `docker_hosts` now returns TXT metadata in the ADDITIONAL section for A/AAAA records.
+- Screenshot assets updated to render correctly in documentation.
+
+### Documentation
+- README refreshed with updated content and screenshots.
+- Version bumped from `0.5.0` to `0.5.1`.
+
+## What's Changed
+* chore(clearnup) Removed test schema by @zallison in https://github.com/zallison/foghorn/pull/47
+* Readme and Screenshot update by @zallison in https://github.com/zallison/foghorn/pull/48
+* Release v0.5.1 by @zallison in https://github.com/zallison/foghorn/pull/49
+
+
+**Full Changelog**: https://github.com/zallison/foghorn/compare/v0.5.0...v0.5.1
 
 
 ----
