@@ -715,6 +715,39 @@ It discovers containers via the Docker CLI on one or more endpoints, extracts
 hostnames plus IPv4/IPv6 addresses, and serves forward and reverse entries from
 an in-memory map that is periodically refreshed.
 
+In addition to A/AAAA/PTR records, DockerHosts publishes per-container TXT
+metadata and an optional aggregate `_containers.<suffix>` TXT record summarizing
+all containers. TXT lines include fields such as:
+
+- `name`, `id` (short container ID)
+- `ans4`, `ans6` (effective answer IPs)
+- `ports` (host listening ports derived from `NetworkSettings.Ports`)
+- `health`, `project-name`, `service`
+- `int4`, `int6`, `nets`, and `endpoint`
+
+TXT output can be extended (or replaced) with additional key/value pairs drawn
+from `docker inspect` via two configuration keys:
+
+- `txt_fields`: list of mappings with:
+  - `name`: TXT key name (for example `image`, `project`).
+  - `path`: minimal JSONPath-like expression into the inspect JSON
+    (for example `Config.Image`, `State.Health.Status`,
+    `Config.Labels.com.docker.compose.project`).
+- `txt_fields_replace` (bool, default `false`): when `true` and at least one
+  `txt_fields` entry resolves for a container, only those custom key/value pairs
+  are emitted in its TXT summary; otherwise they are appended to the built-in
+  summary.
+
+`path` supports a small, predictable subset of JSONPath:
+
+- Optional leading `$` / `$.` (ignored when present).
+- Dot-separated dict traversal, for example `Config.Image`,
+  `State.Health.Status`, `NetworkSettings.Networks.bridge.IPAddress`.
+- Integer segments applied to lists (for example `Config.Env.0`).
+- Special handling for Docker labels whose keys contain dots via
+  `Config.Labels.<full-label-key>`, such as
+  `Config.Labels.com.docker.compose.project`.
+
 **Configuration keys**
 
 ```yaml
@@ -744,6 +777,15 @@ plugins:
 	  # if container networks are not routable.
 	  # use_ipv4: 192.0.2.10
 	  # use_ipv6: 2001:db8::10
+
+	  # Optional: add extra TXT fields from docker inspect, or replace the
+	  # built-in TXT summary entirely when txt_fields_replace is true.
+	  # txt_fields:
+	  #   - name: image
+	  #     path: Config.Image
+	  #   - name: project
+	  #     path: Config.Labels.com.docker.compose.project
+	  # txt_fields_replace: false
 ```
 
 `module` may be any of:

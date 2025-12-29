@@ -159,9 +159,23 @@ plugins:
       # Default: [healthy, running]
       # health: [healthy, running]
 
-      # Optional: publish an aggregate TXT record at _docker.<suffix>
-      # (or _docker when no suffix is configured).
+      # Optional: publish an aggregate TXT record at _containers.<suffix>
+      # (or _containers when no suffix is configured) that summarizes all
+      # containers, plus per-container TXT at each hostname.
       # discovery: true
+
+      # Optional: extend (or replace) the built-in TXT summary using
+      # additional key/value pairs from docker inspect. The "path" syntax
+      # is a small JSONPath-like subset; for example:
+      #   - Config.Image
+      #   - State.Health.Status
+      #   - Config.Labels.com.docker.compose.project
+      # txt_fields:
+      #   - name: image
+      #     path: Config.Image
+      #   - name: project
+      #     path: Config.Labels.com.docker.compose.project
+      # txt_fields_replace: false
 
   # 2) /etc/hosts resolver – answers from hosts files first when possible
   - module: hosts

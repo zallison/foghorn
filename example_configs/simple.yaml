@@ -38,6 +38,18 @@ plugins:
         # - tcp://docker-host.internal:2375
       reload_interval_seconds: 60
       # use_ipv4: 192.0.2.10
+
+      # Optional: include extra per-container TXT fields derived from
+      # docker inspect. The "path" syntax is a minimal JSONPath-like
+      # expression (for example Config.Image or
+      # Config.Labels.com.docker.compose.project).
+      # txt_fields:
+      #   - name: image
+      #     path: Config.Image
+      #   - name: project
+      #     path: Config.Labels.com.docker.compose.project
+      # txt_fields_replace: false
+
   - module: etc-hosts
 
 logging:
