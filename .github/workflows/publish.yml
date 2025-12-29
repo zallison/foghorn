@@ -1,0 +1,27 @@
+name: Publish Package
+on:
+  pull_request:
+    tags: [ 'v*' ]  # Trigger on version tags
+
+jobs:
+  pytest:
+    uses: ./.github/workflows/run-pytest.yml@main  # Call test workflow
+
+  publish:
+    needs: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Build & Publish to PyPI
+        run: |
+          pip install build
+          python -m build
+          pip install twine
+          twine upload --repository testpypi dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
