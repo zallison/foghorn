@@ -485,7 +485,7 @@ class DockerHosts(BasePlugin):
         if client is None and docker is not None:
             try:
                 client = docker.DockerClient(base_url=url)
-            except DockerException as exc:  # pragma: no cover - connection errors
+            except Exception as exc:  # pragma: no cover - connection errors
                 logger.warning(
                     "DockerHosts: failed to create client for %s during reload: %s",
                     url,
@@ -501,12 +501,13 @@ class DockerHosts(BasePlugin):
         try:
             # Only consider running containers; stopped ones are ignored.
             # Accessing container.attrs also performs a Docker API query, so
-            # treat any DockerException raised there as a connection/query
-            # failure for this endpoint and drop all containers from this host
-            # until the next interval.
+            # treat any exception raised there as a connection/query failure for
+            # this endpoint and drop all containers from this host until the
+            # next interval so that stale mappings disappear when a host is
+            # unreachable.
             containers = client.containers.list()
             return [c.attrs for c in containers]
-        except DockerException as exc:
+        except Exception as exc:
             logger.warning(
                 "DockerHosts: failed to list containers for %s: %s", url, exc
             )
