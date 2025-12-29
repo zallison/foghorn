@@ -42,7 +42,9 @@ $(VENV)/bin/foghorn: pyproject.toml
 build: $(VENV)/bin/foghorn ./scripts/generate_foghorn_schema.py
 	@echo "=== Building schema === "
 # Ensure the schema is up to date, only display errors.
-	./scripts/generate_foghorn_schema.py -o assets/config-schema.json
+	./scripts/generate_foghorn_schema.py -o assets/config-schema.json > /dev/null
+# Add newline to end of config
+	echo >> assets/config-schema.json
 
 .PHONY: env-dev
 env-dev:
