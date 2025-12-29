@@ -1138,9 +1138,181 @@ def test_docker_hosts_discovery_publishes_txt(monkeypatch):
     assert "endpoint=unix:///var/run/docker.sock" in container_txt
     assert "health=running" in container_txt
     assert "project-name=myproj" in container_txt
+    # Host listening ports should be included in the TXT summary.
+    assert "ports=8080,8443" in container_txt
 
     # Full container ID should not appear in aggregate TXT.
     assert full_id not in container_txt
+
+
+def test_docker_hosts_txt_fields_append_and_replace(monkeypatch):
+    """Brief: txt_fields appends extra key/value pairs or replaces defaults.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that txt_fields values are appended in default mode and
+        replace the built-in summary when txt_fields_replace is true.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    # Shared container used for both append and replace variants.
+    base_container = {
+        "Id": "deadbeef" * 8,
+        "Name": "/web",
+        "Config": {
+            "Hostname": "web",
+            "Image": "nginx:latest",
+            "Labels": {
+                "com.docker.compose.service": "web",
+                "com.docker.compose.project": "myproj",
+            },
+        },
+        "State": {"Status": "running"},
+        "NetworkSettings": {
+            "Networks": {"bridge": {"IPAddress": "172.17.0.5"}},
+        },
+    }
+
+    # Append mode: custom fields should appear alongside built-in summary keys.
+    plugin_append = DockerHosts(  # type: ignore[arg-type]
+        suffix="docker.mycorp",
+        discovery=True,
+        txt_fields=[
+            {"name": "image", "path": "Config.Image"},
+            {
+                "name": "svc",
+                "path": "Config.Hostname",
+            },
+        ],
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+    monkeypatch.setattr(
+        plugin_append, "_iter_containers_for_endpoint", lambda _ep: [base_container]
+    )
+    plugin_append.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    owner = "_containers.docker.mycorp"
+    q_txt = DNSRecord.question(owner, "TXT")
+    dec = plugin_append.pre_resolve(owner, QTYPE.TXT, q_txt.pack(), ctx)
+    assert dec is not None and dec.response is not None
+    resp = DNSRecord.parse(dec.response)
+    txt_rrs = [rr for rr in resp.rr if rr.rtype == QTYPE.TXT]
+
+    container_txt = None
+    for rr in txt_rrs:
+        s = str(rr.rdata)
+        if "name=" in s and "image=" in s:
+            container_txt = s
+            break
+    assert container_txt is not None
+    assert "name=web" in container_txt
+    assert "image=nginx:latest" in container_txt
+    assert "svc=web" in container_txt
+
+    # Replace mode: when txt_fields_replace is true, only custom fields should
+    # be present (aside from the header line inserted separately).
+    plugin_replace = DockerHosts(  # type: ignore[arg-type]
+        suffix="docker.mycorp",
+        discovery=True,
+        txt_fields=[{"name": "image", "path": "Config.Image"}],
+        txt_fields_replace=True,
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+    monkeypatch.setattr(
+        plugin_replace, "_iter_containers_for_endpoint", lambda _ep: [base_container]
+    )
+    plugin_replace.setup()
+
+    dec2 = plugin_replace.pre_resolve(owner, QTYPE.TXT, q_txt.pack(), ctx)
+    assert dec2 is not None and dec2.response is not None
+    resp2 = DNSRecord.parse(dec2.response)
+    txt_rrs2 = [rr for rr in resp2.rr if rr.rtype == QTYPE.TXT]
+
+    container_txt2 = None
+    for rr in txt_rrs2:
+        s = str(rr.rdata)
+        # Skip the containers=<n> header line which has no '='-separated keys
+        # other than the initial count.
+        if s.startswith('"containers='):
+            continue
+        if "image=" in s:
+            container_txt2 = s
+            break
+    assert container_txt2 is not None
+    assert "image=nginx:latest" in container_txt2
+    # Built-in keys should be absent when in replace mode.
+    assert "name=" not in container_txt2
+    assert "ans4=" not in container_txt2
+    assert "health=" not in container_txt2
+    assert "project-name=" not in container_txt2
+
+
+def test_docker_hosts_txt_fields_label_with_dots(monkeypatch):
+    """Brief: txt_fields can read Config.Labels keys that contain dots.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that a dotted label key is resolved via
+        Config.Labels.<key-with-dots>.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    base_container = {
+        "Id": "c1",
+        "Name": "/git",
+        "Config": {
+            "Hostname": "git",
+            "Labels": {
+                "com.docker.compose.project": "gitea",
+            },
+        },
+        "State": {"Status": "running"},
+        "NetworkSettings": {
+            "Networks": {"gitea_default": {"IPAddress": "172.19.0.2"}},
+        },
+    }
+
+    plugin = DockerHosts(  # type: ignore[arg-type]
+        suffix="docker.mycorp",
+        discovery=True,
+        txt_fields=[
+            {
+                "name": "project",
+                "path": "Config.Labels.com.docker.compose.project",
+            }
+        ],
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+    monkeypatch.setattr(
+        plugin, "_iter_containers_for_endpoint", lambda _ep: [base_container]
+    )
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    owner = "_containers.docker.mycorp"
+    q_txt = DNSRecord.question(owner, "TXT")
+    dec = plugin.pre_resolve(owner, QTYPE.TXT, q_txt.pack(), ctx)
+    assert dec is not None and dec.response is not None
+    resp = DNSRecord.parse(dec.response)
+    txt_rrs = [rr for rr in resp.rr if rr.rtype == QTYPE.TXT]
+
+    container_txt = None
+    for rr in txt_rrs:
+        s = str(rr.rdata)
+        if "project=" in s:
+            container_txt = s
+            break
+    assert container_txt is not None
+    assert "project=gitea" in container_txt
 
 
 def test_docker_hosts_http_snapshot_counts_unique_human_names(monkeypatch):
