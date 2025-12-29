@@ -455,10 +455,12 @@ class DockerHosts(BasePlugin):
             _time.sleep(interval)
             try:
                 self._reload_from_docker()
-            except Exception:  # pragma: no cover - defensive logging
+            except Exception as exc:  # pragma: no cover - defensive logging
+                # Avoid emitting a full stack trace for periodic reload failures so
+                # that transient Docker connectivity issues do not flood logs.
                 logger.warning(
-                    "DockerHosts: error during periodic reload; keeping previous mappings",
-                    exc_info=True,
+                    "DockerHosts: error during periodic reload; keeping previous mappings: %s",
+                    exc,
                 )
 
     def _iter_containers_for_endpoint(
@@ -498,14 +500,17 @@ class DockerHosts(BasePlugin):
 
         try:
             # Only consider running containers; stopped ones are ignored.
+            # Accessing container.attrs also performs a Docker API query, so
+            # treat any DockerException raised there as a connection/query
+            # failure for this endpoint and drop all containers from this host
+            # until the next interval.
             containers = client.containers.list()
+            return [c.attrs for c in containers]
         except DockerException as exc:
             logger.warning(
                 "DockerHosts: failed to list containers for %s: %s", url, exc
             )
             return []
-
-        return [c.attrs for c in containers]
 
     def _reload_from_docker(self) -> None:
         """Brief: Rebuild in-memory host/IP maps by inspecting all containers.
