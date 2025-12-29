@@ -39,7 +39,10 @@ $(VENV)/bin/foghorn: pyproject.toml
 	$(VENV)/bin/pip install -e "."
 
 .PHONY: build
-build: $(VENV)/bin/foghorn
+build: $(VENV)/bin/foghorn ./scripts/generate_foghorn_schema.py
+	@echo "=== Building schema === "
+# Ensure the schema is up to date, only display errors.
+	./scripts/generate_foghorn_schema.py -o assets/config-schema.json
 
 .PHONY: env-dev
 env-dev:
@@ -65,9 +68,9 @@ clean:
 	@echo "=== Removing virtual environment and var directory ==="
 	rm -rf $(VENV) var build docker-build
 	@echo "=== Removing temporary files and byte‑code ==="
-	# Delete __pycache__ directories
+# Delete __pycache__ directories
 	find . -type d -name "__pycache__" -exec rm -rf {} +;
-	# Delete .pyc, .tmp, backup (~) and vim swap files
+# Delete .pyc, .tmp, backup (~) and vim swap files
 	find . -type f \
 	\( -name '*.pyc' -o -name '*.tmp' -o -name '*~' -o -name '#*' -o -name '*.swp' \) -delete
 
