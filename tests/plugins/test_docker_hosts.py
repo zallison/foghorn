@@ -399,6 +399,49 @@ def test_docker_hosts_multiple_ips_in_answer(monkeypatch):
     assert answers == ["172.17.0.5", "172.17.0.6"]
 
 
+def test_docker_hosts_txt_for_a_and_aaaa_in_additional_section(monkeypatch):
+    """Brief: TXT metadata for A/AAAA responses is placed in the ADDITIONAL section.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts TXT RRs for A/AAAA replies appear only in ADDITIONAL, not
+        ANSWER.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+
+    containers = _make_example_containers()
+
+    def fake_iter(endpoint):  # noqa: ARG001
+        return containers
+
+    monkeypatch.setattr(plugin, "_iter_containers_for_endpoint", fake_iter)
+
+    plugin.setup()
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # A query: TXT records should be in ADDITIONAL, not ANSWER.
+    q_a = DNSRecord.question("web", "A")
+    dec_a = plugin.pre_resolve("web", QTYPE.A, q_a.pack(), ctx)
+    assert dec_a is not None and dec_a.response is not None
+    resp_a = DNSRecord.parse(dec_a.response)
+    assert all(rr.rtype != QTYPE.TXT for rr in resp_a.rr)
+    assert any(rr.rtype == QTYPE.TXT for rr in resp_a.ar)
+
+    # AAAA query: same behaviour for IPv6 answers.
+    q_aaaa = DNSRecord.question("web", "AAAA")
+    dec_aaaa = plugin.pre_resolve("web", QTYPE.AAAA, q_aaaa.pack(), ctx)
+    assert dec_aaaa is not None and dec_aaaa.response is not None
+    resp_aaaa = DNSRecord.parse(dec_aaaa.response)
+    assert all(rr.rtype != QTYPE.TXT for rr in resp_aaaa.rr)
+    assert any(rr.rtype == QTYPE.TXT for rr in resp_aaaa.ar)
+
+
 def test_docker_hosts_get_config_model_returns_pydantic_model():
     """Brief: DockerHosts.get_config_model() returns DockerHostsConfig.
 
@@ -1036,6 +1079,7 @@ def test_docker_hosts_discovery_publishes_txt(monkeypatch):
     )
 
     full_id = "deadbeef" * 8  # 64 hex chars
+    short_id = full_id[:12]
 
     containers = [
         {
@@ -1088,6 +1132,7 @@ def test_docker_hosts_discovery_publishes_txt(monkeypatch):
     assert container_txt.find("name=") < container_txt.find("endpoint=")
 
     assert "name=web" in container_txt
+    assert f"id={short_id}" in container_txt
     assert "int4=172.17.0.5" in container_txt
     assert "nets=bridge:172.17.0.5" in container_txt
     assert "endpoint=unix:///var/run/docker.sock" in container_txt

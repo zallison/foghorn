@@ -507,32 +507,34 @@ class DockerHosts(BasePlugin):
                 # results. Next reload will retry the connection.
                 continue
 
-                # When discovery is enabled and we have successfully listed
-                # containers for this endpoint, emit a host-level TXT summary for
-                # the endpoint under _hosts.<suffix> (or _hosts).
-                if self._discovery:
-                    ep_suffix = endpoint.get("suffix") or getattr(self, "_suffix", "")
-                    record_owner = self._hosts_owner_for_suffix(
-                        str(ep_suffix or "").strip()
-                    )
-                    host_ipv4 = endpoint.get("host_ipv4") or ""
-                    host_ipv6 = endpoint.get("host_ipv6") or ""
-                    parts: List[str] = []
-                    url = str(endpoint.get("url"))
-                    if url:
-                        # For display, shorten tcp://host:port endpoints to just
-                        # the host name so TXT/Info stays compact. Other schemes
-                        # (e.g. unix://) are left as-is.
-                        if url.startswith("tcp://"):
-                            disp = url[len("tcp://") :]
-                            # Strip :port when present.
-                            host_only = disp.split(":", 1)[0]
-                            parts.append(f"endpoint={host_only}")
-                        else:
-                            parts.append(f"endpoint={url}")
-                    if host_ipv6:
-                        parts.append(f"ans6={host_ipv6}")
-                    line = " ".join(parts)
+            # When discovery is enabled and we have successfully listed
+            # containers for this endpoint, emit a host-level TXT summary for
+            # the endpoint under _hosts.<suffix> (or _hosts).
+            if self._discovery:
+                ep_suffix = endpoint.get("suffix") or getattr(self, "_suffix", "")
+                record_owner = self._hosts_owner_for_suffix(
+                    str(ep_suffix or "").strip()
+                )
+                host_ipv4 = endpoint.get("host_ipv4") or ""
+                host_ipv6 = endpoint.get("host_ipv6") or ""
+                parts: List[str] = []
+                url = str(endpoint.get("url"))
+                if url:
+                    # For display, shorten tcp://host:port endpoints to just
+                    # the host name so TXT/Info stays compact. Other schemes
+                    # (e.g. unix://) are left as-is.
+                    if url.startswith("tcp://"):
+                        disp = url[len("tcp://") :]
+                        # Strip :port when present.
+                        host_only = disp.split(":", 1)[0]
+                        parts.append(f"endpoint={host_only}")
+                    else:
+                        parts.append(f"endpoint={url}")
+                if host_ipv4:
+                    parts.append(f"ans4={host_ipv4}")
+                if host_ipv6:
+                    parts.append(f"ans6={host_ipv6}")
+                line = " ".join(parts)
                 if line:
                     new_txt.setdefault(record_owner, []).append(line)
                     new_ttl_txt[record_owner] = int(self._ttl)
@@ -1224,13 +1226,6 @@ class DockerHosts(BasePlugin):
                 return ",".join(vals[:limit]) + f"+{len(vals) - limit}"
             return ",".join(vals)
 
-        def _is_full_container_id(name: str) -> bool:
-            # Docker container IDs are typically 64 hex characters.
-            token = str(name).strip().split(".", 1)[0].lower()
-            if len(token) != 64:
-                return False
-            return all(c in "0123456789abcdef" for c in token)
-
         def _strip_domain_suffix(label: str) -> str:
             """Return the left-most DNS label, dropping any domain suffix.
 
@@ -1243,9 +1238,6 @@ class DockerHosts(BasePlugin):
             if not s:
                 return s
             return s.split(".", 1)[0]
-
-        # Filter aliases for aggregate TXT: omit full container IDs.
-        filtered_aliases = [a for a in aliases if a and not _is_full_container_id(a)]
 
         # Collect HostPorts (bindings) for a compact summary.
         ports = (container.get("NetworkSettings") or {}).get("Ports") or {}
@@ -1279,19 +1271,31 @@ class DockerHosts(BasePlugin):
                 net_parts.append(seg)
 
         # Ordering requested:
-        # name, ans6, other metadata, and endpoint last. Host ports are returned
-        # out-of-band for admin display and omitted from TXT for brevity.
+        # name, id (short hash when available), ans4/ans6 (when present), other
+        # metadata, and endpoint last. Host ports are returned out-of-band for
+        # admin display and omitted from TXT for brevity.
         pieces: List[str] = []
 
-        # For display, drop domain suffixes so TXT names/aliases stay short. The
-        # full domain is already shown in the summary table.
+        # For display, drop domain suffixes so TXT names stay short. The full
+        # domain is already shown in the summary table.
         display_name = _strip_domain_suffix(canonical) if canonical else ""
-        display_aliases = [_strip_domain_suffix(a) for a in filtered_aliases]
 
         if display_name:
             pieces.append(f"name={display_name}")
-        # IPv4 answers are implied by the A records for this owner; keep only
-        # ans6 in TXT/Info to reduce visual noise.
+
+        # Include a short ID (first 12 hex characters) when the container Id
+        # looks hash-like so operators can correlate TXT/Info entries with
+        # docker CLI output without exposing the full ID in the record.
+        raw_id = str(container.get("Id") or "").strip()
+        short_id = raw_id[:12]
+        if short_id and all(c in "0123456789abcdefABCDEF" for c in short_id):
+            pieces.append(f"id={short_id.lower()}")
+
+        # Include both IPv4 and IPv6 answers so that TXT/Info reflects the
+        # effective reply addresses, including any use_ipv4/use_ipv6 overrides
+        # configured for the endpoint.
+        if answer_v4:
+            pieces.append(f"ans4={_join(answer_v4)}")
         if answer_v6:
             pieces.append(f"ans6={_join(answer_v6)}")
 
@@ -1302,8 +1306,6 @@ class DockerHosts(BasePlugin):
             pieces.append(f"project-name={proj}")
         if svc:
             pieces.append(f"service={svc}")
-        if display_aliases:
-            pieces.append(f"aliases={_join(display_aliases, limit=3)}")
         if internal_v4:
             pieces.append(f"int4={_join(internal_v4)}")
         if internal_v6:
@@ -1504,7 +1506,11 @@ class DockerHosts(BasePlugin):
                 )
 
             for line in txts:
-                reply.add_answer(
+                # TXT summaries for docker hosts are ancillary metadata for A
+                # answers and belong in the ADDITIONAL section rather than the
+                # ANSWER section so that A responses remain strictly address-only
+                # from a DNS semantics perspective.
+                reply.add_ar(
                     RR(
                         rname=request.q.qname,
                         rtype=QTYPE.TXT,
@@ -1550,7 +1556,11 @@ class DockerHosts(BasePlugin):
                 )
 
             for line in txts:
-                reply.add_answer(
+                # TXT summaries for docker hosts are ancillary metadata for AAAA
+                # answers and belong in the ADDITIONAL section rather than the
+                # ANSWER section so that AAAA responses remain strictly
+                # address-only from a DNS semantics perspective.
+                reply.add_ar(
                     RR(
                         rname=request.q.qname,
                         rtype=QTYPE.TXT,
