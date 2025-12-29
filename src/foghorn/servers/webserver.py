@@ -1617,13 +1617,13 @@ def resolve_www_root(config: Dict[str, Any] | None = None) -> str:
             return str(env_path.resolve())
 
     # 3) Current working directory ./html
-    cwd_html = Path(os.getcwd()) / "html"
+    cwd_html = Path(os.getcwd()) / "src/foghorn/html"
     if cwd_html.is_dir():
         return str(cwd_html.resolve())
 
     # 4) Fallback to package-relative html directory (existing behavior)
     here = Path(__file__).resolve()
-    pkg_html = here.parent.parent / "html"
+    pkg_html = here.parent.parent / "src/foghorn/html"
     return str(pkg_html.resolve())
 
 
