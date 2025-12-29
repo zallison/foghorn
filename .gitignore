@@ -36,3 +36,6 @@ my-config.yaml
 var/
 config.yaml
 config.yaml.new
+
+# Profiling artifacts
+foghorn_cpu.svg

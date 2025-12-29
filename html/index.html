@@ -1918,24 +1918,45 @@
 				heading.textContent = title;
 				group.appendChild(heading);
 
-				// Optional filters (e.g. hide_zero_calls for decorated caches).
+				// Optional filters (e.g. hide_zero_calls for decorated caches or
+				// show_down_services for mDNS). Multiple filters for a section share a
+				// single controls container.
 				var filterIds = Array.isArray(section && section.filters)
 					? section.filters.map(function (f) { return f && f.id; })
 					: [];
 				var controlsDiv = null;
+				function ensureControlsDiv() {
+					if (!controlsDiv) {
+						controlsDiv = document.createElement('div');
+						controlsDiv.className = 'fh-pane-controls';
+						group.appendChild(controlsDiv);
+					}
+					return controlsDiv;
+				}
 				if (filterIds.indexOf('hide_zero_calls') !== -1) {
-					controlsDiv = document.createElement('div');
-					controlsDiv.className = 'fh-pane-controls';
-					var label = document.createElement('label');
-					label.style.fontSize = '0.9em';
-					var cb = document.createElement('input');
-					cb.type = 'checkbox';
-					cb.checked = true;
-					cb.setAttribute('data-filter-id', 'hide_zero_calls');
-					label.appendChild(cb);
-					label.appendChild(document.createTextNode(' Hide zero-call caches'));
-					controlsDiv.appendChild(label);
-					group.appendChild(controlsDiv);
+					var controlsZero = ensureControlsDiv();
+					var labelZero = document.createElement('label');
+					labelZero.style.fontSize = '0.9em';
+					var cbZero = document.createElement('input');
+					cbZero.type = 'checkbox';
+					cbZero.checked = true;
+					cbZero.setAttribute('data-filter-id', 'hide_zero_calls');
+					labelZero.appendChild(cbZero);
+					labelZero.appendChild(document.createTextNode(' Hide zero-call caches'));
+					controlsZero.appendChild(labelZero);
+				}
+				if (filterIds.indexOf('show_down_services') !== -1) {
+					var controlsStatus = ensureControlsDiv();
+					var labelStatus = document.createElement('label');
+					labelStatus.style.fontSize = '0.9em';
+					labelStatus.style.marginLeft = '1.5em';
+					var cbStatus = document.createElement('input');
+					cbStatus.type = 'checkbox';
+					cbStatus.checked = false; // default: show only up services
+					cbStatus.setAttribute('data-filter-id', 'show_down_services');
+					labelStatus.appendChild(cbStatus);
+					labelStatus.appendChild(document.createTextNode(' Show down services'));
+					controlsStatus.appendChild(labelStatus);
 				}
 				if (!rows.length) {
 					var p = document.createElement('p');
@@ -1974,6 +1995,11 @@
 					if (rowData && typeof rowData.calls_total === 'number') {
 						tr.setAttribute('data-calls-total', String(rowData.calls_total));
 					}
+					// Tag each row with status when present so mDNS-style tables can
+					// hide/show down services via a checkbox filter.
+					if (rowData && typeof rowData.status === 'string') {
+						tr.setAttribute('data-status', String(rowData.status).toLowerCase());
+					}
 					columns.forEach(function (col) {
 						var key = col.key;
 						var joiner = col.join || null;
@@ -2010,26 +2036,44 @@
 				table.appendChild(tbody);
 				group.appendChild(table);
 
-				// Wire up hide_zero_calls filter, if present.
+				// Wire up hide_zero_calls and show_down_services filters, when present.
 				if (controlsDiv) {
 					var cbHide = controlsDiv.querySelector('input[data-filter-id="hide_zero_calls"]');
-					if (cbHide) {
-						var applyHideFilter = function () {
-							var hide = cbHide.checked;
+					var cbShowDown = controlsDiv.querySelector('input[data-filter-id="show_down_services"]');
+					if (cbHide || cbShowDown) {
+						var applyFilters = function () {
+							var hideZero = cbHide ? cbHide.checked : false;
+							var showDown = cbShowDown ? cbShowDown.checked : false;
 							var rowsEls = tbody.querySelectorAll('tr');
 							rowsEls.forEach(function (trEl) {
-								var callsAttr = trEl.getAttribute('data-calls-total');
-								var calls = callsAttr ? parseInt(callsAttr, 10) : NaN;
-								if (hide && callsAttr !== null && !isNaN(calls) && calls === 0) {
-									trEl.style.display = 'none';
-								} else {
-									trEl.style.display = '';
+								var display = '';
+								// Zero-call cache rows (decorated caches view).
+								if (cbHide) {
+									var callsAttr = trEl.getAttribute('data-calls-total');
+									var calls = callsAttr ? parseInt(callsAttr, 10) : NaN;
+									if (hideZero && callsAttr !== null && !isNaN(calls) && calls === 0) {
+										display = 'none';
+									}
 								}
+								// mDNS services: show only status=up by default unless
+								// the user explicitly enables down services.
+								if (cbShowDown) {
+									var statusAttr = (trEl.getAttribute('data-status') || '').toLowerCase();
+									if (!showDown && statusAttr === 'down') {
+										display = 'none';
+									}
+								}
+								trEl.style.display = display;
 							});
 						};
-						cbHide.addEventListener('change', applyHideFilter);
-						// Apply initial state.
-						applyHideFilter();
+						if (cbHide) {
+							cbHide.addEventListener('change', applyFilters);
+						}
+						if (cbShowDown) {
+							cbShowDown.addEventListener('change', applyFilters);
+						}
+						// Apply initial state so filters take effect immediately.
+						applyFilters();
 					}
 				}
 
