@@ -227,6 +227,45 @@ class DockerHosts(BasePlugin):
         else:
             self._suffix = ""
 
+        # Optional per-container TXT customisation driven by docker inspect
+        # JSONPath-like expressions. When txt_fields is provided, each entry
+        # must be a mapping with at least:
+        #   - name: field name used in TXT output (e.g. "image").
+        #   - path: JSONPath-like expression evaluated against the container
+        #           inspect dict (e.g. "Config.Image").
+        #
+        # When txt_fields_replace is true and at least one custom field
+        # resolves for a container, only those custom fields are emitted in the
+        # TXT line; otherwise they are appended to the default summary.
+        raw_txt_fields = self.config.get("txt_fields") or []
+        txt_fields: List[Tuple[str, str]] = []
+        if isinstance(raw_txt_fields, list):
+            for item in raw_txt_fields:
+                if not isinstance(item, dict):
+                    logger.warning(
+                        "DockerHosts: ignoring non-mapping txt_fields entry %r", item
+                    )
+                    continue
+                name_val = str(item.get("name") or "").strip()
+                path_val = str(item.get("path") or "").strip()
+                if not name_val or not path_val:
+                    logger.warning(
+                        "DockerHosts: ignoring txt_fields entry missing name/path: %r",
+                        item,
+                    )
+                    continue
+                txt_fields.append((name_val, path_val))
+        elif raw_txt_fields:
+            logger.warning(
+                "DockerHosts: txt_fields must be a list when set; got %r",
+                type(raw_txt_fields),
+            )
+
+        self._txt_fields: List[Tuple[str, str]] = txt_fields
+        self._txt_fields_replace: bool = bool(
+            self.config.get("txt_fields_replace", False)
+        )
+
         raw_endpoints = self.config.get("endpoints") or []
         endpoints_cfg: List[Dict[str, object]] = []
 
@@ -781,6 +820,10 @@ class DockerHosts(BasePlugin):
                     internal_v6=internal_v6,
                     answer_v4=v4_list,
                     answer_v6=v6_list,
+                    extra_txt_fields=getattr(self, "_txt_fields", []),
+                    replace_default_txt=bool(
+                        getattr(self, "_txt_fields_replace", False)
+                    ),
                 )
 
                 # Per-container TXT records: publish a TXT record at each
@@ -1190,6 +1233,8 @@ class DockerHosts(BasePlugin):
         internal_v6: List[str],
         answer_v4: List[str],
         answer_v6: List[str],
+        extra_txt_fields: Optional[List[Tuple[str, str]]] = None,
+        replace_default_txt: bool = False,
         max_len: int = 240,
     ) -> Tuple[str, List[str]]:
         """Brief: Build a compact, single-string summary for the aggregate TXT record.
@@ -1270,18 +1315,126 @@ class DockerHosts(BasePlugin):
                     seg += f"/{ip6}"
                 net_parts.append(seg)
 
+        def _walk_json_path(root: object, expr: str) -> List[str]:
+            """Resolve a minimal JSONPath-like expression against a mapping.
+
+            Supported forms (best-effort, intentionally small subset):
+              - "Config.Image" -> root["Config"]["Image"]
+              - "State.Health.Status" -> nested dict lookups
+              - "Networks.bridge.IPAddress" -> dict-of-dicts lookups
+              - Leading "$." is ignored when present.
+              - When indexing lists, integer path segments are treated as indices;
+                non-integer segments are applied to each element when it is a
+                mapping.
+            """
+
+            s = str(expr or "").strip()
+            if not s:
+                return []
+
+            # Normalise away a leading JSONPath root ("$" or "$."), then
+            # special-case Docker label keys that contain dots so that callers
+            # can use paths like "Config.Labels.com.docker.compose.project".
+            if s.startswith("$"):
+                s = s[1:]
+                if s.startswith("."):
+                    s = s[1:]
+
+            # Config.Labels.<label-key-with-dots>
+            label_prefix = "Config.Labels."
+            if s.startswith(label_prefix):
+                label_key = s[len(label_prefix) :]
+                cfg_obj = container.get("Config") or {}
+                lbl_obj = cfg_obj.get("Labels") if isinstance(cfg_obj, dict) else None
+                if isinstance(lbl_obj, dict):
+                    if label_key in lbl_obj:
+                        val = lbl_obj[label_key]
+                        # Delegate to the normal flattener below.
+                        flat: List[str] = []
+
+                        def _flatten_label(obj: object) -> None:
+                            if isinstance(obj, (list, tuple, set)):
+                                for item in obj:
+                                    _flatten_label(item)
+                            elif isinstance(obj, (str, int, float, bool)):
+                                text = str(obj).strip()
+                                if text:
+                                    flat.append(text)
+
+                        _flatten_label(val)
+                        seen_l: set[str] = set()
+                        out_l: List[str] = []
+                        for text in flat:
+                            if text in seen_l:
+                                continue
+                            seen_l.add(text)
+                            out_l.append(text)
+                        return out_l
+                return []
+
+            parts = [p for p in s.split(".") if p]
+            if not parts:
+                return []
+
+            values: List[object] = [root]
+            for part in parts:
+                next_vals: List[object] = []
+                for val in values:
+                    if isinstance(val, dict) and part in val:
+                        next_vals.append(val[part])
+                    elif isinstance(val, list):
+                        # Integer index: use as list index when valid.
+                        try:
+                            idx = int(part)
+                        except ValueError:
+                            # Non-integer: treat as key lookup on each element
+                            # when elements are mappings.
+                            for elem in val:
+                                if isinstance(elem, dict) and part in elem:
+                                    next_vals.append(elem[part])
+                        else:
+                            if 0 <= idx < len(val):
+                                next_vals.append(val[idx])
+                if not next_vals:
+                    values = []
+                    break
+                values = next_vals
+
+            flat: List[str] = []
+
+            def _flatten(obj: object) -> None:
+                if isinstance(obj, (list, tuple, set)):
+                    for item in obj:
+                        _flatten(item)
+                elif isinstance(obj, (str, int, float, bool)):
+                    text = str(obj).strip()
+                    if text:
+                        flat.append(text)
+
+            for v in values:
+                _flatten(v)
+
+            # Deduplicate while preserving order.
+            seen: set[str] = set()
+            out: List[str] = []
+            for text in flat:
+                if text in seen:
+                    continue
+                seen.add(text)
+                out.append(text)
+            return out
+
         # Ordering requested:
-        # name, id (short hash when available), ans4/ans6 (when present), other
-        # metadata, and endpoint last. Host ports are returned out-of-band for
-        # admin display and omitted from TXT for brevity.
-        pieces: List[str] = []
+        # name, id (short hash when available), ans4/ans6 (when present),
+        # ports (when present), other metadata, and endpoint last.
+        base_pieces: List[str] = []
 
         # For display, drop domain suffixes so TXT names stay short. The full
         # domain is already shown in the summary table.
         display_name = _strip_domain_suffix(canonical) if canonical else ""
 
         if display_name:
-            pieces.append(f"name={display_name}")
+            base_pieces.append(f"name={display_name}")
 
         # Include a short ID (first 12 hex characters) when the container Id
         # looks hash-like so operators can correlate TXT/Info entries with
@@ -1289,29 +1442,33 @@ class DockerHosts(BasePlugin):
         raw_id = str(container.get("Id") or "").strip()
         short_id = raw_id[:12]
         if short_id and all(c in "0123456789abcdefABCDEF" for c in short_id):
-            pieces.append(f"id={short_id.lower()}")
+            base_pieces.append(f"id={short_id.lower()}")
 
         # Include both IPv4 and IPv6 answers so that TXT/Info reflects the
         # effective reply addresses, including any use_ipv4/use_ipv6 overrides
         # configured for the endpoint.
         if answer_v4:
-            pieces.append(f"ans4={_join(answer_v4)}")
+            base_pieces.append(f"ans4={_join(answer_v4)}")
         if answer_v6:
-            pieces.append(f"ans6={_join(answer_v6)}")
+            base_pieces.append(f"ans6={_join(answer_v6)}")
+
+        # Include host listening ports derived from NetworkSettings.Ports.
+        if hostports:
+            base_pieces.append(f"ports={_join(hostports)}")
 
         # Remaining fields (omit empties), keeping endpoint= last.
         if effective_health:
-            pieces.append(f"health={effective_health}")
+            base_pieces.append(f"health={effective_health}")
         if proj:
-            pieces.append(f"project-name={proj}")
+            base_pieces.append(f"project-name={proj}")
         if svc:
-            pieces.append(f"service={svc}")
+            base_pieces.append(f"service={svc}")
         if internal_v4:
-            pieces.append(f"int4={_join(internal_v4)}")
+            base_pieces.append(f"int4={_join(internal_v4)}")
         if internal_v6:
-            pieces.append(f"int6={_join(internal_v6)}")
+            base_pieces.append(f"int6={_join(internal_v6)}")
         if net_parts:
-            pieces.append(f"nets={_join(net_parts, limit=3)}")
+            base_pieces.append(f"nets={_join(net_parts, limit=3)}")
         if endpoint_url:
             # For display, shorten tcp://host:port endpoints to just the host
             # name so TXT/Info stays compact.
@@ -1319,7 +1476,23 @@ class DockerHosts(BasePlugin):
             if endpoint_url.startswith("tcp://"):
                 disp = endpoint_url[len("tcp://") :]
                 disp_endpoint = disp.split(":", 1)[0]
-            pieces.append(f"endpoint={disp_endpoint}")
+            base_pieces.append(f"endpoint={disp_endpoint}")
+
+        custom_pieces: List[str] = []
+        if extra_txt_fields:
+            for field_name, expr in extra_txt_fields:
+                name_s = str(field_name or "").strip()
+                if not name_s:
+                    continue
+                values = _walk_json_path(container, expr)
+                if not values:
+                    continue
+                custom_pieces.append(f"{name_s}={_join(values)}")
+
+        if replace_default_txt and custom_pieces:
+            pieces = custom_pieces
+        else:
+            pieces = base_pieces + custom_pieces
 
         s = " ".join(pieces)
         if len(s) > max_len:
