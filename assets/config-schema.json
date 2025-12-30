@@ -1,1762 +1,1762 @@
 {
   "$defs": {
-	"listener_doh": {
-	  "additionalProperties": false,
-	  "properties": {
-		"cert_file": {
-		  "type": "string"
-		},
-		"enabled": {
-		  "type": "boolean"
-		},
-		"host": {
-		  "type": "string"
-		},
-		"key_file": {
-		  "type": "string"
-		},
-		"port": {
-		  "maximum": 65535,
-		  "minimum": 1,
-		  "type": "integer"
-		}
-	  },
-	  "type": "object"
-	},
-	"listener_dot": {
-	  "additionalProperties": false,
-	  "properties": {
-		"cert_file": {
-		  "type": "string"
-		},
-		"enabled": {
-		  "type": "boolean"
-		},
-		"host": {
-		  "type": "string"
-		},
-		"key_file": {
-		  "type": "string"
-		},
-		"port": {
-		  "maximum": 65535,
-		  "minimum": 1,
-		  "type": "integer"
-		}
-	  },
-	  "type": "object"
-	},
-	"listener_tcp": {
-	  "additionalProperties": false,
-	  "properties": {
-		"enabled": {
-		  "type": "boolean"
-		},
-		"host": {
-		  "type": "string"
-		},
-		"port": {
-		  "maximum": 65535,
-		  "minimum": 1,
-		  "type": "integer"
-		}
-	  },
-	  "type": "object"
-	},
-	"listener_udp": {
-	  "additionalProperties": false,
-	  "properties": {
-		"enabled": {
-		  "type": "boolean"
-		},
-		"host": {
-		  "type": "string"
-		},
-		"port": {
-		  "maximum": 65535,
-		  "minimum": 1,
-		  "type": "integer"
-		}
-	  },
-	  "type": "object"
-	},
-	"plugin_configs": {
-	  "access_control": {
-		"aliases": [
-		  "access_control",
-		  "acl"
-		],
-		"config_schema": {
-		  "additionalProperties": true,
-		  "description": "Brief: Typed configuration model for AccessControlPlugin used for startup validation.\n\nInputs:\n  - default: Default policy (\"allow\" or \"deny\").\n  - allow: List of CIDR/IP strings to allow.\n  - deny: List of CIDR/IP strings to deny.\n\nOutputs:\n  - AccessControlConfig instance with normalized types.",
-		  "properties": {
-			"allow": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Allow",
-			  "type": "array"
-			},
-			"default": {
-			  "default": "allow",
-			  "title": "Default",
-			  "type": "string"
-			},
-			"deny": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Deny",
-			  "type": "array"
-			}
-		  },
-		  "title": "AccessControlConfig",
-		  "type": "object"
-		},
-		"module": "foghorn.plugins.access_control.AccessControlPlugin"
-	  },
-	  "dns_prefetch": {
-		"aliases": [
-		  "dns_prefetch",
-		  "prefetch"
-		],
-		"config_schema": {
-		  "additionalProperties": true,
-		  "description": "Brief: Typed configuration model for DnsPrefetchPlugin.\n\nInputs:\n  - interval_seconds: How often to sample statistics and perform prefetch cycles.\n  - prefetch_top_n: Maximum number of domains considered per cycle based on\n    cache_hit_domains/top_domains statistics.\n  - max_consecutive_misses: Per-domain cap on consecutive prefetch cycles\n    without any observed cache hit; once exceeded, prefetching for that\n    domain is paused until a new cache hit is seen.\n  - qtypes: List of DNS qtype names to prefetch (e.g. [\"A\", \"AAAA\"]).\n\nOutputs:\n  - DnsPrefetchConfig instance with normalized field types.",
-		  "properties": {
-			"interval_seconds": {
-			  "default": 60.0,
-			  "minimum": 1.0,
-			  "title": "Interval Seconds",
-			  "type": "number"
-			},
-			"max_consecutive_misses": {
-			  "default": 5,
-			  "minimum": 1,
-			  "title": "Max Consecutive Misses",
-			  "type": "integer"
-			},
-			"prefetch_top_n": {
-			  "default": 100,
-			  "minimum": 1,
-			  "title": "Prefetch Top N",
-			  "type": "integer"
-			},
-			"qtypes": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Qtypes",
-			  "type": "array"
-			}
-		  },
-		  "title": "DnsPrefetchConfig",
-		  "type": "object"
-		},
-		"module": "foghorn.plugins.dns_prefetch.DnsPrefetchPlugin"
-	  },
-	  "docker_hosts": {
-		"aliases": [
-		  "docker",
-		  "docker_hosts"
-		],
-		"config_schema": {
-		  "$defs": {
-			"DockerEndpointConfig": {
-			  "description": "Brief: Per-endpoint configuration for DockerHosts.\n\nIn addition to full container names and IDs, DockerHosts also exposes a\nshort container ID alias (the first 12 hex characters) for convenience.\n\nInputs:\n  - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n    \"tcp://127.0.0.1:2375\").\n  - reload_interval_second: Interval in seconds between background refreshes\n    for this endpoint. When set to 0, the endpoint is only refreshed at\n    startup (or when other endpoints cause a global refresh).\n  - use_ipv4: Optional IPv4 address to use in answers instead of\n    per-container IPv4 addresses discovered from this endpoint.\n  - use_ipv6: Optional IPv6 address to use in answers instead of\n    per-container IPv6 addresses discovered from this endpoint.\n  - ttl: Optional TTL override for answers derived from this endpoint; when\n    omitted, the plugin-level ttl is used.\n\nOutputs:\n  - DockerEndpointConfig instance with normalized field types.",
-			  "properties": {
-				"reload_interval_second": {
-				  "default": 60.0,
-				  "minimum": 0,
-				  "title": "Reload Interval Second",
-				  "type": "number"
-				},
-				"ttl": {
-				  "anyOf": [
-					{
-					  "minimum": 0,
-					  "type": "integer"
-					},
-					{
-					  "type": "null"
-					}
-				  ],
-				  "default": null,
-				  "title": "Ttl"
-				},
-				"url": {
-				  "title": "Url",
-				  "type": "string"
-				},
-				"use_ipv4": {
-				  "anyOf": [
-					{
-					  "type": "string"
-					},
-					{
-					  "type": "null"
-					}
-				  ],
-				  "default": null,
-				  "title": "Use Ipv4"
-				},
-				"use_ipv6": {
-				  "anyOf": [
-					{
-					  "type": "string"
-					},
-					{
-					  "type": "null"
-					}
-				  ],
-				  "default": null,
-				  "title": "Use Ipv6"
-				}
-			  },
-			  "required": [
-				"url"
-			  ],
-			  "title": "DockerEndpointConfig",
-			  "type": "object"
-			}
-		  },
-		  "additionalProperties": true,
-		  "description": "Brief: Typed configuration model for DockerHosts plugin.\n\nInputs:\n  - endpoints: List of endpoint dictionaries.\n    Each entry must contain:\n      - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n        \"tcp://127.0.0.1:2375\").\n    and may contain:\n      - reload_interval_second: float seconds between refreshes for that\n        endpoint.\n      - use_ipv4: Optional IPv4 address to use instead of per-container\n        IPv4 addresses for containers discovered via that endpoint.\n      - use_ipv6: Optional IPv6 address to use instead of per-container\n        IPv6 addresses for containers discovered via that endpoint.\n      - ttl: Optional TTL override (seconds) for answers derived from that\n        endpoint.\n  - ttl: Plugin-level DNS answer TTL in seconds used when an endpoint does\n    not specify its own ttl.\n  - health: List of acceptable container health/status values. Supported:\n    \"starting\", \"healthy\", \"running\", \"unhealthy\". Default:\n    [\"healthy\", \"running\"].\n  - discovery: When true, publish a TXT record at\n    \"_containers.<suffix>\" (or \"_containers\" when no suffix is configured)\n    containing container summary lines, plus a host-level summary under\n    \"_hosts.<suffix>\" (or \"_hosts\").\n\nOutputs:\n  - DockerHostsConfig instance with normalized field types.",
-		  "properties": {
-			"discovery": {
-			  "default": false,
-			  "title": "Discovery",
-			  "type": "boolean"
-			},
-			"endpoints": {
-			  "items": {
-				"$ref": "#/$defs/DockerEndpointConfig"
-			  },
-			  "title": "Endpoints",
-			  "type": "array"
-			},
-			"health": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Health",
-			  "type": "array"
-			},
-			"ttl": {
-			  "default": 300,
-			  "minimum": 0,
-			  "title": "Ttl",
-			  "type": "integer"
-			}
-		  },
-		  "title": "DockerHostsConfig",
-		  "type": "object"
-		},
-		"module": "foghorn.plugins.docker_hosts.DockerHosts"
-	  },
-	  "etc_hosts": {
-		"aliases": [
-		  "/etc/hosts",
-		  "etc_hosts",
-		  "etchosts",
-		  "hostfile",
-		  "hosts"
-		],
-		"config_schema": {
-		  "additionalProperties": true,
-		  "description": "Brief: Typed configuration model for EtcHosts.\n\nInputs:\n  - file_path: Legacy single hosts file path.\n  - file_paths: Preferred list of hosts file paths.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Response TTL in seconds.\n\nOutputs:\n  - EtcHostsConfig instance with normalized field types.",
-		  "properties": {
-			"file_path": {
-			  "anyOf": [
-				{
-				  "type": "string"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "File Path"
-			},
-			"file_paths": {
-			  "anyOf": [
-				{
-				  "items": {
-					"type": "string"
-				  },
-				  "type": "array"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "File Paths"
-			},
-			"ttl": {
-			  "default": 300,
-			  "minimum": 0,
-			  "title": "Ttl",
-			  "type": "integer"
-			},
-			"watchdog_enabled": {
-			  "anyOf": [
-				{
-				  "type": "boolean"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Watchdog Enabled"
-			},
-			"watchdog_min_interval_seconds": {
-			  "default": 1.0,
-			  "minimum": 0,
-			  "title": "Watchdog Min Interval Seconds",
-			  "type": "number"
-			},
-			"watchdog_poll_interval_seconds": {
-			  "default": 0.0,
-			  "minimum": 0,
-			  "title": "Watchdog Poll Interval Seconds",
-			  "type": "number"
-			}
-		  },
-		  "title": "EtcHostsConfig",
-		  "type": "object"
-		},
-		"module": "foghorn.plugins.etc_hosts.EtcHosts"
-	  },
-	  "examples": {
-		"aliases": [
-		  "examples"
-		],
-		"config_schema": {
-		  "additionalProperties": true,
-		  "description": "Brief: Typed configuration model for ExamplesPlugin.\n\nInputs:\n  - max_subdomains: Maximum allowed subdomain depth.\n  - max_length_no_dots: Maximum label length excluding dots.\n  - base_labels: Rightmost labels comprising the base domain.\n  - apply_to_qtypes: Qtypes this plugin applies to.\n  - rewrite_first_ipv4: List of rewrite rules.\n\nOutputs:\n  - ExamplesConfig instance with normalized field types.",
-		  "properties": {
-			"apply_to_qtypes": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Apply To Qtypes",
-			  "type": "array"
-			},
-			"base_labels": {
-			  "default": 2,
-			  "minimum": 0,
-			  "title": "Base Labels",
-			  "type": "integer"
-			},
-			"max_length_no_dots": {
-			  "default": 50,
-			  "minimum": 0,
-			  "title": "Max Length No Dots",
-			  "type": "integer"
-			},
-			"max_subdomains": {
-			  "default": 5,
-			  "minimum": 0,
-			  "title": "Max Subdomains",
-			  "type": "integer"
-			},
-			"rewrite_first_ipv4": {
-			  "items": {
-				"additionalProperties": true,
-				"type": "object"
-			  },
-			  "title": "Rewrite First Ipv4",
-			  "type": "array"
-			}
-		  },
-		  "title": "ExamplesConfig",
-		  "type": "object"
-		},
-		"module": "foghorn.plugins.examples.ExamplesPlugin"
-	  },
-	  "file_downloader": {
-		"aliases": [
-		  "file_downloader",
-		  "lists"
-		],
-		"config_schema": {
-		  "additionalProperties": true,
-		  "description": "Brief: Typed configuration model for FileDownloader.\n\nInputs:\n  - download_path: Directory where list files are written.\n  - urls: Explicit list of HTTP(S) URLs to download. Each entry may be either\n    a bare URL string or an object with keys:\n      - url (str): The URL to download.\n      - hash_filenames (bool | None): When True, use hashed filenames;\n        when False, derive filenames directly from the URL; when None in a\n        per-URL object, fall back to the plugin-level default.\n      - add_comment (bool | None): When True, prepend a timestamped comment\n        line to the downloaded file; when False or None, no comment is\n        written for that URL.\n  - url_files: Paths to files containing one URL per line.\n  - interval_days: Optional number of days between refreshes (>= 0).\n  - interval_seconds: Optional legacy seconds-based interval (>= 0).\n  - add_comment: Plugin-level default for whether to add a comment header\n    line to downloaded files (default: False).\n  - hash_filenames: Plugin-level default for whether filenames should\n    include a URL hash (default: False).\n\nOutputs:\n  - FileDownloaderConfig instance with normalized field types.",
-		  "properties": {
-			"add_comment": {
-			  "anyOf": [
-				{
-				  "type": "boolean"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": false,
-			  "title": "Add Comment"
-			},
-			"download_path": {
-			  "default": "./config/var/lists",
-			  "title": "Download Path",
-			  "type": "string"
-			},
-			"hash_filenames": {
-			  "default": false,
-			  "title": "Hash Filenames",
-			  "type": "boolean"
-			},
-			"interval_days": {
-			  "anyOf": [
-				{
-				  "minimum": 0,
-				  "type": "number"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Interval Days"
-			},
-			"interval_seconds": {
-			  "anyOf": [
-				{
-				  "minimum": 0,
-				  "type": "integer"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Interval Seconds"
-			},
-			"url_files": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Url Files",
-			  "type": "array"
-			},
-			"urls": {
-			  "items": {},
-			  "title": "Urls",
-			  "type": "array"
-			}
-		  },
-		  "title": "FileDownloaderConfig",
-		  "type": "object"
-		},
-		"module": "foghorn.plugins.file_downloader.FileDownloader"
-	  },
-	  "filter": {
-		"aliases": [
-		  "allow",
-		  "block",
-		  "filter"
-		],
-		"config_schema": {
-		  "additionalProperties": true,
-		  "description": "Brief: Typed configuration model for FilterPlugin.\n\nInputs:\n  - cache_ttl_seconds: TTL for domain cache.\n  - db_path: Optional path to blocklist SQLite DB. When omitted or empty,\n    the plugin uses a per-instance in-memory database so that multiple\n    FilterPlugin instances do not share state by default.\n  - default: Default policy (\"allow\" or \"deny\").\n  - ttl: TTL for synthesized responses.\n  - deny_response: Policy for deny responses.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs for IP-mode denies.\n  - allow_qtypes / deny_qtypes: Optional lists of DNS qtype names to allow or deny.\n  - *_domains_files: List paths for loading allow/block lists from files.\n  - blocked_domains / allowed_domains: Inline domain lists.\n  - blocked_patterns / blocked_patterns_files: Regexes.\n  - blocked_keywords / blocked_keywords_files: Keywords.\n  - blocked_ips / blocked_ips_files: IP rules.\n\nOutputs:\n  - FilterConfig instance with normalized field types.",
-		  "properties": {
-			"allowed_domains": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Allowed Domains",
-			  "type": "array"
-			},
-			"allowed_domains_files": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Allowed Domains Files",
-			  "type": "array"
-			},
-			"blocked_domains": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Blocked Domains",
-			  "type": "array"
-			},
-			"blocked_domains_files": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Blocked Domains Files",
-			  "type": "array"
-			},
-			"blocked_ips": {
-			  "items": {
-				"anyOf": [
-				  {
-					"type": "string"
-				  },
-				  {
-					"additionalProperties": true,
-					"type": "object"
-				  }
-				]
-			  },
-			  "title": "Blocked Ips",
-			  "type": "array"
-			},
-			"blocked_ips_files": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Blocked Ips Files",
-			  "type": "array"
-			},
-			"blocked_keywords": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Blocked Keywords",
-			  "type": "array"
-			},
-			"blocked_keywords_files": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Blocked Keywords Files",
-			  "type": "array"
-			},
-			"blocked_patterns": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Blocked Patterns",
-			  "type": "array"
-			},
-			"blocked_patterns_files": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Blocked Patterns Files",
-			  "type": "array"
-			},
-			"cache_ttl_seconds": {
-			  "default": 600,
-			  "minimum": 0,
-			  "title": "Cache Ttl Seconds",
-			  "type": "integer"
-			},
-			"clear": {
-			  "default": 1,
-			  "minimum": 0,
-			  "title": "Clear",
-			  "type": "integer"
-			},
-			"db_path": {
-			  "anyOf": [
-				{
-				  "type": "string"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Db Path"
-			},
-			"default": {
-			  "default": "deny",
-			  "title": "Default",
-			  "type": "string"
-			},
-			"deny_response": {
-			  "default": "nxdomain",
-			  "title": "Deny Response",
-			  "type": "string"
-			},
-			"deny_response_ip4": {
-			  "anyOf": [
-				{
-				  "type": "string"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Deny Response Ip4"
-			},
-			"deny_response_ip6": {
-			  "anyOf": [
-				{
-				  "type": "string"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Deny Response Ip6"
-			},
-			"ttl": {
-			  "default": 300,
-			  "minimum": 0,
-			  "title": "Ttl",
-			  "type": "integer"
-			}
-		  },
-		  "title": "FilterConfig",
-		  "type": "object"
-		},
-		"module": "foghorn.plugins.filter.FilterPlugin"
-	  },
-	  "flaky_server": {
-		"aliases": [
-		  "buggy",
-		  "flaky",
-		  "flaky_server"
-		],
-		"config_schema": {
-		  "additionalProperties": true,
-		  "description": "Brief: Typed configuration model for FlakyServer.\n\nInputs:\n  - servfail_one_in / nxdomain_one_in: Legacy 1-in-N probabilities for\n    SERVFAIL/NXDOMAIN (still accepted; converted to percentages).\n  - servfail_percent / nxdomain_percent: Percent probabilities (0\u2013100) for\n    SERVFAIL/NXDOMAIN draws; override the legacy one-in-N fields when set.\n  - timeout_percent: Percent probability (0\u2013100) of dropping the query and\n    sending no response (client observes a timeout).\n  - truncate_percent: Percent probability (0\u2013100) of setting the TC bit on\n    responses to encourage client fallback to TCP.\n  - formerr_percent: Percent probability (0\u2013100) of replying with FORMERR\n    instead of forwarding.\n  - noerror_empty_percent: Percent probability (0\u2013100) of replying with\n    NOERROR and an empty answer section.\n  - apply_to_qtypes: Qtypes this plugin applies to.\n  - fuzz_percent: Percent of matching responses to fuzz at the byte level.\n  - min_fuzz_bytes / max_fuzz_bytes: Bounds for how many bytes to mutate\n    when fuzzing a response.\n  - wrong_qtype_percent: Percent of matching responses whose question\n    qtype is rewritten to a different RR type.\n  - fuzz_actions: Fuzz primitives to use (e.g. [\"bit_flip\", \"swap_bytes\"]).\n  - seed: Optional RNG seed.\n\nOutputs:\n  - FlakyServerConfig instance with normalized field types.",
-		  "properties": {
-			"apply_to_qtypes": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Apply To Qtypes",
-			  "type": "array"
-			},
-			"formerr_percent": {
-			  "default": 0.0,
-			  "maximum": 100.0,
-			  "minimum": 0.0,
-			  "title": "Formerr Percent",
-			  "type": "number"
-			},
-			"fuzz_actions": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Fuzz Actions",
-			  "type": "array"
-			},
-			"fuzz_percent": {
-			  "default": 0.0,
-			  "maximum": 100.0,
-			  "minimum": 0.0,
-			  "title": "Fuzz Percent",
-			  "type": "number"
-			},
-			"max_fuzz_bytes": {
-			  "default": 4,
-			  "minimum": 1,
-			  "title": "Max Fuzz Bytes",
-			  "type": "integer"
-			},
-			"min_fuzz_bytes": {
-			  "default": 1,
-			  "minimum": 1,
-			  "title": "Min Fuzz Bytes",
-			  "type": "integer"
-			},
-			"noerror_empty_percent": {
-			  "default": 0.0,
-			  "maximum": 100.0,
-			  "minimum": 0.0,
-			  "title": "Noerror Empty Percent",
-			  "type": "number"
-			},
-			"nxdomain_percent": {
-			  "anyOf": [
-				{
-				  "maximum": 100.0,
-				  "minimum": 0.0,
-				  "type": "number"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Nxdomain Percent"
-			},
-			"seed": {
-			  "anyOf": [
-				{
-				  "type": "integer"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Seed"
-			},
-			"servfail_percent": {
-			  "anyOf": [
-				{
-				  "maximum": 100.0,
-				  "minimum": 0.0,
-				  "type": "number"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Servfail Percent"
-			},
-			"timeout_percent": {
-			  "default": 0.0,
-			  "maximum": 100.0,
-			  "minimum": 0.0,
-			  "title": "Timeout Percent",
-			  "type": "number"
-			},
-			"truncate_percent": {
-			  "default": 0.0,
-			  "maximum": 100.0,
-			  "minimum": 0.0,
-			  "title": "Truncate Percent",
-			  "type": "number"
-			},
-			"wrong_qtype_percent": {
-			  "default": 0.0,
-			  "maximum": 100.0,
-			  "minimum": 0.0,
-			  "title": "Wrong Qtype Percent",
-			  "type": "number"
-			}
-		  },
-		  "title": "FlakyServerConfig",
-		  "type": "object"
-		},
-		"module": "foghorn.plugins.flaky_server.FlakyServer"
-	  },
-	  "greylist": {
-		"aliases": [
-		  "greylist"
-		],
-		"config_schema": {
-		  "additionalProperties": true,
-		  "description": "Brief: Typed configuration model for GreylistPlugin.\n\nInputs:\n  - duration_seconds: Greylist window in seconds.\n  - duration_hours: Legacy hours-based window.\n  - db_path: Path to sqlite DB.\n  - cache_ttl_seconds: TTL for in-memory cache.\n  - cache_max_entries: Max entries in cache.\n\nOutputs:\n  - GreylistConfig instance with normalized field types.",
-		  "properties": {
-			"cache_max_entries": {
-			  "default": 100000,
-			  "minimum": 0,
-			  "title": "Cache Max Entries",
-			  "type": "integer"
-			},
-			"cache_ttl_seconds": {
-			  "default": 300,
-			  "minimum": 0,
-			  "title": "Cache Ttl Seconds",
-			  "type": "integer"
-			},
-			"db_path": {
-			  "default": "./config/var/greylist.db",
-			  "title": "Db Path",
-			  "type": "string"
-			},
-			"duration_hours": {
-			  "default": 24,
-			  "minimum": 0,
-			  "title": "Duration Hours",
-			  "type": "integer"
-			},
-			"duration_seconds": {
-			  "anyOf": [
-				{
-				  "minimum": 0,
-				  "type": "integer"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Duration Seconds"
-			}
-		  },
-		  "title": "GreylistConfig",
-		  "type": "object"
-		},
-		"module": "foghorn.plugins.greylist.GreylistPlugin"
-	  },
-	  "mdns_bridge": {
-		"aliases": [
-		  "bonjour",
-		  "dns_sd",
-		  "dnssd",
-		  "mdns",
-		  "mdns_bridge",
-		  "zeroconf"
-		],
-		"config_schema": {
-		  "additionalProperties": true,
-		  "description": "Brief: Typed configuration model for MdnsBridgePlugin.\n\nInputs:\n  - domain: str DNS domain suffix to treat as the mDNS namespace (default: `.local`).\n  - ttl: int DNS TTL to apply to synthesized answers.\n  - network_enabled: bool controlling whether the plugin starts active\n    zeroconf browsing and uses `get_service_info()` to fetch ServiceInfo. When\n    False, the plugin still initializes internal state but does not touch the\n    network (useful for tests).\n  - include_ipv4: bool controlling whether A records are synthesized.\n  - include_ipv6: bool controlling whether AAAA records are synthesized.\n  - info_timeout_ms: int timeout in milliseconds for fetching ServiceInfo.\n  - zeroconf_interfaces: Which interfaces Zeroconf should bind to.\n    Accepts: \"default\" | \"all\" | list[str] of interface IPs.\n  - zeroconf_ip_version: Which IP versions Zeroconf should use.\n    Accepts: \"v4\" | \"v6\" | \"all\".\n  - zeroconf_unicast: bool passed to Zeroconf(unicast=...).\n  - service_types: Optional list[str] of service types to browse directly\n    (e.g., `_http._tcp.local.`). Useful when `_services._dns-sd._udp.local.`\n    is not advertised on the network.\n\nOutputs:\n  - MdnsBridgeConfig instance.",
-		  "properties": {
-			"domain": {
-			  "default": ".local",
-			  "title": "Domain",
-			  "type": "string"
-			},
-			"include_ipv4": {
-			  "default": true,
-			  "title": "Include Ipv4",
-			  "type": "boolean"
-			},
-			"include_ipv6": {
-			  "default": true,
-			  "title": "Include Ipv6",
-			  "type": "boolean"
-			},
-			"info_timeout_ms": {
-			  "default": 1500,
-			  "minimum": 0,
-			  "title": "Info Timeout Ms",
-			  "type": "integer"
-			},
-			"network_enabled": {
-			  "default": true,
-			  "title": "Network Enabled",
-			  "type": "boolean"
-			},
-			"service_types": {
-			  "items": {
-				"type": "string"
-			  },
-			  "title": "Service Types",
-			  "type": "array"
-			},
-			"ttl": {
-			  "default": 300,
-			  "minimum": 0,
-			  "title": "Ttl",
-			  "type": "integer"
-			},
-			"zeroconf_interfaces": {
-			  "default": "default",
-			  "title": "Zeroconf Interfaces"
-			},
-			"zeroconf_ip_version": {
-			  "anyOf": [
-				{
-				  "type": "string"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Zeroconf Ip Version"
-			},
-			"zeroconf_unicast": {
-			  "default": false,
-			  "title": "Zeroconf Unicast",
-			  "type": "boolean"
-			}
-		  },
-		  "title": "MdnsBridgeConfig",
-		  "type": "object"
-		},
-		"module": "foghorn.plugins.mdns.MdnsBridgePlugin"
-	  },
-	  "new_domain_filter": {
-		"aliases": [
-		  "ndf",
-		  "new_domain",
-		  "new_domain_filter"
-		],
-		"config_schema": {
-		  "additionalProperties": true,
-		  "description": "Brief: Typed configuration model for NewDomainFilterPlugin.\n\nInputs:\n  - threshold_days: Minimum allowed domain age in days.\n  - whois_db_path: Path to WHOIS cache DB.\n  - whois_cache_ttl_seconds: In-memory cache TTL.\n  - whois_refresh_seconds: Max age of DB entries before refresh.\n\nOutputs:\n  - NewDomainFilterConfig instance with normalized field types.",
-		  "properties": {
-			"threshold_days": {
-			  "default": 7,
-			  "minimum": 0,
-			  "title": "Threshold Days",
-			  "type": "integer"
-			},
-			"whois_cache_ttl_seconds": {
-			  "default": 3600,
-			  "minimum": 0,
-			  "title": "Whois Cache Ttl Seconds",
-			  "type": "integer"
-			},
-			"whois_db_path": {
-			  "default": "./config/var/whois_cache.db",
-			  "title": "Whois Db Path",
-			  "type": "string"
-			},
-			"whois_refresh_seconds": {
-			  "default": 86400,
-			  "minimum": 0,
-			  "title": "Whois Refresh Seconds",
-			  "type": "integer"
-			}
-		  },
-		  "title": "NewDomainFilterConfig",
-		  "type": "object"
-		},
-		"module": "foghorn.plugins.new_domain_filter.NewDomainFilterPlugin"
-	  },
-	  "rate_limit": {
-		"aliases": [
-		  "rate",
-		  "rate_limit",
-		  "ratelimit"
-		],
-		"config_schema": {
-		  "additionalProperties": true,
-		  "description": "Brief: Typed configuration model for RateLimitPlugin.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip').\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
-		  "properties": {
-			"alpha": {
-			  "default": 0.2,
-			  "maximum": 1.0,
-			  "minimum": 0.0,
-			  "title": "Alpha",
-			  "type": "number"
-			},
-			"alpha_down": {
-			  "anyOf": [
-				{
-				  "maximum": 1.0,
-				  "minimum": 0.0,
-				  "type": "number"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Alpha Down"
-			},
-			"burst_factor": {
-			  "default": 3.0,
-			  "minimum": 1.0,
-			  "title": "Burst Factor",
-			  "type": "number"
-			},
-			"db_path": {
-			  "default": "./config/var/rate_limit.db",
-			  "title": "Db Path",
-			  "type": "string"
-			},
-			"deny_response": {
-			  "default": "nxdomain",
-			  "title": "Deny Response",
-			  "type": "string"
-			},
-			"deny_response_ip4": {
-			  "anyOf": [
-				{
-				  "type": "string"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Deny Response Ip4"
-			},
-			"deny_response_ip6": {
-			  "anyOf": [
-				{
-				  "type": "string"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Deny Response Ip6"
-			},
-			"global_max_rps": {
-			  "default": 5000.0,
-			  "minimum": 0.0,
-			  "title": "Global Max Rps",
-			  "type": "number"
-			},
-			"min_enforce_rps": {
-			  "default": 50.0,
-			  "minimum": 0.0,
-			  "title": "Min Enforce Rps",
-			  "type": "number"
-			},
-			"mode": {
-			  "default": "per_client",
-			  "title": "Mode",
-			  "type": "string"
-			},
-			"ttl": {
-			  "default": 60,
-			  "minimum": 0,
-			  "title": "Ttl",
-			  "type": "integer"
-			},
-			"warmup_windows": {
-			  "default": 6,
-			  "minimum": 0,
-			  "title": "Warmup Windows",
-			  "type": "integer"
-			},
-			"window_seconds": {
-			  "default": 10,
-			  "minimum": 1,
-			  "title": "Window Seconds",
-			  "type": "integer"
-			}
-		  },
-		  "title": "RateLimitConfig",
-		  "type": "object"
-		},
-		"module": "foghorn.plugins.rate_limit.RateLimitPlugin"
-	  },
-	  "upstream_router": {
-		"aliases": [
-		  "router",
-		  "upstream",
-		  "upstream_router"
-		],
-		"config_schema": {
-		  "$defs": {
-			"UpstreamRoute": {
-			  "additionalProperties": true,
-			  "description": "Brief: Route definition for UpstreamRouterPlugin.\n\nInputs:\n  - domain: Exact domain to match.\n  - suffix: Suffix to match (without leading dot).\n  - upstreams: List of upstream targets.\n\nOutputs:\n  - UpstreamRoute instance with normalized types.",
-			  "properties": {
-				"domain": {
-				  "anyOf": [
-					{
-					  "type": "string"
-					},
-					{
-					  "type": "null"
-					}
-				  ],
-				  "default": null,
-				  "title": "Domain"
-				},
-				"suffix": {
-				  "anyOf": [
-					{
-					  "type": "string"
-					},
-					{
-					  "type": "null"
-					}
-				  ],
-				  "default": null,
-				  "title": "Suffix"
-				},
-				"upstreams": {
-				  "items": {
-					"$ref": "#/$defs/UpstreamRouteTarget"
-				  },
-				  "title": "Upstreams",
-				  "type": "array"
-				}
-			  },
-			  "title": "UpstreamRoute",
-			  "type": "object"
-			},
-			"UpstreamRouteTarget": {
-			  "description": "Brief: Single upstream target host/port pair.\n\nInputs:\n  - host: Upstream DNS host.\n  - port: Upstream DNS port.\n\nOutputs:\n  - UpstreamRouteTarget instance with normalized types.",
-			  "properties": {
-				"host": {
-				  "title": "Host",
-				  "type": "string"
-				},
-				"port": {
-				  "maximum": 65535,
-				  "minimum": 1,
-				  "title": "Port",
-				  "type": "integer"
-				}
-			  },
-			  "required": [
-				"host",
-				"port"
-			  ],
-			  "title": "UpstreamRouteTarget",
-			  "type": "object"
-			}
-		  },
-		  "additionalProperties": true,
-		  "description": "Brief: Typed configuration model for UpstreamRouterPlugin.\n\nInputs:\n  - routes: List of UpstreamRoute definitions.\n\nOutputs:\n  - UpstreamRouterConfig instance with normalized field types.",
-		  "properties": {
-			"routes": {
-			  "items": {
-				"$ref": "#/$defs/UpstreamRoute"
-			  },
-			  "title": "Routes",
-			  "type": "array"
-			}
-		  },
-		  "title": "UpstreamRouterConfig",
-		  "type": "object"
-		},
-		"module": "foghorn.plugins.upstream_router.UpstreamRouterPlugin"
-	  },
-	  "zone_records": {
-		"aliases": [
-		  "custom",
-		  "records",
-		  "zone",
-		  "zone_records"
-		],
-		"config_schema": {
-		  "additionalProperties": true,
-		  "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_path: Legacy single records file path.\n  - file_paths: Preferred list of records file paths.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
-		  "properties": {
-			"file_path": {
-			  "anyOf": [
-				{
-				  "type": "string"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "File Path"
-			},
-			"file_paths": {
-			  "anyOf": [
-				{
-				  "items": {
-					"type": "string"
-				  },
-				  "type": "array"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "File Paths"
-			},
-			"records": {
-			  "anyOf": [
-				{
-				  "items": {
-					"type": "string"
-				  },
-				  "type": "array"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Records"
-			},
-			"ttl": {
-			  "default": 300,
-			  "minimum": 0,
-			  "title": "Ttl",
-			  "type": "integer"
-			},
-			"watchdog_enabled": {
-			  "anyOf": [
-				{
-				  "type": "boolean"
-				},
-				{
-				  "type": "null"
-				}
-			  ],
-			  "default": null,
-			  "title": "Watchdog Enabled"
-			},
-			"watchdog_min_interval_seconds": {
-			  "default": 1.0,
-			  "minimum": 0,
-			  "title": "Watchdog Min Interval Seconds",
-			  "type": "number"
-			},
-			"watchdog_poll_interval_seconds": {
-			  "default": 0.0,
-			  "minimum": 0,
-			  "title": "Watchdog Poll Interval Seconds",
-			  "type": "number"
-			}
-		  },
-		  "title": "ZoneRecordsConfig",
-		  "type": "object"
-		},
-		"module": "foghorn.plugins.zone-records.ZoneRecords"
-	  }
-	},
-	"plugin_entry": {
-	  "oneOf": [
-		{
-		  "minLength": 1,
-		  "type": "string"
-		},
-		{
-		  "additionalProperties": false,
-		  "properties": {
-			"comment": {
-			  "type": "string"
-			},
-			"config": {
-			  "type": "object"
-			},
-			"enabled": {
-			  "type": "boolean"
-			},
-			"module": {
-			  "minLength": 1,
-			  "type": "string"
-			},
-			"name": {
-			  "minLength": 1,
-			  "type": "string"
-			},
-			"post_priority": {
-			  "type": "integer"
-			},
-			"pre_priority": {
-			  "type": "integer"
-			},
-			"priority": {
-			  "type": "integer"
-			},
-			"setup_priority": {
-			  "type": "integer"
-			}
-		  },
-		  "required": [
-			"module"
-		  ],
-		  "type": "object"
-		}
-	  ]
-	},
-	"upstream_doh": {
-	  "additionalProperties": false,
-	  "properties": {
-		"headers": {
-		  "additionalProperties": {
-			"type": "string"
-		  },
-		  "type": "object"
-		},
-		"method": {
-		  "enum": [
-			"GET",
-			"POST"
-		  ],
-		  "type": "string"
-		},
-		"tls": {
-		  "additionalProperties": false,
-		  "properties": {
-			"ca_file": {
-			  "type": "string"
-			},
-			"verify": {
-			  "type": "boolean"
-			}
-		  },
-		  "type": "object"
-		},
-		"transport": {
-		  "const": "doh",
-		  "type": "string"
-		},
-		"url": {
-		  "minLength": 1,
-		  "type": "string"
-		}
-	  },
-	  "required": [
-		"transport",
-		"url"
-	  ],
-	  "type": "object"
-	},
-	"upstream_host": {
-	  "additionalProperties": false,
-	  "properties": {
-		"host": {
-		  "minLength": 1,
-		  "type": "string"
-		},
-		"pool": {
-		  "additionalProperties": false,
-		  "properties": {
-			"idle_timeout_ms": {
-			  "minimum": 0,
-			  "type": "integer"
-			},
-			"max_connections": {
-			  "minimum": 1,
-			  "type": "integer"
-			}
-		  },
-		  "type": "object"
-		},
-		"port": {
-		  "maximum": 65535,
-		  "minimum": 1,
-		  "type": "integer"
-		},
-		"tls": {
-		  "additionalProperties": false,
-		  "properties": {
-			"ca_file": {
-			  "type": "string"
-			},
-			"server_name": {
-			  "type": "string"
-			},
-			"verify": {
-			  "type": "boolean"
-			}
-		  },
-		  "type": "object"
-		},
-		"transport": {
-		  "default": "udp",
-		  "enum": [
-			"udp",
-			"tcp",
-			"dot"
-		  ],
-		  "type": "string"
-		}
-	  },
-	  "required": [
-		"host"
-	  ],
-	  "type": "object"
-	}
+    "listener_doh": {
+      "additionalProperties": false,
+      "properties": {
+        "cert_file": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "host": {
+          "type": "string"
+        },
+        "key_file": {
+          "type": "string"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "listener_dot": {
+      "additionalProperties": false,
+      "properties": {
+        "cert_file": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "host": {
+          "type": "string"
+        },
+        "key_file": {
+          "type": "string"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "listener_tcp": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "listener_udp": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "plugin_configs": {
+      "access_control": {
+        "aliases": [
+          "access_control",
+          "acl"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for AccessControlPlugin used for startup validation.\n\nInputs:\n  - default: Default policy (\"allow\" or \"deny\").\n  - allow: List of CIDR/IP strings to allow.\n  - deny: List of CIDR/IP strings to deny.\n\nOutputs:\n  - AccessControlConfig instance with normalized types.",
+          "properties": {
+            "allow": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Allow",
+              "type": "array"
+            },
+            "default": {
+              "default": "allow",
+              "title": "Default",
+              "type": "string"
+            },
+            "deny": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Deny",
+              "type": "array"
+            }
+          },
+          "title": "AccessControlConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.access_control.AccessControlPlugin"
+      },
+      "dns_prefetch": {
+        "aliases": [
+          "dns_prefetch",
+          "prefetch"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for DnsPrefetchPlugin.\n\nInputs:\n  - interval_seconds: How often to sample statistics and perform prefetch cycles.\n  - prefetch_top_n: Maximum number of domains considered per cycle based on\n    cache_hit_domains/top_domains statistics.\n  - max_consecutive_misses: Per-domain cap on consecutive prefetch cycles\n    without any observed cache hit; once exceeded, prefetching for that\n    domain is paused until a new cache hit is seen.\n  - qtypes: List of DNS qtype names to prefetch (e.g. [\"A\", \"AAAA\"]).\n\nOutputs:\n  - DnsPrefetchConfig instance with normalized field types.",
+          "properties": {
+            "interval_seconds": {
+              "default": 60.0,
+              "minimum": 1.0,
+              "title": "Interval Seconds",
+              "type": "number"
+            },
+            "max_consecutive_misses": {
+              "default": 5,
+              "minimum": 1,
+              "title": "Max Consecutive Misses",
+              "type": "integer"
+            },
+            "prefetch_top_n": {
+              "default": 100,
+              "minimum": 1,
+              "title": "Prefetch Top N",
+              "type": "integer"
+            },
+            "qtypes": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Qtypes",
+              "type": "array"
+            }
+          },
+          "title": "DnsPrefetchConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.dns_prefetch.DnsPrefetchPlugin"
+      },
+      "docker_hosts": {
+        "aliases": [
+          "docker",
+          "docker_hosts"
+        ],
+        "config_schema": {
+          "$defs": {
+            "DockerEndpointConfig": {
+              "description": "Brief: Per-endpoint configuration for DockerHosts.\n\nIn addition to full container names and IDs, DockerHosts also exposes a\nshort container ID alias (the first 12 hex characters) for convenience.\n\nInputs:\n  - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n    \"tcp://127.0.0.1:2375\").\n  - reload_interval_second: Interval in seconds between background refreshes\n    for this endpoint. When set to 0, the endpoint is only refreshed at\n    startup (or when other endpoints cause a global refresh).\n  - use_ipv4: Optional IPv4 address to use in answers instead of\n    per-container IPv4 addresses discovered from this endpoint.\n  - use_ipv6: Optional IPv6 address to use in answers instead of\n    per-container IPv6 addresses discovered from this endpoint.\n  - ttl: Optional TTL override for answers derived from this endpoint; when\n    omitted, the plugin-level ttl is used.\n\nOutputs:\n  - DockerEndpointConfig instance with normalized field types.",
+              "properties": {
+                "reload_interval_second": {
+                  "default": 60.0,
+                  "minimum": 0,
+                  "title": "Reload Interval Second",
+                  "type": "number"
+                },
+                "ttl": {
+                  "anyOf": [
+                    {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Ttl"
+                },
+                "url": {
+                  "title": "Url",
+                  "type": "string"
+                },
+                "use_ipv4": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Use Ipv4"
+                },
+                "use_ipv6": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Use Ipv6"
+                }
+              },
+              "required": [
+                "url"
+              ],
+              "title": "DockerEndpointConfig",
+              "type": "object"
+            }
+          },
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for DockerHosts plugin.\n\nInputs:\n  - endpoints: List of endpoint dictionaries.\n    Each entry must contain:\n      - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n        \"tcp://127.0.0.1:2375\").\n    and may contain:\n      - reload_interval_second: float seconds between refreshes for that\n        endpoint.\n      - use_ipv4: Optional IPv4 address to use instead of per-container\n        IPv4 addresses for containers discovered via that endpoint.\n      - use_ipv6: Optional IPv6 address to use instead of per-container\n        IPv6 addresses for containers discovered via that endpoint.\n      - ttl: Optional TTL override (seconds) for answers derived from that\n        endpoint.\n  - ttl: Plugin-level DNS answer TTL in seconds used when an endpoint does\n    not specify its own ttl.\n  - health: List of acceptable container health/status values. Supported:\n    \"starting\", \"healthy\", \"running\", \"unhealthy\". Default:\n    [\"healthy\", \"running\"].\n  - discovery: When true, publish a TXT record at\n    \"_containers.<suffix>\" (or \"_containers\" when no suffix is configured)\n    containing container summary lines, plus a host-level summary under\n    \"_hosts.<suffix>\" (or \"_hosts\").\n\nOutputs:\n  - DockerHostsConfig instance with normalized field types.",
+          "properties": {
+            "discovery": {
+              "default": false,
+              "title": "Discovery",
+              "type": "boolean"
+            },
+            "endpoints": {
+              "items": {
+                "$ref": "#/$defs/DockerEndpointConfig"
+              },
+              "title": "Endpoints",
+              "type": "array"
+            },
+            "health": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Health",
+              "type": "array"
+            },
+            "ttl": {
+              "default": 300,
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            }
+          },
+          "title": "DockerHostsConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.docker_hosts.DockerHosts"
+      },
+      "etc_hosts": {
+        "aliases": [
+          "/etc/hosts",
+          "etc_hosts",
+          "etchosts",
+          "hostfile",
+          "hosts"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for EtcHosts.\n\nInputs:\n  - file_path: Legacy single hosts file path.\n  - file_paths: Preferred list of hosts file paths.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Response TTL in seconds.\n\nOutputs:\n  - EtcHostsConfig instance with normalized field types.",
+          "properties": {
+            "file_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "File Path"
+            },
+            "file_paths": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "File Paths"
+            },
+            "ttl": {
+              "default": 300,
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            },
+            "watchdog_enabled": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Watchdog Enabled"
+            },
+            "watchdog_min_interval_seconds": {
+              "default": 1.0,
+              "minimum": 0,
+              "title": "Watchdog Min Interval Seconds",
+              "type": "number"
+            },
+            "watchdog_poll_interval_seconds": {
+              "default": 0.0,
+              "minimum": 0,
+              "title": "Watchdog Poll Interval Seconds",
+              "type": "number"
+            }
+          },
+          "title": "EtcHostsConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.etc_hosts.EtcHosts"
+      },
+      "examples": {
+        "aliases": [
+          "examples"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for ExamplesPlugin.\n\nInputs:\n  - max_subdomains: Maximum allowed subdomain depth.\n  - max_length_no_dots: Maximum label length excluding dots.\n  - base_labels: Rightmost labels comprising the base domain.\n  - apply_to_qtypes: Qtypes this plugin applies to.\n  - rewrite_first_ipv4: List of rewrite rules.\n\nOutputs:\n  - ExamplesConfig instance with normalized field types.",
+          "properties": {
+            "apply_to_qtypes": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Apply To Qtypes",
+              "type": "array"
+            },
+            "base_labels": {
+              "default": 2,
+              "minimum": 0,
+              "title": "Base Labels",
+              "type": "integer"
+            },
+            "max_length_no_dots": {
+              "default": 50,
+              "minimum": 0,
+              "title": "Max Length No Dots",
+              "type": "integer"
+            },
+            "max_subdomains": {
+              "default": 5,
+              "minimum": 0,
+              "title": "Max Subdomains",
+              "type": "integer"
+            },
+            "rewrite_first_ipv4": {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "title": "Rewrite First Ipv4",
+              "type": "array"
+            }
+          },
+          "title": "ExamplesConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.examples.ExamplesPlugin"
+      },
+      "file_downloader": {
+        "aliases": [
+          "file_downloader",
+          "lists"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for FileDownloader.\n\nInputs:\n  - download_path: Directory where list files are written.\n  - urls: Explicit list of HTTP(S) URLs to download. Each entry may be either\n    a bare URL string or an object with keys:\n      - url (str): The URL to download.\n      - hash_filenames (bool | None): When True, use hashed filenames;\n        when False, derive filenames directly from the URL; when None in a\n        per-URL object, fall back to the plugin-level default.\n      - add_comment (bool | None): When True, prepend a timestamped comment\n        line to the downloaded file; when False or None, no comment is\n        written for that URL.\n  - url_files: Paths to files containing one URL per line.\n  - interval_days: Optional number of days between refreshes (>= 0).\n  - interval_seconds: Optional legacy seconds-based interval (>= 0).\n  - add_comment: Plugin-level default for whether to add a comment header\n    line to downloaded files (default: False).\n  - hash_filenames: Plugin-level default for whether filenames should\n    include a URL hash (default: False).\n\nOutputs:\n  - FileDownloaderConfig instance with normalized field types.",
+          "properties": {
+            "add_comment": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": false,
+              "title": "Add Comment"
+            },
+            "download_path": {
+              "default": "./config/var/lists",
+              "title": "Download Path",
+              "type": "string"
+            },
+            "hash_filenames": {
+              "default": false,
+              "title": "Hash Filenames",
+              "type": "boolean"
+            },
+            "interval_days": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Interval Days"
+            },
+            "interval_seconds": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Interval Seconds"
+            },
+            "url_files": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Url Files",
+              "type": "array"
+            },
+            "urls": {
+              "items": {},
+              "title": "Urls",
+              "type": "array"
+            }
+          },
+          "title": "FileDownloaderConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.file_downloader.FileDownloader"
+      },
+      "filter": {
+        "aliases": [
+          "allow",
+          "block",
+          "filter"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for FilterPlugin.\n\nInputs:\n  - cache_ttl_seconds: TTL for domain cache.\n  - db_path: Optional path to blocklist SQLite DB. When omitted or empty,\n    the plugin uses a per-instance in-memory database so that multiple\n    FilterPlugin instances do not share state by default.\n  - default: Default policy (\"allow\" or \"deny\").\n  - ttl: TTL for synthesized responses.\n  - deny_response: Policy for deny responses.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs for IP-mode denies.\n  - allow_qtypes / deny_qtypes: Optional lists of DNS qtype names to allow or deny.\n  - *_domains_files: List paths for loading allow/block lists from files.\n  - blocked_domains / allowed_domains: Inline domain lists.\n  - blocked_patterns / blocked_patterns_files: Regexes.\n  - blocked_keywords / blocked_keywords_files: Keywords.\n  - blocked_ips / blocked_ips_files: IP rules.\n\nOutputs:\n  - FilterConfig instance with normalized field types.",
+          "properties": {
+            "allowed_domains": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Allowed Domains",
+              "type": "array"
+            },
+            "allowed_domains_files": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Allowed Domains Files",
+              "type": "array"
+            },
+            "blocked_domains": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Blocked Domains",
+              "type": "array"
+            },
+            "blocked_domains_files": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Blocked Domains Files",
+              "type": "array"
+            },
+            "blocked_ips": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  }
+                ]
+              },
+              "title": "Blocked Ips",
+              "type": "array"
+            },
+            "blocked_ips_files": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Blocked Ips Files",
+              "type": "array"
+            },
+            "blocked_keywords": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Blocked Keywords",
+              "type": "array"
+            },
+            "blocked_keywords_files": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Blocked Keywords Files",
+              "type": "array"
+            },
+            "blocked_patterns": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Blocked Patterns",
+              "type": "array"
+            },
+            "blocked_patterns_files": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Blocked Patterns Files",
+              "type": "array"
+            },
+            "cache_ttl_seconds": {
+              "default": 600,
+              "minimum": 0,
+              "title": "Cache Ttl Seconds",
+              "type": "integer"
+            },
+            "clear": {
+              "default": 1,
+              "minimum": 0,
+              "title": "Clear",
+              "type": "integer"
+            },
+            "db_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Db Path"
+            },
+            "default": {
+              "default": "deny",
+              "title": "Default",
+              "type": "string"
+            },
+            "deny_response": {
+              "default": "nxdomain",
+              "title": "Deny Response",
+              "type": "string"
+            },
+            "deny_response_ip4": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Deny Response Ip4"
+            },
+            "deny_response_ip6": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Deny Response Ip6"
+            },
+            "ttl": {
+              "default": 300,
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            }
+          },
+          "title": "FilterConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.filter.FilterPlugin"
+      },
+      "flaky_server": {
+        "aliases": [
+          "buggy",
+          "flaky",
+          "flaky_server"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for FlakyServer.\n\nInputs:\n  - servfail_one_in / nxdomain_one_in: Legacy 1-in-N probabilities for\n    SERVFAIL/NXDOMAIN (still accepted; converted to percentages).\n  - servfail_percent / nxdomain_percent: Percent probabilities (0\u2013100) for\n    SERVFAIL/NXDOMAIN draws; override the legacy one-in-N fields when set.\n  - timeout_percent: Percent probability (0\u2013100) of dropping the query and\n    sending no response (client observes a timeout).\n  - truncate_percent: Percent probability (0\u2013100) of setting the TC bit on\n    responses to encourage client fallback to TCP.\n  - formerr_percent: Percent probability (0\u2013100) of replying with FORMERR\n    instead of forwarding.\n  - noerror_empty_percent: Percent probability (0\u2013100) of replying with\n    NOERROR and an empty answer section.\n  - apply_to_qtypes: Qtypes this plugin applies to.\n  - fuzz_percent: Percent of matching responses to fuzz at the byte level.\n  - min_fuzz_bytes / max_fuzz_bytes: Bounds for how many bytes to mutate\n    when fuzzing a response.\n  - wrong_qtype_percent: Percent of matching responses whose question\n    qtype is rewritten to a different RR type.\n  - fuzz_actions: Fuzz primitives to use (e.g. [\"bit_flip\", \"swap_bytes\"]).\n  - seed: Optional RNG seed.\n\nOutputs:\n  - FlakyServerConfig instance with normalized field types.",
+          "properties": {
+            "apply_to_qtypes": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Apply To Qtypes",
+              "type": "array"
+            },
+            "formerr_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Formerr Percent",
+              "type": "number"
+            },
+            "fuzz_actions": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Fuzz Actions",
+              "type": "array"
+            },
+            "fuzz_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Fuzz Percent",
+              "type": "number"
+            },
+            "max_fuzz_bytes": {
+              "default": 4,
+              "minimum": 1,
+              "title": "Max Fuzz Bytes",
+              "type": "integer"
+            },
+            "min_fuzz_bytes": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Min Fuzz Bytes",
+              "type": "integer"
+            },
+            "noerror_empty_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Noerror Empty Percent",
+              "type": "number"
+            },
+            "nxdomain_percent": {
+              "anyOf": [
+                {
+                  "maximum": 100.0,
+                  "minimum": 0.0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Nxdomain Percent"
+            },
+            "seed": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Seed"
+            },
+            "servfail_percent": {
+              "anyOf": [
+                {
+                  "maximum": 100.0,
+                  "minimum": 0.0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Servfail Percent"
+            },
+            "timeout_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Timeout Percent",
+              "type": "number"
+            },
+            "truncate_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Truncate Percent",
+              "type": "number"
+            },
+            "wrong_qtype_percent": {
+              "default": 0.0,
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "title": "Wrong Qtype Percent",
+              "type": "number"
+            }
+          },
+          "title": "FlakyServerConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.flaky_server.FlakyServer"
+      },
+      "greylist": {
+        "aliases": [
+          "greylist"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for GreylistPlugin.\n\nInputs:\n  - duration_seconds: Greylist window in seconds.\n  - duration_hours: Legacy hours-based window.\n  - db_path: Path to sqlite DB.\n  - cache_ttl_seconds: TTL for in-memory cache.\n  - cache_max_entries: Max entries in cache.\n\nOutputs:\n  - GreylistConfig instance with normalized field types.",
+          "properties": {
+            "cache_max_entries": {
+              "default": 100000,
+              "minimum": 0,
+              "title": "Cache Max Entries",
+              "type": "integer"
+            },
+            "cache_ttl_seconds": {
+              "default": 300,
+              "minimum": 0,
+              "title": "Cache Ttl Seconds",
+              "type": "integer"
+            },
+            "db_path": {
+              "default": "./config/var/greylist.db",
+              "title": "Db Path",
+              "type": "string"
+            },
+            "duration_hours": {
+              "default": 24,
+              "minimum": 0,
+              "title": "Duration Hours",
+              "type": "integer"
+            },
+            "duration_seconds": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Duration Seconds"
+            }
+          },
+          "title": "GreylistConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.greylist.GreylistPlugin"
+      },
+      "mdns_bridge": {
+        "aliases": [
+          "bonjour",
+          "dns_sd",
+          "dnssd",
+          "mdns",
+          "mdns_bridge",
+          "zeroconf"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for MdnsBridgePlugin.\n\nInputs:\n  - domain: str DNS domain suffix to treat as the mDNS namespace (default: `.local`).\n  - ttl: int DNS TTL to apply to synthesized answers.\n  - network_enabled: bool controlling whether the plugin starts active\n    zeroconf browsing and uses `get_service_info()` to fetch ServiceInfo. When\n    False, the plugin still initializes internal state but does not touch the\n    network (useful for tests).\n  - include_ipv4: bool controlling whether A records are synthesized.\n  - include_ipv6: bool controlling whether AAAA records are synthesized.\n  - info_timeout_ms: int timeout in milliseconds for fetching ServiceInfo.\n  - zeroconf_interfaces: Which interfaces Zeroconf should bind to.\n    Accepts: \"default\" | \"all\" | list[str] of interface IPs.\n  - zeroconf_ip_version: Which IP versions Zeroconf should use.\n    Accepts: \"v4\" | \"v6\" | \"all\".\n  - zeroconf_unicast: bool passed to Zeroconf(unicast=...).\n  - service_types: Optional list[str] of service types to browse directly\n    (e.g., `_http._tcp.local.`). Useful when `_services._dns-sd._udp.local.`\n    is not advertised on the network.\n\nOutputs:\n  - MdnsBridgeConfig instance.",
+          "properties": {
+            "domain": {
+              "default": ".local",
+              "title": "Domain",
+              "type": "string"
+            },
+            "include_ipv4": {
+              "default": true,
+              "title": "Include Ipv4",
+              "type": "boolean"
+            },
+            "include_ipv6": {
+              "default": true,
+              "title": "Include Ipv6",
+              "type": "boolean"
+            },
+            "info_timeout_ms": {
+              "default": 1500,
+              "minimum": 0,
+              "title": "Info Timeout Ms",
+              "type": "integer"
+            },
+            "network_enabled": {
+              "default": true,
+              "title": "Network Enabled",
+              "type": "boolean"
+            },
+            "service_types": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Service Types",
+              "type": "array"
+            },
+            "ttl": {
+              "default": 300,
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            },
+            "zeroconf_interfaces": {
+              "default": "default",
+              "title": "Zeroconf Interfaces"
+            },
+            "zeroconf_ip_version": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Zeroconf Ip Version"
+            },
+            "zeroconf_unicast": {
+              "default": false,
+              "title": "Zeroconf Unicast",
+              "type": "boolean"
+            }
+          },
+          "title": "MdnsBridgeConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.mdns.MdnsBridgePlugin"
+      },
+      "new_domain_filter": {
+        "aliases": [
+          "ndf",
+          "new_domain",
+          "new_domain_filter"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for NewDomainFilterPlugin.\n\nInputs:\n  - threshold_days: Minimum allowed domain age in days.\n  - whois_db_path: Path to WHOIS cache DB.\n  - whois_cache_ttl_seconds: In-memory cache TTL.\n  - whois_refresh_seconds: Max age of DB entries before refresh.\n\nOutputs:\n  - NewDomainFilterConfig instance with normalized field types.",
+          "properties": {
+            "threshold_days": {
+              "default": 7,
+              "minimum": 0,
+              "title": "Threshold Days",
+              "type": "integer"
+            },
+            "whois_cache_ttl_seconds": {
+              "default": 3600,
+              "minimum": 0,
+              "title": "Whois Cache Ttl Seconds",
+              "type": "integer"
+            },
+            "whois_db_path": {
+              "default": "./config/var/whois_cache.db",
+              "title": "Whois Db Path",
+              "type": "string"
+            },
+            "whois_refresh_seconds": {
+              "default": 86400,
+              "minimum": 0,
+              "title": "Whois Refresh Seconds",
+              "type": "integer"
+            }
+          },
+          "title": "NewDomainFilterConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.new_domain_filter.NewDomainFilterPlugin"
+      },
+      "rate_limit": {
+        "aliases": [
+          "rate",
+          "rate_limit",
+          "ratelimit"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for RateLimitPlugin.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip').\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
+          "properties": {
+            "alpha": {
+              "default": 0.2,
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "Alpha",
+              "type": "number"
+            },
+            "alpha_down": {
+              "anyOf": [
+                {
+                  "maximum": 1.0,
+                  "minimum": 0.0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Alpha Down"
+            },
+            "burst_factor": {
+              "default": 3.0,
+              "minimum": 1.0,
+              "title": "Burst Factor",
+              "type": "number"
+            },
+            "db_path": {
+              "default": "./config/var/rate_limit.db",
+              "title": "Db Path",
+              "type": "string"
+            },
+            "deny_response": {
+              "default": "nxdomain",
+              "title": "Deny Response",
+              "type": "string"
+            },
+            "deny_response_ip4": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Deny Response Ip4"
+            },
+            "deny_response_ip6": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Deny Response Ip6"
+            },
+            "global_max_rps": {
+              "default": 5000.0,
+              "minimum": 0.0,
+              "title": "Global Max Rps",
+              "type": "number"
+            },
+            "min_enforce_rps": {
+              "default": 50.0,
+              "minimum": 0.0,
+              "title": "Min Enforce Rps",
+              "type": "number"
+            },
+            "mode": {
+              "default": "per_client",
+              "title": "Mode",
+              "type": "string"
+            },
+            "ttl": {
+              "default": 60,
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            },
+            "warmup_windows": {
+              "default": 6,
+              "minimum": 0,
+              "title": "Warmup Windows",
+              "type": "integer"
+            },
+            "window_seconds": {
+              "default": 10,
+              "minimum": 1,
+              "title": "Window Seconds",
+              "type": "integer"
+            }
+          },
+          "title": "RateLimitConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.rate_limit.RateLimitPlugin"
+      },
+      "upstream_router": {
+        "aliases": [
+          "router",
+          "upstream",
+          "upstream_router"
+        ],
+        "config_schema": {
+          "$defs": {
+            "UpstreamRoute": {
+              "additionalProperties": true,
+              "description": "Brief: Route definition for UpstreamRouterPlugin.\n\nInputs:\n  - domain: Exact domain to match.\n  - suffix: Suffix to match (without leading dot).\n  - upstreams: List of upstream targets.\n\nOutputs:\n  - UpstreamRoute instance with normalized types.",
+              "properties": {
+                "domain": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Domain"
+                },
+                "suffix": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Suffix"
+                },
+                "upstreams": {
+                  "items": {
+                    "$ref": "#/$defs/UpstreamRouteTarget"
+                  },
+                  "title": "Upstreams",
+                  "type": "array"
+                }
+              },
+              "title": "UpstreamRoute",
+              "type": "object"
+            },
+            "UpstreamRouteTarget": {
+              "description": "Brief: Single upstream target host/port pair.\n\nInputs:\n  - host: Upstream DNS host.\n  - port: Upstream DNS port.\n\nOutputs:\n  - UpstreamRouteTarget instance with normalized types.",
+              "properties": {
+                "host": {
+                  "title": "Host",
+                  "type": "string"
+                },
+                "port": {
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "title": "Port",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "host",
+                "port"
+              ],
+              "title": "UpstreamRouteTarget",
+              "type": "object"
+            }
+          },
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for UpstreamRouterPlugin.\n\nInputs:\n  - routes: List of UpstreamRoute definitions.\n\nOutputs:\n  - UpstreamRouterConfig instance with normalized field types.",
+          "properties": {
+            "routes": {
+              "items": {
+                "$ref": "#/$defs/UpstreamRoute"
+              },
+              "title": "Routes",
+              "type": "array"
+            }
+          },
+          "title": "UpstreamRouterConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.upstream_router.UpstreamRouterPlugin"
+      },
+      "zone_records": {
+        "aliases": [
+          "custom",
+          "records",
+          "zone",
+          "zone_records"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_path: Legacy single records file path.\n  - file_paths: Preferred list of records file paths.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
+          "properties": {
+            "file_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "File Path"
+            },
+            "file_paths": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "File Paths"
+            },
+            "records": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Records"
+            },
+            "ttl": {
+              "default": 300,
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            },
+            "watchdog_enabled": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Watchdog Enabled"
+            },
+            "watchdog_min_interval_seconds": {
+              "default": 1.0,
+              "minimum": 0,
+              "title": "Watchdog Min Interval Seconds",
+              "type": "number"
+            },
+            "watchdog_poll_interval_seconds": {
+              "default": 0.0,
+              "minimum": 0,
+              "title": "Watchdog Poll Interval Seconds",
+              "type": "number"
+            }
+          },
+          "title": "ZoneRecordsConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.zone-records.ZoneRecords"
+      }
+    },
+    "plugin_entry": {
+      "oneOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "comment": {
+              "type": "string"
+            },
+            "config": {
+              "type": "object"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "module": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "name": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "post_priority": {
+              "type": "integer"
+            },
+            "pre_priority": {
+              "type": "integer"
+            },
+            "priority": {
+              "type": "integer"
+            },
+            "setup_priority": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "module"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "upstream_doh": {
+      "additionalProperties": false,
+      "properties": {
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "method": {
+          "enum": [
+            "GET",
+            "POST"
+          ],
+          "type": "string"
+        },
+        "tls": {
+          "additionalProperties": false,
+          "properties": {
+            "ca_file": {
+              "type": "string"
+            },
+            "verify": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "transport": {
+          "const": "doh",
+          "type": "string"
+        },
+        "url": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "transport",
+        "url"
+      ],
+      "type": "object"
+    },
+    "upstream_host": {
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "pool": {
+          "additionalProperties": false,
+          "properties": {
+            "idle_timeout_ms": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_connections": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "tls": {
+          "additionalProperties": false,
+          "properties": {
+            "ca_file": {
+              "type": "string"
+            },
+            "server_name": {
+              "type": "string"
+            },
+            "verify": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "transport": {
+          "default": "udp",
+          "enum": [
+            "udp",
+            "tcp",
+            "dot"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "host"
+      ],
+      "type": "object"
+    }
   },
   "$id": "https://example.com/foghorn/config.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
-	"$schema": {
-	  "description": "Optional URI or identifier for the JSON Schema associated with this configuration file. Ignored by Foghorn at runtime.",
-	  "type": "string"
-	},
-	"cache": {
-	  "description": "Cache plugin configuration. May be a string alias/dotted path, an object with {module, config}, or null for default.",
-	  "oneOf": [
-		{
-		  "type": "null"
-		},
-		{
-		  "type": "string"
-		},
-		{
-		  "additionalProperties": false,
-		  "properties": {
-			"config": {
-			  "type": "object"
-			},
-			"module": {
-			  "type": "string"
-			}
-		  },
-		  "type": "object"
-		}
-	  ]
-	},
-	"dnssec": {
-	  "additionalProperties": false,
-	  "properties": {
-		"mode": {
-		  "default": "ignore",
-		  "enum": [
-			"ignore",
-			"passthrough",
-			"validate"
-		  ],
-		  "type": "string"
-		},
-		"udp_payload_size": {
-		  "minimum": 512,
-		  "type": "integer"
-		},
-		"validation": {
-		  "default": "upstream_ad",
-		  "enum": [
-			"upstream_ad",
-			"local"
-		  ],
-		  "type": "string"
-		}
-	  },
-	  "type": "object"
-	},
-	"foghorn": {
-	  "additionalProperties": false,
-	  "properties": {
-		"dnssec": {
-		  "$ref": "#/properties/dnssec"
-		},
-		"logging": {
-		  "$ref": "#/properties/logging"
-		},
-		"resolver": {
-		  "$ref": "#/properties/resolver"
-		},
-		"timeout_ms": {
-		  "minimum": 1,
-		  "type": "integer"
-		},
-		"upstream_max_concurrent": {
-		  "minimum": 1,
-		  "type": "integer"
-		},
-		"upstream_strategy": {
-		  "default": "failover",
-		  "enum": [
-			"failover",
-			"round_robin",
-			"random"
-		  ],
-		  "type": "string"
-		},
-		"use_asyncio": {
-		  "default": true,
-		  "type": "boolean"
-		}
-	  },
-	  "type": "object"
-	},
-	"listen": {
-	  "additionalProperties": false,
-	  "properties": {
-		"doh": {
-		  "$ref": "#/$defs/listener_doh"
-		},
-		"dot": {
-		  "$ref": "#/$defs/listener_dot"
-		},
-		"host": {
-		  "type": "string"
-		},
-		"port": {
-		  "maximum": 65535,
-		  "minimum": 1,
-		  "type": "integer"
-		},
-		"tcp": {
-		  "$ref": "#/$defs/listener_tcp"
-		},
-		"udp": {
-		  "$ref": "#/$defs/listener_udp"
-		}
-	  },
-	  "type": "object"
-	},
-	"logging": {
-	  "additionalProperties": false,
-	  "properties": {
-		"file": {
-		  "type": "string"
-		},
-		"level": {
-		  "enum": [
-			"debug",
-			"info",
-			"warn",
-			"warning",
-			"error",
-			"crit",
-			"critical"
-		  ],
-		  "type": "string"
-		},
-		"stderr": {
-		  "type": "boolean"
-		},
-		"syslog": {
-		  "oneOf": [
-			{
-			  "type": "boolean"
-			},
-			{
-			  "additionalProperties": false,
-			  "properties": {
-				"address": {},
-				"facility": {},
-				"tag": {}
-			  },
-			  "type": "object"
-			}
-		  ]
-		}
-	  },
-	  "type": "object"
-	},
-	"plugins": {
-	  "items": {
-		"$ref": "#/$defs/plugin_entry"
-	  },
-	  "type": "array"
-	},
-	"resolver": {
-	  "additionalProperties": false,
-	  "properties": {
-		"max_depth": {
-		  "minimum": 1,
-		  "type": "integer"
-		},
-		"mode": {
-		  "default": "forward",
-		  "enum": [
-			"forward",
-			"recursive"
-		  ],
-		  "type": "string"
-		},
-		"per_try_timeout_ms": {
-		  "minimum": 1,
-		  "type": "integer"
-		},
-		"timeout_ms": {
-		  "minimum": 1,
-		  "type": "integer"
-		}
-	  },
-	  "type": "object"
-	},
-	"statistics": {
-	  "additionalProperties": false,
-	  "properties": {
-		"enabled": {
-		  "type": "boolean"
-		},
-		"force_rebuild": {
-		  "type": "boolean"
-		},
-		"ignore": {
-		  "additionalProperties": false,
-		  "properties": {
-			"ignore_single_host": {
-			  "type": "boolean"
-			},
-			"include_in_stats": {
-			  "default": true,
-			  "type": "boolean"
-			},
-			"top_clients": {
-			  "items": {
-				"type": "string"
-			  },
-			  "type": "array"
-			},
-			"top_domains": {
-			  "items": {
-				"type": "string"
-			  },
-			  "type": "array"
-			},
-			"top_domains_mode": {
-			  "enum": [
-				"exact",
-				"suffix"
-			  ],
-			  "type": "string"
-			},
-			"top_subdomains": {
-			  "items": {
-				"type": "string"
-			  },
-			  "type": "array"
-			},
-			"top_subdomains_mode": {
-			  "enum": [
-				"exact",
-				"suffix"
-			  ],
-			  "type": "string"
-			}
-		  },
-		  "type": "object"
-		},
-		"include_qtype_breakdown": {
-		  "type": "boolean"
-		},
-		"include_top_clients": {
-		  "type": "boolean"
-		},
-		"include_top_domains": {
-		  "type": "boolean"
-		},
-		"interval_seconds": {
-		  "minimum": 1,
-		  "type": "integer"
-		},
-		"log_level": {
-		  "type": "string"
-		},
-		"persistence": {
-		  "additionalProperties": false,
-		  "properties": {
-			"batch_max_size": {
-			  "minimum": 1,
-			  "type": "integer"
-			},
-			"batch_time_sec": {
-			  "minimum": 0,
-			  "type": "number"
-			},
-			"batch_writes": {
-			  "type": "boolean"
-			},
-			"db_path": {
-			  "type": "string"
-			},
-			"enabled": {
-			  "type": "boolean"
-			},
-			"force_rebuild": {
-			  "type": "boolean"
-			}
-		  },
-		  "type": "object"
-		},
-		"reset_on_log": {
-		  "type": "boolean"
-		},
-		"reset_on_sigusr1": {
-		  "type": "boolean"
-		},
-		"sigusr2_resets_stats": {
-		  "type": "boolean"
-		},
-		"top_n": {
-		  "minimum": 1,
-		  "type": "integer"
-		},
-		"track_latency": {
-		  "type": "boolean"
-		},
-		"track_uniques": {
-		  "type": "boolean"
-		}
-	  },
-	  "type": "object"
-	},
-	"upstreams": {
-	  "items": {
-		"oneOf": [
-		  {
-			"$ref": "#/$defs/upstream_host"
-		  },
-		  {
-			"$ref": "#/$defs/upstream_doh"
-		  }
-		]
-	  },
-	  "minItems": 1,
-	  "type": "array"
-	},
-	"webserver": {
-	  "additionalProperties": false,
-	  "properties": {
-		"api": {
-		  "additionalProperties": false,
-		  "properties": {
-			"timezone": {
-			  "description": "Timezone used for API day bucket alignment. Accepts 'utc', 'local', or an IANA tz database name like 'America/New_York'.",
-			  "type": "string"
-			}
-		  },
-		  "type": "object"
-		},
-		"auth": {
-		  "additionalProperties": false,
-		  "properties": {
-			"mode": {
-			  "enum": [
-				"none",
-				"token",
-				"basic"
-			  ],
-			  "type": "string"
-			},
-			"token": {
-			  "type": "string"
-			}
-		  },
-		  "type": "object"
-		},
-		"cors": {
-		  "additionalProperties": false,
-		  "properties": {
-			"allowlist": {
-			  "items": {
-				"type": "string"
-			  },
-			  "type": "array"
-			},
-			"enabled": {
-			  "type": "boolean"
-			}
-		  },
-		  "type": "object"
-		},
-		"debug_timings": {
-		  "type": "boolean"
-		},
-		"enabled": {
-		  "type": "boolean"
-		},
-		"host": {
-		  "type": "string"
-		},
-		"index": {
-		  "type": "boolean"
-		},
-		"logs": {
-		  "additionalProperties": false,
-		  "properties": {
-			"buffer_size": {
-			  "minimum": 1,
-			  "type": "integer"
-			}
-		  },
-		  "type": "object"
-		},
-		"port": {
-		  "maximum": 65535,
-		  "minimum": 1,
-		  "type": "integer"
-		},
-		"redact_keys": {
-		  "items": {
-			"type": "string"
-		  },
-		  "type": "array"
-		},
-		"system_info_ttl_seconds": {
-		  "minimum": 0,
-		  "type": "number"
-		},
-		"system_metrics_detail": {
-		  "enum": [
-			"full",
-			"basic"
-		  ],
-		  "type": "string"
-		},
-		"www_root": {
-		  "type": "string"
-		}
-	  },
-	  "type": "object"
-	}
+    "$schema": {
+      "description": "Optional URI or identifier for the JSON Schema associated with this configuration file. Ignored by Foghorn at runtime.",
+      "type": "string"
+    },
+    "cache": {
+      "description": "Cache plugin configuration. May be a string alias/dotted path, an object with {module, config}, or null for default.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "config": {
+              "type": "object"
+            },
+            "module": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "dnssec": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "default": "ignore",
+          "enum": [
+            "ignore",
+            "passthrough",
+            "validate"
+          ],
+          "type": "string"
+        },
+        "udp_payload_size": {
+          "minimum": 512,
+          "type": "integer"
+        },
+        "validation": {
+          "default": "upstream_ad",
+          "enum": [
+            "upstream_ad",
+            "local"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "foghorn": {
+      "additionalProperties": false,
+      "properties": {
+        "dnssec": {
+          "$ref": "#/properties/dnssec"
+        },
+        "logging": {
+          "$ref": "#/properties/logging"
+        },
+        "resolver": {
+          "$ref": "#/properties/resolver"
+        },
+        "timeout_ms": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "upstream_max_concurrent": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "upstream_strategy": {
+          "default": "failover",
+          "enum": [
+            "failover",
+            "round_robin",
+            "random"
+          ],
+          "type": "string"
+        },
+        "use_asyncio": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "listen": {
+      "additionalProperties": false,
+      "properties": {
+        "doh": {
+          "$ref": "#/$defs/listener_doh"
+        },
+        "dot": {
+          "$ref": "#/$defs/listener_dot"
+        },
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "tcp": {
+          "$ref": "#/$defs/listener_tcp"
+        },
+        "udp": {
+          "$ref": "#/$defs/listener_udp"
+        }
+      },
+      "type": "object"
+    },
+    "logging": {
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "warning",
+            "error",
+            "crit",
+            "critical"
+          ],
+          "type": "string"
+        },
+        "stderr": {
+          "type": "boolean"
+        },
+        "syslog": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "address": {},
+                "facility": {},
+                "tag": {}
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "plugins": {
+      "items": {
+        "$ref": "#/$defs/plugin_entry"
+      },
+      "type": "array"
+    },
+    "resolver": {
+      "additionalProperties": false,
+      "properties": {
+        "max_depth": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "mode": {
+          "default": "forward",
+          "enum": [
+            "forward",
+            "recursive"
+          ],
+          "type": "string"
+        },
+        "per_try_timeout_ms": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "timeout_ms": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "statistics": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "force_rebuild": {
+          "type": "boolean"
+        },
+        "ignore": {
+          "additionalProperties": false,
+          "properties": {
+            "ignore_single_host": {
+              "type": "boolean"
+            },
+            "include_in_stats": {
+              "default": true,
+              "type": "boolean"
+            },
+            "top_clients": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "top_domains": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "top_domains_mode": {
+              "enum": [
+                "exact",
+                "suffix"
+              ],
+              "type": "string"
+            },
+            "top_subdomains": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "top_subdomains_mode": {
+              "enum": [
+                "exact",
+                "suffix"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "include_qtype_breakdown": {
+          "type": "boolean"
+        },
+        "include_top_clients": {
+          "type": "boolean"
+        },
+        "include_top_domains": {
+          "type": "boolean"
+        },
+        "interval_seconds": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "log_level": {
+          "type": "string"
+        },
+        "persistence": {
+          "additionalProperties": false,
+          "properties": {
+            "batch_max_size": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "batch_time_sec": {
+              "minimum": 0,
+              "type": "number"
+            },
+            "batch_writes": {
+              "type": "boolean"
+            },
+            "db_path": {
+              "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "force_rebuild": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "reset_on_log": {
+          "type": "boolean"
+        },
+        "reset_on_sigusr1": {
+          "type": "boolean"
+        },
+        "sigusr2_resets_stats": {
+          "type": "boolean"
+        },
+        "top_n": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "track_latency": {
+          "type": "boolean"
+        },
+        "track_uniques": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "upstreams": {
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/upstream_host"
+          },
+          {
+            "$ref": "#/$defs/upstream_doh"
+          }
+        ]
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "webserver": {
+      "additionalProperties": false,
+      "properties": {
+        "api": {
+          "additionalProperties": false,
+          "properties": {
+            "timezone": {
+              "description": "Timezone used for API day bucket alignment. Accepts 'utc', 'local', or an IANA tz database name like 'America/New_York'.",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "auth": {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "enum": [
+                "none",
+                "token",
+                "basic"
+              ],
+              "type": "string"
+            },
+            "token": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "cors": {
+          "additionalProperties": false,
+          "properties": {
+            "allowlist": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "debug_timings": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "host": {
+          "type": "string"
+        },
+        "index": {
+          "type": "boolean"
+        },
+        "logs": {
+          "additionalProperties": false,
+          "properties": {
+            "buffer_size": {
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "redact_keys": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "system_info_ttl_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "system_metrics_detail": {
+          "enum": [
+            "full",
+            "basic"
+          ],
+          "type": "string"
+        },
+        "www_root": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
   },
   "required": [
-	"listen",
-	"upstreams"
+    "listen",
+    "upstreams"
   ],
   "title": "Foghorn Config (v0.4.7)",
   "type": "object"

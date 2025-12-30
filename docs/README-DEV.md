@@ -240,6 +240,34 @@ Note: some plugins (such as DockerHosts) rely on configuration-driven background
 refresh loops rather than signal-triggered reloads. For those plugins,
 `handle_sigusr2()` remains a no-op unless explicitly overridden.
 
+### DockerHosts TXT internals
+
+DockerHosts builds per-container TXT lines and optional aggregate
+`_containers.<suffix>` TXT owners from docker inspect data. The TXT builder:
+
+- Always includes a stable set of core keys (for example `name`, short `id`,
+  `ans4`/`ans6`, `ports`, `health`, `project-name`, `service`, `int4`/`int6`,
+  `nets`, `endpoint`).
+- Derives `ports` from `NetworkSettings.Ports[*].HostPort` and also exposes the
+  same host ports in the admin snapshot under the `ports` column.
+- Supports user-configurable TXT extensions via `txt_fields` and
+  `txt_fields_replace` in the DockerHosts config.
+
+The `txt_fields` helper evaluates a deliberately small JSONPath-like subset:
+
+- Leading `$` / `$.` is ignored.
+- Dot-separated dict traversal (for example `Config.Image`, `State.Health.Status`,
+  `NetworkSettings.Networks.bridge.IPAddress`).
+- Integer segments index into lists when possible (for example `Config.Env.0`).
+- A special case for Docker label keys that contain dots via
+  `Config.Labels.<full-label-key>`, so callers can use
+  `Config.Labels.com.docker.compose.project` directly.
+
+Values are flattened to strings, deduplicated while preserving order, and joined
+with commas when multiple values are present. When `txt_fields_replace` is true
+and at least one custom field resolves for a container, the core TXT keys are
+suppressed for that container and only the custom key/value pairs are emitted.
+
 ## Testing
 
 - Unit tests: run `pytest`.

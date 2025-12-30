@@ -33,16 +33,24 @@ run: $(VENV)/bin/foghorn
 env:
 	@echo "=== Creating virtual environment ==="
 	[ -d ${VENV} ] || python -m venv $(VENV)
+	$(VENV)/bin/pip install "."
 
 $(VENV)/bin/foghorn: pyproject.toml
-	$(MAKE) env
-	$(VENV)/bin/pip install -e "."
+	$(MAKE) env-dev
 
 .PHONY: build
-build: $(VENV)/bin/foghorn
+build: $(VENV)/bin/foghorn ./scripts/generate_foghorn_schema.py
+	@echo "=== Building schema === "
+# Ensure the schema is up to date, only display errors.
+
+.PHONY: schema
+schema:
+	./scripts/generate_foghorn_schema.py -o assets/config-schema.json > /dev/null
+# Add newline to end of config
+	echo >> assets/config-schema.json
 
 .PHONY: env-dev
-env-dev:
+env-dev: env
 	@echo "=== Installing project in editable mode ==="
 	$(VENV)/bin/pip install -e ".[dev]"
 
@@ -51,7 +59,7 @@ env-dev:
 # ------------------------------------------------------------
 .PHONY: test tests
 tests: test
-test: $(VENV)/bin/foghorn
+test: $(VENV)/bin/foghorn env-dev
 	@echo "=== Running tests (short) ==="
 	. ${VENV}/bin/activate
 	${VENV}/bin/pytest --cov=foghorn --disable-warnings tests
@@ -65,9 +73,9 @@ clean:
 	@echo "=== Removing virtual environment and var directory ==="
 	rm -rf $(VENV) var build docker-build
 	@echo "=== Removing temporary files and byte‑code ==="
-	# Delete __pycache__ directories
+# Delete __pycache__ directories
 	find . -type d -name "__pycache__" -exec rm -rf {} +;
-	# Delete .pyc, .tmp, backup (~) and vim swap files
+# Delete .pyc, .tmp, backup (~) and vim swap files
 	find . -type f \
 	\( -name '*.pyc' -o -name '*.tmp' -o -name '*~' -o -name '#*' -o -name '*.swp' \) -delete
 
@@ -79,7 +87,7 @@ docker: clean docker-build docker-run docker-logs
 
 .PHONY: docker-build
 docker-build:
-	rsync -qr --exclude='*/__pycache__/*' --delete-during LICENSE.txt ./entrypoint.sh ./src ./html ./pyproject.toml ./Dockerfile ./docker-compose.yaml ./assets ./docs ./scripts docker-build/
+	rsync -qr --exclude='*/__pycache__/*' --delete-during LICENSE.txt ./entrypoint.sh ./src ./pyproject.toml ./Dockerfile ./docker-compose.yaml ./assets ./docs ./scripts docker-build/
 	docker build ./docker-build -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-clean
