@@ -1,0 +1,59 @@
+Foghorn
+=======
+
+Foghorn is a modern, highly configurable, pluggable, and observable DNS utility server.
+It acts as a fast caching forwarder by default and can filter, route, and serve
+authoritative records via a rich plugin system. Both upstream and downstream
+transports are supported across UDP, TCP, DNS-over-TLS (DoT), and DNS-over-HTTPS (DoH).
+
+Features
+--------
+- Caching DNS forwarder with DNSSEC support (passthrough, with optional experimental local validation).
+- Flexible YAML configuration with a published JSON Schema and variable substitution (CLI/env/config).
+- Pluggable pre/post resolution pipeline with configurable priorities and per-plugin targeting (allowlist-style by CIDR/IP and qtype).
+- Multiple cache backends: in‑memory TTL (default), SQLite, Redis/Valkey, or disabled.
+- Versioned admin API and lightweight UI for health, configuration snapshots, statistics, and live upstream status.
+
+Built-in plugin highlights
+--------------------------
+- AccessControl: CIDR-based allow/deny with simple policies.
+- Filter: Block ads/malware or custom domains via inline rules and file-backed lists (domains, patterns, keywords, IP actions).
+- UpstreamRouter: Route queries to different upstreams by domain or suffix.
+- ZoneRecords: Serve static records and simple authoritative zones from local files.
+- DockerHosts: Publish container A/AAAA/PTR entries and container metadata over TXT.
+- FileDownloader: Fetch block lists on a schedule for other plugins to consume.
+- DnsPrefetch / Greylist / FlakyServer / Examples: opt-in helpers for cache warming, demos, and resilience testing.
+
+Transports
+----------
+- Downstream listeners: UDP, TCP, DoT, DoH (HTTP or HTTPS with certificate/key).
+- Upstream resolvers: UDP, TCP, DoT (TLS/SNI/verify controls), DoH (GET/POST, TLS verification controls).
+
+Observability
+-------------
+- Versioned admin API (/api/v1) for health, stats, traffic summaries, logs, and sanitized/raw config views.
+- Optional HTML dashboard served by the admin webserver.
+
+Installation
+------------
+- Requires Python 3.11+.
+- Install with pip (from PyPI):
+  pip install foghorn
+- For development, install extras:
+  pip install 'foghorn[dev]'
+
+Quick start
+-----------
+1) Create a minimal YAML configuration with one or more listeners and upstreams.
+2) Run the server:
+   foghorn --config /path/to/config.yaml
+3) Visit the admin API to check health and stats; iterate on plugins as needed.
+
+Docker
+------
+- A prebuilt image is available (zallison/foghorn:latest). Mount your config at /foghorn/config/config.yaml and publish the desired ports.
+- When using the mDNS bridge plugin, the container must run with host networking to observe multicast traffic.
+
+License
+-------
+MIT (see LICENSE.txt in the source distribution).
