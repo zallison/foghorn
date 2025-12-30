@@ -1,7 +1,7 @@
 # Foghorn
 [![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml)
 
-<img src="src/foghorn/html/logo.png" width="300px" alt="Foghorn Logo, a stylized alarm horn" />
+<img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/src/foghorn/html/transparent-logo.png" width="300px" alt="Foghorn Logo, a stylized alarm horn" />
 
 Foghorn is a modern, highly configurable, pluggable, and observable DNS utility server.
 
@@ -9,7 +9,7 @@ Supporting upstream **and** downstream in UDP, TCP, DoT, and DoH (HTTP or HTTPs 
 
 By default it acts as a caching forwarding DNS server with DNSSEC support.
 
-<img src="assets/screenshot-1.png" width=300px />
+<img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" width=300px />
 
 Tons of knobs and settings to perfect it for your needs. You can tune upstream strategy, concurrency, and health behavior directly from configuration, while monitoring real-time upstream status and response codes via a versioned `/api/v1` admin API and associated UI. Foghorn exposes rich statistics for DNSSEC, rate limiting,  upstream health, and more, with both snapshot and persistent storage options.
 
