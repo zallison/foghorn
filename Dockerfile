@@ -39,8 +39,8 @@ EXPOSE 1853
 # 443  # DNS-over-HTTP
 EXPOSE 8153
 
-# 8053 # Admin / API server (with stats, enabled seperately)
-EXPOSE 8053
+# 5380 # Admin / API server (with stats, enabled seperately)
+EXPOSE 5380
 
 # Define the default command to run when the container starts
 CMD [ "/foghorn/entrypoint.sh" ]
