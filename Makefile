@@ -126,7 +126,7 @@ package-publish: package-build
 	twine upload dist/* --verbose
 
 .PHONY: package-publish-dev
-package-publish: package-build-dev
+package-publish-dev: package-build-dev
 	twine upload --repository testpypi dist/* --verbose
 
 
