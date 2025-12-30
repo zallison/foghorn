@@ -113,9 +113,18 @@ docker-run-not-host: docker-build
 docker-logs:
 	docker logs -f foghorn
 
-.PHONY: dev-ship
-dev-ship: clean docker-build
+.PHONY: docker-ship
+docker-ship: clean docker-build
 	docker push ${PREFIX}/${CONTAINER_NAME}:${TAG}
+
+.PHONY: package-build
+package-build: env-dev
+	python -m build
+
+.PHONY: package-publish
+package-publish:
+    twine upload --repository testpypi dist/* --verbose
+
 
 # ------------------------------------------------------------
 # Help
