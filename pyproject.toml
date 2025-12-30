@@ -37,6 +37,8 @@ dev = [
    "pytest",
    "pytest-cov",
    "coverage",
+   "build",
+   "twine"
 ]
 
 [project.scripts]

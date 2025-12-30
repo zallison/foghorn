@@ -122,8 +122,8 @@ package-build: env-dev
 	python -m build
 
 .PHONY: package-publish
-package-publish:
-    twine upload --repository testpypi dist/* --verbose
+package-publish: package-build
+	twine upload --repository testpypi dist/* --verbose
 
 
 # ------------------------------------------------------------
