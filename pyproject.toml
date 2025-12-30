@@ -10,7 +10,7 @@ description = "**Foghorn** is a fast, pluggable DNS server that caches, filters,
 authors = [ { name = "Zack Allison", email = "zack@zackallison.com" } ]
 license = { file = "LICENSE.txt" }
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
   "PyYAML>=6.0.1",
   "cachetools",
