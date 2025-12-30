@@ -5,7 +5,7 @@ on:
 
 jobs:
   pytest:
-    uses: ./.github/workflows/run-pytest.yml@main  # Call test workflow
+    uses: ./.github/workflows/run-pytest.yml  # Call test workflow
 
   publish:
     needs: pytest

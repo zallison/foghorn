@@ -1,4 +1,5 @@
 # Foghorn
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml)
 
 <img src="src/foghorn/html/logo.png" width="300px" alt="Foghorn Logo, a stylized alarm horn" />
 
