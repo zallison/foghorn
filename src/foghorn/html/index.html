@@ -2008,27 +2008,37 @@
 						if (col.align === 'right') {
 							td.style.textAlign = 'right';
 						}
-						var text = '';
-						if (raw == null) {
-							text = '';
-						} else if (Array.isArray(raw) && joiner) {
-							text = raw.join(String(joiner));
-						} else if (typeof raw === 'boolean') {
-							text = raw ? 'yes' : '';
-						} else if (typeof raw === 'number') {
-							text = formatNumber(raw);
-						} else {
-							text = String(raw);
+					var text = '';
+					// Special-case: last_seen should be rendered in the user's timezone
+					// as "YYYY-MM-DD HH:MM:SS" and expose the full ISO timestamp via
+					// a tooltip on hover.
+					if (key === 'last_seen') {
+						var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
+						var fmt = formatTimestamp(iso || raw);
+						text = fmt != null ? String(fmt) : '';
+						if (iso) {
+							td.title = iso;
 						}
+					} else if (raw == null) {
+						text = '';
+					} else if (Array.isArray(raw) && joiner) {
+						text = raw.join(String(joiner));
+					} else if (typeof raw === 'boolean') {
+						text = raw ? 'yes' : '';
+					} else if (typeof raw === 'number') {
+						text = formatNumber(raw);
+					} else {
+						text = String(raw);
+					}
 						if (col.html) {
 							td.innerHTML = text;
 						} else {
 							td.textContent = text;
 						}
-						// For Docker TXT/Info cells, expose the full raw TXT payload as a tooltip.
-						if (col.key === 'txt' && rowData && rowData._txtTooltip) {
-							td.title = String(rowData._txtTooltip);
-						}
+					// For Docker TXT/Info cells, expose the full raw TXT payload as a tooltip.
+					if (col.key === 'txt' && rowData && rowData._txtTooltip) {
+						td.title = String(rowData._txtTooltip);
+					}
 						tr.appendChild(td);
 					});
 					tbody.appendChild(tr);

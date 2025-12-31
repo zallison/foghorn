@@ -4,7 +4,7 @@ import ipaddress
 import logging
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
 from dnslib import A, AAAA, PTR, QTYPE, RR, SRV, TXT, DNSHeader, DNSRecord
@@ -1771,7 +1771,7 @@ class MdnsBridgePlugin(BasePlugin):
                         {"key": "host", "label": "Host"},
                         {"key": "ipv4", "label": "IPv4", "join": ", "},
                         {"key": "ipv6", "label": "IPv6", "join": ", "},
-                        {"key": "uptime", "label": "Uptime (s)", "align": "right"},
+                        {"key": "uptime_human", "label": "Uptime", "align": "right"},
                     ],
                 },
                 {
@@ -1797,6 +1797,35 @@ class MdnsBridgePlugin(BasePlugin):
             "layout": layout,
         }
 
+    def _format_uptime_human(self, seconds: int) -> str:
+        """Brief: Format a duration in seconds into a concise human-readable string.
+
+        Inputs:
+          - seconds: Non-negative number of seconds.
+
+        Outputs:
+          - str: Duration like "2d 3h 4m 5s", "4h 2m", or "45s". Zero renders as "0s".
+        """
+
+        try:
+            s = max(0, int(seconds))
+        except Exception:
+            s = 0
+        days, rem = divmod(s, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes, secs = divmod(rem, 60)
+        parts: List[str] = []
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes:
+            parts.append(f"{minutes}m")
+        # Always include seconds, even when zero, if no larger unit was emitted.
+        if secs or not parts:
+            parts.append(f"{secs}s")
+        return " ".join(parts)
+
     def get_http_snapshot(self) -> Dict[str, object]:
         """Brief: Summarize current mDNS services and hosts for the admin web UI.
 
@@ -1807,8 +1836,9 @@ class MdnsBridgePlugin(BasePlugin):
           - dict with keys:
               * summary: High-level counts for total services and hosts.
               * services: List of objects for currently up services. Each entry
-                includes an ``uptime`` field (seconds, float) derived from
-                the per-service ``up_since`` timestamp when available.
+                includes ``uptime`` (seconds, int) and ``uptime_human``
+                (human‑readable string) derived from the per-service
+                ``up_since`` timestamp when available.
               * down_services: List of objects for services marked down.
         """
 
@@ -1871,15 +1901,19 @@ class MdnsBridgePlugin(BasePlugin):
             last_seen = raw_last_seen
             if raw_last_seen:
                 try:
-                    dt = datetime.fromisoformat(str(raw_last_seen))
+                    s = str(raw_last_seen)
+                    # Support ISO timestamps with trailing 'Z' by normalizing
+                    # to an explicit UTC offset that datetime.fromisoformat
+                    # reliably understands across Python versions.
+                    if s.endswith("Z"):
+                        s = s[:-1] + "+00:00"
+                    dt = datetime.fromisoformat(s)
                     if dt.tzinfo is None:
                         dt = dt.replace(tzinfo=timezone.utc)
                     local_dt = dt.astimezone()
-                    # Round to the nearest whole second before rendering.
-                    if local_dt.microsecond >= 500_000:
-                        local_dt = local_dt + timedelta(seconds=1)
+                    # Drop sub-second precision and render as "YYYY-MM-DD HH:MM:SS".
                     local_dt = local_dt.replace(microsecond=0)
-                    last_seen = local_dt.isoformat()
+                    last_seen = local_dt.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
                     last_seen = raw_last_seen
 
@@ -1935,6 +1969,12 @@ class MdnsBridgePlugin(BasePlugin):
                 "status": status,
             }
 
+            # Provide the raw ISO-8601 timestamp for frontend formatting in the
+            # user's browser timezone and for tooltips.
+            if raw_last_seen:
+                record["_lastSeenRaw"] = str(raw_last_seen)
+                record["_lastSeenTooltip"] = str(raw_last_seen)
+
             # Derive an uptime (in whole seconds) for services that are currently
             # up, based on the per-instance "up_since" timestamp when available.
             if str(status).lower() == "up" and state is not None:
@@ -1942,7 +1982,10 @@ class MdnsBridgePlugin(BasePlugin):
                 # formatting of last_seen does not affect calculations.
                 up_since_raw = getattr(state, "up_since", "") or raw_last_seen
                 try:
-                    up_since_dt = datetime.fromisoformat(str(up_since_raw))
+                    s_up = str(up_since_raw)
+                    if s_up.endswith("Z"):
+                        s_up = s_up[:-1] + "+00:00"
+                    up_since_dt = datetime.fromisoformat(s_up)
                 except Exception:
                     up_since_dt = None  # type: ignore[assignment]
                 if up_since_dt is not None:
@@ -1950,10 +1993,11 @@ class MdnsBridgePlugin(BasePlugin):
                         uptime_seconds = (now_utc - up_since_dt).total_seconds()
                         if uptime_seconds < 0:
                             uptime_seconds = 0.0
-                        # Expose uptime as an integer number of seconds for
-                        # simplicity and easier sorting/aggregation on the
-                        # client side.
-                        record["uptime"] = int(uptime_seconds)
+                        seconds_int = int(uptime_seconds)
+                        # Preserve numeric uptime for potential sorting/aggregation
+                        # and also include a human-readable string.
+                        record["uptime"] = seconds_int
+                        record["uptime_human"] = self._format_uptime_human(seconds_int)
                     except Exception:
                         pass
 

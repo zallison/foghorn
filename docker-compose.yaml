@@ -1,10 +1,15 @@
 services:
   foghorn:
+    network_mode: ${FH_NETWORKMODE:-host}
     image: zallison/foghorn:latest
-    container_name: foghorn
+    container_name: ${FH_NAME:-foghorn}
     volumes:
-      - /VMData/foghorn:/foghorn/config
+      - ${FH_CONFIG:-./config}:/foghorn/config
     ports:
-      - 53:5335/udp
-      - 8053:8053
+      - 53:5335    # TCP/UDP
+      - 5380:5380  # Admin/API
+      # - 853:1853 # DoT
+      # - 443:8153 # DoH
+    labels:
+      - com.foghorn.priority=${FH_PRIORITY:-200}
     restart: unless-stopped

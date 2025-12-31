@@ -1013,7 +1013,9 @@ def _redact_yaml_text_preserving_layout(
     Outputs:
       - New YAML text with the same overall layout and comments, but with
         matching keys and any keys/subkeys within their block replaced by
-        '***'.
+        '***' for scalar values only. Mapping (dict) and sequence (list)
+        values are left intact at the key line, with nested scalars redacted
+        within their block where possible.
 
     Notes:
       - This is a best-effort textual transformation intended for human-facing
@@ -1039,6 +1041,11 @@ def _redact_yaml_text_preserving_layout(
     targets = {str(k) for k in redact_keys}
     lines = text.splitlines(keepends=False)
     out_lines: list[str] = []
+
+    def _is_container_like(val: str) -> bool:
+        """Best-effort check if an inline YAML value denotes a list or dict."""
+        v = (val or "").lstrip()
+        return v.startswith("[") or v.startswith("{")
 
     # Track a single active redaction block keyed by its indentation level.
     in_block = False
@@ -1068,18 +1075,40 @@ def _redact_yaml_text_preserving_layout(
 
             # Starting a new redaction block when the key itself is in targets.
             if key_clean in targets:
-                in_block = True
-                block_indent = indent_len
-                _value, comment_part = _split_yaml_value_and_comment(rest)
+                # Determine the inline value (if any), excluding any trailing comment
+                value_part, comment_part = _split_yaml_value_and_comment(rest)
+                value_trim = value_part.strip()
+
+                # Enter a block only when the key introduces a nested block
+                # (i.e., nothing after ':' once comments are stripped).
+                if not value_trim:
+                    in_block = True
+                    block_indent = indent_len
+                    # Nothing to replace on this line; leave it as-is (no '***').
+                    out_lines.append(line)
+                    continue
+
+                # If the inline value is a list/dict, do not replace with '***'.
+                if _is_container_like(value_trim):
+                    out_lines.append(line)
+                    continue
+
+                # Scalar inline value -> redact.
                 new_line = f"{indent}{key_clean}: ***{comment_part}"
                 out_lines.append(new_line)
                 continue
 
             # Redact any keys nested under an active redaction block.
             if in_block:
-                _value, comment_part = _split_yaml_value_and_comment(rest)
-                new_line = f"{indent}{key_clean}: ***{comment_part}"
-                out_lines.append(new_line)
+                value_part, comment_part = _split_yaml_value_and_comment(rest)
+                value_trim = value_part.strip()
+                # Only redact scalars; when no inline value or container, keep as-is.
+                if value_trim and not _is_container_like(value_trim):
+                    new_line = f"{indent}{key_clean}: ***{comment_part}"
+                    out_lines.append(new_line)
+                    continue
+                # Keep original line if not a scalar inline value.
+                out_lines.append(line)
                 continue
 
         # Handle list items; a list item can be either "- value" or
@@ -1092,11 +1121,22 @@ def _redact_yaml_text_preserving_layout(
             # If the key for this list-mapping entry is sensitive, redact it and
             # treat it as part of any active block.
             if key_clean in targets or in_block:
-                # Enter a block if this list item itself starts one.
-                if key_clean in targets and not in_block:
+                value_part, comment_part = _split_yaml_value_and_comment(rest)
+                value_trim = value_part.strip()
+
+                # Enter block only when this list item starts a nested block.
+                if key_clean in targets and not in_block and not value_trim:
                     in_block = True
                     block_indent = indent_len
-                _value, comment_part = _split_yaml_value_and_comment(rest)
+                    out_lines.append(line)  # nothing to replace on this header line
+                    continue
+
+                # If inline value is a list/dict or absent, keep the line.
+                if not value_trim or _is_container_like(value_trim):
+                    out_lines.append(line)
+                    continue
+
+                # Scalar inline value -> redact.
                 new_line = f"{indent}- {key_clean}: ***{comment_part}"
                 out_lines.append(new_line)
                 continue
@@ -1109,9 +1149,14 @@ def _redact_yaml_text_preserving_layout(
             m_list = _YAML_LIST_LINE_RE.match(line)
             if m_list:
                 indent, rest = m_list.groups()
-                _value, comment_part = _split_yaml_value_and_comment(rest)
-                new_line = f"{indent}- ***{comment_part}"
-                out_lines.append(new_line)
+                value_part, comment_part = _split_yaml_value_and_comment(rest)
+                value_trim = value_part.strip()
+                # Only redact scalars; keep container or empty-as-header lines.
+                if value_trim and not _is_container_like(value_trim):
+                    new_line = f"{indent}- ***{comment_part}"
+                    out_lines.append(new_line)
+                    continue
+                out_lines.append(line)
                 continue
 
         # Default: emit the original line unchanged.
