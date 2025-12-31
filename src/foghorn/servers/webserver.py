@@ -1903,8 +1903,7 @@ def create_app(
         )
         payload = {
             "server_time": _utc_now_iso(),
-            "ready": ready_ok,
-            "not_ready": not_ready,
+            "ready": ready_ok or not not_ready,
             "details": details,
         }
         return JSONResponse(
