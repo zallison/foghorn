@@ -171,6 +171,141 @@ def _load_base_schema(base_schema_path: Optional[str] = None) -> Dict[str, Any]:
     )
 
 
+def _augment_variables_schema(base: Dict[str, Any]) -> None:
+    """Brief: Ensure top-level `variables` is described for editor tooling.
+
+    Inputs:
+      - base: Mutable JSON Schema mapping loaded from the base schema file.
+
+    Outputs:
+      - None; ``base`` is modified in place when the expected root structure is
+        present.
+
+    Notes:
+      - Runtime validation strips the `variables` block before applying the
+        JSON Schema, but editors and language servers still need to know that
+        `variables` is a legal top-level key. This helper adds a minimal schema
+        that matches the semantics enforced by _normalize_variables_for_validation:
+
+        - keys must be ALL_CAPS identifiers matching ``[A-Z_][A-Z0-9_]*``;
+        - values are arbitrary YAML/JSON values (left intentionally untyped).
+    """
+
+    try:
+        root_props = base.get("properties")
+        if not isinstance(root_props, dict):
+            return
+
+        if "variables" not in root_props:
+            root_props["variables"] = {
+                "type": "object",
+                "description": (
+                    "Optional mapping of ALL_CAPS variable names to arbitrary "
+                    "values. These are expanded before validation and removed "
+                    "from the runtime config."
+                ),
+                "patternProperties": {
+                    r"^[A-Z_][A-Z0-9_]*$": {
+                        # Accept any JSON type for variable values; runtime code
+                        # performs the actual substitution and type handling.
+                    }
+                },
+                "additionalProperties": False,
+            }
+    except Exception:  # pragma: no cover - defensive logging only
+        logger.exception("Failed to augment variables schema")
+
+
+def _augment_statistics_persistence_schema(base: Dict[str, Any]) -> None:
+    """Brief: Extend statistics.persistence schema with backend configuration.
+
+    Inputs:
+      - base: Mutable JSON Schema mapping loaded from the base schema file.
+
+    Outputs:
+      - None; ``base`` is modified in place when the expected statistics
+        structure is present. Any missing or unexpected shapes are treated as
+        no-ops to keep the generator robust against schema drift.
+    """
+
+    try:
+        root_props = base.get("properties")
+        if not isinstance(root_props, dict):
+            return
+
+        stats_obj = root_props.get("statistics")
+        if not isinstance(stats_obj, dict):
+            return
+
+        stats_props = stats_obj.get("properties")
+        if not isinstance(stats_props, dict):
+            return
+
+        persistence_obj = stats_props.get("persistence")
+        if not isinstance(persistence_obj, dict):
+            return
+
+        persistence_props = persistence_obj.get("properties")
+        if not isinstance(persistence_props, dict):
+            return
+
+        # Optional hint selecting which configured backend should be treated as
+        # the primary read backend when multiple backends are present.
+        if "primary_backend" not in persistence_props:
+            persistence_props["primary_backend"] = {
+                "type": "string",
+                "description": (
+                    "Logical name or backend alias of the primary statistics "
+                    "store used for reads when multiple backends are configured."
+                ),
+            }
+
+        # Optional list of backend entries used by the stats/query-log backend
+        # loader. When omitted, the legacy single-backend configuration using
+        # db_path/batch_* remains valid.
+        if "backends" not in persistence_props:
+            persistence_props["backends"] = {
+                "type": "array",
+                "description": (
+                    "Optional list of statistics/query-log backends. When "
+                    "omitted, the legacy single-backend SQLite configuration "
+                    "(db_path, batch_writes, batch_time_sec, batch_max_size) "
+                    "is used."
+                ),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Optional logical instance name used when "
+                                "selecting a primary backend in multi-backend "
+                                "setups."
+                            ),
+                        },
+                        "backend": {
+                            "type": "string",
+                            "description": (
+                                "Backend identifier (for example 'sqlite', "
+                                "'mysql', 'mariadb', or a dotted import path to "
+                                "a BaseStatsStoreBackend implementation)."
+                            ),
+                        },
+                        "config": {
+                            "type": "object",
+                            "description": (
+                                "Backend-specific configuration mapping passed "
+                                "verbatim to the selected backend."
+                            ),
+                        },
+                    },
+                },
+            }
+    except Exception:  # pragma: no cover - defensive logging only
+        logger.exception("Failed to augment statistics.persistence schema")
+
+
 def build_document(base_schema_path: Optional[str] = None) -> Dict[str, Any]:
     """Brief: Build a combined JSON Schema including core config and plugins.
 
@@ -189,6 +324,15 @@ def build_document(base_schema_path: Optional[str] = None) -> Dict[str, Any]:
     """
 
     base = _load_base_schema(base_schema_path=base_schema_path)
+
+    # Ensure top-level helpers (like `variables`) and statistics persistence
+    # backends are visible to tooling that consumes the JSON Schema directly.
+    _augment_variables_schema(base)
+
+    # Ensure statistics.persistence documents the backend loader options used
+    # by foghorn.querylog_backends.load_stats_store_backend().
+    _augment_statistics_persistence_schema(base)
+
     plugins = collect_plugin_schemas()
 
     # Attach plugin schemas under a dedicated defs key so existing references
