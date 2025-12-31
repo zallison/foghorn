@@ -266,6 +266,26 @@ class DockerHosts(BasePlugin):
             self.config.get("txt_fields_replace", False)
         )
 
+        # Optional: when txt_fields_replace is true, preserve a subset of the
+        # built-in TXT summary keys (for example "ans4", "endpoint"). Any
+        # listed keys are only kept when they exist for the container; missing
+        # ones are silently ignored.
+        raw_txt_keep = self.config.get("txt_fields_keep") or []
+        txt_fields_keep: List[str] = []
+        if isinstance(raw_txt_keep, list):
+            for item in raw_txt_keep:
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                txt_fields_keep.append(text)
+        elif raw_txt_keep:
+            logger.warning(
+                "DockerHosts: txt_fields_keep must be a list when set; got %r",
+                type(raw_txt_keep),
+            )
+
+        self._txt_fields_keep: List[str] = txt_fields_keep
+
         raw_endpoints = self.config.get("endpoints") or []
         endpoints_cfg: List[Dict[str, object]] = []
 
@@ -830,6 +850,7 @@ class DockerHosts(BasePlugin):
                     replace_default_txt=bool(
                         getattr(self, "_txt_fields_replace", False)
                     ),
+                    txt_fields_keep=getattr(self, "_txt_fields_keep", []),
                 )
 
                 # Per-container TXT records: publish a TXT record at each
@@ -1241,6 +1262,7 @@ class DockerHosts(BasePlugin):
         answer_v6: List[str],
         extra_txt_fields: Optional[List[Tuple[str, str]]] = None,
         replace_default_txt: bool = False,
+        txt_fields_keep: Optional[List[str]] = None,
         max_len: int = 240,
     ) -> Tuple[str, List[str]]:
         """Brief: Build a compact, single-string summary for the aggregate TXT record.
@@ -1255,6 +1277,12 @@ class DockerHosts(BasePlugin):
           - internal_v4/internal_v6: Container IPs discovered from inspect.
           - answer_v4/answer_v6: IPs that DockerHosts will actually answer with
             (after host overrides).
+          - extra_txt_fields: Optional list of (name, path) pairs for custom TXT fields.
+          - replace_default_txt: When true, emit only custom fields unless
+            txt_fields_keep is set.
+          - txt_fields_keep: Optional list of built-in TXT keys (for example
+            "ans4", "endpoint") to preserve even when replace_default_txt is
+            true, provided those keys are present for the container.
           - max_len: Maximum length for the returned TXT chunk.
 
         Outputs:
@@ -1290,7 +1318,10 @@ class DockerHosts(BasePlugin):
                 return s
             return s.split(".", 1)[0]
 
-        # Collect HostPorts (bindings) for a compact summary.
+        # Collect HostPorts (bindings) for a compact summary. Prefer
+        # NetworkSettings.Ports host bindings; when none are present, fall back
+        # to Config.ExposedPorts so that exposed-but-unbound container ports are
+        # still visible in TXT/Info.
         ports = (container.get("NetworkSettings") or {}).get("Ports") or {}
         hostports: List[str] = []
         if isinstance(ports, dict):
@@ -1304,6 +1335,21 @@ class DockerHosts(BasePlugin):
                         hp = str(b.get("HostPort") or "").strip()
                         if hp and hp not in hostports:
                             hostports.append(hp)
+
+        if not hostports and isinstance(cfg, dict):
+            # Fallback: use Config.ExposedPorts keys when present. Keys are
+            # typically of the form "80/tcp"; we display the numeric port and
+            # preserve protocol when available.
+            exposed = cfg.get("ExposedPorts") or {}
+            if isinstance(exposed, dict):
+                for key in exposed.keys():
+                    text = str(key or "").strip()
+                    if not text:
+                        continue
+                    # Extract "port" or "port/proto" into a compact string.
+                    port_part = text.split("/", 1)[0]
+                    if port_part and port_part not in hostports:
+                        hostports.append(f"E:{port_part}")
 
         # Additional network summaries (best-effort; keep short).
         nets = (container.get("NetworkSettings") or {}).get("Networks") or {}
@@ -1332,103 +1378,130 @@ class DockerHosts(BasePlugin):
               - When indexing lists, integer path segments are treated as indices;
                 non-integer segments are applied to each element when it is a
                 mapping.
+
+            If the resolved value for a path is a dict, the returned list
+            contains its keys (as strings) rather than recursing into values so
+            that callers can expose available subkeys in TXT output.
+
+            Any exception while walking a path results in an empty list so that
+            the caller can safely skip this field and move on to the next.
             """
 
             s = str(expr or "").strip()
             if not s:
                 return []
 
-            # Normalise away a leading JSONPath root ("$" or "$."), then
-            # special-case Docker label keys that contain dots so that callers
-            # can use paths like "Config.Labels.com.docker.compose.project".
-            if s.startswith("$"):
-                s = s[1:]
-                if s.startswith("."):
+            try:
+                # Normalise away a leading JSONPath root ("$" or "$."), then
+                # special-case Docker label keys that contain dots so that callers
+                # can use paths like "Config.Labels.com.docker.compose.project".
+                if s.startswith("$"):
                     s = s[1:]
+                    if s.startswith("."):
+                        s = s[1:]
 
-            # Config.Labels.<label-key-with-dots>
-            label_prefix = "Config.Labels."
-            if s.startswith(label_prefix):
-                label_key = s[len(label_prefix) :]
-                cfg_obj = container.get("Config") or {}
-                lbl_obj = cfg_obj.get("Labels") if isinstance(cfg_obj, dict) else None
-                if isinstance(lbl_obj, dict):
-                    if label_key in lbl_obj:
-                        val = lbl_obj[label_key]
-                        # Delegate to the normal flattener below.
-                        flat: List[str] = []
+                # Config.Labels.<label-key-with-dots>
+                label_prefix = "Config.Labels."
+                if s.startswith(label_prefix):
+                    label_key = s[len(label_prefix) :]
+                    cfg_obj = container.get("Config") or {}
+                    lbl_obj = (
+                        cfg_obj.get("Labels") if isinstance(cfg_obj, dict) else None
+                    )
+                    if isinstance(lbl_obj, dict):
+                        if label_key in lbl_obj:
+                            val = lbl_obj[label_key]
+                            # Delegate to the normal flattener below.
+                            flat: List[str] = []
 
-                        def _flatten_label(obj: object) -> None:
-                            if isinstance(obj, (list, tuple, set)):
-                                for item in obj:
-                                    _flatten_label(item)
-                            elif isinstance(obj, (str, int, float, bool)):
-                                text = str(obj).strip()
-                                if text:
-                                    flat.append(text)
+                            def _flatten_label(obj: object) -> None:
+                                if isinstance(obj, (list, tuple, set)):
+                                    for item in obj:
+                                        _flatten_label(item)
+                                elif isinstance(obj, dict):
+                                    for k in obj.keys():
+                                        text = str(k).strip()
+                                        if text:
+                                            flat.append(text)
+                                elif isinstance(obj, (str, int, float, bool)):
+                                    text = str(obj).strip()
+                                    if text:
+                                        flat.append(text)
 
-                        _flatten_label(val)
-                        seen_l: set[str] = set()
-                        out_l: List[str] = []
-                        for text in flat:
-                            if text in seen_l:
-                                continue
-                            seen_l.add(text)
-                            out_l.append(text)
-                        return out_l
+                            _flatten_label(val)
+                            seen_l: set[str] = set()
+                            out_l: List[str] = []
+                            for text in flat:
+                                if text in seen_l:
+                                    continue
+                                seen_l.add(text)
+                                out_l.append(text)
+                            return out_l
+                    return []
+
+                parts = [p for p in s.split(".") if p]
+                if not parts:
+                    return []
+
+                values: List[object] = [root]
+                for part in parts:
+                    next_vals: List[object] = []
+                    for val in values:
+                        if isinstance(val, dict) and part in val:
+                            next_vals.append(val[part])
+                        elif isinstance(val, list):
+                            # Integer index: use as list index when valid.
+                            try:
+                                idx = int(part)
+                            except ValueError:
+                                # Non-integer: treat as key lookup on each element
+                                # when elements are mappings.
+                                for elem in val:
+                                    if isinstance(elem, dict) and part in elem:
+                                        next_vals.append(elem[part])
+                            else:
+                                if 0 <= idx < len(val):
+                                    next_vals.append(val[idx])
+                    if not next_vals:
+                        values = []
+                        break
+                    values = next_vals
+
+                flat: List[str] = []
+
+                def _flatten(obj: object) -> None:
+                    if isinstance(obj, (list, tuple, set)):
+                        for item in obj:
+                            _flatten(item)
+                    elif isinstance(obj, dict):
+                        # When the terminal value is a dict, surface its keys as
+                        # the result so callers see a comma-separated list of
+                        # available subkeys.
+                        for k in obj.keys():
+                            text = str(k).strip()
+                            if text:
+                                flat.append(text)
+                    elif isinstance(obj, (str, int, float, bool)):
+                        text = str(obj).strip()
+                        if text:
+                            flat.append(text)
+
+                for v in values:
+                    _flatten(v)
+
+                # Deduplicate while preserving order.
+                seen: set[str] = set()
+                out: List[str] = []
+                for text in flat:
+                    if text in seen:
+                        continue
+                    seen.add(text)
+                    out.append(text)
+                return out
+            except Exception:
+                # Any error while walking the path results in no values; the
+                # caller will skip this field and continue.
                 return []
-
-            parts = [p for p in s.split(".") if p]
-            if not parts:
-                return []
-
-            values: List[object] = [root]
-            for part in parts:
-                next_vals: List[object] = []
-                for val in values:
-                    if isinstance(val, dict) and part in val:
-                        next_vals.append(val[part])
-                    elif isinstance(val, list):
-                        # Integer index: use as list index when valid.
-                        try:
-                            idx = int(part)
-                        except ValueError:
-                            # Non-integer: treat as key lookup on each element
-                            # when elements are mappings.
-                            for elem in val:
-                                if isinstance(elem, dict) and part in elem:
-                                    next_vals.append(elem[part])
-                        else:
-                            if 0 <= idx < len(val):
-                                next_vals.append(val[idx])
-                if not next_vals:
-                    values = []
-                    break
-                values = next_vals
-
-            flat: List[str] = []
-
-            def _flatten(obj: object) -> None:
-                if isinstance(obj, (list, tuple, set)):
-                    for item in obj:
-                        _flatten(item)
-                elif isinstance(obj, (str, int, float, bool)):
-                    text = str(obj).strip()
-                    if text:
-                        flat.append(text)
-
-            for v in values:
-                _flatten(v)
-
-            # Deduplicate while preserving order.
-            seen: set[str] = set()
-            out: List[str] = []
-            for text in flat:
-                if text in seen:
-                    continue
-                seen.add(text)
-                out.append(text)
-            return out
 
         # Ordering requested:
         # name, id (short hash when available), ans4/ans6 (when present),
@@ -1484,19 +1557,93 @@ class DockerHosts(BasePlugin):
                 disp_endpoint = disp.split(":", 1)[0]
             base_pieces.append(f"endpoint={disp_endpoint}")
 
+        # Helper to clamp an individual "key=value" segment to a maximum
+        # length; when truncated, the last three characters are "...".
+        def _trim_kv_segment(segment: str, max_len_kv: int = 128) -> str:
+            if len(segment) <= max_len_kv:
+                return segment
+            if max_len_kv <= 3:
+                return "..."[:max_len_kv]
+            return segment[: max_len_kv - 3] + "..."
+
+        # Map of built-in TXT keys to their "key=value" segments so that
+        # txt_fields in replace mode can fall back to these when a custom
+        # JSONPath does not resolve for a container.
+        base_by_key: Dict[str, str] = {}
+        for part in base_pieces:
+            key = part.split("=", 1)[0]
+            if key and key not in base_by_key:
+                base_by_key[key] = part
+
         custom_pieces: List[str] = []
+        # Track which keys have fallen back to built-in values so that
+        # txt_fields_keep does not re-add them later and cause duplicates.
+        fallback_keys: set[str] = set()
         if extra_txt_fields:
             for field_name, expr in extra_txt_fields:
                 name_s = str(field_name or "").strip()
                 if not name_s:
                     continue
                 values = _walk_json_path(container, expr)
+                # When no custom value resolves for this key and we are in
+                # replace_default_txt mode, fall back to the built-in TXT
+                # segment with the same key (when present) instead of omitting
+                # the key entirely.
+                if not values and replace_default_txt:
+                    builtin_seg = base_by_key.get(name_s)
+                    if builtin_seg:
+                        custom_pieces.append(_trim_kv_segment(builtin_seg))
+                        fallback_keys.add(name_s)
+                    continue
                 if not values:
                     continue
-                custom_pieces.append(f"{name_s}={_join(values)}")
+                # Normalise container-style names for custom fields keyed as
+                # "name" so that values like "/foghorn" become "foghorn" in
+                # TXT/Info output. This keeps UI display and DNS labels
+                # consistent even when callers point txt_fields at
+                # docker-specific paths such as "Name".
+                if name_s.lower() == "name":
+                    norm_vals: List[str] = []
+                    for v in values:
+                        text = str(v or "").strip()
+                        if text.startswith("/"):
+                            text = text[1:]
+                        if text:
+                            norm_vals.append(text)
+                    values = norm_vals
+                    if not values:
+                        # In non-replace mode, base_pieces still carries the
+                        # built-in name. In replace mode, fall back to the
+                        # built-in name segment when available.
+                        if replace_default_txt:
+                            builtin_seg = base_by_key.get("name")
+                            if builtin_seg:
+                                custom_pieces.append(_trim_kv_segment(builtin_seg))
+                                fallback_keys.add("name")
+                        continue
+                seg = f"{name_s}={_join(values)}"
+                custom_pieces.append(_trim_kv_segment(seg))
 
+        pieces: List[str]
         if replace_default_txt and custom_pieces:
-            pieces = custom_pieces
+            # In replace mode, only emit custom fields by default. When
+            # txt_fields_keep is configured, preserve a subset of base_pieces
+            # whose keys are explicitly listed and that are present for this
+            # container (for example "ans4", "endpoint").
+            keep_keys = {k.strip() for k in (txt_fields_keep or []) if k.strip()}
+            if keep_keys:
+                kept: List[str] = []
+                for part in base_pieces:
+                    key = part.split("=", 1)[0]
+                    # Skip keys that have already fallen back to built-in
+                    # values via txt_fields so we do not emit duplicates.
+                    if key in keep_keys and key not in fallback_keys:
+                        kept.append(part)
+                # Place kept built-in keys at the end of the TXT record so
+                # custom fields remain visually grouped together.
+                pieces = custom_pieces + kept
+            else:
+                pieces = custom_pieces
         else:
             pieces = base_pieces + custom_pieces
 
