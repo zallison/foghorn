@@ -69,13 +69,20 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
 - A helper script can generate a combined schema document that includes both the core config schema and per-plugin config schemas under `$defs.plugin_configs`:
   - Location: `scripts/generate_foghorn_schema.py`
   - Behavior: loads the existing `assets/config-schema.json`, discovers all plugins via `plugins/registry.py`, and attaches each plugin's config schema (from `get_config_model()` / `get_config_schema()`) into `$defs.plugin_configs`.
+  - In addition, the generator now augments the `statistics.persistence` section of the base schema so tools can see the new backend layout:
+    - `statistics.persistence.primary_backend`: optional string selecting the primary read backend when multiple backends are configured.
+    - `statistics.persistence.backends`: optional array of backend entries, each with:
+      - `name` (optional logical instance name used by `primary_backend`),
+      - `backend` (alias like `sqlite` / `mysql` / `mariadb`, or dotted import path to a concrete `BaseStatsStoreBackend`),
+      - `config` (free-form object passed verbatim to the backend constructor).
+    - When `backends` is omitted, the legacy single-backend SQLite configuration (db_path, batch_writes, batch_time_sec, batch_max_size) remains valid.
   - Example usage from the project root:
 
-    ```bash path=null start=null
+    ```bash
     PYTHONPATH=src python scripts/generate_foghorn_schema.py -o schema.json
     ```
 
-  - The generated `schema.json` keeps the original top-level structure of `config-schema.json`; the extra `$defs.plugin_configs` node is informational only and does not change validation semantics.
+  - The generated `schema.json` keeps the original top-level structure of `config-schema.json`; the extra `$defs.plugin_configs` node and statistics persistence augmentation are informational only and do not change validation semantics.
 
 ## Plugin lifecycle and priorities
 
