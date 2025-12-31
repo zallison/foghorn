@@ -1151,6 +1151,73 @@ def test_docker_hosts_discovery_publishes_txt(monkeypatch):
     assert full_id not in container_txt
 
 
+def test_docker_hosts_uses_exposed_ports_when_no_host_bindings(monkeypatch):
+    """Brief: When no host bindings exist, ports come from Config.ExposedPorts.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that exposed container ports are reflected in the TXT
+        "ports=" field when NetworkSettings.Ports has no host bindings.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(  # type: ignore[arg-type]
+        suffix="docker.mycorp",
+        discovery=True,
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+
+    full_id = "deadbeef" * 8
+
+    containers = [
+        {
+            "Id": full_id,
+            "Name": "/web",
+            "Config": {
+                "Hostname": "web",
+                "Image": "nginx:latest",
+                "ExposedPorts": {
+                    "80/tcp": {},
+                    "443/tcp": {},
+                },
+            },
+            "State": {"Status": "running"},
+            "NetworkSettings": {
+                "Networks": {"bridge": {"IPAddress": "172.17.0.5"}},
+                # No host Port bindings -> exercise ExposedPorts fallback.
+                "Ports": {},
+            },
+        }
+    ]
+
+    monkeypatch.setattr(plugin, "_iter_containers_for_endpoint", lambda _ep: containers)
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    owner = "_containers.docker.mycorp"
+    q_txt = DNSRecord.question(owner, "TXT")
+    dec = plugin.pre_resolve(owner, QTYPE.TXT, q_txt.pack(), ctx)
+    assert dec is not None and dec.response is not None
+
+    resp = DNSRecord.parse(dec.response)
+    txt_rrs = [rr for rr in resp.rr if rr.rtype == QTYPE.TXT]
+    assert len(txt_rrs) >= 2
+
+    container_txt = None
+    for rr in txt_rrs:
+        s = str(rr.rdata)
+        if "name=" in s and "ports=" in s:
+            container_txt = s
+            break
+    assert container_txt is not None
+    # Exposed ports should be visible as container ports when no host bindings exist.
+    assert "ports=80,443" in container_txt
+
+
 def test_docker_hosts_txt_fields_append_and_replace(monkeypatch):
     """Brief: txt_fields appends extra key/value pairs or replaces defaults.
 
@@ -1256,6 +1323,75 @@ def test_docker_hosts_txt_fields_append_and_replace(monkeypatch):
     assert "ans4=" not in container_txt2
     assert "health=" not in container_txt2
     assert "project-name=" not in container_txt2
+
+
+def test_docker_hosts_txt_fields_keep_preserves_selected_builtins(monkeypatch):
+    """Brief: txt_fields_keep preserves specific built-in TXT keys in replace mode.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that when txt_fields_replace is true, configured keys such
+        as "ans4" and "endpoint" are still present alongside custom fields.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    base_container = {
+        "Id": "deadbeef" * 8,
+        "Name": "/web",
+        "Config": {
+            "Hostname": "web",
+            "Image": "nginx:latest",
+            "Labels": {
+                "com.docker.compose.service": "web",
+                "com.docker.compose.project": "myproj",
+            },
+        },
+        "State": {"Status": "running"},
+        "NetworkSettings": {
+            "Networks": {"bridge": {"IPAddress": "172.17.0.5"}},
+        },
+    }
+
+    plugin_keep = DockerHosts(  # type: ignore[arg-type]
+        suffix="docker.mycorp",
+        discovery=True,
+        txt_fields=[{"name": "image", "path": "Config.Image"}],
+        txt_fields_replace=True,
+        txt_fields_keep=["ans4", "endpoint"],
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+    monkeypatch.setattr(
+        plugin_keep, "_iter_containers_for_endpoint", lambda _ep: [base_container]
+    )
+    plugin_keep.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    owner = "_containers.docker.mycorp"
+    q_txt = DNSRecord.question(owner, "TXT")
+    dec = plugin_keep.pre_resolve(owner, QTYPE.TXT, q_txt.pack(), ctx)
+    assert dec is not None and dec.response is not None
+    resp = DNSRecord.parse(dec.response)
+    txt_rrs = [rr for rr in resp.rr if rr.rtype == QTYPE.TXT]
+
+    container_txt = None
+    for rr in txt_rrs:
+        s = str(rr.rdata)
+        if s.startswith('"containers='):
+            continue
+        if "image=" in s:
+            container_txt = s
+            break
+    assert container_txt is not None
+
+    # Custom field still present.
+    assert "image=nginx:latest" in container_txt
+    # Selected built-in keys should be preserved when they exist for the container.
+    assert "ans4=172.17.0.5" in container_txt
+    assert "endpoint=unix:///var/run/docker.sock" in container_txt
 
 
 def test_docker_hosts_txt_fields_label_with_dots(monkeypatch):
