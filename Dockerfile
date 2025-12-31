@@ -31,7 +31,8 @@ RUN pip install --root-user-action=ignore "."
 # Expose: Internal Port
 
 # 53 # Standard UDP/TCP
-EXPOSE 5335
+EXPOSE 5335/tcp
+EXPOSE 5335/udp
 
 # 853  # DNS-over-TLS
 EXPOSE 1853
@@ -41,6 +42,14 @@ EXPOSE 8153
 
 # 5380 # Admin / API server (with stats, enabled seperately)
 EXPOSE 5380
+
+# Configure container health check hitting the FastAPI /health endpoint.
+# The check succeeds only when the JSON body contains "status": "ok".
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD [ \
+    "python", \
+    "-c", \
+    "import json, sys, urllib.request as u; data = json.load(u.urlopen('http://127.0.0.1:5380/health')); sys.exit(0 if data.get('status') == 'ok' else 1)" \
+]
 
 # Define the default command to run when the container starts
 CMD [ "/foghorn/entrypoint.sh" ]
