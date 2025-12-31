@@ -637,6 +637,12 @@ def test_docker_hosts_reload_from_docker_logs_when_no_containers(monkeypatch, ca
     """
 
     mod = importlib.import_module("foghorn.plugins.docker_hosts")
+
+    # Avoid talking to a real Docker daemon: force the module-level docker SDK
+    # reference to None so setup() and _iter_containers_for_endpoint() never
+    # attempt a real connection.
+    monkeypatch.setattr(mod, "docker", None, raising=True)
+
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
