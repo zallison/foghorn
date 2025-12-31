@@ -202,7 +202,59 @@ dnssec:
 
 ## Configuration
 
-Configuration is handled through a `config.yaml` file. The primary top-level sections are `listen`, `upstreams`, `cache`, `foghorn`, and `plugins`.
+Configuration is handled through a `config.yaml` file. The primary top-level sections are `listen`, `upstreams`, `cache`, `foghorn`, `plugins`, and `statistics`.
+
+### Statistics and persistence backends
+
+The `statistics` block controls in-memory counters and optional persistent storage of counts and the raw query log. A minimal configuration looks like:
+
+```yaml
+statistics:
+  enabled: true
+  interval_seconds: 300
+  persistence:
+    enabled: true
+    db_path: ./config/var/stats.db
+    batch_writes: true
+```
+
+By default, persistence uses a single SQLite backend. Advanced users can configure one or more *statistics/query-log backends* via `statistics.persistence.backends` while keeping the legacy `db_path` fields for backward compatibility:
+
+```yaml
+statistics:
+  enabled: true
+  interval_seconds: 300
+  persistence:
+    enabled: true
+    # Optional multi-backend configuration (writes fan out; reads use the primary).
+    primary_backend: mysql_analytics        # optional logical name or backend alias
+    backends:
+      - name: sqlite_mirror
+        backend: sqlite
+        config:
+          db_path: ./config/var/stats.db
+          batch_writes: true
+          batch_time_sec: 15.0
+          batch_max_size: 1000
+      - name: mysql_analytics
+        backend: mysql
+        config:
+          host: 127.0.0.1
+          port: 3306
+          user: foghorn
+          password: change-me
+          database: foghorn_stats
+```
+
+Semantics:
+- When `backends` is omitted, the legacy single-SQLite configuration is used (db_path, batch_writes, batch_time_sec, batch_max_size).
+- When `backends` contains a single entry, that backend is used for both reads and writes.
+- When `backends` has multiple entries:
+  - Writes (counts and query log) are fanned out to **all** backends.
+  - Reads (health checks, counts export, query log/aggregations) go to the *primary* backend.
+  - The primary defaults to the first configured backend; `primary_backend` can override this by logical name or backend alias.
+
+`backend` accepts short aliases like `sqlite`, `mysql`, or `mariadb`, or a dotted import path to a custom `BaseStatsStoreBackend` implementation.
 
 The `cache` section selects the DNS response cache implementation (default: in-memory TTL):
 
