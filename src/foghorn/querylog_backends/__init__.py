@@ -18,6 +18,7 @@ from typing import Any, List, Optional
 from .base import BaseStatsStoreBackend, StatsStoreBackendConfig
 from .sqlite import SqliteStatsStoreBackend
 from .mysql_mariadb import MySqlStatsStoreBackend
+from .mqtt_logging import MqttLoggingBackend
 
 __all__ = [
     "BaseStatsStoreBackend",
@@ -250,6 +251,8 @@ def _build_backend_from_config(cfg: StatsStoreBackendConfig) -> BaseStatsStoreBa
         )
     elif backend_name in {"mysql", "mariadb"}:
         backend = MySqlStatsStoreBackend(**conf)
+    elif backend_name in {"mqtt"}:
+        backend = MqttLoggingBackend(**conf)
     else:
         # Fallback: treat backend as a dotted import path to a concrete class.
         module_name, _, class_name = backend_name.rpartition(".")
