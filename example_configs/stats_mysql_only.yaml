@@ -19,14 +19,17 @@ statistics:
 
   persistence:
     enabled: true
-    # Legacy single-backend configuration kept for schema compatibility.
+    # Legacy single-backend configuration (SQLite) remains the default and is
+    # the only shape currently described by the JSON Schema.
     db_path: ./config/var/stats.db
     batch_writes: true
     batch_time_sec: 15.0
     batch_max_size: 1000
 
-    # Example MySQL/MariaDB backend (not yet reflected in JSON schema):
-    # Use a single MySQL/MariaDB backend for statistics and query logs.
+    # Example MySQL/MariaDB backend using the new multi-backend loader. This is
+    # intentionally commented-out so that example configs remain schema-valid.
+    # To enable it, uncomment and remove the legacy db_path-based config above.
+    #
     # backends:
     #   - backend: mysql
     #     config:

@@ -19,16 +19,18 @@ statistics:
 
   persistence:
     enabled: true
-    # Legacy single-backend configuration kept for schema compatibility.
+    # Legacy single-backend configuration (SQLite) remains the default and is
+    # the only shape currently described by the JSON Schema.
     db_path: ./config/var/stats.db
     batch_writes: true
     batch_time_sec: 15.0
     batch_max_size: 1000
 
-    # Example multi-backend configuration (not yet reflected in JSON schema):
-    # Use both SQLite and MySQL backends:
-    #   - Writes go to both backends.
-    #   - Reads (counts, query_log, warm-load) use the primary backend.
+    # Example multi-backend configuration using the new loader. Writes go to all
+    # backends; reads use the primary backend selected via primary_backend,
+    # environment, or CLI. This is commented-out to keep this example
+    # schema-valid; to enable, uncomment and remove the legacy db_path config.
+    #
     # primary_backend: mysql_analytics
     # backends:
     #   - name: sqlite_mirror
