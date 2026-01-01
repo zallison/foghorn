@@ -390,3 +390,34 @@ class BaseStatsStoreBackend:
             page_size_i = max_page_size
 
         return page_i, page_size_i
+
+    @staticmethod
+    def _normalize_interval_args(
+        start_ts: object,
+        end_ts: object,
+        interval_seconds: object,
+    ) -> Tuple[float, float, int]:
+        """Brief: Normalize time-window and interval arguments for aggregations.
+
+        Inputs:
+          - start_ts: Inclusive start timestamp (float-like).
+          - end_ts: Exclusive end timestamp (float-like).
+          - interval_seconds: Bucket size in seconds (int-like).
+
+        Outputs:
+          - (start_f, end_f, interval_i): Normalized window and interval.
+        """
+
+        try:
+            start_f = float(start_ts)  # type: ignore[arg-type]
+            end_f = float(end_ts)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            start_f = 0.0
+            end_f = 0.0
+
+        try:
+            interval_i = int(interval_seconds)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            interval_i = 0
+
+        return start_f, end_f, interval_i
