@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Foghorn"
-version = "0.5.3"
+version = "0.5.4a3"
 description = "Foghorn is a fast, pluggable DNS server that caches, filters, routes, and bends DNS to your will. Up- and down-stream UDP, TCP, DoT, and DoH. DNSEC. Because DNS should do what you want."
 
 authors = [ { name = "Zack Allison", email = "zack@zackallison.com" } ]
@@ -21,6 +21,9 @@ dependencies = [
   "fastapi>=0.111.0",
   "httpx",
   "jsonschema>=4.17.3",
+  "paho-mqtt",
+  "mariadb",
+  "mysql-connector-python",
   "psutil",
   "requests>=2.31.0",
   "uvicorn>=0.30.0",
@@ -32,12 +35,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
    "black",
-   "ruff",
+   "build",
+   "coverage",
    "isort",
    "pytest",
    "pytest-cov",
-   "coverage",
-   "build",
+   "ruff",
    "twine"
 ]
 
