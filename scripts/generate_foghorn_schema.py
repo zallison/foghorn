@@ -241,6 +241,38 @@ def _augment_statistics_persistence_schema(base: Dict[str, Any]) -> None:
         if not isinstance(stats_props, dict):
             return
 
+        # Optional toggle to restrict runtime statistics behaviour to a
+        # "logging-only" mode where background warm-load/rebuild passes are
+        # skipped and only insert-style operations (query_log appends and
+        # counter increments) are performed. This is written directly into the
+        # base statistics schema so that validation tools always see it as a
+        # first-class optional property, just like other booleans under
+        # statistics.
+        stats_props["logging_only"] = {
+            "type": "boolean",
+            "description": (
+                "When true, restrict statistics to logging-only mode where "
+                "only insert-style operations (query_log appends and "
+                "counter increments) are performed and background warm-load "
+                "or rebuild passes are skipped."
+            ),
+            "default": False,
+        }
+
+        # Optional toggle to restrict persistence usage to the raw query_log
+        # only. When true, aggregate counters are not mirrored into the
+        # persistent store (counts table); only query_log appends are
+        # performed.
+        stats_props["query_log_only"] = {
+            "type": "boolean",
+            "description": (
+                "When true, only the raw query_log is written to the "
+                "persistence backend and aggregate counters are kept "
+                "in-memory only."
+            ),
+            "default": False,
+        }
+
         persistence_obj = stats_props.get("persistence")
         if not isinstance(persistence_obj, dict):
             return

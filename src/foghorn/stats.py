@@ -1524,6 +1524,8 @@ class StatsCollector:
         ignore_subdomains_as_suffix: bool = False,
         ignore_single_host: bool = False,
         include_ignored_in_stats: bool = True,
+        logging_only: bool = False,
+        query_log_only: bool = False,
     ) -> None:
         """Initialize statistics collector with configuration flags.
 
@@ -1548,6 +1550,13 @@ class StatsCollector:
                 affect display/exported top lists. When False, entries matching
                 ignore filters are excluded from aggregation (totals/uniques/topk)
                 but are still written to the persistent query_log.
+            logging_only: When True, skip background warm-load operations from
+                the persistent store so that only insert-style operations
+                (query_log appends and counter increments) are performed against
+                the attached stats_store.
+            query_log_only: When True, only the raw query_log is written to the
+                persistent store; aggregate counters are kept in-memory only and
+                are not mirrored into the counts table.
 
         Outputs:
             None
@@ -1566,6 +1575,12 @@ class StatsCollector:
 
         # Control whether ignore filters exclude entries from aggregation.
         self.include_ignored_in_stats = bool(include_ignored_in_stats)
+        # Logging-only mode controls whether background warm-loads use the
+        # attached persistent store. Insert-style operations remain enabled.
+        self.logging_only = bool(logging_only)
+        # When query_log_only is true, only query_log appends are written to
+        # the persistent store; aggregate counters remain in-memory only.
+        self.query_log_only = bool(query_log_only)
 
         # Optional persistent store for long-lived aggregates and query logs
         self._store: Optional[StatsSQLiteStore] = stats_store
@@ -1829,7 +1844,7 @@ class StatsCollector:
                 tracker.add(domain)
 
             # Mirror core counters into the persistent store when available.
-            if self._store is not None:
+            if self._store is not None and not self.query_log_only:
                 try:
                     self._store.increment_count("totals", "total_queries")
                     if self.include_qtype_breakdown:
@@ -1889,7 +1904,7 @@ class StatsCollector:
             ):
                 self._top_cache_hit_subdomains.add(domain)
 
-            if self._store is not None:
+            if self._store is not None and not self.query_log_only:
                 try:
                     self._store.increment_count("totals", "cache_hits")
                     if base:
@@ -1941,7 +1956,7 @@ class StatsCollector:
             ):
                 self._top_cache_miss_subdomains.add(domain)
 
-            if self._store is not None:
+            if self._store is not None and not self.query_log_only:
                 try:
                     self._store.increment_count("totals", "cache_misses")
                     if base:
@@ -1992,7 +2007,7 @@ class StatsCollector:
                 key = f"cache_{status}"
                 self._totals[key] += 1
 
-            if self._store is not None:
+            if self._store is not None and not self.query_log_only:
                 try:
                     self._store.increment_count("totals", "cache_null")
                     if status in ("deny_pre", "override_pre"):
@@ -2029,7 +2044,7 @@ class StatsCollector:
         with self._lock:
             self._totals[totals_key] += 1
 
-            if self._store is not None:
+            if self._store is not None and not self.query_log_only:
                 try:
                     self._store.increment_count(
                         "totals", totals_key
@@ -2065,7 +2080,7 @@ class StatsCollector:
             ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 return
 
-            if self._store is not None:
+            if self._store is not None and not self.query_log_only:
                 try:
                     # Use a dedicated "cache" scope so per-label aggregates can
                     # be inspected or warm-loaded separately from core totals.
@@ -2096,7 +2111,7 @@ class StatsCollector:
         with self._lock:
             self._totals[label] += 1
 
-            if self._store is not None:
+            if self._store is not None and not self.query_log_only:
                 try:
                     self._store.increment_count("totals", label)
                 except (
@@ -2241,7 +2256,7 @@ class StatsCollector:
             elif action == "modify":
                 self._totals["modified"] += 1
 
-            if self._store is not None:
+            if self._store is not None and not self.query_log_only:
                 try:
                     if action == "allow":
                         self._store.increment_count("totals", "allowed")
@@ -2286,7 +2301,7 @@ class StatsCollector:
             self._upstreams[upstream_id][outcome] += 1
             if qtype:
                 self._upstream_qtypes[upstream_id][qtype] += 1
-            if self._store is not None:
+            if self._store is not None and not self.query_log_only:
                 try:
                     key = f"{upstream_id}|{outcome}"
                     self._store.increment_count("upstreams", key)
@@ -2325,7 +2340,7 @@ class StatsCollector:
         with self._lock:
             self._upstream_rcodes[upstream_id][rcode] += 1
 
-            if self._store is not None:
+            if self._store is not None and not self.query_log_only:
                 try:
                     key = f"{upstream_id}|{rcode}"
                     # Use a dedicated scope for per-upstream rcodes so that
@@ -2390,7 +2405,7 @@ class StatsCollector:
                         self._top_rcode_subdomains[rcode] = sub_tracker
                     sub_tracker.add(domain)
 
-            if self._store is not None:
+            if self._store is not None and not self.query_log_only:
                 try:
                     self._store.increment_count("rcodes", rcode)
                     if base:
@@ -3148,8 +3163,12 @@ class StatsCollector:
               cache_miss_domains, rcode_domains, rcode_subdomains) are applied.
             - Top-N client/domain trackers and unique counts are approximated
               from the aggregated counts when enabled.
+            - When logging_only or query_log_only is True, this method is a
+              no-op so that the attached stats_store is only exercised via
+              insert-style operations (query_log appends, and in logging_only
+              mode, counter increments).
         """
-        if self._store is None:
+        if self._store is None or self.logging_only or self.query_log_only:
             return
 
         try:
