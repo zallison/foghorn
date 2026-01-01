@@ -1216,7 +1216,7 @@ def test_docker_hosts_uses_exposed_ports_when_no_host_bindings(monkeypatch):
     assert container_txt is not None
     # Exposed ports should be visible as container ports when no host bindings exist.
     # Ports that originate only from Config.ExposedPorts are prefixed with "E:".
-    assert "ports=E:80" in container_txt
+    assert "ports=exposed:80" in container_txt
     assert "443" in container_txt
 
 
