@@ -1323,6 +1323,7 @@ class DockerHosts(BasePlugin):
         # to Config.ExposedPorts so that exposed-but-unbound container ports are
         # still visible in TXT/Info.
         ports = (container.get("NetworkSettings") or {}).get("Ports") or {}
+        base_pieces: List[str] = []
         hostports: List[str] = []
         if isinstance(ports, dict):
             for _port_key, bindings in ports.items():
@@ -1335,6 +1336,8 @@ class DockerHosts(BasePlugin):
                         hp = str(b.get("HostPort") or "").strip()
                         if hp and hp not in hostports:
                             hostports.append(hp)
+            if hostports:
+                base_pieces.append(f"ports={_join(hostports)}")
 
         if not hostports and isinstance(cfg, dict):
             # Fallback: use Config.ExposedPorts keys when present. Keys are
@@ -1349,7 +1352,9 @@ class DockerHosts(BasePlugin):
                     # Extract "port" or "port/proto" into a compact string.
                     port_part = text.split("/", 1)[0]
                     if port_part and port_part not in hostports:
-                        hostports.append(f"E:{port_part}")
+                        hostports.append(f"{port_part}")
+            if hostports:
+                base_pieces.append(f"ports=exposed:{_join(hostports)}")
 
         # Additional network summaries (best-effort; keep short).
         nets = (container.get("NetworkSettings") or {}).get("Networks") or {}
@@ -1503,11 +1508,6 @@ class DockerHosts(BasePlugin):
                 # caller will skip this field and continue.
                 return []
 
-        # Ordering requested:
-        # name, id (short hash when available), ans4/ans6 (when present),
-        # ports (when present), other metadata, and endpoint last.
-        base_pieces: List[str] = []
-
         # For display, drop domain suffixes so TXT names stay short. The full
         # domain is already shown in the summary table.
         display_name = _strip_domain_suffix(canonical) if canonical else ""
@@ -1532,8 +1532,8 @@ class DockerHosts(BasePlugin):
             base_pieces.append(f"ans6={_join(answer_v6)}")
 
         # Include host listening ports derived from NetworkSettings.Ports.
-        if hostports:
-            base_pieces.append(f"ports={_join(hostports)}")
+        # if hostports:
+        #  base_pieces.append(f"ports={_join(hostports)}")
 
         # Remaining fields (omit empties), keeping endpoint= last.
         if effective_health:
