@@ -381,6 +381,25 @@ def main(argv: List[str] | None = None) -> int:
     # Initialize statistics collection if enabled
     stats_cfg = cfg.get("statistics", {})
     stats_enabled = stats_cfg.get("enabled", False)
+    # Optional mode restricting statistics to logging-only behaviour where
+    # background warm-load/rebuild passes are skipped and only insert-style
+    # operations (query_log appends and counter increments) are performed.
+    logging_only = bool(stats_cfg.get("logging_only", False))
+    # Optional mode restricting persistence usage to the raw query_log only.
+    # When true, aggregate counters are not mirrored into the persistent
+    # store; only query_log appends are performed. This implicitly implies
+    # logging_only semantics for startup warm-load/rebuild behaviour.
+    query_log_only = bool(stats_cfg.get("query_log_only", False))
+
+    # Guard against ambiguous/contradictory configurations.
+    if logging_only and query_log_only:
+        raise ValueError(
+            "Invalid statistics configuration: logging_only and query_log_only "
+            "may not both be true; choose at most one."
+        )
+
+    logging_only_effective = bool(logging_only or query_log_only)
+
     stats_collector = None
     stats_reporter = None
     stats_persistence_store = None
@@ -446,19 +465,25 @@ def main(argv: List[str] | None = None) -> int:
                 logger.info("Initialized statistics SQLite store at %s", db_path)
 
                 # Optionally rebuild counts from the query_log when requested or
-                # when counts are empty but query_log has rows.
-                try:
-                    stats_persistence_store.rebuild_counts_if_needed(
-                        force_rebuild=force_rebuild, logger_obj=logger
-                    )
-                except (
-                    Exception
-                ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                    logger.error(
-                        "Failed to rebuild statistics counts from query_log: %s",
-                        exc,
-                        exc_info=True,
-                    )
+                # when counts are empty but query_log has rows. When
+                # statistics.logging_only or statistics.query_log_only is
+                # enabled, skip this background rebuild so that the persistence
+                # store is only exercised via insert-style operations
+                # (query_log appends and, in logging_only mode, counter
+                # increments).
+                if not logging_only_effective:
+                    try:
+                        stats_persistence_store.rebuild_counts_if_needed(
+                            force_rebuild=force_rebuild, logger_obj=logger
+                        )
+                    except (
+                        Exception
+                    ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                        logger.error(
+                            "Failed to rebuild statistics counts from query_log: %s",
+                            exc,
+                            exc_info=True,
+                        )
             except (
                 Exception
             ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
@@ -499,20 +524,23 @@ def main(argv: List[str] | None = None) -> int:
             ignore_subdomains_as_suffix=ignore_subdomains_as_suffix,
             ignore_single_host=ignore_single_host,
             include_ignored_in_stats=include_in_stats,
+            logging_only=logging_only_effective,
+            query_log_only=query_log_only,
         )
 
         # Best-effort warm-load of persisted aggregate counters on startup.
-        try:
-            stats_collector.warm_load_from_store()
-            logger.info("Statistics warm-load from SQLite store completed")
-        except (
-            Exception
-        ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-            logger.error(
-                "Failed to warm-load statistics from SQLite store: %s",
-                exc,
-                exc_info=True,
-            )
+        if not logging_only_effective:
+            try:
+                stats_collector.warm_load_from_store()
+                logger.info("Statistics warm-load from SQLite store completed")
+            except (
+                Exception
+            ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                logger.error(
+                    "Failed to warm-load statistics from SQLite store: %s",
+                    exc,
+                    exc_info=True,
+                )
 
         stats_reporter = StatsReporter(
             collector=stats_collector,
