@@ -620,7 +620,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
         This handler now delegates resolution to foghorn.server.resolve_query_bytes
         so that UDP shares the same plugin/caching/upstream/DNSSEC pipeline as
-        other transports (TCP/DoT/DoH). DNSUDPHandler's class-level knobs
+        othefoghorn.servers.transports (TCP/DoT/DoH). DNSUDPHandler's class-level knobs
         (plugins, upstreams, DNSSEC settings, and optional stats collector)
         are still honored by the core resolver.
 
