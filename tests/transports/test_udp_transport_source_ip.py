@@ -10,7 +10,7 @@ Outputs:
 
 import socket
 
-from foghorn.transports.udp import udp_query
+from foghorn.serverfoghorn.servers.transports.udp import udp_query
 
 
 def test_udp_query_source_ip_bind():

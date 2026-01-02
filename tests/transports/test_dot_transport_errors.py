@@ -10,7 +10,7 @@ Outputs:
 
 import pytest
 
-from foghorn.transports.dot import DoTError, dot_query
+from foghorn.serverfoghorn.servers.transports.dot import DoTError, dot_query
 
 
 def test_dot_verify_tls_fails_without_trust():
