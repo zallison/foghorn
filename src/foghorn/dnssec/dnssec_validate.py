@@ -188,7 +188,7 @@ class _RecursiveValidationResolver:
         # import cycles when DNSSEC is disabled.
         from dnslib import EDNS0, DNSRecord
 
-        from foghorn.recursive_resolver import RecursiveResolver
+        from foghorn.servers.recursive_resolver import RecursiveResolver
 
         # Normalise name and rdtype to text for dnslib.
         qname_text = getattr(name, "to_text", lambda: str(name))()
