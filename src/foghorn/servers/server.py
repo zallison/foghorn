@@ -15,12 +15,12 @@ from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
 
 from cachetools import TTLCache
 
-from foghorn.utils.register_caches import registered_cached
-from ..plugins.resolve import base as plugin_base
-from ..plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
+from foghorn.plugins.resolve import base as plugin_base
+from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
 from foghorn.servers.recursive_resolver import RecursiveResolver
 from foghorn.servers.transports.dot import DoTError, get_dot_pool
 from foghorn.servers.transports.tcp import TCPError, get_tcp_pool, tcp_query
+from foghorn.utils.register_caches import registered_cached
 from .udp_server import DNSUDPHandler
 
 logger = logging.getLogger("foghorn.server")

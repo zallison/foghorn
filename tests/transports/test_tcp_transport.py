@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from foghorn.serverfoghorn.servers.transports.tcp import tcp_query
+from foghorn.servers.transports.tcp import tcp_query
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
