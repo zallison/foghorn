@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from foghorn.transports.doh import doh_query
+from foghorn.serverfoghorn.servers.transports.doh import doh_query
 
 
 class _StubHandler(BaseHTTPRequestHandler):

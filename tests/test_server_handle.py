@@ -172,7 +172,7 @@ def test_handle_upstream_all_failed_sends_single_servfail(monkeypatch):
     DNSUDPHandler.plugins = []
     DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
 
-    # Force the shared resolver path (used by UDP and other transports) to
+    # Force the shared resolver path (used by UDP and othefoghorn.servers.transports) to
     # behave as if all upstreams failed.
     import foghorn.servers.server as srv_mod
 
