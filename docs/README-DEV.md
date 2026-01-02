@@ -20,10 +20,10 @@ This release introduces a few developer-visible breaking changes:
   - DoT: `src/foghorn/servers/dot_server.py` (TLS, RFC 7858; asyncio).
   - DoH: `src/foghorn/servers/doh_server.py` (HTTP admin and DNS-over-HTTPS plumbing; RFC 8484).
 - Upstreafoghorn.servers.transports:
-  - UDP: `src/foghorn.serverfoghorn.servers.transports/udp.py` (dnslib send)
-  - TCP: `src/foghorn.serverfoghorn.servers.transports/tcp.py` with connection pooling
-  - DoT: `src/foghorn.serverfoghorn.servers.transports/dot.py` with connection pooling
-  - DoH: `src/foghorn.serverfoghorn.servers.transports/doh.py` (stdlib http.client; GET/POST; TLS verification controls)
+  - UDP: `src/foghorn.servers.transports/udp.py` (dnslib send)
+  - TCP: `src/foghorn.servers.transports/tcp.py` with connection pooling
+  - DoT: `src/foghorn.servers.transports/dot.py` with connection pooling
+  - DoH: `src/foghorn.servers.transports.doh.py` (stdlib http.client; GET/POST; TLS verification controls)
 - Plugins: `src/foghorn/plugins/*`, discovered via `plugins/registry.py`. Hooks: `pre_resolve`, `post_resolve`. Aliases supported (e.g., `acl`, `router`, `new_domain`, `filter`, `custom`, `records`, `docker-hosts`).
 - Cache: cache plugins live in `src/foghorn/plugins/cache/`; TTL cache backends live in `src/foghorn/plugins/cache/backends/` and are reused by the resolver and some plugins.
 

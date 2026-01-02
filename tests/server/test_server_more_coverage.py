@@ -99,7 +99,7 @@ def test_send_query_with_failover_servfail_then_success(monkeypatch):
             return r_sf.pack()
         return r_ok.pack()
 
-    import foghorn.serverfoghorn.servers.transports.udp as udp_mod
+    import foghorn.servers.transports.udp as udp_mod
 
     monkeypatch.setattr(udp_mod, "udp_query", fake_udp_query)
 
@@ -131,7 +131,7 @@ def test_send_query_with_failover_parse_error_then_success(monkeypatch, caplog):
             return b"\x00\x01garbage"
         return r_ok.pack()
 
-    import foghorn.serverfoghorn.servers.transports.udp as udp_mod
+    import foghorn.servers.transports.udp as udp_mod
 
     monkeypatch.setattr(udp_mod, "udp_query", fake_udp_query)
 

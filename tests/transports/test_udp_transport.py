@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from foghorn.serverfoghorn.servers.transports.udp import udp_query
+from foghorn.servers.transports.udp import udp_query
 
 
 class _UDPStub:

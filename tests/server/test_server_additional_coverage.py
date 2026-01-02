@@ -455,7 +455,7 @@ def test_send_query_with_failover_doh_success(monkeypatch):
     ok = _mk_ok_reply(q)
 
     # Patch doh_query to return body and headers
-    import foghorn.serverfoghorn.servers.transports.doh as doh_mod
+    import foghorn.servers.transports.doh as doh_mod
 
     monkeypatch.setattr(doh_mod, "doh_query", lambda url, body, **kw: (ok, {"X": "Y"}))
 
@@ -550,7 +550,7 @@ def test_send_query_with_failover_servfail_then_ok_udp(monkeypatch):
     wire_ok = _mk_ok_reply(q)
 
     # Use udp_query patch to control responses by host
-    import foghorn.serverfoghorn.servers.transports.udp as udp_mod
+    import foghorn.servers.transports.udp as udp_mod
 
     def fake_udp_query(host, port, payload, timeout_ms=None):
         return wire_servfail if host == "bad" else wire_ok
