@@ -1,4 +1,4 @@
-"""Brief: Unit tests for src.foghorn.current_cache helpers.
+"""Brief: Unit tests for src.foghorn.utils.current_cache helpers.
 
 Inputs:
   - None
@@ -15,9 +15,9 @@ from typing import Any, Optional, Tuple
 
 import pytest
 
-import foghorn.current_cache as current_cache_module
+import foghorn.utils.current_cache as current_cache_module
 from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
-from foghorn.current_cache import (
+from foghorn.utils.current_cache import (
     TTLCacheAdapter,
     get_current_namespaced_cache,
     module_namespace,

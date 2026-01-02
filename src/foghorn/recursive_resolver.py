@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from foghorn.current_cache import get_current_namespaced_cache, module_namespace
+from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 
 from dnslib import QTYPE, RCODE, DNSRecord
 

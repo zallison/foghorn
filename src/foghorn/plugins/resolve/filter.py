@@ -18,7 +18,7 @@ from dnslib import A as RDATA_A
 from dnslib import DNSRecord
 from pydantic import BaseModel, Field
 
-from foghorn.current_cache import get_current_namespaced_cache, module_namespace
+from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 

@@ -9,7 +9,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from foghorn.current_cache import get_current_namespaced_cache, module_namespace
+from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
 
 log = logging.getLogger(__name__)
