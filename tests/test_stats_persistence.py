@@ -38,10 +38,10 @@ def _make_sample_snapshot() -> StatsSnapshot:
     collector.record_response_rcode("NOERROR")
     collector.record_response_rcode("NXDOMAIN")
     collector.record_plugin_decision(
-        "FilterPlugin", "block", reason="blocklist", domain="bad.com"
+        "Filter", "block", reason="blocklist", domain="bad.com"
     )
     collector.record_plugin_decision(
-        "FilterPlugin", "allow", reason="allowlist", domain="good.com"
+        "Filter", "allow", reason="allowlist", domain="good.com"
     )
     collector.record_upstream_result("8.8.8.8:53", "success")
     collector.record_upstream_result("1.1.1.1:53", "timeout")
@@ -849,7 +849,7 @@ def test_stats_collector_load_from_snapshot_handles_malformed_mappings() -> None
     base_snap = base_collector.snapshot(reset=False)
 
     decisions = {
-        "FilterPlugin": {
+        "Filter": {
             "allow": "1",
             "block": "not-int",
             "allowed_by": {"reason-ok": 2},
@@ -903,10 +903,10 @@ def test_stats_collector_load_from_snapshot_handles_malformed_mappings() -> None
     assert snap_after.qtypes == base_snap.qtypes
 
     # Plugin decisions preserve numeric actions and nested allowed/blocked maps.
-    assert snap_after.decisions["FilterPlugin"]["allow"] == 1
-    assert "block" not in snap_after.decisions["FilterPlugin"]
-    assert snap_after.decisions["FilterPlugin"]["allowed_by"]["reason-ok"] == 2
-    assert snap_after.decisions["FilterPlugin"]["blocked_by"]["reason-bad"] == "x"
+    assert snap_after.decisions["Filter"]["allow"] == 1
+    assert "block" not in snap_after.decisions["Filter"]
+    assert snap_after.decisions["Filter"]["allowed_by"]["reason-ok"] == 2
+    assert snap_after.decisions["Filter"]["blocked_by"]["reason-bad"] == "x"
 
     # Upstream aggregates from snapshots preserve values as-is for the
     # plain upstreams mapping, while malformed numeric data in

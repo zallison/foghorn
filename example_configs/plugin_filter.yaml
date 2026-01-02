@@ -24,7 +24,7 @@ logging:
   level: info
 
 plugins:
-  - module: filter  # FilterPlugin alias
+  - module: filter  # Filter alias
     # pre_priority: 20  # optional: run after ACL
     config:
       # Default policy when no rule matches.

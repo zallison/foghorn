@@ -86,9 +86,9 @@ def test_stats_hooks_are_called(monkeypatch, path):
 
     # Be explicit about cache isolation for this parametrized test.
     try:
-        from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
+        from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 
-        plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+        plugin_base.DNS_CACHE = InMemoryTTLCache()
     except Exception:  # pragma: no cover
         pass
 

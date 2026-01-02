@@ -26,7 +26,7 @@ def _import_redis() -> Any:
         return importlib.import_module("redis")
     except Exception as exc:  # pragma: no cover
         raise ImportError(
-            "RedisCachePlugin requires the optional 'redis' dependency. "
+            "RedisCache requires the optional 'redis' dependency. "
             "Install it with: pip install redis"
         ) from exc
 
@@ -82,7 +82,7 @@ def _decode_value(payload: bytes, is_pickle: int) -> Any:
 
 
 @cache_aliases("redis", "valkey")
-class RedisCachePlugin(CachePlugin):
+class RedisCache(CachePlugin):
     """Redis/Valkey-backed DNS cache plugin.
 
     Brief:
@@ -104,7 +104,7 @@ class RedisCachePlugin(CachePlugin):
           - min_cache_ttl (int): Optional cache TTL floor used by resolver.
 
     Outputs:
-      - RedisCachePlugin instance.
+      - RedisCache instance.
 
     Example:
       cache:

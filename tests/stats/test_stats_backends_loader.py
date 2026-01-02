@@ -14,14 +14,14 @@ import logging
 from typing import Any, Dict, Optional
 
 from foghorn.plugins.querylog import (
-    BaseStatsStoreBackend,
+    BaseStatsStore,
     StatsStoreBackendConfig,
     load_stats_store_backend,
-    MultiStatsStoreBackend,
+    MultiStatsStore,
 )
 
 
-class DummyBackend(BaseStatsStoreBackend):
+class DummyBackend(BaseStatsStore):
     """Brief: In-memory dummy backend used to validate loader semantics.
 
     Inputs (constructor):
@@ -151,23 +151,23 @@ def test_loader_legacy_single_sqlite_config_still_works(monkeypatch) -> None:
 
     backend = load_stats_store_backend(cfg)
     assert backend is not None
-    assert isinstance(backend, BaseStatsStoreBackend)
+    assert isinstance(backend, BaseStatsStore)
 
 
 def test_loader_multi_backend_returns_multi_and_respects_order(monkeypatch) -> None:
-    """Brief: statistics.persistence.backends builds a MultiStatsStoreBackend.
+    """Brief: statistics.persistence.backends builds a MultiStatsStore.
 
     Inputs:
       - monkeypatch fixture.
 
     Outputs:
-      - Asserts that the loader returns a MultiStatsStoreBackend with backends
+      - Asserts that the loader returns a MultiStatsStore with backends
         created in the configured order and that reads use the primary.
     """
 
     created: list[DummyBackend] = []
 
-    def _dummy_ctor(cfg: StatsStoreBackendConfig) -> BaseStatsStoreBackend:
+    def _dummy_ctor(cfg: StatsStoreBackendConfig) -> BaseStatsStore:
         # Construct named DummyBackend instances in order.
         name = cfg.name or cfg.backend
         b = DummyBackend(name=name)
@@ -186,7 +186,7 @@ def test_loader_multi_backend_returns_multi_and_respects_order(monkeypatch) -> N
     }
 
     backend = load_stats_store_backend(persistence_cfg)
-    assert isinstance(backend, MultiStatsStoreBackend)
+    assert isinstance(backend, MultiStatsStore)
 
     # Loader should have built two DummyBackend instances in order.
     assert [b.name for b in created] == ["primary", "secondary"]
@@ -243,7 +243,7 @@ def test_loader_respects_primary_backend_hint(monkeypatch) -> None:
 
     created: list[DummyBackend] = []
 
-    def _dummy_ctor(cfg: StatsStoreBackendConfig) -> BaseStatsStoreBackend:
+    def _dummy_ctor(cfg: StatsStoreBackendConfig) -> BaseStatsStore:
         # Name dummy backends after their configured instance name when present.
         name = cfg.name or cfg.backend
         b = DummyBackend(name=name)
@@ -264,7 +264,7 @@ def test_loader_respects_primary_backend_hint(monkeypatch) -> None:
     }
 
     backend = load_stats_store_backend(persistence_cfg)
-    assert isinstance(backend, MultiStatsStoreBackend)
+    assert isinstance(backend, MultiStatsStore)
 
     # Loader still builds in declared order.
     assert [b.name for b in created] == ["primary", "secondary"]

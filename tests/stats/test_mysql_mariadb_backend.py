@@ -1,5 +1,5 @@
 """
-Brief: Tests for MySqlStatsStoreBackend using a fake MySQL/MariaDB driver.
+Brief: Tests for MySqlStatsStore using a fake MySQL/MariaDB driver.
 
 Inputs:
   - None
@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
-from foghorn.plugins.querylog.mysql_mariadb import MySqlStatsStoreBackend
+from foghorn.plugins.querylog.mysql_mariadb import MySqlStatsStore
 
 
 class _FakeCursor:
@@ -142,7 +142,7 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    """Brief: In-memory connection object backing MySqlStatsStoreBackend tests.
+    """Brief: In-memory connection object backing MySqlStatsStore tests.
 
     Inputs:
       - kwargs: connection keyword arguments (recorded for assertions).
@@ -219,16 +219,16 @@ def fake_mysql_driver(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "mysql.connector", driver_mod)
 
 
-def _make_backend(fake_mysql_driver) -> MySqlStatsStoreBackend:  # type: ignore[no-untyped-def]
+def _make_backend(fake_mysql_driver) -> MySqlStatsStore:  # type: ignore[no-untyped-def]
     """Brief: Helper to construct a backend using the fake MySQL driver.
 
     Inputs:
       - fake_mysql_driver: fixture ensuring the fake driver is installed.
 
     Outputs:
-      - MySqlStatsStoreBackend instance with an in-memory _FakeConn.
+      - MySqlStatsStore instance with an in-memory _FakeConn.
     """
-    return MySqlStatsStoreBackend(
+    return MySqlStatsStore(
         host="127.0.0.42",
         port=3307,
         user="user",

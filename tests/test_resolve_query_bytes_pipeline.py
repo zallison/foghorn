@@ -12,7 +12,7 @@ import pytest
 from dnslib import QTYPE, RCODE, DNSRecord, RR, A
 
 import foghorn.servers.server as server_mod
-from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.plugins.resolve import base as plugin_base
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
 from foghorn.servers.server import DNSUDPHandler, resolve_query_bytes
@@ -72,7 +72,7 @@ def test_resolve_query_bytes_stats_pre_deny_and_override():
       - None; asserts key stats hooks are called for deny/override.
     """
 
-    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
 
     stats = _Stats()
     DNSUDPHandler.stats_collector = stats
@@ -116,7 +116,7 @@ def test_resolve_query_bytes_stats_cache_and_no_upstreams():
     resolve_query_bytes(q.pack(), "127.0.0.1")
 
     # No upstreams: clear cache and ensure no upstreams configured
-    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
     DNSUDPHandler.upstream_addrs = []
     q2 = DNSRecord.question("no-upstreams-stats.example", "A")
     resolve_query_bytes(q2.pack(), "127.0.0.1")
@@ -191,7 +191,7 @@ def test_resolve_query_bytes_stats_outer_exception(
     stats = _Stats()
     DNSUDPHandler.stats_collector = stats
     DNSUDPHandler.plugins = []
-    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
     DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
 
     def _boom_send(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
@@ -266,7 +266,7 @@ def test_resolve_query_bytes_recursive_mode_uses_recursive_resolver(
 
     # Configure handler state for recursive mode.
     DNSUDPHandler.plugins = []
-    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
     DNSUDPHandler.resolver_mode = "recursive"
     DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
 

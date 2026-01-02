@@ -1,4 +1,4 @@
-"""Brief: Unit tests for foghorn.utils.cache_registry helpers.
+"""Brief: Unit tests for foghorn.utils.register_caches helpers.
 
 Inputs:
   - None
@@ -13,7 +13,7 @@ from typing import Any, Dict, List
 
 from cachetools import TTLCache
 
-import foghorn.utils.cache_registry as cache_reg
+import foghorn.utils.register_caches as cache_reg
 
 
 def _find_entry_by_backend(

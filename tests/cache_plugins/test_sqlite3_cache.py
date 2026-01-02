@@ -16,7 +16,7 @@ import time
 import pytest
 
 from foghorn.plugins.cache.registry import load_cache_plugin
-from foghorn.plugins.cache.sqlite_cache import SQLite3CachePlugin
+from foghorn.plugins.cache.sqlite_cache import SQLite3Cache
 
 
 def test_sqlite3_cache_creates_parent_directory(tmp_path) -> None:
@@ -32,7 +32,7 @@ def test_sqlite3_cache_creates_parent_directory(tmp_path) -> None:
     db_path = tmp_path / "nested" / "dns_cache.db"
     assert not db_path.parent.exists()
 
-    plugin = SQLite3CachePlugin(db_path=str(db_path))
+    plugin = SQLite3Cache(db_path=str(db_path))
     plugin.set(("example.com", 1), 60, b"wire")
 
     assert db_path.parent.exists()
@@ -54,7 +54,7 @@ def test_sqlite3_cache_roundtrip_bytes(tmp_path, monkeypatch) -> None:
     import foghorn.plugins.cache.backends.sqlite_ttl as mod
 
     db_path = tmp_path / "dns_cache.db"
-    plugin = SQLite3CachePlugin(db_path=str(db_path))
+    plugin = SQLite3Cache(db_path=str(db_path))
 
     # Freeze time for deterministic TTL behavior.
     t = {"now": 1000.0}
@@ -91,7 +91,7 @@ def test_sqlite3_cache_snapshot_includes_counters(tmp_path) -> None:
     """
 
     db_path = tmp_path / "dns_cache.db"
-    plugin = SQLite3CachePlugin(db_path=str(db_path))
+    plugin = SQLite3Cache(db_path=str(db_path))
 
     # Exercise the cache a bit so counters are non-zero.
     key = ("example.com", 1)
@@ -135,7 +135,7 @@ def test_sqlite3_cache_roundtrip_pickled_objects(tmp_path, value: Any) -> None:
       - None; asserts value equality after a set/get.
     """
 
-    plugin = SQLite3CachePlugin(db_path=str(tmp_path / "dns_cache.db"))
+    plugin = SQLite3Cache(db_path=str(tmp_path / "dns_cache.db"))
     key = ("example.com", 28)
 
     plugin.set(key, 60, value)
@@ -154,7 +154,7 @@ def test_registry_loads_sqlite3_cache_from_mapping(tmp_path) -> None:
 
     db_path = tmp_path / "dns_cache.db"
     inst = load_cache_plugin({"module": "sqlite3", "config": {"db_path": str(db_path)}})
-    assert isinstance(inst, SQLite3CachePlugin)
+    assert isinstance(inst, SQLite3Cache)
 
 
 def test_sqlite3_cache_db_path_and_namespace_validation(tmp_path) -> None:
@@ -169,16 +169,16 @@ def test_sqlite3_cache_db_path_and_namespace_validation(tmp_path) -> None:
 
     # When only "path" is provided, db_path should resolve from it.
     db_path = tmp_path / "via_path.db"
-    plugin = SQLite3CachePlugin(path=str(db_path))
+    plugin = SQLite3Cache(path=str(db_path))
     assert plugin.db_path.endswith("via_path.db")
 
     # When neither db_path nor path is provided, plugin should use the default.
-    plugin_default = SQLite3CachePlugin()
+    plugin_default = SQLite3Cache()
     assert "dns_cache.db" in plugin_default.db_path
 
     # Invalid/empty namespace should raise ValueError.
     with pytest.raises(ValueError):
-        SQLite3CachePlugin(db_path=str(db_path), namespace="  ")
+        SQLite3Cache(db_path=str(db_path), namespace="  ")
 
 
 def test_sqlite3_cache_targets_cache_summary(monkeypatch, tmp_path) -> None:
@@ -193,7 +193,7 @@ def test_sqlite3_cache_targets_cache_summary(monkeypatch, tmp_path) -> None:
     """
 
     db_path = tmp_path / "dns_cache.db"
-    plugin = SQLite3CachePlugin(db_path=str(db_path))
+    plugin = SQLite3Cache(db_path=str(db_path))
 
     class DummyCache:
         def __init__(self) -> None:
@@ -230,7 +230,7 @@ def test_sqlite3_cache_admin_descriptor_shape(tmp_path) -> None:
     """
 
     db_path = tmp_path / "dns_cache.db"
-    plugin = SQLite3CachePlugin(db_path=str(db_path))
+    plugin = SQLite3Cache(db_path=str(db_path))
     desc = plugin.get_admin_ui_descriptor()
 
     assert desc["kind"] == "cache_sqlite"
@@ -252,7 +252,7 @@ def test_sqlite3_cache_purge_returns_int(tmp_path) -> None:
     """
 
     db_path = tmp_path / "dns_cache.db"
-    plugin = SQLite3CachePlugin(db_path=str(db_path))
+    plugin = SQLite3Cache(db_path=str(db_path))
     assert isinstance(plugin.purge(), int)
 
 
@@ -268,7 +268,7 @@ def test_sqlite3_cache_purge_and_close_dont_raise(tmp_path, monkeypatch) -> None
     """
 
     db_path = tmp_path / "dns_cache.db"
-    plugin = SQLite3CachePlugin(db_path=str(db_path))
+    plugin = SQLite3Cache(db_path=str(db_path))
 
     # Ensure purge delegates to the backend and returns an int.
     assert isinstance(plugin.purge(), int)
@@ -299,7 +299,7 @@ def test_sqlite3_cache_snapshot_includes_decorated_registry(
       - None; asserts decorated rows reflect registry data and skip bad entries.
     """
 
-    plugin = SQLite3CachePlugin(db_path=str(tmp_path / "dns_cache.db"))
+    plugin = SQLite3Cache(db_path=str(tmp_path / "dns_cache.db"))
 
     # Fake two registry entries: one valid, one missing module/qualname.
     good_entry = {
@@ -319,7 +319,7 @@ def test_sqlite3_cache_snapshot_includes_decorated_registry(
         return [good_entry, bad_entry]
 
     # Import inside function, so patch on the module path used there.
-    import foghorn.utils.cache_registry as reg_mod
+    import foghorn.utils.register_caches as reg_mod
 
     monkeypatch.setattr(reg_mod, "get_registered_cached", _fake_get_registered_cached)
 

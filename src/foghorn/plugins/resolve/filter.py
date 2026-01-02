@@ -26,13 +26,13 @@ logger = logging.getLogger(__name__)
 
 
 class FilterConfig(BaseModel):
-    """Brief: Typed configuration model for FilterPlugin.
+    """Brief: Typed configuration model for Filter.
 
     Inputs:
       - cache_ttl_seconds: TTL for domain cache.
       - db_path: Optional path to blocklist SQLite DB. When omitted or empty,
         the plugin uses a per-instance in-memory database so that multiple
-        FilterPlugin instances do not share state by default.
+        Filter instances do not share state by default.
       - default: Default policy ("allow" or "deny").
       - ttl: TTL for synthesized responses.
       - deny_response: Policy for deny responses.
@@ -78,7 +78,7 @@ class FilterConfig(BaseModel):
 
 
 @plugin_aliases("filter", "block", "allow")
-class FilterPlugin(BasePlugin):
+class Filter(BasePlugin):
     """
     A comprehensive filtering plugin that filters both domains and IP addresses.
 
@@ -95,7 +95,7 @@ class FilterPlugin(BasePlugin):
     Example use:
         In config.yaml:
         plugins:
-          - module: foghorn.plugins.filter.FilterPlugin
+          - module: foghorn.plugins.filter.Filter
             config:
               # Pre-resolve (domain) filterings (exact match)
               allowed_domains:
@@ -142,11 +142,11 @@ class FilterPlugin(BasePlugin):
 
     def setup(self):
         """
-        Initializes the FilterPlugin.  Config has been read.
+        Initializes the Filter.  Config has been read.
 
         Notes:
             - When ``db_path`` is omitted or empty, this plugin uses an
-              in-memory SQLite database so each FilterPlugin instance has its
+              in-memory SQLite database so each Filter instance has its
               own isolated allow/deny state by default.
             - When multiple instances explicitly share the same non-empty
               ``db_path``, they also share the same underlying table and
@@ -241,7 +241,7 @@ class FilterPlugin(BasePlugin):
         }
         if self.deny_response not in valid_deny_responses:
             logger.warning(
-                "FilterPlugin: unknown deny_response %r; defaulting to 'nxdomain'",
+                "Filter: unknown deny_response %r; defaulting to 'nxdomain'",
                 self.deny_response,
             )
             self.deny_response = "nxdomain"
@@ -655,7 +655,7 @@ class FilterPlugin(BasePlugin):
 
         Example:
             >>> # path=null start=null
-            >>> # plugin = FilterPlugin(deny_response='refused')  # doctest: +SKIP
+            >>> # plugin = Filter(deny_response='refused')  # doctest: +SKIP
         """
         mode = (getattr(self, "deny_response", "nxdomain") or "nxdomain").lower()
         if mode == "nxdomain":
@@ -668,7 +668,7 @@ class FilterPlugin(BasePlugin):
                 Exception
             ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 logger.warning(
-                    "FilterPlugin: failed to parse request while building deny response: %s",
+                    "Filter: failed to parse request while building deny response: %s",
                     e,
                 )
                 return PluginDecision(action="deny")
@@ -700,7 +700,7 @@ class FilterPlugin(BasePlugin):
                     ValueError
                 ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                     logger.error(
-                        "FilterPlugin: invalid deny_response IP %r for %s",
+                        "Filter: invalid deny_response IP %r for %s",
                         ipaddr,
                         qname,
                     )
@@ -724,11 +724,11 @@ class FilterPlugin(BasePlugin):
             "ip",
         }:
             logger.warning(
-                "FilterPlugin: unknown deny_response %r; defaulting to NXDOMAIN", mode
+                "Filter: unknown deny_response %r; defaulting to NXDOMAIN", mode
             )
         else:
             logger.debug(
-                "FilterPlugin: falling back to NXDOMAIN deny for %s (mode=%s)",
+                "Filter: falling back to NXDOMAIN deny for %s (mode=%s)",
                 qname,
                 mode,
             )
@@ -770,7 +770,7 @@ class FilterPlugin(BasePlugin):
                 response.rr = []
             else:
                 logger.warning(
-                    "FilterPlugin: unknown deny_response %r in post path; defaulting to NXDOMAIN",
+                    "Filter: unknown deny_response %r in post path; defaulting to NXDOMAIN",
                     mode,
                 )
                 return PluginDecision(action="deny")
@@ -780,7 +780,7 @@ class FilterPlugin(BasePlugin):
             Exception
         ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.warning(
-                "FilterPlugin: failed to pack deny response for %s (%s): %s",
+                "Filter: failed to pack deny response for %s (%s): %s",
                 qname,
                 mode,
                 e,
@@ -839,7 +839,7 @@ class FilterPlugin(BasePlugin):
 
         Example:
             >>> # doctest: +SKIP
-            >>> FilterPlugin._expand_globs(['config/*.txt', 'config/static.txt'])
+            >>> Filter._expand_globs(['config/*.txt', 'config/static.txt'])
             ['config/a.txt', 'config/b.txt', 'config/static.txt']
         """
         resolved: List[str] = []
@@ -871,7 +871,7 @@ class FilterPlugin(BasePlugin):
 
         Example:
             >>> # doctest: +SKIP
-            >>> for ln, text in FilterPlugin._iter_noncomment_lines('file.txt'):
+            >>> for ln, text in Filter._iter_noncomment_lines('file.txt'):
             ...     print(ln, text)
         """
         with open(path, "r", encoding="utf-8") as fh:

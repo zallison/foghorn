@@ -8,13 +8,13 @@ Outputs:
   - None
 """
 
-from foghorn.plugins.resolve.access_control import AccessControlPlugin
+from foghorn.plugins.resolve.access_control import AccessControl
 from foghorn.plugins.resolve.base import PluginContext
 
 
 def test_access_control_init_default_allow(tmp_path):
     """
-    Brief: Verify AccessControlPlugin initializes with default allow.
+    Brief: Verify AccessControl initializes with default allow.
 
     Inputs:
       - config: empty or minimal configuration
@@ -22,14 +22,14 @@ def test_access_control_init_default_allow(tmp_path):
     Outputs:
       - None: Asserts default is 'allow'
     """
-    plugin = AccessControlPlugin()
+    plugin = AccessControl()
     plugin.setup()
     assert plugin.default == "allow"
 
 
 def test_access_control_init_default_deny(tmp_path):
     """
-    Brief: Verify AccessControlPlugin initializes with default deny.
+    Brief: Verify AccessControl initializes with default deny.
 
     Inputs:
       - config: default set to 'deny'
@@ -37,7 +37,7 @@ def test_access_control_init_default_deny(tmp_path):
     Outputs:
       - None: Asserts default is 'deny'
     """
-    plugin = AccessControlPlugin(default="deny")
+    plugin = AccessControl(default="deny")
     plugin.setup()
     assert plugin.default == "deny"
 
@@ -52,7 +52,7 @@ def test_access_control_allow_list_parsing(tmp_path):
     Outputs:
       - None: Asserts networks parsed
     """
-    plugin = AccessControlPlugin(allow=["192.168.1.0/24", "10.0.0.0/8"])
+    plugin = AccessControl(allow=["192.168.1.0/24", "10.0.0.0/8"])
     plugin.setup()
     assert len(plugin.allow_nets) == 2
 
@@ -67,7 +67,7 @@ def test_access_control_deny_list_parsing(tmp_path):
     Outputs:
       - None: Asserts networks parsed
     """
-    plugin = AccessControlPlugin(deny=["192.168.1.10/32", "172.16.0.0/12"])
+    plugin = AccessControl(deny=["192.168.1.10/32", "172.16.0.0/12"])
     plugin.setup()
     assert len(plugin.deny_nets) == 2
 
@@ -83,7 +83,7 @@ def test_access_control_allows_by_default(tmp_path):
     Outputs:
       - None: Asserts decision to allow (deny action returned)
     """
-    plugin = AccessControlPlugin(default="allow")
+    plugin = AccessControl(default="allow")
     plugin.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
@@ -101,7 +101,7 @@ def test_access_control_denies_by_default(tmp_path):
     Outputs:
       - None: Asserts decision to deny
     """
-    plugin = AccessControlPlugin(default="deny")
+    plugin = AccessControl(default="deny")
     plugin.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
@@ -119,7 +119,7 @@ def test_access_control_allow_rule_matches(tmp_path):
     Outputs:
       - None: Asserts None returned (allow)
     """
-    plugin = AccessControlPlugin(default="deny", allow=["192.168.1.0/24"])
+    plugin = AccessControl(default="deny", allow=["192.168.1.0/24"])
     plugin.setup()
     ctx = PluginContext(client_ip="192.168.1.100")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
@@ -137,7 +137,7 @@ def test_access_control_deny_rule_matches(tmp_path):
     Outputs:
       - None: Asserts decision to deny
     """
-    plugin = AccessControlPlugin(default="allow", deny=["192.168.1.10"])
+    plugin = AccessControl(default="allow", deny=["192.168.1.10"])
     plugin.setup()
     ctx = PluginContext(client_ip="192.168.1.10")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
@@ -156,7 +156,7 @@ def test_access_control_deny_takes_precedence(tmp_path):
     Outputs:
       - None: Asserts decision to deny
     """
-    plugin = AccessControlPlugin(
+    plugin = AccessControl(
         default="allow", allow=["192.168.1.0/24"], deny=["192.168.1.10"]
     )
     plugin.setup()
@@ -177,7 +177,7 @@ def test_access_control_ipv6_support(tmp_path):
     Outputs:
       - None: Asserts IPv6 processed correctly
     """
-    plugin = AccessControlPlugin(default="deny", allow=["2001:db8::/32"])
+    plugin = AccessControl(default="deny", allow=["2001:db8::/32"])
     plugin.setup()
 
     ctx = PluginContext(client_ip="2001:db8::1")
@@ -196,7 +196,7 @@ def test_access_control_single_ip_no_mask(tmp_path):
     Outputs:
       - None: Asserts single IP parsed as /32
     """
-    plugin = AccessControlPlugin(default="allow", deny=["10.0.0.1"])
+    plugin = AccessControl(default="allow", deny=["10.0.0.1"])
     plugin.setup()
     ctx = PluginContext(client_ip="10.0.0.1")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
@@ -215,7 +215,7 @@ def test_access_control_no_rules_default_allow(tmp_path):
     Outputs:
       - None: Asserts decision to allow
     """
-    plugin = AccessControlPlugin(default="allow")
+    plugin = AccessControl(default="allow")
     plugin.setup()
     ctx = PluginContext(client_ip="203.0.113.1")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
@@ -233,7 +233,7 @@ def test_access_control_no_rules_default_deny(tmp_path):
     Outputs:
       - None: Asserts decision to deny
     """
-    plugin = AccessControlPlugin(default="deny")
+    plugin = AccessControl(default="deny")
     plugin.setup()
     ctx = PluginContext(client_ip="203.0.113.1")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)
@@ -241,7 +241,7 @@ def test_access_control_no_rules_default_deny(tmp_path):
 
 
 def test_access_control_respects_baseplugin_targets(tmp_path):
-    """Brief: AccessControlPlugin returns None when client is not targeted.
+    """Brief: AccessControl returns None when client is not targeted.
 
     Inputs:
       - targets: ["10.0.0.0/8"]
@@ -251,7 +251,7 @@ def test_access_control_respects_baseplugin_targets(tmp_path):
       - None; asserts pre_resolve returns None instead of deny when the
         client_ip is outside the targets set.
     """
-    plugin = AccessControlPlugin(default="deny", targets=["10.0.0.0/8"])
+    plugin = AccessControl(default="deny", targets=["10.0.0.0/8"])
     plugin.setup()
     ctx = PluginContext(client_ip="192.0.2.1")
     decision = plugin.pre_resolve("example.com", 1, b"", ctx)

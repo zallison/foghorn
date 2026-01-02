@@ -26,7 +26,7 @@ logging:
   level: info
 
 plugins:
-  - module: greylist  # GreylistPlugin alias
+  - module: greylist  # GreylistExample alias
     # pre_priority: 35
     config:
       # How long a domain stays in "grey" state before being allowed

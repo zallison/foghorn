@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class AccessControlConfig(BaseModel):
-    """Brief: Typed configuration model for AccessControlPlugin used for startup validation.
+    """Brief: Typed configuration model for AccessControl used for startup validation.
 
     Inputs:
       - default: Default policy ("allow" or "deny").
@@ -32,14 +32,14 @@ class AccessControlConfig(BaseModel):
 
 
 @plugin_aliases("acl", "access_control")
-class AccessControlPlugin(BasePlugin):
+class AccessControl(BasePlugin):
     """
     A plugin that provides access control based on client IP addresses.
 
     Example use:
         In config.yaml:
         plugins:
-          - module: foghorn.plugins.access_control.AccessControlPlugin
+          - module: foghorn.plugins.access_control.AccessControl
             config:
               default: deny
               allow:
@@ -61,15 +61,15 @@ class AccessControlPlugin(BasePlugin):
 
     def setup(self, **config):
         """
-        Initializes the AccessControlPlugin.
+        Initializes the AccessControl.
 
         Args:
             **config: Configuration for the plugin.
 
         Example use:
-            >>> from foghorn.plugins.access_control import AccessControlPlugin
+            >>> from foghorn.plugins.access_control import AccessControl
             >>> config = {"default": "deny", "allow": ["192.168.1.0/24"]}
-            >>> plugin = AccessControlPlugin(**config)
+            >>> plugin = AccessControl(**config)
             >>> plugin.default
             'deny'
         """
@@ -96,10 +96,10 @@ class AccessControlPlugin(BasePlugin):
             A PluginDecision to allow or deny the request.
 
         Example use:
-            >>> from foghorn.plugins.access_control import AccessControlPlugin
+            >>> from foghorn.plugins.access_control import AccessControl
             >>> from foghorn.plugins.resolve.base import PluginContext
             >>> config = {"default": "allow", "deny": ["192.168.1.10"]}
-            >>> plugin = AccessControlPlugin(**config)
+            >>> plugin = AccessControl(**config)
             >>> ctx = PluginContext(client_ip="192.168.1.10")
             >>> decision = plugin.pre_resolve("example.com", 1, b'', ctx)
             >>> decision.action

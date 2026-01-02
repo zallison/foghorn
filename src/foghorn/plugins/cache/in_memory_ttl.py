@@ -9,7 +9,7 @@ from .base import CachePlugin, cache_aliases
 
 
 @cache_aliases("in_memory_ttl", "memory", "ttl")
-class InMemoryTTLCachePlugin(CachePlugin):
+class InMemoryTTLCache(CachePlugin):
     """In-memory TTL cache plugin.
 
     Brief:
@@ -21,7 +21,7 @@ class InMemoryTTLCachePlugin(CachePlugin):
             floor applied by the resolver when caching responses.
 
     Outputs:
-      - InMemoryTTLCachePlugin instance.
+      - InMemoryTTLCache instance.
     """
 
     def __init__(self, **config: object) -> None:
@@ -307,7 +307,7 @@ class InMemoryTTLCachePlugin(CachePlugin):
 
         # Decorated cache functions registered via registered_cached().
         try:
-            from foghorn.utils.cache_registry import get_registered_cached
+            from foghorn.utils.register_caches import get_registered_cached
 
             decorated = get_registered_cached()
         except Exception:

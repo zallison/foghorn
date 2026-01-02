@@ -27,8 +27,8 @@ from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 logger = logging.getLogger(__name__)
 
 
-class NewDomainFilterConfig(BaseModel):
-    """Brief: Typed configuration model for NewDomainFilterPlugin.
+class NewDomainFilterExampleConfig(BaseModel):
+    """Brief: Typed configuration model for NewDomainFilterExample.
 
     Inputs:
       - threshold_days: Minimum allowed domain age in days.
@@ -37,7 +37,7 @@ class NewDomainFilterConfig(BaseModel):
       - whois_refresh_seconds: Max age of DB entries before refresh.
 
     Outputs:
-      - NewDomainFilterConfig instance with normalized field types.
+      - NewDomainFilterExampleConfig instance with normalized field types.
     """
 
     threshold_days: int = Field(default=7, ge=0)
@@ -50,7 +50,7 @@ class NewDomainFilterConfig(BaseModel):
 
 
 @plugin_aliases("new_domain", "new_domain_filter", "ndf")
-class NewDomainFilterPlugin(BasePlugin):
+class NewDomainFilterExample(BasePlugin):
     """Plugin that filters out domains registered too recently.
 
     Brief:
@@ -61,7 +61,7 @@ class NewDomainFilterPlugin(BasePlugin):
     Example use in YAML config:
 
         plugins:
-          - module: foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
+          - module: foghorn.plugins.new_domain_filter.NewDomainFilterExample
             config:
               threshold_days: 30
     """
@@ -74,14 +74,14 @@ class NewDomainFilterPlugin(BasePlugin):
           - None.
 
         Outputs:
-          - NewDomainFilterConfig class for use by the core config loader.
+          - NewDomainFilterExampleConfig class for use by the core config loader.
         """
 
-        return NewDomainFilterConfig
+        return NewDomainFilterExampleConfig
 
     def setup(self):
         """
-        Initializes the NewDomainFilterPlugin.
+        Initializes the NewDomainFilterExample.
 
         Inputs:
           - None (configuration is taken from ``self.config`` set by BasePlugin).
@@ -90,8 +90,8 @@ class NewDomainFilterPlugin(BasePlugin):
           - None (sets threshold_days, WHOIS cache/DB configuration and opens DB).
 
         Example:
-          >>> from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin
-          >>> plugin = NewDomainFilterPlugin(threshold_days=10)
+          >>> from foghorn.plugins.new_domain_filter import NewDomainFilterExample
+          >>> plugin = NewDomainFilterExample(threshold_days=10)
           >>> plugin.setup()
           >>> plugin.threshold_days
           10
@@ -139,10 +139,10 @@ class NewDomainFilterPlugin(BasePlugin):
 
         Example use:
             (Note: This is a simplified example that doesn't actually make a network request)
-            >>> from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin
+            >>> from foghorn.plugins.new_domain_filter import NewDomainFilterExample
             >>> from foghorn.plugins.resolve.base import PluginContext
             >>> from unittest.mock import patch
-            >>> plugin = NewDomainFilterPlugin(threshold_days=30)
+            >>> plugin = NewDomainFilterExample(threshold_days=30)
             >>> with patch.object(plugin, '_domain_age_days', return_value=10):
             ...     decision = plugin.pre_resolve("new.com", 1, b'', PluginContext("1.2.3.4"))
             ...     decision.action
@@ -177,8 +177,8 @@ class NewDomainFilterPlugin(BasePlugin):
         Example use:
             (Note: This example is for illustration and won't make a real network request)
             >>> from unittest.mock import patch
-            >>> from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin
-            >>> plugin = NewDomainFilterPlugin()
+            >>> from foghorn.plugins.new_domain_filter import NewDomainFilterExample
+            >>> plugin = NewDomainFilterExample()
             >>> with patch.object(plugin, '_fetch_creation_date', return_value=dt.datetime(2023, 1, 1, tzinfo=dt.timezone.utc)):
             ...     isinstance(plugin._domain_age_days("example.com"), int)
             True

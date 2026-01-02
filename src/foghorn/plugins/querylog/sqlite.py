@@ -1,4 +1,4 @@
-"""SQLite-backed implementation of the BaseStatsStoreBackend interface.
+"""SQLite-backed implementation of the BaseStatsStore interface.
 
 Inputs:
   - Constructed via the same configuration fields historically used for the
@@ -11,7 +11,7 @@ Outputs:
 
 Notes:
   - This module ports the prior StatsSQLiteStore implementation into
-    SqliteStatsStoreBackend so that the SQLite backend can live under
+    SqliteStatsStore so that the SQLite backend can live under
     foghorn.plugins.querylog without changing its runtime behavior.
 """
 
@@ -25,7 +25,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from foghorn.plugins.querylog.base import BaseStatsStoreBackend
+from foghorn.plugins.querylog.base import BaseStatsStore
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +69,11 @@ def _is_subdomain(domain: str) -> bool:
     return True
 
 
-class SqliteStatsStoreBackend(BaseStatsStoreBackend):
+class SqliteStatsStore(BaseStatsStore):
     """SQLite-backed persistent statistics and query-log backend.
 
     This class is a direct port of the legacy StatsSQLiteStore implementation
-    so that it satisfies the BaseStatsStoreBackend interface while preserving
+    so that it satisfies the BaseStatsStore interface while preserving
     existing SQLite behavior.
     """
 
@@ -207,9 +207,7 @@ class SqliteStatsStoreBackend(BaseStatsStoreBackend):
                 with self._conn:
                     self._conn.execute(sql, params)
             except Exception as exc:  # pragma: no cover - defensive
-                logger.error(
-                    "SqliteStatsStoreBackend execute error: %s", exc, exc_info=True
-                )
+                logger.error("SqliteStatsStore execute error: %s", exc, exc_info=True)
             return
 
         # Batched mode
@@ -245,7 +243,7 @@ class SqliteStatsStoreBackend(BaseStatsStoreBackend):
             self._pending_ops.clear()
             self._last_flush = time.time()
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error("SqliteStatsStoreBackend flush error: %s", exc, exc_info=True)
+            logger.error("SqliteStatsStore flush error: %s", exc, exc_info=True)
 
     # ------------------------------------------------------------------
     # Public API: counters and query log
@@ -262,7 +260,7 @@ class SqliteStatsStoreBackend(BaseStatsStoreBackend):
             self._execute(sql, (scope, key, int(delta)))
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
-                "SqliteStatsStoreBackend increment_count error: %s", exc, exc_info=True
+                "SqliteStatsStore increment_count error: %s", exc, exc_info=True
             )
 
     def set_count(self, scope: str, key: str, value: int) -> None:
@@ -276,9 +274,7 @@ class SqliteStatsStoreBackend(BaseStatsStoreBackend):
             )
             self._execute(sql, (scope, key, int(value)))
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error(
-                "SqliteStatsStoreBackend set_count error: %s", exc, exc_info=True
-            )
+            logger.error("SqliteStatsStore set_count error: %s", exc, exc_info=True)
 
     def insert_query_log(
         self,
@@ -316,7 +312,7 @@ class SqliteStatsStoreBackend(BaseStatsStoreBackend):
             self._execute(sql, params)
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
-                "SqliteStatsStoreBackend insert_query_log error: %s", exc, exc_info=True
+                "SqliteStatsStore insert_query_log error: %s", exc, exc_info=True
             )
 
     def select_query_log(
@@ -392,7 +388,7 @@ class SqliteStatsStoreBackend(BaseStatsStoreBackend):
             total = int(row[0]) if row else 0
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
-                "SqliteStatsStoreBackend select_query_log count error: %s",
+                "SqliteStatsStore select_query_log count error: %s",
                 exc,
                 exc_info=True,
             )
@@ -449,7 +445,7 @@ class SqliteStatsStoreBackend(BaseStatsStoreBackend):
                 )
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
-                "SqliteStatsStoreBackend select_query_log rows error: %s",
+                "SqliteStatsStore select_query_log rows error: %s",
                 exc,
                 exc_info=True,
             )
@@ -595,7 +591,7 @@ class SqliteStatsStoreBackend(BaseStatsStoreBackend):
                     rows.append((b_i, None, c_i))
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
-                "SqliteStatsStoreBackend aggregate_query_log_counts error: %s",
+                "SqliteStatsStore aggregate_query_log_counts error: %s",
                 exc,
                 exc_info=True,
             )
@@ -662,9 +658,7 @@ class SqliteStatsStoreBackend(BaseStatsStoreBackend):
             cur = self._conn.execute("SELECT 1 FROM counts LIMIT 1")  # type: ignore[attr-defined]
             return cur.fetchone() is not None
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error(
-                "SqliteStatsStoreBackend has_counts error: %s", exc, exc_info=True
-            )
+            logger.error("SqliteStatsStore has_counts error: %s", exc, exc_info=True)
             return False
 
     def export_counts(self) -> Dict[str, Dict[str, int]]:
@@ -682,9 +676,7 @@ class SqliteStatsStoreBackend(BaseStatsStoreBackend):
                     # Skip rows with non-integer values defensively.
                     continue
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error(
-                "SqliteStatsStoreBackend export_counts error: %s", exc, exc_info=True
-            )
+            logger.error("SqliteStatsStore export_counts error: %s", exc, exc_info=True)
         return result
 
     def has_query_log(self) -> bool:
@@ -694,9 +686,7 @@ class SqliteStatsStoreBackend(BaseStatsStoreBackend):
             cur = self._conn.execute("SELECT 1 FROM query_log LIMIT 1")  # type: ignore[attr-defined]
             return cur.fetchone() is not None
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error(
-                "SqliteStatsStoreBackend has_query_log error: %s", exc, exc_info=True
-            )
+            logger.error("SqliteStatsStore has_query_log error: %s", exc, exc_info=True)
             return False
 
     def rebuild_counts_from_query_log(
@@ -883,4 +873,4 @@ class SqliteStatsStoreBackend(BaseStatsStoreBackend):
             if conn is not None:
                 conn.close()
         except Exception:  # pragma: no cover - defensive
-            logger.exception("Error while closing SqliteStatsStoreBackend connection")
+            logger.exception("Error while closing SqliteStatsStore connection")

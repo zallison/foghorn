@@ -26,7 +26,7 @@ import dns.rdatatype
 import dns.resolver
 from cachetools import TTLCache
 
-from foghorn.utils.cache_registry import registered_cached
+from foghorn.utils.register_caches import registered_cached
 
 
 def _parse_resolv_conf_nameservers(path: str = "/etc/resolv.conf") -> list[str]:

@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, validator
 
 try:  # cachetools is an optional dependency; fall back to shim when missing.
     from cachetools import TTLCache  # type: ignore[import]
-    from foghorn.utils.cache_registry import registered_cached
+    from foghorn.utils.register_caches import registered_cached
 except Exception:  # pragma: no cover - defensive optional dependency handling
 
     class TTLCache(dict):  # type: ignore[override]
@@ -40,7 +40,7 @@ from foghorn.plugins.resolve.base import (
 logger = logging.getLogger(__name__)
 
 # Default service types to browse when `service_types` is omitted from the
-# MdnsBridgePlugin config. This mirrors the curated list shipped in
+# MdnsBridge config. This mirrors the curated list shipped in
 # `config/config.yaml` so that, in the common case, users can omit the
 # field and still get rich discovery.
 DEFAULT_MDNS_SERVICE_TYPES: List[str] = [
@@ -155,7 +155,7 @@ _MDNS_SANITIZE_QNAME_CACHE: TTLCache = TTLCache(maxsize=2048, ttl=3600)
 
 
 class MdnsBridgeConfig(BaseModel):
-    """Brief: Typed configuration model for MdnsBridgePlugin.
+    """Brief: Typed configuration model for MdnsBridge.
 
     Inputs:
       - domain: str DNS domain suffix to treat as the mDNS namespace (default: `.local`).
@@ -320,7 +320,7 @@ class _ServiceState:
 
 
 @plugin_aliases("mdns", "zeroconf", "dns_sd", "dnssd", "bonjour")
-class MdnsBridgePlugin(BasePlugin):
+class MdnsBridge(BasePlugin):
     """Brief: Expose mDNS/DNS-SD (zeroconf) data as DNS records.
 
     Inputs:
@@ -380,7 +380,7 @@ class MdnsBridgePlugin(BasePlugin):
         # Prefer per-plugin logger when available.
         log = getattr(self, "logger", logger)
         log.info(
-            "MdnsBridgePlugin setup: dns_domain=%s mdns_domain=%s network_enabled=%s include_ipv4=%s include_ipv6=%s ttl=%s info_timeout_ms=%s",
+            "MdnsBridge setup: dns_domain=%s mdns_domain=%s network_enabled=%s include_ipv4=%s include_ipv6=%s ttl=%s info_timeout_ms=%s",
             str(getattr(self._config_model, "domain", ".local")),
             ".local",
             bool(getattr(self._config_model, "network_enabled", True)),
@@ -437,7 +437,7 @@ class MdnsBridgePlugin(BasePlugin):
 
         if not bool(self._config_model.network_enabled):
             log.info(
-                "MdnsBridgePlugin: network_enabled=false; skipping zeroconf initialization"
+                "MdnsBridge: network_enabled=false; skipping zeroconf initialization"
             )
             return
 
@@ -452,7 +452,7 @@ class MdnsBridgePlugin(BasePlugin):
             )
         except Exception as exc:
             raise RuntimeError(
-                'MdnsBridgePlugin requires the "zeroconf" package. Install it or disable this plugin.'
+                'MdnsBridge requires the "zeroconf" package. Install it or disable this plugin.'
             ) from exc
 
         self._ServiceBrowser = ServiceBrowser
@@ -463,7 +463,7 @@ class MdnsBridgePlugin(BasePlugin):
         # mDNS sockets on all interfaces or enabling IPv6 multicast can fail.
         interfaces_cfg = self._config_model.zeroconf_interfaces
         log.debug(
-            "MdnsBridgePlugin: zeroconf config interfaces=%r ip_version=%r unicast=%r",
+            "MdnsBridge: zeroconf config interfaces=%r ip_version=%r unicast=%r",
             interfaces_cfg,
             self._config_model.zeroconf_ip_version,
             bool(self._config_model.zeroconf_unicast),
@@ -502,23 +502,23 @@ class MdnsBridgePlugin(BasePlugin):
                 unicast=bool(self._config_model.zeroconf_unicast),
                 ip_version=ip_version,
             )
-            log.info("MdnsBridgePlugin: Zeroconf initialized successfully")
+            log.info("MdnsBridge: Zeroconf initialized successfully")
         except PermissionError as exc:
             log.error(
-                "MdnsBridgePlugin: Zeroconf failed to bind mDNS sockets (EPERM). interfaces=%r ip_version=%r unicast=%r",
+                "MdnsBridge: Zeroconf failed to bind mDNS sockets (EPERM). interfaces=%r ip_version=%r unicast=%r",
                 interfaces_cfg,
                 self._config_model.zeroconf_ip_version,
                 bool(self._config_model.zeroconf_unicast),
                 exc_info=True,
             )
             raise RuntimeError(
-                "MdnsBridgePlugin: Zeroconf failed to bind mDNS sockets (permission error). "
+                "MdnsBridge: Zeroconf failed to bind mDNS sockets (permission error). "
                 "Try setting zeroconf_interfaces=default and/or zeroconf_ip_version=v4."
             ) from exc
         except OSError as exc:
             # Some systems report multicast/bind failures as generic OSError.
             log.error(
-                "MdnsBridgePlugin: Zeroconf failed to initialize mDNS sockets: %s (interfaces=%r ip_version=%r unicast=%r)",
+                "MdnsBridge: Zeroconf failed to initialize mDNS sockets: %s (interfaces=%r ip_version=%r unicast=%r)",
                 exc,
                 interfaces_cfg,
                 self._config_model.zeroconf_ip_version,
@@ -526,7 +526,7 @@ class MdnsBridgePlugin(BasePlugin):
                 exc_info=True,
             )
             raise RuntimeError(
-                f"MdnsBridgePlugin: Zeroconf failed to initialize mDNS sockets: {exc}. "
+                f"MdnsBridge: Zeroconf failed to initialize mDNS sockets: {exc}. "
                 "Try setting zeroconf_interfaces=default and/or zeroconf_ip_version=v4."
             ) from exc
 
@@ -535,7 +535,7 @@ class MdnsBridgePlugin(BasePlugin):
         # In that case, configure `service_types` to browse known types directly.
         try:
             browse_name = f"_services._dns-sd._udp{self._mdns_domain}."
-            log.debug("MdnsBridgePlugin: starting ServiceBrowser for %s", browse_name)
+            log.debug("MdnsBridge: starting ServiceBrowser for %s", browse_name)
             self._browsers.append(
                 ServiceBrowser(
                     self._zc,
@@ -543,25 +543,25 @@ class MdnsBridgePlugin(BasePlugin):
                     handlers=[self._on_service_type_event],
                 )
             )
-            log.debug("MdnsBridgePlugin: ServiceBrowser started")
+            log.debug("MdnsBridge: ServiceBrowser started")
         except PermissionError as exc:
             log.error(
-                "MdnsBridgePlugin: ServiceBrowser failed with EPERM while starting mDNS browsing",
+                "MdnsBridge: ServiceBrowser failed with EPERM while starting mDNS browsing",
                 exc_info=True,
             )
             raise RuntimeError(
-                "MdnsBridgePlugin: ServiceBrowser failed with EPERM while starting mDNS browsing. "
+                "MdnsBridge: ServiceBrowser failed with EPERM while starting mDNS browsing. "
                 "This is commonly caused by VPN/tunnel interfaces. Try setting zeroconf_interfaces to a "
                 "specific LAN interface IP (e.g. your Wi-Fi/Ethernet address) and zeroconf_ip_version=v4."
             ) from exc
         except OSError as exc:
             log.error(
-                "MdnsBridgePlugin: ServiceBrowser failed while starting mDNS browsing: %s",
+                "MdnsBridge: ServiceBrowser failed while starting mDNS browsing: %s",
                 exc,
                 exc_info=True,
             )
             raise RuntimeError(
-                f"MdnsBridgePlugin: ServiceBrowser failed while starting mDNS browsing: {exc}. "
+                f"MdnsBridge: ServiceBrowser failed while starting mDNS browsing: {exc}. "
                 "Try setting zeroconf_interfaces to a specific LAN interface IP and zeroconf_ip_version=v4."
             ) from exc
 
@@ -584,7 +584,7 @@ class MdnsBridgePlugin(BasePlugin):
                 self._start_type_browser(str(service_type))
             except Exception:
                 log.debug(
-                    "MdnsBridgePlugin: failed to start explicit service type browser for %r",
+                    "MdnsBridge: failed to start explicit service type browser for %r",
                     service_type,
                     exc_info=True,
                 )
@@ -697,7 +697,7 @@ class MdnsBridgePlugin(BasePlugin):
 
         log = getattr(self, "logger", logger)
         log.debug(
-            "MdnsBridgePlugin: PTR add owner=%s target=%s owners=%s targets=%s",
+            "MdnsBridge: PTR add owner=%s target=%s owners=%s targets=%s",
             self._normalize_owner(owner),
             self._normalize_owner(target),
             owners,
@@ -902,7 +902,7 @@ class MdnsBridgePlugin(BasePlugin):
             self._type_browsers[key] = browser
             self._browsers.append(browser)
 
-        log.debug("MdnsBridgePlugin: started explicit ServiceBrowser for %s", t)
+        log.debug("MdnsBridge: started explicit ServiceBrowser for %s", t)
 
     def _on_service_type_event(self, zeroconf, service_type: str, name: str, state_change) -> None:  # type: ignore[no-untyped-def]  # pragma: nocover callback from zeroconf
         """Brief: Handle PTR events for `_services._dns-sd._udp.<domain>.`.
@@ -922,7 +922,7 @@ class MdnsBridgePlugin(BasePlugin):
         with self._lock:
             if getattr(state_change, "name", "") == "Removed":
                 log.debug(
-                    "MdnsBridgePlugin: service type removed: %s (mdns_domain=%s)",
+                    "MdnsBridge: service type removed: %s (mdns_domain=%s)",
                     name,
                     self._mdns_domain,
                 )
@@ -936,7 +936,7 @@ class MdnsBridgePlugin(BasePlugin):
                 return
 
             log.debug(
-                "MdnsBridgePlugin: service type added/updated: %s (mdns_domain=%s)",
+                "MdnsBridge: service type added/updated: %s (mdns_domain=%s)",
                 name,
                 self._mdns_domain,
             )
@@ -986,7 +986,7 @@ class MdnsBridgePlugin(BasePlugin):
         with self._lock:
             if getattr(state_change, "name", "") == "Removed":
                 log.debug(
-                    "MdnsBridgePlugin: instance removed: %s (type=%s)",
+                    "MdnsBridge: instance removed: %s (type=%s)",
                     name,
                     service_type,
                 )
@@ -1007,7 +1007,7 @@ class MdnsBridgePlugin(BasePlugin):
                         self._update_service_state(canonical_instance, status="down")
                 except Exception:
                     log.debug(
-                        "MdnsBridgePlugin: failed to update service state for removal: %s (type=%s)",
+                        "MdnsBridge: failed to update service state for removal: %s (type=%s)",
                         name,
                         service_type,
                         exc_info=True,
@@ -1017,7 +1017,7 @@ class MdnsBridgePlugin(BasePlugin):
             # Record the instance event (PTRs are updated after we fetch ServiceInfo
             # so we can map service types to hostnames).
             log.debug(
-                "MdnsBridgePlugin: instance added/updated: %s (type=%s)",
+                "MdnsBridge: instance added/updated: %s (type=%s)",
                 name,
                 service_type,
             )
@@ -1028,7 +1028,7 @@ class MdnsBridgePlugin(BasePlugin):
             )
         except Exception:
             log.debug(
-                "MdnsBridgePlugin: get_service_info raised for %s (type=%s)",
+                "MdnsBridge: get_service_info raised for %s (type=%s)",
                 name,
                 service_type,
                 exc_info=True,
@@ -1037,7 +1037,7 @@ class MdnsBridgePlugin(BasePlugin):
 
         if info is None:
             log.debug(
-                "MdnsBridgePlugin: get_service_info returned None for %s (type=%s)",
+                "MdnsBridge: get_service_info returned None for %s (type=%s)",
                 name,
                 service_type,
             )
@@ -1053,7 +1053,7 @@ class MdnsBridgePlugin(BasePlugin):
             port = None
 
         log.debug(
-            "MdnsBridgePlugin: ingesting ServiceInfo for %s (type=%s host=%s port=%s)",
+            "MdnsBridge: ingesting ServiceInfo for %s (type=%s host=%s port=%s)",
             name,
             service_type,
             host,
@@ -1067,7 +1067,7 @@ class MdnsBridgePlugin(BasePlugin):
             )
         except Exception:
             log.debug(
-                "MdnsBridgePlugin: failed to index PTRs for service_type=%s host=%s",
+                "MdnsBridge: failed to index PTRs for service_type=%s host=%s",
                 service_type,
                 host,
                 exc_info=True,
@@ -1086,7 +1086,7 @@ class MdnsBridgePlugin(BasePlugin):
             self._ptr_add(service_type, canonical_instance)
         except Exception:
             log.debug(
-                "MdnsBridgePlugin: failed to index PTR for service_type=%s instance=%s",
+                "MdnsBridge: failed to index PTR for service_type=%s instance=%s",
                 service_type,
                 name,
                 exc_info=True,
@@ -1099,7 +1099,7 @@ class MdnsBridgePlugin(BasePlugin):
             self._update_service_state(key_for_state, status="up", host=host)
         except Exception:
             log.debug(
-                "MdnsBridgePlugin: failed to update service state for %s (type=%s)",
+                "MdnsBridge: failed to update service state for %s (type=%s)",
                 name,
                 service_type,
                 exc_info=True,
@@ -1190,7 +1190,7 @@ class MdnsBridgePlugin(BasePlugin):
 
         log = getattr(self, "logger", logger)
         log.debug(
-            "MdnsBridgePlugin: caching instance=%s host=%s port=%d ttl=%d",
+            "MdnsBridge: caching instance=%s host=%s port=%d ttl=%d",
             str(instance_name).rstrip("."),
             str(server).rstrip("."),
             int(port or 0),
@@ -1704,7 +1704,7 @@ class MdnsBridgePlugin(BasePlugin):
         return PluginDecision(action="override", response=reply.pack())
 
     def get_admin_pages(self) -> List[AdminPageSpec]:
-        """Brief: Describe the MdnsBridgePlugin admin page for the web UI.
+        """Brief: Describe the MdnsBridge admin page for the web UI.
 
         Inputs:
           - None; uses the plugin instance name for routing and data lookups.
@@ -1719,7 +1719,7 @@ class MdnsBridgePlugin(BasePlugin):
                 slug="mdns",
                 title="mDNS",
                 description=(
-                    "Services and hosts discovered by the MdnsBridgePlugin. "
+                    "Services and hosts discovered by the MdnsBridge. "
                     "Intended to be paired with JSON data from a future "
                     "/api/v1/plugins/{name}/mdns endpoint."
                 ),
@@ -2041,7 +2041,7 @@ class MdnsBridgePlugin(BasePlugin):
         """
 
         log = getattr(self, "logger", logger)
-        log.info("MdnsBridgePlugin: closing zeroconf resources")
+        log.info("MdnsBridge: closing zeroconf resources")
 
         zc = getattr(self, "_zc", None)
         if zc is not None:

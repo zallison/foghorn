@@ -1,5 +1,5 @@
 """
-Brief: Extra tests for NewDomainFilterPlugin covering DB freshness, cache corruption tolerance.
+Brief: Extra tests for NewDomainFilterExample covering DB freshness, cache corruption tolerance.
 
 Inputs:
   - None
@@ -11,7 +11,7 @@ Outputs:
 import datetime as dt
 from contextlib import closing
 
-from foghorn.plugins.resolve.new_domain_filter import NewDomainFilterPlugin
+from foghorn.plugins.resolve.new_domain_filter import NewDomainFilterExample
 
 
 def test_fetch_creation_date_uses_fresh_db_and_seeds_cache(tmp_path, monkeypatch):
@@ -25,7 +25,7 @@ def test_fetch_creation_date_uses_fresh_db_and_seeds_cache(tmp_path, monkeypatch
       - None: asserts returned datetime matches and cache populated
     """
     db = tmp_path / "whois.db"
-    plugin = NewDomainFilterPlugin(whois_db_path=str(db), whois_refresh_seconds=86400)
+    plugin = NewDomainFilterExample(whois_db_path=str(db), whois_refresh_seconds=86400)
     plugin.setup()
     now_ts = 2000000000
     domain = "fresh.com"
@@ -55,7 +55,7 @@ def test_fetch_creation_date_refreshes_stale_db(tmp_path, monkeypatch):
       - None: asserts returned date is new, DB updated, and cache set
     """
     db = tmp_path / "whois.db"
-    plugin = NewDomainFilterPlugin(whois_db_path=str(db), whois_refresh_seconds=100)
+    plugin = NewDomainFilterExample(whois_db_path=str(db), whois_refresh_seconds=100)
     plugin.setup()
     domain = "stale.com"
 
@@ -97,7 +97,7 @@ def test_fetch_creation_date_bad_cached_value_is_ignored(tmp_path, monkeypatch):
       - None: asserts returned date comes from DB and cache repaired
     """
     db = tmp_path / "whois.db"
-    plugin = NewDomainFilterPlugin(whois_db_path=str(db), whois_refresh_seconds=999999)
+    plugin = NewDomainFilterExample(whois_db_path=str(db), whois_refresh_seconds=999999)
     plugin.setup()
     domain = "cachecorrupt.com"
 

@@ -26,7 +26,7 @@ from dnslib import (  # noqa: F401 - imports are for implementations of this cla
 
 from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 from foghorn.plugins.cache.base import CachePlugin
-from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.config.logging_config import BracketLevelFormatter, SyslogFormatter
 
 # Canonical DNS response cache used by the resolver.
@@ -41,7 +41,7 @@ from foghorn.config.logging_config import BracketLevelFormatter, SyslogFormatter
 #
 # Outputs:
 #   - DNS_CACHE: CachePlugin instance
-DNS_CACHE: CachePlugin = InMemoryTTLCachePlugin()
+DNS_CACHE: CachePlugin = InMemoryTTLCache()
 
 # Canonical DNS response cache used by the resolver.
 #
@@ -55,7 +55,7 @@ DNS_CACHE: CachePlugin = InMemoryTTLCachePlugin()
 #
 # Outputs:
 #   - DNS_CACHE: CachePlugin instance
-DNS_CACHE: CachePlugin = InMemoryTTLCachePlugin()
+DNS_CACHE: CachePlugin = InMemoryTTLCache()
 
 logger = logging.getLogger(__name__)
 
@@ -946,9 +946,9 @@ def plugin_aliases(*aliases: str):
     Example:
         >>> from foghorn.plugins.resolve.base import BasePlugin, plugin_aliases
         >>> @plugin_aliases("acl", "access")
-        ... class AccessControlPlugin(BasePlugin):
+        ... class AccessControl(BasePlugin):
         ...     pass
-        >>> AccessControlPlugin.aliases
+        >>> AccessControl.aliases
         ('acl', 'access')
     """
 

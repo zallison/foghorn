@@ -35,7 +35,7 @@ plugins:
   #     include_ipv4: true
   #     include_ipv6: true
   #     info_timeout_ms: 1500
-  - module: examples  # ExamplesPlugin alias
+  - module: examples  # Examples alias
     # pre_priority: 60
     # post_priority: 90  # optional: perform rewrites late
     config:

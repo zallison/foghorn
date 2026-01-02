@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 try:  # cachetools is an optional dependency; fall back to shim when missing.
     from cachetools import TTLCache  # type: ignore[import]
-    from foghorn.utils.cache_registry import registered_cached
+    from foghorn.utils.register_caches import registered_cached
 except Exception:  # pragma: no cover - defensive optional dependency handling
 
     class TTLCache(dict):  # type: ignore[override]

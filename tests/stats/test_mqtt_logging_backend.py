@@ -1,4 +1,4 @@
-"""Brief: Tests for the MQTT logging-only BaseStatsStoreBackend implementation.
+"""Brief: Tests for the MQTT logging-only BaseStatsStore implementation.
 
 Inputs:
   - None; uses a fake paho-mqtt style client injected via monkeypatch.
@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from foghorn.plugins.querylog.mqtt_logging import (
-    MqttLoggingBackend,
+    MqttLogging,
     _import_mqtt_driver,
 )
 
@@ -118,7 +118,7 @@ def test_mqtt_logging_backend_constructs_and_marks_healthy(
         __import__("sys").modules, "paho.mqtt.client", _FakeMqttModule()
     )
 
-    backend = MqttLoggingBackend(
+    backend = MqttLogging(
         host="mqtt.example", port=1884, topic="foghorn/test", qos=1, retain=True
     )
 
@@ -143,7 +143,7 @@ def test_insert_query_log_publishes_payload_and_parses_result_json(
     fake_module = _FakeMqttModule()
     monkeypatch.setitem(__import__("sys").modules, "paho.mqtt.client", fake_module)
 
-    backend = MqttLoggingBackend(topic="foghorn/query_log", qos=2, retain=False)
+    backend = MqttLogging(topic="foghorn/query_log", qos=2, retain=False)
 
     result_payload = {"answers": ["1.2.3.4"], "dnssec_status": "dnssec_secure"}
     backend.insert_query_log(
@@ -197,7 +197,7 @@ def test_insert_query_log_returns_early_when_unhealthy(
         __import__("sys").modules, "paho.mqtt.client", _FakeMqttModule()
     )
 
-    backend = MqttLoggingBackend(topic="foghorn/query_log")
+    backend = MqttLogging(topic="foghorn/query_log")
     client = backend._client  # type: ignore[attr-defined]
 
     # Mark backend unhealthy via close() and verify insert_query_log is a no-op.
