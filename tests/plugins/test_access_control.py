@@ -1,5 +1,5 @@
 """
-Brief: Tests for foghorn.plugins.access_control module.
+Brief: Tests for foghorn.plugins.resolve.access_control module.
 
 Inputs:
   - None
@@ -8,8 +8,8 @@ Outputs:
   - None
 """
 
-from foghorn.plugins.access_control import AccessControlPlugin
-from foghorn.plugins.base import PluginContext
+from foghorn.plugins.resolve.access_control import AccessControlPlugin
+from foghorn.plugins.resolve.base import PluginContext
 
 
 def test_access_control_init_default_allow(tmp_path):

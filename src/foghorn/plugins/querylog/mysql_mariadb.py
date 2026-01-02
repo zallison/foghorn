@@ -1,4 +1,10 @@
 from __future__ import annotations
+import json
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+from .base import BaseStatsStoreBackend
+from .sqlite import _normalize_domain, _is_subdomain
 
 """MySQL/MariaDB-backed implementation of the BaseStatsStoreBackend interface.
 
@@ -19,13 +25,6 @@ Notes:
     lazily so that Foghorn does not require it unless this backend is used.
 """
 
-import json
-import logging
-from typing import Any, Dict, List, Optional, Tuple
-
-from .base import BaseStatsStoreBackend
-from .sqlite import _normalize_domain, _is_subdomain
-
 logger = logging.getLogger(__name__)
 
 
@@ -43,6 +42,7 @@ def _import_mysql_driver():
     """
 
     try:  # Prefer mysql-connector-python when available.
+        # pragma: disable E402
         import mysql.connector as driver  # type: ignore[import]
 
         return driver
@@ -417,8 +417,6 @@ class MySqlStatsStoreBackend(BaseStatsStoreBackend):
         )
         cur2 = self._conn.cursor()
         cur2.execute(sql, tuple(params + [page_size_i, offset]))
-
-        import json
 
         items: List[Dict[str, Any]] = []
         for (

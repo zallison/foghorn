@@ -29,8 +29,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Type
 
-from foghorn.plugins.base import BasePlugin
-from foghorn.plugins import registry as plugin_registry
+from foghorn.plugins.resolve.base import BasePlugin
+from foghorn.plugins.resolve import registry as plugin_registry
 
 # Add the 'src' directory to sys.path to resolve 'foghorn' module imports
 script_dir = Path(__file__).resolve().parent
@@ -362,7 +362,7 @@ def build_document(base_schema_path: Optional[str] = None) -> Dict[str, Any]:
     _augment_variables_schema(base)
 
     # Ensure statistics.persistence documents the backend loader options used
-    # by foghorn.querylog_backends.load_stats_store_backend().
+    # by foghorn.plugins.querylog.load_stats_store_backend().
     _augment_statistics_persistence_schema(base)
 
     plugins = collect_plugin_schemas()

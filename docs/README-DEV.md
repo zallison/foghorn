@@ -25,7 +25,7 @@ This release introduces a few developer-visible breaking changes:
   - DoT: `src/foghorn/transports/dot.py` with connection pooling
   - DoH: `src/foghorn/transports/doh.py` (stdlib http.client; GET/POST; TLS verification controls)
 - Plugins: `src/foghorn/plugins/*`, discovered via `plugins/registry.py`. Hooks: `pre_resolve`, `post_resolve`. Aliases supported (e.g., `acl`, `router`, `new_domain`, `filter`, `custom`, `records`, `docker-hosts`).
-- Cache: cache plugins live in `src/foghorn/cache_plugins/`; `src/foghorn/cache.py` provides internal TTL caches used by the resolver and some plugins.
+- Cache: cache plugins live in `src/foghorn/plugins/cache/`; TTL cache backends live in `src/foghorn/plugins/cache/backends/` and are reused by the resolver and some plugins.
 
 ## Request Pipeline
 
@@ -54,7 +54,7 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
 - Listeners under `listen.{udp,tcp,dot,doh}` with `enabled`, `host`, `port`. DoT/DoH accept `cert_file` and `key_file` (optional for DoH if plain HTTP is desired). The DoH listener is implemented via `foghorn.doh_api.start_doh_server` and shares the same resolver/plugin pipeline as UDP/TCP/DoT.
 - Upstreams accept optional `transport: udp|tcp|dot|doh`. For DoT set `tls.server_name`, `tls.verify`. For DoH set `url`, optional `method`, `headers`, and `tls.verify`/`tls.ca_file`.
 - `dnssec.mode: ignore|passthrough|validate`, `dnssec.validation: upstream_ad|local|local_extended` (local* are experimental), `dnssec.udp_payload_size` (default 1232).
-- DNS caching is implemented via cache plugins configured under the top-level `cache` key. Built-in cache plugins live in `src/foghorn/cache_plugins/`:
+- DNS caching is implemented via cache plugins configured under the top-level `cache` key. Built-in cache plugins live in `src/foghorn/plugins/cache/`:
   - `in_memory_ttl` (default)
   - `sqlite3` (persistent on-disk)
   - `redis` / `valkey` (remote; requires the optional Python dependency `redis`)

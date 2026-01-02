@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from foghorn.querylog_backends.base import (
+from foghorn.plugins.querylog.base import (
     BaseStatsStoreBackend,
     StatsStoreBackendConfig,
 )

@@ -16,8 +16,8 @@ from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
 from cachetools import TTLCache
 
 from foghorn.utils.cache_registry import registered_cached
-from ..plugins import base as plugin_base
-from ..plugins.base import BasePlugin, PluginContext, PluginDecision
+from ..plugins.resolve import base as plugin_base
+from ..plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
 from ..recursive_resolver import RecursiveResolver
 from ..transports.dot import DoTError, get_dot_pool
 from ..transports.tcp import TCPError, get_tcp_pool, tcp_query
@@ -1336,7 +1336,7 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
     upstreams, DNSSEC knobs, and optional StatsCollector) so that TCP/DoT/DoH
     and other non-UDP callers share the same behavior and statistics pipeline.
 
-    DNS response caching is provided by `foghorn.plugins.base.DNS_CACHE`.
+    DNS response caching is provided by `foghorn.plugins.resolve.base.DNS_CACHE`.
 
     Example:
       >>> resp = resolve_query_bytes(query_bytes, '127.0.0.1')
@@ -1402,7 +1402,7 @@ class DNSServer:
         # Install cache plugin for all transports.
         if cache is None:
             try:
-                from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+                from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
 
                 cache = InMemoryTTLCachePlugin()
             except Exception:

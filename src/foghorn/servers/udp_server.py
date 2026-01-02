@@ -6,7 +6,7 @@ from typing import Callable, Dict, List, Optional
 
 from dnslib import QTYPE, RCODE, DNSRecord
 
-from ..plugins.base import BasePlugin, PluginDecision
+from ..plugins.resolve.base import BasePlugin, PluginDecision
 
 logger = logging.getLogger("foghorn.server")
 
@@ -226,7 +226,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                         rcode_name,
                         effective_ttl,
                     )
-                    from ..plugins import base as plugin_base
+                    from ..plugins.resolve import base as plugin_base
 
                     plugin_base.DNS_CACHE.set(cache_key, effective_ttl, response_wire)
                 else:
@@ -624,7 +624,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         (plugins, upstreams, DNSSEC settings, and optional stats collector)
         are still honored by the core resolver.
 
-        DNS response caching is provided by foghorn.plugins.base.DNS_CACHE.
+        DNS response caching is provided by foghorn.plugins.resolve.base.DNS_CACHE.
         """
         data, sock = self.request
         client_ip = self.client_address[0]

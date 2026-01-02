@@ -46,7 +46,7 @@ from pydantic import BaseModel
 
 from ..stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 from .udp_server import DNSUDPHandler
-from ..plugins.base import AdminPageSpec
+from ..plugins.resolve.base import AdminPageSpec
 
 try:
     import psutil  # type: ignore[import]
@@ -2813,7 +2813,7 @@ def create_app(
 
         # Also surface the global DNS cache plugin when it exposes admin UI.
         try:
-            from ..plugins import base as plugin_base
+            from ..plugins.resolve import base as plugin_base
 
             cache = getattr(plugin_base, "DNS_CACHE", None)
         except Exception:
@@ -2946,7 +2946,7 @@ def create_app(
         """Brief: Return a JSON-safe snapshot for the active DNS cache plugin.
 
         Inputs:
-          - None (uses foghorn.plugins.base.DNS_CACHE).
+          - None (uses foghorn.plugins.resolve.base.DNS_CACHE).
 
         Outputs:
           - Dict with server_time and data keys when the active cache exposes a
@@ -2954,7 +2954,7 @@ def create_app(
         """
 
         try:
-            from ..plugins import base as plugin_base
+            from ..plugins.resolve import base as plugin_base
 
             cache = getattr(plugin_base, "DNS_CACHE", None)
         except Exception:

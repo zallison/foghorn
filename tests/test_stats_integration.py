@@ -4,8 +4,8 @@ from unittest.mock import Mock, patch
 
 from dnslib import QTYPE, DNSRecord
 
-from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
-from foghorn.plugins import base as plugin_base
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins.resolve import base as plugin_base
 from foghorn.servers.server import DNSUDPHandler
 from foghorn.stats import StatsCollector
 

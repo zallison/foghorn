@@ -1,100 +1,91 @@
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Optional, Tuple
 
-from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
+from foghorn.plugins.cache.backends.sqlite_ttl import SQLite3TTLCache
 
 from .base import CachePlugin, cache_aliases
 
 
-@cache_aliases("in_memory_ttl", "memory", "ttl")
-class InMemoryTTLCachePlugin(CachePlugin):
-    """In-memory TTL cache plugin.
+@cache_aliases("sqlite3", "sqlite", "sqlite_cache", "sqlite3_cache")
+class SQLite3CachePlugin(CachePlugin):
+    """SQLite3-backed DNS cache plugin.
 
     Brief:
-      Default CachePlugin implementation backed by `foghorn.cache.FoghornTTLCache`.
+      Persistent CachePlugin implementation for DNS caching. Internally this
+      delegates storage and TTL behavior to `foghorn.plugins.cache.backends.sqlite_ttl.SQLite3TTLCache`
+      so other subsystems (plugins, recursive resolver helpers) can reuse the
+      same sqlite-backed TTL cache.
 
     Inputs:
-      - **config: Optional implementation-specific config.
-          - min_cache_ttl: Non-negative int seconds. This is the cache expiry
-            floor applied by the resolver when caching responses.
+      - **config:
+          - db_path (str): Path to sqlite3 DB file.
+          - path (str): Alias for db_path.
+          - namespace (str): Namespace/table name (default 'dns_cache').
+          - table (str): Backward-compatible alias for namespace.
+          - min_cache_ttl (int): Optional cache TTL floor used by the resolver.
+          - journal_mode (str): SQLite journal mode; defaults to 'WAL'.
 
     Outputs:
-      - InMemoryTTLCachePlugin instance.
+      - SQLite3CachePlugin instance.
+
+    Example:
+      cache:
+        module: sqlite3
+        config:
+          db_path: ./config/var/dns_cache.db
+          min_cache_ttl: 60
     """
 
     def __init__(self, **config: object) -> None:
-        """Brief: Initialize an in-memory TTL cache.
+        """Brief: Initialize the sqlite3 cache plugin.
 
         Inputs:
           - **config:
-              - min_cache_ttl: Non-negative int seconds cache TTL floor.
+              - db_path/path: sqlite3 database file path.
+              - namespace: Optional namespace/table name.
+              - table: Backward-compatible alias for namespace.
+              - min_cache_ttl: Optional cache TTL floor used by resolver.
+              - journal_mode: SQLite journal mode (e.g., 'WAL').
 
         Outputs:
           - None.
         """
 
-        self.min_cache_ttl = max(0, int(config.get("min_cache_ttl", 0) or 0))
-        self._cache = FoghornTTLCache()
+        cfg_db_path = config.get("db_path")
+        if not isinstance(cfg_db_path, str) or not cfg_db_path.strip():
+            cfg_db_path = config.get("path")
+        if isinstance(cfg_db_path, str) and cfg_db_path.strip():
+            db_path = cfg_db_path.strip()
+        else:  # pragma: nocover default path only used in production
+            db_path = "./config/var/dns_cache.db"
 
-    def get(self, key: Tuple[str, int]) -> Any | None:
-        """Brief: Return cached value when present.
+        self.db_path: str = os.path.abspath(os.path.expanduser(str(db_path)))
+        self.min_cache_ttl: int = max(0, int(config.get("min_cache_ttl", 0) or 0))
 
-        Inputs:
-          - key: Tuple[str, int] cache key.
+        namespace = config.get("namespace", "dns_cache")
+        if (
+            not isinstance(namespace, str) or not namespace.strip()
+        ):  # pragma: nocover validated by config layer
+            raise ValueError(
+                "sqlite cache config requires a non-empty 'namespace' field"
+            )
+        journal_mode = config.get("journal_mode", "WAL")
 
-        Outputs:
-          - Any | None: Cached value, or None.
-        """
-
-        return self._cache.get(key)
-
-    def get_with_meta(
-        self, key: Tuple[str, int]
-    ) -> Tuple[Any | None, Optional[float], Optional[int]]:
-        """Brief: Return cached value plus seconds_remaining and original TTL.
-
-        Inputs:
-          - key: Tuple[str, int] cache key.
-
-        Outputs:
-          - (value_or_None, seconds_remaining_or_None, original_ttl_or_None)
-        """
-
-        return self._cache.get_with_meta(key)
-
-    def set(self, key: Tuple[str, int], ttl: int, value: Any) -> None:
-        """Brief: Store a cached value.
-
-        Inputs:
-          - key: Tuple[str, int] cache key.
-          - ttl: int time-to-live seconds.
-          - value: cached payload.
-
-        Outputs:
-          - None.
-        """
-
-        self._cache.set(key, ttl, value)
-
-    def purge(self) -> int:
-        """Brief: Purge expired items from the cache.
-
-        Inputs:
-          - None.
-
-        Outputs:
-          - int: Number of removed entries.
-        """
-
-        return int(self._cache.purge_expired())
+        self._cache = SQLite3TTLCache(
+            self.db_path,
+            namespace=str(namespace or "dns_cache"),
+            journal_mode=str(journal_mode or "WAL"),
+            create_dir=True,
+        )
 
     def get_http_snapshot(self) -> dict[str, object]:
-        """Brief: Summarize current in-memory cache state for the admin web UI.
+        """Brief: Summarize current SQLite3 cache state for the admin web UI.
 
         Inputs:
-          - None (uses the underlying FoghornTTLCache backing store and
+          - None (uses the underlying SQLite3TTLCache connection and
             well-known caches from configured plugins).
 
         Outputs:
@@ -106,46 +97,38 @@ class InMemoryTTLCachePlugin(CachePlugin):
         total_entries = 0
         live_entries = 0
         expired_entries = 0
-        now_ts = time.time()
+        now_ts: float | None = None
 
-        # FoghornTTLCache stores entries in a private _store mapping of
-        # (key, (expiry, value)). We introspect this structure under the cache
-        # lock to compute lightweight statistics for the admin UI.
         try:
-            store = getattr(self._cache, "_store", {}) or {}
-            lock = getattr(self._cache, "_lock", None)
-        except Exception:
-            store = {}
-            lock = None
+            conn = getattr(self._cache, "_conn", None)
+            namespace = getattr(self._cache, "namespace", "ttl_cache")
+            if conn is not None:
+                cur = conn.cursor()
+                cur.execute(f"SELECT COUNT(*) FROM {namespace}")
+                row = cur.fetchone()
+                total_entries = int(row[0]) if row and row[0] is not None else 0
+                now_ts = time.time()
+                cur.execute(
+                    f"SELECT COUNT(*) FROM {namespace} WHERE expiry <= ?",
+                    (float(now_ts),),
+                )
+                row2 = cur.fetchone()
+                expired_entries = int(row2[0]) if row2 and row2[0] is not None else 0
+        except (
+            Exception
+        ):  # pragma: nocover - defensive snapshot query handling; zero-fill on any failure
+            # Best-effort only; fallback to zeros on any failure.
+            total_entries = max(total_entries, 0)
+            expired_entries = max(expired_entries, 0)
 
-        def _compute_counts(
-            mapping: dict[tuple[object, object], tuple[float, Any]],
-        ) -> tuple[int, int, int]:
-            total = 0
-            live = 0
-            expired = 0
-            for _k, (expiry, _value) in list(mapping.items()):
-                total += 1
-                try:
-                    exp = float(expiry)
-                except Exception:
-                    # Treat malformed entries as expired for counting purposes.
-                    expired += 1
-                    continue
-                if exp <= now_ts:
-                    expired += 1
-                else:
-                    live += 1
-            return total, live, expired
+        live_entries = max(0, total_entries - expired_entries)
 
-        if hasattr(self._cache, "_lock") and lock is not None:
-            try:
-                with lock:
-                    total_entries, live_entries, expired_entries = _compute_counts(store)  # type: ignore[arg-type]
-            except Exception:
-                total_entries = live_entries = expired_entries = 0
-        else:
-            total_entries, live_entries, expired_entries = _compute_counts(store)  # type: ignore[arg-type]
+        db_size_bytes = 0
+        try:
+            if os.path.isfile(self.db_path):
+                db_size_bytes = max(0, int(os.path.getsize(self.db_path)))
+        except Exception:  # pragma: nocover - filesystem errors treated as size=0
+            db_size_bytes = 0
 
         # Global counters from the primary cache backend, when available.
         calls_total = getattr(self._cache, "calls_total", None)
@@ -153,12 +136,13 @@ class InMemoryTTLCachePlugin(CachePlugin):
         cache_misses = getattr(self._cache, "cache_misses", None)
 
         summary: dict[str, object] = {
-            "backend": "in_memory",
-            "namespace": getattr(self._cache, "namespace", None) or "default",
+            "db_path": self.db_path,
+            "namespace": getattr(self._cache, "namespace", "dns_cache"),
+            "journal_mode": getattr(self._cache, "journal_mode", "WAL"),
             "total_entries": int(total_entries),
             "live_entries": int(live_entries),
             "expired_entries": int(expired_entries),
-            "min_cache_ttl": int(self.min_cache_ttl),
+            "db_size_bytes": int(db_size_bytes),
         }
         if isinstance(calls_total, int):
             summary["calls_total"] = int(calls_total)
@@ -192,15 +176,38 @@ class InMemoryTTLCachePlugin(CachePlugin):
             entries_total = 0
             entries_live = 0
             entries_expired = 0
+            current_ts = time.time()
             calls_total_local: object = None
             cache_hits_local: object = None
             cache_misses_local: object = None
+
+            def _compute_counts(
+                mapping: dict[tuple[object, object], tuple[float, Any]],
+            ) -> tuple[int, int, int]:
+                total = 0
+                live = 0
+                expired = 0
+                for _k, (expiry, _value) in list(mapping.items()):
+                    total += 1
+                    try:
+                        exp = float(expiry)
+                    except Exception:
+                        expired += 1
+                        continue
+                    if exp <= current_ts:
+                        expired += 1
+                    else:
+                        live += 1
+                return total, live, expired
+
             # Pull best-effort counters from the backend when present.
             try:
                 calls_total_local = getattr(cache_obj, "calls_total", None)
                 cache_hits_local = getattr(cache_obj, "cache_hits", None)
                 cache_misses_local = getattr(cache_obj, "cache_misses", None)
-            except Exception:  # pragma: no cover - defensive only
+            except (
+                Exception
+            ):  # pragma: nocover - defensive only; cache_obj may not expose counters
                 calls_total_local = cache_hits_local = cache_misses_local = None
 
             if inner_lock is not None:
@@ -230,10 +237,12 @@ class InMemoryTTLCachePlugin(CachePlugin):
                 if isinstance(cache_hits_local, int) and isinstance(
                     cache_misses_local, int
                 ):
-                    total = cache_hits_local + cache_misses_local
-                    if total > 0:
-                        hit_pct_local = round((cache_hits_local / total) * 100.0, 1)
-            except Exception:
+                    total_local = cache_hits_local + cache_misses_local
+                    if total_local > 0:
+                        hit_pct_local = round(
+                            (cache_hits_local / total_local) * 100.0, 1
+                        )
+            except Exception:  # pragma: nocover - defensive percentage computation
                 hit_pct_local = None
 
             row: dict[str, object] = {
@@ -266,12 +275,12 @@ class InMemoryTTLCachePlugin(CachePlugin):
                     hit_pct_primary = round(
                         (cache_hits_summary / total_primary) * 100.0, 1
                     )
-        except Exception:
+        except Exception:  # pragma: nocover - defensive percentage computation
             hit_pct_primary = None
 
         primary_row: dict[str, object] = {
             "label": "dns_cache (primary)",
-            "backend": summary["backend"],
+            "backend": "sqlite3",
             "entries": summary["total_entries"],
             "live_entries": summary["live_entries"],
             "expired_entries": summary["expired_entries"],
@@ -288,19 +297,23 @@ class InMemoryTTLCachePlugin(CachePlugin):
             from foghorn.servers.udp_server import DNSUDPHandler  # type: ignore[import]
 
             plugins_list = getattr(DNSUDPHandler, "plugins", []) or []
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - import/attribute errors leave plugins_list empty
             plugins_list = []
 
         for plugin in plugins_list:
             try:
                 cache_obj = getattr(plugin, "_targets_cache", None)
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: nocover - defensive getattr on plugin._targets_cache
                 cache_obj = None
             if cache_obj is None:
                 continue
             try:
                 name = getattr(plugin, "name", None) or plugin.__class__.__name__
-            except Exception:
+            except Exception:  # pragma: nocover - defensive getattr on plugin.name
                 name = plugin.__class__.__name__
             label = f"plugin_targets:{name}"
             caches.append(_summarize_foghorn_ttl(label, cache_obj))
@@ -310,7 +323,7 @@ class InMemoryTTLCachePlugin(CachePlugin):
             from foghorn.utils.cache_registry import get_registered_cached
 
             decorated = get_registered_cached()
-        except Exception:
+        except Exception:  # pragma: nocover - registry import failure is non-critical
             decorated = []
 
         decorated_rows: list[dict[str, object]] = []
@@ -319,15 +332,15 @@ class InMemoryTTLCachePlugin(CachePlugin):
                 module = str(entry.get("module", ""))
                 qualname = str(entry.get("qualname", ""))
                 cache_kwargs = entry.get("cache_kwargs", {}) or {}
-                # Prefer normalized ttl/maxsize recorded by the registry; fall
-                # back to any explicit decorator kwargs if present.
                 ttl_val = entry.get("ttl") or cache_kwargs.get("ttl")
                 maxsize_val = entry.get("maxsize") or cache_kwargs.get("maxsize")
                 size_current = entry.get("size_current")
                 calls_total = entry.get("calls_total")
                 cache_hits = entry.get("cache_hits")
                 cache_misses = entry.get("cache_misses")
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: nocover - defensive against malformed registry entries
                 module = ""
                 qualname = ""
                 ttl_val = None
@@ -340,14 +353,13 @@ class InMemoryTTLCachePlugin(CachePlugin):
             if not module or not qualname:
                 continue
 
-            # Compute hit percentage when we have both hit/miss counters.
             hit_pct: object = None
             try:
                 if isinstance(cache_hits, int) and isinstance(cache_misses, int):
                     total = cache_hits + cache_misses
                     if total > 0:
                         hit_pct = round((cache_hits / total) * 100.0, 1)
-            except Exception:
+            except Exception:  # pragma: nocover - defensive percentage computation
                 hit_pct = None
 
             decorated_rows.append(
@@ -378,15 +390,17 @@ class InMemoryTTLCachePlugin(CachePlugin):
         return {"summary": summary, "caches": caches, "decorated": decorated_rows}
 
     def get_admin_ui_descriptor(self) -> dict[str, object]:
-        """Brief: Describe in-memory cache admin UI using a generic snapshot layout.
+        """Brief: Describe SQLite cache admin UI using a generic snapshot layout.
 
         Inputs:
-          - None (uses the active DNS cache instance when configured).
+          - None (uses the global DNS cache instance when configured).
 
         Outputs:
           - dict with keys compatible with plugin-based admin descriptors.
         """
 
+        # Cache plugins do not participate in the plugin ordering by name, so we
+        # expose a single logical tab named "cache".
         plugin_name = getattr(self, "name", "cache") or "cache"
         base_title = "Cache"
         title = f"{base_title} ({plugin_name})" if plugin_name else base_title
@@ -401,12 +415,13 @@ class InMemoryTTLCachePlugin(CachePlugin):
                     "path": "summary",
                     "align": "right",
                     "rows": [
-                        {"key": "backend", "label": "Backend"},
+                        {"key": "db_path", "label": "Database path"},
                         {"key": "namespace", "label": "Namespace"},
-                        {"key": "min_cache_ttl", "label": "Min cache TTL (s)"},
+                        {"key": "journal_mode", "label": "Journal mode"},
                         {"key": "total_entries", "label": "Total entries"},
                         {"key": "live_entries", "label": "Live entries"},
                         {"key": "expired_entries", "label": "Expired entries"},
+                        {"key": "db_size_bytes", "label": "DB size (bytes)"},
                         {"key": "calls_total", "label": "Calls"},
                         {"key": "cache_hits", "label": "Hits"},
                         {"key": "cache_misses", "label": "Misses"},
@@ -462,7 +477,84 @@ class InMemoryTTLCachePlugin(CachePlugin):
             "name": str(plugin_name),
             "title": str(title),
             "order": 40,
-            "kind": "cache_memory",
+            "kind": "cache_sqlite",
             "endpoints": {"snapshot": snapshot_url},
             "layout": layout,
         }
+
+    def get(self, key: Tuple[str, int]) -> Any | None:
+        """Brief: Lookup a cached entry enforcing expiry.
+
+        Inputs:
+          - key: Tuple[str, int] cache key (qname, qtype).
+
+        Outputs:
+          - Any | None: Cached value if present and not expired; otherwise None.
+        """
+
+        return self._cache.get(key)
+
+    def get_with_meta(
+        self, key: Tuple[str, int]
+    ) -> Tuple[Any | None, Optional[float], Optional[int]]:
+        """Brief: Lookup a cached entry and return metadata.
+
+        Inputs:
+          - key: Tuple[str, int] cache key (qname, qtype).
+
+        Outputs:
+          - (value_or_None, seconds_remaining_or_None, original_ttl_or_None)
+        """
+
+        return self._cache.get_with_meta(key)
+
+    def set(self, key: Tuple[str, int], ttl: int, value: Any) -> None:
+        """Brief: Store a value under key with a TTL.
+
+        Inputs:
+          - key: Tuple[str, int] cache key (qname, qtype).
+          - ttl: int time-to-live in seconds.
+          - value: Cached value.
+
+        Outputs:
+          - None.
+        """
+
+        self._cache.set(key, ttl, value)
+
+    def purge(self) -> int:
+        """Brief: Purge expired entries.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - int: Number of entries removed (best-effort).
+        """
+
+        return int(self._cache.purge())
+
+    def close(self) -> None:
+        """Brief: Close underlying sqlite resources.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+        """
+
+        try:
+            self._cache.close()
+        except (
+            Exception
+        ):  # pragma: nocover - defensive close during interpreter shutdown
+            pass
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except (
+            Exception
+        ):  # pragma: nocover - defensive __del__ during interpreter shutdown
+            pass

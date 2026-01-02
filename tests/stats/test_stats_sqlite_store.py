@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from foghorn.stats import StatsSQLiteStore
-from foghorn.querylog_backends.sqlite import (
+from foghorn.plugins.querylog.sqlite import (
     SqliteStatsStoreBackend,
     _is_subdomain,
     _normalize_domain,

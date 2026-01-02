@@ -15,8 +15,8 @@ import time
 
 import pytest
 
-from foghorn.cache_plugins.registry import load_cache_plugin
-from foghorn.cache_plugins.sqlite_cache import SQLite3CachePlugin
+from foghorn.plugins.cache.registry import load_cache_plugin
+from foghorn.plugins.cache.sqlite_cache import SQLite3CachePlugin
 
 
 def test_sqlite3_cache_creates_parent_directory(tmp_path) -> None:
@@ -51,7 +51,7 @@ def test_sqlite3_cache_roundtrip_bytes(tmp_path, monkeypatch) -> None:
         get() misses after expiry.
     """
 
-    import foghorn.cache_backends.sqlite_ttl as mod
+    import foghorn.plugins.cache.backends.sqlite_ttl as mod
 
     db_path = tmp_path / "dns_cache.db"
     plugin = SQLite3CachePlugin(db_path=str(db_path))

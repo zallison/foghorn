@@ -12,8 +12,8 @@ from contextlib import closing
 
 from dnslib import QTYPE
 
-from foghorn.plugins.base import PluginContext
-from foghorn.plugins.greylist import GreylistPlugin
+from foghorn.plugins.resolve.base import PluginContext
+from foghorn.plugins.resolve.greylist import GreylistPlugin
 
 
 def test_first_seen_inserts_and_denies(tmp_path, monkeypatch):

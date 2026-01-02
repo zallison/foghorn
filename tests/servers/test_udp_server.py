@@ -16,7 +16,7 @@ import pytest
 from dnslib import DNSRecord, QTYPE, RCODE
 
 from foghorn.servers.udp_server import DNSUDPHandler, serve_udp
-from foghorn.plugins.base import PluginContext, PluginDecision
+from foghorn.plugins.resolve.base import PluginContext, PluginDecision
 
 
 def _echo_resolver(q: bytes, client_ip: str) -> bytes:

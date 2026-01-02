@@ -10,7 +10,7 @@ Outputs:
 
 import logging
 
-from foghorn.plugins.base import BasePlugin, PluginContext
+from foghorn.plugins.resolve.base import BasePlugin, PluginContext
 
 
 def test_default_priorities_are_100():

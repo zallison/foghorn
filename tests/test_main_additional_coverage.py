@@ -19,10 +19,10 @@ from unittest.mock import mock_open, patch
 import pytest
 
 import foghorn.main as main_mod
-from foghorn.cache_plugins.none import NullCache
+from foghorn.plugins.cache.none import NullCache
 from foghorn.config.config_parser import normalize_upstream_config
 from foghorn.main import _clear_lru_caches, run_setup_plugins
-from foghorn.plugins.base import BasePlugin
+from foghorn.plugins.resolve.base import BasePlugin
 
 
 def test_clear_lru_caches_none_and_explicit_list():
@@ -222,7 +222,7 @@ def test_main_installs_cache_plugin_without_udp_listener(monkeypatch) -> None:
 
     assert rc == 0
 
-    from foghorn.plugins import base as plugin_base
+    from foghorn.plugins.resolve import base as plugin_base
 
     assert isinstance(plugin_base.DNS_CACHE, NullCache)
 

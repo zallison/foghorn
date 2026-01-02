@@ -15,8 +15,8 @@ import sys
 
 import pytest
 
-from foghorn.cache_plugins import redis_cache as redis_cache_mod
-from foghorn.cache_plugins.registry import get_cache_plugin_class, load_cache_plugin
+from foghorn.plugins.cache import redis_cache as redis_cache_mod
+from foghorn.plugins.cache.registry import get_cache_plugin_class, load_cache_plugin
 
 
 class FakeRedisClient:

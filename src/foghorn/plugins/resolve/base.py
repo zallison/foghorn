@@ -24,9 +24,9 @@ from dnslib import (  # noqa: F401 - imports are for implementations of this cla
     DNSRecord,
 )
 
-from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
-from foghorn.cache_plugins.base import CachePlugin
-from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
+from foghorn.plugins.cache.base import CachePlugin
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
 from foghorn.config.logging_config import BracketLevelFormatter, SyslogFormatter
 
 # Canonical DNS response cache used by the resolver.
@@ -151,8 +151,6 @@ class PluginDecision:
         # BasePlugin instance, which indicates a plugin hook constructed this
         # decision. Any failures here must not affect normal query handling.
         try:
-            from foghorn.plugins.base import BasePlugin  # type: ignore[import]
-
             for frame_info in inspect.stack():
                 self_obj = frame_info.frame.f_locals.get("self")
                 if isinstance(self_obj, BasePlugin):
@@ -189,7 +187,7 @@ class PluginContext:
       - PluginContext instance with fields initialized.
 
     Example use:
-        >>> from foghorn.plugins.base import PluginContext
+        >>> from foghorn.plugins.resolve.base import PluginContext
         >>> ctx = PluginContext(client_ip="192.0.2.1")
         >>> ctx.client_ip
         '192.0.2.1'
@@ -235,7 +233,7 @@ class BasePlugin:
         helpers.
 
     Example use:
-        >>> from foghorn.plugins.base import BasePlugin
+        >>> from foghorn.plugins.resolve.base import BasePlugin
         >>> class MyPlugin(BasePlugin):
         ...     pre_priority = 10
         ...     def pre_resolve(self, qname, qtype, req, ctx):
@@ -298,7 +296,7 @@ class BasePlugin:
         Priority values are clamped to [1, 255]. Invalid types use class defaults.
 
         Example use:
-            >>> from foghorn.plugins.base import BasePlugin
+            >>> from foghorn.plugins.resolve.base import BasePlugin
             >>> plugin = BasePlugin(pre_priority=10, post_priority=200)
             >>> plugin.pre_priority
             10
@@ -811,7 +809,7 @@ class BasePlugin:
             the query to proceed unchanged (default).
 
         Example use:
-            >>> from foghorn.plugins.base import BasePlugin, PluginContext
+            >>> from foghorn.plugins.resolve.base import BasePlugin, PluginContext
             >>> plugin = BasePlugin()
             >>> ctx = PluginContext('127.0.0.1')
             >>> plugin.pre_resolve("example.com", 1, b'', ctx) is None
@@ -835,7 +833,7 @@ class BasePlugin:
             the upstream response as-is (default).
 
         Example use:
-            >>> from foghorn.plugins.base import BasePlugin, PluginContext
+            >>> from foghorn.plugins.resolve.base import BasePlugin, PluginContext
             >>> plugin = BasePlugin()
             >>> ctx = PluginContext('127.0.0.1')
             >>> plugin.post_resolve("example.com", 1, b"response", ctx) is None
@@ -877,7 +875,7 @@ class BasePlugin:
             before starting listeners.
 
         Example:
-            >>> from foghorn.plugins.base import BasePlugin
+            >>> from foghorn.plugins.resolve.base import BasePlugin
             >>> class P(BasePlugin):
             ...     def setup(self):
             ...         self.ready = True
@@ -946,7 +944,7 @@ def plugin_aliases(*aliases: str):
       - Callable that applies the aliases to a plugin class and returns it.
 
     Example:
-        >>> from foghorn.plugins.base import BasePlugin, plugin_aliases
+        >>> from foghorn.plugins.resolve.base import BasePlugin, plugin_aliases
         >>> @plugin_aliases("acl", "access")
         ... class AccessControlPlugin(BasePlugin):
         ...     pass

@@ -16,7 +16,7 @@ from .config.config_parser import (
 )
 from foghorn.dnssec.dnssec_validate import configure_dnssec_resolver
 from .config.logging_config import init_logging
-from .plugins.base import BasePlugin
+from .plugins.resolve.base import BasePlugin
 from .servers.doh_api import start_doh_server
 from .servers.server import DNSServer
 from .servers.webserver import RingBuffer, RuntimeState, start_webserver
@@ -48,7 +48,7 @@ def _is_setup_plugin(plugin: BasePlugin) -> bool:
       - bool: True when plugin defines its own setup() implementation.
 
     Example use:
-      >>> from foghorn.plugins.base import BasePlugin
+      >>> from foghorn.plugins.resolve.base import BasePlugin
       >>> class P(BasePlugin):
       ...     def setup(self):
       ...         pass
@@ -340,7 +340,7 @@ def main(argv: List[str] | None = None) -> int:
     # Outputs:
     #   - cache_plugin: CachePlugin instance
     try:
-        from foghorn.cache_plugins.registry import load_cache_plugin
+        from foghorn.plugins.cache.registry import load_cache_plugin
 
         cache_plugin = load_cache_plugin(cfg.get("cache"))
     except Exception:
@@ -350,7 +350,7 @@ def main(argv: List[str] | None = None) -> int:
     # share it, even when the UDP DNSServer is not started.
     if cache_plugin is not None:
         try:
-            from foghorn.plugins import base as plugin_base
+            from foghorn.plugins.resolve import base as plugin_base
 
             plugin_base.DNS_CACHE = cache_plugin  # type: ignore[assignment]
         except Exception:

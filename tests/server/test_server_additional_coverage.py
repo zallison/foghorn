@@ -12,7 +12,7 @@ import pytest
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 import foghorn.servers.server as srv
-from foghorn.plugins import base as plugin_base
+from foghorn.plugins.resolve import base as plugin_base
 from foghorn.servers.server import DNSUDPHandler, send_query_with_failover
 
 
@@ -86,7 +86,7 @@ def test_stats_hooks_are_called(monkeypatch, path):
 
     # Be explicit about cache isolation for this parametrized test.
     try:
-        from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+        from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
 
         plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
     except Exception:  # pragma: no cover

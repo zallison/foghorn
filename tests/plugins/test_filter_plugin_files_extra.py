@@ -13,8 +13,8 @@ from contextlib import closing
 import pytest
 from dnslib import AAAA, QTYPE, RR, A, DNSRecord
 
-from foghorn.plugins.base import PluginContext, PluginDecision
-from foghorn.plugins.filter import FilterPlugin
+from foghorn.plugins.resolve.base import PluginContext, PluginDecision
+from foghorn.plugins.resolve.filter import FilterPlugin
 
 
 def _mk_response_with_ips(name, records):
@@ -375,7 +375,7 @@ def test_expand_globs_fallback_to_os_path_exists(tmp_path, monkeypatch):
     Outputs:
       - None: Asserts direct path is returned when file exists but glob gives no matches.
     """
-    from foghorn.plugins import filter as filter_mod
+    from foghorn.plugins.resolve import filter as filter_mod
 
     f = tmp_path / "one.txt"
     f.write_text("x\n")
@@ -395,7 +395,7 @@ def test_load_list_from_file_json_non_object_line(monkeypatch, tmp_path, caplog)
     Outputs:
       - None: Asserts the non-object JSON line is reported and skipped.
     """
-    from foghorn.plugins import filter as filter_mod
+    from foghorn.plugins.resolve import filter as filter_mod
 
     db = tmp_path / "bl_nonobj.db"
     p = FilterPlugin(db_path=str(db), default="deny")
@@ -428,7 +428,7 @@ def test_blocked_ips_file_json_non_object_line(monkeypatch, tmp_path, caplog):
     Outputs:
       - None: Asserts the non-object JSON line is reported and skipped.
     """
-    from foghorn.plugins import filter as filter_mod
+    from foghorn.plugins.resolve import filter as filter_mod
 
     jsonl = tmp_path / "ips_nonobj.jsonl"
     jsonl.write_text('{"ip": "203.0.113.1", "action": "deny"}\n')

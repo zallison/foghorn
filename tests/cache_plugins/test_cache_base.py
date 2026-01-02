@@ -1,4 +1,4 @@
-"""Brief: Unit tests for foghorn.cache_plugins.base.
+"""Brief: Unit tests for foghorn.plugins.cache.base.
 
 Inputs:
   - None
@@ -13,8 +13,8 @@ import time
 
 import pytest
 
-from foghorn.cache_plugins.base import CachePlugin, cache_aliases
-from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins.cache.base import CachePlugin, cache_aliases
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
 
 
 def test_cache_aliases_decorator_sets_aliases_and_returns_class() -> None:
@@ -187,7 +187,7 @@ def test_in_memory_ttl_cache_snapshot_includes_plugin_targets_and_decorated(
     plugin = InMemoryTTLCachePlugin()
 
     # Fake a plugin with a FoghornTTLCache-style _targets_cache.
-    from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
+    from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 
     targets_cache = FoghornTTLCache()
     targets_cache.set(("targets.com", 1), 60, b"wire")
