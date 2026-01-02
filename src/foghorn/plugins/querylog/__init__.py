@@ -15,35 +15,35 @@ Outputs:
 import logging
 from typing import Any, List, Optional
 
-from .base import BaseStatsStoreBackend, StatsStoreBackendConfig
-from .sqlite import SqliteStatsStoreBackend
-from .mysql_mariadb import MySqlStatsStoreBackend
-from .mqtt_logging import MqttLoggingBackend
+from .base import BaseStatsStore, StatsStoreBackendConfig
+from .sqlite import SqliteStatsStore
+from .mysql_mariadb import MySqlStatsStore
+from .mqtt_logging import MqttLogging
 
 __all__ = [
-    "BaseStatsStoreBackend",
+    "BaseStatsStore",
     "StatsStoreBackendConfig",
     "load_stats_store_backend",
 ]
 
 
-class MultiStatsStoreBackend(BaseStatsStoreBackend):
+class MultiStatsStore(BaseStatsStore):
     """Brief: Aggregate backend that fans out writes and reads from the primary.
 
     Inputs (constructor):
-      - backends: Non-empty list of concrete BaseStatsStoreBackend instances.
+      - backends: Non-empty list of concrete BaseStatsStore instances.
 
     Outputs:
-      - MultiStatsStoreBackend instance that:
+      - MultiStatsStore instance that:
         - Delegates all read operations (select/export/aggregate/health) to the
           first backend in the list (the primary).
         - Fans out write operations (increment/set/insert/rebuild/close) to all
           backends, logging and continuing on per-backend errors.
     """
 
-    def __init__(self, backends: List[BaseStatsStoreBackend], **_: Any) -> None:
+    def __init__(self, backends: List[BaseStatsStore], **_: Any) -> None:
         if not backends:
-            raise ValueError("MultiStatsStoreBackend requires at least one backend")
+            raise ValueError("MultiStatsStore requires at least one backend")
         self._backends = list(backends)
 
     # Health and lifecycle -------------------------------------------------
@@ -216,14 +216,14 @@ def _normalize_backend_name(raw: str) -> str:
     return raw.strip().lower().replace("-", "_")
 
 
-def _build_backend_from_config(cfg: StatsStoreBackendConfig) -> BaseStatsStoreBackend:
+def _build_backend_from_config(cfg: StatsStoreBackendConfig) -> BaseStatsStore:
     """Brief: Construct a concrete backend from a StatsStoreBackendConfig.
 
     Inputs:
       - cfg: Parsed backend configuration model.
 
     Outputs:
-      - Concrete BaseStatsStoreBackend instance.
+      - Concrete BaseStatsStore instance.
 
     Notes:
       - Supports short backend aliases ("sqlite", "mysql", "mariadb").
@@ -243,16 +243,16 @@ def _build_backend_from_config(cfg: StatsStoreBackendConfig) -> BaseStatsStoreBa
         batch_writes = bool(conf.get("batch_writes", True))
         batch_time_sec = float(conf.get("batch_time_sec", 15.0))
         batch_max_size = int(conf.get("batch_max_size", 1000))
-        backend = SqliteStatsStoreBackend(
+        backend = SqliteStatsStore(
             db_path=db_path,
             batch_writes=batch_writes,
             batch_time_sec=batch_time_sec,
             batch_max_size=batch_max_size,
         )
     elif backend_name in {"mysql", "mariadb"}:
-        backend = MySqlStatsStoreBackend(**conf)
+        backend = MySqlStatsStore(**conf)
     elif backend_name in {"mqtt"}:
-        backend = MqttLoggingBackend(**conf)
+        backend = MqttLogging(**conf)
     else:
         # Fallback: treat backend as a dotted import path to a concrete class.
         module_name, _, class_name = backend_name.rpartition(".")
@@ -264,21 +264,19 @@ def _build_backend_from_config(cfg: StatsStoreBackendConfig) -> BaseStatsStoreBa
         module = importlib.import_module(module_name)
         klass = getattr(module, class_name)
         backend = klass(**conf)
-        if not isinstance(
-            backend, BaseStatsStoreBackend
-        ):  # pragma: no cover - defensive
+        if not isinstance(backend, BaseStatsStore):  # pragma: no cover - defensive
             raise TypeError(
-                f"Configured backend {cfg.backend!r} is not a BaseStatsStoreBackend"
+                f"Configured backend {cfg.backend!r} is not a BaseStatsStore"
             )
 
-    # Attach a logical name attribute for later selection in MultiStatsStoreBackend.
+    # Attach a logical name attribute for later selection in MultiStatsStore.
     setattr(backend, "name", instance_name)
     return backend
 
 
 def load_stats_store_backend(
     persistence_cfg: Optional[dict[str, Any]],
-) -> Optional[BaseStatsStoreBackend]:
+) -> Optional[BaseStatsStore]:
     """Brief: Construct the configured statistics/query-log backend(s).
 
     Inputs:
@@ -287,9 +285,9 @@ def load_stats_store_backend(
         mapping, this function returns None.
 
     Outputs:
-      - Backend instance implementing the BaseStatsStoreBackend interface, or
+      - Backend instance implementing the BaseStatsStore interface, or
         None when persistence is disabled or misconfigured. When multiple
-        backends are configured, returns a MultiStatsStoreBackend that writes to
+        backends are configured, returns a MultiStatsStore that writes to
         all backends and reads from the first-listed backend.
     """
 
@@ -302,7 +300,7 @@ def load_stats_store_backend(
         if persistence_cfg.get("primary_backend")
         else ""
     )
-    backends: List[BaseStatsStoreBackend] = []
+    backends: List[BaseStatsStore] = []
 
     if isinstance(backends_cfg, list) and backends_cfg:
         for entry in backends_cfg:
@@ -335,7 +333,7 @@ def load_stats_store_backend(
                         backends = [b] + backends[:idx] + backends[idx + 1 :]
                     break
 
-        return MultiStatsStoreBackend(backends)
+        return MultiStatsStore(backends)
 
     # Legacy single-backend configuration; treat persistence_cfg itself as the
     # SQLite backend config so existing configs continue to work.

@@ -3,10 +3,10 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from .base import BaseStatsStoreBackend
+from .base import BaseStatsStore
 from .sqlite import _normalize_domain, _is_subdomain
 
-"""MySQL/MariaDB-backed implementation of the BaseStatsStoreBackend interface.
+"""MySQL/MariaDB-backed implementation of the BaseStatsStore interface.
 
 Inputs:
   - Constructed via a configuration mapping passed through StatsStoreBackendConfig
@@ -20,7 +20,7 @@ Outputs:
 
 Notes:
   - This backend intentionally mirrors the logical schema and behaviour of the
-    SqliteStatsStoreBackend so callers remain backend-agnostic.
+    SqliteStatsStore so callers remain backend-agnostic.
   - The underlying DB driver (mysql-connector-python or MariaDB) is imported
     lazily so that Foghorn does not require it unless this backend is used.
 """
@@ -54,11 +54,12 @@ def _import_mysql_driver():
         except Exception as exc:  # pragma: no cover - environment specific
             raise RuntimeError(
                 "No supported MySQL/MariaDB driver found; install either "
-                "'mysql-connector-python' or 'mariadb' to use the MySqlStatsStoreBackend"
+                "'mysql-connector-python' or 'mariadb' "
+                "to use the MySqlStatsStore"
             ) from exc
 
 
-class MySqlStatsStoreBackend(BaseStatsStoreBackend):
+class MySqlStatsStore(BaseStatsStore):
     """MySQL/MariaDB-backed persistent statistics and query-log backend.
 
     This backend stores the same logical ``counts`` and ``query_log`` tables as
@@ -75,7 +76,7 @@ class MySqlStatsStoreBackend(BaseStatsStoreBackend):
             (for example, ssl, unix_socket).
 
     Outputs:
-        Initialized MySqlStatsStoreBackend instance with ensured schema.
+        Initialized MySqlStatsStore instance with ensured schema.
     """
 
     def __init__(
@@ -197,7 +198,7 @@ class MySqlStatsStoreBackend(BaseStatsStoreBackend):
             if conn is not None:
                 conn.close()
         except Exception:  # pragma: no cover - defensive
-            logger.exception("Error while closing MySqlStatsStoreBackend connection")
+            logger.exception("Error while closing MySqlStatsStore connection")
 
     # ------------------------------------------------------------------
     # Counter API
@@ -375,9 +376,7 @@ class MySqlStatsStoreBackend(BaseStatsStoreBackend):
             Dictionary with total, page, page_size, total_pages, and items.
         """
 
-        page_i, page_size_i = BaseStatsStoreBackend._normalize_page_args(
-            page, page_size
-        )
+        page_i, page_size_i = BaseStatsStore._normalize_page_args(page, page_size)
 
         where: List[str] = []
         params: List[Any] = []
@@ -493,7 +492,7 @@ class MySqlStatsStoreBackend(BaseStatsStoreBackend):
             Mapping with window metadata and aggregated bucket counts.
         """
 
-        start_f, end_f, interval_i = BaseStatsStoreBackend._normalize_interval_args(
+        start_f, end_f, interval_i = BaseStatsStore._normalize_interval_args(
             start_ts, end_ts, interval_seconds
         )
         if interval_i <= 0 or end_f <= start_f:

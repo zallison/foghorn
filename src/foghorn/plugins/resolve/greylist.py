@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 
 
 class GreylistConfig(BaseModel):
-    """Brief: Typed configuration model for GreylistPlugin.
+    """Brief: Typed configuration model for GreylistExample.
 
     Inputs:
       - duration_seconds: Greylist window in seconds.
@@ -39,7 +39,7 @@ class GreylistConfig(BaseModel):
         extra = "allow"
 
 
-class GreylistPlugin(BasePlugin):
+class GreylistExample(BasePlugin):
     """
     A greylisting plugin that uses a persistent sqlite3 database and a fast
     in-memory cache.
@@ -74,7 +74,7 @@ class GreylistPlugin(BasePlugin):
 
     def start(self, **config):
         """
-        Initializes the GreylistPlugin.
+        Initializes the GreylistExample.
 
         Args:
             **config: Plugin-specific configuration.

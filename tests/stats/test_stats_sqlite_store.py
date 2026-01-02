@@ -13,7 +13,7 @@ from typing import Any
 
 from foghorn.stats import StatsSQLiteStore
 from foghorn.plugins.querylog.sqlite import (
-    SqliteStatsStoreBackend,
+    SqliteStatsStore,
     _is_subdomain,
     _normalize_domain,
 )
@@ -164,7 +164,7 @@ def test_sqlite_helpers_normalize_domain_and_is_subdomain() -> None:
 
 
 def test_sqlite_backend_health_check_true_and_false() -> None:
-    """Brief: SqliteStatsStoreBackend.health_check reflects connection state.
+    """Brief: SqliteStatsStore.health_check reflects connection state.
 
     Inputs:
       - None.
@@ -173,7 +173,7 @@ def test_sqlite_backend_health_check_true_and_false() -> None:
       - None; asserts True for healthy connection and False when cursor fails.
     """
 
-    backend = SqliteStatsStoreBackend(":memory:")
+    backend = SqliteStatsStore(":memory:")
     assert backend.health_check() is True
 
     class BoomConn:
@@ -187,7 +187,7 @@ def test_sqlite_backend_health_check_true_and_false() -> None:
 
 
 def test_sqlite_backend_counts_and_export(tmp_path) -> None:
-    """Brief: SqliteStatsStoreBackend counts helpers read and write correctly.
+    """Brief: SqliteStatsStore counts helpers read and write correctly.
 
     Inputs:
       - tmp_path: pytest temporary directory fixture.
@@ -197,7 +197,7 @@ def test_sqlite_backend_counts_and_export(tmp_path) -> None:
     """
 
     db_path = tmp_path / "stats" / "counts.sqlite"
-    backend = SqliteStatsStoreBackend(str(db_path))
+    backend = SqliteStatsStore(str(db_path))
 
     # Initially no rows.
     assert backend.has_counts() is False
@@ -214,7 +214,7 @@ def test_sqlite_backend_counts_and_export(tmp_path) -> None:
 
 
 def test_sqlite_backend_insert_and_select_query_log_json_decoding() -> None:
-    """Brief: SqliteStatsStoreBackend decodes query_log result_json variants.
+    """Brief: SqliteStatsStore decodes query_log result_json variants.
 
     Inputs:
       - None.
@@ -223,7 +223,7 @@ def test_sqlite_backend_insert_and_select_query_log_json_decoding() -> None:
       - None; asserts dict, list, and invalid JSON handling.
     """
 
-    backend = SqliteStatsStoreBackend(":memory:")
+    backend = SqliteStatsStore(":memory:")
 
     # Insert three log rows with different JSON payload shapes.
     backend.insert_query_log(
@@ -290,7 +290,7 @@ def test_sqlite_backend_insert_and_select_query_log_json_decoding() -> None:
 
 
 def test_sqlite_backend_aggregate_counts_bad_inputs_and_dense() -> None:
-    """Brief: SqliteStatsStoreBackend aggregates into dense zero-filled buckets.
+    """Brief: SqliteStatsStore aggregates into dense zero-filled buckets.
 
     Inputs:
       - None.
@@ -299,7 +299,7 @@ def test_sqlite_backend_aggregate_counts_bad_inputs_and_dense() -> None:
       - None; asserts early-return for bad interval and dense buckets with no rows.
     """
 
-    backend = SqliteStatsStoreBackend(":memory:")
+    backend = SqliteStatsStore(":memory:")
 
     res_bad = backend.aggregate_query_log_counts(
         start_ts="x", end_ts="y", interval_seconds="z"
@@ -322,7 +322,7 @@ def test_sqlite_backend_aggregate_counts_bad_inputs_and_dense() -> None:
 
 
 def test_sqlite_backend_aggregate_counts_group_by_sparse() -> None:
-    """Brief: SqliteStatsStoreBackend returns sparse grouped results.
+    """Brief: SqliteStatsStore returns sparse grouped results.
 
     Inputs:
       - None.
@@ -331,7 +331,7 @@ def test_sqlite_backend_aggregate_counts_group_by_sparse() -> None:
       - None; asserts group_by path executes and returns empty items when no rows.
     """
 
-    backend = SqliteStatsStoreBackend(":memory:")
+    backend = SqliteStatsStore(":memory:")
 
     res = backend.aggregate_query_log_counts(
         start_ts=0.0,
@@ -354,7 +354,7 @@ def test_sqlite_backend_rebuild_counts_from_query_log() -> None:
       - None; asserts several key counters are populated from query_log rows.
     """
 
-    backend = SqliteStatsStoreBackend(":memory:")
+    backend = SqliteStatsStore(":memory:")
 
     backend.insert_query_log(
         ts=1.0,
@@ -412,7 +412,7 @@ def test_sqlite_backend_rebuild_counts_if_needed_branches(monkeypatch) -> None:
       - None; asserts helper calls are gated correctly.
     """
 
-    backend = SqliteStatsStoreBackend(":memory:")
+    backend = SqliteStatsStore(":memory:")
 
     calls = {"rebuild": 0}
 
@@ -455,9 +455,7 @@ def test_sqlite_backend_batching_execute_flush_and_close(tmp_path) -> None:
     """
 
     db_path = tmp_path / "stats" / "batched.sqlite"
-    backend = SqliteStatsStoreBackend(
-        str(db_path), batch_writes=True, batch_time_sec=3600.0
-    )
+    backend = SqliteStatsStore(str(db_path), batch_writes=True, batch_time_sec=3600.0)
 
     # Batched increment should enqueue but not immediately flush due to thresholds.
     backend.increment_count("totals", "queued", 1)

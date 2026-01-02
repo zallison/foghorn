@@ -105,7 +105,7 @@ def collect_plugin_schemas() -> Dict[str, Any]:
     results: Dict[str, Any] = {}
 
     for cls, info in by_cls.items():
-        # Canonical alias is derived from the class name (e.g. FilterPlugin -> filter)
+        # Canonical alias is derived from the class name (e.g. Filter -> filter)
         canonical = plugin_registry._default_alias_for(cls)  # type: ignore[attr-defined]
         aliases = sorted(info["aliases"])
         module_path = info["module"]
@@ -321,7 +321,7 @@ def _augment_statistics_persistence_schema(base: Dict[str, Any]) -> None:
                             "description": (
                                 "Backend identifier (for example 'sqlite', "
                                 "'mysql', 'mariadb', or a dotted import path to "
-                                "a BaseStatsStoreBackend implementation)."
+                                "a BaseStatsStore implementation)."
                             ),
                         },
                         "config": {

@@ -121,7 +121,7 @@ def get_current_namespaced_cache(
     Outputs:
       - TTLCacheAdapter wrapping either:
           - SQLite3TTLCache pointing at the DNS cache's sqlite DB (when the
-            current DNS cache is SQLite3CachePlugin), or
+            current DNS cache is SQLite3Cache), or
           - A per-call in-memory FoghornTTLCache fallback.
     """
 
@@ -136,9 +136,9 @@ def get_current_namespaced_cache(
 
     # SQLite-backed DNS cache: create a dedicated sqlite TTL table per namespace.
     try:
-        from foghorn.plugins.cache.sqlite_cache import SQLite3CachePlugin
+        from foghorn.plugins.cache.sqlite_cache import SQLite3Cache
 
-        if isinstance(cache_plugin, SQLite3CachePlugin):
+        if isinstance(cache_plugin, SQLite3Cache):
             journal_mode = "WAL"
             try:
                 journal_mode = str(getattr(cache_plugin._cache, "journal_mode", "WAL"))
@@ -174,9 +174,9 @@ def get_current_namespaced_cache(
     # the same backing store so multiple subsystems still reuse "the current
     # cache".
     try:
-        from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
+        from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 
-        if isinstance(cache_plugin, InMemoryTTLCachePlugin):
+        if isinstance(cache_plugin, InMemoryTTLCache):
             base = getattr(cache_plugin, "_cache", None)
             if isinstance(base, FoghornTTLCache):
                 return TTLCacheAdapter(base.with_namespace(namespace))

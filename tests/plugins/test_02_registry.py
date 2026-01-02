@@ -166,18 +166,18 @@ def test_discover_plugins_returns_dict():
 
 def test_discover_plugins_includes_filter():
     """
-    Brief: Verify FilterPlugin is discovered.
+    Brief: Verify Filter is discovered.
 
     Inputs:
       - None
 
     Outputs:
-      - None: Asserts 'filter' alias maps to FilterPlugin
+      - None: Asserts 'filter' alias maps to Filter
     """
     registry = discover_plugins()
     assert "filter" in registry
     cls = registry["filter"]
-    assert cls.__name__ == "FilterPlugin"
+    assert cls.__name__ == "Filter"
 
 
 def test_discover_plugins_includes_aliases():
@@ -191,7 +191,7 @@ def test_discover_plugins_includes_aliases():
       - None: Asserts known aliases present
     """
     registry = discover_plugins()
-    # FilterPlugin has aliases: filter, block, allow
+    # Filter has aliases: filter, block, allow
     assert "filter" in registry
     assert "block" in registry
     assert "allow" in registry
@@ -208,7 +208,7 @@ def test_get_plugin_class_by_alias():
       - None: Asserts correct class returned
     """
     cls = get_plugin_class("filter")
-    assert cls.__name__ == "FilterPlugin"
+    assert cls.__name__ == "Filter"
 
 
 def test_get_plugin_class_by_dotted_path():
@@ -221,8 +221,8 @@ def test_get_plugin_class_by_dotted_path():
     Outputs:
       - None: Asserts correct class returned
     """
-    cls = get_plugin_class("foghorn.plugins.resolve.filter.FilterPlugin")
-    assert cls.__name__ == "FilterPlugin"
+    cls = get_plugin_class("foghorn.plugins.resolve.filter.Filter")
+    assert cls.__name__ == "Filter"
 
 
 def test_get_plugin_class_unknown_alias_raises():
@@ -330,7 +330,7 @@ def test_get_plugin_class_case_insensitive():
       - None: Asserts correct class returned
     """
     cls = get_plugin_class("FILTER")
-    assert cls.__name__ == "FilterPlugin"
+    assert cls.__name__ == "Filter"
 
 
 def test_get_plugin_class_with_hyphens():

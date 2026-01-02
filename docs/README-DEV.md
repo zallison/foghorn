@@ -7,7 +7,7 @@ This document contains developer-facing details: architecture, transports, plugi
 This release introduces a few developer-visible breaking changes:
 
 - **Upstream config normalization**: `src/foghorn/main.py.normalize_upstream_config` no longer accepts `cfg['upstream']` as a single mapping with optional `timeout_ms`. Only list-based upstreams are supported; callers must ensure YAML uses the list form.
-- **UpstreamRouterPlugin routes**: `src/foghorn/plugins/upstream_router.py` now normalizes routes exclusively from `routes[*].upstreams`. The legacy `routes[*].upstream` single mapping is removed.
+- **UpstreamRouter routes**: `src/foghorn/plugins/upstream_router.py` now normalizes routes exclusively from `routes[*].upstreams`. The legacy `routes[*].upstream` single mapping is removed.
 - **BasePlugin priorities**: `src/foghorn/plugins/base.py` no longer honors the legacy `priority` key. Plugins must use `pre_priority`, `post_priority`, and (for setup-aware plugins) `setup_priority`. All three obey the same clamping semantics (1–255), and `setup_priority` falls back to the config-specified `pre_priority` or to the class attribute when omitted.
 - **DoH server shim**: the legacy asyncio-based `foghorn.doh_server.serve_doh` entrypoint has been removed. All DoH usage should go through `foghorn.doh_api.start_doh_server`; YAML `listen.doh` behavior is unchanged (requests still go through the standard plugin/caching pipeline).
 
@@ -73,7 +73,7 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
     - `statistics.persistence.primary_backend`: optional string selecting the primary read backend when multiple backends are configured.
     - `statistics.persistence.backends`: optional array of backend entries, each with:
       - `name` (optional logical instance name used by `primary_backend`),
-      - `backend` (alias like `sqlite` / `mysql` / `mariadb`, or dotted import path to a concrete `BaseStatsStoreBackend`),
+      - `backend` (alias like `sqlite` / `mysql` / `mariadb`, or dotted import path to a concrete `BaseStatsStore`),
       - `config` (free-form object passed verbatim to the backend constructor).
     - When `backends` is omitted, the legacy single-backend SQLite configuration (db_path, batch_writes, batch_time_sec, batch_max_size) remains valid.
   - Example usage from the project root:
@@ -102,7 +102,7 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
   - Reads `abort_on_failure` from each plugin’s `config` (defaults to `True`); if `setup()` raises and `abort_on_failure` is true, startup is aborted with `RuntimeError`. If `abort_on_failure` is false, the error is logged and startup continues.
 - Example setup ordering (FileDownloader and Filter):
   - `FileDownloader` defines `setup_priority = 15` so it runs early, downloads lists, and validates them before other plugins.
-  - `FilterPlugin` typically uses a higher `setup_priority` (for example 20), so it runs after FileDownloader and can safely load the downloaded files.
+  - `Filter` typically uses a higher `setup_priority` (for example 20), so it runs after FileDownloader and can safely load the downloaded files.
   - User config may override `setup_priority` on a per-plugin basis when composing plugin chains.
 
 ## BasePlugin targeting and TTL cache
@@ -134,7 +134,7 @@ Runtime behavior (`BasePlugin.targets(ctx) -> bool`):
   configured TTL; cache lookups are a fast path on hot clients under load.
 
 Core plugins that currently respect `targets()` include AccessControl,
-Filter, Greylist, NewDomainFilter, UpstreamRouter, FlakyServer, Examples,
+Filter, Greylist, NewDomainFilterExample, UpstreamRouter, FlakyServer, Examples,
 and EtcHosts. Implementers of new plugins are encouraged to call
 `self.targets(ctx)` early in their `pre_resolve`/`post_resolve` hooks when
 client‑scoped behavior is desired.
@@ -328,8 +328,8 @@ good.com
 ```
 
 Project-specific notes
-- FilterPlugin is the only component that reads JSONL from external files; specifically the file-backed input fields: allowed_domains_files, blocked_domains_files, blocked_patterns_files, blocked_keywords_files, blocked_ips_files
-- Each FilterPlugin instance uses its own in-memory SQLite DB by default; a shared on-disk DB is only used when a non-empty db_path is explicitly configured for that instance.
+- Filter is the only component that reads JSONL from external files; specifically the file-backed input fields: allowed_domains_files, blocked_domains_files, blocked_patterns_files, blocked_keywords_files, blocked_ips_files
+- Each Filter instance uses its own in-memory SQLite DB by default; a shared on-disk DB is only used when a non-empty db_path is explicitly configured for that instance.
 - The core YAML config does not accept JSONL; it only references which files to load
 - Statistics snapshots are logged as single-line JSON objects (conceptually JSONL when collected)
 
@@ -380,9 +380,9 @@ Semantics:
 - Background reloads replace the entire `records` mapping atomically under
   `_records_lock` to avoid exposing partially updated state.
 
-## FilterPlugin file parsing internals
+## Filter file parsing internals
 
-FilterPlugin supports file-backed inputs for domains, patterns, keywords, and IP rules. Parsing is layered to keep responsibilities clear and avoid state leakage.
+Filter supports file-backed inputs for domains, patterns, keywords, and IP rules. Parsing is layered to keep responsibilities clear and avoid state leakage.
 
 Helpers (in src/foghorn/plugins/filter.py):
 - _expand_globs(paths: list[str]) -> list[str]

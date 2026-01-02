@@ -27,7 +27,7 @@ class UpstreamRouteTarget(BaseModel):
 
 
 class UpstreamRoute(BaseModel):
-    """Brief: Route definition for UpstreamRouterPlugin.
+    """Brief: Route definition for UpstreamRouter.
 
     Inputs:
       - domain: Exact domain to match.
@@ -47,7 +47,7 @@ class UpstreamRoute(BaseModel):
 
 
 class UpstreamRouterConfig(BaseModel):
-    """Brief: Typed configuration model for UpstreamRouterPlugin.
+    """Brief: Typed configuration model for UpstreamRouter.
 
     Inputs:
       - routes: List of UpstreamRoute definitions.
@@ -63,7 +63,7 @@ class UpstreamRouterConfig(BaseModel):
 
 
 @plugin_aliases("upstream_router", "router", "upstream")
-class UpstreamRouterPlugin(BasePlugin):
+class UpstreamRouter(BasePlugin):
     """Routes queries to different upstream DNS servers based on the queried domain, with failover."""
 
     @classmethod
@@ -81,19 +81,19 @@ class UpstreamRouterPlugin(BasePlugin):
 
     def __init__(self, **config):
         """
-        Initializes the UpstreamRouterPlugin.
+        Initializes the UpstreamRouter.
 
         Args:
             **config: Configuration for the plugin.
 
         Example use:
-            >>> from foghorn.plugins.upstream_router import UpstreamRouterPlugin
+            >>> from foghorn.plugins.upstream_router import UpstreamRouter
             >>> config = {
             ...     "routes": [
             ...         {"domain": "example.com", "upstream": {"host": "1.1.1.1", "port": 53}}
             ...     ]
             ... }
-            >>> plugin = UpstreamRouterPlugin(**config)
+            >>> plugin = UpstreamRouter(**config)
             >>> plugin.routes[0]["domain"]
             'example.com'
         """
@@ -148,8 +148,8 @@ class UpstreamRouterPlugin(BasePlugin):
             A list of normalized routing rules.
 
         Example use:
-            >>> from foghorn.plugins.upstream_router import UpstreamRouterPlugin
-            >>> plugin = UpstreamRouterPlugin()
+            >>> from foghorn.plugins.upstream_router import UpstreamRouter
+            >>> plugin = UpstreamRouter()
             >>> routes = [
             ...     {"domain": "MiXeD.Example.", "upstreams": [{"host": "1.1.1.1", "port": "53"}]},
             ...     {"suffix": ".Sub.Example", "upstreams": [{"host": "10.0.0.1", "port": 53}]}
@@ -311,14 +311,14 @@ class UpstreamRouterPlugin(BasePlugin):
             A list of upstream candidates, or None if no match is found.
 
         Example use:
-            >>> from foghorn.plugins.upstream_router import UpstreamRouterPlugin
+            >>> from foghorn.plugins.upstream_router import UpstreamRouter
             >>> config = {
             ...     "routes": [
             ...         {"domain": "example.com", "upstream": {"host": "1.1.1.1", "port": 53}},
             ...         {"suffix": "corp", "upstreams": [{"host": "10.0.0.1", "port": 53}, {"host": "10.0.0.2", "port": 53}]}
             ...     ]
             ... }
-            >>> plugin = UpstreamRouterPlugin(**config)
+            >>> plugin = UpstreamRouter(**config)
             >>> plugin._match_upstream_candidates("example.com")
             [{'host': '1.1.1.1', 'port': 53}]
             >>> plugin._match_upstream_candidates("server.corp")

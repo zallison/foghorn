@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class ExamplesConfig(BaseModel):
-    """Brief: Typed configuration model for ExamplesPlugin.
+    """Brief: Typed configuration model for Examples.
 
     Inputs:
       - max_subdomains: Maximum allowed subdomain depth.
@@ -39,7 +39,7 @@ class ExamplesConfig(BaseModel):
 
 
 @plugin_aliases("examples")
-class ExamplesPlugin(BasePlugin):
+class Examples(BasePlugin):
     """
     Deny over-deep or too-long domains pre-resolve; rewrite the first IPv4 A answer post-resolve.
 
@@ -58,7 +58,7 @@ class ExamplesPlugin(BasePlugin):
 
     Example usage (YAML):
         plugins:
-          - module: examples | foghorn.plugins.examples.ExamplesPlugin
+          - module: examples | foghorn.plugins.examples.Examples
             config:
               max_subdomains: 5
               max_length_no_dots: 50
@@ -177,9 +177,9 @@ class ExamplesPlugin(BasePlugin):
             PluginDecision("deny") to block, or None to allow.
 
         Example:
-            >>> from foghorn.plugins.examples import ExamplesPlugin
+            >>> from foghorn.plugins.examples import Examples
             >>> from foghorn.plugins.resolve.base import PluginContext
-            >>> plugin = ExamplesPlugin()
+            >>> plugin = Examples()
             >>> ctx = PluginContext("1.2.3.4")
             >>> decision = plugin.pre_resolve("a.b.c.d.e.f.example.com", 1, ctx)
             >>> decision.action
@@ -203,7 +203,7 @@ class ExamplesPlugin(BasePlugin):
 
         if subdomains > self.max_subdomains:
             logger.info(
-                "ExamplesPlugin deny: %s has %d subdomains > %d",
+                "Examples deny: %s has %d subdomains > %d",
                 name,
                 subdomains,
                 self.max_subdomains,
@@ -212,7 +212,7 @@ class ExamplesPlugin(BasePlugin):
 
         if length_no_dots > self.max_length_no_dots:
             logger.info(
-                "ExamplesPlugin deny: %s length_no_dots=%d > %d",
+                "Examples deny: %s length_no_dots=%d > %d",
                 name,
                 length_no_dots,
                 self.max_length_no_dots,
@@ -259,7 +259,7 @@ class ExamplesPlugin(BasePlugin):
         try:
             reply = DNSRecord.parse(response_wire)
         except Exception as e:
-            logger.warning("ExamplesPlugin parse failure: %s", e)
+            logger.warning("Examples parse failure: %s", e)
             return None
 
         changed = False
@@ -268,24 +268,20 @@ class ExamplesPlugin(BasePlugin):
                 ip_override = matching_rule["ip_override"]
                 rr.rdata = A(ip_override)
                 changed = True
-                logger.debug(
-                    "ExamplesPlugin rewrite: first A record -> %s", ip_override
-                )
+                logger.debug("Examples rewrite: first A record -> %s", ip_override)
                 break
             elif rr.rtype == QTYPE.AAAA:
                 ip_override = matching_rule["ip_override"]
                 rr.rdata = AAAA(ip_override)
                 changed = True
-                logger.debug(
-                    "ExamplesPlugin rewrite: first AAAA record -> %s", ip_override
-                )
+                logger.debug("Examples rewrite: first AAAA record -> %s", ip_override)
                 break
 
         if changed:
             try:
                 return PluginDecision(action="override", response=reply.pack())
             except Exception as e:
-                logger.warning("ExamplesPlugin pack failure: %s", e)
+                logger.warning("Examples pack failure: %s", e)
                 return None
 
         return None

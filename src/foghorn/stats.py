@@ -2239,7 +2239,7 @@ class StatsCollector:
         Example:
             >>> collector = StatsCollector()
             >>> collector.record_plugin_decision(
-            ...     "FilterPlugin", "block", reason="blocklist_match", domain="bad.com"
+            ...     "Filter", "block", reason="blocklist_match", domain="bad.com"
             ... )
         """
         with self._lock:
@@ -2937,7 +2937,7 @@ class StatsCollector:
                 latency_recent_stats = self._latency_recent.summarize()
 
             # Derive a simple rate-limit summary from cache_stat_* counters
-            # when present. This keeps RateLimitPlugin statistics visible in
+            # when present. This keeps RateLimit statistics visible in
             # snapshots and downstream APIs without coupling StatsCollector to
             # plugin internals.
             rate_limit: Optional[Dict[str, Any]] = None

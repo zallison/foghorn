@@ -24,7 +24,7 @@ logging:
   level: info
 
 plugins:
-  - module: acl  # AccessControlPlugin alias
+  - module: acl  # AccessControl alias
     # pre_priority: 10  # optional: run early in the pre-processing chain
     config:
       # default policy controls what happens when a client is not matched by allow/deny lists.

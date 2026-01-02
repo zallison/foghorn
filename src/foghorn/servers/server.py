@@ -15,7 +15,7 @@ from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
 
 from cachetools import TTLCache
 
-from foghorn.utils.cache_registry import registered_cached
+from foghorn.utils.register_caches import registered_cached
 from ..plugins.resolve import base as plugin_base
 from ..plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
 from ..recursive_resolver import RecursiveResolver
@@ -1402,9 +1402,9 @@ class DNSServer:
         # Install cache plugin for all transports.
         if cache is None:
             try:
-                from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
+                from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 
-                cache = InMemoryTTLCachePlugin()
+                cache = InMemoryTTLCache()
             except Exception:
                 cache = None
         try:

@@ -1,5 +1,5 @@
 """
-Brief: Unit tests for GreylistPlugin covering first-seen deny, windowed deny, and allow after window.
+Brief: Unit tests for GreylistExample covering first-seen deny, windowed deny, and allow after window.
 
 Inputs:
   - None (uses temporary sqlite DB and mocked time)
@@ -13,7 +13,7 @@ from contextlib import closing
 from dnslib import QTYPE
 
 from foghorn.plugins.resolve.base import PluginContext
-from foghorn.plugins.resolve.greylist import GreylistPlugin
+from foghorn.plugins.resolve.greylist import GreylistExample
 
 
 def test_first_seen_inserts_and_denies(tmp_path, monkeypatch):
@@ -27,7 +27,7 @@ def test_first_seen_inserts_and_denies(tmp_path, monkeypatch):
       - None: asserts deny and first_seen==1000 in DB and cache-load path
     """
     db = tmp_path / "grey.db"
-    p = GreylistPlugin(db_path=str(db), duration_seconds=60, cache_ttl_seconds=300)
+    p = GreylistExample(db_path=str(db), duration_seconds=60, cache_ttl_seconds=300)
     p.start()
     ctx = PluginContext(client_ip="1.2.3.4")
 
@@ -53,7 +53,7 @@ def test_within_window_denies_again_without_updating_first_seen(tmp_path, monkey
       - None: asserts deny and DB first_seen remains 1000
     """
     db = tmp_path / "grey.db"
-    p = GreylistPlugin(db_path=str(db), duration_seconds=60, cache_ttl_seconds=300)
+    p = GreylistExample(db_path=str(db), duration_seconds=60, cache_ttl_seconds=300)
     p.start()
     ctx = PluginContext(client_ip="1.2.3.4")
 
@@ -81,7 +81,7 @@ def test_after_window_allows_and_does_not_update_first_seen(tmp_path, monkeypatc
       - None: asserts None decision and first_seen still 1000
     """
     db = tmp_path / "grey.db"
-    p = GreylistPlugin(db_path=str(db), duration_seconds=60, cache_ttl_seconds=300)
+    p = GreylistExample(db_path=str(db), duration_seconds=60, cache_ttl_seconds=300)
     p.start()
     ctx = PluginContext(client_ip="1.2.3.4")
 
@@ -107,7 +107,7 @@ def test_to_base_domain_extraction_cases():
     Outputs:
       - None: asserts expected base-domain strings
     """
-    p = GreylistPlugin(db_path=":memory:", duration_seconds=60)
+    p = GreylistExample(db_path=":memory:", duration_seconds=60)
     assert p._to_base_domain("Sub.Example.COM.") == "example.com"
     assert p._to_base_domain("example.com") == "example.com"
     assert p._to_base_domain("com") == "com"
@@ -126,7 +126,7 @@ def test_cache_hit_bypasses_db(monkeypatch, tmp_path):
       - None: asserts allow (since 2100-2000>=50) and no DB call
     """
     db = tmp_path / "grey.db"
-    p = GreylistPlugin(db_path=str(db), duration_seconds=50, cache_ttl_seconds=300)
+    p = GreylistExample(db_path=str(db), duration_seconds=50, cache_ttl_seconds=300)
     p.start()
     ctx = PluginContext(client_ip="1.2.3.4")
 
@@ -156,7 +156,7 @@ def test_db_load_populates_cache(tmp_path, monkeypatch):
       - None: asserts first load uses DB; second load hits cache (DB bypass)
     """
     db = tmp_path / "grey.db"
-    p = GreylistPlugin(db_path=str(db), duration_seconds=60, cache_ttl_seconds=300)
+    p = GreylistExample(db_path=str(db), duration_seconds=60, cache_ttl_seconds=300)
     p.start()
 
     with closing(p.conn):

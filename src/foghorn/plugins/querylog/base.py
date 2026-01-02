@@ -4,11 +4,11 @@ This module defines:
 
 - StatsStoreBackendConfig: Pydantic model describing a single backend
   configuration entry (backend identifier plus backend-specific config).
-- BaseStatsStoreBackend: Abstract interface mirroring the public API of
+- BaseStatsStore: Abstract interface mirroring the public API of
   StatsSQLiteStore for use by multiple storage backends (SQLite, MariaDB/MySQL,
   MongoDB, Redis, etc.).
 
-Concrete backends must subclass BaseStatsStoreBackend and implement all
+Concrete backends must subclass BaseStatsStore and implement all
 methods. The semantics of methods are defined to match the existing
 StatsSQLiteStore behavior so callers (StatsCollector, webserver, helper
 scripts) can remain backend-agnostic.
@@ -57,7 +57,7 @@ class StatsStoreBackendConfig(BaseModel):
         extra = "allow"
 
 
-class BaseStatsStoreBackend:
+class BaseStatsStore:
     """Brief: Abstract base class for persistent statistics and query-log backends.
 
     Implementations are responsible for:
@@ -91,7 +91,7 @@ class BaseStatsStoreBackend:
             required to become usable.
         """
 
-        raise NotImplementedError("BaseStatsStoreBackend.__init__ must be implemented")
+        raise NotImplementedError("BaseStatsStore.__init__ must be implemented")
 
     # ------------------------------------------------------------------
     # Health and lifecycle

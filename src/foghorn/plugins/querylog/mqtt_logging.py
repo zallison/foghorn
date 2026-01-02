@@ -1,4 +1,4 @@
-"""MQTT logging-only implementation of the BaseStatsStoreBackend interface.
+"""MQTT logging-only implementation of the BaseStatsStore interface.
 
 Inputs:
   - Constructed via a configuration mapping passed through StatsStoreBackendConfig
@@ -23,7 +23,7 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
-from .base import BaseStatsStoreBackend
+from .base import BaseStatsStore
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +57,11 @@ def _import_mqtt_driver():
     except Exception as exc:  # pragma: no cover - environment specific
         raise RuntimeError(
             "No supported MQTT client library found; install 'paho-mqtt' to "
-            "use the MqttLoggingBackend"
+            "use the MqttLogging"
         ) from exc
 
 
-class MqttLoggingBackend(BaseStatsStoreBackend):
+class MqttLogging(BaseStatsStore):
     """MQTT-backed logging-only backend.
 
     Inputs (constructor):
@@ -82,7 +82,7 @@ class MqttLoggingBackend(BaseStatsStoreBackend):
             ssl options or socket options).
 
     Outputs:
-        Initialized MqttLoggingBackend instance connected to the broker and
+        Initialized MqttLogging instance connected to the broker and
         ready to publish query-log entries.
     """
 
@@ -230,7 +230,7 @@ class MqttLoggingBackend(BaseStatsStoreBackend):
         except Exception:  # pragma: no cover - defensive
             logger.exception("Failed to publish query_log message to MQTT")
 
-    # All other BaseStatsStoreBackend methods (counters, export, rebuild,
+    # All other BaseStatsStore methods (counters, export, rebuild,
     # select_query_log, aggregate_query_log_counts, has_query_log) are
     # intentionally left unimplemented so that the base class raises
     # NotImplementedError when they are called. This enforces that the MQTT

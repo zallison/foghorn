@@ -20,7 +20,7 @@ _PREFETCH_LOCAL = threading.local()
 
 
 class DnsPrefetchConfig(BaseModel):
-    """Brief: Typed configuration model for DnsPrefetchPlugin.
+    """Brief: Typed configuration model for DnsPrefetch.
 
     Inputs:
       - interval_seconds: How often to sample statistics and perform prefetch cycles.
@@ -45,7 +45,7 @@ class DnsPrefetchConfig(BaseModel):
 
 
 @plugin_aliases("dns_prefetch", "prefetch")
-class DnsPrefetchPlugin(BasePlugin):
+class DnsPrefetch(BasePlugin):
     """Prefetch DNS records for frequently requested domains using statistics.
 
     Brief:
@@ -68,7 +68,7 @@ class DnsPrefetchPlugin(BasePlugin):
     """
 
     def __init__(self, **config: object) -> None:
-        """Brief: Initialize DnsPrefetchPlugin from raw configuration.
+        """Brief: Initialize DnsPrefetch from raw configuration.
 
         Inputs:
           - **config: Arbitrary keyword configuration, validated by
@@ -129,7 +129,7 @@ class DnsPrefetchPlugin(BasePlugin):
 
         self._thread = threading.Thread(
             target=self._run_loop,
-            name="DnsPrefetchPlugin",
+            name="DnsPrefetch",
             daemon=True,
         )
         self._thread.start()
@@ -148,7 +148,7 @@ class DnsPrefetchPlugin(BasePlugin):
             self._stop_event.set()
         except Exception:
             # Defensive: never let signal handling raise.
-            logger.info("DnsPrefetchPlugin: failed to set stop event", exc_info=True)
+            logger.info("DnsPrefetch: failed to set stop event", exc_info=True)
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
@@ -206,7 +206,7 @@ class DnsPrefetchPlugin(BasePlugin):
             try:
                 self._run_single_cycle()
             except Exception:
-                logger.info("DnsPrefetchPlugin: prefetch cycle failed", exc_info=True)
+                logger.info("DnsPrefetch: prefetch cycle failed", exc_info=True)
 
     def _get_stats_collector(self) -> Optional[StatsCollector]:
         """Brief: Return the active StatsCollector if available.
@@ -277,7 +277,7 @@ class DnsPrefetchPlugin(BasePlugin):
                     # additional cache hits.
                     if streak >= self.max_consecutive_misses:
                         logger.info(
-                            "DnsPrefetchPlugin: skipping %s (streak=%d, max=%d)",
+                            "DnsPrefetch: skipping %s (streak=%d, max=%d)",
                             name,
                             streak,
                             self.max_consecutive_misses,
@@ -304,7 +304,7 @@ class DnsPrefetchPlugin(BasePlugin):
                 self._prefetch_single(domain, qtype_name)
             except Exception:
                 logger.info(
-                    "DnsPrefetchPlugin: prefetch failed for %s %s",
+                    "DnsPrefetch: prefetch failed for %s %s",
                     domain,
                     qtype_name,
                     exc_info=True,

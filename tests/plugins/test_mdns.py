@@ -22,15 +22,15 @@ def _make_query(name: str, qtype: int) -> bytes:
 
 
 def test_mdns_bridge_answers_dns_sd_records() -> None:
-    """Brief: MdnsBridgePlugin can answer PTR/SRV/TXT/A/AAAA under a DNS suffix.
+    """Brief: MdnsBridge can answer PTR/SRV/TXT/A/AAAA under a DNS suffix.
     @@
         Outputs:
           - Asserts override responses include expected RR types.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(
+    plugin = MdnsBridge(
         network_enabled=False,
         ttl=120,
         domain=".mdns",
@@ -146,9 +146,9 @@ def test_mdns_bridge_service_node_a_and_txt_returned_together() -> None:
             service and A/AAAA for the underlying host.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(
+    plugin = MdnsBridge(
         network_enabled=False,
         ttl=120,
         domain=".mdns",
@@ -201,9 +201,9 @@ def test_mdns_bridge_service_type_a_aaaa_return_ptr() -> None:
           - Asserts A/AAAA queries for service-type owners yield PTR RRs using cached targets.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(
+    plugin = MdnsBridge(
         network_enabled=False,
         ttl=120,
         domain=".mdns",
@@ -253,9 +253,9 @@ def test_mdns_bridge_falls_through_when_unknown() -> None:
       - Asserts plugin returns None.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(
+    plugin = MdnsBridge(
         network_enabled=False,
         domain=".local",
         yes_i_really_mean_local=True,
@@ -277,9 +277,9 @@ def test_mdns_bridge_mirror_suffixes_roundtrip() -> None:
       - None; asserts suffix normalization behavior.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
+    plugin = MdnsBridge(network_enabled=False, domain=".mdns")
     plugin.setup()
 
     # `.local` mDNS names are rewritten into the configured DNS suffix.
@@ -298,9 +298,9 @@ def test_mdns_bridge_ptr_add_and_remove_mirrors_suffixes() -> None:
       - None; asserts `_ptr` cache contains/clears `.local` entries.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
+    plugin = MdnsBridge(network_enabled=False, domain=".mdns")
     plugin.setup()
 
     plugin._ptr_add("_http._tcp.local.", "myhost.local.")
@@ -325,9 +325,9 @@ def test_mdns_bridge_ptr_glue_hosts_match_owner_suffix() -> None:
         include hosts under the same suffix as the queried service type.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(
+    plugin = MdnsBridge(
         network_enabled=False,
         ttl=120,
         domain=".zaa",
@@ -386,7 +386,7 @@ def test_mdns_bridge_ingest_service_info_populates_caches(
       - None; asserts internal caches are populated as expected.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
     class DummyInfo:
         def __init__(self) -> None:
@@ -401,7 +401,7 @@ def test_mdns_bridge_ingest_service_info_populates_caches(
                 ipaddress.ip_address("2001:db8::10").packed,
             ]
 
-    plugin = MdnsBridgePlugin(
+    plugin = MdnsBridge(
         network_enabled=False,
         include_ipv4=include_ipv4,
         include_ipv6=include_ipv6,
@@ -443,11 +443,9 @@ def test_mdns_bridge_pre_resolve_returns_none_for_untargeted_client() -> None:
       - None; asserts untargeted clients do not receive overrides.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(
-        network_enabled=False, targets=["10.0.0.0/8"], domain=".mdns"
-    )
+    plugin = MdnsBridge(network_enabled=False, targets=["10.0.0.0/8"], domain=".mdns")
     plugin.setup()
 
     plugin._test_seed_records(a={"myhost.mdns": ["192.0.2.10"]})
@@ -467,9 +465,9 @@ def test_mdns_bridge_pre_resolve_returns_none_for_invalid_dns_request() -> None:
       - None; asserts parse errors fall through.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
+    plugin = MdnsBridge(network_enabled=False, domain=".mdns")
     plugin.setup()
 
     plugin._test_seed_records(a={"myhost.mdns": ["192.0.2.10"]})
@@ -491,9 +489,9 @@ def test_mdns_bridge_pre_resolve_uses_configured_ttl() -> None:
       - None; asserts TTL in answer RRs matches configured value.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(network_enabled=False, ttl=123, domain=".mdns")
+    plugin = MdnsBridge(network_enabled=False, ttl=123, domain=".mdns")
     plugin.setup()
 
     plugin._test_seed_records(a={"myhost.mdns": ["192.0.2.10"]})
@@ -519,9 +517,9 @@ def test_mdns_bridge_get_admin_pages_descriptor() -> None:
       - None; asserts slug, title, and layout/kind fields.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
+    plugin = MdnsBridge(network_enabled=False, domain=".mdns")
     plugin.setup()
 
     pages = plugin.get_admin_pages()
@@ -543,9 +541,9 @@ def test_mdns_bridge_get_admin_ui_descriptor_shape() -> None:
       - None; asserts descriptor keys, snapshot endpoint, and layout sections.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
+    plugin = MdnsBridge(network_enabled=False, domain=".mdns")
     plugin.setup()
 
     desc = plugin.get_admin_ui_descriptor()
@@ -581,9 +579,9 @@ def test_mdns_bridge_get_http_snapshot_summarizes_services_and_hosts() -> None:
       - None; asserts summary totals and services entries reflect cached data.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(
+    plugin = MdnsBridge(
         network_enabled=False,
         domain=".local",
         yes_i_really_mean_local=True,
@@ -632,9 +630,9 @@ def test_mdns_bridge_update_service_state_preserves_host_and_up_since() -> None:
       - None; asserts host and up_since are preserved across repeated "up" events.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(
+    plugin = MdnsBridge(
         network_enabled=False,
         domain=".local",
         yes_i_really_mean_local=True,
@@ -669,9 +667,9 @@ def test_mdns_bridge_format_uptime_human_variants() -> None:
       - None; asserts formatting for several representative durations.
     """
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridge
 
-    plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
+    plugin = MdnsBridge(network_enabled=False, domain=".mdns")
     plugin.setup()
 
     assert plugin._format_uptime_human(0) == "0s"
@@ -697,9 +695,9 @@ def test_mdns_bridge_get_http_snapshot_uses_state_for_host_last_seen_and_uptime(
 
     from datetime import datetime, timezone
 
-    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin, _ServiceState
+    from foghorn.plugins.resolve.mdns import MdnsBridge, _ServiceState
 
-    plugin = MdnsBridgePlugin(
+    plugin = MdnsBridge(
         network_enabled=False,
         domain=".local",
         yes_i_really_mean_local=True,

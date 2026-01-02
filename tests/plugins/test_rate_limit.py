@@ -1,5 +1,5 @@
 """
-Brief: Tests for foghorn.plugins.rate_limit.RateLimitPlugin learning and enforcement.
+Brief: Tests for foghorn.plugins.rate_limit.RateLimit learning and enforcement.
 
 Inputs:
   - None
@@ -14,7 +14,7 @@ import threading
 from dnslib import QTYPE, DNSRecord
 
 from foghorn.plugins.resolve.base import PluginContext
-from foghorn.plugins.resolve.rate_limit import RateLimitPlugin
+from foghorn.plugins.resolve.rate_limit import RateLimit
 import foghorn.plugins.resolve.rate_limit as rate_limit_module
 
 
@@ -43,7 +43,7 @@ def test_warmup_phase_does_not_enforce(tmp_path, monkeypatch):
     """
 
     db = tmp_path / "rl.db"
-    plugin = RateLimitPlugin(
+    plugin = RateLimit(
         db_path=str(db),
         window_seconds=10,
         warmup_windows=2,
@@ -79,7 +79,7 @@ def test_enforces_after_learning_when_rate_spikes(tmp_path, monkeypatch):
     """
 
     db = tmp_path / "rl2.db"
-    plugin = RateLimitPlugin(
+    plugin = RateLimit(
         db_path=str(db),
         window_seconds=10,
         warmup_windows=1,
@@ -124,7 +124,7 @@ def test_per_domain_mode_uses_base_domain_key(tmp_path, monkeypatch):
     """
 
     db = tmp_path / "rl-domain.db"
-    plugin = RateLimitPlugin(
+    plugin = RateLimit(
         db_path=str(db),
         mode="per_domain",
         window_seconds=10,
@@ -163,7 +163,7 @@ def test_profiles_persist_and_can_be_read_from_db(tmp_path, monkeypatch):
     """
 
     db = tmp_path / "rl3.db"
-    plugin = RateLimitPlugin(
+    plugin = RateLimit(
         db_path=str(db),
         window_seconds=10,
         warmup_windows=0,
@@ -206,7 +206,7 @@ def test_to_base_domain_single_label():
 def test_get_config_model_returns_config_class():
     """Brief: get_config_model exposes the RateLimitConfig model.\n\n    Inputs:\n      - None.\n\n    Outputs:\n      - None: asserts the returned model is RateLimitConfig.\n"""
 
-    model = RateLimitPlugin.get_config_model()
+    model = RateLimit.get_config_model()
     assert model is rate_limit_module.RateLimitConfig
 
 
@@ -214,7 +214,7 @@ def test_invalid_mode_defaults_to_per_client(tmp_path):
     """Brief: Unknown mode falls back to 'per_client'.\n\n    Inputs:\n      - tmp_path: pytest tmp path for sqlite db.\n\n    Outputs:\n      - None: asserts plugin.mode is 'per_client'.\n"""
 
     db = tmp_path / "rl-mode.db"
-    plugin = RateLimitPlugin(db_path=str(db), mode="invalid-mode")
+    plugin = RateLimit(db_path=str(db), mode="invalid-mode")
     plugin.setup()
     assert plugin.mode == "per_client"
 
@@ -223,7 +223,7 @@ def test_invalid_deny_response_defaults_to_nxdomain(tmp_path):
     """Brief: Unknown deny_response falls back to 'nxdomain'.\n\n    Inputs:\n      - tmp_path: pytest tmp path for sqlite db.\n\n    Outputs:\n      - None: asserts deny_response attribute is normalized.\n"""
 
     db = tmp_path / "rl-deny.db"
-    plugin = RateLimitPlugin(db_path=str(db), deny_response="bogus")
+    plugin = RateLimit(db_path=str(db), deny_response="bogus")
     plugin.setup()
     assert plugin.deny_response == "nxdomain"
 
@@ -232,7 +232,7 @@ def test_int_config_parsing_and_clamping(tmp_path):
     """Brief: _parse_int_config handles non-integers and clamps to minimum.\n\n    Inputs:\n      - tmp_path: pytest tmp path for sqlite db.\n\n    Outputs:\n      - None: asserts defaults and minimum clamping are applied.\n"""
 
     db = tmp_path / "rl-int.db"
-    plugin = RateLimitPlugin(
+    plugin = RateLimit(
         db_path=str(db),
         window_seconds="not-an-int",
         warmup_windows=-5,
@@ -249,7 +249,7 @@ def test_float_config_parsing_and_clamping(tmp_path):
 
     db = tmp_path / "rl-float.db"
     # alpha is a non-float -> use default 0.2; alpha_down below min; burst_factor below 1.0.
-    plugin = RateLimitPlugin(
+    plugin = RateLimit(
         db_path=str(db),
         alpha="not-a-float",
         alpha_down=-0.1,
@@ -264,7 +264,7 @@ def test_float_config_parsing_and_clamping(tmp_path):
 
     # Second instance to exercise max clamping branch.
     db2 = tmp_path / "rl-float-max.db"
-    plugin2 = RateLimitPlugin(
+    plugin2 = RateLimit(
         db_path=str(db2),
         alpha=2.0,
         alpha_down=5.0,
@@ -279,7 +279,7 @@ def test_per_client_domain_mode_uses_client_and_base_domain(tmp_path, monkeypatc
     """Brief: mode='per_client_domain' uses client_ip and base domain in key.\n\n    Inputs:\n      - tmp_path: pytest tmp path.\n      - monkeypatch: unused here but matches other tests.\n\n    Outputs:\n      - None: asserts key combines client and base domain.\n"""
 
     db = tmp_path / "rl-client-domain.db"
-    plugin = RateLimitPlugin(
+    plugin = RateLimit(
         db_path=str(db),
         mode="per_client_domain",
         window_seconds=10,
@@ -298,7 +298,7 @@ def test_increment_window_default_now_uses_time(monkeypatch, tmp_path):
     """Brief: _increment_window uses time.time() when now is omitted.\n\n    Inputs:\n      - monkeypatch: pytest monkeypatch fixture.\n      - tmp_path: pytest tmp path.\n\n    Outputs:\n      - None: asserts window_id and count are computed.\n"""
 
     db = tmp_path / "rl-window.db"
-    plugin = RateLimitPlugin(db_path=str(db), window_seconds=10, warmup_windows=0)
+    plugin = RateLimit(db_path=str(db), window_seconds=10, warmup_windows=0)
     plugin.setup()
 
     monkeypatch.setattr(rate_limit_module.time, "time", lambda: 30.0)
@@ -311,7 +311,7 @@ def test_build_deny_decision_status_codes(tmp_path):
     """Brief: deny_response modes map to expected DNS status codes.\n\n    Inputs:\n      - tmp_path: pytest tmp path.\n\n    Outputs:\n      - None: asserts override responses have appropriate rcodes.\n"""
 
     db = tmp_path / "rl-deny-modes.db"
-    plugin = RateLimitPlugin(db_path=str(db), deny_response="refused")
+    plugin = RateLimit(db_path=str(db), deny_response="refused")
     plugin.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
@@ -340,7 +340,7 @@ def test_build_deny_decision_ip_mode_and_fallback(tmp_path):
     """Brief: deny_response 'ip' uses override when IP is configured, else deny.\n\n    Inputs:\n      - tmp_path: pytest tmp path.\n\n    Outputs:\n      - None: asserts both override and simple deny behavior.\n"""
 
     db = tmp_path / "rl-deny-ip.db"
-    plugin = RateLimitPlugin(
+    plugin = RateLimit(
         db_path=str(db),
         deny_response="ip",
         deny_response_ip4="192.0.2.1",
@@ -363,7 +363,7 @@ def test_build_deny_decision_ip_mode_and_fallback(tmp_path):
     assert decision_aaaa.action == "override"
 
     # When no IPs are configured, IP mode falls back to a simple deny.
-    plugin2 = RateLimitPlugin(db_path=str(db), deny_response="ip")
+    plugin2 = RateLimit(db_path=str(db), deny_response="ip")
     plugin2.setup()
     decision_fallback = plugin2._build_deny_decision(
         "example.com", QTYPE.A, wire_a, ctx
@@ -375,7 +375,7 @@ def test_pre_resolve_respects_targets_and_missing_client_ip(tmp_path, monkeypatc
     """Brief: pre_resolve short-circuits on non-targets and missing client IP.\n\n    Inputs:\n      - tmp_path: pytest tmp path.\n      - monkeypatch: pytest monkeypatch fixture.\n\n    Outputs:\n      - None: asserts early-return branches are exercised.\n"""
 
     db = tmp_path / "rl-targets.db"
-    plugin = RateLimitPlugin(
+    plugin = RateLimit(
         db_path=str(db),
         window_seconds=10,
         warmup_windows=0,
@@ -390,7 +390,7 @@ def test_pre_resolve_respects_targets_and_missing_client_ip(tmp_path, monkeypatc
     assert plugin.pre_resolve("example.com", QTYPE.A, b"", ctx_not_targeted) is None
 
     # With no targets configured, but an empty client_ip, pre_resolve also returns None.
-    plugin2 = RateLimitPlugin(db_path=str(db), window_seconds=10, warmup_windows=0)
+    plugin2 = RateLimit(db_path=str(db), window_seconds=10, warmup_windows=0)
     plugin2.setup()
     ctx_empty_ip = PluginContext(client_ip="")
     _set_time(monkeypatch, 0.0)
@@ -409,7 +409,7 @@ def test_asymmetric_alpha_allows_slower_ramp_down(tmp_path, monkeypatch):
     """
 
     db = tmp_path / "rl-alpha.db"
-    plugin = RateLimitPlugin(
+    plugin = RateLimit(
         db_path=str(db),
         window_seconds=10,
         warmup_windows=0,
@@ -455,7 +455,7 @@ def test_malformed_rate_profiles_rows_are_ignored(tmp_path, monkeypatch):
     """
 
     db = tmp_path / "rl-bad-row.db"
-    plugin = RateLimitPlugin(
+    plugin = RateLimit(
         db_path=str(db),
         window_seconds=10,
         warmup_windows=0,
@@ -504,7 +504,7 @@ def test_db_get_profile_is_thread_safe_with_lock(tmp_path):
     """
 
     db = tmp_path / "rl-thread.db"
-    plugin = RateLimitPlugin(
+    plugin = RateLimit(
         db_path=str(db),
         window_seconds=10,
         warmup_windows=0,

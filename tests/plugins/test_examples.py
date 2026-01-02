@@ -12,7 +12,7 @@ from dnslib import QTYPE, A, DNSRecord
 
 from foghorn.plugins.resolve.base import PluginContext
 from foghorn.plugins.resolve.examples import (
-    ExamplesPlugin,
+    Examples,
     ExamplesConfig,
     _count_subdomains,
     _length_without_dots,
@@ -90,7 +90,7 @@ def test_length_without_dots_trailing_dot():
 
 def test_examples_plugin_init_defaults():
     """
-    Brief: Verify ExamplesPlugin initializes with defaults.
+    Brief: Verify Examples initializes with defaults.
 
     Inputs:
       - None
@@ -98,7 +98,7 @@ def test_examples_plugin_init_defaults():
     Outputs:
       - None: Asserts default config values
     """
-    plugin = ExamplesPlugin()
+    plugin = Examples()
     plugin.setup()
     assert plugin.max_subdomains == 5
     assert plugin.max_length_no_dots == 50
@@ -108,7 +108,7 @@ def test_examples_plugin_init_defaults():
 
 def test_examples_plugin_init_custom_config():
     """
-    Brief: Verify ExamplesPlugin initializes with custom config.
+    Brief: Verify Examples initializes with custom config.
 
     Inputs:
       - **config: custom configuration values
@@ -116,7 +116,7 @@ def test_examples_plugin_init_custom_config():
     Outputs:
       - None: Asserts custom values stored
     """
-    plugin = ExamplesPlugin(
+    plugin = Examples(
         max_subdomains=3,
         max_length_no_dots=30,
         base_labels=3,
@@ -139,7 +139,7 @@ def test_examples_plugin_pre_resolve_allows_normal():
     Outputs:
       - None: Asserts None returned (allow)
     """
-    plugin = ExamplesPlugin()
+    plugin = Examples()
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
     decision = plugin.pre_resolve("www.example.com", QTYPE.A, b"", ctx)
@@ -156,7 +156,7 @@ def test_examples_plugin_pre_resolve_denies_too_many_subdomains():
     Outputs:
       - None: Asserts deny decision
     """
-    plugin = ExamplesPlugin(max_subdomains=3)
+    plugin = Examples(max_subdomains=3)
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
     # a.b.c.d.example.com = 4 subdomains
@@ -175,7 +175,7 @@ def test_examples_plugin_pre_resolve_denies_too_long():
     Outputs:
       - None: Asserts deny decision
     """
-    plugin = ExamplesPlugin(max_length_no_dots=10)
+    plugin = Examples(max_length_no_dots=10)
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
     # "verylongdomainname.com" = 21 chars without dots
@@ -195,7 +195,7 @@ def test_examples_plugin_applies_qtype_filter():
     Outputs:
       - None: Asserts filtering applied
     """
-    plugin = ExamplesPlugin(max_subdomains=0, apply_to_qtypes=["A"])
+    plugin = Examples(max_subdomains=0, apply_to_qtypes=["A"])
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
@@ -220,13 +220,13 @@ def test_examples_plugin_pre_resolve_not_targeted_and_qtype_filter():
     """
 
     # Target only 10.0.0.0/8; client outside that range should be ignored.
-    plugin = ExamplesPlugin(targets=["10.0.0.0/8"])
+    plugin = Examples(targets=["10.0.0.0/8"])
     plugin.setup()
     ctx_not_targeted = PluginContext(client_ip="192.0.2.1")
     assert plugin.pre_resolve("www.example.com", QTYPE.A, b"", ctx_not_targeted) is None
 
     # Apply only to AAAA; A query should be skipped by _applies.
-    plugin2 = ExamplesPlugin(apply_to_qtypes=["AAAA"])
+    plugin2 = Examples(apply_to_qtypes=["AAAA"])
     plugin2.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
     assert plugin2.pre_resolve("www.example.com", QTYPE.A, b"", ctx) is None
@@ -242,7 +242,7 @@ def test_examples_plugin_post_resolve_no_rewrite_rules():
     Outputs:
       - None: Asserts None returned
     """
-    plugin = ExamplesPlugin()
+    plugin = Examples()
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
     query = DNSRecord.question("example.com", "A")
@@ -264,7 +264,7 @@ def test_examples_plugin_post_resolve_with_rewrite():
       - None: Asserts override decision with modified response
     """
     rewrite_first_ipv4 = [{"apply_to_qtypes": ["A"], "ip_override": "127.0.0.1"}]
-    plugin = ExamplesPlugin(rewrite_first_ipv4=rewrite_first_ipv4)
+    plugin = Examples(rewrite_first_ipv4=rewrite_first_ipv4)
     plugin.setup()
 
     ctx = PluginContext(client_ip="127.0.0.1")
@@ -293,7 +293,7 @@ def test_examples_plugin_post_resolve_with_rewrite():
 
     # Also verify AAAA rewrite path uses matching_rule and AAAA rtype.
     rewrite_first_ipv6 = [{"apply_to_qtypes": ["AAAA"], "ip_override": "::1"}]
-    plugin_v6 = ExamplesPlugin(rewrite_first_ipv4=rewrite_first_ipv6)
+    plugin_v6 = Examples(rewrite_first_ipv4=rewrite_first_ipv6)
     plugin_v6.setup()
 
     from dnslib import RR, DNSHeader, AAAA as AAAA_RDATA
@@ -330,7 +330,7 @@ def test_examples_plugin_get_config_model_returns_examples_config():
       - None: Asserts returned class is ExamplesConfig.
     """
 
-    assert ExamplesPlugin.get_config_model() is ExamplesConfig
+    assert Examples.get_config_model() is ExamplesConfig
 
 
 def test_examples_plugin_qtype_name_normalization():
@@ -343,7 +343,7 @@ def test_examples_plugin_qtype_name_normalization():
     Outputs:
       - None: Asserts normalized uppercase name
     """
-    plugin = ExamplesPlugin()
+    plugin = Examples()
     assert plugin._qtype_name(1) == "A"
     assert plugin._qtype_name("a") == "A"
     assert plugin._qtype_name("AAAA") == "AAAA"

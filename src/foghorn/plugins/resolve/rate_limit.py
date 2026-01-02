@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 class RateLimitConfig(BaseModel):
-    """Brief: Typed configuration model for RateLimitPlugin.
+    """Brief: Typed configuration model for RateLimit.
 
     Inputs:
       - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'
@@ -84,10 +84,10 @@ def _to_base_domain(qname: str, base_labels: int = 2) -> str:
 
 
 @plugin_aliases("rate_limit", "ratelimit", "rate")
-class RateLimitPlugin(BasePlugin):
+class RateLimit(BasePlugin):
     """Brief: Learning rate limiting plugin with sqlite3-backed per-key baselines.
 
-    Plugins using RateLimitPlugin can prevent abusive spikes while allowing
+    Plugins using RateLimit can prevent abusive spikes while allowing
     legitimate sustained high-volume traffic. The plugin learns a per-key
     baseline requests-per-second (RPS) and only enforces when the current
     window rate is a clear outlier relative to the learned average.
@@ -119,9 +119,7 @@ class RateLimitPlugin(BasePlugin):
         # Parse mode
         raw_mode = str(self.config.get("mode", "per_client")).strip().lower()
         if raw_mode not in {"per_client", "per_client_domain", "per_domain"}:
-            logger.warning(
-                "RateLimitPlugin: invalid mode %r; using 'per_client'", raw_mode
-            )
+            logger.warning("RateLimit: invalid mode %r; using 'per_client'", raw_mode)
             raw_mode = "per_client"
         self.mode = raw_mode
 
@@ -155,7 +153,7 @@ class RateLimitPlugin(BasePlugin):
         }
         if deny_resp not in valid_deny:
             logger.warning(
-                "RateLimitPlugin: unknown deny_response %r; defaulting to 'nxdomain'",
+                "RateLimit: unknown deny_response %r; defaulting to 'nxdomain'",
                 deny_resp,
             )
             deny_resp = "nxdomain"
@@ -200,13 +198,11 @@ class RateLimitPlugin(BasePlugin):
         try:
             value = int(raw)
         except (TypeError, ValueError):
-            logger.warning(
-                "RateLimitPlugin: %s non-integer %r; using %d", key, raw, default
-            )
+            logger.warning("RateLimit: %s non-integer %r; using %d", key, raw, default)
             return default
         if value < minimum:
             logger.warning(
-                "RateLimitPlugin: %s below minimum %d (%d); clamping",
+                "RateLimit: %s below minimum %d (%d); clamping",
                 key,
                 minimum,
                 value,
@@ -237,13 +233,11 @@ class RateLimitPlugin(BasePlugin):
         try:
             value = float(raw)
         except (TypeError, ValueError):
-            logger.warning(
-                "RateLimitPlugin: %s non-float %r; using %s", key, raw, default
-            )
+            logger.warning("RateLimit: %s non-float %r; using %s", key, raw, default)
             return default
         if value < minimum:
             logger.warning(
-                "RateLimitPlugin: %s below minimum %s (%s); clamping",
+                "RateLimit: %s below minimum %s (%s); clamping",
                 key,
                 minimum,
                 value,
@@ -251,7 +245,7 @@ class RateLimitPlugin(BasePlugin):
             value = minimum
         if maximum is not None and value > maximum:
             logger.warning(
-                "RateLimitPlugin: %s above maximum %s (%s); clamping",
+                "RateLimit: %s above maximum %s (%s); clamping",
                 key,
                 maximum,
                 value,
@@ -275,7 +269,7 @@ class RateLimitPlugin(BasePlugin):
                 os.makedirs(dir_path, exist_ok=True)
             except Exception as exc:  # pragma: no cover - defensive: log-only path
                 logger.warning(
-                    "RateLimitPlugin: failed to create directory for db_path %s: %s",
+                    "RateLimit: failed to create directory for db_path %s: %s",
                     self.db_path,
                     exc,
                 )
@@ -315,11 +309,11 @@ class RateLimitPlugin(BasePlugin):
             return None
         try:
             if row[0] is None or row[1] is None or row[2] is None:
-                raise TypeError("RateLimitPlugin: NULL fields in rate_profiles row")
+                raise TypeError("RateLimit: NULL fields in rate_profiles row")
             return float(row[0]), float(row[1]), int(row[2])
         except Exception as exc:  # pragma: no cover - defensive: malformed DB rows
             logger.warning(
-                "RateLimitPlugin: ignoring malformed rate_profiles row for %s: %s",
+                "RateLimit: ignoring malformed rate_profiles row for %s: %s",
                 key,
                 exc,
             )
@@ -453,7 +447,7 @@ class RateLimitPlugin(BasePlugin):
             payload = f"{window_id}:{count}".encode()
             self._window_cache.set(cache_key, int(ttl), payload)
         except Exception:  # pragma: no cover - defensive logging only
-            logger.debug("RateLimitPlugin: failed updating window cache for %s", key)
+            logger.debug("RateLimit: failed updating window cache for %s", key)
 
         # If we have a completed window, update the learned profile in sqlite.
         if prev_window_id is not None and prev_count is not None and prev_count > 0:
@@ -464,7 +458,7 @@ class RateLimitPlugin(BasePlugin):
             except (
                 Exception
             ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                logger.warning("RateLimitPlugin: failed to update profile for %s", key)
+                logger.warning("RateLimit: failed to update profile for %s", key)
 
         return window_id, count
 
@@ -498,7 +492,7 @@ class RateLimitPlugin(BasePlugin):
                 Exception
             ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 logger.warning(
-                    "RateLimitPlugin: failed to parse request while building deny response: %s",
+                    "RateLimit: failed to parse request while building deny response: %s",
                     exc,
                 )
                 return PluginDecision(action="deny")
@@ -577,7 +571,7 @@ class RateLimitPlugin(BasePlugin):
             Exception
         ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             logger.warning(
-                "RateLimitPlugin: failed to load profile for %s: %s",
+                "RateLimit: failed to load profile for %s: %s",
                 key,
                 exc,
                 exc_info=True,
@@ -604,7 +598,7 @@ class RateLimitPlugin(BasePlugin):
             return None
 
         logger.info(
-            "RateLimitPlugin: limiting key=%s current_rps=%.2f avg_rps=%.2f allowed_rps=%.2f",
+            "RateLimit: limiting key=%s current_rps=%.2f avg_rps=%.2f allowed_rps=%.2f",
             key,
             current_rps,
             avg_rps,

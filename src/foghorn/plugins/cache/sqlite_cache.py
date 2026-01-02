@@ -10,7 +10,7 @@ from .base import CachePlugin, cache_aliases
 
 
 @cache_aliases("sqlite3", "sqlite", "sqlite_cache", "sqlite3_cache")
-class SQLite3CachePlugin(CachePlugin):
+class SQLite3Cache(CachePlugin):
     """SQLite3-backed DNS cache plugin.
 
     Brief:
@@ -29,7 +29,7 @@ class SQLite3CachePlugin(CachePlugin):
           - journal_mode (str): SQLite journal mode; defaults to 'WAL'.
 
     Outputs:
-      - SQLite3CachePlugin instance.
+      - SQLite3Cache instance.
 
     Example:
       cache:
@@ -320,7 +320,7 @@ class SQLite3CachePlugin(CachePlugin):
 
         # Decorated cache functions registered via registered_cached().
         try:
-            from foghorn.utils.cache_registry import get_registered_cached
+            from foghorn.utils.register_caches import get_registered_cached
 
             decorated = get_registered_cached()
         except Exception:  # pragma: nocover - registry import failure is non-critical

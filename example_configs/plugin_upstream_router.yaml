@@ -26,7 +26,7 @@ logging:
   level: info
 
 plugins:
-  - module: upstream  # UpstreamRouterPlugin alias
+  - module: upstream  # UpstreamRouter alias
     # pre_priority: 30  # route before most filtering
     config:
       routes:

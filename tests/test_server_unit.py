@@ -10,7 +10,7 @@ Outputs:
 
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
-from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.plugins.resolve import base as plugin_base
 from foghorn.servers.server import (
     DNSUDPHandler,
@@ -268,7 +268,7 @@ def _make_handler_for_cache_tests(min_cache_ttl: int):
       - DNSUDPHandler instance with fake cache and client metadata
     """
     handler = DNSUDPHandler.__new__(DNSUDPHandler)
-    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
     handler.min_cache_ttl = min_cache_ttl
     handler.client_address = ("127.0.0.1", 12345)
     return handler
@@ -302,9 +302,9 @@ def test_cache_and_send_response_uses_effective_ttl(monkeypatch):
 
     # Patch at the class level so the assertion is stable even if another test
     # swaps out plugin_base.DNS_CACHE concurrently.
-    monkeypatch.setattr(InMemoryTTLCachePlugin, "set", fake_set)
+    monkeypatch.setattr(InMemoryTTLCache, "set", fake_set)
 
-    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
 
     class DummySock:
         def __init__(self):
@@ -356,9 +356,9 @@ def test_cache_and_send_response_never_caches_servfail(monkeypatch):
 
     # Patch at the class level so the assertion is stable even if another test
     # swaps out plugin_base.DNS_CACHE concurrently.
-    monkeypatch.setattr(InMemoryTTLCachePlugin, "set", fake_set)
+    monkeypatch.setattr(InMemoryTTLCache, "set", fake_set)
 
-    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
 
     class DummySock:
         def __init__(self):
