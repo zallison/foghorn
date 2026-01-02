@@ -13,7 +13,7 @@ def cache_aliases(*aliases: str):
       - Callable that applies the aliases to a CachePlugin subclass and returns it.
 
     Example:
-      >>> from foghorn.cache_plugins.base import CachePlugin, cache_aliases
+      >>> from foghorn.plugins.cache.base import CachePlugin, cache_aliases
       >>> @cache_aliases('none', 'null')
       ... class NullCache(CachePlugin):
       ...     pass
@@ -59,7 +59,7 @@ class CachePlugin:
             method and return a JSON-serializable mapping.
 
           - The returned mapping follows the same conventions as
-            foghorn.plugins.base.BasePlugin.get_admin_ui_descriptor(), with
+            foghorn.plugins.resolve.base.BasePlugin.get_admin_ui_descriptor(), with
             common keys including:
 
               * name (str): Effective instance name used for routing and

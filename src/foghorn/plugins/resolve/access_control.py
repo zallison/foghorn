@@ -97,7 +97,7 @@ class AccessControlPlugin(BasePlugin):
 
         Example use:
             >>> from foghorn.plugins.access_control import AccessControlPlugin
-            >>> from foghorn.plugins.base import PluginContext
+            >>> from foghorn.plugins.resolve.base import PluginContext
             >>> config = {"default": "allow", "deny": ["192.168.1.10"]}
             >>> plugin = AccessControlPlugin(**config)
             >>> ctx = PluginContext(client_ip="192.168.1.10")

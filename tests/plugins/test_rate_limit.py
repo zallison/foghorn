@@ -13,9 +13,9 @@ import threading
 
 from dnslib import QTYPE, DNSRecord
 
-from foghorn.plugins.base import PluginContext
-from foghorn.plugins.rate_limit import RateLimitPlugin
-import foghorn.plugins.rate_limit as rate_limit_module
+from foghorn.plugins.resolve.base import PluginContext
+from foghorn.plugins.resolve.rate_limit import RateLimitPlugin
+import foghorn.plugins.resolve.rate_limit as rate_limit_module
 
 
 def _set_time(monkeypatch, value: float) -> None:

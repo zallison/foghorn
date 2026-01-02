@@ -17,7 +17,7 @@ except Exception:  # pragma: no cover - defensive fallback when watchdog is unav
     FileSystemEventHandler = object  # type: ignore[assignment]
     Observer = None  # type: ignore[assignment]
 
-from foghorn.plugins.base import (
+from foghorn.plugins.resolve.base import (
     AdminPageSpec,
     BasePlugin,
     PluginContext,

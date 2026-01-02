@@ -37,7 +37,7 @@ except Exception:  # pragma: no cover - defensive optional dependency handling
         return decorator
 
 
-from foghorn.plugins.base import (
+from foghorn.plugins.resolve.base import (
     AdminPageSpec,
     BasePlugin,
     PluginContext,

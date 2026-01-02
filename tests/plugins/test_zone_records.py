@@ -6,7 +6,7 @@ import threading
 import pytest
 from dnslib import QTYPE, RCODE, DNSRecord
 
-from foghorn.plugins.base import PluginContext
+from foghorn.plugins.resolve.base import PluginContext
 
 
 def _make_query(name: str, qtype: int) -> bytes:
@@ -53,7 +53,7 @@ def test_load_records_uniques_and_preserves_order_single_file(
         encoding="utf-8",
     )
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])
@@ -105,7 +105,7 @@ def test_load_records_across_multiple_files_order_and_dedup(
         encoding="utf-8",
     )
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(f1), str(f2)])
@@ -142,7 +142,7 @@ def test_pre_resolve_uses_value_order_from_config(tmp_path: pathlib.Path) -> Non
         encoding="utf-8",
     )
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])
@@ -172,7 +172,7 @@ def test_inline_records_config_only() -> None:
       - Asserts that an inline record defined via the `records` config field is
         present in plugin.records and used by pre_resolve().
     """
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(records=["inline.example|A|300|203.0.113.10"])
@@ -220,7 +220,7 @@ def test_inline_records_merge_after_files(tmp_path: pathlib.Path) -> None:
         encoding="utf-8",
     )
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(
@@ -249,7 +249,7 @@ def test_normalize_paths_raises_when_no_paths(tmp_path: pathlib.Path) -> None:
     Outputs:
       - Asserts that ValueError is raised when no paths are configured.
     """
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords()
@@ -279,7 +279,7 @@ def test_load_records_skips_blank_and_comment_lines(tmp_path: pathlib.Path) -> N
         encoding="utf-8",
     )
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])
@@ -304,7 +304,7 @@ def test_load_records_malformed_line_wrong_field_count(tmp_path: pathlib.Path) -
     records_file = tmp_path / "records.txt"
     records_file.write_text("bad-line-without-separators\n", encoding="utf-8")
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])
@@ -325,7 +325,7 @@ def test_load_records_malformed_line_empty_field(tmp_path: pathlib.Path) -> None
     # Empty value field after the last '|'.
     records_file.write_text("example.com|A|300|\n", encoding="utf-8")
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])
@@ -345,7 +345,7 @@ def test_load_records_qtype_numeric_and_negative_ttl(tmp_path: pathlib.Path) -> 
     records_file = tmp_path / "records.txt"
     records_file.write_text("example.com|1|-10|1.2.3.4\n", encoding="utf-8")
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])
@@ -365,7 +365,7 @@ def test_load_records_invalid_ttl_non_integer(tmp_path: pathlib.Path) -> None:
     records_file = tmp_path / "records.txt"
     records_file.write_text("example.com|A|abc|1.2.3.4\n", encoding="utf-8")
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])
@@ -388,7 +388,7 @@ def test_load_records_qtype_fallback_to_get_int(
     records_file = tmp_path / "records.txt"
     records_file.write_text("example.com|FOO|300|1.2.3.4\n", encoding="utf-8")
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
 
     class DummyQType:
         def __getattr__(self, name: str) -> int:
@@ -420,7 +420,7 @@ def test_load_records_qtype_unknown_raises(monkeypatch, tmp_path: pathlib.Path) 
     records_file = tmp_path / "records.txt"
     records_file.write_text("example.com|BAR|300|1.2.3.4\n", encoding="utf-8")
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
 
     class DummyQType:
         def __getattr__(self, name: str) -> int:
@@ -449,7 +449,7 @@ def test_load_records_assigns_without_lock(tmp_path: pathlib.Path) -> None:
     records_file = tmp_path / "records.txt"
     records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])
@@ -474,7 +474,7 @@ def test_pre_resolve_no_entry_and_no_lock(tmp_path: pathlib.Path) -> None:
     records_file = tmp_path / "records.txt"
     records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])
@@ -505,7 +505,7 @@ def test_pre_resolve_returns_none_when_rr_parsing_fails(
     records_file = tmp_path / "records.txt"
     records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])
@@ -544,7 +544,7 @@ def test_watchdog_handler_should_reload_and_on_any_event(
     Outputs:
       - Asserts _should_reload and on_any_event behaviour for various event shapes.
     """
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -612,7 +612,7 @@ def test_start_watchdog_observer_none(monkeypatch, tmp_path: pathlib.Path) -> No
     Outputs:
       - Asserts that _observer is left as None when Observer is unavailable.
     """
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -637,7 +637,7 @@ def test_start_watchdog_with_no_directories(monkeypatch) -> None:
     Outputs:
       - Asserts that _observer is set to None when file_paths is empty.
     """
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     # Construct a bare instance without going through __init__ to allow empty file_paths.
@@ -670,7 +670,7 @@ def test_start_polling_configuration(monkeypatch, tmp_path: pathlib.Path) -> Non
     Outputs:
       - Asserts that polling thread is only started when both interval and stop_event are set.
     """
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -710,7 +710,7 @@ def test_poll_loop_early_return_and_iteration(tmp_path: pathlib.Path) -> None:
     Outputs:
       - Asserts both the early-return and single-iteration behaviours.
     """
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -749,7 +749,7 @@ def test_have_files_changed_tracks_snapshot(
     Outputs:
       - Asserts that the first call returns True and subsequent identical stats return False.
     """
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -794,7 +794,7 @@ def test_schedule_debounced_reload_variants(
     Outputs:
       - Asserts that reload is called immediately for zero delay and scheduled via Timer otherwise.
     """
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -885,7 +885,7 @@ def test_reload_records_from_watchdog_deferred_and_immediate(
     Outputs:
       - Asserts that short intervals schedule a deferred reload and long ones call _load_records.
     """
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -931,7 +931,7 @@ def test_close_stops_observer_polling_and_timers() -> None:
     Outputs:
       - Asserts that observer, poll_thread, and debounce timer are cleared.
     """
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = object.__new__(ZoneRecords)
@@ -1000,7 +1000,7 @@ def test_setup_watchdog_enabled_flag_controls_start(
     Outputs:
       - Asserts that _start_watchdog is only called when watchdog_enabled is truthy.
     """
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -1054,7 +1054,7 @@ def test_authoritative_zone_nxdomain_and_nodata(tmp_path: pathlib.Path) -> None:
         encoding="utf-8",
     )
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])
@@ -1114,7 +1114,7 @@ def test_authoritative_cname_and_any_semantics(tmp_path: pathlib.Path) -> None:
         encoding="utf-8",
     )
 
-    mod = importlib.import_module("foghorn.plugins.zone-records")
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])

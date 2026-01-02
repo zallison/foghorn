@@ -11,8 +11,8 @@ Outputs:
 from dnslib import NS, QTYPE, RCODE, RR, SOA, A, DNSRecord
 
 import foghorn.servers.server as srv
-from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
-from foghorn.plugins import base as plugin_base
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins.resolve import base as plugin_base
 
 
 def test_compute_effective_ttl_variants():

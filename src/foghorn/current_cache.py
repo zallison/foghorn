@@ -4,8 +4,8 @@ import os
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
-from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
-from foghorn.cache_backends.sqlite_ttl import SQLite3TTLCache
+from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
+from foghorn.plugins.cache.backends.sqlite_ttl import SQLite3TTLCache
 
 
 class TTLCacheAdapter:
@@ -116,7 +116,7 @@ def get_current_namespaced_cache(
     Inputs:
       - namespace: Namespace/table name to isolate data.
       - cache_plugin: Optional CachePlugin-like object. When omitted, this uses
-        `foghorn.plugins.base.DNS_CACHE`.
+        `foghorn.plugins.resolve.base.DNS_CACHE`.
 
     Outputs:
       - TTLCacheAdapter wrapping either:
@@ -128,7 +128,7 @@ def get_current_namespaced_cache(
     # Import lazily to avoid circular imports during module import.
     if cache_plugin is None:
         try:
-            from foghorn.plugins import base as plugin_base
+            from foghorn.plugins.resolve import base as plugin_base
 
             cache_plugin = getattr(plugin_base, "DNS_CACHE", None)
         except Exception:
@@ -136,7 +136,7 @@ def get_current_namespaced_cache(
 
     # SQLite-backed DNS cache: create a dedicated sqlite TTL table per namespace.
     try:
-        from foghorn.cache_plugins.sqlite3_cache import SQLite3CachePlugin
+        from foghorn.plugins.cache.sqlite_cache import SQLite3CachePlugin
 
         if isinstance(cache_plugin, SQLite3CachePlugin):
             journal_mode = "WAL"
@@ -174,7 +174,7 @@ def get_current_namespaced_cache(
     # the same backing store so multiple subsystems still reuse "the current
     # cache".
     try:
-        from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+        from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
 
         if isinstance(cache_plugin, InMemoryTTLCachePlugin):
             base = getattr(cache_plugin, "_cache", None)
@@ -186,7 +186,7 @@ def get_current_namespaced_cache(
     # Other cache plugins (e.g., NullCache): return the plugin itself as a TTL
     # backend. This allows per-plugin cache overrides like `cache: none`.
     try:
-        from foghorn.cache_plugins.base import CachePlugin
+        from foghorn.plugins.cache.base import CachePlugin
 
         if isinstance(cache_plugin, CachePlugin):
             return TTLCacheAdapter(cache_plugin)

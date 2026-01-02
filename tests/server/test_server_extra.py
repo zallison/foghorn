@@ -11,8 +11,8 @@ Outputs:
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 import foghorn.servers.server as srv
-from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
-from foghorn.plugins import base as plugin_base
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins.resolve import base as plugin_base
 from foghorn.servers.udp_server import _set_response_id
 
 

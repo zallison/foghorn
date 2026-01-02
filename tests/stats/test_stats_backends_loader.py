@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from foghorn.querylog_backends import (
+from foghorn.plugins.querylog import (
     BaseStatsStoreBackend,
     StatsStoreBackendConfig,
     load_stats_store_backend,
@@ -174,7 +174,7 @@ def test_loader_multi_backend_returns_multi_and_respects_order(monkeypatch) -> N
         created.append(b)
         return b
 
-    from foghorn import querylog_backends as qlb
+    from foghorn.plugins import querylog as qlb
 
     monkeypatch.setattr(qlb, "_build_backend_from_config", _dummy_ctor)
 
@@ -250,7 +250,7 @@ def test_loader_respects_primary_backend_hint(monkeypatch) -> None:
         created.append(b)
         return b
 
-    from foghorn import querylog_backends as qlb
+    from foghorn.plugins import querylog as qlb
 
     monkeypatch.setattr(qlb, "_build_backend_from_config", _dummy_ctor)
 

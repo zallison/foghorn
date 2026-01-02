@@ -12,7 +12,7 @@ import importlib
 
 from dnslib import QTYPE, DNSRecord
 
-from foghorn.plugins.base import PluginContext
+from foghorn.plugins.resolve.base import PluginContext
 
 
 def test_etc_hosts_pre_resolve_ipv6_answer(tmp_path):
@@ -28,7 +28,7 @@ def test_etc_hosts_pre_resolve_ipv6_answer(tmp_path):
     Example:
       2001:db8::42 v6host.local
     """
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"

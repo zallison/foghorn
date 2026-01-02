@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 from dnslib import A, NS, QTYPE, RCODE, RR, SOA, DNSRecord
 
-from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
+from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 from foghorn.recursive_resolver import RecursiveResolver
 
 

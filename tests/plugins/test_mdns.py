@@ -3,7 +3,7 @@ import ipaddress
 import pytest
 from dnslib import QTYPE, DNSRecord
 
-from foghorn.plugins.base import PluginContext
+from foghorn.plugins.resolve.base import PluginContext
 
 
 def _make_query(name: str, qtype: int) -> bytes:
@@ -23,15 +23,12 @@ def _make_query(name: str, qtype: int) -> bytes:
 
 def test_mdns_bridge_answers_dns_sd_records() -> None:
     """Brief: MdnsBridgePlugin can answer PTR/SRV/TXT/A/AAAA under a DNS suffix.
-
-    Inputs:
-      - None.
-
-    Outputs:
-      - Asserts override responses include expected RR types.
+    @@
+        Outputs:
+          - Asserts override responses include expected RR types.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(
         network_enabled=False,
@@ -143,16 +140,13 @@ def test_mdns_bridge_answers_dns_sd_records() -> None:
 
 def test_mdns_bridge_service_node_a_and_txt_returned_together() -> None:
     """Brief: Service-node A/TXT queries return both metadata and host addresses.
-
-    Inputs:
-      - None.
-
-    Outputs:
-      - Asserts that A or TXT queries for a service-node name include TXT for the
-        service and A/AAAA for the underlying host.
+    @@
+        Outputs:
+          - Asserts that A or TXT queries for a service-node name include TXT for the
+            service and A/AAAA for the underlying host.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(
         network_enabled=False,
@@ -202,15 +196,12 @@ def test_mdns_bridge_service_node_a_and_txt_returned_together() -> None:
 
 def test_mdns_bridge_service_type_a_aaaa_return_ptr() -> None:
     """Brief: A/AAAA queries for `_service._proto` names return PTR data when cached.
-
-    Inputs:
-      - None.
-
-    Outputs:
-      - Asserts A/AAAA queries for service-type owners yield PTR RRs using cached targets.
+    @@
+        Outputs:
+          - Asserts A/AAAA queries for service-type owners yield PTR RRs using cached targets.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(
         network_enabled=False,
@@ -262,7 +253,7 @@ def test_mdns_bridge_falls_through_when_unknown() -> None:
       - Asserts plugin returns None.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(
         network_enabled=False,
@@ -286,7 +277,7 @@ def test_mdns_bridge_mirror_suffixes_roundtrip() -> None:
       - None; asserts suffix normalization behavior.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
     plugin.setup()
@@ -307,7 +298,7 @@ def test_mdns_bridge_ptr_add_and_remove_mirrors_suffixes() -> None:
       - None; asserts `_ptr` cache contains/clears `.local` entries.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
     plugin.setup()
@@ -334,7 +325,7 @@ def test_mdns_bridge_ptr_glue_hosts_match_owner_suffix() -> None:
         include hosts under the same suffix as the queried service type.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(
         network_enabled=False,
@@ -395,7 +386,7 @@ def test_mdns_bridge_ingest_service_info_populates_caches(
       - None; asserts internal caches are populated as expected.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     class DummyInfo:
         def __init__(self) -> None:
@@ -452,7 +443,7 @@ def test_mdns_bridge_pre_resolve_returns_none_for_untargeted_client() -> None:
       - None; asserts untargeted clients do not receive overrides.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(
         network_enabled=False, targets=["10.0.0.0/8"], domain=".mdns"
@@ -476,7 +467,7 @@ def test_mdns_bridge_pre_resolve_returns_none_for_invalid_dns_request() -> None:
       - None; asserts parse errors fall through.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
     plugin.setup()
@@ -500,7 +491,7 @@ def test_mdns_bridge_pre_resolve_uses_configured_ttl() -> None:
       - None; asserts TTL in answer RRs matches configured value.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(network_enabled=False, ttl=123, domain=".mdns")
     plugin.setup()
@@ -528,7 +519,7 @@ def test_mdns_bridge_get_admin_pages_descriptor() -> None:
       - None; asserts slug, title, and layout/kind fields.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
     plugin.setup()
@@ -552,7 +543,7 @@ def test_mdns_bridge_get_admin_ui_descriptor_shape() -> None:
       - None; asserts descriptor keys, snapshot endpoint, and layout sections.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
     plugin.setup()
@@ -590,7 +581,7 @@ def test_mdns_bridge_get_http_snapshot_summarizes_services_and_hosts() -> None:
       - None; asserts summary totals and services entries reflect cached data.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(
         network_enabled=False,
@@ -641,7 +632,7 @@ def test_mdns_bridge_update_service_state_preserves_host_and_up_since() -> None:
       - None; asserts host and up_since are preserved across repeated "up" events.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(
         network_enabled=False,
@@ -678,7 +669,7 @@ def test_mdns_bridge_format_uptime_human_variants() -> None:
       - None; asserts formatting for several representative durations.
     """
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin
 
     plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
     plugin.setup()
@@ -706,7 +697,7 @@ def test_mdns_bridge_get_http_snapshot_uses_state_for_host_last_seen_and_uptime(
 
     from datetime import datetime, timezone
 
-    from foghorn.plugins.mdns import MdnsBridgePlugin, _ServiceState
+    from foghorn.plugins.resolve.mdns import MdnsBridgePlugin, _ServiceState
 
     plugin = MdnsBridgePlugin(
         network_enabled=False,

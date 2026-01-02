@@ -113,7 +113,7 @@
           "title": "AccessControlConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.access_control.AccessControlPlugin"
+        "module": "foghorn.plugins.resolve.access_control.AccessControlPlugin"
       },
       "dns_prefetch": {
         "aliases": [
@@ -153,7 +153,7 @@
           "title": "DnsPrefetchConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.dns_prefetch.DnsPrefetchPlugin"
+        "module": "foghorn.plugins.resolve.dns_prefetch.DnsPrefetchPlugin"
       },
       "docker_hosts": {
         "aliases": [
@@ -252,7 +252,7 @@
           "title": "DockerHostsConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.docker_hosts.DockerHosts"
+        "module": "foghorn.plugins.resolve.docker_hosts.DockerHosts"
       },
       "etc_hosts": {
         "aliases": [
@@ -327,7 +327,7 @@
           "title": "EtcHostsConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.etc_hosts.EtcHosts"
+        "module": "foghorn.plugins.resolve.etc_hosts.EtcHosts"
       },
       "examples": {
         "aliases": [
@@ -374,7 +374,7 @@
           "title": "ExamplesConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.examples.ExamplesPlugin"
+        "module": "foghorn.plugins.resolve.examples.ExamplesPlugin"
       },
       "file_downloader": {
         "aliases": [
@@ -449,7 +449,7 @@
           "title": "FileDownloaderConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.file_downloader.FileDownloader"
+        "module": "foghorn.plugins.resolve.file_downloader.FileDownloader"
       },
       "filter": {
         "aliases": [
@@ -607,7 +607,7 @@
           "title": "FilterConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.filter.FilterPlugin"
+        "module": "foghorn.plugins.resolve.filter.FilterPlugin"
       },
       "flaky_server": {
         "aliases": [
@@ -731,7 +731,7 @@
           "title": "FlakyServerConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.flaky_server.FlakyServer"
+        "module": "foghorn.plugins.resolve.flaky_server.FlakyServer"
       },
       "greylist": {
         "aliases": [
@@ -781,7 +781,7 @@
           "title": "GreylistConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.greylist.GreylistPlugin"
+        "module": "foghorn.plugins.resolve.greylist.GreylistPlugin"
       },
       "mdns_bridge": {
         "aliases": [
@@ -860,7 +860,7 @@
           "title": "MdnsBridgeConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.mdns.MdnsBridgePlugin"
+        "module": "foghorn.plugins.resolve.mdns.MdnsBridgePlugin"
       },
       "new_domain_filter": {
         "aliases": [
@@ -899,7 +899,7 @@
           "title": "NewDomainFilterConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.new_domain_filter.NewDomainFilterPlugin"
+        "module": "foghorn.plugins.resolve.new_domain_filter.NewDomainFilterPlugin"
       },
       "rate_limit": {
         "aliases": [
@@ -1011,7 +1011,7 @@
           "title": "RateLimitConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.rate_limit.RateLimitPlugin"
+        "module": "foghorn.plugins.resolve.rate_limit.RateLimitPlugin"
       },
       "upstream_router": {
         "aliases": [
@@ -1096,7 +1096,7 @@
           "title": "UpstreamRouterConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.upstream_router.UpstreamRouterPlugin"
+        "module": "foghorn.plugins.resolve.upstream_router.UpstreamRouterPlugin"
       },
       "zone_records": {
         "aliases": [
@@ -1185,7 +1185,7 @@
           "title": "ZoneRecordsConfig",
           "type": "object"
         },
-        "module": "foghorn.plugins.zone-records.ZoneRecords"
+        "module": "foghorn.plugins.resolve.zone-records.ZoneRecords"
       }
     },
     "plugin_entry": {
@@ -1596,6 +1596,11 @@
         "log_level": {
           "type": "string"
         },
+        "logging_only": {
+          "default": false,
+          "description": "When true, restrict statistics to logging-only mode where only insert-style operations (query_log appends and counter increments) are performed and background warm-load or rebuild passes are skipped.",
+          "type": "boolean"
+        },
         "persistence": {
           "additionalProperties": false,
           "properties": {
@@ -1647,6 +1652,11 @@
             }
           },
           "type": "object"
+        },
+        "query_log_only": {
+          "default": false,
+          "description": "When true, only the raw query_log is written to the persistence backend and aggregate counters are kept in-memory only.",
+          "type": "boolean"
         },
         "reset_on_log": {
           "type": "boolean"

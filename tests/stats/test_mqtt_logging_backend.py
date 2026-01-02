@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from foghorn.querylog_backends.mqtt_logging import (
+from foghorn.plugins.querylog.mqtt_logging import (
     MqttLoggingBackend,
     _import_mqtt_driver,
 )

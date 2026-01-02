@@ -12,9 +12,9 @@ import pytest
 from dnslib import QTYPE, RCODE, DNSRecord, RR, A
 
 import foghorn.servers.server as server_mod
-from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
-from foghorn.plugins import base as plugin_base
-from foghorn.plugins.base import BasePlugin, PluginContext, PluginDecision
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins.resolve import base as plugin_base
+from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
 from foghorn.servers.server import DNSUDPHandler, resolve_query_bytes
 
 

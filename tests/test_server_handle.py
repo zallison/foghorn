@@ -10,8 +10,8 @@ Outputs:
 
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
-from foghorn.plugins import base as plugin_base
-from foghorn.plugins.base import BasePlugin, PluginDecision
+from foghorn.plugins.resolve import base as plugin_base
+from foghorn.plugins.resolve.base import BasePlugin, PluginDecision
 from foghorn.servers.server import DNSUDPHandler
 
 

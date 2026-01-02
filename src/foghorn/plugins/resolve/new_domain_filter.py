@@ -140,7 +140,7 @@ class NewDomainFilterPlugin(BasePlugin):
         Example use:
             (Note: This is a simplified example that doesn't actually make a network request)
             >>> from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin
-            >>> from foghorn.plugins.base import PluginContext
+            >>> from foghorn.plugins.resolve.base import PluginContext
             >>> from unittest.mock import patch
             >>> plugin = NewDomainFilterPlugin(threshold_days=30)
             >>> with patch.object(plugin, '_domain_age_days', return_value=10):

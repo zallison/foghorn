@@ -10,7 +10,7 @@ Outputs:
 
 from dnslib import QTYPE, DNSRecord
 
-from foghorn.plugins import base as plugin_base
+from foghorn.plugins.resolve import base as plugin_base
 from foghorn.servers.server import DNSUDPHandler
 
 

@@ -12,7 +12,7 @@ import importlib
 
 from dnslib import QTYPE, DNSRecord
 
-from foghorn.plugins.base import PluginContext
+from foghorn.plugins.resolve.base import PluginContext
 
 
 def _write(tmp_path, name, text):
@@ -34,7 +34,7 @@ def test_init_with_file_paths_only_merges_in_order(tmp_path):
       f1: 1.1.1.1 hostA
       f2: 2.2.2.2 hostA
     """
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     f1 = _write(tmp_path, "f1", "1.1.1.1 hostA\n127.0.0.1 localhost\n1.1.2.2 hostC\n")
@@ -60,7 +60,7 @@ def test_no_input_uses_default_via_monkeypatched_normalize(tmp_path, monkeypatch
     Example:
       default -> tmp file with 4.4.4.4 defaultHost
     """
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     default_hosts = _write(tmp_path, "default", "4.4.4.4 defaultHost\n")
@@ -89,7 +89,7 @@ def test_pre_resolve_with_multiple_files_uses_last_override(tmp_path):
       f1: 1.1.1.1 multi.local
       f2: 2.2.2.2 multi.local
     """
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     f1 = _write(tmp_path, "f1", "1.1.1.1 multi.local\n")

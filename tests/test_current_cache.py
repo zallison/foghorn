@@ -16,14 +16,14 @@ from typing import Any, Optional, Tuple
 import pytest
 
 import foghorn.current_cache as current_cache_module
-from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
+from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 from foghorn.current_cache import (
     TTLCacheAdapter,
     get_current_namespaced_cache,
     module_namespace,
 )
-from foghorn.cache_plugins.base import CachePlugin
-from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins.cache.base import CachePlugin
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
 
 
 class _FakeBackendWithMeta:
@@ -425,9 +425,9 @@ def test_get_current_namespaced_cache_with_sqlite_plugin_uses_sqlite_backend(
     """
 
     # Ensure the module import used inside get_current_namespaced_cache
-    # succeeds by registering a synthetic foghorn.cache_plugins.sqlite3_cache
+    # succeeds by registering a synthetic foghorn.plugins.cache.sqlite_cache
     # module exporting SQLite3CachePlugin.
-    sqlite3_cache_mod = types.ModuleType("foghorn.cache_plugins.sqlite3_cache")
+    sqlite3_cache_mod = types.ModuleType("foghorn.plugins.cache.sqlite_cache")
 
     class _StubInnerCache:
         """Brief: Minimal inner cache exposing journal_mode for tests.
@@ -458,7 +458,7 @@ def test_get_current_namespaced_cache_with_sqlite_plugin_uses_sqlite_backend(
 
     sqlite3_cache_mod.SQLite3CachePlugin = _StubSQLite3CachePlugin
     monkeypatch.setitem(
-        sys.modules, "foghorn.cache_plugins.sqlite3_cache", sqlite3_cache_mod
+        sys.modules, "foghorn.plugins.cache.sqlite_cache", sqlite3_cache_mod
     )
 
     recorded: dict[str, object] = {}
@@ -522,7 +522,7 @@ def test_get_current_namespaced_cache_with_sqlite_plugin_missing_db_path_uses_fa
         sqlite plugin has no usable db_path.
     """
 
-    sqlite3_cache_mod = types.ModuleType("foghorn.cache_plugins.sqlite3_cache")
+    sqlite3_cache_mod = types.ModuleType("foghorn.plugins.cache.sqlite_cache")
 
     class _StubInnerCacheNoJournal:
         """Brief: Inner cache without journal_mode, forcing default handling.
@@ -553,7 +553,7 @@ def test_get_current_namespaced_cache_with_sqlite_plugin_missing_db_path_uses_fa
 
     sqlite3_cache_mod.SQLite3CachePlugin = _StubSQLite3CachePluginEmptyDb
     monkeypatch.setitem(
-        sys.modules, "foghorn.cache_plugins.sqlite3_cache", sqlite3_cache_mod
+        sys.modules, "foghorn.plugins.cache.sqlite_cache", sqlite3_cache_mod
     )
 
     def _fail_if_called(*_args: object, **_kwargs: object) -> None:

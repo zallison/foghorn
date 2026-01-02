@@ -14,9 +14,9 @@ from contextlib import closing
 import pytest
 from dnslib import AAAA, QTYPE, RR, TXT, A, DNSRecord, RCODE
 
-from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
-from foghorn.plugins.base import PluginContext, PluginDecision
-from foghorn.plugins.filter import FilterConfig, FilterPlugin
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins.resolve.base import PluginContext, PluginDecision
+from foghorn.plugins.resolve.filter import FilterConfig, FilterPlugin
 
 
 def _mk_query(name="example.com", qtype="A"):

@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
-from foghorn.querylog_backends.mysql_mariadb import MySqlStatsStoreBackend
+from foghorn.plugins.querylog.mysql_mariadb import MySqlStatsStoreBackend
 
 
 class _FakeCursor:

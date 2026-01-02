@@ -12,8 +12,8 @@ import datetime as dt
 from contextlib import closing
 from unittest.mock import patch
 
-from foghorn.plugins.base import PluginContext
-from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin
+from foghorn.plugins.resolve.base import PluginContext
+from foghorn.plugins.resolve.new_domain_filter import NewDomainFilterPlugin
 
 
 def test_new_domain_filter_init_defaults(tmp_path):
@@ -153,7 +153,7 @@ def test_new_domain_filter_domain_age_days(tmp_path, monkeypatch):
 
         monkeypatch.setattr(plugin, "_fetch_creation_date", lambda d: created)
 
-        with patch("foghorn.plugins.new_domain_filter.dt.datetime") as mock_dt:
+        with patch("foghorn.plugins.resolve.new_domain_filter.dt.datetime") as mock_dt:
             mock_dt.now.return_value = now
             mock_dt.timezone = dt.timezone
             age = plugin._domain_age_days("example.com")
@@ -242,8 +242,7 @@ def test_new_domain_filter_db_get_nonexistent(tmp_path):
 
 
 def test_new_domain_filter_whois_lookup_no_libraries(tmp_path, monkeypatch):
-    """
-    Brief: Verify graceful handling when whois libraries unavailable.
+    """Brief: Verify graceful handling when whois libraries unavailable.
 
     Inputs:
       - monkeypatch: to set whois modules to None
@@ -251,7 +250,7 @@ def test_new_domain_filter_whois_lookup_no_libraries(tmp_path, monkeypatch):
     Outputs:
       - None: Asserts None returned
     """
-    import foghorn.plugins.new_domain_filter as ndf_mod
+    import foghorn.plugins.resolve.new_domain_filter as ndf_mod
 
     # Mock both whois libraries as unavailable
     monkeypatch.setattr(ndf_mod, "_whois_mod", None)

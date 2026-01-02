@@ -140,7 +140,7 @@ def test_list_plugin_ui_descriptors_and_title_normalisation(
 def test_cache_snapshot_404_and_success(
     monkeypatch: pytest.MonkeyPatch, web_config: Dict[str, Any]
 ) -> None:
-    from foghorn.plugins import base as plugin_base
+    from foghorn.plugins.resolve import base as plugin_base
 
     # First, ensure 404 when DNS_CACHE is missing or lacks helper.
     monkeypatch.setattr(plugin_base, "DNS_CACHE", None, raising=False)

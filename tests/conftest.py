@@ -52,8 +52,8 @@ def clear_dns_cache_between_tests():
       - None
     """
     try:
-        from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
-        from foghorn.plugins import base as plugin_base
+        from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCachePlugin
+        from foghorn.plugins.resolve import base as plugin_base
 
         plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
     except Exception:  # pragma: no cover

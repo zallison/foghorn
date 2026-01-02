@@ -29,7 +29,7 @@ class FoghornTTLCache:
 
     Example use:
         >>> import time
-        >>> from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
+        >>> from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
         >>> cache = FoghornTTLCache()
         >>> key = ("example.com", 1) # QNAME, QTYPE
         >>> cache.set(key, 60, b"dns-response-data")

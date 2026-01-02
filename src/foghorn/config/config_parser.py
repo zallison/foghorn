@@ -25,9 +25,9 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import yaml
 
 from .config_schema import validate_config
-from ..cache_plugins.registry import load_cache_plugin
-from ..plugins.base import BasePlugin
-from ..plugins.registry import discover_plugins, get_plugin_class
+from ..plugins.cache.registry import load_cache_plugin
+from ..plugins.resolve.base import BasePlugin
+from ..plugins.resolve.registry import discover_plugins, get_plugin_class
 
 
 def _is_var_key(key: str) -> bool:
@@ -538,7 +538,7 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
 
         # Resolve cache instance and inject into plugin configuration.
         try:
-            from foghorn.plugins import base as plugin_base
+            from foghorn.plugins.resolve import base as plugin_base
 
             global_cache = getattr(plugin_base, "DNS_CACHE", None)
         except (

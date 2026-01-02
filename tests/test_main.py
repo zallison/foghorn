@@ -86,7 +86,7 @@ def test_load_plugins_uses_registry(monkeypatch):
     monkeypatch.setattr(parser_mod, "get_plugin_class", fake_get)
 
     # Patch global cache and cache loader so load_plugins injects a cache instance.
-    import foghorn.plugins.base as plugin_base
+    import foghorn.plugins.resolve.base as plugin_base
 
     global_cache = object()
     plugin_base.DNS_CACHE = global_cache  # type: ignore[assignment]

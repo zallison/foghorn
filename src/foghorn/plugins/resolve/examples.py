@@ -7,7 +7,7 @@ from typing import List, Optional, Union
 from dnslib import AAAA, QTYPE, A, DNSRecord
 from pydantic import BaseModel, Field
 
-from foghorn.plugins.base import plugin_aliases
+from foghorn.plugins.resolve.base import plugin_aliases
 
 from .base import BasePlugin, PluginContext, PluginDecision
 
@@ -178,7 +178,7 @@ class ExamplesPlugin(BasePlugin):
 
         Example:
             >>> from foghorn.plugins.examples import ExamplesPlugin
-            >>> from foghorn.plugins.base import PluginContext
+            >>> from foghorn.plugins.resolve.base import PluginContext
             >>> plugin = ExamplesPlugin()
             >>> ctx = PluginContext("1.2.3.4")
             >>> decision = plugin.pre_resolve("a.b.c.d.e.f.example.com", 1, ctx)

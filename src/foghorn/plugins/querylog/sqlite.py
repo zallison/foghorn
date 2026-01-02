@@ -12,7 +12,7 @@ Outputs:
 Notes:
   - This module ports the prior StatsSQLiteStore implementation into
     SqliteStatsStoreBackend so that the SQLite backend can live under
-    foghorn.querylog_backends without changing its runtime behavior.
+    foghorn.plugins.querylog without changing its runtime behavior.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from foghorn.querylog_backends.base import BaseStatsStoreBackend
+from foghorn.plugins.querylog.base import BaseStatsStoreBackend
 
 logger = logging.getLogger(__name__)
 

@@ -38,7 +38,7 @@ def _normalize(alias: str) -> str:
 
 
 def _iter_cache_plugin_modules(
-    package_name: str = "foghorn.cache_plugins",
+    package_name: str = "foghorn.plugins.cache",
 ) -> Iterable[str]:
     pkg = importlib.import_module(package_name)
     for modinfo in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
@@ -47,7 +47,7 @@ def _iter_cache_plugin_modules(
 
 @functools.lru_cache(maxsize=4)
 def discover_cache_plugins(
-    package_name: str = "foghorn.cache_plugins",
+    package_name: str = "foghorn.plugins.cache",
 ) -> Dict[str, Type[CachePlugin]]:
     """Brief: Discover CachePlugin subclasses and register them by alias.
 

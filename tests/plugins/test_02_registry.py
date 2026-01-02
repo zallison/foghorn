@@ -1,5 +1,5 @@
 """
-Brief: Tests for foghorn.plugins.registry module.
+Brief: Tests for foghorn.plugins.resolve.registry module.
 
 Inputs:
   - None
@@ -10,8 +10,8 @@ Outputs:
 
 import pytest
 
-from foghorn.plugins.base import BasePlugin
-from foghorn.plugins.registry import (
+from foghorn.plugins.resolve.base import BasePlugin
+from foghorn.plugins.resolve.registry import (
     _camel_to_snake,
     _default_alias_for,
     _normalize,
@@ -221,7 +221,7 @@ def test_get_plugin_class_by_dotted_path():
     Outputs:
       - None: Asserts correct class returned
     """
-    cls = get_plugin_class("foghorn.plugins.filter.FilterPlugin")
+    cls = get_plugin_class("foghorn.plugins.resolve.filter.FilterPlugin")
     assert cls.__name__ == "FilterPlugin"
 
 
@@ -251,7 +251,7 @@ def test_get_plugin_class_invalid_dotted_path_raises_2():
       - None: Asserts ValueError raised with helpful message
     """
     with pytest.raises(ValueError) as exc:
-        get_plugin_class("foghorn.plugins.base.")
+        get_plugin_class("foghorn.plugins.resolve.base.")
     assert "Invalid plugin path" in str(exc.value)
 
 
@@ -266,7 +266,7 @@ def test_aget_plugin_class_not_baseplugin_raises_2():
       - None: Asserts TypeError raised by registry.get_plugin_class
     """
     with pytest.raises(TypeError) as exc:
-        get_plugin_class("foghorn.plugins.base.PluginContext")
+        get_plugin_class("foghorn.plugins.resolve.base.PluginContext")
     assert "is not a BasePlugin subclass" in str(exc.value)
 
 
@@ -285,7 +285,7 @@ def test_discover_plugins_duplicate_alias_raises_1(tmp_path, monkeypatch):
     pkgdir.mkdir()
     (pkgdir / "__init__.py").write_text("")
     (pkgdir / "mod1.py").write_text(
-        "from foghorn.plugins.base import BasePlugin, plugin_aliases\n"
+        "from foghorn.plugins.resolve.base import BasePlugin, plugin_aliases\n"
         "@plugin_aliases('filter')\n"
         "class Some(BasePlugin):\n    pass\n"
     )
@@ -305,7 +305,7 @@ def test_discover_plugins_duplicate_alias_raises_1(tmp_path, monkeypatch):
         importlib.import_module("foghorn.plugins.filter")
 
         # Ensure iterator returns an existing real plugin and our conflicting test module
-        import foghorn.plugins.registry as reg
+        import foghorn.plugins.resolve.registry as reg
 
         monkeypatch.setattr(
             reg,
@@ -360,7 +360,7 @@ def test_discover_plugins_import_exception_propagates(monkeypatch):
       - None: asserts ImportError is raised
     """
     # Patch the iterator to return a single fake module name
-    import foghorn.plugins.registry as reg
+    import foghorn.plugins.resolve.registry as reg
 
     monkeypatch.setattr(
         reg,

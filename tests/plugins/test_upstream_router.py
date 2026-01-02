@@ -10,8 +10,8 @@ Outputs:
 
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
-from foghorn.plugins.base import PluginContext
-from foghorn.plugins.upstream_router import UpstreamRouterPlugin
+from foghorn.plugins.resolve.base import PluginContext
+from foghorn.plugins.resolve.upstream_router import UpstreamRouterPlugin
 
 
 def _mk_query(name="example.com", qtype="A"):
