@@ -346,7 +346,7 @@ def main(argv: List[str] | None = None) -> int:
     except Exception:
         cache_plugin = None
 
-    # Install the configured cache plugin globally so all transports (UDP/TCP/DoT/DoH)
+    # Install the configured cache plugin globally so alfoghorn.servers.transports (UDP/TCP/DoT/DoH)
     # share it, even when the UDP DNSServer is not started.
     if cache_plugin is not None:
         try:
@@ -1061,7 +1061,7 @@ def main(argv: List[str] | None = None) -> int:
 
     try:
         # Keep the main thread in a lightweight keepalive loop while UDP/TCP/DoT
-        # listeners run in the background. This ensures all transports are
+        # listeners run in the background. This ensures alfoghorn.servers.transports are
         # treated consistently and that shutdown is always driven by
         # shutdown_event/termination signals rather than a blocking
         # serve_forever() call.
