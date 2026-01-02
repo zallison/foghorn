@@ -554,9 +554,8 @@ def evaluate_readiness(
       - runtime_state: Optional RuntimeState populated by foghorn.main.
 
     Outputs:
-      - (ready, not_ready, details)
+      - (ready, details)
         * ready: bool
-        * not_ready: list[str] human-readable reasons
         * details: dict with structured readiness details
 
     Notes:
@@ -1883,6 +1882,8 @@ def create_app(
 
         return _get_about_payload()
 
+    @app.get("/api/v1/status")
+    @app.get("/status")
     @app.get("/api/v1/ready")
     @app.get("/ready")
     async def ready() -> JSONResponse:
@@ -1903,8 +1904,7 @@ def create_app(
         )
         payload = {
             "server_time": _utc_now_iso(),
-            "ready": ready_ok,
-            "not_ready": not_ready,
+            "ready": ready_ok or not not_ready,
             "details": details,
         }
         return JSONResponse(

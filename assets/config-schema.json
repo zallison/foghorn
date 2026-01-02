@@ -1599,6 +1599,28 @@
         "persistence": {
           "additionalProperties": false,
           "properties": {
+            "backends": {
+              "description": "Optional list of statistics/query-log backends. When omitted, the legacy single-backend SQLite configuration (db_path, batch_writes, batch_time_sec, batch_max_size) is used.",
+              "items": {
+                "additionalProperties": true,
+                "properties": {
+                  "backend": {
+                    "description": "Backend identifier (for example 'sqlite', 'mysql', 'mariadb', or a dotted import path to a BaseStatsStoreBackend implementation).",
+                    "type": "string"
+                  },
+                  "config": {
+                    "description": "Backend-specific configuration mapping passed verbatim to the selected backend.",
+                    "type": "object"
+                  },
+                  "name": {
+                    "description": "Optional logical instance name used when selecting a primary backend in multi-backend setups.",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "type": "array"
+            },
             "batch_max_size": {
               "minimum": 1,
               "type": "integer"
@@ -1618,6 +1640,10 @@
             },
             "force_rebuild": {
               "type": "boolean"
+            },
+            "primary_backend": {
+              "description": "Logical name or backend alias of the primary statistics store used for reads when multiple backends are configured.",
+              "type": "string"
             }
           },
           "type": "object"
@@ -1657,6 +1683,14 @@
       },
       "minItems": 1,
       "type": "array"
+    },
+    "variables": {
+      "additionalProperties": false,
+      "description": "Optional mapping of ALL_CAPS variable names to arbitrary values. These are expanded before validation and removed from the runtime config.",
+      "patternProperties": {
+        "^[A-Z_][A-Z0-9_]*$": {}
+      },
+      "type": "object"
     },
     "webserver": {
       "additionalProperties": false,

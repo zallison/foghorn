@@ -637,6 +637,12 @@ def test_docker_hosts_reload_from_docker_logs_when_no_containers(monkeypatch, ca
     """
 
     mod = importlib.import_module("foghorn.plugins.docker_hosts")
+
+    # Avoid talking to a real Docker daemon: force the module-level docker SDK
+    # reference to None so setup() and _iter_containers_for_endpoint() never
+    # attempt a real connection.
+    monkeypatch.setattr(mod, "docker", None, raising=True)
+
     DockerHosts = mod.DockerHosts
 
     plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
@@ -1145,6 +1151,75 @@ def test_docker_hosts_discovery_publishes_txt(monkeypatch):
     assert full_id not in container_txt
 
 
+def test_docker_hosts_uses_exposed_ports_when_no_host_bindings(monkeypatch):
+    """Brief: When no host bindings exist, ports come from Config.ExposedPorts.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that exposed container ports are reflected in the TXT
+        "ports=" field when NetworkSettings.Ports has no host bindings.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(  # type: ignore[arg-type]
+        suffix="docker.mycorp",
+        discovery=True,
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+
+    full_id = "deadbeef" * 8
+
+    containers = [
+        {
+            "Id": full_id,
+            "Name": "/web",
+            "Config": {
+                "Hostname": "web",
+                "Image": "nginx:latest",
+                "ExposedPorts": {
+                    "80/tcp": {},
+                    "443/tcp": {},
+                },
+            },
+            "State": {"Status": "running"},
+            "NetworkSettings": {
+                "Networks": {"bridge": {"IPAddress": "172.17.0.5"}},
+                # No host Port bindings -> exercise ExposedPorts fallback.
+                "Ports": {},
+            },
+        }
+    ]
+
+    monkeypatch.setattr(plugin, "_iter_containers_for_endpoint", lambda _ep: containers)
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    owner = "_containers.docker.mycorp"
+    q_txt = DNSRecord.question(owner, "TXT")
+    dec = plugin.pre_resolve(owner, QTYPE.TXT, q_txt.pack(), ctx)
+    assert dec is not None and dec.response is not None
+
+    resp = DNSRecord.parse(dec.response)
+    txt_rrs = [rr for rr in resp.rr if rr.rtype == QTYPE.TXT]
+    assert len(txt_rrs) >= 2
+
+    container_txt = None
+    for rr in txt_rrs:
+        s = str(rr.rdata)
+        if "name=" in s and "ports=" in s:
+            container_txt = s
+            break
+    assert container_txt is not None
+    # Exposed ports should be visible as container ports when no host bindings exist.
+    # Ports that originate only from Config.ExposedPorts are prefixed with "E:".
+    assert "ports=exposed:80" in container_txt
+    assert "443" in container_txt
+
+
 def test_docker_hosts_txt_fields_append_and_replace(monkeypatch):
     """Brief: txt_fields appends extra key/value pairs or replaces defaults.
 
@@ -1250,6 +1325,75 @@ def test_docker_hosts_txt_fields_append_and_replace(monkeypatch):
     assert "ans4=" not in container_txt2
     assert "health=" not in container_txt2
     assert "project-name=" not in container_txt2
+
+
+def test_docker_hosts_txt_fields_keep_preserves_selected_builtins(monkeypatch):
+    """Brief: txt_fields_keep preserves specific built-in TXT keys in replace mode.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that when txt_fields_replace is true, configured keys such
+        as "ans4" and "endpoint" are still present alongside custom fields.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    base_container = {
+        "Id": "deadbeef" * 8,
+        "Name": "/web",
+        "Config": {
+            "Hostname": "web",
+            "Image": "nginx:latest",
+            "Labels": {
+                "com.docker.compose.service": "web",
+                "com.docker.compose.project": "myproj",
+            },
+        },
+        "State": {"Status": "running"},
+        "NetworkSettings": {
+            "Networks": {"bridge": {"IPAddress": "172.17.0.5"}},
+        },
+    }
+
+    plugin_keep = DockerHosts(  # type: ignore[arg-type]
+        suffix="docker.mycorp",
+        discovery=True,
+        txt_fields=[{"name": "image", "path": "Config.Image"}],
+        txt_fields_replace=True,
+        txt_fields_keep=["ans4", "endpoint"],
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+    monkeypatch.setattr(
+        plugin_keep, "_iter_containers_for_endpoint", lambda _ep: [base_container]
+    )
+    plugin_keep.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    owner = "_containers.docker.mycorp"
+    q_txt = DNSRecord.question(owner, "TXT")
+    dec = plugin_keep.pre_resolve(owner, QTYPE.TXT, q_txt.pack(), ctx)
+    assert dec is not None and dec.response is not None
+    resp = DNSRecord.parse(dec.response)
+    txt_rrs = [rr for rr in resp.rr if rr.rtype == QTYPE.TXT]
+
+    container_txt = None
+    for rr in txt_rrs:
+        s = str(rr.rdata)
+        if s.startswith('"containers='):
+            continue
+        if "image=" in s:
+            container_txt = s
+            break
+    assert container_txt is not None
+
+    # Custom field still present.
+    assert "image=nginx:latest" in container_txt
+    # Selected built-in keys should be preserved when they exist for the container.
+    assert "ans4=172.17.0.5" in container_txt
+    assert "endpoint=unix:///var/run/docker.sock" in container_txt
 
 
 def test_docker_hosts_txt_fields_label_with_dots(monkeypatch):
@@ -1447,3 +1591,176 @@ def test_docker_hosts_project_name_not_added_when_same_as_image(monkeypatch):
 
     assert "web" in plugin._forward_v4  # type: ignore[attr-defined]
     assert "nginx" not in plugin._forward_v4  # type: ignore[attr-defined]
+
+
+def test_docker_hosts_admin_pages_and_ui_descriptor_shape():
+    """Brief: get_admin_pages and get_admin_ui_descriptor describe Docker UI.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts slug/title and snapshot endpoint/layout shape.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+    # Avoid contacting Docker during setup.
+    plugin._reload_from_docker = lambda: None  # type: ignore[assignment]
+    plugin.setup()
+
+    pages = plugin.get_admin_pages()
+    assert len(pages) == 1
+    page = pages[0]
+    assert page.slug == "docker-hosts"
+    assert page.title == "Docker"
+
+    desc = plugin.get_admin_ui_descriptor()
+    assert desc["name"] == str(getattr(plugin, "name", "docker"))
+    assert isinstance(desc["title"], str)
+    endpoints = desc["endpoints"]
+    assert isinstance(endpoints, dict)
+    assert "snapshot" in endpoints
+    layout = desc["layout"]
+    assert isinstance(layout, dict)
+    sections = layout.get("sections")
+    assert isinstance(sections, list) and sections
+    assert any(s.get("id") == "summary" for s in sections)
+    assert any(s.get("id") == "containers" for s in sections)
+
+
+def test_docker_hosts_owner_helpers_normalize_suffixes():
+    """Brief: _aggregate_owner_for_suffix and _hosts_owner_for_suffix normalize suffixes.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts various suffix forms map to expected owner names.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
+
+    agg = mod.DockerHosts._aggregate_owner_for_suffix  # type: ignore[attr-defined]
+    hosts = mod.DockerHosts._hosts_owner_for_suffix  # type: ignore[attr-defined]
+
+    assert agg("") == "_containers"
+    assert agg(" docker.mycorp ") == "_containers.docker.mycorp"
+    assert agg(".docker..mycorp.") == "_containers.docker.mycorp"
+
+    assert hosts("") == "_hosts"
+    assert hosts(" docker.mycorp ") == "_hosts.docker.mycorp"
+    assert hosts(".docker..mycorp.") == "_hosts.docker.mycorp"
+
+
+def test_docker_hosts_make_ip_response_success_a_and_aaaa(monkeypatch):
+    """Brief: _make_ip_response builds A/AAAA answers for valid DNS queries.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that responses contain the expected RR types and TTLs.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+    monkeypatch.setattr(plugin, "_reload_from_docker", lambda: None)
+    plugin.setup()
+
+    # Build a valid A query and have _make_ip_response add a single A RR.
+    q_a = DNSRecord.question("web", "A")
+    resp_bytes = plugin._make_ip_response("web", QTYPE.A, q_a.pack(), ["192.0.2.1"], 42)
+    assert resp_bytes is not None
+    resp = DNSRecord.parse(resp_bytes)
+    a_rrs = [rr for rr in resp.rr if rr.rtype == QTYPE.A]
+    assert len(a_rrs) == 1
+    assert str(a_rrs[0].rdata) == "192.0.2.1"
+    assert a_rrs[0].ttl == 42
+
+    # AAAA variant.
+    q_aaaa = DNSRecord.question("web", "AAAA")
+    resp_bytes_v6 = plugin._make_ip_response(
+        "web", QTYPE.AAAA, q_aaaa.pack(), ["2001:db8::1"], 99
+    )
+    assert resp_bytes_v6 is not None
+    resp_v6 = DNSRecord.parse(resp_bytes_v6)
+    aaaa_rrs = [rr for rr in resp_v6.rr if rr.rtype == QTYPE.AAAA]
+    assert len(aaaa_rrs) == 1
+    assert str(aaaa_rrs[0].rdata) == "2001:db8::1"
+    assert aaaa_rrs[0].ttl == 99
+
+    # Empty addrs returns a response with header/question only.
+    resp_bytes_empty = plugin._make_ip_response("web", QTYPE.A, q_a.pack(), [], 60)
+    assert resp_bytes_empty is not None
+    resp_empty = DNSRecord.parse(resp_bytes_empty)
+    assert resp_empty.rr == []
+
+
+def test_docker_hosts_reload_loop_returns_immediately_when_interval_non_positive(
+    monkeypatch,
+):
+    """Brief: _reload_loop returns immediately when _reload_interval <= 0.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that no reloads occur when interval is non-positive.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+    monkeypatch.setattr(plugin, "_reload_from_docker", lambda: None)
+    plugin.setup()
+
+    # Force interval to zero so _reload_loop should hit the early return path.
+    plugin._reload_interval = 0.0  # type: ignore[attr-defined]
+
+    calls = {"reload": 0}
+
+    def fake_reload() -> None:
+        calls["reload"] += 1
+
+    plugin._reload_from_docker = fake_reload  # type: ignore[assignment]
+
+    # No need to monkeypatch time.sleep because the function should return
+    # before entering the loop when interval <= 0.
+    plugin._reload_loop()
+    assert calls["reload"] == 0
+
+
+def test_docker_hosts_invalid_txt_fields_and_keep_types_log_warnings(caplog):
+    """Brief: setup() logs warnings for invalid txt_fields and txt_fields_keep types.
+
+    Inputs:
+      - caplog: pytest caplog fixture.
+
+    Outputs:
+      - None; asserts that non-list txt_fields and txt_fields_keep produce warnings.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(  # type: ignore[arg-type]
+        txt_fields="not-a-list",
+        txt_fields_keep="also-not-a-list",
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+
+    # Avoid docker-dependent reload.
+    plugin._reload_from_docker = lambda: None  # type: ignore[assignment]
+
+    caplog.set_level("WARNING", logger=mod.__name__)
+    plugin.setup()
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("txt_fields must be a list" in m for m in messages)
+    assert any("txt_fields_keep must be a list" in m for m in messages)

@@ -1,8 +1,9 @@
 services:
   foghorn:
     network_mode: ${FH_NETWORKMODE:-host}
-    image: zallison/foghorn:latest
+    image: ${PREFIX:-zallison}/foghorn:${FH_TAG:-latest}
     container_name: ${FH_NAME:-foghorn}
+    privileged: true
     volumes:
       - ${FH_CONFIG:-./config}:/foghorn/config
     ports:

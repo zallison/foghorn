@@ -96,6 +96,7 @@ statistics:
   # and the --rebuild CLI flag when those are present.
   force_rebuild: false
 
+  # Basic persistence configuration: one SQLite backend with batched writes.
   persistence:
     enabled: true
     db_path: ./config/var/stats.db

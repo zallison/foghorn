@@ -629,3 +629,143 @@ def test_mdns_bridge_get_http_snapshot_summarizes_services_and_hosts() -> None:
     assert svc["host"].endswith(".local")
     assert "192.0.2.10" in svc["ipv4"]
     assert "2001:db8::10" in svc["ipv6"]
+
+
+def test_mdns_bridge_update_service_state_preserves_host_and_up_since() -> None:
+    """Brief: _update_service_state normalizes names and preserves uptime periods.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts host and up_since are preserved across repeated "up" events.
+    """
+
+    from foghorn.plugins.mdns import MdnsBridgePlugin
+
+    plugin = MdnsBridgePlugin(
+        network_enabled=False,
+        domain=".local",
+        yes_i_really_mean_local=True,
+    )
+    plugin.setup()
+
+    instance = "MyService._http._tcp.local."
+    host = "MyHost.Local."
+
+    # First transition to "up" with a host should set host and up_since.
+    plugin._update_service_state(instance, status="up", host=host)
+    key = "myservice._http._tcp.local"
+    state1 = plugin._service_state[key]
+    assert state1.host.endswith(".local")
+    assert state1.status == "up"
+    assert state1.up_since
+
+    # Second "up" event without a host should keep the original host and up_since.
+    plugin._update_service_state(instance, status="up")
+    state2 = plugin._service_state[key]
+    assert state2.host == state1.host
+    assert state2.up_since == state1.up_since
+
+
+def test_mdns_bridge_format_uptime_human_variants() -> None:
+    """Brief: _format_uptime_human handles normal and invalid inputs.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts formatting for several representative durations.
+    """
+
+    from foghorn.plugins.mdns import MdnsBridgePlugin
+
+    plugin = MdnsBridgePlugin(network_enabled=False, domain=".mdns")
+    plugin.setup()
+
+    assert plugin._format_uptime_human(0) == "0s"
+    assert plugin._format_uptime_human(59) == "59s"
+    # Minutes/hours omit trailing zero seconds.
+    assert plugin._format_uptime_human(60) == "1m"
+    assert plugin._format_uptime_human(3661) == "1h 1m 1s"
+    # Non-numeric input should be treated as 0.
+    assert plugin._format_uptime_human("bad") == "0s"  # type: ignore[arg-type]
+
+
+def test_mdns_bridge_get_http_snapshot_uses_state_for_host_last_seen_and_uptime() -> (
+    None
+):
+    """Brief: get_http_snapshot folds service state into host, last_seen, and uptime.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts up and down services reflect _service_state and caches.
+    """
+
+    from datetime import datetime, timezone
+
+    from foghorn.plugins.mdns import MdnsBridgePlugin, _ServiceState
+
+    plugin = MdnsBridgePlugin(
+        network_enabled=False,
+        domain=".local",
+        yes_i_really_mean_local=True,
+    )
+    plugin.setup()
+
+    # Seed SRV and address data for one "up" service.
+    up_instance = "upsvc._http._tcp.local."
+    up_host = "uphost.local."
+    plugin._test_seed_records(
+        srv={up_instance: (0, 0, 8080, up_host)},
+        a={up_host: ["192.0.2.10"]},
+        aaaa={up_host: ["2001:db8::10"]},
+    )
+
+    # Seed state for the up service with a stable last_seen and up_since.
+    now_str = datetime.now(timezone.utc).replace(microsecond=0).isoformat() + "Z"
+    key_up = "upsvc._http._tcp.local"
+    plugin._service_state[key_up] = _ServiceState(
+        status="up",
+        last_seen=now_str,
+        host="uphost.local",
+        up_since=now_str,
+    )
+
+    # Seed a "down" service that has no SRV data but a remembered host.
+    down_instance_key = "downsvc._http._tcp.local"
+    plugin._service_state[down_instance_key] = _ServiceState(
+        status="down",
+        last_seen=now_str,
+        host="downhost.local",
+        up_since="",
+    )
+
+    snap = plugin.get_http_snapshot()
+
+    services = snap["services"]
+    down_services = snap["down_services"]
+
+    # Up service should appear in services with host/addresses and uptime fields.
+    up_records = [r for r in services if r["instance"] == key_up]
+    assert up_records
+    up_rec = up_records[0]
+    assert up_rec["host"] == "uphost.local"
+    assert "192.0.2.10" in up_rec["ipv4"]
+    assert "2001:db8::10" in up_rec["ipv6"]
+    assert "_lastSeenRaw" in up_rec and "_lastSeenTooltip" in up_rec
+    # Uptime is best-effort; when present it should be an int with a human string.
+    if "uptime" in up_rec:
+        assert isinstance(up_rec["uptime"], int)
+        assert "uptime_human" in up_rec and isinstance(up_rec["uptime_human"], str)
+
+    # Down service should appear in down_services with host but no addresses.
+    down_records = [r for r in down_services if r["instance"] == down_instance_key]
+    assert down_records
+    down_rec = down_records[0]
+    assert down_rec["host"] == "downhost.local"
+    assert down_rec["status"] == "down"
+    assert down_rec["ipv4"] == []
+    assert down_rec["ipv6"] == []

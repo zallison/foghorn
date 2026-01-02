@@ -1,0 +1,47 @@
+listen:
+  host: 127.0.0.1
+  port: 5354
+
+upstreams:
+  - host: 1.1.1.1
+    port: 53
+
+statistics:
+  enabled: true
+  interval_seconds: 300
+  reset_on_log: false
+  include_qtype_breakdown: true
+  include_top_clients: true
+  include_top_domains: true
+  top_n: 10
+  track_latency: true
+  force_rebuild: false
+
+  persistence:
+    enabled: true
+    # Legacy single-backend configuration (SQLite) remains the default and is
+    # the only shape currently described by the JSON Schema.
+    db_path: ./config/var/stats.db
+    batch_writes: true
+    batch_time_sec: 15.0
+    batch_max_size: 1000
+
+    # Example MySQL/MariaDB backend using the new multi-backend loader. This is
+    # intentionally commented-out so that example configs remain schema-valid.
+    # To enable it, uncomment and remove the legacy db_path-based config above.
+    #
+    # backends:
+    #   - backend: mysql
+    #     config:
+    #       host: 127.0.0.1
+    #       port: 3306
+    #       user: foghorn
+    #       password: change-me
+    #       database: foghorn_stats
+
+webserver:
+  enabled: true
+  host: 127.0.0.1
+  port: 5380
+  logs:
+    buffer_size: 500
