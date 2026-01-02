@@ -51,7 +51,7 @@ In practice, for normal stub-resolver traffic, Foghorn behaves like a convention
 
 - **UDP:**
   - Standard UDP DNS listener for queries.
-  - Uses the same parsing, caching, plugin, and statistics pipeline as other transports.
+  - Uses the same parsing, caching, plugin, and statistics pipeline as othefoghorn.servers.transports.
 - **TCP (RFC 7766):**
   - Implements length-prefixed DNS messages over TCP.
   - Uses connection pooling for upstream TCP resolvers.
