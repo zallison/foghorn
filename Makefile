@@ -5,6 +5,8 @@ CONTAINER_NAME ?= foghorn
 CONTAINER_DATA ?= ./.docker
 TAG ?= latest
 LISTEN ?= 0.0.0.0
+FH_PRIORITY ?= 100
+
 # Default ports
 ADMINPORT ?= 8053
 UDPPORT ?= 53
@@ -99,7 +101,8 @@ docker-clean:
 docker-run: docker-build
 	docker rm -f foghorn
 	docker run -d --privileged --net=host --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ \
-		 -v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
+		--label "com.foghorn.priority=${FH_PRIORITY}" \
+		-v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 # Port forwarding
 .PHONY: docker-run-not-host

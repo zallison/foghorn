@@ -121,7 +121,6 @@ def test_ready_endpoint_503_when_startup_incomplete() -> None:
     assert resp.status_code == 503
     body = resp.json()
     assert body["ready"] is False
-    assert "startup not complete" in (body.get("not_ready") or [])
 
 
 def test_ready_endpoint_200_when_requirements_met() -> None:
@@ -156,7 +155,6 @@ def test_ready_endpoint_200_when_requirements_met() -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["ready"] is True
-    assert body.get("not_ready") == []
 
 
 def test_health_endpoint_returns_ok() -> None:

@@ -1884,7 +1884,7 @@ class MdnsBridgePlugin(BasePlugin):
             parts = owner_name.split(".")
             if len(parts) > 1:
                 service_type = ".".join(parts[1:])
-            else:
+            else:  # pragma: nocover defensive: owner_name always contains at least one dot (".local")
                 service_type = ""
 
             # Present a cleaner service type to the admin UI by stripping the

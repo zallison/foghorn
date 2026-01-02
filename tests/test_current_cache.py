@@ -9,10 +9,13 @@ Outputs:
 
 from __future__ import annotations
 
+import sys
+import types
 from typing import Any, Optional, Tuple
 
 import pytest
 
+import foghorn.current_cache as current_cache_module
 from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
 from foghorn.current_cache import (
     TTLCacheAdapter,
@@ -404,3 +407,174 @@ def test_get_current_namespaced_cache_falls_back_to_in_memory_when_unknown_backe
     key = ("example.net", 1)
     adapter.set(key, 10, b"v")
     assert adapter.get(key) == b"v"
+
+
+def test_get_current_namespaced_cache_with_sqlite_plugin_uses_sqlite_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Brief: SQLite3CachePlugin yields a SQLite3TTLCache-backed adapter.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture used to inject test doubles.
+      - tmp_path: Pytest temporary path fixture used to build a DB path.
+
+    Outputs:
+      - None; asserts that get_current_namespaced_cache constructs a
+        SQLite3TTLCache with the expected arguments when a sqlite plugin is
+        active.
+    """
+
+    # Ensure the module import used inside get_current_namespaced_cache
+    # succeeds by registering a synthetic foghorn.cache_plugins.sqlite3_cache
+    # module exporting SQLite3CachePlugin.
+    sqlite3_cache_mod = types.ModuleType("foghorn.cache_plugins.sqlite3_cache")
+
+    class _StubInnerCache:
+        """Brief: Minimal inner cache exposing journal_mode for tests.
+
+        Inputs:
+          - journal_mode: Journal mode string to expose.
+
+        Outputs:
+          - _StubInnerCache instance.
+        """
+
+        def __init__(self, journal_mode: str = "TRUNCATE") -> None:
+            self.journal_mode = journal_mode
+
+    class _StubSQLite3CachePlugin:
+        """Brief: Lightweight SQLite plugin stand-in used by tests.
+
+        Inputs:
+          - db_path: Database path string.
+
+        Outputs:
+          - _StubSQLite3CachePlugin instance.
+        """
+
+        def __init__(self, db_path: str) -> None:
+            self.db_path = db_path
+            self._cache = _StubInnerCache()
+
+    sqlite3_cache_mod.SQLite3CachePlugin = _StubSQLite3CachePlugin
+    monkeypatch.setitem(
+        sys.modules, "foghorn.cache_plugins.sqlite3_cache", sqlite3_cache_mod
+    )
+
+    recorded: dict[str, object] = {}
+
+    class _RecordingSQLite3TTLCache:
+        """Brief: Test double that records constructor arguments.
+
+        Inputs:
+          - db_path: Database path passed to the TTL cache.
+          - namespace: Logical namespace/table name.
+          - journal_mode: Journal mode string.
+          - create_dir: Whether directory creation was requested.
+
+        Outputs:
+          - _RecordingSQLite3TTLCache instance.
+        """
+
+        def __init__(
+            self,
+            db_path: str,
+            *,
+            namespace: str,
+            journal_mode: str,
+            create_dir: bool,
+        ) -> None:
+            recorded["db_path"] = db_path
+            recorded["namespace"] = namespace
+            recorded["journal_mode"] = journal_mode
+            recorded["create_dir"] = create_dir
+
+    monkeypatch.setattr(
+        current_cache_module,
+        "SQLite3TTLCache",
+        _RecordingSQLite3TTLCache,
+    )
+
+    db_path = str(tmp_path / "subdir" / "dns_cache.sqlite3")
+    plugin = _StubSQLite3CachePlugin(db_path=db_path)
+
+    adapter = get_current_namespaced_cache(
+        namespace="my_namespace", cache_plugin=plugin
+    )
+
+    assert isinstance(adapter, TTLCacheAdapter)
+    assert recorded["db_path"] == db_path
+    assert recorded["namespace"] == "my_namespace"
+    assert recorded["journal_mode"] == "TRUNCATE"
+    assert recorded["create_dir"] is True
+
+
+def test_get_current_namespaced_cache_with_sqlite_plugin_missing_db_path_uses_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: sqlite plugin with empty db_path falls back to in-memory cache.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture used to inject test doubles.
+
+    Outputs:
+      - None; asserts the defensive FoghornTTLCache fallback is used when the
+        sqlite plugin has no usable db_path.
+    """
+
+    sqlite3_cache_mod = types.ModuleType("foghorn.cache_plugins.sqlite3_cache")
+
+    class _StubInnerCacheNoJournal:
+        """Brief: Inner cache without journal_mode, forcing default handling.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - _StubInnerCacheNoJournal instance.
+        """
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+    class _StubSQLite3CachePluginEmptyDb:
+        """Brief: sqlite plugin stand-in that exposes an empty db_path.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - _StubSQLite3CachePluginEmptyDb instance.
+        """
+
+        def __init__(self) -> None:
+            self.db_path = ""
+            self._cache = _StubInnerCacheNoJournal()
+
+    sqlite3_cache_mod.SQLite3CachePlugin = _StubSQLite3CachePluginEmptyDb
+    monkeypatch.setitem(
+        sys.modules, "foghorn.cache_plugins.sqlite3_cache", sqlite3_cache_mod
+    )
+
+    def _fail_if_called(*_args: object, **_kwargs: object) -> None:
+        """Brief: Helper that raises if the sqlite TTL cache is constructed.
+
+        Inputs:
+          - *_args: Positional arguments.
+          - **_kwargs: Keyword arguments.
+
+        Outputs:
+          - None; always raises AssertionError to detect incorrect code paths.
+        """
+
+        raise AssertionError("SQLite3TTLCache should not be constructed")
+
+    monkeypatch.setattr(current_cache_module, "SQLite3TTLCache", _fail_if_called)
+
+    plugin = _StubSQLite3CachePluginEmptyDb()
+
+    adapter = get_current_namespaced_cache(namespace="ns-empty", cache_plugin=plugin)
+
+    assert isinstance(adapter, TTLCacheAdapter)
+    backend = adapter._backend  # type: ignore[attr-defined]
+    assert isinstance(backend, FoghornTTLCache)
