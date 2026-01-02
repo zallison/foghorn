@@ -16,7 +16,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           sudo apt update
-          sudo apt install mariadb-client-core mariadb-client
+          sudo apt install libmariadb3 libmariadb-dev
           make env-dev build
       - name: Test with pytest
         run: ./venv/bin/activate && ./venv/bin/pytest -v
