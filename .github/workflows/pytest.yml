@@ -15,8 +15,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          apt update
-          apt install mariadb-client-core mariadb-client
+          sudo apt update
+          sudo apt install mariadb-client-core mariadb-client
           make env-dev build
       - name: Test with pytest
         run: ./venv/bin/activate && ./venv/bin/pytest -v
