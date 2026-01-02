@@ -1,6 +1,6 @@
 # Foghorn Developer Guide
 
-This document contains developer-facing details: architecture, transports, plugins, logging, statistics, signals, and testing. For end‑users and configuration examples, see README.md.
+This document contains developer-facing details: architecturefoghorn.servers.transports, plugins, logging, statistics, signals, and testing. For end‑users and configuration examples, see README.md.
 
 ## Breaking changes
 
@@ -19,11 +19,11 @@ This release introduces a few developer-visible breaking changes:
   - TCP: `src/foghorn/servers/tcp_server.py` (length‑prefixed, persistent connections, RFC 7766; asyncio with threaded fallback).
   - DoT: `src/foghorn/servers/dot_server.py` (TLS, RFC 7858; asyncio).
   - DoH: `src/foghorn/servers/doh_server.py` (HTTP admin and DNS-over-HTTPS plumbing; RFC 8484).
-- Upstream transports:
-  - UDP: `src/foghorn/transports/udp.py` (dnslib send)
-  - TCP: `src/foghorn/transports/tcp.py` with connection pooling
-  - DoT: `src/foghorn/transports/dot.py` with connection pooling
-  - DoH: `src/foghorn/transports/doh.py` (stdlib http.client; GET/POST; TLS verification controls)
+- Upstreafoghorn.servers.transports:
+  - UDP: `src/foghorn.serverfoghorn.servers.transports/udp.py` (dnslib send)
+  - TCP: `src/foghorn.serverfoghorn.servers.transports/tcp.py` with connection pooling
+  - DoT: `src/foghorn.serverfoghorn.servers.transports/dot.py` with connection pooling
+  - DoH: `src/foghorn.serverfoghorn.servers.transports/doh.py` (stdlib http.client; GET/POST; TLS verification controls)
 - Plugins: `src/foghorn/plugins/*`, discovered via `plugins/registry.py`. Hooks: `pre_resolve`, `post_resolve`. Aliases supported (e.g., `acl`, `router`, `new_domain`, `filter`, `custom`, `records`, `docker-hosts`).
 - Cache: cache plugins live in `src/foghorn/plugins/cache/`; TTL cache backends live in `src/foghorn/plugins/cache/backends/` and are reused by the resolver and some plugins.
 
