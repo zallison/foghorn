@@ -1,5 +1,8 @@
 # Foghorn
+
 [![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml)
+[Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/foghorn)
 
 <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/src/foghorn/html/transparent-logo.png" width="300px" alt="Foghorn Logo, a stylized alarm horn" />
 
@@ -213,9 +216,9 @@ statistics:
   enabled: true
   interval_seconds: 300
   persistence:
-    enabled: true
-    db_path: ./config/var/stats.db
-    batch_writes: true
+	enabled: true
+	db_path: ./config/var/stats.db
+	batch_writes: true
 ```
 
 By default, persistence uses a single SQLite backend. Advanced users can configure one or more *statistics/query-log backends* via `statistics.persistence.backends` while keeping the legacy `db_path` fields for backward compatibility:
@@ -225,25 +228,25 @@ statistics:
   enabled: true
   interval_seconds: 300
   persistence:
-    enabled: true
-    # Optional multi-backend configuration (writes fan out; reads use the primary).
-    primary_backend: mysql_analytics        # optional logical name or backend alias
-    backends:
-      - name: sqlite_mirror
-        backend: sqlite
-        config:
-          db_path: ./config/var/stats.db
-          batch_writes: true
-          batch_time_sec: 15.0
-          batch_max_size: 1000
-      - name: mysql_analytics
-        backend: mysql
-        config:
-          host: 127.0.0.1
-          port: 3306
-          user: foghorn
-          password: change-me
-          database: foghorn_stats
+	enabled: true
+	# Optional multi-backend configuration (writes fan out; reads use the primary).
+	primary_backend: mysql_analytics        # optional logical name or backend alias
+	backends:
+	  - name: sqlite_mirror
+		backend: sqlite
+		config:
+		  db_path: ./config/var/stats.db
+		  batch_writes: true
+		  batch_time_sec: 15.0
+		  batch_max_size: 1000
+	  - name: mysql_analytics
+		backend: mysql
+		config:
+		  host: 127.0.0.1
+		  port: 3306
+		  user: foghorn
+		  password: change-me
+		  database: foghorn_stats
 ```
 
 Semantics:
