@@ -166,7 +166,10 @@ class Filter(BasePlugin):
         raw_db_path = self.config.get("db_path")
         # None/empty db_path => per-instance in-memory database.
         self.db_path: str = raw_db_path or ":memory:"
-        self.default = self.config.get("default", "deny")
+
+        raw_default = self.config.get("default", "deny")
+
+        self.default = str(raw_default).lower()
 
         # TTL used when synthesizing A/AAAA responses (e.g., when deny_response="ip")
         self._ttl = int(self.config.get("ttl", 300))
@@ -1250,10 +1253,6 @@ class Filter(BasePlugin):
             else [normalized]
         )
 
-        # SQLite connections are not safe for concurrent use from multiple
-        # threads without external locking, even with check_same_thread=False.
-        # The DNS server uses ThreadingUDPServer, so guard DB access with a
-        # per-plugin lock to prevent "bad parameter or other API misuse".
         row = None
         with self._db_lock:
             for cand in candidates:
