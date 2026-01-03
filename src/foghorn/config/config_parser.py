@@ -81,12 +81,15 @@ def parse_config_variables(
       - environ: Optional environment mapping (defaults to os.environ).
 
     Outputs:
-      - dict: The merged variables mapping stored back onto cfg['variables'].
+      - dict: The merged variables mapping stored back onto cfg['variables'] and
+        cfg['vars'] (for internal normalization helpers).
 
     Precedence:
       - CLI (-v/--var) overrides environment overrides config-file variables.
 
     Notes:
+      - Accepts both top-level 'variables' (preferred) and legacy 'vars'. When
+        both are present, 'variables' wins.
       - Only ALL_UPPERCASE keys matching [A-Z_][A-Z0-9_]* are considered.
       - Values are parsed as YAML so list/dict/int/bool values can be provided.
 
@@ -96,13 +99,21 @@ def parse_config_variables(
       300
     """
 
-    base = cfg.get("variables")
-    if base is None:
-        merged: Dict[str, Any] = {}
-    elif isinstance(base, dict):
-        merged = dict(base)
+    # Prefer the public "variables" key but continue to support the legacy
+    # internal "vars" key for backward compatibility.
+    variables_base = cfg.get("variables")
+    vars_base = cfg.get("vars") if "variables" not in cfg else None
+
+    if variables_base is not None:
+        if not isinstance(variables_base, dict):
+            raise ValueError("config.variables must be a mapping when present")
+        merged: Dict[str, Any] = dict(variables_base)
+    elif vars_base is not None:
+        if not isinstance(vars_base, dict):
+            raise ValueError("config.vars must be a mapping when present")
+        merged = dict(vars_base)
     else:
-        raise ValueError("config.variables must be a mapping when present")
+        merged = {}
 
     env = environ or dict(os.environ)
     for k, v in env.items():
@@ -126,7 +137,10 @@ def parse_config_variables(
             )
         merged[k] = _parse_yaml_value(raw)
 
+    # Store on both keys so that downstream helpers which look at cfg['vars']
+    # continue to work while callers see the public 'variables' mapping.
     cfg["variables"] = merged
+    cfg["vars"] = merged
     return merged
 
 
@@ -134,12 +148,16 @@ def parse_config_file(
     config_path: str,
     *,
     cli_vars: Optional[List[str]] = None,
+    unknown_keys: str = "warn",
 ) -> Dict[str, Any]:
-    """Brief: Read, variable-merge, and schema-validate a YAML config file.
+    """Brief: Read, variable-merge, and schema-validate a v2 YAML config file.
 
     Inputs:
       - config_path: Path to the YAML configuration file.
       - cli_vars: Optional list of CLI `KEY=YAML` assignments (from -v/--var).
+      - unknown_keys: Policy for unknown config keys not described by the
+        JSON Schema ("ignore", "warn", or "error"). See
+        ``foghorn.config.config_schema.validate_config`` for semantics.
 
     Outputs:
       - dict: Parsed configuration mapping (mutated by validate_config).
@@ -149,17 +167,22 @@ def parse_config_file(
 
     Notes:
       - validate_config() performs normalization steps, including variable
-        expansion, and may remove cfg['variables'] after expansion.
+        expansion, and may remove cfg['vars'] after expansion.
+      - The JSON Schema document enforces the v2 root layout
+        (vars/server/upstreams/logging/stats/http/plugins); legacy root keys are
+        not part of the accepted schema anymore.
     """
 
     with open(config_path, "r") as f:
-        cfg = yaml.safe_load(f) or {}
+        cfg: Dict[str, Any] = yaml.safe_load(f) or {}
 
     if not isinstance(cfg, dict):
         raise ValueError("Configuration root must be a mapping")
 
+    # Expand and validate variables, then run JSON Schema validation.
     parse_config_variables(cfg, cli_vars=list(cli_vars or []))
-    validate_config(cfg, config_path=config_path)
+    validate_config(cfg, config_path=config_path, unknown_keys=unknown_keys)
+
     return cfg
 
 
@@ -169,22 +192,48 @@ def normalize_upstream_config(
     """Brief: Normalize upstream configuration to endpoints + timeout.
 
     Inputs:
-      - cfg: dict containing parsed YAML. Supports:
-        - cfg['upstreams'] as a list of upstream entries (dicts)
-        - cfg['foghorn']['timeout_ms'] for the global upstream timeout.
+      - cfg: dict containing parsed YAML. Supports both:
+        - v2 layout (preferred):
+
+            upstreams:
+              strategy: failover|round_robin|random
+              max_concurrent: int
+              endpoints: [...]
+
+            server:
+              resolver:
+                timeout_ms: int
+
+        - legacy layout (still accepted for direct helper usage/tests):
+
+            upstreams: [...]
+            foghorn:
+              timeout_ms: int
 
     Outputs:
       - (upstreams, timeout_ms):
-        - upstreams: list[dict] with keys like {'host': str, 'port': int} or DoH metadata.
+        - upstreams: list[dict] with keys like {'host': str, 'port': int} or DoH
+          metadata (transport/url/method/headers/tls).
         - timeout_ms: int timeout in milliseconds applied per upstream attempt.
 
     Raises:
       - ValueError: For invalid types or missing required fields.
     """
 
-    upstream_raw = cfg.get("upstreams")
+    upstream_block = cfg.get("upstreams")
+
+    # Accept either the v2 object-with-endpoints or the legacy list form so that
+    # callers outside main() (for example unit tests) can continue to exercise
+    # the helper without constructing a full v2 root.
+    if isinstance(upstream_block, dict) and "endpoints" in upstream_block:
+        upstream_raw = upstream_block.get("endpoints")
+    else:
+        upstream_raw = upstream_block
+
     if not isinstance(upstream_raw, list):
-        raise ValueError("config.upstreams must be a list of upstream definitions")
+        raise ValueError(
+            "config.upstreams must be a list or an object with an 'endpoints' list",
+        )
 
     upstreams: List[Dict[str, Union[str, int, dict]]] = []
     for u in upstream_raw:
@@ -223,14 +272,31 @@ def normalize_upstream_config(
             rec2["pool"] = u["pool"]
         upstreams.append(rec2)
 
-    foghorn_cfg = cfg.get("foghorn") or {}
-    if not isinstance(foghorn_cfg, dict):
-        raise ValueError("config.foghorn must be a mapping when present")
+    # Timeout source: prefer v2 server.resolver.timeout_ms when present, falling
+    # back to legacy foghorn.timeout_ms for older callers/tests.
+    timeout_ms = 2000
 
-    try:
-        timeout_ms = int(foghorn_cfg.get("timeout_ms", 2000))
-    except (TypeError, ValueError):
-        timeout_ms = 2000
+    server_cfg = cfg.get("server")
+    if isinstance(server_cfg, dict):
+        resolver_cfg = server_cfg.get("resolver") or {}
+        if not isinstance(resolver_cfg, dict) and resolver_cfg is not None:
+            raise ValueError("config.server.resolver must be a mapping when present")
+        if isinstance(resolver_cfg, dict):
+            try:
+                timeout_ms = int(resolver_cfg.get("timeout_ms", timeout_ms))
+            except (TypeError, ValueError):
+                timeout_ms = 2000
+    # Legacy foghorn-based timeout support (used only when server.resolver is
+    # absent) to keep tests and direct helper calls working.
+    else:
+        foghorn_cfg = cfg.get("foghorn") or {}
+        if not isinstance(foghorn_cfg, dict) and foghorn_cfg is not None:
+            raise ValueError("config.foghorn must be a mapping when present")
+        if isinstance(foghorn_cfg, dict):
+            try:
+                timeout_ms = int(foghorn_cfg.get("timeout_ms", timeout_ms))
+            except (TypeError, ValueError):
+                timeout_ms = 2000
 
     return upstreams, timeout_ms
 
@@ -409,14 +475,22 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
     Inputs:
       - plugin_specs: List of plugin specs. Each item is either:
         - str: a dotted module path or short alias, or
-        - dict: plugin entry mapping supporting:
-          - module: dotted module path or alias
-          - name: optional friendly plugin label
-          - config: plugin-specific configuration mapping
-          - enabled: bool (default True). When false, the plugin is skipped.
-          - comment: optional human-only string (ignored)
-          - pre_priority/post_priority/setup_priority: BasePlugin hook priorities
-          - priority: shorthand that sets all three priority fields above
+        - dict: plugin entry mapping supporting either legacy or v2 shapes:
+          Legacy keys (still accepted):
+            - module: dotted module path or alias
+            - name: optional friendly plugin label
+          v2 keys (preferred):
+            - type: plugin type/alias (maps to the same aliases used by
+              discover_plugins/get_plugin_class)
+            - id: optional stable identifier for this plugin instance; when
+              present and non-empty, it is treated as the effective plugin
+              instance name for logging/statistics.
+          Common keys (both layouts):
+            - config: plugin-specific configuration mapping
+            - enabled: bool (default True). When false, the plugin is skipped.
+            - comment: optional human-only string (ignored)
+            - pre_priority/post_priority/setup_priority: BasePlugin hook priorities
+            - priority: shorthand that sets all three priority fields above
 
     Outputs:
       - list[BasePlugin]: Initialized plugin instances.
@@ -428,9 +502,9 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         keys win.
       - `Comment` is rejected; use `comment`.
       - Each plugin instance must have a unique name. When a config entry omits
-        `name`, a name derived from the plugin's primary alias (or module
-        basename) is used and a numeric suffix ("2", "3", ...) is appended when
-        needed to avoid collisions.
+        `name` and `id`, a name derived from the plugin's primary alias (or
+        module basename) is used and a numeric suffix ("2", "3", ...) is
+        appended when needed to avoid collisions.
     """
 
     alias_registry = discover_plugins()
@@ -453,8 +527,15 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
             plugin_name = None
             raw_config = {}
         elif isinstance(spec, dict):
-            module_path = spec.get("module")
-            plugin_name = spec.get("name")
+            # Prefer the v2 "type" field (plugin alias) when present, but retain
+            # support for the legacy "module" key so existing configs continue
+            # to work. The effective identifier is passed to get_plugin_class(),
+            # which accepts either aliases or dotted import paths.
+            module_path = spec.get("module") or spec.get("type")
+            # Prefer explicit "name" when provided; otherwise fall back to the
+            # v2 "id" field so operator-assigned instance IDs become the
+            # human-visible plugin names.
+            plugin_name = spec.get("name") or spec.get("id")
 
             spec_priority = spec.get("priority")
             spec_pre = spec.get("pre_priority")
