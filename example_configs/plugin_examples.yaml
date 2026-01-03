@@ -1,62 +1,34 @@
-# Foghorn example: Examples plugin
-# Demonstrates request filtering and simple response rewrite.
-
-listen:
-  udp:
-    enabled: true
-    host: 127.0.0.1
-    port: 5353
-  tcp:
-    enabled: false
-  dot:
-    enabled: false
-
 upstreams:
+  endpoints:
   - host: 1.1.1.1
     port: 53
   - host: 8.8.8.8
     port: 53
-
-dnssec:
-  mode: passthrough
-  validation: upstream_ad
-  udp_payload_size: 1232
-
 logging:
   level: info
-
 plugins:
-  # Example: expose mDNS/DNS-SD as DNS records (PTR/SRV/TXT/A/AAAA) under a DNS suffix
-  # (default: .mdns) derived from the mDNS `.local` namespace.
-  # - module: mdns
-  #   config:
-  #     ttl: 60
-  #     network_enabled: true
-  #     include_ipv4: true
-  #     include_ipv6: true
-  #     info_timeout_ms: 1500
-  - module: examples  # Examples alias
-    # pre_priority: 60
-    # post_priority: 90  # optional: perform rewrites late
-    config:
-      # Optional BasePlugin-level targeting knobs (apply to all hooks for this plugin)
-      # targets: ["192.0.2.0/24", "2001:db8::/32"]
-      # targets_ignore: ["192.0.2.128/25"]
-      # targets_cache_ttl_seconds: 300  # cache per-client targeting decisions
-
-      # Pre-filtering knobs
-      max_subdomains: 5
-      max_length_no_dots: 50
-      base_labels: 2
-      apply_to_qtypes: ["*"]
-
-      # Post-response rewrite example: override first IPv4 answer
-      rewrite_first_ipv4:
-        - apply_to_qtypes: ["A"]
-          ip_override: "127.0.0.1"
-        # - apply_to_qtypes: ["AAAA"]
-        #   ip_override: "::1"
-
-      # Notes:
-      # - Pre-filter checks run before upstream resolution.
-      # - Rewrites occur after an answer is received (post-processing).
+- type: examples
+  config:
+    max_subdomains: 5
+    max_length_no_dots: 50
+    base_labels: 2
+    apply_to_qtypes:
+    - '*'
+    rewrite_first_ipv4:
+    - apply_to_qtypes:
+      - A
+      ip_override: 127.0.0.1
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5353
+    tcp:
+      enabled: false
+    dot:
+      enabled: false
+  dnssec:
+    mode: passthrough
+    validation: upstream_ad
+    udp_payload_size: 1232
