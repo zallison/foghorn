@@ -71,11 +71,13 @@ def web_config(tmp_path: Path) -> Dict[str, Any]:
     (www_root / "index.html").write_text("<html>ok</html>", encoding="utf-8")
 
     return {
-        "webserver": {
-            "enabled": True,
-            "host": "127.0.0.1",
-            "port": 0,
-            "index": True,
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+                "index": True,
+            }
         },
         "foghorn": {"use_asyncio": False},
         "www_root": str(www_root),
