@@ -1,42 +1,27 @@
-# Foghorn example: New-domain filter plugin
-# Gate newly-registered domains based on WHOIS-derived age.
-
-listen:
-  udp:
-    enabled: true
-    host: 127.0.0.1
-    port: 5353
-  tcp:
-    enabled: false
-  dot:
-    enabled: false
-
 upstreams:
+  endpoints:
   - host: 1.1.1.1
     port: 53
   - host: 8.8.8.8
     port: 53
-
-dnssec:
-  mode: passthrough
-  validation: upstream_ad
-  udp_payload_size: 1232
-
 logging:
   level: info
-
 plugins:
-  - module: new_domain  # NewDomainFilterExample alias
-    # pre_priority: 45
-    config:
-      # Block or flag domains younger than this many days
-      threshold_days: 14
-
-      # Local cache for WHOIS lookups
-      whois_db_path: ./config/var/whois_cache.db
-      # whois_cache_ttl_seconds: 3600
-      # whois_refresh_seconds: 86400
-
-      # Notes:
-      # - Behavior for unknown/undetermined age may be pass-through (allowed); consult plugin defaults.
-      # - Increase threshold_days to be stricter; set to 0 to effectively disable blocking by age.
+- type: new_domain
+  config:
+    threshold_days: 14
+    whois_db_path: ./config/var/whois_cache.db
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5353
+    tcp:
+      enabled: false
+    dot:
+      enabled: false
+  dnssec:
+    mode: passthrough
+    validation: upstream_ad
+    udp_payload_size: 1232

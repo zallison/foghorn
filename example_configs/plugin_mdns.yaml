@@ -1,41 +1,20 @@
-# Foghorn example: MdnsBridge (mDNS / DNS-SD bridge)
-#
-# This plugin listens to mDNS/DNS-SD via python-zeroconf and exposes discovered
-# records as normal DNS answers under `.local` and `.mdns`.
-#
-# Supported answers (when discovered):
-#   - PTR: service browsing and instance enumeration
-#   - SRV: service instance target + port
-#   - TXT: service instance properties
-#   - A/AAAA: host addresses (when present in zeroconf ServiceInfo)
-
-listen:
-  udp:
-    enabled: true
-    host: 127.0.0.1
-    port: 5353
-
 upstreams:
-  # Fallback upstream for anything the plugin does not know about.
+  endpoints:
   - host: 1.1.1.1
     port: 53
-
 logging:
   level: info
-
 plugins:
-  - module: mdns
-    config:
-      # TTL in seconds for synthesized answers
-      ttl: 60
-
-      # When false, the plugin will not open sockets or browse mDNS.
-      # Useful for tests.
-      network_enabled: true
-
-      # Optionally disable address families.
-      include_ipv4: true
-      include_ipv6: true
-
-      # Timeout for fetching ServiceInfo for instances.
-      info_timeout_ms: 1500
+- type: mdns
+  config:
+    ttl: 60
+    network_enabled: true
+    include_ipv4: true
+    include_ipv6: true
+    info_timeout_ms: 1500
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5353

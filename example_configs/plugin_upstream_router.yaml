@@ -1,48 +1,36 @@
-# Foghorn example: Upstream router plugin
-# Route queries to specific upstream resolvers based on domain or suffix.
-
-listen:
-  udp:
-    enabled: true
-    host: 127.0.0.1
-    port: 5353
-  tcp:
-    enabled: false
-  dot:
-    enabled: false
-
 upstreams:
+  endpoints:
   - host: 1.1.1.1
     port: 53
   - host: 8.8.8.8
     port: 53
-
-dnssec:
-  mode: passthrough
-  validation: upstream_ad
-  udp_payload_size: 1232
-
 logging:
   level: info
-
 plugins:
-  - module: upstream  # UpstreamRouter alias
-    # pre_priority: 30  # route before most filtering
-    config:
-      routes:
-        # Exact domain match (and its subdomains if plugin supports it)
-        - domain: "internal.example"
-          upstreams:
-            - { host: "10.0.0.2", port: 53 }
-            - { host: "10.0.0.3", port: 53 }  # simple failover
-
-        # Suffix (e.g., anything ending in .corp)
-        - suffix: "corp"
-          upstreams:
-            - { host: "10.0.1.1", port: 53 }
-
-      # Notes:
-      # - Multiple upstreams provide failover (ordered).
-      # - Use domain for a specific zone; use suffix for broader matches.
-      # - A legacy single-upstream example (if supported by the plugin):
-      #   default_upstream: { host: "1.1.1.1", port: 53 }
+- type: upstream
+  config:
+    routes:
+    - domain: internal.example
+      upstreams:
+      - host: 10.0.0.2
+        port: 53
+      - host: 10.0.0.3
+        port: 53
+    - suffix: corp
+      upstreams:
+      - host: 10.0.1.1
+        port: 53
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5353
+    tcp:
+      enabled: false
+    dot:
+      enabled: false
+  dnssec:
+    mode: passthrough
+    validation: upstream_ad
+    udp_payload_size: 1232
