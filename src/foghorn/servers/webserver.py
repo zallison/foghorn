@@ -1638,20 +1638,22 @@ def resolve_www_root(config: Dict[str, Any] | None = None) -> str:
       - str absolute path to the directory from which static files are served.
 
     Example:
-      >>> cfg = {"webserver": {"www_root": "/srv/foghorn/html"}}
+      >>> cfg = {"server": {"http": {"www_root": "/srv/foghorn/html"}}}
       >>> path = resolve_www_root(cfg)
       >>> path.endswith("/srv/foghorn/html")
       True
     """
 
-    # 1) Config override: webserver.www_root
+    # 1) Config override: server.http.www_root
     if isinstance(config, dict):
-        web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
-        candidate = web_cfg.get("www_root")
-        if isinstance(candidate, str) and candidate:
-            cfg_path = Path(candidate).expanduser()
-            if cfg_path.is_dir():
-                return str(cfg_path.resolve())
+        server_cfg = config.get("server") or {}
+        http_cfg = server_cfg.get("http") or {}
+        if isinstance(http_cfg, dict):
+            candidate = http_cfg.get("www_root")
+            if isinstance(candidate, str) and candidate:
+                cfg_path = Path(candidate).expanduser()
+                if cfg_path.is_dir():
+                    return str(cfg_path.resolve())
 
     # 2) Environment variable override
     env_root = os.environ.get("FOGHORN_WWW_ROOT")
@@ -5063,10 +5065,18 @@ def _start_admin_server_threaded(
       - WebServerHandle if server started successfully, else None.
 
     Example:
-      >>> handle = _start_admin_server_threaded(None, {"webserver": {"enabled": True}}, None)
+      >>> handle = _start_admin_server_threaded(
+      ...     None,
+      ...     {"server": {"http": {"enabled": True}}},
+      ...     None,
+      ... )
     """
 
-    web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
+    if isinstance(config, dict):
+        server_cfg = config.get("server") or {}
+        web_cfg = server_cfg.get("http") or {}
+    else:
+        web_cfg = {}
     if not web_cfg.get("enabled"):
         return None
 
@@ -5195,7 +5205,8 @@ def start_webserver(
       - log_buffer: Optional RingBuffer for log entries (created if None).
 
     Outputs:
-      - WebServerHandle if webserver.enabled is true, else None.
+      - WebServerHandle when the admin HTTP server is enabled via the
+        ``server.http`` block; otherwise None.
 
     Example:
       >>> handle = start_webserver(collector, cfg, None)
@@ -5203,7 +5214,14 @@ def start_webserver(
       ...     assert handle.is_running()
     """
 
-    web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
+    if isinstance(config, dict):
+        # Only accept webserver enable/host/port configuration from the
+        # v2-style server-level ``server.http`` block. Root-level ``http`` and
+        # ``webserver`` blocks are intentionally ignored.
+        server_cfg = config.get("server") or {}
+        web_cfg = server_cfg.get("http") or {}
+    else:
+        web_cfg = {}
 
     # Treat presence of a webserver block as enabled by default so that
     # configurations that declare webserver: {} behave as "on" unless
