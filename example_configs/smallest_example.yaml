@@ -1,5 +1,5 @@
-# By default use the UDP listener on port 5335
-listen: {}
-# Forward to Google's public server
 upstreams:
+  endpoints:
   - host: 8.8.8.8
+server:
+  listen: {}

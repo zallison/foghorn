@@ -1,15 +1,5 @@
-# Foghorn - DNS (simple DoT + UDP example)
-listen:
-  udp:
-    enabled: true
-    host: 0.0.0.0
-    port: 5353
-  tcp:
-    enabled: false
-  dot:
-    enabled: false
-
 upstreams:
+  endpoints:
   - host: 1.1.1.1
     port: 853
     transport: dot
@@ -18,45 +8,32 @@ upstreams:
       verify: true
   - host: 8.8.8.8
     port: 53
-
-dnssec:
-  mode: passthrough
-  validation: upstream_ad
-  udp_payload_size: 1232
-
-foghorn:
-  timeout_ms: 2000
-  upstream_strategy: failover
-  upstream_max_concurrent: 1
-  use_asyncio: true
-
+  strategy: failover
+  max_concurrent: 1
 plugins:
-  - module: docker-hosts
-    config:
-      endpoints:
-        - unix:///var/run/docker.sock
-        # - tcp://docker-host.internal:2375
-      reload_interval_seconds: 60
-      # use_ipv4: 192.0.2.10
-
-      # Optional: include extra per-container TXT fields derived from
-      # docker inspect. The "path" syntax is a minimal JSONPath-like
-      # expression (for example Config.Image or
-      # Config.Labels.com.docker.compose.project).
-      # txt_fields:
-      #   - name: image
-      #     path: Config.Image
-      #   - name: project
-      #     path: Config.Labels.com.docker.compose.project
-      # txt_fields_replace: false
-
-  - module: etc-hosts
-
+- type: docker-hosts
+  config:
+    endpoints:
+    - unix:///var/run/docker.sock
+    reload_interval_seconds: 60
+- type: etc-hosts
 logging:
   level: debug
   stderr: true
-
-# Optional: enable statistics
-# statistics:
-#   enabled: true
-#   interval_seconds: 10
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 0.0.0.0
+      port: 5353
+    tcp:
+      enabled: false
+    dot:
+      enabled: false
+  dnssec:
+    mode: passthrough
+    validation: upstream_ad
+    udp_payload_size: 1232
+  resolver:
+    timeout_ms: 2000
+    use_asyncio: true
