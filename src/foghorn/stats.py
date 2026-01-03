@@ -23,12 +23,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-logger = logging.getLogger(__name__)
+from foghorn.plugins.querylog import BaseStatsStore
 
+logger = logging.getLogger(__name__)
 
 try:
     FOGHORN_VERSION = importlib_metadata.version("foghorn")
-except Exception:  # pragma: no cover - defensive fallback
+except Exception:  # pragma: no cover - defensive fallback when metadata is missing
     FOGHORN_VERSION = "unknown"
 
 
@@ -1516,7 +1517,7 @@ class StatsCollector:
         include_top_domains: bool = False,
         top_n: int = 10,
         track_latency: bool = False,
-        stats_store: Optional[StatsSQLiteStore] = None,
+        stats_store: Optional[BaseStatsStore] = None,
         ignore_top_clients: Optional[List[str]] = None,
         ignore_top_domains: Optional[List[str]] = None,
         ignore_top_subdomains: Optional[List[str]] = None,
@@ -1582,8 +1583,11 @@ class StatsCollector:
         # the persistent store; aggregate counters remain in-memory only.
         self.query_log_only = bool(query_log_only)
 
-        # Optional persistent store for long-lived aggregates and query logs
-        self._store: Optional[StatsSQLiteStore] = stats_store
+        # Optional persistent store for long-lived aggregates and query logs.
+        # This can be any BaseStatsStore implementation, including
+        # MultiStatsStore, which fans writes out to multiple concrete
+        # backends (for example, SQLite plus an MQTT logging sink).
+        self._store: Optional[BaseStatsStore] = stats_store
 
         # Core counters
         self._totals: Dict[str, int] = defaultdict(int)
