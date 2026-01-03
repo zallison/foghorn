@@ -26,11 +26,23 @@ def test_sigusr1_resets_stats_and_notifies_plugins(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
         "upstreams:\n"
-        "  - host: 1.1.1.1\n"
-        "    port: 53\n"
-        "statistics:\n  enabled: true\n  sigusr2_resets_stats: true\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "    use_asyncio: true\n"
+        "stats:\n  enabled: true\n  sigusr2_resets_stats: true\n"
     )
 
     class DummyServer:
