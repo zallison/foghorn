@@ -57,7 +57,7 @@ def udp_query(
                 s.close()
             except (
                 Exception
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            ):  # pragma: nocover defensive: close() failure is environment-specific and extremely hard to trigger reliably in tests
                 pass
     except OSError as e:
         raise UDPError(f"UDP error: {e}")

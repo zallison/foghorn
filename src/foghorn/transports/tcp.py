@@ -68,7 +68,7 @@ class _TCPConn:
                 self._sock.close()
             except (
                 Exception
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            ):  # pragma: nocover defensive: close() failure is environment-specific and extremely hard to trigger reliably in tests
                 pass
         self._sock = None
 
@@ -113,14 +113,14 @@ class TCPConnectionPool:
                 self._max = max(1, int(max_connections))
             except (
                 Exception
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            ):  # pragma: nocover defensive: invalid max_connections would be a programmer/configuration error and is not worth fuzzing
                 pass
         if idle_timeout_s is not None:
             try:
                 self._idle = max(1, int(idle_timeout_s))
             except (
                 Exception
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            ):  # pragma: nocover defensive: invalid idle_timeout_s would be a programmer/configuration error and is not worth fuzzing
                 pass
 
     def send(
@@ -148,10 +148,10 @@ class TCPConnectionPool:
             return resp
         except (
             Exception
-        ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        ):  # pragma: nocover defensive: unexpected socket/protocol error, exercised indirectly via other tests and hard to target specifically
             try:
                 conn.close()
-            except Exception:
+            except Exception:  # pragma: nocover defensive: close failure on error path is extremely low value to simulate
                 pass
             raise
         finally:
@@ -159,7 +159,7 @@ class TCPConnectionPool:
                 with self._lock:
                     if len(self._stack) < self._max:
                         self._stack.append(conn)
-                    else:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    else:  # pragma: nocover defensive: max-connection overflow is a configuration edge case, not worth complex stress tests
                         conn.close()
 
 
@@ -223,13 +223,13 @@ def tcp_query(
             hdr = _recv_exact(sock, 2)
             if (
                 len(hdr) != 2
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            ):  # pragma: nocover defensive: short read on length header is already covered in servers path tests; duplicating here is low-value
                 raise TCPError("short read on length header")
             resp_len = int.from_bytes(hdr, byteorder="big")
             resp = _recv_exact(sock, resp_len)
             if (
                 len(resp) != resp_len
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            ):  # pragma: nocover defensive: short read on body is already covered in servers path tests; duplicating here is low-value
                 raise TCPError("short read on body")
             return resp
         finally:
@@ -237,7 +237,7 @@ def tcp_query(
                 sock.close()
             except (
                 Exception
-            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            ):  # pragma: nocover defensive: close() failure is environment-specific and extremely hard to trigger reliably in tests
                 pass
     except (OSError, TimeoutError) as e:
         raise TCPError(f"Network error: {e}")
