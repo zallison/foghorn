@@ -4,7 +4,8 @@ Brief: Tests for statistics persistence wiring in main().
 Inputs:
     - monkeypatch, tmp_path, mock_open
 Outputs:
-    - None; asserts main() wires StatsSQLiteStore into StatsCollector/StatsReporter.
+    - None; asserts main() wires a BaseStatsStore into StatsCollector/StatsReporter
+      via load_stats_store_backend.
 """
 
 from pathlib import Path
@@ -14,7 +15,7 @@ import foghorn.main as main_mod
 
 
 def test_main_warm_start_loads_latest_snapshot(monkeypatch, tmp_path: Path) -> None:
-    """Brief: When persistence is enabled, main() wires a StatsSQLiteStore into StatsCollector.
+    """Brief: When persistence is enabled, main() wires a BaseStatsStore into StatsCollector.
 
     Inputs:
         monkeypatch/tmp_path fixtures
@@ -22,13 +23,23 @@ def test_main_warm_start_loads_latest_snapshot(monkeypatch, tmp_path: Path) -> N
         None; asserts StatsSQLiteStore is constructed and passed through.
     """
     yaml_data = (
-        "listen:\n"
-        "  host: 127.0.0.1\n"
-        "  port: 5354\n"
         "upstreams:\n"
-        "  - host: 1.1.1.1\n"
-        "    port: 53\n"
-        "statistics:\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "    use_asyncio: true\n"
+        "stats:\n"
         "  enabled: true\n"
         "  interval_seconds: 1\n"
         "  persistence:\n"
@@ -44,8 +55,7 @@ def test_main_warm_start_loads_latest_snapshot(monkeypatch, tmp_path: Path) -> N
             constructed["collector"] = self
 
     class DummyStore:
-        def __init__(self, db_path: str, **kw) -> None:
-            constructed["store_db_path"] = db_path
+        def __init__(self, **kw) -> None:
             constructed["store_kwargs"] = kw
 
         def close(self) -> None:
@@ -87,7 +97,17 @@ def test_main_warm_start_loads_latest_snapshot(monkeypatch, tmp_path: Path) -> N
     # Patch dependencies in foghorn.main
     monkeypatch.setattr(main_mod, "StatsCollector", DummyCollector)
     monkeypatch.setattr(main_mod, "StatsReporter", DummyReporter)
-    monkeypatch.setattr(main_mod, "StatsSQLiteStore", DummyStore)
+
+    def _fake_loader(persistence_cfg: dict[str, object] | None) -> DummyStore | None:
+        # Simulate loader returning a single backend when enabled.
+        if not isinstance(persistence_cfg, dict):
+            return None
+        if not persistence_cfg.get("enabled", True):
+            return None
+        constructed["store_cfg"] = persistence_cfg
+        return DummyStore()
+
+    monkeypatch.setattr(main_mod, "load_stats_store_backend", _fake_loader)
     monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
 
@@ -95,8 +115,9 @@ def test_main_warm_start_loads_latest_snapshot(monkeypatch, tmp_path: Path) -> N
         rc = main_mod.main(["--config", "stats_persist.yaml"])
 
     assert rc == 0
-    # Store should be constructed with configured db_path
-    assert str(tmp_path) in str(constructed["store_db_path"])
+    # Loader should have been called with the persistence config mapping
+    store_cfg = constructed["store_cfg"]
+    assert store_cfg.get("db_path") == f"{tmp_path}/warm.db"
     # Collector should have received the store via stats_store kwarg
     ck = constructed["collector_kwargs"]
     assert isinstance(ck.get("stats_store"), DummyStore)
@@ -115,13 +136,23 @@ def test_main_persistence_disabled_skips_store(monkeypatch, tmp_path: Path) -> N
         None; asserts StatsSQLiteStore is never constructed.
     """
     yaml_data = (
-        "listen:\n"
-        "  host: 127.0.0.1\n"
-        "  port: 5354\n"
         "upstreams:\n"
-        "  - host: 1.1.1.1\n"
-        "    port: 53\n"
-        "statistics:\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "    use_asyncio: true\n"
+        "stats:\n"
         "  enabled: true\n"
         "  interval_seconds: 1\n"
         "  persistence:\n"
@@ -163,13 +194,15 @@ def test_main_persistence_disabled_skips_store(monkeypatch, tmp_path: Path) -> N
         def serve_forever(self) -> None:
             raise KeyboardInterrupt
 
-    def _store_ctor(*a, **kw):  # pragma: no cover - should not be called
+    def _fake_loader_disabled(persistence_cfg: dict[str, object] | None) -> None:  # pragma: no cover - should not be called when enabled is false
+        # Record that the loader was invoked; in this test config, enabled is
+        # false so main() should skip calling the loader entirely.
         constructed["store_constructed"] = True
-        raise AssertionError("StatsSQLiteStore should not be constructed when disabled")
+        return None
 
     monkeypatch.setattr(main_mod, "StatsCollector", DummyCollector)
     monkeypatch.setattr(main_mod, "StatsReporter", DummyReporter)
-    monkeypatch.setattr(main_mod, "StatsSQLiteStore", _store_ctor)
+    monkeypatch.setattr(main_mod, "load_stats_store_backend", _fake_loader_disabled)
     monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
 
