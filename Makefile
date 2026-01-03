@@ -64,7 +64,7 @@ tests: test
 test: $(VENV)/bin/foghorn env-dev
 	@echo "=== Running tests (short) ==="
 	. ${VENV}/bin/activate
-	${VENV}/bin/pytest --cov=foghorn --disable-warnings tests
+	${VENV}/bin/pytest --cov=src --cov-report=term-missing --ff tests
 
 
 # ------------------------------------------------------------
