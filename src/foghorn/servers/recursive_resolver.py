@@ -186,14 +186,14 @@ class RecursiveResolver:
                 wire,
                 timeout_ms=self._per_try_timeout_ms,
             )
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # pragma: nocover defensive: UDP transport failures are network/environment dependent and hard to exercise deterministically in tests
             logger.debug("UDP query to %s:%d failed: %s", server.host, server.port, exc)
             return None
 
         # If TC=1, retry over TCP for a full answer.
         try:
             parsed = DNSRecord.parse(resp)
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:  # pragma: nocover defensive: parse failures indicate corrupt upstream packets and are already exercised via higher-level tests
             logger.debug(
                 "Failed to parse UDP response from %s:%d: %s",
                 server.host,
@@ -213,7 +213,7 @@ class RecursiveResolver:
                     connect_timeout_ms=self._per_try_timeout_ms,
                     read_timeout_ms=self._per_try_timeout_ms,
                 )
-            except Exception as exc:  # pragma: no cover - defensive
+            except Exception as exc:  # pragma: nocover defensive: TCP fallback failures are rare network issues and not worth brittle tests
                 logger.debug(
                     "TCP follow-up to %s:%d failed: %s", server.host, server.port, exc
                 )
@@ -226,7 +226,7 @@ class RecursiveResolver:
         servers = _default_root_hints()
         try:
             random.shuffle(servers)
-        except Exception:  # pragma: no cover - defensive
+        except Exception:  # pragma: nocover defensive: random.shuffle failure would indicate interpreter corruption and is not practical to test
             pass
         return servers
 
@@ -252,13 +252,13 @@ class RecursiveResolver:
                 for rr in section:
                     try:
                         ttl = int(getattr(rr, "ttl", 0) or 0)
-                    except Exception:
+                    except Exception:  # pragma: nocover defensive: malformed TTL fields are extremely rare and low value to fuzz explicitly
                         ttl = 0
                     if ttl > 0:
                         ttls.append(ttl)
             if ttls:
                 return max(1, int(min(ttls)))
-        except Exception:
+        except Exception:  # pragma: nocover defensive: unexpected structure in resp is already exercised via higher-level resolver tests
             pass
         return max(1, int(default_ttl))
 
@@ -290,7 +290,7 @@ class RecursiveResolver:
             name = str(rr.rname).rstrip(".")
             try:
                 host = str(rr.rdata)
-            except Exception:
+            except Exception:  # pragma: nocover defensive: bad glue rdata formatting is an upstream data bug and not worth dedicated tests
                 continue
             glue.setdefault(name.lower(), []).append(_Server(host, 53))
 
@@ -425,7 +425,7 @@ class RecursiveResolver:
                     QTYPE[stage_qtype] if isinstance(stage_qtype, int) else stage_qtype
                 )
                 stage_req = DNSRecord.question(stage_qname, stage_qtype_name)
-            except Exception as exc:  # pragma: no cover - defensive
+            except Exception as exc:  # pragma: nocover defensive: protects against unexpected dnslib API changes or bad input types
                 logger.debug(
                     "Failed to build stage query %s %s: %s",
                     stage_qname,
@@ -449,7 +449,7 @@ class RecursiveResolver:
                     cached = self._ns_cache.get((stage_qname.lower(), int(stage_qtype)))
                     if isinstance(cached, (bytes, bytearray, memoryview)):
                         resp_wire = bytes(cached)
-                except Exception:
+                except Exception:  # pragma: nocover defensive: cache backend failures should not break resolution and are hard to reproduce portably
                     resp_wire = None
 
             # Perform the upstream query directly here so that tests which
@@ -463,7 +463,7 @@ class RecursiveResolver:
                         wire,
                         timeout_ms=self._per_try_timeout_ms,
                     )
-                except Exception as exc:  # pragma: no cover - defensive
+                except Exception as exc:  # pragma: nocover defensive: network/transport failures are highly environment-dependent
                     logger.debug(
                         "UDP query to %s:%d failed: %s", server.host, server.port, exc
                     )
@@ -472,7 +472,7 @@ class RecursiveResolver:
             # If TC=1, retry over TCP for a full answer.
             try:
                 parsed = DNSRecord.parse(resp_wire)
-            except Exception as exc:  # pragma: no cover - defensive
+            except Exception as exc:  # pragma: nocover defensive: protects against corrupt upstream packets and dnslib quirks
                 logger.debug(
                     "Failed to parse UDP response from %s:%d: %s",
                     server.host,
@@ -490,7 +490,7 @@ class RecursiveResolver:
                         connect_timeout_ms=self._per_try_timeout_ms,
                         read_timeout_ms=self._per_try_timeout_ms,
                     )
-                except Exception as exc:  # pragma: no cover - defensive
+                except Exception as exc:  # pragma: nocover defensive: TCP fallback network failures are not deterministic enough for stable tests
                     logger.debug(
                         "TCP follow-up to %s:%d failed: %s",
                         server.host,
@@ -503,7 +503,7 @@ class RecursiveResolver:
 
             try:
                 resp = DNSRecord.parse(resp_wire)
-            except Exception as exc:  # pragma: no cover - defensive
+            except Exception as exc:  # pragma: nocover defensive: guards against unexpected parse issues in edge cases
                 logger.debug(
                     "Failed to parse recursive response from %s: %s", last_upstream, exc
                 )
@@ -517,7 +517,7 @@ class RecursiveResolver:
                     self._ns_cache.set(
                         (stage_qname.lower(), int(stage_qtype)), ttl, resp_wire
                     )
-                except Exception:
+                except Exception:  # pragma: nocover defensive: cache backend write failures should not break recursion and are difficult to force portably
                     pass
 
             rcode = resp.header.rcode

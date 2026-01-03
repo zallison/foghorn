@@ -151,11 +151,13 @@ def test_admin_fallback_logs_with_limit_and_static_files(
     buf.push({"msg": "entry3"})
 
     cfg = {
-        "webserver": {
-            "enabled": True,
-            "host": "127.0.0.1",
-            "port": 0,
-            "www_root": str(www_root),
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+                "www_root": str(www_root),
+            }
         }
     }
 
@@ -283,10 +285,12 @@ def test_admin_fallback_query_log_and_aggregate(monkeypatch: Any, tmp_path) -> N
     )
 
     cfg = {
-        "webserver": {
-            "enabled": True,
-            "host": "127.0.0.1",
-            "port": 0,
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+            }
         }
     }
 
@@ -369,10 +373,12 @@ def test_admin_fallback_config_raw_and_save(monkeypatch: Any, tmp_path) -> None:
     cfg_path.write_text(initial_yaml, encoding="utf-8")
 
     cfg = {
-        "webserver": {
-            "enabled": True,
-            "host": "127.0.0.1",
-            "port": 0,
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+            }
         }
     }
 
@@ -453,10 +459,12 @@ def test_admin_webserver_fallback_runtime_state_is_updated(monkeypatch: Any) -> 
     state = web_mod.RuntimeState(startup_complete=True)
 
     cfg = {
-        "webserver": {
-            "enabled": True,
-            "host": "127.0.0.1",
-            "port": 0,
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+            }
         }
     }
 
@@ -504,12 +512,18 @@ def test_admin_fallback_query_log_validation_errors(monkeypatch: Any) -> None:
             self._store = DummyStore()
 
     cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+            }
+        },
+        # Auth configuration for the threaded admin handlers still lives under
+        # the legacy webserver block; start_webserver now only reads server.http.
         "webserver": {
-            "enabled": True,
-            "host": "127.0.0.1",
-            "port": 0,
             "auth": {"mode": "token", "token": "secret-token"},
-        }
+        },
     }
 
     handle = start_webserver(stats=DummyStats(), config=cfg, log_buffer=RingBuffer())
@@ -785,10 +799,12 @@ def test_admin_prefers_uvicorn_when_asyncio_ok(monkeypatch: Any) -> None:
     monkeypatch.setitem(sys.modules, "uvicorn", dummy_uvicorn)
 
     cfg = {
-        "webserver": {
-            "enabled": True,
-            "host": "127.0.0.1",
-            "port": 8053,
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 8053,
+            }
         }
     }
 
@@ -834,10 +850,12 @@ def test_admin_uvicorn_sets_runtime_state_listener(monkeypatch: Any) -> None:
     state = web_mod.RuntimeState(startup_complete=True)
 
     cfg = {
-        "webserver": {
-            "enabled": True,
-            "host": "127.0.0.1",
-            "port": 8053,
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 8053,
+            }
         }
     }
 
@@ -939,12 +957,18 @@ def test_admin_webserver_fallback_health_and_auth(monkeypatch: Any) -> None:
     monkeypatch.setattr(asyncio, "new_event_loop", boom_new_loop, raising=True)
 
     cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+            }
+        },
+        # Auth configuration for threaded handlers continues to live under the
+        # legacy webserver block; start_webserver now only reads server.http.
         "webserver": {
-            "enabled": True,
-            "host": "127.0.0.1",
-            "port": 0,
             "auth": {"mode": "token", "token": "secret-token"},
-        }
+        },
     }
 
     handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
