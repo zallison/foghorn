@@ -29,15 +29,15 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Type
 
-from foghorn.plugins.resolve.base import BasePlugin
-from foghorn.plugins.resolve import registry as plugin_registry
-
 # Add the 'src' directory to sys.path to resolve 'foghorn' module imports
 script_dir = Path(__file__).resolve().parent
 project_root = script_dir.parent
 src_dir = project_root / "src"
 if src_dir.is_dir() and str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
+
+from foghorn.plugins.resolve.base import BasePlugin
+from foghorn.plugins.resolve import registry as plugin_registry
 
 logger = logging.getLogger(__name__)
 
@@ -217,15 +217,15 @@ def _augment_variables_schema(base: Dict[str, Any]) -> None:
 
 
 def _augment_statistics_persistence_schema(base: Dict[str, Any]) -> None:
-    """Brief: Extend statistics.persistence schema with backend configuration.
+    """Brief: Extend statistics/stats persistence schema with backend configuration.
 
     Inputs:
       - base: Mutable JSON Schema mapping loaded from the base schema file.
 
     Outputs:
-      - None; ``base`` is modified in place when the expected statistics
-        structure is present. Any missing or unexpected shapes are treated as
-        no-ops to keep the generator robust against schema drift.
+      - None; ``base`` is modified in place when the expected statistics or
+        stats structure is present. Any missing or unexpected shapes are
+        treated as no-ops to keep the generator robust against schema drift.
     """
 
     try:
@@ -233,13 +233,20 @@ def _augment_statistics_persistence_schema(base: Dict[str, Any]) -> None:
         if not isinstance(root_props, dict):
             return
 
+        # Support both legacy root-level "statistics" (older schemas) and the
+        # v2 "stats" block used by the current configuration layout.
         stats_obj = root_props.get("statistics")
         if not isinstance(stats_obj, dict):
-            return
+            stats_obj = root_props.get("stats")
+            if not isinstance(stats_obj, dict):
+                return
 
+        # Ensure a properties mapping exists so we can safely extend it even
+        # when the base schema only declared a bare "type": "object".
         stats_props = stats_obj.get("properties")
         if not isinstance(stats_props, dict):
-            return
+            stats_props = {}
+            stats_obj["properties"] = stats_props
 
         # Optional toggle to restrict runtime statistics behaviour to a
         # "logging-only" mode where background warm-load/rebuild passes are
@@ -306,7 +313,12 @@ def _augment_statistics_persistence_schema(base: Dict[str, Any]) -> None:
                 ),
                 "items": {
                     "type": "object",
-                    "additionalProperties": True,
+                    # Keep the top-level backend entries strict so obvious
+                    # misconfigurations (for example, using 'driver' instead of
+                    # 'backend') are surfaced by validation, while still
+                    # allowing arbitrary fields inside the nested 'config'
+                    # mapping.
+                    "additionalProperties": False,
                     "properties": {
                         "name": {
                             "type": "string",
@@ -330,29 +342,213 @@ def _augment_statistics_persistence_schema(base: Dict[str, Any]) -> None:
                                 "Backend-specific configuration mapping passed "
                                 "verbatim to the selected backend."
                             ),
+                            "additionalProperties": True,
                         },
                     },
+                    "required": ["backend"],
                 },
             }
     except Exception:  # pragma: no cover - defensive logging only
         logger.exception("Failed to augment statistics.persistence schema")
 
 
+def _build_v2_root_schema(base: Dict[str, Any], plugins: Dict[str, Any]) -> Dict[str, Any]:
+    """Brief: Construct the v2 root JSON Schema from a v1-like base + plugin defs.
+
+    Inputs:
+      - base: Existing schema mapping loaded from assets/config-schema.json.
+      - plugins: Mapping of plugin alias -> {module, aliases, config_schema}.
+
+    Outputs:
+      - Dict: New v2 schema mapping with a v2 root layout and attached defs.
+
+    Notes:
+      - This function intentionally ignores the legacy root "properties" layout
+        and instead builds a new root with top-level keys: vars, server,
+        upstreams, logging, stats, plugins.
+      - It reuses the detailed sub-schemas for things like dnssec, logging,
+        resolver, statistics, and webserver/http from the base schema to avoid
+        duplicating those definitions.
+    """
+
+    # Reuse detailed component schemas from the old root where possible.
+    base_props: Dict[str, Any] = dict(base.get("properties", {}))
+
+    # Historically, these lived at the root; newer schemas may nest them under
+    # server.* instead. Prefer the nested forms when available for forward
+    # compatibility while still accepting older base schemas.
+    server_obj = base_props.get("server")
+    server_props = server_obj.get("properties") if isinstance(server_obj, dict) else None
+
+    dnssec_schema = (
+        server_props.get("dnssec")  # type: ignore[union-attr]
+        if isinstance(server_props, dict) and "dnssec" in server_props
+        else base_props.get("dnssec", {"type": "object"})
+    )
+    listen_schema = (
+        server_props.get("listen")  # type: ignore[union-attr]
+        if isinstance(server_props, dict) and "listen" in server_props
+        else base_props.get("listen", {"type": "object"})
+    )
+    resolver_schema = (
+        server_props.get("resolver")  # type: ignore[union-attr]
+        if isinstance(server_props, dict) and "resolver" in server_props
+        else base_props.get("resolver", {"type": "object"})
+    )
+    cache_schema = (
+        server_props.get("cache")  # type: ignore[union-attr]
+        if isinstance(server_props, dict) and "cache" in server_props
+        else base_props.get("cache", {"type": ["object", "null"]})
+    )
+    logging_schema = base_props.get("logging", {"type": "object"})
+    statistics_schema = base_props.get("statistics", {"type": "object"})
+
+    # Web/admin HTTP schema: only consider server.http in the base schema. If
+    # it is missing, fall back to a minimal object schema rather than any
+    # legacy root-level keys.
+    if isinstance(server_props, dict) and "http" in server_props:
+        webserver_schema = server_props["http"]
+    else:
+        webserver_schema = {"type": "object"}
+
+    # Variable schema: prefer modern 'vars', then legacy 'variables'.
+    variables_schema = base_props.get("vars", base_props.get("variables", {"type": "object"}))
+
+    # Upstreams v2: wrap endpoints + strategy/max_concurrent while reusing
+    # upstream_host/upstream_doh defs from $defs.
+    defs = base.setdefault("$defs", {})
+    upstream_host_ref = {"$ref": "#/$defs/upstream_host"}
+    upstream_doh_ref = {"$ref": "#/$defs/upstream_doh"}
+
+    upstreams_v2: Dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "strategy": {
+                "type": "string",
+                "enum": ["failover", "round_robin", "random"],
+                "description": "Strategy for picking upstreams per query.",
+                "default": "failover",
+            },
+            "max_concurrent": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum concurrent upstream queries.",
+                "default": 1,
+            },
+            "endpoints": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "oneOf": [upstream_host_ref, upstream_doh_ref],
+                },
+            },
+        },
+        "required": ["endpoints"],
+    }
+
+    # Attach plugin config schemas under $defs.PluginConfigs.
+    defs["PluginConfigs"] = {
+        alias: {
+            "module": meta["module"],
+            "aliases": meta["aliases"],
+            "config_schema": meta["config_schema"],
+        }
+        for alias, meta in plugins.items()
+    }
+
+    # Lightweight PluginInstance schema: keep it permissive for now but reflect
+    # the v2 shape (id/type/enabled/logging/setup/hooks/config).
+    defs["PluginInstance"] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "Optional stable identifier for this plugin instance.",
+            },
+            "type": {
+                "type": "string",
+                "description": "Plugin type/alias.",
+            },
+            "enabled": {
+                "type": "boolean",
+                "default": True,
+            },
+            "logging": {
+                "type": "object",
+                "description": "Per-plugin logging overrides.",
+                "additionalProperties": True,
+            },
+            "setup": {
+                "type": "object",
+                "additionalProperties": True,
+                "description": "Setup-phase behaviour (enabled/priority/abort_on_failure).",
+            },
+            "hooks": {
+                "type": "object",
+                "additionalProperties": True,
+                "description": "Per-hook enablement/priorities (pre_resolve/post_resolve).",
+            },
+            "config": {
+                "type": "object",
+                "additionalProperties": True,
+                "description": "Plugin-specific configuration mapping.",
+            },
+        },
+        "required": ["type"],
+    }
+
+    v2_root: Dict[str, Any] = {
+        "$id": base.get("$id", "https://example.com/foghorn/config-v2.schema.json"),
+        "$schema": base.get("$schema", "https://json-schema.org/draft/2020-12/schema"),
+        "title": base.get("title", "Foghorn Config (v2)"),
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "$schema": {
+                "type": "string",
+                "description": "Optional URI or identifier for the JSON Schema associated with this configuration file.",
+            },
+            "vars": variables_schema,
+            "server": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "listen": listen_schema,
+                    "dnssec": dnssec_schema,
+                    "resolver": resolver_schema,
+                    "cache": cache_schema,
+                    # Preferred v2 placement for admin HTTP/web UI config.
+                    "http": webserver_schema,
+                },
+            },
+            "upstreams": upstreams_v2,
+            "logging": logging_schema,
+            "stats": statistics_schema,
+            # Legacy root-level http is no longer part of the v2 schema; it is
+            # still accepted at runtime as a fallback for older configs.
+            "plugins": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/PluginInstance"},
+            },
+        },
+        "required": ["server", "upstreams"],
+        "$defs": defs,
+    }
+
+    return v2_root
+
+
 def build_document(base_schema_path: Optional[str] = None) -> Dict[str, Any]:
-    """Brief: Build a combined JSON Schema including core config and plugins.
+    """Brief: Build a combined v2 JSON Schema including core config and plugins.
 
     Inputs:
       - base_schema_path: Optional explicit path to a base schema JSON file.
 
     Outputs:
-      - Dict based on the existing config-schema.json with an extra
-        ``$defs.plugin_configs`` mapping that contains all discovered plugin
-        configuration schemas keyed by canonical alias.
-
-    Notes:
-      - This does not change validation behaviour of the main schema; the
-        additional definitions are informational only and can be consumed by
-        tooling (e.g. UIs or editors) that want per-plugin config schemas.
+      - Dict describing the v2 configuration JSON Schema with attached plugin
+        config definitions.
     """
 
     base = _load_base_schema(base_schema_path=base_schema_path)
@@ -367,12 +563,7 @@ def build_document(base_schema_path: Optional[str] = None) -> Dict[str, Any]:
 
     plugins = collect_plugin_schemas()
 
-    # Attach plugin schemas under a dedicated defs key so existing references
-    # remain untouched.
-    defs = base.setdefault("$defs", {})
-    defs["plugin_configs"] = plugins
-
-    return base
+    return _build_v2_root_schema(base, plugins)
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
