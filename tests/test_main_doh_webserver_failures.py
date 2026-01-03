@@ -14,20 +14,32 @@ import foghorn.main as main_mod
 
 
 def _basic_yaml_base() -> str:
-    """Brief: Return minimal YAML config shared by tests.
+    """Brief: Return minimal v2 YAML config shared by tests.
 
     Inputs:
       - None
 
     Outputs:
-      - str: YAML configuration string with basic listen/upstream.
+      - str: YAML configuration string with basic server/upstreams layout.
     """
 
     return (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
         "upstreams:\n"
-        "  - host: 1.1.1.1\n"
-        "    port: 53\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "    use_asyncio: true\n"
     )
 
 
@@ -64,16 +76,26 @@ def test_doh_enabled_start_returns_none_is_fatal(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n"
-        "  host: 127.0.0.1\n"
-        "  port: 5354\n"
-        "  doh:\n"
-        "    enabled: true\n"
-        "    host: 127.0.0.1\n"
-        "    port: 8053\n"
         "upstreams:\n"
-        "  - host: 1.1.1.1\n"
-        "    port: 53\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "    doh:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 8053\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "    use_asyncio: true\n"
     )
 
     _patch_minimal_server(monkeypatch)
@@ -103,7 +125,7 @@ def test_webserver_enabled_start_returns_none_is_fatal(monkeypatch, caplog):
       - None: asserts rc == 1 and fatal error logged.
     """
 
-    yaml_data = _basic_yaml_base() + ("webserver:\n  enabled: true\n")
+    yaml_data = _basic_yaml_base() + ("server:\n  http:\n    enabled: true\n")
 
     _patch_minimal_server(monkeypatch)
 

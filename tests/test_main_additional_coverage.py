@@ -19,6 +19,27 @@ from unittest.mock import mock_open, patch
 import pytest
 
 import foghorn.main as main_mod
+
+
+class _FakeThreadingModule:
+    """Test helper: module-like shim that overrides Thread but proxies others.
+
+    Inputs:
+      - real_module: The real threading module.
+      - thread_cls: Replacement Thread implementation for tests.
+
+    Outputs:
+      - An object suitable for insertion into sys.modules['threading'] that
+        exposes Thread as thread_cls while delegating all other attributes to
+        real_module.
+    """
+
+    def __init__(self, real_module, thread_cls) -> None:  # type: ignore[no-untyped-def]
+        self._real = real_module
+        self.Thread = thread_cls
+
+    def __getattr__(self, name):  # type: ignore[no-untyped-def]
+        return getattr(self._real, name)
 from foghorn.plugins.cache.none import NullCache
 from foghorn.config.config_parser import normalize_upstream_config
 from foghorn.main import _clear_lru_caches, run_setup_plugins
@@ -153,8 +174,21 @@ def test_main_returns_one_when_run_setup_plugins_fails(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
         "plugins: []\n"
     )
 
@@ -191,18 +225,27 @@ def test_main_installs_cache_plugin_without_udp_listener(monkeypatch) -> None:
     """
 
     yaml_data = (
-        "listen:\n"
-        "  udp:\n"
+        "server:\n"
+        "  http:\n"
         "    enabled: false\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: false\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "  cache:\n"
+        "    module: none\n"
+        "    config: {}\n"
         "upstreams:\n"
-        "  - host: 1.1.1.1\n"
-        "    port: 53\n"
-        "cache:\n"
-        "  module: none\n"
-        "  config: {}\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
         "plugins: []\n"
-        "webserver:\n"
-        "  enabled: false\n"
     )
 
     # Avoid spinning up real webserver components during this unit test.
@@ -263,9 +306,24 @@ def test_sigusr1_skip_reset_and_coalescing(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
-        "statistics:\n  enabled: true\n  sigusr2_resets_stats: false\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "stats:\n"
+        "  enabled: true\n"
+        "  sigusr2_resets_stats: false\n"
     )
 
     handler_info = _capture_sig_handlers()
@@ -360,8 +418,21 @@ def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     def fake_signal(sig, handler):
@@ -403,9 +474,24 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
-        "statistics:\n  enabled: true\n  sigusr2_resets_stats: true\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "stats:\n"
+        "  enabled: true\n"
+        "  sigusr2_resets_stats: true\n"
     )
 
     handler_info = _capture_sig_handlers()
@@ -518,9 +604,24 @@ def test_sigusr2_logs_no_collector_active(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
-        "statistics:\n  enabled: true\n  sigusr2_resets_stats: true\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "stats:\n"
+        "  enabled: true\n"
+        "  sigusr2_resets_stats: true\n"
     )
 
     handler_info = _capture_sig_handlers()
@@ -567,8 +668,21 @@ def test_sigusr2_registration_failure_logs_warning(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     def fake_signal(sig, handler):
@@ -611,8 +725,21 @@ def test_sighup_with_udp_enabled_exits_cleanly(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     captured: Dict[str, Any] = {"sighup": None}
@@ -677,12 +804,21 @@ def test_start_without_udp_uses_keepalive_loop(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n"
-        "  host: 127.0.0.1\n"
-        "  port: 5354\n"
-        "  udp:\n"
-        "    enabled: false\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
+        "server:\n"
+        "  listen:\n"
+        "    host: 127.0.0.1\n"
+        "    port: 5354\n"
+        "    udp:\n"
+        "      enabled: false\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     # Ensure DNSServer is never constructed because UDP is disabled.
@@ -728,14 +864,23 @@ def test_tcp_permission_error_falls_back_to_threaded(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n"
-        "  host: 127.0.0.1\n"
-        "  port: 5354\n"
-        "  tcp:\n"
-        "    enabled: true\n"
+        "server:\n"
+        "  listen:\n"
         "    host: 127.0.0.1\n"
         "    port: 5354\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
+        "    tcp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     class DummyServer:
@@ -764,16 +909,11 @@ def test_tcp_permission_error_falls_back_to_threaded(monkeypatch, caplog):
             if self._target is not None:
                 self._target()
 
-    import sys as _sys
-
-    fake_threading = SimpleNamespace(Thread=DummyThread)
-
-    def fake_import_module(name: str):  # used inside _start_asyncio_server
-        if name == "threading":
-            return fake_threading
-        raise ImportError(name)
-
     import asyncio as _asyncio
+    import sys as _sys
+    import threading as _threading
+
+    fake_threading = _FakeThreadingModule(_threading, DummyThread)
 
     monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
@@ -786,7 +926,8 @@ def test_tcp_permission_error_falls_back_to_threaded(monkeypatch, caplog):
         "foghorn.servers.tcp_server.serve_tcp_threaded", fake_serve_tcp_threaded
     )
     # Patch asyncio's global new_event_loop so that the instance imported in
-    # foghorn.main sees the PermissionError.
+    # foghorn.main sees the PermissionError, and ensure that the dynamic
+    # import inside _start_asyncio_server sees our fake threading module.
     monkeypatch.setattr(_asyncio, "new_event_loop", fake_new_event_loop)
     monkeypatch.setitem(_sys.modules, "threading", fake_threading)
 
@@ -810,16 +951,25 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n"
-        "  host: 127.0.0.1\n"
-        "  port: 5354\n"
-        "  dot:\n"
-        "    enabled: true\n"
+        "server:\n"
+        "  listen:\n"
         "    host: 127.0.0.1\n"
-        "    port: 8853\n"
-        "    cert_file: cert.pem\n"
-        "    key_file: key.pem\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
+        "    port: 5354\n"
+        "    dot:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 8853\n"
+        "      cert_file: cert.pem\n"
+        "      key_file: key.pem\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     class DummyServer:
@@ -844,8 +994,9 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
 
     import asyncio as _asyncio
     import sys as _sys
+    import threading as _threading
 
-    fake_threading = SimpleNamespace(Thread=DummyThread)
+    fake_threading = _FakeThreadingModule(_threading, DummyThread)
 
     monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
@@ -853,8 +1004,9 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
     )
     # Patch asyncio's global new_event_loop so that the instance imported in
-    # foghorn.main sees the PermissionError, and ensure threading import
-    # returns our DummyThread implementation.
+    # foghorn.main sees the PermissionError, and ensure that the dynamic
+    # import of threading used by _start_asyncio_server resolves to our
+    # fake module.
     monkeypatch.setattr(_asyncio, "new_event_loop", fake_new_event_loop)
     monkeypatch.setitem(_sys.modules, "threading", fake_threading)
 
@@ -881,16 +1033,25 @@ def test_dot_start_logs_info(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n"
-        "  host: 127.0.0.1\n"
-        "  port: 5354\n"
-        "  dot:\n"
-        "    enabled: true\n"
+        "server:\n"
+        "  listen:\n"
         "    host: 127.0.0.1\n"
-        "    port: 8853\n"
-        "    cert_file: cert.pem\n"
-        "    key_file: key.pem\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
+        "    port: 5354\n"
+        "    dot:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 8853\n"
+        "      cert_file: cert.pem\n"
+        "      key_file: key.pem\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     class DummyServer:
@@ -900,9 +1061,8 @@ def test_dot_start_logs_info(monkeypatch, caplog):
         def serve_forever(self) -> None:
             raise KeyboardInterrupt
 
-    # Prevent real background threads by replacing the threading module that
-    # _start_asyncio_server imports with a dummy implementation whose start()
-    # is a no-op.
+    # Prevent real background threads by forcing threading.Thread used by
+    # _start_asyncio_server to be a dummy implementation whose start() is a no-op.
     class DummyThread:
         def __init__(self, target=None, name=None, daemon=None) -> None:
             self._target = target
@@ -913,8 +1073,9 @@ def test_dot_start_logs_info(monkeypatch, caplog):
             return None
 
     import sys as _sys
+    import threading as _threading
 
-    fake_threading = SimpleNamespace(Thread=DummyThread)
+    fake_threading = _FakeThreadingModule(_threading, DummyThread)
 
     monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
@@ -942,14 +1103,23 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
     """
 
     yaml_data = (
-        "listen:\n"
-        "  host: 127.0.0.1\n"
-        "  port: 5354\n"
-        "  tcp:\n"
-        "    enabled: true\n"
+        "server:\n"
+        "  listen:\n"
         "    host: 127.0.0.1\n"
         "    port: 5354\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
+        "    tcp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     class DummyServer:
@@ -974,6 +1144,7 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
 
     import asyncio as _asyncio
     import sys as _sys
+    import threading as _threading
 
     def fake_new_event_loop() -> DummyLoop:
         loop = DummyLoop()
@@ -1001,14 +1172,16 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
             if self._target is not None:
                 self._target()
 
-    fake_threading = SimpleNamespace(Thread=DummyThread)
+    fake_threading = _FakeThreadingModule(_threading, DummyThread)
 
     monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
     )
-    # Ensure serve_tcp imported inside main() refers to our stub.
+    # Ensure serve_tcp imported inside main() refers to our stub and that
+    # _start_asyncio_server uses our DummyThread implementation instead of the
+    # real threading.Thread.
     monkeypatch.setattr("foghorn.servers.tcp_server.serve_tcp", fake_serve_tcp)
     monkeypatch.setattr(_asyncio, "new_event_loop", fake_new_event_loop)
     monkeypatch.setattr(_asyncio, "set_event_loop", fake_set_event_loop)
@@ -1035,14 +1208,23 @@ def test_doh_start_failure_returns_one(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n"
-        "  host: 127.0.0.1\n"
-        "  port: 5354\n"
-        "  doh:\n"
-        "    enabled: true\n"
+        "server:\n"
+        "  listen:\n"
         "    host: 127.0.0.1\n"
-        "    port: 8053\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
+        "    port: 5354\n"
+        "    doh:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 8053\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     class DummyServer:
@@ -1082,9 +1264,22 @@ def test_webserver_stop_called_on_shutdown(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
-        "webserver:\n  enabled: true\n"
+        "server:\n"
+        "  http:\n    enabled: true\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     class DummyServer:
@@ -1130,8 +1325,21 @@ def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
     """
 
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     def boom_parse_config_file(*_a: Any, **_kw: Any) -> Dict[str, Any]:  # noqa: ANN401
@@ -1161,8 +1369,21 @@ def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     captured: Dict[str, Any] = {"sigterm": None, "sigint": None, "force_exit": None}
@@ -1287,8 +1508,21 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
     """
 
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     class FailingSocketServer:
@@ -1358,8 +1592,21 @@ def test_udp_teardown_outer_exception_logs_unexpected_error(monkeypatch, caplog)
     """
 
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
-        "upstreams:\n  - host: 1.1.1.1\n    port: 53\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     class BrokenServerAttr:

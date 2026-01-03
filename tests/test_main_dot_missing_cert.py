@@ -16,16 +16,26 @@ import foghorn.main as main_mod
 
 def test_main_dot_missing_cert_logs_error(monkeypatch, caplog):
     yaml_data = (
-        "listen:\n"
-        "  host: 127.0.0.1\n"
-        "  port: 5354\n"
-        "  dot:\n"
-        "    enabled: true\n"
-        "    host: 127.0.0.1\n"
-        "    port: 8853\n"
         "upstreams:\n"
-        "  - host: 1.1.1.1\n"
-        "    port: 53\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "    dot:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 8853\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "    use_asyncio: true\n"
     )
 
     class DummyServer:
