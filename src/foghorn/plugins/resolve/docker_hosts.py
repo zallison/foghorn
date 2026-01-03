@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 try:  # cachetools is an optional dependency; fall back to shim when missing.
     from cachetools import TTLCache  # type: ignore[import]
     from foghorn.utils.register_caches import registered_cached
-except Exception:  # pragma: no cover - defensive optional dependency handling
+except Exception:  # pragma: nocover defensive: optional cachetools dependency may be absent in some environments
 
     class TTLCache(dict):  # type: ignore[override]
         def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - simple shim
@@ -48,7 +48,7 @@ from foghorn.plugins.resolve.base import (
 try:  # docker SDK is optional at import time; plugin degrades gracefully.
     import docker
     from docker.errors import DockerException
-except Exception:  # pragma: no cover - environment without docker SDK installed
+except Exception:  # pragma: nocover defensive: allow import in environments without docker SDK installed
     docker = None  # type: ignore[assignment]
 
     class DockerException(Exception):  # type: ignore[no-redef]
@@ -475,7 +475,7 @@ class DockerHosts(BasePlugin):
             _time.sleep(interval)
             try:
                 self._reload_from_docker()
-            except Exception as exc:  # pragma: no cover - defensive logging
+            except Exception as exc:  # pragma: nocover defensive: periodic reload failures are logged but not worth fragile tests
                 # Avoid emitting a full stack trace for periodic reload failures so
                 # that transient Docker connectivity issues do not flood logs.
                 logger.warning(
@@ -505,7 +505,7 @@ class DockerHosts(BasePlugin):
         if client is None and docker is not None:
             try:
                 client = docker.DockerClient(base_url=url)
-            except Exception as exc:  # pragma: no cover - connection errors
+            except Exception as exc:  # pragma: nocover defensive: connection and auth errors depend on external Docker daemon state
                 logger.warning(
                     "DockerHosts: failed to create client for %s during reload: %s",
                     url,
@@ -734,7 +734,7 @@ class DockerHosts(BasePlugin):
 
                 if (
                     not normalized_names
-                ):  # pragma: no cover - unreachable (container_id or hostname always yields at least one name)
+                ):  # pragma: nocover defensive: unreachable under normal docker inspect data (hostname or Id always yields at least one name)
                     # No usable names even though we have IPs; fall back to
                     # container ID if possible, otherwise skip.
                     if container_id:
@@ -775,7 +775,7 @@ class DockerHosts(BasePlugin):
                     base_canonical = raw_name.strip(".").lower()
                 elif hostname:
                     base_canonical = str(hostname).strip(".").lower()
-                else:  # pragma: no cover - unreachable because containers without hostname are skipped above
+                else:  # pragma: nocover defensive: unreachable because containers without hostname are skipped earlier in _reload_from_docker
                     base_canonical = container_id or normalized_names[0]
 
                 if ep_suffix:
