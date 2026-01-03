@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
+import time
 from typing import Any, Dict, Optional
 
 from .base import BaseStatsStore
@@ -101,7 +103,7 @@ class MqttLogging(BaseStatsStore):
         **_: Any,
     ) -> None:
         mqtt = _import_mqtt_driver()
-
+        logger.warning("Log start published")
         self._host = host
         self._port = int(port)
         self._topic = topic
@@ -119,6 +121,26 @@ class MqttLogging(BaseStatsStore):
         # publish() calls succeed without explicit per-call loop management.
         self._client.connect(self._host, self._port, self._keepalive, **kw)
         self._client.loop_start()
+
+        # Publish a best-effort "log_start" marker to a metadata topic so
+        # downstream consumers can detect when a new logging session begins.
+        try:
+            start_payload = {
+                "event": "log_start",
+                "ts": float(time.time()),
+                "version": 1,
+                "hostname": socket.gethostname(),
+            }
+            start_data = json.dumps(start_payload, separators=(",", ":"))
+            meta_topic = f"{self._topic}/meta"
+            self._client.publish(
+                meta_topic,
+                start_data,
+                qos=self._qos,
+                retain=self._retain,
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to publish MQTT query_log start marker")
 
         self._healthy = True
 

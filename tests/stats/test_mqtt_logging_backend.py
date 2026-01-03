@@ -137,7 +137,8 @@ def test_insert_query_log_publishes_payload_and_parses_result_json(
       - monkeypatch fixture.
 
     Outputs:
-      - None; asserts publish() is called once with the expected topic/payload.
+      - None; asserts publish() is called for the main topic with the expected
+        payload, ignoring the initial log_start meta publish.
     """
 
     fake_module = _FakeMqttModule()
@@ -161,9 +162,11 @@ def test_insert_query_log_publishes_payload_and_parses_result_json(
 
     client = backend._client  # type: ignore[attr-defined]
     assert isinstance(client, _FakeMqttClient)
-    assert len(client.publishes) == 1
+    # One publish is for the log_start meta marker; the second is the
+    # insert_query_log payload we care about.
+    assert len(client.publishes) == 2
 
-    topic, payload, qos, retain = client.publishes[0]
+    topic, payload, qos, retain = client.publishes[1]
     assert topic == "foghorn/query_log"
     assert qos == 2
     assert retain is False
@@ -190,7 +193,8 @@ def test_insert_query_log_returns_early_when_unhealthy(
       - monkeypatch fixture.
 
     Outputs:
-      - None; asserts no additional publish calls are made after close().
+      - None; asserts no additional publish calls are made after close(),
+        ignoring the initial log_start meta publish on connect.
     """
 
     monkeypatch.setitem(
@@ -199,6 +203,9 @@ def test_insert_query_log_returns_early_when_unhealthy(
 
     backend = MqttLogging(topic="foghorn/query_log")
     client = backend._client  # type: ignore[attr-defined]
+
+    # Capture publish count after initial construction (includes log_start meta).
+    initial_publishes = list(getattr(client, "publishes", []))
 
     # Mark backend unhealthy via close() and verify insert_query_log is a no-op.
     backend.close()
@@ -215,4 +222,6 @@ def test_insert_query_log_returns_early_when_unhealthy(
         result_json="{}",
     )
 
-    assert getattr(client, "publishes", []) == []
+    # No additional publishes should have been recorded beyond the initial
+    # construction-time log_start marker.
+    assert getattr(client, "publishes", []) == initial_publishes
