@@ -174,40 +174,29 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
       - bytes: response with corrected ID.
 
     Fast path: DNS ID is the first 2 bytes (big-endian). We rewrite them
-    without parsing to avoid any packing differences.
-
-    Note: We normalize to bytes before delegating to a cached helper so that
-    unhashable types (e.g., bytearray) do not break caching.
+    without parsing to avoid any packing differences. For non-bytes inputs we
+    return the original object unchanged so callers can rely on a best-effort
+    behaviour without hard failures.
     """
+    # Non-bytes inputs (e.g., None in defensive tests) are returned unchanged
+    # but still trigger an error log so callers can diagnose misuse.
+    if not isinstance(wire, (bytes, bytearray, memoryview)):
+        logger.error("Failed to set response id: non-bytes wire %r", type(wire))
+        return wire
     try:
-        # Normalize to bytes to ensure hashability and immutability
-        try:
-            bwire = bytes(wire)
-        except Exception:
-            bwire = wire  # fallback; will likely still be bytes
-        return _set_response_id_cached(bwire, int(req_id))
-    except (
-        Exception
-    ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+        bwire = bytes(wire)
+        if len(bwire) < 2:
+            return bwire
+        hi = (int(req_id) >> 8) & 0xFF
+        lo = int(req_id) & 0xFF
+        return bytes([hi, lo]) + bwire[2:]
+    except Exception as e:  # pragma: no cover - defensive: error-handling path
         logger.error("Failed to set response id: %s", e)
-        return (
-            bytes(wire)
-            if not isinstance(wire, (bytes, bytearray))
-            else (bytes(wire) if isinstance(wire, bytearray) else wire)
-        )
+        # Fall back to returning the original value when rewriting fails.
+        return wire
 
 
-@registered_lru_cached(maxsize=1024)
-def _set_response_id_cached(wire: bytes, req_id: int) -> bytes:
-    """Cached helper for setting DNS ID on an immutable bytes payload.
-
-    Inputs:
-      - wire: Immutable bytes payload containing DNS message.
-      - req_id: int request ID to embed in the first two bytes.
-
-    Outputs:
-      - bytes: DNS message with first two bytes rewritten when possible.
-    """
+def _set_response_id_bytes(wire: bytes, req_id: int) -> bytes:
     try:
         if len(wire) >= 2:
             hi = (req_id >> 8) & 0xFF
