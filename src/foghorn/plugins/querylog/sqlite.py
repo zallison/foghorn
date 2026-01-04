@@ -72,6 +72,19 @@ def _is_subdomain(domain: str) -> bool:
 class SqliteStatsStore(BaseStatsStore):
     """SQLite-backed persistent statistics and query-log backend.
 
+    # Aliases used by the stats backend registry. The default alias derived from
+    # the class name is "sqlite", but we also accept "sqlite3" for convenience.
+    aliases = ("sqlite", "sqlite3")
+
+    # Default configuration values used by the generic loader when db_path or
+    # batching knobs are omitted from statistics.persistence.
+    default_config = {
+        "db_path": "./config/var/stats.db",
+        "batch_writes": True,
+        "batch_time_sec": 15.0,
+        "batch_max_size": 1000,
+    }
+
     This class is a direct port of the legacy StatsSQLiteStore implementation
     so that it satisfies the BaseStatsStore interface while preserving
     existing SQLite behavior.

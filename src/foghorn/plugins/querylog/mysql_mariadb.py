@@ -62,6 +62,9 @@ def _import_mysql_driver():
 class MySqlStatsStore(BaseStatsStore):
     """MySQL/MariaDB-backed persistent statistics and query-log backend.
 
+    # Aliases used by the stats backend registry.
+    aliases = ("mysql", "mariadb")
+
     This backend stores the same logical ``counts`` and ``query_log`` tables as
     the SQLite implementation, but in a MariaDB/MySQL database.
 

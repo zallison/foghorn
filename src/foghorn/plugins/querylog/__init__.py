@@ -16,9 +16,7 @@ import logging
 from typing import Any, List, Optional
 
 from .base import BaseStatsStore, StatsStoreBackendConfig
-from .sqlite import SqliteStatsStore
-from .mysql_mariadb import MySqlStatsStore
-from .mqtt_logging import MqttLogging
+from .registry import get_stats_backend_class
 
 __all__ = [
     "BaseStatsStore",
@@ -233,41 +231,40 @@ def _build_backend_from_config(cfg: StatsStoreBackendConfig) -> BaseStatsStore:
     backend_name = _normalize_backend_name(cfg.backend) if cfg.backend else "sqlite"
     conf = dict(cfg.config or {})
 
+    # Resolve the concrete backend class via the registry, allowing backends to
+    # advertise their own aliases.
+    backend_cls = get_stats_backend_class(backend_name)
+
+    # Merge any backend-provided default configuration with the user config,
+    # giving precedence to values from cfg.config.
+    default_conf = getattr(backend_cls, "default_config", {}) or {}
+    merged: dict[str, object] = dict(default_conf)
+    merged.update(conf)
+
+    # Filter to keyword arguments actually accepted by the backend __init__ so
+    # that legacy keys such as "enabled" or "force_rebuild" do not leak into
+    # constructors that do not expect them.
+    import inspect
+
+    sig = inspect.signature(backend_cls.__init__)
+    valid_keys = {
+        name
+        for name, param in sig.parameters.items()
+        if name not in {"self", "args", "kwargs", "*args", "**kwargs"}
+        and param.kind
+        in {
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }
+    }
+    filtered = {k: v for k, v in merged.items() if k in valid_keys}
+
+    backend = backend_cls(**filtered)
+
     # Derive a stable logical instance name for the backend. When cfg.name is
     # not provided, fall back to the normalized backend alias so that
     # primary_backend can still match by type (for example, "sqlite", "mysql").
     instance_name = _normalize_backend_name(cfg.name) if cfg.name else backend_name
-
-    if backend_name in {"sqlite", ""}:
-        db_path = str(conf.get("db_path", "./config/var/stats.db"))
-        batch_writes = bool(conf.get("batch_writes", True))
-        batch_time_sec = float(conf.get("batch_time_sec", 15.0))
-        batch_max_size = int(conf.get("batch_max_size", 1000))
-        backend = SqliteStatsStore(
-            db_path=db_path,
-            batch_writes=batch_writes,
-            batch_time_sec=batch_time_sec,
-            batch_max_size=batch_max_size,
-        )
-    elif backend_name in {"mysql", "mariadb"}:
-        backend = MySqlStatsStore(**conf)
-    elif backend_name in {"mqtt"}:
-        backend = MqttLogging(**conf)
-    else:
-        # Fallback: treat backend as a dotted import path to a concrete class.
-        module_name, _, class_name = backend_name.rpartition(".")
-        if not module_name or not class_name:
-            raise ValueError(f"Unknown statistics backend alias: {cfg.backend!r}")
-
-        import importlib
-
-        module = importlib.import_module(module_name)
-        klass = getattr(module, class_name)
-        backend = klass(**conf)
-        if not isinstance(backend, BaseStatsStore):  # pragma: no cover - defensive
-            raise TypeError(
-                f"Configured backend {cfg.backend!r} is not a BaseStatsStore"
-            )
 
     # Attach a logical name attribute for later selection in MultiStatsStore.
     setattr(backend, "name", instance_name)
