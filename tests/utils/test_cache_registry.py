@@ -19,7 +19,7 @@ import foghorn.utils.register_caches as cache_reg
 def _find_entry_by_backend(
     entries: List[Dict[str, Any]], backend: str
 ) -> Dict[str, Any]:
-    """Brief: Helper to locate a registry entry by backend name.
+    """Brief: Helper to locate the first registry entry by backend name.
 
     Inputs:
       - entries: List of registry snapshot entries.
@@ -30,6 +30,25 @@ def _find_entry_by_backend(
     """
 
     for entry in entries:
+        if entry.get("backend") == backend:
+            return entry
+    raise AssertionError(f"No entry found for backend={backend!r}")
+
+
+def _find_last_entry_by_backend(
+    entries: List[Dict[str, Any]], backend: str
+) -> Dict[str, Any]:
+    """Brief: Helper to locate the most recent registry entry by backend name.
+
+    Inputs:
+      - entries: List of registry snapshot entries.
+      - backend: Backend name string (e.g., "ttlcache", "lru_cache").
+
+    Outputs:
+      - Last matching entry dict.
+    """
+
+    for entry in reversed(entries):
         if entry.get("backend") == backend:
             return entry
     raise AssertionError(f"No entry found for backend={backend!r}")
@@ -89,10 +108,12 @@ def test_registered_lru_cached_records_hit_and_miss_counters() -> None:
     assert fn_lru(2) == 6
 
     snapshot = cache_reg.get_registered_cached()
-    entry = _find_entry_by_backend(snapshot, "lru_cache")
+    entry = _find_last_entry_by_backend(snapshot, "lru_cache")
 
     # Calls counter should be present and >= number of invocations.
     assert isinstance(entry.get("calls_total"), int) and entry["calls_total"] >= 3
     # Hit/miss counters are best-effort; just assert they exist and are non-negative.
     assert isinstance(entry.get("cache_hits"), int) and entry["cache_hits"] >= 0
     assert isinstance(entry.get("cache_misses"), int) and entry["cache_misses"] >= 0
+    # size_current for lru_cache backends should be present and non-negative.
+    assert isinstance(entry.get("size_current"), int) and entry["size_current"] >= 0
