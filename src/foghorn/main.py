@@ -424,9 +424,9 @@ def main(argv: List[str] | None = None) -> int:
     if not isinstance(stats_cfg, dict):
         stats_cfg = {}
     if isinstance(stats_cfg, dict):
-        stats_enabled = bool(udp_section.get("enabled", True))
+        stats_enabled = bool(stats_cfg.get("enabled", True))
     else:
-        stats_enabled = stats_cfg.get("enabled", False)
+        stats_enabled = False
 
     logging_only = bool(stats_cfg.get("logging_only", False))
     query_log_only = bool(stats_cfg.get("query_log_only", False))
@@ -450,7 +450,11 @@ def main(argv: List[str] | None = None) -> int:
         # in-memory StatsCollector remains the live source for periodic
         # logging and web API snapshots.
         persistence_cfg = stats_cfg.get("persistence", {}) or {}
-        persistence_enabled = bool(persistence_cfg.get("enabled", True))
+        if isinstance(persistence_cfg, dict):
+            persistence_enabled = bool(persistence_cfg.get("enabled", True))
+        else:
+            persistence_enabled = bool(persistence_cfg.get("enabled", False))
+
         stats_persistence_store = None
 
         if persistence_enabled:
@@ -663,9 +667,8 @@ def main(argv: List[str] | None = None) -> int:
 
         Notes:
           - Both SIGUSR1 and SIGUSR2 share the same behavior: when statistics
-            are enabled and the configuration flag sigusr2_resets_stats is
-            true, the in-memory statistics are reset. In all cases, active
-            plugins that implement handle_sigusr2() are notified.
+            are enabled and the configuration flags sigusr[12]_resets_stats is
+            true, the in-memory statistics are reset.
         """
 
         nonlocal cfg, stats_collector
@@ -674,18 +677,23 @@ def main(argv: List[str] | None = None) -> int:
         # Conditionally reset statistics based on config; failures here must
         # never prevent plugin notifications from running.
         try:
-            # v2 configs place statistics under the root 'stats' block; retain a
-            # legacy fallback to 'statistics' for older callers/tests that
-            # bypass JSON Schema validation.
             if isinstance(cfg, dict):
                 raw_stats = cfg.get("stats") or cfg.get("statistics") or {}
                 s_cfg = raw_stats if isinstance(raw_stats, dict) else {}
             else:
                 s_cfg = {}
+
             enabled = bool(s_cfg.get("enabled", False))
-            # Only sigusr2_resets_stats is supported; legacy reset_on_sigusr1 is
-            # no longer accepted to keep configuration semantics explicit.
-            reset_flag = bool(s_cfg.get("sigusr2_resets_stats", False))
+            # Use sigusr2_resets_stats as the canonical configuration flag for
+            # both SIGUSR1 and SIGUSR2 so that user expectations are consistent
+            # regardless of which signal they choose to send. For
+            # backwards-compatibility, also accept sigusr1_resets_stats as a
+            # deprecated alias.
+            reset_flag = bool(
+                s_cfg.get("sigusr2_resets_stats", False)
+                or s_cfg.get("sigusr1_resets_stats", False)
+            )
+
             if enabled and reset_flag:
                 if stats_collector is not None:
                     try:
