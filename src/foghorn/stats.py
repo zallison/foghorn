@@ -8,7 +8,6 @@ guaranteed thread-safety for concurrent request handling.
 
 from __future__ import annotations
 
-import functools
 import importlib.metadata as importlib_metadata
 import ipaddress
 import json
@@ -24,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from foghorn.plugins.querylog import BaseStatsStore
+from foghorn.utils.register_caches import registered_lru_cached
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def get_process_uptime_seconds() -> float:
     return max(0.0, time.time() - _PROCESS_START_TIME)
 
 
-@functools.lru_cache(maxsize=1024)
+@registered_lru_cached(maxsize=1024)
 def _normalize_domain(domain: str) -> str:
     """
     Normalize domain name for statistics tracking.
@@ -73,7 +73,7 @@ def _normalize_domain(domain: str) -> str:
     return domain.rstrip(".").lower()
 
 
-@functools.lru_cache(maxsize=1024)
+@registered_lru_cached(maxsize=1024)
 def _is_subdomain(domain: str) -> bool:
     """Return True if the name should be treated as a subdomain.
 

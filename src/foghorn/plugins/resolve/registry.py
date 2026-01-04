@@ -1,5 +1,4 @@
 import difflib
-import functools
 import importlib
 import inspect
 import logging
@@ -8,6 +7,7 @@ import re
 from typing import Dict, Iterable, Type
 
 from .base import BasePlugin
+from foghorn.utils.register_caches import registered_lru_cached
 
 logger = logging.getLogger(__name__)
 
@@ -15,14 +15,14 @@ _CAMEL_1 = re.compile(r"(.)([A-Z][a-z]+)")
 _CAMEL_2 = re.compile(r"([a-z0-9])([A-Z])")
 
 
-@functools.lru_cache(maxsize=1024)
+@registered_lru_cached(maxsize=1024)
 def _camel_to_snake(name: str) -> str:
     s1 = _CAMEL_1.sub(r"\1_\2", name)
     s2 = _CAMEL_2.sub(r"\1_\2", s1)
     return s2.lower()
 
 
-@functools.lru_cache(maxsize=1024)
+@registered_lru_cached(maxsize=1024)
 def _default_alias_for(cls: Type[BasePlugin]) -> str:
     name = cls.__name__
     if name.endswith("Plugin"):
@@ -30,7 +30,7 @@ def _default_alias_for(cls: Type[BasePlugin]) -> str:
     return _camel_to_snake(name)
 
 
-@functools.lru_cache(maxsize=1024)
+@registered_lru_cached(maxsize=1024)
 def _normalize(alias: str) -> str:
     return alias.strip().lower().replace("-", "_")
 
