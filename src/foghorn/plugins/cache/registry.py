@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import difflib
-import functools
 import importlib
 import inspect
 import pkgutil
@@ -9,19 +8,20 @@ import re
 from typing import Dict, Iterable, Optional, Type
 
 from .base import CachePlugin
+from foghorn.utils.register_caches import registered_lru_cached
 
 _CAMEL_1 = re.compile(r"(.)([A-Z][a-z]+)")
 _CAMEL_2 = re.compile(r"([a-z0-9])([A-Z])")
 
 
-@functools.lru_cache(maxsize=1024)
+@registered_lru_cached(maxsize=1024)
 def _camel_to_snake(name: str) -> str:
     s1 = _CAMEL_1.sub(r"\1_\2", name)
     s2 = _CAMEL_2.sub(r"\1_\2", s1)
     return s2.lower()
 
 
-@functools.lru_cache(maxsize=1024)
+@registered_lru_cached(maxsize=1024)
 def _default_alias_for(cls: Type[CachePlugin]) -> str:
     name = cls.__name__
     # Common suffixes used by cache implementations.
@@ -32,7 +32,7 @@ def _default_alias_for(cls: Type[CachePlugin]) -> str:
     return _camel_to_snake(name)
 
 
-@functools.lru_cache(maxsize=1024)
+@registered_lru_cached(maxsize=1024)
 def _normalize(alias: str) -> str:
     return alias.strip().lower().replace("-", "_")
 
@@ -45,7 +45,7 @@ def _iter_cache_plugin_modules(
         yield modinfo.name
 
 
-@functools.lru_cache(maxsize=4)
+@registered_lru_cached(maxsize=4)
 def discover_cache_plugins(
     package_name: str = "foghorn.plugins.cache",
 ) -> Dict[str, Type[CachePlugin]]:
