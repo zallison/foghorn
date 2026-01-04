@@ -66,6 +66,9 @@ def _import_mqtt_driver():
 class MqttLogging(BaseStatsStore):
     """MQTT-backed logging-only backend.
 
+    # Aliases used by the stats backend registry.
+    aliases = ("mqtt", "broker")
+
     Inputs (constructor):
         host: MQTT broker host (default "127.0.0.1").
         port: MQTT broker port (default 1883).
