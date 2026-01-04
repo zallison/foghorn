@@ -10,24 +10,8 @@ from typing import Dict, List, Optional, Set, Tuple
 from dnslib import A, AAAA, PTR, QTYPE, RR, SRV, TXT, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field, validator
 
-try:  # cachetools is an optional dependency; fall back to shim when missing.
-    from cachetools import TTLCache  # type: ignore[import]
-    from foghorn.utils.register_caches import registered_cached
-except Exception:  # pragma: no cover - defensive optional dependency handling
-
-    class TTLCache(dict):  # type: ignore[override]
-        def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - simple shim
-            """Lightweight TTLCache shim when cachetools is unavailable."""
-            super().__init__()
-
-    def registered_cached(*, cache, **kwargs):  # type: ignore[no-redef]
-        """No-op registered_cached decorator used when cachetools is unavailable."""
-
-        def decorator(func):
-            return func
-
-        return decorator
-
+from cachetools import TTLCache  # type: ignore[import]
+from foghorn.utils.register_caches import registered_cached
 
 from foghorn.plugins.resolve.base import (
     AdminPageSpec,

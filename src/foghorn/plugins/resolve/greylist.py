@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import logging
 import sqlite3
 import threading
@@ -10,6 +9,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
+from foghorn.utils.register_caches import registered_lru_cached
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
 
 log = logging.getLogger(__name__)
@@ -107,7 +107,7 @@ class GreylistExample(BasePlugin):
                 ")"
             )
 
-    @functools.lru_cache(maxsize=1024)
+    @registered_lru_cached(maxsize=1024)
     def _to_base_domain(self, qname: str) -> str:
         """
         Extracts the last two labels of a domain name.
