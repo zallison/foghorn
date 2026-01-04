@@ -170,17 +170,11 @@ def registered_lru_cached(
         entry["cache_kwargs"] = dict(lru_kwargs) if lru_kwargs else {}
         entry["backend"] = "lru_cache"
 
-        # Attempt to retain a reference to the underlying cache mapping so that
-        # size_current can be computed in get_registered_cached(). For CPython's
-        # lru_cache, the wrapper exposes cache_parameters() and clear() but not
-        # the internal dict, so we fall back to hits/misses only.
-        cache_ref: Optional[Any] = None
-        try:
-            cache_ref = getattr(wrapped, "cache", None)
-        except Exception:  # pragma: nocover defensive cache_ref lookup
-            cache_ref = None
-        if cache_ref is not None:
-            entry["_cache_ref"] = cache_ref
+        # Retain a reference to the lru_cache wrapper itself so that
+        # get_registered_cached() can derive the current size via
+        # cache_info().currsize. The wrapper is stored under a private key and
+        # stripped from snapshots before they are returned to callers.
+        entry["_lru_wrapper_ref"] = wrapped
 
         def _wrapper(*args: Any, **kwargs: Any) -> Any:
             try:
@@ -258,7 +252,8 @@ def get_registered_cached() -> List[Dict[str, Any]]:
         include:
 
           * size_current: best-effort ``len(cache)`` when the cache exposes
-            ``__len__``.
+            ``__len__`` or, for ``functools.lru_cache``,
+            ``cache_info().currsize`` via the wrapper.
     """
 
     snapshot: List[Dict[str, Any]] = []
@@ -268,13 +263,29 @@ def get_registered_cached() -> List[Dict[str, Any]]:
         except Exception:  # pragma: nocover defensive snapshot copy
             continue
 
+        backend = copy.get("backend")
         cache_ref = copy.pop("_cache_ref", None)
+        lru_wrapper = copy.pop("_lru_wrapper_ref", None)
+
+        # TTLCache and other mapping-like backends where we have the cache
+        # object itself: use len(cache).
         if cache_ref is not None:
             try:
                 cur_size = len(cache_ref)  # type: ignore[arg-type]
                 copy["size_current"] = int(cur_size)
             except Exception:  # pragma: nocover defensive size computation
                 # size_current is best-effort only.
+                pass
+
+        # functools.lru_cache wrappers: derive current size from
+        # cache_info().currsize when a live wrapper reference is available.
+        if backend == "lru_cache" and lru_wrapper is not None:
+            try:
+                info = lru_wrapper.cache_info()  # type: ignore[call-arg]
+                curr = getattr(info, "currsize", None)
+                if isinstance(curr, int):
+                    copy["size_current"] = curr
+            except Exception:  # pragma: nocover defensive lru size computation
                 pass
 
         snapshot.append(copy)
