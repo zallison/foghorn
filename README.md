@@ -24,7 +24,7 @@ Plugins are where the magic happens. The plugin architecture enables advanced be
 
 Plugins can be instantiated multiple times with different settings.  A "priority" field controls the order of execution.  Further control is available by breaking it down into "setup_priorty", "pre_priority", and "post_priority".  Lower is more imporatant.
 
-Even the cache type and backend can be set globally and per plugin. `In-memory-ttl` is the default, other options include `sqlite` and `redis`/`valkey`. Caching can be disabled with the `None` cache.  Multiple servers using the same `valkey` server share cache results.
+Even the cache type and backend can be set globally and per plugin. `In-memory-ttl` is the default, other options include `sqlite`, `redis`/`valkey`, `mongodb`, and `memcached`. Caching can be disabled with the `None` cache.
 
 There's a lot to configure so there's a [schema](./assets/config-schema.json) for the configuration.  If you run the Foghorn webserver it will also be served from there, ensuring your schema matches your version.
 
@@ -257,7 +257,7 @@ Semantics:
   - Reads (health checks, counts export, query log/aggregations) go to the *primary* backend.
   - The primary defaults to the first configured backend; `primary_backend` can override this by logical name or backend alias.
 
-`backend` accepts short aliases like `sqlite`, `mysql`, or `mariadb`, or a dotted import path to a custom `BaseStatsStore` implementation.
+`backend` accepts short aliases like `sqlite`, `mysql`, `mariadb`, `postgres`/`postgresql`/`pg`, `mongo`/`mongodb`, or `mqtt`, or a dotted import path to a custom `BaseStatsStore` implementation.
 
 The `cache` section selects the DNS response cache implementation (default: in-memory TTL):
 
@@ -936,6 +936,8 @@ Built-in cache plugins:
 - `in_memory_ttl` (default): in-process TTL cache
 - `sqlite3`: persistent on-disk TTL cache (SQLite)
 - `redis` / `valkey`: Redis-compatible remote cache (requires the optional Python dependency `redis`)
+- `mongodb`: MongoDB-backed persistent TTL cache (requires the optional Python dependency `pymongo`)
+- `memcached` / `memcache`: Memcached-backed TTL cache (requires the optional Python dependency `pymemcache`)
 - `none`: disables caching
 
 Examples (complete runnable configs) are available in:
@@ -973,6 +975,30 @@ cache:
   module: redis
   config:
 	url: redis://127.0.0.1:6379/0
+	namespace: foghorn:dns_cache:
+	min_cache_ttl: 60
+```
+
+`mongodb` (MongoDB-backed cache):
+
+```yaml
+cache:
+  module: mongodb
+  config:
+	uri: mongodb://127.0.0.1:27017
+	database: foghorn_cache
+	collection: dns_cache
+	min_cache_ttl: 60
+```
+
+`memcached` (Memcached-backed cache):
+
+```yaml
+cache:
+  module: memcached
+  config:
+	host: 127.0.0.1
+	port: 11211
 	namespace: foghorn:dns_cache:
 	min_cache_ttl: 60
 ```

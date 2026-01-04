@@ -58,6 +58,8 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
   - `in_memory_ttl` (default)
   - `sqlite3` (persistent on-disk)
   - `redis` / `valkey` (remote; requires the optional Python dependency `redis`)
+  - `mongodb` (MongoDB-backed persistent TTL cache; requires the optional Python dependency `pymongo`)
+  - `memcached` / `memcache` (Memcached-backed TTL cache; requires the optional Python dependency `pymemcache`)
   - `none` (disable caching)
   TTL flooring is configured via the cache plugin: `cache.config.min_cache_ttl` (seconds).
   See README.md and the runnable examples under `example_configs/cache_*.yaml`.
@@ -73,7 +75,7 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
     - `statistics.persistence.primary_backend`: optional string selecting the primary read backend when multiple backends are configured.
     - `statistics.persistence.backends`: optional array of backend entries, each with:
       - `name` (optional logical instance name used by `primary_backend`),
-      - `backend` (alias like `sqlite` / `mysql` / `mariadb`, or dotted import path to a concrete `BaseStatsStore`),
+      - `backend` (alias like `sqlite` / `mysql` / `mariadb` / `postgres` / `postgresql` / `pg` / `mongo` / `mongodb` / `mqtt`, or a dotted import path to a concrete `BaseStatsStore`),
       - `config` (free-form object passed verbatim to the backend constructor).
     - When `backends` is omitted, the legacy single-backend SQLite configuration (db_path, batch_writes, batch_time_sec, batch_max_size) remains valid.
   - Example usage from the project root:
