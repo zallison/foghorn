@@ -15,15 +15,15 @@ RUN pip3 install --root-user-action=ignore PyYAML>=6.0.1 jsonschema>=4.17.3 cach
 	dnspython>=2.6.1 fastapi>=0.111.0 httpx psutil pytest requests>=2.31.0 uvicorn>=0.30.0 watchdog \
 	whois coverage docker cryptography mysql-connector-python mariadb zeroconf
 
-# Dev packages
-RUN pip3 install --root-user-action=ignore black build coverage isort pytest pytest-cov ruff twine
+# Dev packages and build dependencies
+RUN pip3 install --root-user-action=ignore black build coverage isort pytest pytest-cov ruff twine setuptools>=68 wheel
 
 # NB: Use `make docker-build` to get a cleaner build (no .git, etc)
 # Copy the current directory contents into the container
 COPY . /foghorn
 
 # Ensure dependencies
-RUN pip install --root-user-action=ignore "."
+RUN pip install --root-user-action=ignore --no-build-isolation "."
 
 ## Port expose and suggusted mappings
 # Normal Port # Comment
