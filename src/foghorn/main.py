@@ -224,14 +224,31 @@ def main(argv: List[str] | None = None) -> int:
     # Runtime state used by /ready readiness probes exposed by the admin webserver.
     runtime_state = RuntimeState(startup_complete=False)
 
-    # Normalize listen configuration with backward compatibility.
-    # Prefer server.listen when present; fall back to legacy root-level listen
-    # for older configs/tests that bypass JSON Schema validation.
-    listen_cfg = server_cfg.get("listen") or cfg.get("listen", {}) or {}
+    # Normalize listen configuration.
+    listen_cfg = server_cfg.get("listen") or {}
     if not isinstance(listen_cfg, dict):
         listen_cfg = {}
-    default_host = str(listen_cfg.get("host", "127.0.0.1"))
-    default_port = int(listen_cfg.get("port", 5335))
+
+    dns_cfg = listen_cfg.get("dns")
+    if not isinstance(dns_cfg, dict):
+        dns_cfg = {}
+
+    # Host/port precedence:
+    #   1) listen.dns.host/port when set
+    #   2) listen.host/port when set
+    #   3) hard-coded defaults 127.0.0.1:5335
+    raw_host = dns_cfg.get("host")
+    if raw_host is None:
+        raw_host = listen_cfg.get("host", "127.0.0.1")
+    raw_port = dns_cfg.get("port")
+    if raw_port is None:
+        raw_port = listen_cfg.get("port", 5335)
+
+    default_host = str(raw_host)
+    try:
+        default_port = int(raw_port)
+    except (TypeError, ValueError):
+        default_port = 5335
 
     # Resolver configuration (forward vs recursive) with conservative defaults.
     resolver_cfg = server_cfg.get("resolver") or cfg.get("resolver") or {}
@@ -243,28 +260,37 @@ def main(argv: List[str] | None = None) -> int:
         out = {**defaults, **d} if isinstance(d, dict) else defaults
         return out
 
-    # Get listeners configs
-    #
-    # Semantics:
-    #   - UDP remains enabled by default, even when listen.udp is omitted, to
-    #     preserve long-standing behaviour.
-    #   - For TCP/DoT/DoH, presence of a listener subsection implies that the
-    #     listener should be enabled by default unless an explicit
-    #     enabled: false override is provided. This makes configurations like
-    #
-    #         server:
-    #           listen:
-    #             tcp:
-    #               host: 0.0.0.0
-    #               port: 5353
-    #
-    #     behave as expected without requiring an explicit enabled: true.
+    udp_section = listen_cfg.get("udp")
+    if isinstance(udp_section, dict):
+        udp_default_enabled = bool(udp_section.get("enabled", True))
+    else:
+        # No explicit UDP listener block; fall back to dns.udp when present,
+        # otherwise preserve the historical default of UDP enabled.
+        if "udp" in dns_cfg:
+            udp_default_enabled = bool(dns_cfg.get("udp"))
+        else:
+            udp_default_enabled = True
+
     udp_cfg = _sub(
-        "udp", {"enabled": True, "host": default_host, "port": default_port or 5335}
+        "udp",
+        {
+            "enabled": udp_default_enabled,
+            "host": default_host,
+            "port": default_port or 5335,
+        },
     )
 
     tcp_section = listen_cfg.get("tcp")
-    tcp_default_enabled = True if isinstance(tcp_section, dict) else False
+    if isinstance(tcp_section, dict):
+        tcp_default_enabled = bool(tcp_section.get("enabled", True))
+    else:
+        # No explicit TCP listener block; fall back to dns.tcp when present,
+        # otherwise preserve the historical default of TCP disabled.
+        if "tcp" in dns_cfg:
+            tcp_default_enabled = bool(dns_cfg.get("tcp"))
+        else:
+            tcp_default_enabled = False
+
     tcp_cfg = _sub(
         "tcp",
         {
@@ -397,15 +423,12 @@ def main(argv: List[str] | None = None) -> int:
     stats_cfg = cfg.get("stats", {}) or {}
     if not isinstance(stats_cfg, dict):
         stats_cfg = {}
-    stats_enabled = stats_cfg.get("enabled", False)
-    # Optional mode restricting statistics to logging-only behaviour where
-    # background warm-load/rebuild passes are skipped and only insert-style
-    # operations (query_log appends and counter increments) are performed.
+    if isinstance(stats_cfg, dict):
+        stats_enabled = bool(udp_section.get("enabled", True))
+    else:
+        stats_enabled = stats_cfg.get("enabled", False)
+
     logging_only = bool(stats_cfg.get("logging_only", False))
-    # Optional mode restricting persistence usage to the raw query_log only.
-    # When true, aggregate counters are not mirrored into the persistent
-    # store; only query_log appends are performed. This implicitly implies
-    # logging_only semantics for startup warm-load/rebuild behaviour.
     query_log_only = bool(stats_cfg.get("query_log_only", False))
 
     # Guard against ambiguous/contradictory configurations.
