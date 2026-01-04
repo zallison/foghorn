@@ -1,4 +1,3 @@
-import functools
 import logging
 import socketserver
 import threading
@@ -20,7 +19,7 @@ from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecisi
 from foghorn.servers.recursive_resolver import RecursiveResolver
 from foghorn.servers.transports.dot import DoTError, get_dot_pool
 from foghorn.servers.transports.tcp import TCPError, get_tcp_pool, tcp_query
-from foghorn.utils.register_caches import registered_cached
+from foghorn.utils.register_caches import registered_cached, registered_lru_cached
 from .udp_server import DNSUDPHandler
 
 logger = logging.getLogger("foghorn.server")
@@ -198,7 +197,7 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
         )
 
 
-@functools.lru_cache(maxsize=1024)
+@registered_lru_cached(maxsize=1024)
 def _set_response_id_cached(wire: bytes, req_id: int) -> bytes:
     """Cached helper for setting DNS ID on an immutable bytes payload.
 

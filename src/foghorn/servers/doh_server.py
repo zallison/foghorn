@@ -1,7 +1,8 @@
 import asyncio
 import base64
-import functools
 from typing import Callable
+
+from foghorn.utils.register_caches import registered_lru_cached
 
 _HTTP_OK = b"HTTP/1.1 200 OK\r\n"
 _HTTP_BAD = b"HTTP/1.1 400 Bad Request\r\n"
@@ -13,7 +14,7 @@ _CONN_CLOSE = b"Connection: close\r\n"
 _CRLF = b"\r\n"
 
 
-@functools.lru_cache(maxsize=1024)
+@registered_lru_cached(maxsize=1024)
 def _b64url_decode_nopad(s: str) -> bytes:
     """
     Brief: Decode base64url without padding.
