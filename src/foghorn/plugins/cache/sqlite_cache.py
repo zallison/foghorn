@@ -456,6 +456,7 @@ class SQLite3Cache(CachePlugin):
                     "sort": "by_calls",
                     "filters": [
                         {"id": "hide_zero_calls", "label": "Hide zero-call caches"},
+                        {"id": "hide_zero_hits", "label": "Hide zero-hit caches"},
                     ],
                     "columns": [
                         {"key": "module", "label": "Module"},
