@@ -267,6 +267,44 @@ cache:
   config: {}
 ```
 
+Advanced users can also tune *decorated caches* (the small helper caches used by
+DNSSEC, mDNS, DockerHosts, stats, etc.) via `server.cache.func_caches` when using the
+v2 layout:
+
+```yaml
+server:
+  cache:
+    module: in_memory_ttl
+    config: {}
+    func_caches:
+      - module: foghorn.dnssec.dnssec_validate
+        name: _find_zone_apex_cached
+        backend: ttlcache
+        maxsize: 4096
+        ttl: 300
+        reset_on_ttl_change: true
+```
+
+Each entry targets a specific decorated function by `module` + `name` and can
+optionally narrow the match by `backend` (see the "Decorated caches" admin table
+for the recorded backend name). Supported backends include:
+
+- `ttlcache` (cachetools `TTLCache`)
+- `lru_cache` (`functools.lru_cache`)
+- `foghorn_ttl` (`FoghornTTLCache`)
+- `sqlite_ttl` (`SQLite3TTLCache`)
+- `lfu_cache` (`cachetools.LFUCache`)
+- `rr_cache` (`cachetools.RRCache`)
+
+`maxsize` applies to backends that have a notion of size; for `ttlcache` and
+`lru_cache` it updates the live cache, while for the others it is recorded for
+operator diagnostics and helper logic that consults the registry. `ttl` applies
+only to TTL-style backends (`ttlcache`, `foghorn_ttl`, `sqlite_ttl`); for
+non-TTL backends (`lru_cache`, `lfu_cache`, `rr_cache`) TTL overrides are
+ignored and logged at debug level. `reset_on_ttl_change` controls whether the
+underlying `TTLCache` is cleared when the TTL value actually changes; it is
+currently only effective for `ttlcache`.
+
 The `foghorn` section also exposes optional cache prefetch / stale‑while‑revalidate knobs that work together with the shared resolver.
 
 ------
