@@ -1,0 +1,84 @@
+# Example: tuning decorated helper caches via server.cache.func_caches
+#
+# This example shows how to override maxsize and TTL for specific decorated
+# caches (functions wrapped by registered_cached / registered_lru_cached /
+# registered_foghorn_ttl / registered_sqlite_ttl).
+#
+# NOTE:
+#   - module + name must match the decorated function's qualified name as
+#     reported in the admin "Decorated caches" table.
+#   - backend is optional; when set it must match the cache backend recorded in
+#     the admin "Decorated caches" table. Supported values currently include
+#     "ttlcache", "lru_cache", "foghorn_ttl", "sqlite_ttl", "lfu_cache", and
+#     "rr_cache".
+#   - maxsize applies to backends with a notion of size. For "ttlcache" and
+#     "lru_cache" it updates the live cache; for other backends it is recorded
+#     in the registry for diagnostics and helper logic but may not change the
+#     underlying behaviour.
+#   - ttl only applies to TTL-style backends ("ttlcache", "foghorn_ttl",
+#     "sqlite_ttl"). For non-TTL backends ("lru_cache", "lfu_cache",
+#     "rr_cache") ttl overrides are ignored and logged at debug level.
+#   - reset_on_ttl_change controls whether the underlying TTLCache is cleared
+#     once when the TTL value actually changes; it is only effective for the
+#     "ttlcache" backend.
+
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 0.0.0.0
+      port: 5353
+
+  cache:
+    module: in_memory_ttl
+    config:
+      min_cache_ttl: 60
+
+    # Configure selected decorated caches used by DNSSEC and mDNS.
+    func_caches:
+      # DNSSEC: cache for finding the zone apex for a given qname/payload size
+      - module: foghorn.dnssec.dnssec_validate
+        name: _find_zone_apex_cached
+        backend: ttlcache
+        maxsize: 2048
+        ttl: 300
+        reset_on_ttl_change: true
+
+      # DNSSEC: cache for validated DNSKEY chains per apex/payload size
+      - module: foghorn.dnssec.dnssec_validate
+        name: _validate_chain_cached
+        backend: ttlcache
+        maxsize: 8192
+        ttl: 900
+
+      # mDNS: normalization helper cache (TTL-only tuning example)
+      - module: foghorn.plugins.resolve.mdns
+        name: MdnsBridge._normalize_owner
+        backend: ttlcache
+        ttl: 3600
+        reset_on_ttl_change: false
+
+      # LRU example: tune an lru_cache-backed helper (maxsize only). TTL is
+      # ignored for lru_cache backends.
+      - module: foghorn.stats
+        name: _normalize_domain
+        backend: lru_cache
+        maxsize: 16384
+
+  dnssec:
+    mode: passthrough
+    validation: upstream_ad
+    udp_payload_size: 1232
+
+upstreams:
+  endpoints:
+    - host: 1.1.1.1
+      port: 53
+  strategy: failover
+  max_concurrent: 1
+
+plugins: []
+
+logging:
+  level: info
+  stderr: true
