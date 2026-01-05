@@ -205,7 +205,7 @@ def test_in_memory_ttl_cache_snapshot_includes_plugin_targets_and_decorated(
 
     good_entry = {
         "module": "foghorn.example",
-        "qualname": "fn",
+        "name": "fn",
         "ttl": 30,
         "backend": "ttlcache",
         "maxsize": 128,
@@ -214,7 +214,7 @@ def test_in_memory_ttl_cache_snapshot_includes_plugin_targets_and_decorated(
         "cache_hits": 3,
         "cache_misses": 2,
     }
-    bad_entry = {"module": "", "qualname": ""}
+    bad_entry = {"module": "", "name": ""}
 
     def _fake_get_registered_cached():
         return [good_entry, bad_entry]

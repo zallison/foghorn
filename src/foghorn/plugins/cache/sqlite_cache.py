@@ -330,7 +330,7 @@ class SQLite3Cache(CachePlugin):
         for entry in decorated:
             try:
                 module = str(entry.get("module", ""))
-                qualname = str(entry.get("qualname", ""))
+                name = str(entry.get("name", ""))
                 cache_kwargs = entry.get("cache_kwargs", {}) or {}
                 ttl_val = entry.get("ttl") or cache_kwargs.get("ttl")
                 maxsize_val = entry.get("maxsize") or cache_kwargs.get("maxsize")
@@ -342,7 +342,7 @@ class SQLite3Cache(CachePlugin):
                 Exception
             ):  # pragma: nocover - defensive against malformed registry entries
                 module = ""
-                qualname = ""
+                name = ""
                 ttl_val = None
                 maxsize_val = None
                 size_current = None
@@ -350,7 +350,7 @@ class SQLite3Cache(CachePlugin):
                 cache_hits = None
                 cache_misses = None
 
-            if not module or not qualname:
+            if not module or not name:
                 continue
 
             hit_pct: object = None
@@ -365,7 +365,7 @@ class SQLite3Cache(CachePlugin):
             decorated_rows.append(
                 {
                     "module": module,
-                    "qualname": qualname,
+                    "name": name,
                     "ttl": int(ttl_val) if isinstance(ttl_val, int) else None,
                     "backend": entry.get("backend") or "ttlcache",
                     "maxsize": (
@@ -429,7 +429,7 @@ class SQLite3Cache(CachePlugin):
                 },
                 {
                     "id": "caches",
-                    "title": "All caches",
+                    "title": "DNS and plugin target caches",
                     "type": "table",
                     "path": "caches",
                     "columns": [
@@ -460,7 +460,7 @@ class SQLite3Cache(CachePlugin):
                     ],
                     "columns": [
                         {"key": "module", "label": "Module"},
-                        {"key": "qualname", "label": "Function"},
+                        {"key": "name", "label": "Function"},
                         {"key": "backend", "label": "Backend"},
                         {"key": "ttl", "label": "TTL (s)", "align": "right"},
                         {"key": "maxsize", "label": "Max size", "align": "right"},
