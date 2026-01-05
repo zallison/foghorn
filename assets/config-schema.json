@@ -1,5 +1,50 @@
 {
   "$defs": {
+    "DecoratedCacheOverride": {
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "description": "Optional backend filter (ttlcache, lru_cache, foghorn_ttl, sqlite_ttl, lfu_cache, or rr_cache).",
+          "enum": [
+            "ttlcache",
+            "lru_cache",
+            "foghorn_ttl",
+            "sqlite_ttl",
+            "lfu_cache",
+            "rr_cache"
+          ],
+          "type": "string"
+        },
+        "maxsize": {
+          "description": "Optional maxsize override for the underlying cache (>= 0).",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "module": {
+          "description": "Fully-qualified module name of the decorated function (e.g. 'foghorn.dnssec.dnssec_validate').",
+          "type": "string"
+        },
+        "name": {
+          "description": "Function name / qualified name for the decorated callable (e.g. '_find_zone_apex_cached' or 'MdnsBridge._normalize_owner').",
+          "type": "string"
+        },
+        "reset_on_ttl_change": {
+          "default": false,
+          "description": "When true, clear the cache after applying a TTL override when the TTL value changes.",
+          "type": "boolean"
+        },
+        "ttl": {
+          "description": "Optional TTL override in seconds for ttlcache backends (>= 0).",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "module",
+        "name"
+      ],
+      "type": "object"
+    },
     "PluginConfigs": {
       "access_control": {
         "aliases": [
@@ -2543,6 +2588,22 @@
       "additionalProperties": false,
       "properties": {
         "cache": {
+          "properties": {
+            "decorated_overrides": {
+              "description": "Optional list of overrides for decorated caches (functions wrapped by registered_cached/registered_lru_cached). Each entry may target a specific module+name pair and override backend-specific settings such as maxsize or TTL.",
+              "items": {
+                "$ref": "#/$defs/DecoratedCacheOverride"
+              },
+              "type": "array"
+            },
+            "modify": {
+              "description": "Optional list of overrides for decorated caches (functions wrapped by registered_cached/registered_lru_cached). Each entry may target a specific module+name pair and override backend-specific settings such as maxsize or TTL.",
+              "items": {
+                "$ref": "#/$defs/DecoratedCacheOverride"
+              },
+              "type": "array"
+            }
+          },
           "type": [
             "object",
             "null"

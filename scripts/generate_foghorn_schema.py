@@ -417,6 +417,94 @@ def _build_v2_root_schema(base: Dict[str, Any], plugins: Dict[str, Any]) -> Dict
     # Upstreams v2: wrap endpoints + strategy/max_concurrent while reusing
     # upstream_host/upstream_doh defs from $defs.
     defs = base.setdefault("$defs", {})
+
+    # Decorated cache overrides are modelled via a dedicated definition so that
+    # both tooling and runtime helpers share the same canonical module+name
+    # shape. Always override any existing definition to keep the schema in sync
+    # with the public configuration format.
+    defs["DecoratedCacheOverride"] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "module": {
+                "type": "string",
+                "description": "Fully-qualified module name of the decorated function (e.g. 'foghorn.dnssec.dnssec_validate').",
+            },
+            "name": {
+                "type": "string",
+                "description": "Function name / qualified name for the decorated callable (e.g. '_find_zone_apex_cached' or 'MdnsBridge._normalize_owner').",
+            },
+            "backend": {
+                "type": "string",
+                "enum": [
+                    "ttlcache",
+                    "lru_cache",
+                    "foghorn_ttl",
+                    "sqlite_ttl",
+                    "lfu_cache",
+                    "rr_cache",
+                ],
+                "description": "Optional backend filter (ttlcache, lru_cache, foghorn_ttl, sqlite_ttl, lfu_cache, or rr_cache).",
+            },
+            "maxsize": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Optional maxsize override for the underlying cache (>= 0).",
+            },
+            "ttl": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Optional TTL override in seconds for ttlcache backends (>= 0).",
+            },
+            "reset_on_ttl_change": {
+                "type": "boolean",
+                "description": "When true, clear the cache after applying a TTL override when the TTL value changes.",
+                "default": False,
+            },
+        },
+        "required": ["module", "name"],
+    }
+
+    # Extend and normalize the server.cache schema so that both the legacy
+    # 'decorated_overrides' and preferred 'modify' arrays share the same
+    # DecoratedCacheOverride item shape and description.
+    if isinstance(cache_schema, dict):
+        cache_props = cache_schema.get("properties")
+        if not isinstance(cache_props, dict):
+            cache_props = {}
+            cache_schema["properties"] = cache_props
+
+        override_array_schema = {
+            "type": "array",
+            "description": (
+                "Optional list of overrides for decorated caches (functions "
+                "wrapped by registered_cached/registered_lru_cached). Each "
+                "entry may target a specific module+name pair and override "
+                "backend-specific settings such as maxsize or TTL."
+            ),
+            "items": {"$ref": "#/$defs/DecoratedCacheOverride"},
+        }
+
+        # Normalize any existing decorated_overrides entry to the canonical
+        # description and item reference.
+        if "decorated_overrides" in cache_props:
+            existing = cache_props.get("decorated_overrides")
+            if isinstance(existing, dict):
+                existing["type"] = "array"
+                existing["description"] = override_array_schema["description"]
+                existing["items"] = override_array_schema["items"]
+            else:
+                cache_props["decorated_overrides"] = override_array_schema
+
+        # Ensure modify exists and matches the canonical override array schema.
+        existing_modify = cache_props.get("modify")
+        if isinstance(existing_modify, dict):
+            existing_modify["type"] = "array"
+            existing_modify["description"] = override_array_schema["description"]
+            existing_modify["items"] = override_array_schema["items"]
+        else:
+            cache_props["modify"] = override_array_schema
+
     upstream_host_ref = {"$ref": "#/$defs/upstream_host"}
     upstream_doh_ref = {"$ref": "#/$defs/upstream_doh"}
 
