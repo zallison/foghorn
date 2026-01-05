@@ -301,10 +301,10 @@ def test_sqlite3_cache_snapshot_includes_decorated_registry(
 
     plugin = SQLite3Cache(db_path=str(tmp_path / "dns_cache.db"))
 
-    # Fake two registry entries: one valid, one missing module/qualname.
+    # Fake two registry entries: one valid, one missing module/name.
     good_entry = {
         "module": "foghorn.example",
-        "qualname": "fn",
+        "name": "fn",
         "ttl": 30,
         "backend": "ttlcache",
         "maxsize": 128,
@@ -313,7 +313,7 @@ def test_sqlite3_cache_snapshot_includes_decorated_registry(
         "cache_hits": 3,
         "cache_misses": 2,
     }
-    bad_entry = {"module": "", "qualname": ""}
+    bad_entry = {"module": "", "name": ""}
 
     def _fake_get_registered_cached():
         return [good_entry, bad_entry]

@@ -317,7 +317,7 @@ class InMemoryTTLCache(CachePlugin):
         for entry in decorated:
             try:
                 module = str(entry.get("module", ""))
-                qualname = str(entry.get("qualname", ""))
+                name = str(entry.get("name", ""))
                 cache_kwargs = entry.get("cache_kwargs", {}) or {}
                 # Prefer normalized ttl/maxsize recorded by the registry; fall
                 # back to any explicit decorator kwargs if present.
@@ -329,7 +329,7 @@ class InMemoryTTLCache(CachePlugin):
                 cache_misses = entry.get("cache_misses")
             except Exception:
                 module = ""
-                qualname = ""
+                name = ""
                 ttl_val = None
                 maxsize_val = None
                 size_current = None
@@ -337,7 +337,7 @@ class InMemoryTTLCache(CachePlugin):
                 cache_hits = None
                 cache_misses = None
 
-            if not module or not qualname:
+            if not module or not name:
                 continue
 
             # Compute hit percentage when we have both hit/miss counters.
@@ -353,7 +353,7 @@ class InMemoryTTLCache(CachePlugin):
             decorated_rows.append(
                 {
                     "module": module,
-                    "qualname": qualname,
+                    "name": name,
                     "ttl": int(ttl_val) if isinstance(ttl_val, int) else None,
                     "backend": entry.get("backend") or "ttlcache",
                     "maxsize": (
@@ -414,7 +414,7 @@ class InMemoryTTLCache(CachePlugin):
                 },
                 {
                     "id": "caches",
-                    "title": "All caches",
+                    "title": "DNS and plugin target caches",
                     "type": "table",
                     "path": "caches",
                     "columns": [
@@ -445,7 +445,7 @@ class InMemoryTTLCache(CachePlugin):
                     ],
                     "columns": [
                         {"key": "module", "label": "Module"},
-                        {"key": "qualname", "label": "Function"},
+                        {"key": "name", "label": "Function"},
                         {"key": "backend", "label": "Backend"},
                         {"key": "ttl", "label": "TTL (s)", "align": "right"},
                         {"key": "maxsize", "label": "Max size", "align": "right"},

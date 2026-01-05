@@ -15,6 +15,7 @@ from .config.config_parser import (
     parse_config_file,
 )
 from foghorn.dnssec.dnssec_validate import configure_dnssec_resolver
+from foghorn.utils.register_caches import apply_decorated_cache_overrides
 from .config.logging_config import init_logging
 from .plugins.resolve.base import BasePlugin
 from .servers.doh_api import start_doh_server
@@ -202,6 +203,27 @@ def main(argv: List[str] | None = None) -> int:
     init_logging(logging_cfg or None)
     logger = logging.getLogger("foghorn.main")
     logger.info("Loaded config from %s", args.config)
+
+    # Apply any configured overrides for decorated caches (registered_cached /
+    # registered_lru_cached) before listeners are started so that diagnostic
+    # caches use operator-selected sizes/TTLs. This is best-effort and
+    # silently ignores malformed entries.
+    try:
+        cache_block = server_cfg.get("cache") if isinstance(server_cfg, dict) else None
+        raw_overrides = []
+        if isinstance(cache_block, dict):
+            # Preferred key: server.cache.func_caches (list of DecoratedCacheOverride).
+            candidate = cache_block.get("func_caches")
+            # Backwards-compatible fallbacks for older configs/tests.
+            if not isinstance(candidate, list):
+                candidate = cache_block.get("modify")
+            if not isinstance(candidate, list):
+                candidate = cache_block.get("decorated_overrides")
+            if isinstance(candidate, list):
+                raw_overrides = [o for o in candidate if isinstance(o, dict)]
+        apply_decorated_cache_overrides(raw_overrides)
+    except Exception:  # pragma: no cover - defensive: cache override failures must not block startup
+        logger.debug("Failed to apply decorated cache overrides from config", exc_info=True)
 
     # Keep references for signal-driven reload/reset and coordinated shutdown.
     # These are captured by inner closures (SIGUSR1/SIGUSR2 handlers and
