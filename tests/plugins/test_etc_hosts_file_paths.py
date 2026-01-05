@@ -108,3 +108,22 @@ def test_pre_resolve_with_multiple_files_uses_last_override(tmp_path):
     assert decision is not None
     assert decision.action == "override"
     assert decision.response is not None
+
+
+def test_normalize_paths_includes_legacy_and_deduplicates():
+    """Brief: _normalize_paths includes legacy path once and preserves order.
+
+    Inputs:
+      - file_paths: list with duplicates relative to legacy.
+      - legacy: single legacy path also present in file_paths.
+
+    Outputs:
+      - None: asserts returned list contains each path only once in order.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
+    EtcHosts = mod.EtcHosts
+
+    plugin = EtcHosts.__new__(EtcHosts)  # type: ignore[call-arg]
+    paths = plugin._normalize_paths(["/a", "/b"], "/a")
+
+    assert paths == ["/a", "/b"]
