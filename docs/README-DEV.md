@@ -63,6 +63,35 @@ When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnss
   - `none` (disable caching)
   TTL flooring is configured via the cache plugin: `cache.config.min_cache_ttl` (seconds).
   See README.md and the runnable examples under `example_configs/cache_*.yaml`.
+- Small helper caches created via `registered_cached`, `registered_lru_cached`,
+-  `registered_foghorn_ttl`, and `registered_sqlite_ttl` ("decorated caches";
+-  used by DNSSEC, mDNS, DockerHosts, querylog registry, stats helpers, and
+-  others) can be tuned at startup via `server.cache.func_caches` in the v2 layout.
+-  Each entry is a `DecoratedCacheOverride` and targets a `(module, name)` pair
+-  (where `name` corresponds to the function's qualified name) with optional
+-  fields:
+-
+-    - `backend`: Optional backend filter; when set it must match the cache
+-      backend recorded in the admin "Decorated caches" table. Supported values
+-      currently include `ttlcache` (cachetools `TTLCache`), `lru_cache`
+-      (`functools.lru_cache`), `foghorn_ttl` (`FoghornTTLCache`), `sqlite_ttl`
+-      (`SQLite3TTLCache`), `lfu_cache` (`cachetools.LFUCache`), and `rr_cache`
+-      (`cachetools.RRCache`).
+-    - `maxsize`: Optional logical max size override (>= 0). For `ttlcache` and
+-      `lru_cache` this is applied to the live cache implementation; for the
+-      other backends it is recorded in the registry for operator visibility and
+-      helper logic that consults the registry but may not change the underlying
+-      backend behaviour.
+-    - `ttl`: Optional TTL override in seconds for TTL-style backends
+-      (`ttlcache`, `foghorn_ttl`, `sqlite_ttl`). For non-TTL backends
+-      (`lru_cache`, `lfu_cache`, `rr_cache`) TTL overrides are ignored and only
+-      logged at debug level.
+-    - `reset_on_ttl_change`: When true, and when the backend is `ttlcache`, the
+-      underlying `TTLCache` is cleared once when the TTL value actually
+-      changes; for other backends this flag is recorded but has no effect.
+-
+-  Runtime application is handled by `apply_decorated_cache_overrides()` in
+-  `foghorn.utils.register_caches` during `main()` startup.
 
 ## Config JSON Schema and plugin schemas
 
