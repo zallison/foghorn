@@ -1,0 +1,77 @@
+flowchart TB
+	User[User / Client]
+
+	%% Downstreams
+	UDP[UDP]
+	TCP[TCP]
+	DoT[DoT]
+	DoH[DoH]
+
+	%% Core blocks
+	Listeners[Listeners]
+	Resolver[Resolver]
+	Cache[(DNS Cache)]
+	Log[Logging]
+	Response[Response]
+
+	%% Plugin groups (indeterminate number)
+	subgraph PrePluginGroup [Pre-Resolve Plugins]
+		direction LR
+		PreP1[Plugin_pre_1]
+		PreP2[Plugin_pre_2]
+		PrePN[Plugin_pre_N]
+	end
+
+	subgraph PostPluginGroup [Post-Resolve Plugins]
+		direction LR
+		PostP1[Plugin_post_1]
+		PostP2[Plugin_post_2]
+		PostPN[Plugin_post_N]
+	end
+
+	subgraph LogGroup [Logging Plugins]
+		direction LR
+		LogP1[Log Plugin 1]
+		LogP2[Log Plugin 2]
+		LogPN[Log Plugin N]
+	end
+
+	%% Upstream
+	Upstream[DNS Upstreams or Recursive Resolver]
+
+	%% Flow
+	User --> UDP
+	User --> TCP
+	User --> DoT
+	User --> DoH
+
+	UDP --> Listeners
+	TCP --> Listeners
+	DoT --> Listeners
+	DoH --> Listeners
+
+	Listeners --> PrePluginGroup
+	PreP1 --> PreP2
+	PreP2 --> PrePN
+
+	%% Decision point for Pre-Resolve plugins
+	PrePluginGroup --> |Pass|Resolver
+	PrePluginGroup --> |"Pre Plugin Decision"| Log
+
+	Resolver -- Query --> Cache
+	Cache -- Cache Hit --> Log
+	Cache -- Cache Miss --> Resolver
+	Resolver -- Cache Write --> Cache
+	Resolver -- Query --> Upstream
+	Upstream -- Response --> Resolver
+
+	Resolver --> PostPluginGroup
+	PostP1 --> PostP2
+	PostP2 --> PostPN
+
+	%% Decision point for Post-Resolve plugins
+	PostPluginGroup --> |"Post Plugin Decision"| Log
+
+	Log --> LogGroup
+
+	Log --> Response
