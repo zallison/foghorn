@@ -410,9 +410,7 @@ def _apply_lru_override_for_entry(
 
     # Rebuild the lru_cache wrapper with the new maxsize while preserving the
     # original function and the typed flag when available.
-    orig_func = entry.get("_lru_orig_func") or getattr(
-        lru_wrapper, "__wrapped__", None
-    )
+    orig_func = entry.get("_lru_orig_func") or getattr(lru_wrapper, "__wrapped__", None)
     if orig_func is None:
         _logger.debug(
             "apply_decorated_cache_overrides: missing original function for lru_cache %s.%s",
@@ -578,7 +576,7 @@ def registered_foghorn_ttl(
         try:
             _REGISTERED_CACHED_FUNCS.append(entry)
         except Exception:  # pragma: nocover defensive registry append
-        
+
             pass
 
         return _wrapper
@@ -796,7 +794,7 @@ def apply_decorated_cache_overrides(overrides: List[Dict[str, Any]]) -> None:
             if backend_filter is not None and str(ebackend) != backend_filter:
                 continue
 
-        # TTLCache-backed caches: adjust maxsize/ttl as requested.
+            # TTLCache-backed caches: adjust maxsize/ttl as requested.
             if ebackend == "ttlcache":
                 cache_ref = entry.get("_cache_ref")
                 if not isinstance(cache_ref, TTLCache):

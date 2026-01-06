@@ -21,7 +21,9 @@ from pydantic import BaseModel, Field
 try:  # cachetools is an optional dependency; fall back to shim when missing.
     from cachetools import TTLCache  # type: ignore[import]
     from foghorn.utils.register_caches import registered_cached
-except Exception:  # pragma: nocover defensive: optional cachetools dependency may be absent in some environments
+except (
+    Exception
+):  # pragma: nocover defensive: optional cachetools dependency may be absent in some environments
 
     class TTLCache(dict):  # type: ignore[override]
         def __init__(self, *args, **kwargs) -> None:  # noqa: D401 - simple shim
@@ -48,7 +50,9 @@ from foghorn.plugins.resolve.base import (
 try:  # docker SDK is optional at import time; plugin degrades gracefully.
     import docker
     from docker.errors import DockerException
-except Exception:  # pragma: nocover defensive: allow import in environments without docker SDK installed
+except (
+    Exception
+):  # pragma: nocover defensive: allow import in environments without docker SDK installed
     docker = None  # type: ignore[assignment]
 
     class DockerException(Exception):  # type: ignore[no-redef]
@@ -475,7 +479,9 @@ class DockerHosts(BasePlugin):
             _time.sleep(interval)
             try:
                 self._reload_from_docker()
-            except Exception as exc:  # pragma: nocover defensive: periodic reload failures are logged but not worth fragile tests
+            except (
+                Exception
+            ) as exc:  # pragma: nocover defensive: periodic reload failures are logged but not worth fragile tests
                 # Avoid emitting a full stack trace for periodic reload failures so
                 # that transient Docker connectivity issues do not flood logs.
                 logger.warning(
@@ -505,7 +511,9 @@ class DockerHosts(BasePlugin):
         if client is None and docker is not None:
             try:
                 client = docker.DockerClient(base_url=url)
-            except Exception as exc:  # pragma: nocover defensive: connection and auth errors depend on external Docker daemon state
+            except (
+                Exception
+            ) as exc:  # pragma: nocover defensive: connection and auth errors depend on external Docker daemon state
                 logger.warning(
                     "DockerHosts: failed to create client for %s during reload: %s",
                     url,

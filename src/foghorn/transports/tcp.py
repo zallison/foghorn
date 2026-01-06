@@ -151,7 +151,9 @@ class TCPConnectionPool:
         ):  # pragma: nocover defensive: unexpected socket/protocol error, exercised indirectly via other tests and hard to target specifically
             try:
                 conn.close()
-            except Exception:  # pragma: nocover defensive: close failure on error path is extremely low value to simulate
+            except (
+                Exception
+            ):  # pragma: nocover defensive: close failure on error path is extremely low value to simulate
                 pass
             raise
         finally:
