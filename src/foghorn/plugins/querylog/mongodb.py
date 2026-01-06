@@ -85,6 +85,7 @@ class MongoStatsStore(BaseStatsStore):
         password: Optional[str] = None,
         database: str = "foghorn_stats",
         connect_kwargs: Optional[Dict[str, Any]] = None,
+        async_logging: bool = False,
         **_: Any,
     ) -> None:
         mongo_mod = _import_mongo_driver()
@@ -103,6 +104,9 @@ class MongoStatsStore(BaseStatsStore):
                 kwargs["password"] = password
             kwargs.update(connect_kwargs)
             self._client = mongo_mod.MongoClient(**kwargs)
+
+        # Use synchronous logging by default for Mongo stats backend.
+        self._async_logging = bool(async_logging)
 
         self._db = self._client[database]
         self._counts = self._db["counts"]
@@ -125,9 +129,7 @@ class MongoStatsStore(BaseStatsStore):
 
         try:
             # Unique composite key for counts documents.
-            self._counts.create_index(
-                [("scope", 1), ("key", 1)], unique=True
-            )
+            self._counts.create_index([("scope", 1), ("key", 1)], unique=True)
 
             # Query-log indexes mirroring SQLite/SQL backends.
             self._query_log.create_index([("ts", 1)], name="idx_query_log_ts")
@@ -141,7 +143,9 @@ class MongoStatsStore(BaseStatsStore):
                 [("upstream_id", 1), ("ts", 1)], name="idx_query_log_upstream_ts"
             )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error("MongoStatsStore _ensure_indexes error: %s", exc, exc_info=True)
+            logger.error(
+                "MongoStatsStore _ensure_indexes error: %s", exc, exc_info=True
+            )
 
     # ------------------------------------------------------------------
     # Health and lifecycle
@@ -183,7 +187,7 @@ class MongoStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Counter API
     # ------------------------------------------------------------------
-    def increment_count(self, scope: str, key: str, delta: int = 1) -> None:
+    def _increment_count(self, scope: str, key: str, delta: int = 1) -> None:
         """Increment an aggregate counter in the counts collection.
 
         Inputs:
@@ -202,7 +206,9 @@ class MongoStatsStore(BaseStatsStore):
                 upsert=True,
             )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error("MongoStatsStore increment_count error: %s", exc, exc_info=True)
+            logger.error(
+                "MongoStatsStore increment_count error: %s", exc, exc_info=True
+            )
 
     def set_count(self, scope: str, key: str, value: int) -> None:
         """Set an aggregate counter in the counts collection.
@@ -253,7 +259,9 @@ class MongoStatsStore(BaseStatsStore):
 
         result: Dict[str, Dict[str, int]] = {}
         try:
-            for doc in self._counts.find({}, {"_id": 0, "scope": 1, "key": 1, "value": 1}):
+            for doc in self._counts.find(
+                {}, {"_id": 0, "scope": 1, "key": 1, "value": 1}
+            ):
                 scope = str(doc.get("scope", ""))
                 key = str(doc.get("key", ""))
                 scope_map = result.setdefault(scope, {})
@@ -268,7 +276,7 @@ class MongoStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Query-log API
     # ------------------------------------------------------------------
-    def insert_query_log(
+    def _insert_query_log(
         self,
         ts: float,
         client_ip: str,
@@ -314,7 +322,9 @@ class MongoStatsStore(BaseStatsStore):
             }
             self._query_log.insert_one(doc)
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error("MongoStatsStore insert_query_log error: %s", exc, exc_info=True)
+            logger.error(
+                "MongoStatsStore insert_query_log error: %s", exc, exc_info=True
+            )
 
     def has_query_log(self) -> bool:
         """Return True if the query_log collection contains at least one document.
@@ -381,7 +391,9 @@ class MongoStatsStore(BaseStatsStore):
         try:
             total = int(self._query_log.count_documents(flt))
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error("MongoStatsStore select_query_log count error: %s", exc, exc_info=True)
+            logger.error(
+                "MongoStatsStore select_query_log count error: %s", exc, exc_info=True
+            )
             total = 0
 
         offset = (page_i - 1) * page_size_i
@@ -438,7 +450,9 @@ class MongoStatsStore(BaseStatsStore):
                     }
                 )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error("MongoStatsStore select_query_log rows error: %s", exc, exc_info=True)
+            logger.error(
+                "MongoStatsStore select_query_log rows error: %s", exc, exc_info=True
+            )
 
         total_pages = (total + page_size_i - 1) // page_size_i if page_size_i > 0 else 0
         return {
@@ -581,7 +595,9 @@ class MongoStatsStore(BaseStatsStore):
                     rows.append((bucket, None, c_i))
         except Exception as exc:  # pragma: no cover - defensive
             logger.error(
-                "MongoStatsStore aggregate_query_log_counts error: %s", exc, exc_info=True
+                "MongoStatsStore aggregate_query_log_counts error: %s",
+                exc,
+                exc_info=True,
             )
             rows = []
 

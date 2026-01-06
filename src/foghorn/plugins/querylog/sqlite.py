@@ -96,6 +96,7 @@ class SqliteStatsStore(BaseStatsStore):
         batch_writes: bool = False,
         batch_time_sec: float = 15.0,
         batch_max_size: int = 1000,
+        async_logging: bool = False,
         **_: Any,
     ) -> None:
         """Initialize SQLite backend and ensure schema exists.
@@ -112,6 +113,9 @@ class SqliteStatsStore(BaseStatsStore):
 
         self._db_path = db_path
         self._conn = self._init_connection()
+
+        # Logging/queuing behaviour
+        self._async_logging = bool(async_logging)
 
         # Batching configuration
         self._batch_writes = bool(batch_writes)
@@ -261,7 +265,7 @@ class SqliteStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Public API: counters and query log
     # ------------------------------------------------------------------
-    def increment_count(self, scope: str, key: str, delta: int = 1) -> None:
+    def _increment_count(self, scope: str, key: str, delta: int = 1) -> None:
         """Increment an aggregate counter in the counts table."""
 
         try:
@@ -289,7 +293,7 @@ class SqliteStatsStore(BaseStatsStore):
         except Exception as exc:  # pragma: no cover - defensive
             logger.error("SqliteStatsStore set_count error: %s", exc, exc_info=True)
 
-    def insert_query_log(
+    def _insert_query_log(
         self,
         ts: float,
         client_ip: str,

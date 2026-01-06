@@ -90,6 +90,7 @@ class PostgresStatsStore(BaseStatsStore):
         password: Optional[str] = None,
         database: str = "foghorn_stats",
         connect_kwargs: Optional[Dict[str, Any]] = None,
+        async_logging: bool = False,
         **_: Any,
     ) -> None:
         driver = _import_postgres_driver()
@@ -108,6 +109,9 @@ class PostgresStatsStore(BaseStatsStore):
 
         self._driver = driver
         self._conn = driver.connect(**kwargs)
+
+        # Use synchronous logging by default for SQL stats backends.
+        self._async_logging = bool(async_logging)
 
         self._ensure_schema()
 
@@ -225,7 +229,7 @@ class PostgresStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Counter API
     # ------------------------------------------------------------------
-    def increment_count(self, scope: str, key: str, delta: int = 1) -> None:
+    def _increment_count(self, scope: str, key: str, delta: int = 1) -> None:
         """Increment an aggregate counter in the counts table.
 
         Inputs:
@@ -303,7 +307,7 @@ class PostgresStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Query-log API
     # ------------------------------------------------------------------
-    def insert_query_log(
+    def _insert_query_log(
         self,
         ts: float,
         client_ip: str,
