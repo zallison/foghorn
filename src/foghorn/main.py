@@ -222,8 +222,12 @@ def main(argv: List[str] | None = None) -> int:
             if isinstance(candidate, list):
                 raw_overrides = [o for o in candidate if isinstance(o, dict)]
         apply_decorated_cache_overrides(raw_overrides)
-    except Exception:  # pragma: no cover - defensive: cache override failures must not block startup
-        logger.debug("Failed to apply decorated cache overrides from config", exc_info=True)
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: cache override failures must not block startup
+        logger.debug(
+            "Failed to apply decorated cache overrides from config", exc_info=True
+        )
 
     # Keep references for signal-driven reload/reset and coordinated shutdown.
     # These are captured by inner closures (SIGUSR1/SIGUSR2 handlers and
@@ -475,7 +479,7 @@ def main(argv: List[str] | None = None) -> int:
         if isinstance(persistence_cfg, dict):
             persistence_enabled = bool(persistence_cfg.get("enabled", True))
         else:
-            persistence_enabled = bool(persistence_cfg.get("enabled", False))
+            False
 
         stats_persistence_store = None
 
@@ -887,10 +891,8 @@ def main(argv: List[str] | None = None) -> int:
     ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
         logger.warning("Could not install SIGINT handler on this platform")
 
-    # DNSSEC config (ignore|passthrough|validate). Prefer server.dnssec but fall
-    # back to root-level dnssec for older configs/tests that bypass JSON Schema
-    # validation.
-    dnssec_cfg = server_cfg.get("dnssec") or cfg.get("dnssec", {}) or {}
+    # DNSSEC config (ignore|passthrough|validate).
+    dnssec_cfg = server_cfg.get("dnssec") or {}
     if not isinstance(dnssec_cfg, dict):
         dnssec_cfg = {}
     dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()

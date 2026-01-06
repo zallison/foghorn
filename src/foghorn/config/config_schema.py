@@ -16,7 +16,9 @@ from typing import Any, Dict, List, Optional
 try:
     from jsonschema import Draft202012Validator, ValidationError
     from jsonschema.exceptions import SchemaError
-except Exception:  # pragma: nocover defensive: allow import in environments without jsonschema installed
+except (
+    Exception
+):  # pragma: nocover defensive: allow import in environments without jsonschema installed
     Draft202012Validator = None  # type: ignore[assignment]
     ValidationError = Exception  # type: ignore[assignment]
     SchemaError = Exception  # type: ignore[assignment]
@@ -424,7 +426,10 @@ def _split_extra_property_errors(
     extra: List[ValidationError] = []
     other: List[ValidationError] = []
     for err in errors:
-        if getattr(err, "validator", None) in {"additionalProperties", "unevaluatedProperties"}:
+        if getattr(err, "validator", None) in {
+            "additionalProperties",
+            "unevaluatedProperties",
+        }:
             extra.append(err)
         else:
             other.append(err)
@@ -474,7 +479,9 @@ def validate_config(
     effective_schema_path = schema_path or get_default_schema_path()
 
     if unknown_keys not in {"ignore", "warn", "error"}:
-        raise ValueError(f"unknown_keys policy must be 'ignore', 'warn', or 'error', got {unknown_keys!r}")
+        raise ValueError(
+            f"unknown_keys policy must be 'ignore', 'warn', or 'error', got {unknown_keys!r}"
+        )
 
     # Normalize config regardless of whether JSON Schema validation is
     # available. This keeps runtime behavior consistent even when assets are
