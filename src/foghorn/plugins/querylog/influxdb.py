@@ -62,7 +62,7 @@ def _escape_field_string(value: str) -> str:
         Value wrapped in double quotes with internal quotes and backslashes escaped.
     """
 
-    escaped = value.replace("\\", "\\\\").replace("\"", "\\\"")
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
 
 
@@ -109,7 +109,9 @@ def _format_line_protocol(
         field_parts.append("count=1i")
 
     ns_ts = int(ts * 1_000_000_000)
-    line = f"{_escape_tag(measurement)}{tag_section} " f"{','.join(field_parts)} {ns_ts}"
+    line = (
+        f"{_escape_tag(measurement)}{tag_section} " f"{','.join(field_parts)} {ns_ts}"
+    )
     return line
 
 
@@ -146,6 +148,7 @@ class InfluxLogging(BaseStatsStore):
         token: Optional[str] = None,
         timeout: float = 2.0,
         session_kwargs: Optional[Dict[str, Any]] = None,
+        async_logging: bool = True,
         **_: Any,
     ) -> None:
         self._write_url = str(write_url)
@@ -153,6 +156,10 @@ class InfluxLogging(BaseStatsStore):
         self._bucket = str(bucket) if bucket is not None else None
         self._precision = str(precision or "ns")
         self._timeout = float(timeout)
+
+        # Logging behaviour: default to async for remote HTTP logging, but
+        # allow callers to disable it via config.
+        self._async_logging = bool(async_logging)
 
         self._session = requests.Session(**(session_kwargs or {}))
         self._params: Dict[str, str] = {"precision": self._precision}
@@ -242,6 +249,55 @@ class InfluxLogging(BaseStatsStore):
         first: Optional[str],
         result_json: str,
     ) -> None:  # type: ignore[override]
+        """Enqueue or synchronously write a DNS query-log entry.
+
+        Inputs:
+            ts: Unix timestamp (float seconds).
+            client_ip: Client IP address string.
+            name: Normalized query name.
+            qtype: Query type string.
+            upstream_id: Optional upstream identifier.
+            rcode: Optional DNS response code.
+            status: Optional high-level status string.
+            error: Optional error summary.
+            first: Optional first answer value.
+            result_json: JSON-encoded result payload from the resolver.
+
+        Outputs:
+            None; writes directly via the InfluxDB HTTP session.
+        """
+
+        # This backend is write-only and relatively low volume, so use a
+        # synchronous implementation here instead of the BaseStatsStore
+        # background queue. This keeps behavior simple and deterministic for
+        # callers and tests while still allowing other backends to use the
+        # shared async worker.
+        self._insert_query_log(
+            ts,
+            client_ip,
+            name,
+            qtype,
+            upstream_id,
+            rcode,
+            status,
+            error,
+            first,
+            result_json,
+        )
+
+    def _insert_query_log(
+        self,
+        ts: float,
+        client_ip: str,
+        name: str,
+        qtype: str,
+        upstream_id: Optional[str],
+        rcode: Optional[str],
+        status: Optional[str],
+        error: Optional[str],
+        first: Optional[str],
+        result_json: str,
+    ) -> None:  # type: ignore[override]
         """Write a DNS query-log entry to InfluxDB using line protocol.
 
         Inputs:
@@ -314,5 +370,7 @@ class InfluxLogging(BaseStatsStore):
                     resp.text,
                 )
         except Exception as exc:  # pragma: no cover - defensive
-            logger.error("Failed to write query_log to InfluxDB: %s", exc, exc_info=True)
+            logger.error(
+                "Failed to write query_log to InfluxDB: %s", exc, exc_info=True
+            )
             self._healthy = False

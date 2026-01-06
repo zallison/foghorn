@@ -103,6 +103,7 @@ class MqttLogging(BaseStatsStore):
         qos: int = 0,
         retain: bool = False,
         connect_kwargs: Optional[Dict[str, Any]] = None,
+        async_logging: bool = False,
         **_: Any,
     ) -> None:
         mqtt = _import_mqtt_driver()
@@ -113,6 +114,11 @@ class MqttLogging(BaseStatsStore):
         self._keepalive = int(keepalive)
         self._qos = int(qos)
         self._retain = bool(retain)
+
+        # Logging behaviour: allow callers to opt into async queuing via
+        # ``async_logging``; MQTT logging defaults to synchronous behaviour so
+        # tests and callers see publishes immediately.
+        self._async_logging = bool(async_logging)
 
         self._client = mqtt.Client(client_id=client_id or "foghorn_mqtt_logger")
         if username is not None:
@@ -189,7 +195,7 @@ class MqttLogging(BaseStatsStore):
     # ------------------------------------------------------------------
     # Query-log API (write-only)
     # ------------------------------------------------------------------
-    def insert_query_log(
+    def _insert_query_log(
         self,
         ts: float,
         client_ip: str,
