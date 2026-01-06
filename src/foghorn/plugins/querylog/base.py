@@ -17,6 +17,8 @@ scripts) can remain backend-agnostic.
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 from typing import Any, Dict, Optional, Tuple
 
 from pydantic import BaseModel, Field
@@ -58,7 +60,7 @@ class StatsStoreBackendConfig(BaseModel):
 
 
 class BaseStatsStore:
-    """Brief: Abstract base class for persistent statistics and query-log backends.
+    """Brief: Base class for persistent statistics and query-log backends.
 
     Implementations are responsible for:
       - Maintaining aggregate counters in a logical "counts" store.
@@ -78,6 +80,11 @@ class BaseStatsStore:
       - All public methods intentionally mirror the StatsSQLiteStore API in
         src/foghorn/stats.py so that existing callers remain compatible when
         the concrete backend is swapped.
+      - The base class provides a lightweight background worker thread and
+        in-memory queue for high-volume write paths (increment_count and
+        insert_query_log). Subclasses should implement the private
+        ``_increment_count`` and ``_insert_query_log`` helpers; callers keep
+        using the public methods and need not be aware of the queue.
     """
 
     def __init__(self, **config: object) -> None:  # pragma: no cover - interface only
@@ -92,6 +99,76 @@ class BaseStatsStore:
         """
 
         raise NotImplementedError("BaseStatsStore.__init__ must be implemented")
+
+    # ------------------------------------------------------------------
+    # Internal async worker for write-heavy operations
+    # ------------------------------------------------------------------
+    def _ensure_worker(self) -> None:
+        """Brief: Start the background worker thread on first use.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None; ensures ``self._op_queue`` and the worker thread exist.
+        """
+
+        if getattr(self, "_op_queue", None) is not None:
+            return
+
+        q: "queue.Queue[tuple[str, tuple[Any, ...], dict[str, Any]]]" = queue.Queue()
+        self._op_queue = q
+
+        worker = threading.Thread(
+            target=self._worker_loop,
+            name=f"{self.__class__.__name__}Worker",
+            daemon=True,
+        )
+        self._op_worker = worker
+        worker.start()
+
+    def _worker_loop(self) -> None:
+        """Brief: Background loop that consumes and executes queued operations.
+
+        Inputs:
+          - None; runs until a sentinel (empty op_name) is received or an
+            unrecoverable queue error occurs.
+
+        Outputs:
+          - None; logs and continues on per-operation failures.
+        """
+
+        log = logging.getLogger(__name__)
+        q = getattr(self, "_op_queue", None)
+        if q is None:
+            return
+
+        while True:
+            try:
+                op_name, args, kwargs = q.get()
+            except Exception:
+                # Unexpected queue error; bail out to avoid a tight error loop.
+                break
+
+            try:
+                if not op_name:
+                    # Sentinel received: stop the worker.
+                    break
+
+                handler = getattr(self, f"_{op_name}", None)
+                if callable(handler):
+                    handler(*args, **kwargs)
+                else:
+                    log.debug("BaseStatsStore: unknown op_name %r discarded", op_name)
+            except Exception:
+                # Ensure one failing backend or handler does not kill logging.
+                log.exception("BaseStatsStore worker failed while handling %r", op_name)
+            finally:
+                try:
+                    q.task_done()
+                except Exception:
+                    # Defensive: task_done must not raise.
+                    pass
 
     # ------------------------------------------------------------------
     # Health and lifecycle
@@ -123,10 +200,13 @@ class BaseStatsStore:
     # ------------------------------------------------------------------
     # Counter API: aggregate counts table
     # ------------------------------------------------------------------
-    def increment_count(
-        self, scope: str, key: str, delta: int = 1
-    ) -> None:  # pragma: no cover - interface only
-        """Brief: Increment an aggregate counter in the counts store.
+    def increment_count(self, scope: str, key: str, delta: int = 1) -> None:
+        """Brief: Optionally enqueue an aggregate counter increment for async processing.
+
+        When ``self._async_logging`` is truthy (the default), increments are
+        queued to the background worker thread as before. When it is falsy,
+        this method bypasses the queue and calls ``_increment_count``
+        synchronously so that callers observe updates immediately.
 
         Inputs:
           - scope: Logical scope name (for example, "totals", "domains").
@@ -134,10 +214,34 @@ class BaseStatsStore:
           - delta: Increment value (may be negative for decrements).
 
         Outputs:
-          - None.
+          - None. Depending on ``self._async_logging``, either enqueues the
+            operation for the background worker or calls ``_increment_count``
+            synchronously.
         """
 
-        raise NotImplementedError("increment_count() must be implemented by a subclass")
+        # Allow backends to opt out of async queuing entirely.
+        if not getattr(self, "_async_logging", True):
+            handler = getattr(self, "_increment_count", None)
+            if callable(handler):
+                handler(scope, key, delta)
+                return
+            raise NotImplementedError(
+                "_increment_count() must be implemented by a subclass"
+            )
+
+        try:
+            self._ensure_worker()
+            self._op_queue.put(  # type: ignore[attr-defined]
+                ("increment_count", (scope, key, delta), {})
+            )
+        except Exception:
+            handler = getattr(self, "_increment_count", None)
+            if callable(handler):
+                handler(scope, key, delta)
+            else:
+                raise NotImplementedError(
+                    "_increment_count() must be implemented by a subclass"
+                )
 
     def set_count(
         self, scope: str, key: str, value: int
@@ -238,8 +342,8 @@ class BaseStatsStore:
         error: Optional[str],
         first: Optional[str],
         result_json: str,
-    ) -> None:  # pragma: no cover - interface only
-        """Brief: Append a DNS query entry to the persistent query log.
+    ) -> None:
+        """Brief: Enqueue a DNS query entry for async logging.
 
         Inputs:
           - ts: Unix timestamp (float seconds) with at least millisecond
@@ -256,12 +360,71 @@ class BaseStatsStore:
           - result_json: Structured result payload as JSON text.
 
         Outputs:
-          - None.
+          - None. Depending on ``self._async_logging``, either enqueues the
+            operation for the background worker or calls ``_insert_query_log``
+            synchronously.
         """
 
-        raise NotImplementedError(
-            "insert_query_log() must be implemented by a subclass"
-        )
+        # Allow backends to opt out of async queuing entirely.
+        if not getattr(self, "_async_logging", True):
+            handler = getattr(self, "_insert_query_log", None)
+            if callable(handler):
+                handler(
+                    ts,
+                    client_ip,
+                    name,
+                    qtype,
+                    upstream_id,
+                    rcode,
+                    status,
+                    error,
+                    first,
+                    result_json,
+                )
+                return
+            raise NotImplementedError(
+                "_insert_query_log() must be implemented by a subclass"
+            )
+
+        try:
+            self._ensure_worker()
+            self._op_queue.put(  # type: ignore[attr-defined]
+                (
+                    "insert_query_log",
+                    (
+                        ts,
+                        client_ip,
+                        name,
+                        qtype,
+                        upstream_id,
+                        rcode,
+                        status,
+                        error,
+                        first,
+                        result_json,
+                    ),
+                    {},
+                )
+            )
+        except Exception:
+            handler = getattr(self, "_insert_query_log", None)
+            if callable(handler):
+                handler(
+                    ts,
+                    client_ip,
+                    name,
+                    qtype,
+                    upstream_id,
+                    rcode,
+                    status,
+                    error,
+                    first,
+                    result_json,
+                )
+            else:
+                raise NotImplementedError(
+                    "_insert_query_log() must be implemented by a subclass"
+                )
 
     def select_query_log(
         self,
