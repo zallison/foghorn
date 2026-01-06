@@ -37,11 +37,23 @@ class MultiStatsStore(BaseStatsStore):
           first backend in the list (the primary).
         - Fans out write operations (increment/set/insert/rebuild/close) to all
           backends, logging and continuing on per-backend errors.
+        - Relies on BaseStatsStore for the async queue/worker used by
+          high-volume write paths such as increment_count and insert_query_log.
     """
 
     def __init__(self, backends: List[BaseStatsStore], **_: Any) -> None:
+        """Brief: Initialize MultiStatsStore with a fan-out backend list.
+
+        Inputs:
+          - backends: Non-empty list of concrete BaseStatsStore instances.
+
+        Outputs:
+          - None; stores the backend list for subsequent fan-out.
+        """
+
         if not backends:
             raise ValueError("MultiStatsStore requires at least one backend")
+
         self._backends = list(backends)
 
     # Health and lifecycle -------------------------------------------------
@@ -60,14 +72,29 @@ class MultiStatsStore(BaseStatsStore):
         return bool(fn()) if callable(fn) else True
 
     def close(self) -> None:
-        """Brief: Close all underlying backends, ignoring individual failures.
+        """Brief: Flush any queued operations and close all underlying backends.
 
         Inputs:
           - None.
 
         Outputs:
-          - None.
+          - None; waits for the BaseStatsStore worker queue (if present) to
+            drain before closing individual backends. Per-backend close
+            failures are ignored.
         """
+
+        # If the BaseStatsStore async worker/queue was used, signal it to finish
+        # and wait for all queued operations to be processed so that tests and
+        # callers observe all writes before shutdown.
+        q = getattr(self, "_op_queue", None)
+        if q is not None:
+            try:
+                # Sentinel op_name "" is handled as a stop signal in _worker_loop.
+                q.put(("", (), {}))  # type: ignore[arg-type]
+                q.join()
+            except Exception:
+                # Best-effort: queue failures must not prevent backend close.
+                pass
 
         for backend in self._backends:
             try:
@@ -77,12 +104,38 @@ class MultiStatsStore(BaseStatsStore):
                 continue
 
     # Counter API ----------------------------------------------------------
-    def increment_count(self, scope: str, key: str, delta: int = 1) -> None:
+    def _increment_count(self, scope: str, key: str, delta: int = 1) -> None:
+        """Brief: Fan out increment_count calls to all backends.
+
+        Inputs:
+          - scope: Logical counter scope (for example, "totals").
+          - key: Counter key within the scope.
+          - delta: Increment amount (may be negative).
+
+        Outputs:
+          - None; errors are logged or ignored per-backend.
+        """
+
         for backend in self._backends:
             try:
                 backend.increment_count(scope, key, delta)
             except Exception:
                 continue
+
+    def increment_count(self, scope: str, key: str, delta: int = 1) -> None:
+        """Brief: Synchronously fan out an increment_count to all backends.
+
+        Inputs:
+          - scope: Logical counter scope.
+          - key: Counter key within the scope.
+          - delta: Increment amount (may be negative).
+
+        Outputs:
+          - None; delegates directly to ``_increment_count`` so that writes are
+            observed immediately by underlying backends and tests.
+        """
+
+        self._increment_count(scope, key, delta)
 
     def set_count(self, scope: str, key: str, value: int) -> None:
         for backend in self._backends:
@@ -120,7 +173,7 @@ class MultiStatsStore(BaseStatsStore):
                 continue
 
     # Query-log API --------------------------------------------------------
-    def insert_query_log(
+    def _insert_query_log(
         self,
         ts: float,
         client_ip: str,
@@ -133,6 +186,24 @@ class MultiStatsStore(BaseStatsStore):
         first: Optional[str],
         result_json: str,
     ) -> None:
+        """Brief: Fan out insert_query_log calls to all backends.
+
+        Inputs:
+          - ts: Unix timestamp (float seconds).
+          - client_ip: Client IP address string.
+          - name: Normalized query name.
+          - qtype: Query type (for example, "A").
+          - upstream_id: Optional upstream identifier.
+          - rcode: Optional DNS response code.
+          - status: Optional high-level status string.
+          - error: Optional error summary.
+          - first: Optional first answer.
+          - result_json: JSON-encoded result payload.
+
+        Outputs:
+          - None; errors are logged or ignored per-backend.
+        """
+
         for backend in self._backends:
             try:
                 backend.insert_query_log(
@@ -149,6 +220,50 @@ class MultiStatsStore(BaseStatsStore):
                 )
             except Exception:
                 continue
+
+    def insert_query_log(
+        self,
+        ts: float,
+        client_ip: str,
+        name: str,
+        qtype: str,
+        upstream_id: Optional[str],
+        rcode: Optional[str],
+        status: Optional[str],
+        error: Optional[str],
+        first: Optional[str],
+        result_json: str,
+    ) -> None:
+        """Brief: Enqueue an insert_query_log operation via BaseStatsStore.
+
+        Inputs:
+          - ts: Unix timestamp (float seconds).
+          - client_ip: Client IP address string.
+          - name: Normalized query name.
+          - qtype: Query type (for example, "A").
+          - upstream_id: Optional upstream identifier.
+          - rcode: Optional DNS response code.
+          - status: Optional high-level status string.
+          - error: Optional error summary.
+          - first: Optional first answer.
+          - result_json: JSON-encoded result payload.
+
+        Outputs:
+          - None; see BaseStatsStore.insert_query_log for details.
+        """
+
+        super().insert_query_log(
+            ts,
+            client_ip,
+            name,
+            qtype,
+            upstream_id,
+            rcode,
+            status,
+            error,
+            first,
+            result_json,
+        )
 
     def select_query_log(
         self,

@@ -117,9 +117,7 @@ def discover_stats_backends(
             if not issubclass(obj, BaseStatsStore) or obj is BaseStatsStore:
                 continue
 
-            claimed = set(
-                _normalize(a) for a in (getattr(obj, "aliases", ()) or ())
-            )
+            claimed = set(_normalize(a) for a in (getattr(obj, "aliases", ()) or ()))
             claimed.add(_normalize(_default_alias_for(obj)))
 
             for alias in claimed:
