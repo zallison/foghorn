@@ -238,6 +238,12 @@ def test_insert_query_log_posts_line_protocol_and_parses_result_json(
         result_json=json.dumps(payload),
     )
 
+    # Wait for any queued operations in the async worker to complete so that
+    # the underlying _insert_query_log implementation has a chance to run.
+    op_queue = getattr(backend, "_op_queue", None)
+    if op_queue is not None:
+        op_queue.join()
+
     # Expect two posts total: one meta marker from __init__ and one data point.
     assert len(session.posts) == 2
     line = session.posts[1]["data"].decode("utf-8") if isinstance(session.posts[1]["data"], bytes) else session.posts[1]["data"]
