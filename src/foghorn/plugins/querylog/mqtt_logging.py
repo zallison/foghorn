@@ -79,7 +79,11 @@ class MqttLogging(BaseStatsStore):
         username: Optional username for broker authentication.
         password: Optional password for broker authentication.
         keepalive: Keepalive interval in seconds (default 60).
-        qos: QoS level for publishes (0, 1, or 2; default 0).
+        qos: QoS level for publishes (0, 1, or 2; default 1). For statistics
+            logging we default to QoS 1 so that each query_log entry is
+            delivered "at least once" to the broker. QoS 0 is fire-and-forget
+            and can silently drop log messages under transient network or
+            broker issues.
         retain: Whether to set the retain flag on published messages
             (default False).
         connect_kwargs: Optional mapping of additional keyword arguments passed
@@ -100,7 +104,7 @@ class MqttLogging(BaseStatsStore):
         username: Optional[str] = None,
         password: Optional[str] = None,
         keepalive: int = 60,
-        qos: int = 0,
+        qos: int = 1,
         retain: bool = False,
         connect_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = False,
