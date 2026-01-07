@@ -2540,7 +2540,38 @@
     },
     "logging": {
       "additionalProperties": false,
+      "description": "Global logging configuration. Supports both the legacy root-level layout (level/stderr/file/syslog) and the newer layout where Python logging lives under logging.python and statistics/query-log backends live under logging.backends.",
       "properties": {
+        "async": {
+          "default": true,
+          "description": "When true, statistics/query-log backends default to using an async worker queue for high-volume writes. When false, backends perform writes synchronously unless they opt in explicitly via their own async_logging setting.",
+          "type": "boolean"
+        },
+        "backends": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "backend": {
+                "description": "Backend identifier or dotted import path (for example 'sqlite', 'mysql', 'mqtt_logging').",
+                "type": "string"
+              },
+              "config": {
+                "additionalProperties": true,
+                "description": "Backend-specific configuration mapping passed verbatim to the selected BaseStatsStore implementation.",
+                "type": "object"
+              },
+              "id": {
+                "description": "Logical backend identifier used by stats.source_backend and any future per-server logging selectors.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "backend"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
         "file": {
           "type": "string"
         },
@@ -2555,6 +2586,51 @@
             "critical"
           ],
           "type": "string"
+        },
+        "python": {
+          "additionalProperties": false,
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "level": {
+              "enum": [
+                "debug",
+                "info",
+                "warn",
+                "warning",
+                "error",
+                "crit",
+                "critical"
+              ],
+              "type": "string"
+            },
+            "stderr": {
+              "type": "boolean"
+            },
+            "syslog": {
+              "oneOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "address": {},
+                    "facility": {},
+                    "tag": {}
+                  },
+                  "type": "object"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "query_log_only": {
+          "default": false,
+          "description": "When true, only the raw query_log is written to the configured backends and aggregate counters are kept in-memory only.",
+          "type": "boolean"
         },
         "stderr": {
           "type": "boolean"
