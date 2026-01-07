@@ -56,30 +56,6 @@ With special thanks to **Fiona** Weatherwax for their contributions and inspirat
 
 Also thanks to my junior developers, AI from both local and remote models, some via warp.dev, who keeps my docstrings and unit tests up to date, creates good commit messages, and other janitorial tasks. Also ~~a lot of help with the~~ all the HTML/JS. Because I'm just not good at it.
 
-## Upgrading from 0.5.x to 0.6.0
-
-Foghorn v0.6.0 is a **breaking** release. Configuration files written for v0.5.x
-(including v0.5.4) will not validate against the new schema or start cleanly
-without changes.
-
-At a high level:
-
-- The configuration schema and layout were reorganized so related settings live
-  together more logically (for example `logging`, `stats`, cache configuration,
-  and plugin wiring).
-- Internal modules, classes, and helper functions were moved and renamed for
-  consistency. If you import Foghorn internals or maintain out‑of‑tree plugins,
-  you may need to update import paths and identifiers.
-- Stats and query‑log persistence now run through the `logging.backends` /
-  `stats` model, with optional background async workers and multiple targets.
-
-For existing deployments it is usually faster to start from the updated
-examples in this README and adapt them, instead of trying to retrofit an
-existing 0.5.x configuration.
-
-
-For existing deployments, it is usually faster to start from the updated examples in this README and adapt them to your environment than to retrofit an old 0.5.x configuration.
-
 ## 1. Quick start: minimal config
 
 This example listens on all interfaces for UDP/TCP DNS and forwards to a public DoT resolver. It also enables a simple in-memory cache.
@@ -568,35 +544,35 @@ Flexible domain/IP/pattern filter used to build adblockers and kid-safe DNS.
 ```yaml
 plugins:
   - type: filter
-    config:
-      hooks:
-        pre_resolve:  { priority: 25 } # Run early in block queries so other plugins don't do anything
-        post_resolve: { priority: 25 } # Post-resolve IP filtering and policy
-      default: allow  # deny | allow
-      targets:
-        - 10.0.1.0/24 # Kids subnet
-      ttl: 300
-      # When a pre_resolve deny happens, synthesize an IP response pointing at a sinkhole address
-      deny_response: ip  # nxdomain | refused | servfail | ip | noerror_empty
-      deny_response_ip4: 0.0.0.0
+	config:
+	  hooks:
+		pre_resolve:  { priority: 25 } # Run early in block queries so other plugins don't do anything
+		post_resolve: { priority: 25 } # Post-resolve IP filtering and policy
+	  default: allow  # deny | allow
+	  targets:
+		- 10.0.1.0/24 # Kids subnet
+	  ttl: 300
+	  # When a pre_resolve deny happens, synthesize an IP response pointing at a sinkhole address
+	  deny_response: ip  # nxdomain | refused | servfail | ip | noerror_empty
+	  deny_response_ip4: 0.0.0.0
 
-      # Post-resolve IP filtering rules (answer inspection)
-      blocked_ips:
-        - ip: 203.0.113.10        # Replace a specific IP with a safer landing page
-          action: replace
-          replace_with: 0.0.0.0
-        - ip: 203.0.113.0/24      # Strip an entire subnet from answers
-          action: remove
-        - ip: 198.51.100.42       # Block a single IP entirely (maps to deny)
-          action: deny
+	  # Post-resolve IP filtering rules (answer inspection)
+	  blocked_ips:
+		- ip: 203.0.113.10        # Replace a specific IP with a safer landing page
+		  action: replace
+		  replace_with: 0.0.0.0
+		- ip: 203.0.113.0/24      # Strip an entire subnet from answers
+		  action: remove
+		- ip: 198.51.100.42       # Block a single IP entirely (maps to deny)
+		  action: deny
 
-      blocked_domains_files:
-        - ./config/var/lists/*.txt
-      allowed_domains:
-        - homework.example.org
-      blocked_domains:
-        - how-to-cheat.org
-        - current-game-obession.io
+	  blocked_domains_files:
+		- ./config/var/lists/*.txt
+	  allowed_domains:
+		- homework.example.org
+	  blocked_domains:
+		- how-to-cheat.org
+		- current-game-obession.io
 
 ```
 
