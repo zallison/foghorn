@@ -26,7 +26,7 @@ import dns.rdatatype
 import dns.resolver
 from cachetools import TTLCache
 
-from foghorn.utils.cache_registry import registered_cached
+from foghorn.utils.register_caches import registered_cached
 
 
 def _parse_resolv_conf_nameservers(path: str = "/etc/resolv.conf") -> list[str]:
@@ -188,7 +188,7 @@ class _RecursiveValidationResolver:
         # import cycles when DNSSEC is disabled.
         from dnslib import EDNS0, DNSRecord
 
-        from foghorn.recursive_resolver import RecursiveResolver
+        from foghorn.servers.recursive_resolver import RecursiveResolver
 
         # Normalise name and rdtype to text for dnslib.
         qname_text = getattr(name, "to_text", lambda: str(name))()

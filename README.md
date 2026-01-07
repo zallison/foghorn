@@ -1,1287 +1,1094 @@
-# Foghorn
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml)
+# Foghorn Configuration & Operations
 
-<img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/src/foghorn/html/transparent-logo.png" width="300px" alt="Foghorn Logo, a stylized alarm horn" />
+Foghorn is a versatile DNS server designed for flexibility and performance. Built on a robust caching forwarder or recursive resolver foundation, it seamlessly integrates with YAML-based configuration and modular plugins to transform into a powerful ad-blocker, local hosts service, kid-safe filter. Fine-tune its capabilities with a Redis backend, InfluxDB logging, and customizable function-cache sizes tailored to your specific needs.
 
-Foghorn is a modern, highly configurable, pluggable, and observable DNS utility server.
+With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard.
 
-Supporting upstream **and** downstream in UDP, TCP, DoT, and DoH (HTTP or HTTPs w/ cert and key for downstream).
-
-By default it acts as a caching forwarding DNS server with DNSSEC support.
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/foghorn)
 
 <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" width=300px />
 
-Tons of knobs and settings to perfect it for your needs. You can tune upstream strategy, concurrency, and health behavior directly from configuration, while monitoring real-time upstream status and response codes via a versioned `/api/v1` admin API and associated UI. Foghorn exposes rich statistics for DNSSEC, rate limiting,  upstream health, and more, with both snapshot and persistent storage options.
-
-Configurations support variables which can be set in the command line, and environment variable, or the config file.  In that order of precendence. Variables can, for example, define your lan domain or define CIDRs so they can be referred to by name instead of copying the CIDR lists each time.
-
-You can use this to apply different settings to otherwise identical configurations, or in CI/CD systems.
-
-Plugins are where the magic happens. The plugin architecture enables advanced behaviors without forking core code. An example of making a [pihole replacement](./docs/PiholeConfig.md) walks you through building a simple config that downloads ad/malware lists, filters them, and optionally add your /etc/hosts or other records.
-
-Plugins can be instantiated multiple times with different settings.  A "priority" field controls the order of execution.  Further control is available by breaking it down into "setup_priorty", "pre_priority", and "post_priority".  Lower is more imporatant.
-
-Even the cache type and backend can be set globally and per plugin. `In-memory-ttl` is the default, other options include `sqlite` and `redis`/`valkey`. Caching can be disabled with the `None` cache.  Multiple servers using the same `valkey` server share cache results.
-
-There's a lot to configure so there's a [schema](./assets/config-schema.json) for the configuration.  If you run the Foghorn webserver it will also be served from there, ensuring your schema matches your version.
-
-----
-
-[Jump to Documentation Index](#index)
-
-----
-
-## Plugin Overview
-
-Plugins are where the magic happens.
-
-Each plugin can can be configured with:
-
-- `logging:` it's logging confing
-- `targets:` - select incoming CIDR range, and qtype apply different rules to different CIDRs.
-- `priority` - A shortcut for setting `setup_`, `pre_` and, `post` run time priorities.
-- `enabled` - disable a plugin without removing or commenting out the code
-- `comment` - a free form text
-
-Foghorn comes with a fair amount of plugins by default:
-
-- `AccessControlPlugin` - CIDR based access control.
-- `DockerHosts` - Automatically create DNS names for Docker containers and expose container metadata over TXT records.
-- `DnsPrefetchPlugin` - Keep frequently requested names warm in the cache by issuing background prefetches.
-- `EtcHosts` - Map `/etc/hosts` (or other hostfiles) to DNS records, with reverse PTRs.
-- `ExamplesPlugin` - Demonstration policies and rewrites for learning and experimentation. (EXAMPLE, not for production.)
-- `FileDownloader` - Download block lists and other files so that other plugins (like Filter) can consume them from disk.
-- `FilterPlugin` - Block ads, malware, and other domains via inline or file-backed rules, keywords, regexps, and IP-based actions.
-- `FlakyServer` - Simulate unreliable upstreams with timeouts, malformed responses, and wire-level fuzzing for resilience testing.
-- `GreylistPlugin` - Temporarily delay or block newly seen domains. (EXAMPLE, not for production.)
-- `MdnsBridgePlugin` - Rebroadcast mDNS (sd-dns, zeroconf, avahi, ".local") records over DNS so non-mDNS clients can discover services. **Requires being on the host network, `--host=net` if using docker** (e.g.: `dig PTR _airplay._tcp.local` to find AirPlay hosts and `dig TXT host_name._airplay._tcp.local` for details.)
-- `NewDomainFilterPlugin` - Example plugin that blocks recently-registered domains using WHOIS metadata.
-- `RateLimitPlugin` - Dynamic or static rate limiting with learned baselines and per-key profiles.
-- `UpstreamRouterPlugin` - Redirect queries to different upstreams based on domain or suffix (for example, VPN-only or LAN-only zones).
-- `ZoneRecords` - Serve static records or authoritative zones from one or more local files.
-
-"Denied" queries can return be REFUSED, SERVFAIL, NODATA, or a specific ip (or invalid ip like 0.0.0.0)
-
-----
-
-With special thanks to Fiona Weatherwax for their contributions and inspiration, to the `dnslib` team for the low level / on wire primitives, and to `dnspython` for the DNSSEC implementation.  Additional shout outs to the whole `python` community, and the teams of `fastapi`, `pydantic`, `black`, `ruff`, `pytest`, and every other giant on whose shoulders I stand.
-
-For developer documentation (architecture, transports, plugin internals, testing), see README-DEV.md.
-
-*AI*
-Also thanks to my junior developer, `AI` via `warp.dev`, who keeps my docstrings and unit tests up to date, creates good commit messages, and other janitorial tasks.  Also ~~a lot of help with~~ the HTML/JS.  Because I'm just not good at it.
-
-----
-
-## Index
-
-- [Features](#features)
-- [Installation](#installation)
-- [Usage](#usage)
-  - [Docker](#docker)
-  - [DNSSEC modes](#dnssec-modes)
-- [Configuration](#configuration)
-  - [`listen`](#listen)
-  - [`upstreams`](#upstreams)
-  - [`plugins`](#plugins)
-  - [Complete `config.yaml` Example](#complete-configyaml-example)
-- [Use Cases](#use-cases)
-- [Logging](#logging)
-- [License](#license)
-
-## Features
-
-*   **DNS Caching:** Speeds up DNS resolution by caching responses from upstream servers.
-*   **Extensible Plugin System:** Easily add custom logic to control DNS resolution.
-*   **Flexible Configuration:** Configure listeners, upstream resolvers (UDP/TCP/DoT/DoH), and plugins using YAML.
-*   **Built-in Plugins:**
-  *   **Access Control (AccessControlPlugin):** CIDR-based allow/deny (allowlist/blocklist terminology in docs).
-  *   **DockerHosts:** Create DNS records for Docker containers, reverse PTRs, and TXT metadata for service discovery and health checks.
-*   **DnsPrefetchPlugin (EXAMPLE, not for production):** Inspect cache statistics and prefetch hot domains so answers stay warm.
-  *   **EtcHosts:** Answer queries based on host file(s) such as `/etc/hosts`, including reverse PTRs.
-*   **ExamplesPlugin (EXAMPLE, not for production):** Demonstration policies and rewrites (length limits, subdomain caps, IP rewrites) for experimentation.
-  *   **FileDownloader:** Download block lists and related files for downstream plugins like Filter.
-  *   **FilterPlugin:** Block ads, malware, or anything else using inline or file-backed rules, regexps, keywords, and IP actions.
-  *   **FlakyServer:** Simulate a malfunctioning DNS server or bad network connection with configurable failures and fuzzed responses.
-*   **GreylistPlugin (EXAMPLE, not for production):** Temporarily greylist newly seen domains before allowing them.
-  *   **MdnsBridgePlugin:** Rebroadcast mDNS (sd-dns, zeroconf, avahi, ".local") over DNS so non-mDNS clients can discover services. **Requires being on the host network.**
-  *   **NewDomainFilterPlugin:** Example plugin that blocks recently-registered domains using WHOIS data.
-  *   **RateLimitPlugin:** Adaptive or static rate limiting, by client, domain, or client-domain.
-  *   **UpstreamRouterPlugin:** Route queries to different upstream servers by domain or suffix.
-  *   **ZoneRecords:** Serve static DNS records and authoritative zones from one or more files, with optional live reload on change.
-* **Examples**:
-  *   **dnsprefetch**: Read statistics and try to keep the cache warm for oft accessed domains.
-  *   **Examples:** Showcase of simple policies and rewrites.
-  *   **New Domain Filter:** Block recently registered domains. Do NOT use for production. Use a real RDAP server instead.
-  *   **Greylist:** Temporarily block newly seen domain, and the original inspiration for the project: part of an anti-phishing / anti-malware layer.
-
-> **Note about mDNS / MdnsBridgePlugin**
-> The mDNS bridge plugin (`MdnsBridgePlugin`, alias `mdns`) relies on multicast
-> DNS on the local layer‑2 network. When you run Foghorn inside Docker and want
-> mDNS discovery to work, the container **must** share the host network (for
-> example, `--net=host` on Linux). If you use the default bridged Docker
-> network, mDNS traffic will not be visible to the container and the plugin will
-> not see any services.
 
 
-## Installation
+The configuration file is validated against a JSON Schema, but you rarely need to read the schema directly. This guide walks through the main sections (`vars`, `server`, `upstreams`, `logging`, `stats`, and `plugins`), then shows concrete examples for every built‑in plugin.
 
-Use a virtual environment (I use `venv`):
+## Table of Contents
+- [0. Thanks](#0-thanks)
+- [1. Quick start: minimal config](#1-quick-start-minimal-config)
+- [2. Configuration layout overview](#2-configuration-layout-overview)
+  - [2.1 Top-level keys](#21-top-level-keys)
+  - [2.2 Server block](#22-server-block)
+  - [2.3 Upstreams block](#23-upstreams-block)
+  - [2.4 Logging](#24-logging)
+  - [2.5 Stats and query log](#25-stats-and-query-log)
+  - [2.6 Plugins](#26-plugins)
+- [3. Listeners and upstreams by example](#3-listeners-and-upstreams-by-example)
+  - [3.1 UDP/TCP listener](#31-udptcp-listener)
+  - [3.2 DNS-over-TLS (DoT) upstream](#32-dns-over-tls-dot-upstream)
+  - [3.3 DNS-over-HTTPS (DoH) listener with TLS](#33-dns-over-https-doh-listener-with-tls)
+  - [3.4 DoH listener behind an HTTP reverse proxy](#34-doh-listener-behind-an-http-reverse-proxy)
+- [4. Plugin cookbook](#4-plugin-cookbook)
+  - [4.1 Access control (acl)](#41-access-control-acl)
+  - [4.2 DNS prefetch (prefetch)](#42-dns-prefetch-prefetch)
+  - [4.3 Docker containers (docker)](#43-docker-containers-docker)
+  - [4.4 Hosts files (hosts)](#44-hosts-files-hosts)
+  - [4.5 Example rewrites EXAMPLE(examples)](#45-example-rewrites-examples)
+  - [4.6 List downloader (lists)](#46-list-downloader-lists)
+  - [4.7 Domain filter / adblock (filter)](#47-domain-filter--adblock-filter)
+  - [4.8 Flaky upstream simulator (flaky)](#48-flaky-upstream-simulator-flaky)
+  - [4.9 Greylist new names EXAMPLE (greylist_example)](#49-greylist-new-names-greylist_example)
+  - [4.10 mDNS / Bonjour bridge (mdns)](#410-mdns--bonjour-bridge-mdns)
+  - [4.11 New-domain WHOIS filter EXAMPLE (new_domain)](#411-new-domain-whois-filter-new_domain)
+  - [4.12 Rate limiting (rate)](#412-rate-limiting-rate)
+  - [4.13 Per-domain upstream routing (router)](#413-per-domain-upstream-routing-router)
+  - [4.14 Inline and file-based records (zone)](#414-inline-and-file-based-records-zone)
+- [5. Sample configurations](#5-sample-configurations)
+  - [5.1 `local`: workstation config](#51-local-workstation-config)
+  - [5.2 `lan`: home LAN with adblock and kid filter](#52-lan-home-lan-with-adblock-and-kid-filter)
+  - [5.3 `smb`: small business](#53-smb-small-business)
+  - [5.4 `enterprise`: layered caches and rich stats](#54-enterprise-layered-caches-and-rich-stats)
 
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install .
-# Optional for development:
-pip install -e '.[dev]'
-```
+---
 
-## Usage
+## 0. Thanks
 
-Create a `config.yaml`, then run:
+With special thanks to **Fiona** Weatherwax for their contributions and inspiration, to the **dnslib** team for the low level / on wire primitives, and to **dnspython** for the DNSSEC implementation. Additional shout outs to the whole **python community**, and the teams of **fastapi, pydantic, black, ruff, pytest,** and every other giant on whose shoulders I stand.
 
-```bash
-foghorn --config /path/to/config.yaml
-```
+Also thanks to my junior developers, AI from both local and remote models, some via warp.dev, who keeps my docstrings and unit tests up to date, creates good commit messages, and other janitorial tasks. Also ~~a lot of help with the~~ all the HTML/JS. Because I'm just not good at it.
 
-Alternatively, run as a module:
+## 1. Quick start: minimal config
 
-```bash
-python -m foghorn.main --config /path/to/config.yaml
-```
-
-The server will start listening for DNS queries on the configured host and port.
-
-### Docker
-
-Foghorn is available on Docker Hub at `zallison/foghorn:latest`.
-
-
-**Using the pre-built image:**
-
-```bash
-docker run -d -p 5335:5335/udp \
-  -v /path/to/your/config/:/foghorn/config/ \
-  zallison/foghorn:latest
-```
-
-**Building locally:**
-
-```bash
-[cp /path/to/your/config.yaml ./config/config.yaml] # Optional
-docker build -t my/foghorn .
-docker run -d -p 5353:5353/udp my/foghorn
-```
-
-**Important:** Mount your `config.yaml` to `/foghorn/config/config.yaml` inside the container unless you've built your own image that contains your config.
-
-If you need to expose additional listeners (TCP/DoT/DoH), add the corresponding port mappings:
-
-```bash
-docker run -d \
-  -p 5335:5335 \
-  -p 8853:8853/tcp \
-  -p 5380:5380/tcp \
-  -v /path/to/your/config.yaml:/foghorn/config/config.yaml \
-  zallison/foghorn:latest
-```
-
-### DNSSEC modes
+This example listens on all interfaces for UDP/TCP DNS and forwards to a public DoT resolver. It also enables a simple in-memory cache.
 
 ```yaml
-dnssec:
-  mode: passthrough            # ignore | passthrough | validate
-  validation: upstream_ad      # upstream_ad | local   (local = experimental)
-  udp_payload_size: 1232
-```
-- ignore: do not advertise DO; DNSSEC data not requested.
-- passthrough: advertise DO and return DNSSEC records; forward AD bit if upstream set it.
-- validate:
-  - upstream_ad: require upstream AD bit (recommended for now)
-  - local (experimental): perform local DNSSEC validation.
+# config/config.yaml
 
-## Configuration
+vars:
+  ENV: prod
 
-Configuration is handled through a `config.yaml` file. The primary top-level sections are `listen`, `upstreams`, `cache`, `foghorn`, `plugins`, and `statistics`.
+server:
+  listen:
+	dns:
+	  udp:
+		enabled: true
+		host: 0.0.0.0
+		port: 53
+	  tcp:
+		enabled: true
+		host: 0.0.0.0
+		port: 53
+  cache:
+	module: memory  # memory | sqlite | redis | memcached | mongodb | none
 
-### Statistics and persistence backends
+upstreams:
+  strategy: failover        # failover | round_robin | random
+  max_concurrent: 1         # 1 | 2 | 4 ...
+  endpoints:
+	- host: 1.1.1.1
+	  port: 853
+	  transport: dot        # udp | tcp | dot
+	  tls:
+		server_name: cloudflare-dns.com
 
-The `statistics` block controls in-memory counters and optional persistent storage of counts and the raw query log. A minimal configuration looks like:
-
-```yaml
-statistics:
-  enabled: true
-  interval_seconds: 300
-  persistence:
-    enabled: true
-    db_path: ./config/var/stats.db
-    batch_writes: true
-```
-
-By default, persistence uses a single SQLite backend. Advanced users can configure one or more *statistics/query-log backends* via `statistics.persistence.backends` while keeping the legacy `db_path` fields for backward compatibility:
-
-```yaml
-statistics:
-  enabled: true
-  interval_seconds: 300
-  persistence:
-    enabled: true
-    # Optional multi-backend configuration (writes fan out; reads use the primary).
-    primary_backend: mysql_analytics        # optional logical name or backend alias
-    backends:
-      - name: sqlite_mirror
-        backend: sqlite
-        config:
-          db_path: ./config/var/stats.db
-          batch_writes: true
-          batch_time_sec: 15.0
-          batch_max_size: 1000
-      - name: mysql_analytics
-        backend: mysql
-        config:
-          host: 127.0.0.1
-          port: 3306
-          user: foghorn
-          password: change-me
-          database: foghorn_stats
+plugins: []
 ```
 
-Semantics:
-- When `backends` is omitted, the legacy single-SQLite configuration is used (db_path, batch_writes, batch_time_sec, batch_max_size).
-- When `backends` contains a single entry, that backend is used for both reads and writes.
-- When `backends` has multiple entries:
-  - Writes (counts and query log) are fanned out to **all** backends.
-  - Reads (health checks, counts export, query log/aggregations) go to the *primary* backend.
-  - The primary defaults to the first configured backend; `primary_backend` can override this by logical name or backend alias.
+You can start Foghorn with:
 
-`backend` accepts short aliases like `sqlite`, `mysql`, or `mariadb`, or a dotted import path to a custom `BaseStatsStoreBackend` implementation.
-
-The `cache` section selects the DNS response cache implementation (default: in-memory TTL):
-
-```yaml
-cache:
-  module: in_memory_ttl
-  config: {}
+```bash
+foghorn --config config/config.yaml
 ```
 
-The `foghorn` section also exposes optional cache prefetch / stale‑while‑revalidate knobs that work together with the shared resolver.
+From here you layer in plugins to get adblocking, hosts files, per-user allowlists, and more.
 
-------
+### Makefile helpers
 
-## `listen`
+For local development there is a `Makefile` with a few convenience targets:
 
-You can enable one or more `listener`s. `UDP` is enabled by default; `TCP`, `DoT`, and `DoH` are optional and supported.
+- `make run` – create a venv if needed and start Foghorn with `config/config.yaml`.
+- `make env` / `make env-dev` – create the virtualenv in `./venv` and install dependencies (with dev extras for `env-dev`).
+- `make build` – prepare the development environment (keeps the JSON schema up to date).
+- `make schema` – regenerate `assets/config-schema.json` from the Python code.
+- `make test` – run the test suite with coverage.
+- `make clean` – remove the venv, build artefacts, and temporary files.
+- `make docker`, `make docker-build`, `make docker-run`, `make docker-logs`, `make docker-clean`, `make docker-ship` – build and run Docker images/containers.
+- `make package-build` / `make package-publish` / `make package-publish-dev` – build and (optionally) publish Python packages.
+- `make ssl-cert` – generate a self-signed TLS key and certificate under `./var` using `openssl req -x509`.
 
-The default ports (UDP/TCP 5333, DoT 8853, DoH 5380, admin webserver 5380) are chosen to be above 1024 so that Foghorn can be run as a non-root user without special capabilities.
+---
 
-```yaml
-listen:
-  udp:
-	enabled: true
-	host: 127.0.0.1
-	port: 5335
-  tcp:
-	enabled: false
-	host: 127.0.0.1
-	port: 5335
-  dot:
-	enabled: false
-	host: 127.0.0.1
-	port: 8853
-	cert_file: /path/to/cert.pem
-	key_file: /path/to/key.pem
-  doh:
-	enabled: false
-	host: 127.0.0.1
-	port: 5443
-	# Optional TLS
-	# cert_file: /path/to/cert.pem
-	# key_file: /path/to/key.pem
+## 2. Configuration layout overview
+
+### 2.1 Top-level keys
+
+At the top level the schema defines these keys:
+
+- `vars`: key/value variables for interpolation inside the rest of the file.
+- `server`: listener, DNSSEC, resolver, cache, and admin HTTP settings.
+- `upstreams`: how outbound DNS queries are sent.
+- `logging`: global logging level and outputs.
+- `stats`: runtime statistics and query-log persistence.
+- `plugins`: the ordered list of plugins that wrap each query.
+
+Conceptually, a request flows like this:
+
+```text
+client ---> UDP/TCP/DoH listener
+		---> DNS cache (memory, redis, etc) (optional)
+		---> plugins (pre_resolve chain)
+		---> [maybe upstream DNS calls or recursive resolving]
+		---> plugins (post_resolve chain)
+		---> response or deny
 ```
 
-Note: The DoH listener is served by a dedicated FastAPI app using uvicorn in a
-single background thread. TLS is applied via `cert_file`/`key_file`. Behavior is
-RFC 8484‑compatible and unchanged from previous releases; only the runtime
-implementation has changed.
+**Note:** when a pre_resolve plugin returns an `override` decision the generated
+response is sent immediately and the post_resolve chain is skipped entirely; a
+post_resolve `override` short-circuits any later post_resolve plugins for that
+query.
 
-----
+### 2.2 Server block
 
-## `upstreams`
+Key parts of `server`:
 
-You can mix transports per upstream. If `transport` is omitted it defaults to UDP.
+- `server.listen`
+  - `dns.udp` / `dns.tcp`: classic DNS listeners.
+  - `dns.dot`: DNS-over-TLS listener.
+  - `doh`: DNS-over-HTTPS listener.
+- `server.cache`
+  - `module`: which cache plugin to use.
+  - `config`: plugin-specific cache settings.
+  - `modify` / `decorated_overrides`: optional overrides for internal helper caches.
+- `server.dnssec`
+  - Mode and DNSSEC validation knobs (e.g., UDP payload size).
+- `server.resolver`
+  - Timeouts, recursion depth, and whether Foghorn runs as a forwarder or recursive resolver.
+- `server.http`
+  - Admin web UI listener configuration.
+
+### 2.3 Upstreams block
+
+`upstreams` describes how Foghorn talks to other DNS servers:
+
+- `strategy`: `failover` (try in order), `round_robin`, or `random`.
+- `max_concurrent`: maximum simultaneous outstanding upstream queries.
+- `endpoints`: list of `upstream_host` definitions.
+
+An `upstream_host` entry:
 
 ```yaml
 upstreams:
-  - host: 1.1.1.1
-	port: 853
-	transport: dot
-	tls:
-	  server_name: cloudflare-dns.com
-	  verify: true
-	pool:
-	  max_connections: 64
-	  idle_timeout_ms: 30000
-  - host: 8.8.8.8
-	port: 53
-	# transport: udp (default)
-	pool:
-	  max_connections: 32
-	  idle_timeout_ms: 15000
-  - transport: doh
-	url: https://dns.google/dns-query
-	method: POST   # or GET
-	headers:
-	  user-agent: foghorn
-	tls:
-	  verify: true
-	  # ca_file: /etc/ssl/certs/ca-certificates.crt
+  endpoints:
+	- host: 9.9.9.9
+	  port: 53        # 853 for DoT
+	  transport: udp  # udp | tcp | dot
+	  tls:
+		server_name: dns.quad9.net
+		verify: true  # true | false
 ```
 
-----
+An `upstream_host` entry: using `DNS-over-HTTP(s)`
 
-## `plugins`
+```yaml
+upstreams:
+  endpoints:
+	- transport: doh
+	  url: https://dns.example.com/dns-query
+	  method: POST    # POST | GET
+	  tls:
+		verify: true  # true | false
+		ca_file: /etc/ssl/certs/ca-certificates.crt
+```
 
-This section is a list of plugins to load. Each plugin has a `module` and a `config` section. You can also specify a plugin as a short string alias.
+### 2.4 Logging
 
-You can use short aliases instead of full dotted paths:
-- access_control or acl -> foghorn.plugins.access_control.AccessControlPlugin
-- new_domain_filter or new_domain -> foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
-- upstream_router or router -> foghorn.plugins.upstream_router.UpstreamRouterPlugin
-- filter -> foghorn.plugins.filter.FilterPlugin
-- rate_limit or ratelimit -> foghorn.plugins.rate_limit.RateLimitPlugin
-- docker-hosts, docker_hosts or docker -> foghorn.plugins.docker-hosts.DockerHosts
+`logging` controls both the process-wide Python logger **and** the
+statistics/query-log backends.
 
-Examples of plugin entries:
-- As a dict with module/config: `{ module: acl, config: {...} }`
-- As a plain alias string: `acl` (no config)
+Python logging (global defaults):
 
-#### Base plugin targeting (targets / targets_ignore)
+```yaml
+logging:
+  python:
+	level: info       # debug | info | warn | error | critical
+	stderr: true      # true | false
+	file: ./var/foghorn.log
+	syslog: false     # false | true | {address, facility, tag}
+```
 
-All plugins that inherit from `BasePlugin` support optional, shared client‑targeting
-knobs in their `config` block:
+Plugins can also override logging per-instance via their own `logging` block on
+the plugin entry, using the same shape as `logging.python`.
 
-- `targets` (optional): list of CIDR/IP strings (or a single string) specifying
-  which client networks this plugin should apply to.
-- `targets_ignore` (optional): list of CIDR/IP strings to exclude from
-  targeting, even when they match `targets`.
-- `targets_cache_ttl_seconds` (optional, default 300): TTL in seconds for an
-  in‑memory cache of per‑client targeting decisions; longer values reduce CPU
-  when many queries arrive from the same clients.
+`logging.backends` describes where persistent stats/query-log data is written.
+Each entry maps to a statistics backend such as SQLite or MQTT logging:
 
-Semantics:
+```yaml
+logging:
+  async: true          # default async behaviour for stats backends
+  query_log_only: false  # false | true
+  backends:
+	- id: local-log
+	  backend: sqlite
+	  config:
+		db_path: ./config/var/stats.db
+		batch_writes: true
+	- id: backup-mqtt
+	  backend: mqtt_logging
+	  config:
+		host: mqtt.internal
+		port: 1883
+		topic: foghorn/query_log
+```
 
-- When **neither** `targets` nor `targets_ignore` is set, the plugin applies to
-  **all** clients (default behavior).
-- When **only** `targets` is set, the plugin applies **only** to clients whose
-  IP is contained in at least one listed CIDR/IP.
-- When **only** `targets_ignore` is set, the plugin applies to **all clients
-  except** those in `targets_ignore` (inverted logic).
-- When **both** are set, `targets_ignore` wins: clients in that list are
-  skipped even if they match an entry in `targets`.
+### 2.5 Stats and query log
 
-These knobs are honored by core plugins such as AccessControl, Filter,
-Greylist, NewDomainFilter, UpstreamRouter, FlakyServer, Examples, and
-EtcHosts. See `example_configs/` (for example `kitchen_sink.yaml` and
-`plugin_rate_limit.yaml`) for usage patterns.
+The `stats` section controls runtime statistics behaviour and selects which
+logging backend to read from. When `logging.async` is true, writes to
+stats/query-log backends are performed by a background worker so request
+handling stays fast; setting it to `false` forces synchronous writes.
 
-A minimal plugin entry using all common BasePlugin-wide options looks like:
+Important fields include:
+
+- `enabled`: master on/off switch for statistics.
+- `source_backend`: which `logging.backends[*].id` (or backend alias) to treat
+  as the primary read backend.
+
+Example:
+
+```yaml
+logging:
+  async: true
+  query_log_only: false     # false | true
+  backends:
+	- id: local-log
+	  backend: sqlite
+	  config:
+		db_path: ./config/var/stats.db
+		batch_writes: true
+
+stats:
+  enabled: true
+  source_backend: local-log
+  interval_seconds: 300
+  ignore:
+	include_in_stats: true
+	ignore_single_host: false
+	top_domains_mode: suffix   # exact | suffix
+	top_domains:
+	  - example
+```
+
+### 2.6 Plugins
+
+In the `plugins` list each entry is a `PluginInstance`:
 
 ```yaml
 plugins:
-  - module: some_plugin
-	name: example_plugin
+  - type: filter
+	id: main-filter
 	enabled: true
-	comment: "Demo plugin using common BasePlugin options"
-	pre_priority: 40
-	post_priority: 60
-	setup_priority: 50
+	setup:
+	  abort_on_failure: true
+	hooks:
+``    pre_resolve:
+		enabled: true
+		priority: 50
+	logging:
+	  level: info
 	config:
-	  # BasePlugin-wide options
-	  logging:
-		level: debug
-		stderr: true
-		file: ./logs/example_filter.log
-		syslog:
-		  address: /dev/log
-		  facility: user
+	  # plugin-specific config here
+```
+
+You normally care about:
+
+- `type`: short alias for the plugin.
+- `id`: optional stable identifier for this plugin instance (surfaced in stats, logs, and admin UI).
+- `enabled`: whether it runs.
+- `hooks`: per-hook enable/priority overrides (optional).
+- `setup`: one-time setup behaviour; `abort_on_failure` controls whether a failing setup() aborts startup.
+- `logging`: per-plugin logging overrides (level, file, stderr, syslog) using the same shape as the global `logging` block.
+- `config`: the actual configuration for that plugin.
+
+Common plugin‑wide options:
+
+- **Client targeting** (all resolve plugins honor this):
+  - `config.targets`: list (or single string) of CIDR/IPs to explicitly target. When set, only matching clients are affected.
+  - `config.targets_ignore`: list (or single string) of CIDR/IPs to skip. When only `targets_ignore` is set, all other clients are targeted by default.
+- **qtype targeting**:
+  - `config.target_qtypes`: list of qtype names or `'*'` for all types, e.g. `['A', 'AAAA']`, `['MX']` or `['*']`.
+- **Per-plugin logging**:
+  - The `logging` stanza on the plugin instance lets you bump log level or direct output differently from the global logger.
+
+Example with targeting and qtype selection:
+
+```yaml
+plugins:
+  - type: filter
+	id: lan-filter
+	enabled: true
+	logging:
+	  level: debug
+	config:
 	  targets:
-		- 10.0.0.0/8
-		- 192.0.2.1
+		- 192.168.0.0/16
 	  targets_ignore:
-		- 10.0.5.0/24
-	  targets_cache_ttl_seconds: 600
-	  target_qtypes:
-		- A
-		- AAAA
-
-	  abort_on_failure: true  # used by some plugins during setup()
+		- 192.168.0.10
+	  target_qtypes: ['A', 'AAAA']  # '*' | ['A'] | ['A', 'AAAA']
 ```
 
-#### Plugin priorities and `setup_priority`
+---
 
-Plugins support three priority knobs in their config (all optional, integers 1–255):
+## 3. Listeners and upstreams by example
 
-- `pre_priority`: controls the order of `pre_resolve` hooks; lower values run first.
-- `post_priority`: controls the order of `post_resolve` hooks; lower values run first.
-- `setup_priority`: controls the order of one-time `setup()` calls during startup; lower values run first.
+### 3.1 UDP/TCP listener
 
-`setup_priority` is only used for plugins that override `BasePlugin.setup`. Its value is resolved as:
+A typical `server.listen.dns` configuration:
 
-- Use the explicit `setup_priority` from config if provided.
-- Otherwise, reuse the config’s `pre_priority` value for setup-aware plugins.
-- Otherwise, fall back to the plugin’s class-level default (50).
+```yaml
+server:
+  listen:
+	dns:
+	  udp:
+		enabled: true
+		host: 0.0.0.0
+		port: 53
+	  tcp:
+		enabled: true
+		host: 0.0.0.0
+		port: 53
+```
 
-This lets you, for example, have a FileDownloader plugin run its setup early (to download lists) and a Filter plugin run slightly later to load those lists from disk.
+Turn TCP off if you never want to accept TCP DNS:
 
-------
+```yaml
+	  tcp:
+		enabled: false  # true | false
+```
 
-### AccessControlPlugin
+### 3.2 DNS-over-TLS (DoT) upstream
 
-This plugin provides access control based on the client's IP address.
+To talk to an upstream DoT resolver:
 
-**Configuration:**
+```yaml
+upstreams:
+  strategy: round_robin      # failover | round_robin | random
+  endpoints:
+	- host: 1.1.1.1
+	  port: 853
+	  transport: dot
+	  tls:
+		server_name: cloudflare-dns.com
+		verify: true
+```
 
-*   `default`: The default action to take if no rule matches (`allow` or `deny`).
-*   `allow`: A list of CIDR ranges to allow.
-*   `deny`: A list of CIDR ranges to deny. Deny rules take precedence over allow rules.
+You can mix DoT and plain UDP endpoints in the same list; the `strategy` decides how they are chosen.
 
-**Example (full path):**
+### 3.3 DNS-over-HTTPS (DoH) listener with TLS
+
+To expose a DoH listener directly from Foghorn (for example on port 8053 with TLS termination):
+
+```yaml
+server:
+  listen:
+	# ... dns.udp / dns.tcp here ...
+	doh:
+	  enabled: true
+	  host: 0.0.0.0
+	  port: 8053
+	  cert_file: /etc/foghorn/tls/server.crt
+	  key_file: /etc/foghorn/tls/server.key
+```
+
+### 3.4 DoH listener behind an HTTP reverse proxy
+
+When Foghorn itself is running behind an HTTP reverse proxy (for example, nginx or Envoy), you typically terminate TLS at the proxy and run the DoH listener as plain HTTP on localhost. The proxy handles `https://` and forwards `/dns-query` to Foghorn:
+
+```yaml
+server:
+  listen:
+	# ... dns.udp / dns.tcp here ...
+	doh:
+	  enabled: true
+	  host: 127.0.0.1
+	  port: 8053
+	  # No cert_file/key_file here; TLS is terminated at the reverse proxy.
+```
+
+Your reverse proxy is then configured to listen on `443` with TLS and proxy requests such as `https://dns.example.com/dns-query` to `http://127.0.0.1:8053/dns-query`.
+
+### 3.5 Helper Make targets for TLS keys and certificates
+
+For quick local testing, the `Makefile` includes convenience targets that generate a small CA and server key material under `./keys`:
+
+- `make ssl-ca` – create `foghorn_ca.key` and a self-signed `foghorn_ca.crt` with CA key usage.
+- `make ssl-ca-pem` – export the CA certificate as `foghorn_ca.pem` for use as a trust anchor (e.g. `upstreams.*.tls.ca_file`).
+- `make ssl-cert` – create a server key and certificate signed by the local CA, named `foghorn_${CNAME}.key` / `.crt`.
+- `make ssl-server-pem` – build a combined `foghorn_${CNAME}.pem` containing the server certificate and key.
+
+Use `ca.pem` when Foghorn is a TLS **client** and needs to *trust* an internal CA (for example for DoT/DoH upstreams via `tls.ca_file`). Use `server.pem` when Foghorn is acting as a TLS **server** and you need a single file containing both cert and key for a listener.
+
+These are intended for development and lab environments only; for production, use your normal PKI or certificate management.
+
+---
+
+## 4. Plugin cookbook
+
+Below are the built‑in plugins, with short descriptions and minimal configs. All examples assume they live in the shared `plugins:` list.
+
+Some resolver filters are shipped as **examples only** and now live under
+`foghorn.plugins.resolve.examples` (for example the DNS prefetch, example
+rewrites, greylist, and new-domain WHOIS filters). They are not wired into a
+running server by default; configuration that references these example types
+will not work unless you first move or copy the corresponding module into
+`foghorn.plugins.resolve`. This is an intentional speed bump so that you review
+and understand what they do before enabling them in your own deployment.
+
+### 4.1 Access control (`acl`)
+
+IP-based allow/deny control at the edge.
 
 ```yaml
 plugins:
-  - module: foghorn.plugins.access_control.AccessControlPlugin
+  - type: acl
 	config:
-	  default: allow
+	  default: allow       # allow | deny
 	  allow:
-		- "192.168.0.0/16"
-		- "10.0.0.0/8"
+		- 192.168.1.1 # Overrides the deny below.
+		- 10.0.0.0/8
 	  deny:
-		- "203.0.113.0/24"
+		- 192.168.0.0/16
+		- 172.16.0.0/12
 ```
 
-**Example (short alias):**
+### 4.2 Example: DNS prefetch (`prefetch`)
+
+Prefetches the most popular names from statistics to keep the cache warm.  Not very effecient yet, but it shows the concept
 
 ```yaml
 plugins:
-  - module: acl
+  - type: prefetch
 	config:
-	  default: allow
-	  allow:
-		- "192.168.0.0/16"
+	  interval_seconds: 60
+	  prefetch_top_n: 100
+	  max_consecutive_misses: 5
+	  qtypes: ['A', 'AAAA']
 ```
 
-------
+### 4.3 Docker containers (`docker`)
 
-### NewDomainFilterPlugin (EXAMPLE, not for production)
-
-This plugin blocks domains that were registered recently by checking the domain's creation date using `whois`.
-
-**Configuration:**
-
-*   `threshold_days`: The minimum age of a domain in days. Domains younger than this will be blocked.
-*   `timeout_ms`: The timeout in milliseconds for `whois` queries.
-
-**Example (full path):**
+Expose Docker container names as DNS answers.
 
 ```yaml
 plugins:
-  - module: foghorn.plugins.new_domain_filter.NewDomainFilterPlugin
+  - type: docker
 	config:
-	  threshold_days: 7
-	  timeout_ms: 2000
+	  endpoints:
+		- url: unix:///var/run/docker.sock
+		- url: tcp://my.server.lan:2375
+	  ttl: 60
+	  health: ['healthy', 'running']
+	  discovery: true   # false | true
 ```
 
-**Example (short alias):**
+### 4.4 Hosts files (`hosts`)
+
+Serve additional records from one or more hosts-style files.
 
 ```yaml
 plugins:
-  - module: new_domain
+  - type: hosts
 	config:
-	  threshold_days: 14
+	  file_paths:
+		- /etc/hosts
+		- ./config/hosts.local
+	  ttl: 300
+	  watchdog_enabled: true   # null | true | false
 ```
 
-------
+### 4.5 Example rewrites (`examples`)
 
-### RateLimitPlugin
-
-This plugin provides adaptive or fixed per-key DNS rate limiting, backed by a
-sqlite database. It can key profiles by client IP, client+domain, or domain
-only, and it learns a baseline requests-per-second (RPS) for each key.
-
-**Configuration (subset):**
-
-* `mode`: `per_client`, `per_client_domain`, or `per_domain`.
-* `window_seconds`: measurement window length in seconds.
-* `warmup_windows`: number of completed windows to observe before enforcing.
-* `alpha`: EWMA factor when the new window's RPS is >= the current average
-  (ramp-up speed).
-* `alpha_down`: optional EWMA factor when the new window's RPS is < the current
-  average (ramp-down speed). If omitted, it defaults to `alpha`.
-* `burst_factor`: multiplier over the learned average when computing
-  `allowed_rps`.
-* `min_enforce_rps`: lower bound on `allowed_rps`.
-* `global_max_rps`: optional hard upper bound on `allowed_rps` (0 disables).
-* `db_path`: sqlite file storing learned profiles.
-* `deny_response`: how to answer when a query is rate-limited (mirrors
-  FilterPlugin: `nxdomain`, `refused`, `servfail`, `noerror_empty`/`nodata`, or
-  `ip`).
-
-To make the limiter behave like a "dumb" fixed-rate limiter, set
-`min_enforce_rps` and `global_max_rps` to the same value; in that case the
-learned average no longer affects the enforcement threshold.
-
-See `example_configs/plugin_rate_limit.yaml` for concrete profiles (solo user,
-home network, SMB) and notes on static vs adaptive behavior.
-
-------
-
-### UpstreamRouterPlugin
-
-This plugin routes queries to different upstream DNS servers based on the queried domain.
-
-**Configuration:**
-
-*   `routes`: A list of routing rules. Each rule can have a `domain` (for exact matches) or a `suffix` (for suffix matches) and a list of `upstreams` servers to route to.
-
-**Example (full path):**
+A playground plugin that can rewrite responses or demonstrate behaviours.
 
 ```yaml
 plugins:
-  - module: foghorn.plugins.upstream_router.UpstreamRouterPlugin
+  - type: examples
 	config:
-	  routes:
-		- domain: "internal.corp.com"
-		  upstreams:
-			- host: 10.0.0.1
-			  port: 53
-		- suffix: ".dev.example.com"
-		  upstreams:
-			- host: 192.168.1.1
-			  port: 53
+	  base_labels: 2
+	  max_subdomains: 5
+	  apply_to_qtypes: ['A']
 ```
 
-**Example (short alias):**
+### 4.6 List downloader (`lists`)
+
+Fetches remote blocklists/allowlists on a schedule and stores them as files for other plugins.
 
 ```yaml
 plugins:
-  - module: router
-	config:
-	  routes:
-		- suffix: "corp"
-		  upstreams:
-			- host: 10.0.0.53
-			  port: 53
-```
-
-------
-
-### FilterPlugin
-
-This plugin provides flexible filtering of DNS queries based on domain names, patterns, keywords, and response IPs.
-
-**Configuration:**
-
-- blocked_domains: list of exact domain names to block.
-- blocked_patterns: list of regular expressions to match against the domain name.
-- blocked_keywords: list of keywords to block if they appear anywhere in the domain name.
-- blocked_ips: list of IP addresses or CIDR ranges to control post‑resolution behavior; each entry supports action deny, remove, or replace (with replace_with).
-
-File-backed inputs (support globs):
-- allowed_domains_files, blocked_domains_files
-- blocked_patterns_files
-- blocked_keywords_files
-- blocked_ips_files
-
-Formats supported per file (auto-detected line-by-line):
-- Plain text (default): a single value per line; blank lines and lines starting with '#' are ignored
-- JSON Lines (JSONL): one JSON object per line with the following schemas
-  - Domains: {"domain": "example.com", "mode": "allow|deny"} (mode optional; defaults to the file-level mode implied by which key you used)
-  - Patterns: {"pattern": "^ads\\.", "flags": ["IGNORECASE"]} (flags optional; defaults to IGNORECASE)
-  - Keywords: {"keyword": "tracker"}
-  - IPs: {"ip": "203.0.113.0/24", "action": "deny|remove|replace", "replace_with": "IP"}
-
-Note: JSONL is only supported in FilterPlugin file-backed inputs (the *_files keys above). The core YAML config does not accept JSONL.
-
-Load order and precedence for domains (last write wins):
-1) allowed_domains_files
-2) blocked_domains_files
-3) inline allowed_domains
-4) inline blocked_domains
-
-**Example (short alias):**
-
-```yaml
-plugins:
-  - module: filter
-	config:
-	  # Pre-resolve (domain) filtering
-	  blocked_domains:
-		- "malware.com"
-		- "phishing-site.org"
-
-	  blocked_patterns:
-		- ".*\\.porn\\..*"
-
-	  blocked_keywords:
-		- "gambling"
-
-	  # Post-resolve (IP) filtering
-	  blocked_ips:
-		- ip: "1.2.3.4"
-		  action: "deny" # Deny the whole response
-		- ip: "8.8.8.0/24"
-		  action: "remove" # Remove just this A/AAAA record
-
-	  # File-backed examples (globs allowed)
-	  allowed_domains_files:
-		- config/allow.txt
-		- config/allow.d/*.list
-	  blocked_domains_files:
-		- config/block.txt
-		- config/block.d/*.txt
-	  blocked_patterns_files:
-		- config/patterns/*.re
-	  blocked_keywords_files:
-		- config/keywords.txt
-	  blocked_ips_files:
-		- config/ips.txt
-		- config/ips.d/*.csv
-```
-
-#### JSON Lines examples for files
-
-- Domains (allowed_domains_files or blocked_domains_files):
-
-```json
-{"domain": "good.com", "mode": "allow"}
-{"domain": "bad.com", "mode": "deny"}
-{"domain": "neutral.com"}
-```
-
-- Patterns (blocked_patterns_files):
-
-```json
-{"pattern": "^ads\\.", "flags": ["IGNORECASE"]}
-{"pattern": "^track\\.", "flags": []}
-```
-
-- Keywords (blocked_keywords_files):
-
-```json
-{"keyword": "tracker"}
-{"keyword": "analytics"}
-```
-
-- IPs (blocked_ips_files):
-
-```json
-{"ip": "192.0.2.1", "action": "deny"}
-{"ip": "198.51.100.0/24", "action": "remove"}
-{"ip": "203.0.113.5", "action": "replace", "replace_with": "127.0.0.1"}
-```
-
-Notes:
-- Plain-text lines continue to work alongside JSON Lines within the same file.
-- Unknown actions default to deny (logged). Invalid JSON/regex/IP lines are logged and skipped.
-
-------
-
-### FileDownloader plugin
-
-Download domain-only blocklists from well-known sources to local files so the Filter plugin can load them.
-
-Notes:
-- Works with domain-per-line lists (e.g., Firebog "just domains"). Hosts-formatted lists (with IPs) are not supported without preprocessing.
-- Runs early (pre_priority 15) so files are present before Filter executes.
-
-**Configuration:**
-
-* `urls`: List of HTTP(S) URLs to domain-only lists (comments with `#` allowed).
-* `url_files`: List of file paths, each containing one URL per line (supports `#` comments and blank lines).
-* `download_path`: Directory to write files (default `./config/var/lists`).
-* `interval_days`: Optional periodic refresh interval (in days) while the server runs.
-
-Filenames are unique and stable per-URL: `{base}-{sha1(url)[:12]}{ext}`. If the URL has no extension, none is added (`{base}-{hash}`). Each file begins with a header line: `# YYYY-MM-DD HH:MM - URL`.
-
-**Example:**
-
-```yaml
-plugins:
-  - module: file_downloader
-	pre_priority: 15
+  - type: lists
+	hooks: # Setup early so other plugins have their files available.
+	  setup:  { priority: 10 }
 	config:
 	  download_path: ./config/var/lists
 	  interval_days: 1
+	  hash_filenames: true # false | true - Multiple "hosts.txt" files easily handled by hashing the URL
 	  urls:
-		- https://v.firebog.net/hosts/AdguardDNS.txt
-		- https://v.firebog.net/hosts/Easylist.txt
-		- https://v.firebog.net/hosts/Prigent-Ads.txt
-		- https://v.firebog.net/hosts/Prigent-Malware.txt
-
-  - module: filter
-	pre_priority: 20
-	config:
-	  default: deny
-	  blocklist_files:
-		- ./config/var/lists/AdguardDNS-*.txt
-		- ./config/var/lists/Easylist-*.txt
-		- ./config/var/lists/Prigent-Ads-*.txt
-		- ./config/var/lists/Prigent-Malware-*.txt
+		- https://example.com/ads.txt
+		- https://example.com/hosts.txt
+		- https://serverA/hosts.txt
+		- https://serverB/hosts.txt
 ```
 
-------
+### 4.7 Domain filter / adblock (`filter`)
 
-### DockerHosts plugin
-
-The `DockerHosts` plugin answers selected queries directly from Docker metadata.
-It discovers containers via the Docker CLI on one or more endpoints, extracts
-hostnames plus IPv4/IPv6 addresses, and serves forward and reverse entries from
-an in-memory map that is periodically refreshed.
-
-In addition to A/AAAA/PTR records, DockerHosts publishes per-container TXT
-metadata and an optional aggregate `_containers.<suffix>` TXT record summarizing
-all containers. TXT lines include fields such as:
-
-- `name`, `id` (short container ID)
-- `ans4`, `ans6` (effective answer IPs)
-- `ports` (host listening ports derived from `NetworkSettings.Ports`)
-- `health`, `project-name`, `service`
-- `int4`, `int6`, `nets`, and `endpoint`
-
-TXT output can be extended (or replaced) with additional key/value pairs drawn
-from `docker inspect` via two configuration keys:
-
-- `txt_fields`: list of mappings with:
-  - `name`: TXT key name (for example `image`, `project`).
-  - `path`: minimal JSONPath-like expression into the inspect JSON
-	(for example `Config.Image`, `State.Health.Status`,
-	`Config.Labels.com.docker.compose.project`).
-- `txt_fields_replace` (bool, default `false`): when `true` and at least one
-  `txt_fields` entry resolves for a container, only those custom key/value pairs
-  are emitted in its TXT summary; otherwise they are appended to the built-in
-  summary.
-
-`path` supports a small, predictable subset of JSONPath:
-
-- Optional leading `$` / `$.` (ignored when present).
-- Dot-separated dict traversal, for example `Config.Image`,
-  `State.Health.Status`, `NetworkSettings.Networks.bridge.IPAddress`.
-- Integer segments applied to lists (for example `Config.Env.0`).
-- Special handling for Docker labels whose keys contain dots via
-  `Config.Labels.<full-label-key>`, such as
-  `Config.Labels.com.docker.compose.project`.
-
-**Configuration keys**
+Flexible domain/IP/pattern filter used to build adblockers and kid-safe DNS.
 
 ```yaml
 plugins:
-  - module: docker-hosts
+  - type: filter
 	config:
-	  # Optional: list of Docker endpoints; defaults to the local Unix socket
-	  endpoints:
-		- unix:///var/run/docker.sock
-		# Example TCP endpoints (remote Docker daemons or proxies):
-		# - tcp://127.0.0.1:2375
-		# - tcp://docker-host.internal:2375
-		# - tcp://10.0.0.10:2376
-
-	  # Optional: docker CLI binary; defaults to "docker"
-	  docker_binary: docker
-
-	  # TTL for A/AAAA/PTR answers served by this plugin (seconds; default 300)
+	  hooks:
+		pre_resolve:  { priority: 25 } # Run early in block queries so other plugins don't do anything
+		post_resolve: { priority: 25 } # Post-resolve IP filtering and policy
+	  default: allow  # deny | allow
+	  targets:
+		- 10.0.1.0/24 # Kids subnet
 	  ttl: 300
+	  # When a pre_resolve deny happens, synthesize an IP response pointing at a sinkhole address
+	  deny_response: ip  # nxdomain | refused | servfail | ip | noerror_empty
+	  deny_response_ip4: 0.0.0.0
 
-	  # Background refresh interval in seconds. When set to 0, only the
-	  # initial mapping from setup() is used and no periodic refresh occurs.
-	  reload_interval_seconds: 60
+	  # Post-resolve IP filtering rules (answer inspection)
+	  blocked_ips:
+		- ip: 203.0.113.10        # Replace a specific IP with a safer landing page
+		  action: replace
+		  replace_with: 0.0.0.0
+		- ip: 203.0.113.0/24      # Strip an entire subnet from answers
+		  action: remove
+		- ip: 198.51.100.42       # Block a single IP entirely (maps to deny)
+		  action: deny
 
-	  # Optional per-family host IP overrides. When set, these are used in
-	  # place of per-container addresses so that clients reach the host even
-	  # if container networks are not routable.
-	  # use_ipv4: 192.0.2.10
-	  # use_ipv6: 2001:db8::10
+	  blocked_domains_files:
+		- ./config/var/lists/*.txt
+	  allowed_domains:
+		- homework.example.org
+	  blocked_domains:
+		- how-to-cheat.org
+		- current-game-obession.io
 
-	  # Optional: add extra TXT fields from docker inspect, or replace the
-	  # built-in TXT summary entirely when txt_fields_replace is true.
-	  # txt_fields:
-	  #   - name: image
-	  #     path: Config.Image
-	  #   - name: project
-	  #     path: Config.Labels.com.docker.compose.project
-	  # txt_fields_replace: false
 ```
 
-`module` may be any of:
+### 4.8 Flaky upstream simulator (`flaky`)
 
-- Full dotted path: `foghorn.plugins.docker-hosts.DockerHosts`
-- Alias: `docker-hosts`, `docker_hosts`, or `docker`
-
-DockerHosts inspects all containers on each endpoint, building:
-
-- forward maps from hostname (case-insensitive) to IPv4/IPv6 addresses
-- reverse maps from both IPv4 and IPv6 addresses to hostnames using
-  RFC-compliant in-addr.arpa and ip6.arpa reverse names
-
-During `pre_resolve`, the plugin:
-
-- answers A queries from the IPv4 map (`QTYPE.A`)
-- answers AAAA queries from the IPv6 map (`QTYPE.AAAA`)
-- answers PTR queries when the reverse lookup matches a known address
-
-If a container is missing a hostname or has no usable IP addresses, DockerHosts
-logs a warning and skips that container. If no containers across all endpoints
-have usable hostname/IP combinations, it logs a summary warning after reload.
-
-------
-
-### ZoneRecords plugin
-
-The `ZoneRecords` plugin answers selected queries directly from one or more
-local files, and can act as an authoritative server for configured zones while
-still bypassing upstream resolvers and the cache for those names.
-
-**Record file format**
-
-Each non-empty, non-comment line in a records file must be:
-
-`<domain>|<qtype>|<ttl>|<value>`
-
-- `domain`: hostname (with or without trailing dot); stored and matched case-insensitively.
-- `qtype`: mnemonic (for example `A`, `AAAA`, `TXT`, `CNAME`) or numeric type code.
-- `ttl`: non-negative integer TTL in seconds.
-- `value`: RDATA for the given type (for example an IP for `A`/`AAAA`, a target
-  name for `CNAME`, the text for `TXT`, and so on).
-
-Lines beginning with `#` (after stripping leading whitespace), or that are
-empty after removing inline `#` comments, are ignored.
-
-When the same `(domain, qtype)` appears multiple times (even across multiple
-files), the first TTL is kept and values are de-duplicated while preserving
-first-seen ordering. This ordering is reflected in the final DNS answer.
-
-**Configuration keys**
+Injects DNS errors and timeouts for testing client behaviour.
 
 ```yaml
 plugins:
-  - module: zone
+  - type: flaky
 	config:
-	  # Provide one or more records files; lines use:
-	  #   <domain>|<qtype>|<ttl>|<value>
-	  # example.com|A|300|192.0.2.10
-	  file_paths:
-		- ./config/custom-records.txt
-		- ./config/custom-records-extra.txt
-
-	  # Optional: add or override entries directly in config using the same
-	  # line format; these are merged after file-backed records with
-	  # first-TTL-wins and de-duplicated values.
-	  # records:
-	  #   - example.com|A|300|192.0.2.20
-	  #   - www.example.com|CNAME|300|example.com.
-
-	  # Optional: control how filesystem changes are detected
-	  watchdog_enabled: true                        # default true when omitted
-	  watchdog_min_interval_seconds: 1.0            # minimum time between reloads
-	  watchdog_poll_interval_seconds: 0.0           # >0 enables stat-based polling
+	  servfail_percent: 5
+	  nxdomain_percent: 0
+	  timeout_percent: 1
+	  truncate_percent: 0
+	  noerror_empty_percent: 0
+	  apply_to_qtypes: ['A', 'AAAA']
 ```
 
-`module` may be any of:
+### 4.9 Greylist new names (`greylist_example`)
 
-- Full dotted path: `foghorn.plugins.zone-records.ZoneRecords`
-- Alias: `zone`, `zone_records`, `custom`, or `records`
+Introduces a delay window before new names are allowed.  The origin of the project!  Started as a greylist for security researches working on phishing protection. It would sound an alarm when potential phishing domain names were spotted.  Things like "mycorp.phishing.com".
+The idea was most of these phishing domains don't see any traffic before the campagin is active.
 
-When `watchdog_enabled` is true and the optional `watchdog` dependency is
-installed, the plugin watches the parent directories of all configured records
-files and reloads them when changed. When
-`watchdog_poll_interval_seconds > 0`, a lightweight polling loop supplements
-filesystem events, which is useful in some container or network filesystem
-setups where file change notifications are unreliable.
-
-------
-
-### DnsPrefetchPlugin (EXAMPLE, not for production)
-
-The `DnsPrefetchPlugin` runs a background worker that periodically inspects
-statistics (primarily `cache_hit_domains`, with `top_domains` as a fallback) and
-issues synthetic DNS queries for the hottest domains and qtypes so that cache
-entries stay warm.
-
-**Configuration keys**
 
 ```yaml
 plugins:
-  - module: dns_prefetch
+  - type: greylist_example
 	config:
-	  interval_seconds: 60        # how often to run a prefetch cycle
-	  prefetch_top_n: 100         # max domains considered each cycle
-	  max_consecutive_misses: 5   # stop prefetching if no hits are ever seen
-	  qtypes: ["A", "AAAA"]       # record types to prefetch
+	  db_path: ./config/var/greylist.db
+	  cache_ttl_seconds: 300
+	  duration_hours: 24
 ```
 
-Notes:
-- The plugin never modifies individual client queries; it only issues
-  background prefetches.
-- Statistics must be enabled for the plugin to be effective (see
-  `example_configs/prefetch.yaml` for a minimal example).
+### 4.10 mDNS / Bonjour bridge (`mdns`)
 
-------
-
-## Cache plugins
-Foghorn caches DNS responses via a configurable *cache plugin* under the top-level `cache:` key.
-
-Built-in cache plugins:
-- `in_memory_ttl` (default): in-process TTL cache
-- `sqlite3`: persistent on-disk TTL cache (SQLite)
-- `redis` / `valkey`: Redis-compatible remote cache (requires the optional Python dependency `redis`)
-- `none`: disables caching
-
-Examples (complete runnable configs) are available in:
-- `example_configs/cache_in_memory_ttl.yaml`
-- `example_configs/cache_sqlite3.yaml`
-- `example_configs/cache_redis.yaml`
-- `example_configs/cache_none.yaml`
-
-Minimal config snippets:
-
-`in_memory_ttl` (default):
+Expose mDNS / DNS-SD services as normal DNS records.
 
 ```yaml
-cache:
-  module: in_memory_ttl
-  config:
-	min_cache_ttl: 60
+plugins:
+  - type: mdns
+	config:
+	  domain: '.local'
+	  ttl: 120
+	  include_ipv4: true   # true | false
+	  include_ipv6: true   # true | false
+	  network_enabled: true
 ```
 
-`sqlite3` (persistent on-disk cache):
+### 4.11 New-domain WHOIS filter EXAMPLE (`new_domain`)
+
+Blocks domains that appear too new according to WHOIS data.
 
 ```yaml
-cache:
-  module: sqlite3
-  config:
-	db_path: ./config/var/dbs/dns_cache.db
-	namespace: dns_cache
-	min_cache_ttl: 60
+plugins:
+  - type: new_domain
+	config:
+	  threshold_days: 7
+	  whois_db_path: ./config/var/whois_cache.db
+	  whois_cache_ttl_seconds: 3600
 ```
 
-`redis` / `valkey` (remote cache):
+### 4.12 Rate limiting (`rate`)
+
+Adaptive rate limiting per client or per (client,domain).
 
 ```yaml
-cache:
-  module: redis
-  config:
-	url: redis://127.0.0.1:6379/0
-	namespace: foghorn:dns_cache:
-	min_cache_ttl: 60
+plugins:
+  - type: rate
+	config:
+	  mode: per_client        # per_client | per_client_domain | per_domain
+	  window_seconds: 10
+	  warmup_windows: 6
+	  burst_factor: 3.0
+	  min_enforce_rps: 50.0
+	  deny_response: nxdomain # nxdomain | refused | servfail | noerror_empty | ip
+	  deny_response_ip4: 0.0.0.0
+	  db_path: ./config/var/rate_limit.db
 ```
 
-`none` (disable caching):
+### 4.13 Per-domain upstream routing (`router`)
+
+Send different domains to different upstreams.
 
 ```yaml
-cache:
-  module: none
-```
-
-Notes:
-- `min_cache_ttl` is a cache-expiry floor used by the resolver; it does not rewrite TTLs inside DNS answers.
-
-## Complete `config.yaml` Example
-
-Here is a complete `config.yaml` file that shows how plugin priorities (including `setup_priority`) work:
-
-```yaml
-# Example configuration for the DNS caching server
-
-# Global timeout and upstream behaviour knobs
-foghorn:
-  timeout_ms: 2000
-  upstream_strategy: failover
-  upstream_max_concurrent: 1
-  use_asyncio: true
-
-  # asyncio can fail under a number of strict container rules.
-  # Check SECCOMP setting or run with --privileged.
-  # On false or asyncio fails, we fall back to a threaded HTTP server.
-
-listen:
-  # Listener config; UDP is enabled by default.
-  udp:
-	enabled: true
-	host: 127.0.0.1
-	port: 5335
-  tcp:
-	enabled: false
-	host: 127.0.0.1
-	port: 5335
-  dot:
-	enabled: false
-	host: 127.0.0.1
-	port: 8853
-	# cert_file: /path/to/cert.pem
-	# key_file: /path/to/key.pem
-  doh:
-	enabled: false
-	host: 127.0.0.1
-	port: 5380
-	# Optional TLS for DoH
-	# cert_file: /path/to/cert.pem
-	# key_file: /path/to/key.pem
-
-# Multiple upstream DNS servers.  See `foghorn` setting for more information
-# All upstreams share a single timeout (foghorn.timeout_ms) per attempt).
 upstreams:
-  - host: 8.8.8.8
-	port: 53
-	transport: udp
-  - host: 1.1.1.1
-	port: 853
-	transport: dot
-	tls:
-	  server_name: cloudflare-dns.com
-	  verify: true
-	  # ca_file: /etc/ssl/certs/ca-certificates.crt
-  - transport: doh
-	url: https://dns.google/dns-query
-	method: POST
-	headers:
-	  user-agent: FoghornDNS
-	tls:
-	  verify: true
-	  # ca_file: /etc/ssl/certs/ca-certificates.crt
-
-# Cache configuration
-cache:
-  module: in_memory_ttl
-  config:
-	# Minimum cache TTL (in seconds) applied to ***all*** cached responses.
-	# - For NOERROR with answers: cache TTL = max(min(answer TTLs), min_cache_ttl)
-	# - For NOERROR with no answers, NXDOMAIN, and SERVFAIL: cache TTL = min_cache_ttl
-	# Note: TTL field in the DNS response is not rewritten; this controls cache expiry only.
-	min_cache_ttl: 60
-
-# Optional DNSSEC configuration
-# dnssec:
-#   mode: passthrough            # ignore | passthrough | validate
-#   validation: upstream_ad      # upstream_ad | local (local is experimental)
-#   udp_payload_size: 1232
-
-# Logging configuration
-logging:
-  level: debug            # Available levels: debug, info, warn, error, crit
-  stderr: true            # Log to stderr (default: true)
-  file: /tmp/foghorn.log  # Optional: also log to this file
-  syslog: false           # Optional: also log to syslog
-
-# Statistics (optional)
-statistics:
-  enabled: false
-  interval_seconds: 10
-  reset_on_log: false
-  include_qtype_breakdown: true
-  include_top_clients: true
-  include_top_domains: true
-  top_n: 10
-  track_latency: true
-  # When true, either SIGUSR1 or SIGUSR2 will reset in-memory statistics before
-  # notifying plugins.
-  # sigusr2_resets_stats: true
-  # Optional display-only ignore filters for top lists. These do not affect
-  # totals or persisted aggregates; they only hide entries from the
-  # top_clients/top_domains/top_subdomains sections exposed via /stats.
-  # ignore:
-  #   # IPs/CIDRs to hide from top_clients only.
-  #   top_clients:
-  #     - 192.168.0.0/16
-  #     - 10.0.0.0/8
-  #
-  #   # Base domains to hide from top_domains and, when subdomains list is
-  #   # empty, from top_subdomains as well. Matching is exact by default.
-  #   top_domains:
-  #     - example.internal
-  #   # Matching mode for top_domains: "exact" (default) or "suffix".
-  #   # In suffix mode, a base domain D is ignored when D == value or
-  #   # D ends with "." + value.
-  #   top_domains_mode: suffix
-  #
-  #   # Full qnames to hide from top_subdomains. When this list is empty,
-  #   # the values from top_domains are reused as the ignore set.
-  #   top_subdomains:
-  #     - dev.example.internal
-  #   # Matching mode for top_subdomains: "exact" (default) or "suffix".
-  #   # In suffix mode, a subdomain name N is ignored when N == value or
-  #   # N ends with "." + value.
-  #   top_subdomains_mode: suffix
+  strategy: failover
+  endpoints:
+	- host: 9.9.9.9
+	  port: 53
+	  transport: udp
 
 plugins:
-  # New-domain filter: simple pre-resolve policy plugin.
-  - module: new_domain
-	config:
-	  threshold_days: 14
-
-  # Greylist plugin.
-  - module: greylist
-	config:
-	  duration_seconds: 60
-	  # duration_hours: 1  # Only if duration_seconds isn't provided
-	  # db_path: ./greylist.db
-
-  # Upstream router: route queries to specific upstreams by suffix.
-  # Uses the modern "upstreams" list format only.
-  - module: router
+  - type: router
 	config:
 	  routes:
-		- suffix: ".mylan"
+		- domain: internal.example
+		  upstreams:
+			- host: 10.0.0.53
+			  port: 53
+		- suffix: corp.local
 		  upstreams:
 			- host: 192.168.1.1
 			  port: 53
-		- suffix: "corp.internal"
-		  upstreams:
-			- host: 10.0.0.1
-			  port: 53
-			- host: 10.0.0.2
-			  port: 53
+```
 
-  # FileDownloader: runs early in the setup phase to download blocklists
-  # that the Filter plugin will read from disk.
-  - module: file_downloader
+### 4.14 Inline and file-based records (`zone`)
+
+Define custom records either inline or in zone files.
+
+```yaml
+plugins:
+  - type: zone
 	config:
-	  # setup_priority controls when setup() runs relative to other plugins.
-	  # Lower numbers run earlier. FileDownloader defaults to 15.
-	  setup_priority: 15
+	  file_paths:
+		- ./config/zones.d/internal.zone
+	  records:
+		- 'printer.lan|A|300|192.168.1.50'
+		- 'files.lan|AAAA|300|2001:db8::50'
+	  ttl: 300
+```
+
+---
+
+## 5. Sample configurations
+
+These sketches show how all the pieces fit together. Adjust paths and IPs to match your environment.
+
+### 5.1 `local`: workstation config
+
+Goals:
+
+- Cache locally for speed.
+- Forward to a public DoT resolver.
+- No plugins yet.
+
+```yaml
+vars:
+  PROFILE: local
+
+server:
+  listen:
+	dns:
+	  udp: {enabled: "true", host: "127.0.0.1", port: 5353}
+  cache:
+	module: memory
+
+upstreams:
+  strategy: failover
+  endpoints:
+	- host: 1.1.1.1
+	  port: 853
+	  transport: dot
+	  tls: {server_name: "cloudflare-dns.com", verify: true}
+
+logging:
+  python:
+	level: info
+  query_log_only: true
+
+stats:
+  enabled: true
+  source_backend: local-log
+
+plugins: []
+```
+
+### 5.2 `lan`: home LAN with adblock and kid filter
+
+Goals:
+
+- Listen on all interfaces.
+- Use filter+lists to block ads.
+- Use a second filter instance as a stricter allowlist for kids.
+- Route internal corp domains to a separate upstream.
+
+```yaml
+vars:
+  PROFILE: lan
+  LAN: 192.168.0.0/16
+  KIDS: 192.168.2.0/24
+
+server:
+  listen:
+	dns:
+	  udp: {enabled: true, host: 0.0.0.0, port: 53}
+  cache:
+	module: sqlite
+	config:
+	  db_path: ./config/var/dns_cache.db
+
+upstreams:
+  strategy: round_robin
+  endpoints:
+	- host: 9.9.9.9
+	  port: 53
+	  transport: udp
+	- host: 1.1.1.1
+	  port: 53
+	  transport: udp
+
+logging:
+  python:
+	level: info
+  async: true
+  query_log_only: false
+  backends:
+	- id: lan-log
+	  backend: sqlite
+	  config:
+		db_path: ./config/var/stats_lan.db
+
+stats:
+  enabled: true
+  source_backend: lan-log
+
+plugins:
+  - type: lists
+	id: blocklists
+	config:
+	  pre_priority: 20
 	  download_path: ./config/var/lists
-	  interval_seconds: 3600
+	  interval_days: 1
 	  urls:
-		- https://v.firebog.net/hosts/AdguardDNS.txt
-		- https://v.firebog.net/hosts/Easylist.txt
-		- https://v.firebog.net/hosts/Prigent-Ads.txt
-		- https://v.firebog.net/hosts/Prigent-Malware.txt
+		- https://example.com/ads.txt
 
-  # Filter plugin: loads domain lists and applies domain/IP filtering.
-  - module: filter
-	  # pre_priority for setupable plugins, or to the class default (50).
-	  setup_priority: 20
-
-	  # Pre-resolve (domain) filtering
-	  blocked_domains:
-		- "malware.com"
-		- "phishing-site.org"
-		- "spam.example"
-
-	  blocked_patterns:
-		- ".*\\.porn\\..*"      # Block any domain with "porn" in subdomain
-		- "casino[0-9]+\\..*"   # Block casino1.com, casino2.net, etc.
-		- ".*adult.*"           # Block domains containing "adult"
-
-	  blocked_keywords:
-		- "porn"
-		- "gambling"
-		- "casino"
-		- "malware"
-		- "phishing"
-
-	  # Optional: file-backed allow/block inputs (globs allowed)
-	  # allowed_domains_files:
-	  #   - config/allow.txt
-	  #   - config/allow.d/*.list
-	  # blocked_domains_files:
-	  #   - config/block.txt
-	  #   - config/block.d/*.txt
-	  # blocked_patterns_files:
-	  #   - config/patterns/*.re
-	  # blocked_keywords_files:
-	  #   - config/keywords.txt
-	  # blocked_ips_files:
-	  #   - config/ips.txt
-
-	  # Post-resolve (IP) filtering with per-IP actions
-	  blocked_ips:
-		# Remove just the matching IP(s)
-		- ip: "23.220.75.245/16"
-		  action: "remove"
-		# Deny entire response if any returned IPs are found
-		- ip: "1.2.3.4"
-		  action: "deny"
-
-  # Examples plugin: demonstrates additional policies and rewrites.
-  - module: foghorn.plugins.examples.ExamplesPlugin
+  - type: filter
+	id: adblock  # Ad block for everyone
 	config:
-	  # Pre-resolve policy
-	  max_subdomains: 5
-	  max_length_no_dots: 50
-	  base_labels: 2
+	  pre_priority: 40
+	  default: allow
+	  blocked_domains_files:
+		- ./config/var/lists/ads.txt
 
-	  # Post-resolve IP rewrite rules
-	  rewrite_first_ipv4:
-		- apply_to_qtypes: ["A"]
-		  ip_override: 127.0.0.1
-		- apply_to_qtypes: ["AAAA"]
-		  ip_override: ::1
+  - type: filter
+	id: kids  # Filter just for the kids.
+	config:
+	  pre_priority: 50
+	  targets: ${KIDS}
+	  default: deny
+	  allowed_domains:
+		- homework.example.org
+		- library.example.org
+	  deny_response: ip
+	  deny_response_ip4: 0.0.0.0
 
+  - type: router
+	id: corp-router
+	config:
+	  pre_priority: 80
+	  routes:
+		- suffix: corp
+		  upstreams:
+			- host: 192.168.100.53
+			  port: 53
 ```
 
-------
+### 5.3 `smb`: small business
 
-## Logging
+Goals:
 
-Foghorn includes configurable logging with bracketed level tags and UTC timestamps. Example output:
+- Persistent DNS cache.
+- Local LAN overrides via hosts, mDNS bridge, and zone records.
+- Simple access control and rate limiting.
+- Query-log persistence in MariaDB/MySQL (configured via logging.backends).
 
+```yaml
+vars:
+  PROFILE: smb
+  LISTEN: "0.0.0.0"
+  LAN: 192.168.0.0/16
+  FLOOR1: 192.168.10.50
+  FLOOR2: 192.168.20.50
+  FLOOR1_NET: 192.168.10.0/24
+  FLOOR2_NET: 192.168.20.0/24
+
+server:
+  listen:
+	dns:
+	  udp: {enabled: true, host: ${LISTEN}, port: 53}
+	  tcp: {enabled: true, host: ${LISTEN}, port: 53}
+  cache:
+	module: sqlite
+	config:
+	  db_path: ./config/var/dns_cache.db
+
+upstreams:
+  strategy: failover
+  endpoints:
+	- host: dot1.myisp.example
+	  port: 853
+	  transport: dot
+	  tls: {server_name: dot1.myisp.example, verify: true}
+	- host: dot2.myisp.example
+	  port: 853
+	  transport: dot
+	  tls: {server_name: dot2.myisp.example, verify: true}
+
+logging:
+  python:
+	level: info
+  async: true
+  query_log_only: false
+  backends:
+	- id: mariadb
+	  backend: mariadb
+	  config:
+		host: db.internal
+		port: 3306
+		user: foghorn
+		database: foghorn_stats
+
+stats:
+  enabled: true
+  source_backend: mariadb
+
+plugins:
+  - type: acl
+	id: lan-only
+	config:
+	  pre_priority: 10
+	  default: deny
+	  allow:
+		- ${LAN}
+
+  - type: hosts
+	id: office-hosts
+	config:
+	  pre_priority: 20
+	  file_paths:
+		- /etc/hosts
+		- ./config/hosts.office
+
+  - type: mdns
+	id: office-mdns
+	config:
+	  pre_priority: 30
+	  domain: 'devices.mycorp'
+	  ttl: 120
+
+  - type: zone
+	id: printers-floor1
+	config:
+	  pre_priority: 40
+	  targets: ${FLOOR1_NET}
+	  records:
+		- 'printer.corp|A|300|${FLOOR1}'
+
+  - type: zone
+	id: printers-floor2
+	config:
+	  pre_priority: 41
+	  targets: ${FLOOR2_NET}
+	  records:
+		- 'printer.corp|A|300|${FLOOR2}'
+
+  - type: docker
+	id: lan-docker
+	config:
+	  pre_priority: 50
+	  targets: ${LAN}
+	  endpoints:
+		- url: unix:///var/run/docker.sock
+	  ttl: 60
+
+  - type: rate
+	id: smb-rate
+	config:
+	  pre_priority: 90
+	  mode: per_client
+	  window_seconds: 10
+	  min_enforce_rps: 20.0
+	  deny_response: servfail
 ```
-2025-10-24T05:56:01Z [info] foghorn.main: Starting Foghorn on 127.0.0.1:5354
-2025-10-24T05:56:01Z [debug] foghorn.server: Query from 127.0.0.1: example.com 1
-2025-10-24T05:56:02Z [warn] foghorn.plugins.new_domain_filter: Domain example-new.com blocked (age: 3 days, threshold: 7)
+
+### 5.4 `enterprise`: layered caches and rich stats
+
+Goals:
+
+- Redis or Memcached cache for large edge deployments.
+- Multiple PostgreSQL statistics backends plus Influx logging.
+- Heavy use of plugins (router, filter, docker, mdns, zone).
+- Fine-grained client targeting and per-plugin priorities.
+
+```yaml
+vars:
+  PROFILE: enterprise
+  LISTEN: 0.0.0.0
+  LAN: 10.0.0.0/16
+  OFFICE: 10.10.0.0/16
+  OFFICE_REMOTE: 10.20.0.0/16
+
+server:
+  listen:
+	dns:
+	  udp: {enabled: true, host: ${LISTEN}, port: 53}
+	  tcp: {enabled: true, host: ${LISTEN}, port: 53}
+	  dot:
+		enabled: true
+		host: ${LISTEN}
+		port: 853
+		cert_file: /etc/foghorn/tls/server.crt
+		key_file: /etc/foghorn/tls/server.key
+  cache:
+	module: redis # redis | memcached | sqlite | memory | mongodb | none
+	config:
+	  url: redis://redis-cache.internal:6379/0
+	  namespace: foghorn:dns_cache:
+
+upstreams:
+  strategy: round_robin
+  max_concurrent: 4
+  endpoints:
+	- host: 10.0.0.53
+	  port: 53
+	  transport: udp
+	  pool:
+		max_connections: 64
+		idle_timeout_ms: 30000
+	- host: 10.0.1.53
+	  port: 53
+	  transport: udp
+	  pool:
+		max_connections: 64
+		idle_timeout_ms: 30000
+	- host: 10.0.2.53
+	  port: 853
+	  transport: dot
+	  tls: {server_name: dns.corp.example, verify: true}
+	  pool:
+		max_connections: 32
+		idle_timeout_ms: 60000
+
+logging:
+  python:
+	level: info
+  async: true
+  query_log_only: false
+  backends:
+	- id: pg_primary
+	  backend: postgr   - id: pg_reporting
+	  backend: postgres
+	  config:
+		  host: pg-reporting.internal
+		  port: 5432
+		  user: foghorn_ro
+		  database: foghorn_stats
+	- id: influx-logging
+	  backend: influx
+	  config:
+		  write_url: http://metrics.internal:8086/api/v2/write
+		  bucket: dns
+		  org: infra
+
+stats:
+  enabled: true
+  source_backend: pg_primary
+
+plugins:
+  - type: acl
+	id: lan-only
+	config:
+	  pre_priority: 10
+	  default: deny
+	  allow:
+		- ${LAN}
+
+  - type: docker
+	id: lan-docker
+	config:
+	  pre_priority: 20
+	  targets: ${LAN}
+	  endpoints:
+		- url: unix:///var/run/docker.sock
+	  ttl: 60
+
+  - type: mdns
+	id: enterprise-mdns
+	config:
+	  pre_priority: 30
+	  domain: 'devices.lan'
+	  ttl: 120
+
+  - type: zone
+	id: zone-1-office
+	config:
+	  pre_priority: 40
+	  targets: ${OFFICE}
+	  file_paths:
+		- ./config/zones.d/zone-1.zone
+
+  - type: zone
+	id: zone-2-remote
+	config:
+	  pre_priority: 41
+	  targets: ${OFFICE_REMOTE}
+	  file_paths:
+		- ./config/zones.d/zone-2.zone
+
+  - type: router
+	id: corp-router
+	config:
+	  pre_priority: 60
+	  routes:
+		- suffix: corp.example
+		  upstreams:
+			- host: 10.1.0.53
+			  port: 53
+
+  - type: filter
+	id: global-filter
+	config:
+	  pre_priority: 80
+	  default: allow
+	  blocked_domains_files:
+		- ./config/var/lists/global_block.txt
 ```
 
-See README-DEV.md for advanced logging and statistics options.
-
-## Use Cases
-
-1) Local development resolver
-  -  Serve only localhost.
-  -  Use DoT/DoH for upstream encrypted DNS.
-  -  Route VPN-only domains over the VPN.
-  -  Useful for dev machines that need split-horizon resolution.
-
-2) LAN resolver / name service
-  -  Serve the whole LAN.
-  -  Honor and serve entries from /etc/hosts or a centralized hosts file.
-  -  Optionally publish mDNS or integrate with local DHCP for dynamic names.
-
-3) Office caching recursive resolver
-  -  High-performance caching recursive resolver for an office.
-  -  Backed by Redis (or in-process cache) for TTL-sensitive caching.
-  -  Use DockerHosts to resolve container names to services in the office network.
-
-4) Authoritative DNS server
-  -  Serve authoritative records for one or more zones.
-  -  Stand-alone deployment recommended for reliability and security.
-  -  Useful for small orgs or lab domains.
-
-5) DNS-based load balancer / aggregator
-  -  Aggregate/cache results from multiple upstreams and upstream pools.
-  -  Implement simple health checks and weighted round-robin via plugins.
-  -  Reduce latency and offload upstream queries.
-
-6) Lab & resilience testing harness
-  -  Enable FlakyServer plugin to inject seedable, randomized failures (timeouts, malformed responses, truncated answers) and wire-level fuzzing.
-  -  Useful for testing client resilience, retries, and fallback behavior.
-
-7) Client access control & policy enforcement
-  -  Restrict query types (e.g., deny MX lookups for certain subnets).
-  -  Block or allow specific domains or categories (allowlist/blacklist semantics).
-  -  Force IPv6-only by denying A and allowing AAAA for specific clients or groups.
-  -  Limit new employees to a curated set of sites during onboarding.
-
-8) Custom behavior via plugins
-  -  Write plugins to transform queries/responses: redirect domains, synthesize records, perform per-client logic, integrate with external APIs (auth, telemetry, IP reputation).
-  -  Drop the "Plugin" suffix in names (e.g., UpstreamRouter → UpstreamRouter) if you prefer.
-
-9) Split-horizon / multi-homed environments
-  -  Serve different answers based on client subnet, VLAN, or AD site.
-  -  Route internal names to private IPs while exposing public records externally.
-
-10) Privacy-forward resolver for teams
-  -  Strip or minimize query metadata, forward queries via encrypted channels (DoH/DoT), and optionally log only aggregates to external telemetry.
-  -  Useful for remote teams with privacy requirements.
-
-## License
-
-MIT, see LICENSE file.
+From here you can mix and match plugins, caches, and stats backends to shape Foghorn into exactly the DNS service you need.

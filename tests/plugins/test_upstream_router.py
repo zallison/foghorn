@@ -1,5 +1,5 @@
 """
-Brief: Unit tests for UpstreamRouterPlugin covering pre_resolve routing and failover forwarding.
+Brief: Unit tests for UpstreamRouter covering pre_resolve routing and failover forwarding.
 
 Inputs:
   - None (tests generate synthetic DNS wires and mock network calls)
@@ -10,8 +10,8 @@ Outputs:
 
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
-from foghorn.plugins.base import PluginContext
-from foghorn.plugins.upstream_router import UpstreamRouterPlugin
+from foghorn.plugins.resolve.base import PluginContext
+from foghorn.plugins.resolve.upstream_router import UpstreamRouter
 
 
 def _mk_query(name="example.com", qtype="A"):
@@ -98,7 +98,7 @@ def test_pre_resolve_single_upstream_sets_candidates():
     Outputs:
       - None: asserts candidates list; returns None
     """
-    plugin = UpstreamRouterPlugin(
+    plugin = UpstreamRouter(
         routes=[
             {
                 "domain": "test.example",
@@ -125,7 +125,7 @@ def test_pre_resolve_multi_upstreams_sets_candidates_no_override():
     Outputs:
       - None: asserts candidates list order; override remains None
     """
-    plugin = UpstreamRouterPlugin(
+    plugin = UpstreamRouter(
         routes=[
             {
                 "suffix": ".example",
@@ -158,7 +158,7 @@ def test_pre_resolve_no_match_passthrough():
     Outputs:
       - None: asserts ctx.upstream_candidates and override remain None
     """
-    plugin = UpstreamRouterPlugin(
+    plugin = UpstreamRouter(
         routes=[{"domain": "x.example", "upstream": {"host": "1.1.1.1", "port": 53}}]
     )
     ctx = PluginContext(client_ip="127.0.0.1")
@@ -180,7 +180,7 @@ def test_pre_resolve_case_insensitive_and_trailing_dot():
     Outputs:
       - None: asserts candidates set correctly
     """
-    plugin = UpstreamRouterPlugin(
+    plugin = UpstreamRouter(
         routes=[
             {
                 "domain": "Example.COM.",
@@ -211,7 +211,7 @@ def test_normalize_mixed_routes_and_types():
     Outputs:
       - None: asserts normalized domain/suffix and int ports
     """
-    plugin = UpstreamRouterPlugin()
+    plugin = UpstreamRouter()
     routes = [
         {
             "domain": "MiXeD.Example.",
@@ -245,7 +245,7 @@ def test_normalize_ignores_invalid_entries():
     Outputs:
       - None: asserts only valid, matchable routes remain
     """
-    plugin = UpstreamRouterPlugin()
+    plugin = UpstreamRouter()
     routes = [
         {
             "domain": "ok.example",
@@ -283,7 +283,7 @@ def test_match_exact_domain_vs_suffix_priority():
     Outputs:
       - None: asserts exact match for 'a.example' and suffix match for 'b.example.'
     """
-    plugin = UpstreamRouterPlugin(
+    plugin = UpstreamRouter(
         routes=[
             {
                 "domain": "A.Example",
@@ -319,7 +319,7 @@ def test_forward_success_first_upstream(monkeypatch):
     Outputs:
       - None: asserts success=True and single attempt
     """
-    plugin = UpstreamRouterPlugin()
+    plugin = UpstreamRouter()
     q, wire = _mk_query("ok.example", "A")
     ok_wire = _mk_reply(q, RCODE.NOERROR, answers=[("ok.example", "1.2.3.4", 60)])
 
@@ -346,7 +346,7 @@ def test_forward_servfail_then_success(monkeypatch):
     Outputs:
       - None: asserts success=True and two attempts
     """
-    plugin = UpstreamRouterPlugin()
+    plugin = UpstreamRouter()
     q, wire = _mk_query("svc.example", "A")
     servfail = _mk_reply(q, RCODE.SERVFAIL)
     ok_wire = _mk_reply(q, RCODE.NOERROR)
@@ -374,7 +374,7 @@ def test_forward_nxdomain_is_accepted(monkeypatch):
     Outputs:
       - None: asserts success=True and single attempt
     """
-    plugin = UpstreamRouterPlugin()
+    plugin = UpstreamRouter()
     q, wire = _mk_query("nx.example", "A")
     nx = _mk_reply(q, RCODE.NXDOMAIN)
 
@@ -401,7 +401,7 @@ def test_forward_exception_then_success(monkeypatch):
     Outputs:
       - None: asserts success=True and two attempts
     """
-    plugin = UpstreamRouterPlugin()
+    plugin = UpstreamRouter()
     q, wire = _mk_query("ex.example", "A")
     ok_wire = _mk_reply(q, RCODE.NOERROR)
 
@@ -428,7 +428,7 @@ def test_forward_unparseable_reply_is_accepted(monkeypatch):
     Outputs:
       - None: asserts success=True and returned bytes match
     """
-    plugin = UpstreamRouterPlugin()
+    plugin = UpstreamRouter()
     q, wire = _mk_query("junk.example", "A")
     junk = b"xxxx"
 
@@ -455,7 +455,7 @@ def test_forward_all_failures_return_synth_servfail(monkeypatch):
     Outputs:
       - None: asserts success=False and response parses as SERVFAIL with matching ID
     """
-    plugin = UpstreamRouterPlugin()
+    plugin = UpstreamRouter()
     q, wire = _mk_query("allfail.example", "A")
     servfail = _mk_reply(q, RCODE.SERVFAIL)
 
@@ -483,7 +483,7 @@ def test_forward_truncated_reply_is_accepted(monkeypatch):
     Outputs:
       - None: asserts success=True and single attempt
     """
-    plugin = UpstreamRouterPlugin()
+    plugin = UpstreamRouter()
     q, wire = _mk_query("tc.example", "A")
     tc_wire = _mk_reply(q, RCODE.NOERROR, truncated=True)
 

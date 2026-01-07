@@ -1,4 +1,3 @@
-import functools
 import logging
 import socketserver
 import threading
@@ -15,12 +14,12 @@ from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
 
 from cachetools import TTLCache
 
-from foghorn.utils.cache_registry import registered_cached
-from ..plugins import base as plugin_base
-from ..plugins.base import BasePlugin, PluginContext, PluginDecision
-from ..recursive_resolver import RecursiveResolver
-from ..transports.dot import DoTError, get_dot_pool
-from ..transports.tcp import TCPError, get_tcp_pool, tcp_query
+from foghorn.plugins.resolve import base as plugin_base
+from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
+from foghorn.servers.recursive_resolver import RecursiveResolver
+from foghorn.servers.transports.dot import DoTError, get_dot_pool
+from foghorn.servers.transports.tcp import TCPError, get_tcp_pool, tcp_query
+from foghorn.utils.register_caches import registered_cached, registered_lru_cached
 from .udp_server import DNSUDPHandler
 
 logger = logging.getLogger("foghorn.server")
@@ -175,40 +174,29 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
       - bytes: response with corrected ID.
 
     Fast path: DNS ID is the first 2 bytes (big-endian). We rewrite them
-    without parsing to avoid any packing differences.
-
-    Note: We normalize to bytes before delegating to a cached helper so that
-    unhashable types (e.g., bytearray) do not break caching.
+    without parsing to avoid any packing differences. For non-bytes inputs we
+    return the original object unchanged so callers can rely on a best-effort
+    behaviour without hard failures.
     """
+    # Non-bytes inputs (e.g., None in defensive tests) are returned unchanged
+    # but still trigger an error log so callers can diagnose misuse.
+    if not isinstance(wire, (bytes, bytearray, memoryview)):
+        logger.error("Failed to set response id: non-bytes wire %r", type(wire))
+        return wire
     try:
-        # Normalize to bytes to ensure hashability and immutability
-        try:
-            bwire = bytes(wire)
-        except Exception:
-            bwire = wire  # fallback; will likely still be bytes
-        return _set_response_id_cached(bwire, int(req_id))
-    except (
-        Exception
-    ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+        bwire = bytes(wire)
+        if len(bwire) < 2:
+            return bwire
+        hi = (int(req_id) >> 8) & 0xFF
+        lo = int(req_id) & 0xFF
+        return bytes([hi, lo]) + bwire[2:]
+    except Exception as e:  # pragma: no cover - defensive: error-handling path
         logger.error("Failed to set response id: %s", e)
-        return (
-            bytes(wire)
-            if not isinstance(wire, (bytes, bytearray))
-            else (bytes(wire) if isinstance(wire, bytearray) else wire)
-        )
+        # Fall back to returning the original value when rewriting fails.
+        return wire
 
 
-@functools.lru_cache(maxsize=1024)
-def _set_response_id_cached(wire: bytes, req_id: int) -> bytes:
-    """Cached helper for setting DNS ID on an immutable bytes payload.
-
-    Inputs:
-      - wire: Immutable bytes payload containing DNS message.
-      - req_id: int request ID to embed in the first two bytes.
-
-    Outputs:
-      - bytes: DNS message with first two bytes rewritten when possible.
-    """
+def _set_response_id_bytes(wire: bytes, req_id: int) -> bytes:
     try:
         if len(wire) >= 2:
             hi = (req_id >> 8) & 0xFF
@@ -359,7 +347,7 @@ def send_query_with_failover(
                 )
                 verify = bool(tls_cfg.get("verify", True))
                 ca_file = tls_cfg.get("ca_file")
-                from ..transports.doh import (  # local import to avoid overhead
+                from foghorn.servers.transports.doh import (  # local import to avoid overhead
                     doh_query,
                 )
 
@@ -380,7 +368,7 @@ def send_query_with_failover(
                 except Exception:
                     pack = None
                 if callable(pack):
-                    from ..transports.udp import udp_query
+                    from foghorn.servers.transports.udp import udp_query
 
                     response_wire = udp_query(
                         host, int(port), query.pack(), timeout_ms=timeout_ms
@@ -560,7 +548,7 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
             if isinstance(decision, PluginDecision):
                 if decision.action == "drop":
                     # Pre-plugin timeout/drop: return sentinel empty wire so UDP
-                    # handlers and other transports can choose not to reply.
+                    # handlers and othefoghorn.servers.transports can choose not to reply.
                     return _ResolveCoreResult(
                         wire=b"",
                         dnssec_status=None,
@@ -1130,7 +1118,7 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
         # delegations/referrals using TTLs derived from SOA/NS records where
         # possible, following RFC 2308 guidance.
 
-        # DNSSEC classification for non-UDP transports (TCP/DoT/DoH) now shares
+        # DNSSEC classification for non-UDfoghorn.servers.transports (TCP/DoT/DoH) now shares
         # the same helper as UDP handlers so stats and query_log entries carry a
         # consistent "secure"/"insecure" status when dnssec.mode is 'validate'.
         dnssec_status = None
@@ -1253,7 +1241,7 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
-        # Latency tracking shared across all transports
+        # Latency tracking shared across alfoghorn.servers.transports
         if stats is not None and t0 is not None:
             try:
                 t1 = _time.perf_counter()
@@ -1336,7 +1324,7 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
     upstreams, DNSSEC knobs, and optional StatsCollector) so that TCP/DoT/DoH
     and other non-UDP callers share the same behavior and statistics pipeline.
 
-    DNS response caching is provided by `foghorn.plugins.base.DNS_CACHE`.
+    DNS response caching is provided by `foghorn.plugins.resolve.base.DNS_CACHE`.
 
     Example:
       >>> resp = resolve_query_bytes(query_bytes, '127.0.0.1')
@@ -1399,12 +1387,12 @@ class DNSServer:
             min_cache_ttl: Minimum cache TTL in seconds applied to all cached responses.
             stats_collector: Optional StatsCollector for recording metrics.
         """
-        # Install cache plugin for all transports.
+        # Install cache plugin for alfoghorn.servers.transports.
         if cache is None:
             try:
-                from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+                from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 
-                cache = InMemoryTTLCachePlugin()
+                cache = InMemoryTTLCache()
             except Exception:
                 cache = None
         try:

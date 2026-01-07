@@ -24,10 +24,22 @@ def test_sigusr2_calls_plugin_handlers(monkeypatch, caplog):
       - None
     """
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
         "upstreams:\n"
-        "  - host: 1.1.1.1\n"
-        "    port: 53\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "    use_asyncio: true\n"
     )
 
     class DummyServer:

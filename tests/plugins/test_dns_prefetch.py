@@ -13,7 +13,7 @@ from typing import List, Optional, Tuple
 
 import pytest
 
-from foghorn.plugins.base import PluginContext
+from foghorn.plugins.resolve.base import PluginContext
 from foghorn.stats import StatsCollector, StatsSnapshot
 
 
@@ -58,8 +58,8 @@ def test_dns_prefetch_setup_starts_thread_once_and_sigusr2_stops(monkeypatch) ->
       - None; asserts thread is started once and stop event is set.
     """
 
-    from foghorn.plugins.dns_prefetch import DnsPrefetchPlugin
-    import foghorn.plugins.dns_prefetch as mod
+    from foghorn.plugins.resolve.dns_prefetch import DnsPrefetch
+    import foghorn.plugins.resolve.dns_prefetch as mod
 
     created = {"count": 0}
 
@@ -79,13 +79,13 @@ def test_dns_prefetch_setup_starts_thread_once_and_sigusr2_stops(monkeypatch) ->
 
     monkeypatch.setattr(mod.threading, "Thread", DummyThread)
 
-    plugin = DnsPrefetchPlugin(interval_seconds=60)
+    plugin = DnsPrefetch(interval_seconds=60)
     plugin.setup()
     plugin.setup()  # should be idempotent
 
     assert created["count"] == 1
     assert plugin._thread is not None
-    assert plugin._thread.name == "DnsPrefetchPlugin"
+    assert plugin._thread.name == "DnsPrefetch"
     assert plugin._thread.daemon is True
 
     assert plugin._stop_event.is_set() is False
@@ -103,10 +103,10 @@ def test_dns_prefetch_get_stats_collector_requires_statscollector(monkeypatch) -
       - None; asserts type gating around DNSUDPHandler.stats_collector.
     """
 
-    from foghorn.plugins.dns_prefetch import DnsPrefetchPlugin
+    from foghorn.plugins.resolve.dns_prefetch import DnsPrefetch
     from foghorn.servers.udp_server import DNSUDPHandler
 
-    plugin = DnsPrefetchPlugin(interval_seconds=60)
+    plugin = DnsPrefetch(interval_seconds=60)
     # Prevent starting a real background thread during unit tests.
     plugin.interval_seconds = 0
     plugin.setup()
@@ -131,10 +131,10 @@ def test_dns_prefetch_run_single_cycle_prefers_cache_hit_domains_and_limits(
       - None; asserts only the top-N cache-hit domains are prefetched.
     """
 
-    from foghorn.plugins.dns_prefetch import DnsPrefetchPlugin
+    from foghorn.plugins.resolve.dns_prefetch import DnsPrefetch
     from foghorn.servers.udp_server import DNSUDPHandler
 
-    plugin = DnsPrefetchPlugin(interval_seconds=60, prefetch_top_n=2)
+    plugin = DnsPrefetch(interval_seconds=60, prefetch_top_n=2)
     plugin.interval_seconds = 0
     plugin.setup()
 
@@ -175,10 +175,10 @@ def test_dns_prefetch_run_single_cycle_falls_back_to_top_domains(monkeypatch) ->
       - None; asserts top_domains are used as candidates.
     """
 
-    from foghorn.plugins.dns_prefetch import DnsPrefetchPlugin
+    from foghorn.plugins.resolve.dns_prefetch import DnsPrefetch
     from foghorn.servers.udp_server import DNSUDPHandler
 
-    plugin = DnsPrefetchPlugin(interval_seconds=60, prefetch_top_n=1)
+    plugin = DnsPrefetch(interval_seconds=60, prefetch_top_n=1)
     plugin.interval_seconds = 0
     plugin.setup()
 
@@ -207,10 +207,10 @@ def test_dns_prefetch_run_single_cycle_skips_after_max_misses_until_hit_increase
       - None; asserts skip behavior and streak reset when hits increase.
     """
 
-    from foghorn.plugins.dns_prefetch import DnsPrefetchPlugin
+    from foghorn.plugins.resolve.dns_prefetch import DnsPrefetch
     from foghorn.servers.udp_server import DNSUDPHandler
 
-    plugin = DnsPrefetchPlugin(
+    plugin = DnsPrefetch(
         interval_seconds=60,
         prefetch_top_n=1,
         max_consecutive_misses=2,
@@ -259,9 +259,9 @@ def test_dns_prefetch_prefetch_domain_continues_on_error(monkeypatch) -> None:
       - None; asserts later qtypes still run.
     """
 
-    from foghorn.plugins.dns_prefetch import DnsPrefetchPlugin
+    from foghorn.plugins.resolve.dns_prefetch import DnsPrefetch
 
-    plugin = DnsPrefetchPlugin(interval_seconds=60, qtypes=["A", "AAAA"])
+    plugin = DnsPrefetch(interval_seconds=60, qtypes=["A", "AAAA"])
     plugin.interval_seconds = 0
     plugin.setup()
 
@@ -290,10 +290,10 @@ def test_dns_prefetch_prefetch_single_sets_and_resets_threadlocal(monkeypatch) -
       - None; asserts threadlocal marker is reset even on exceptions.
     """
 
-    from foghorn.plugins.dns_prefetch import DnsPrefetchPlugin, _PREFETCH_LOCAL
-    import foghorn.plugins.dns_prefetch as mod
+    from foghorn.plugins.resolve.dns_prefetch import DnsPrefetch, _PREFETCH_LOCAL
+    import foghorn.plugins.resolve.dns_prefetch as mod
 
-    plugin = DnsPrefetchPlugin(interval_seconds=60)
+    plugin = DnsPrefetch(interval_seconds=60)
     plugin.interval_seconds = 0
     plugin.setup()
 
@@ -330,9 +330,9 @@ def test_dns_prefetch_hooks_are_noops() -> None:
       - None; asserts hook return values.
     """
 
-    from foghorn.plugins.dns_prefetch import DnsPrefetchPlugin
+    from foghorn.plugins.resolve.dns_prefetch import DnsPrefetch
 
-    plugin = DnsPrefetchPlugin(interval_seconds=60)
+    plugin = DnsPrefetch(interval_seconds=60)
     plugin.interval_seconds = 0
     plugin.setup()
 

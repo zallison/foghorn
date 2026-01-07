@@ -8,7 +8,6 @@ guaranteed thread-safety for concurrent request handling.
 
 from __future__ import annotations
 
-import functools
 import importlib.metadata as importlib_metadata
 import ipaddress
 import json
@@ -23,12 +22,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-logger = logging.getLogger(__name__)
+from foghorn.plugins.querylog import BaseStatsStore
+from foghorn.utils.register_caches import registered_lru_cached
 
+logger = logging.getLogger(__name__)
 
 try:
     FOGHORN_VERSION = importlib_metadata.version("foghorn")
-except Exception:  # pragma: no cover - defensive fallback
+except Exception:  # pragma: no cover - defensive fallback when metadata is missing
     FOGHORN_VERSION = "unknown"
 
 
@@ -54,7 +55,7 @@ def get_process_uptime_seconds() -> float:
     return max(0.0, time.time() - _PROCESS_START_TIME)
 
 
-@functools.lru_cache(maxsize=1024)
+@registered_lru_cached(maxsize=(16 * 1024))
 def _normalize_domain(domain: str) -> str:
     """
     Normalize domain name for statistics tracking.
@@ -72,7 +73,7 @@ def _normalize_domain(domain: str) -> str:
     return domain.rstrip(".").lower()
 
 
-@functools.lru_cache(maxsize=1024)
+@registered_lru_cached(maxsize=(16 * 1024))
 def _is_subdomain(domain: str) -> bool:
     """Return True if the name should be treated as a subdomain.
 
@@ -1516,7 +1517,7 @@ class StatsCollector:
         include_top_domains: bool = False,
         top_n: int = 10,
         track_latency: bool = False,
-        stats_store: Optional[StatsSQLiteStore] = None,
+        stats_store: Optional[BaseStatsStore] = None,
         ignore_top_clients: Optional[List[str]] = None,
         ignore_top_domains: Optional[List[str]] = None,
         ignore_top_subdomains: Optional[List[str]] = None,
@@ -1582,8 +1583,11 @@ class StatsCollector:
         # the persistent store; aggregate counters remain in-memory only.
         self.query_log_only = bool(query_log_only)
 
-        # Optional persistent store for long-lived aggregates and query logs
-        self._store: Optional[StatsSQLiteStore] = stats_store
+        # Optional persistent store for long-lived aggregates and query logs.
+        # This can be any BaseStatsStore implementation, including
+        # MultiStatsStore, which fans writes out to multiple concrete
+        # backends (for example, SQLite plus an MQTT logging sink).
+        self._store: Optional[BaseStatsStore] = stats_store
 
         # Core counters
         self._totals: Dict[str, int] = defaultdict(int)
@@ -2239,7 +2243,7 @@ class StatsCollector:
         Example:
             >>> collector = StatsCollector()
             >>> collector.record_plugin_decision(
-            ...     "FilterPlugin", "block", reason="blocklist_match", domain="bad.com"
+            ...     "Filter", "block", reason="blocklist_match", domain="bad.com"
             ... )
         """
         with self._lock:
@@ -2937,7 +2941,7 @@ class StatsCollector:
                 latency_recent_stats = self._latency_recent.summarize()
 
             # Derive a simple rate-limit summary from cache_stat_* counters
-            # when present. This keeps RateLimitPlugin statistics visible in
+            # when present. This keeps RateLimit statistics visible in
             # snapshots and downstream APIs without coupling StatsCollector to
             # plugin internals.
             rate_limit: Optional[Dict[str, Any]] = None

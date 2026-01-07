@@ -24,16 +24,22 @@ def test_main_doh_listener_starts(monkeypatch):
       - None: Asserts main() returns 0 and doh thread started once
     """
     yaml_data = (
-        "listen:\n"
-        "  host: 127.0.0.1\n"
-        "  port: 5354\n"
-        "  doh:\n"
-        "    enabled: true\n"
-        "    host: 127.0.0.1\n"
-        "    port: 8053\n"
         "upstreams:\n"
-        "  - host: 1.1.1.1\n"
-        "    port: 53\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "server:\n"
+        "  listen:\n"
+        "    doh:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 8053\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "    use_asyncio: true\n"
     )
 
     class DummyServer:
@@ -60,9 +66,19 @@ def test_main_doh_listener_starts(monkeypatch):
             return
 
     import sys
-    import types
+    import threading as real_threading
 
-    fake_threading = types.SimpleNamespace(Thread=DummyThread)
+    class _FakeThreadingModule:
+        """Test helper: module-like shim that overrides Thread but proxies others."""
+
+        def __init__(self, real_module, thread_cls):  # type: ignore[no-untyped-def]
+            self._real = real_module
+            self.Thread = thread_cls
+
+        def __getattr__(self, name):  # type: ignore[no-untyped-def]
+            return getattr(self._real, name)
+
+    fake_threading = _FakeThreadingModule(real_threading, DummyThread)
 
     monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)

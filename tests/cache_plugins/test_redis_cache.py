@@ -15,8 +15,8 @@ import sys
 
 import pytest
 
-from foghorn.cache_plugins import redis_cache as redis_cache_mod
-from foghorn.cache_plugins.registry import get_cache_plugin_class, load_cache_plugin
+from foghorn.plugins.cache import redis_cache as redis_cache_mod
+from foghorn.plugins.cache.registry import get_cache_plugin_class, load_cache_plugin
 
 
 class FakeRedisClient:
@@ -185,7 +185,7 @@ def test_registry_resolves_redis_alias_to_plugin_class() -> None:
     """
 
     cls = get_cache_plugin_class("redis")
-    assert cls.__name__ == "RedisCachePlugin"
+    assert cls.__name__ == "RedisCache"
 
     cls2 = get_cache_plugin_class("valkey")
     assert cls2 is cls
@@ -250,7 +250,7 @@ def test_encode_decode_roundtrip_bytes_and_pickled() -> None:
 
 
 def test_redis_cache_uses_fake_redis_from_url_for_url_config(monkeypatch) -> None:
-    """Brief: RedisCachePlugin initializes client via Redis.from_url when url is provided.
+    """Brief: RedisCache initializes client via Redis.from_url when url is provided.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
@@ -262,7 +262,7 @@ def test_redis_cache_uses_fake_redis_from_url_for_url_config(monkeypatch) -> Non
     monkeypatch.setattr(redis_cache_mod, "_import_redis", lambda: _fake_redis_module())
 
     url = "redis://localhost:6379/0"
-    plugin = redis_cache_mod.RedisCachePlugin(url=url, namespace="foghorn:test:")
+    plugin = redis_cache_mod.RedisCache(url=url, namespace="foghorn:test:")
     client = plugin._client
     assert isinstance(client, FakeRedisClient)
     assert client.from_url_calls == [url]
@@ -273,7 +273,7 @@ def test_redis_cache_uses_fake_redis_from_url_for_url_config(monkeypatch) -> Non
 
 
 def test_redis_cache_roundtrip_bytes_and_metadata_with_fake_client(monkeypatch) -> None:
-    """Brief: RedisCachePlugin set/get round-trip bytes and expose TTL metadata.
+    """Brief: RedisCache set/get round-trip bytes and expose TTL metadata.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
@@ -284,7 +284,7 @@ def test_redis_cache_roundtrip_bytes_and_metadata_with_fake_client(monkeypatch) 
 
     monkeypatch.setattr(redis_cache_mod, "_import_redis", lambda: _fake_redis_module())
 
-    plugin = redis_cache_mod.RedisCachePlugin(
+    plugin = redis_cache_mod.RedisCache(
         host="example-cache",
         port=1234,
         db="1",
@@ -321,7 +321,7 @@ def test_redis_cache_roundtrip_bytes_and_metadata_with_fake_client(monkeypatch) 
 def test_redis_cache_uses_default_namespace_and_min_cache_ttl_floor(
     monkeypatch,
 ) -> None:
-    """Brief: RedisCachePlugin normalizes namespace and min_cache_ttl config.
+    """Brief: RedisCache normalizes namespace and min_cache_ttl config.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
@@ -332,6 +332,6 @@ def test_redis_cache_uses_default_namespace_and_min_cache_ttl_floor(
 
     monkeypatch.setattr(redis_cache_mod, "_import_redis", lambda: _fake_redis_module())
 
-    plugin = redis_cache_mod.RedisCachePlugin(namespace="   ", min_cache_ttl=-10)
+    plugin = redis_cache_mod.RedisCache(namespace="   ", min_cache_ttl=-10)
     assert plugin.namespace == "foghorn:dns_cache:"
     assert plugin.min_cache_ttl == 0

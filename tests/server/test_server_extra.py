@@ -11,8 +11,8 @@ Outputs:
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 import foghorn.servers.server as srv
-from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
-from foghorn.plugins import base as plugin_base
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
+from foghorn.plugins.resolve import base as plugin_base
 from foghorn.servers.udp_server import _set_response_id
 
 
@@ -42,7 +42,7 @@ def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
     srv.DNSUDPHandler.plugins = []
     srv.DNSUDPHandler.upstream_addrs = []
     # Reset cache by swapping the instance.
-    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
     return h, sock
 
 
@@ -139,7 +139,7 @@ def test_resolve_query_bytes_cache_store_variants(monkeypatch):
     r_sf.header.rcode = RCODE.SERVFAIL
 
     # Fresh cache and upstreams for this test
-    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
     srv.DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
     srv.DNSUDPHandler.plugins = []
 
@@ -249,7 +249,7 @@ def test_resolve_query_bytes_end_to_end_paths(monkeypatch):
     q = DNSRecord.question("no-up.example", "A")
     srv.DNSUDPHandler.upstream_addrs = []
     srv.DNSUDPHandler.plugins = []
-    plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
     wire = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
     assert DNSRecord.parse(wire).header.rcode == RCODE.SERVFAIL
 

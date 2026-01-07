@@ -1,5 +1,5 @@
 """
-Brief: Tests for foghorn.cache_backends.foghorn_ttl.FoghornTTLCache functionality.
+Brief: Tests for foghorn.plugins.cache.backends.foghorn_ttl.FoghornTTLCache functionality.
 
 Inputs:
   - None
@@ -10,7 +10,7 @@ Outputs:
 
 import threading
 
-from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
+from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 
 
 def test_cache_set_and_get_basic():
@@ -60,8 +60,8 @@ def test_cache_expiry_and_purge(monkeypatch):
     c.set(k, 1, b"x")
 
     # Advance cache's notion of time without real sleeping by monkeypatching
-    # the time module used inside foghorn.cache_backends.foghorn_ttl.
-    import foghorn.cache_backends.foghorn_ttl as cache_mod
+    # the time module used inside foghorn.plugins.cache.backends.foghorn_ttl.
+    import foghorn.plugins.cache.backends.foghorn_ttl as cache_mod
 
     base = cache_mod.time.time()
 

@@ -12,7 +12,7 @@ import pytest
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 import foghorn.servers.server as srv
-from foghorn.plugins import base as plugin_base
+from foghorn.plugins.resolve import base as plugin_base
 from foghorn.servers.server import DNSUDPHandler, send_query_with_failover
 
 
@@ -86,9 +86,9 @@ def test_stats_hooks_are_called(monkeypatch, path):
 
     # Be explicit about cache isolation for this parametrized test.
     try:
-        from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+        from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 
-        plugin_base.DNS_CACHE = InMemoryTTLCachePlugin()
+        plugin_base.DNS_CACHE = InMemoryTTLCache()
     except Exception:  # pragma: no cover
         pass
 
@@ -455,7 +455,7 @@ def test_send_query_with_failover_doh_success(monkeypatch):
     ok = _mk_ok_reply(q)
 
     # Patch doh_query to return body and headers
-    import foghorn.transports.doh as doh_mod
+    import foghorn.servers.transports.doh as doh_mod
 
     monkeypatch.setattr(doh_mod, "doh_query", lambda url, body, **kw: (ok, {"X": "Y"}))
 
@@ -550,7 +550,7 @@ def test_send_query_with_failover_servfail_then_ok_udp(monkeypatch):
     wire_ok = _mk_ok_reply(q)
 
     # Use udp_query patch to control responses by host
-    import foghorn.transports.udp as udp_mod
+    import foghorn.servers.transports.udp as udp_mod
 
     def fake_udp_query(host, port, payload, timeout_ms=None):
         return wire_servfail if host == "bad" else wire_ok

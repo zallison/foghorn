@@ -18,7 +18,7 @@ import pytest
 
 pytestmark = pytest.mark.slow
 
-from foghorn.transports.dot import dot_query
+from foghorn.servers.transports.dot import dot_query
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:

@@ -3,7 +3,7 @@ import types
 
 import pytest
 
-import foghorn.plugins as plugins
+import foghorn.plugins.resolve as plugins
 
 
 def test_all_contains_known_modules():
@@ -30,7 +30,7 @@ def test_getattr_imports_module():
     """
     mod = getattr(plugins, "base")
     assert isinstance(mod, types.ModuleType)
-    assert mod is importlib.import_module("foghorn.plugins.base")
+    assert mod is importlib.import_module("foghorn.plugins.resolve.base")
 
 
 def test_getattr_missing_attribute_raises_attributeerror():

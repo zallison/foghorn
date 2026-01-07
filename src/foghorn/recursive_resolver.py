@@ -6,15 +6,15 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from foghorn.current_cache import get_current_namespaced_cache, module_namespace
+from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 
 from dnslib import QTYPE, RCODE, DNSRecord
 
 from . import (
     recursive_resolver as _recursive_module,  # Self-import to honour test monkeypatching.
 )
-from .transports.tcp import tcp_query as _tcp_transport_query
-from .transports.udp import udp_query as _udp_transport_query
+from foghorn.servers.transports.tcp import tcp_query as _tcp_transport_query
+from foghorn.servers.transports.udp import udp_query as _udp_transport_query
 
 """Iterative recursive resolver for Foghorn.
 

@@ -14,7 +14,7 @@ from typing import Any, Dict, List
 import pytest
 
 from foghorn.config import config_parser as cp
-from foghorn.plugins.base import BasePlugin
+from foghorn.plugins.resolve.base import BasePlugin
 
 
 def test_is_var_key_empty_and_uppercase() -> None:

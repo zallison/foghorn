@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 from cachetools import TTLCache
 
-from foghorn.utils.cache_registry import registered_cached, registered_lru_cached
+from foghorn.utils.register_caches import registered_cached, registered_lru_cached
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
@@ -46,7 +46,7 @@ from pydantic import BaseModel
 
 from ..stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 from .udp_server import DNSUDPHandler
-from ..plugins.base import AdminPageSpec
+from ..plugins.resolve.base import AdminPageSpec
 
 try:
     import psutil  # type: ignore[import]
@@ -78,7 +78,7 @@ _STATS_SNAPSHOT_CACHE_LOCK = threading.Lock()
 # Map id(StatsCollector) -> (StatsSnapshot, timestamp)
 _last_stats_snapshots: Dict[int, tuple[StatsSnapshot, float]] = {}
 
-# Short-lived cache for RateLimitPlugin statistics derived from its SQLite
+# Short-lived cache for RateLimit statistics derived from its SQLite
 # profile database(s). This keeps /api/v1/ratelimit lightweight even when
 # rate_profiles contains many entries.
 _RATE_LIMIT_CACHE_TTL_SECONDS = 5.0
@@ -1223,13 +1223,13 @@ def _get_sanitized_config_yaml_cached(
 
 
 def _find_rate_limit_db_paths_from_config(config: Dict[str, Any] | None) -> list[str]:
-    """Brief: Discover RateLimitPlugin db_path values from the loaded config.
+    """Brief: Discover RateLimit db_path values from the loaded config.
 
     Inputs:
       - config: Full configuration mapping loaded from YAML (or None).
 
     Outputs:
-      - List of unique db_path strings for RateLimitPlugin instances. When no
+      - List of unique db_path strings for RateLimit instances. When no
         explicit plugins referencing rate_limit are found, an empty list is
         returned so callers can decide whether to fall back to a default
         location.
@@ -1256,7 +1256,7 @@ def _find_rate_limit_db_paths_from_config(config: Dict[str, Any] | None) -> list
 
 
 def _collect_rate_limit_stats(config: Dict[str, Any] | None) -> Dict[str, Any]:
-    """Brief: Collect per-key RateLimitPlugin statistics from sqlite3 profiles.
+    """Brief: Collect per-key RateLimit statistics from sqlite3 profiles.
 
     Inputs:
       - config: Full configuration mapping loaded from YAML (or None).
@@ -1281,11 +1281,11 @@ def _collect_rate_limit_stats(config: Dict[str, Any] | None) -> Dict[str, Any]:
     summaries: list[Dict[str, Any]] = []
 
     # Heuristic fallback: if no explicit db_path is configured but the default
-    # RateLimitPlugin db exists, include it.
+    # RateLimit db exists, include it.
     default_db = "./config/var/rate_limit.db"
     if not db_paths and os.path.exists(
         default_db
-    ):  # pragma: no cover - default RateLimitPlugin DB fallback path
+    ):  # pragma: no cover - default RateLimit DB fallback path
         db_paths.append(default_db)
 
     for path in db_paths:
@@ -1638,20 +1638,22 @@ def resolve_www_root(config: Dict[str, Any] | None = None) -> str:
       - str absolute path to the directory from which static files are served.
 
     Example:
-      >>> cfg = {"webserver": {"www_root": "/srv/foghorn/html"}}
+      >>> cfg = {"server": {"http": {"www_root": "/srv/foghorn/html"}}}
       >>> path = resolve_www_root(cfg)
       >>> path.endswith("/srv/foghorn/html")
       True
     """
 
-    # 1) Config override: webserver.www_root
+    # 1) Config override: server.http.www_root
     if isinstance(config, dict):
-        web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
-        candidate = web_cfg.get("www_root")
-        if isinstance(candidate, str) and candidate:
-            cfg_path = Path(candidate).expanduser()
-            if cfg_path.is_dir():
-                return str(cfg_path.resolve())
+        server_cfg = config.get("server") or {}
+        http_cfg = server_cfg.get("http") or {}
+        if isinstance(http_cfg, dict):
+            candidate = http_cfg.get("www_root")
+            if isinstance(candidate, str) and candidate:
+                cfg_path = Path(candidate).expanduser()
+                if cfg_path.is_dir():
+                    return str(cfg_path.resolve())
 
     # 2) Environment variable override
     env_root = os.environ.get("FOGHORN_WWW_ROOT")
@@ -2813,7 +2815,7 @@ def create_app(
 
         # Also surface the global DNS cache plugin when it exposes admin UI.
         try:
-            from ..plugins import base as plugin_base
+            from ..plugins.resolve import base as plugin_base
 
             cache = getattr(plugin_base, "DNS_CACHE", None)
         except Exception:
@@ -2946,7 +2948,7 @@ def create_app(
         """Brief: Return a JSON-safe snapshot for the active DNS cache plugin.
 
         Inputs:
-          - None (uses foghorn.plugins.base.DNS_CACHE).
+          - None (uses foghorn.plugins.resolve.base.DNS_CACHE).
 
         Outputs:
           - Dict with server_time and data keys when the active cache exposes a
@@ -2954,7 +2956,7 @@ def create_app(
         """
 
         try:
-            from ..plugins import base as plugin_base
+            from ..plugins.resolve import base as plugin_base
 
             cache = getattr(plugin_base, "DNS_CACHE", None)
         except Exception:
@@ -3154,7 +3156,7 @@ def create_app(
 
     @app.get("/api/v1/plugins/{plugin_name}/mdns", dependencies=[Depends(auth_dep)])
     async def get_mdns_snapshot(plugin_name: str) -> Dict[str, Any]:
-        """Return a JSON-safe snapshot for an MdnsBridgePlugin instance.
+        """Return a JSON-safe snapshot for an MdnsBridge instance.
 
         Inputs:
           - plugin_name: Instance name from the configuration (plugins[].name or
@@ -3186,7 +3188,7 @@ def create_app(
         except Exception as exc:  # pragma: no cover - defensive: plugin-specific
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"failed to build MdnsBridgePlugin snapshot: {exc}",
+                detail=f"failed to build MdnsBridge snapshot: {exc}",
             ) from exc
 
         return {
@@ -3229,7 +3231,7 @@ def create_app(
 
     @app.get("/api/v1/ratelimit", dependencies=[Depends(auth_dep)])
     async def get_rate_limit() -> Dict[str, Any]:
-        """Return RateLimitPlugin statistics derived from sqlite3 profiles.
+        """Return RateLimit statistics derived from sqlite3 profiles.
 
         Inputs: none
         Outputs:
@@ -4881,7 +4883,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 },
             )
         elif path.startswith("/api/v1/plugins/") and path.endswith("/mdns"):
-            # Threaded fallback for the MdnsBridgePlugin admin snapshot endpoint mirrors
+            # Threaded fallback for the MdnsBridge admin snapshot endpoint mirrors
             # the FastAPI route at /api/v1/plugins/{plugin_name}/mdns.
             if not self._require_auth():
                 return
@@ -4913,7 +4915,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json(
                     500,
                     {
-                        "detail": f"failed to build MdnsBridgePlugin snapshot: {exc}",
+                        "detail": f"failed to build MdnsBridge snapshot: {exc}",
                         "server_time": _utc_now_iso(),
                     },
                 )
@@ -5063,10 +5065,18 @@ def _start_admin_server_threaded(
       - WebServerHandle if server started successfully, else None.
 
     Example:
-      >>> handle = _start_admin_server_threaded(None, {"webserver": {"enabled": True}}, None)
+      >>> handle = _start_admin_server_threaded(
+      ...     None,
+      ...     {"server": {"http": {"enabled": True}}},
+      ...     None,
+      ... )
     """
 
-    web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
+    if isinstance(config, dict):
+        server_cfg = config.get("server") or {}
+        web_cfg = server_cfg.get("http") or {}
+    else:
+        web_cfg = {}
     if not web_cfg.get("enabled"):
         return None
 
@@ -5195,7 +5205,8 @@ def start_webserver(
       - log_buffer: Optional RingBuffer for log entries (created if None).
 
     Outputs:
-      - WebServerHandle if webserver.enabled is true, else None.
+      - WebServerHandle when the admin HTTP server is enabled via the
+        ``server.http`` block; otherwise None.
 
     Example:
       >>> handle = start_webserver(collector, cfg, None)
@@ -5203,7 +5214,14 @@ def start_webserver(
       ...     assert handle.is_running()
     """
 
-    web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
+    if isinstance(config, dict):
+        # Only accept webserver enable/host/port configuration from the
+        # v2-style server-level ``server.http`` block. Root-level ``http`` and
+        # ``webserver`` blocks are intentionally ignored.
+        server_cfg = config.get("server") or {}
+        web_cfg = server_cfg.get("http") or {}
+    else:
+        web_cfg = {}
 
     # Treat presence of a webserver block as enabled by default so that
     # configurations that declare webserver: {} behave as "on" unless

@@ -1,4 +1,4 @@
-"""Brief: Additional coverage tests for foghorn.plugins.base.
+"""Brief: Additional coverage tests for foghorn.plugins.resolve.base.
 
 Inputs:
   - None.
@@ -9,9 +9,9 @@ Outputs:
 
 import logging
 
-import foghorn.plugins.base as base_mod
-from foghorn.plugins.base import BasePlugin, PluginContext, PluginDecision
-from foghorn.plugins.base import logger as base_logger
+import foghorn.plugins.resolve.base as base_mod
+from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
+from foghorn.plugins.resolve.base import logger as base_logger
 
 
 def test_plugin_decision_populates_plugin_and_label_from_stack() -> None:
@@ -63,8 +63,8 @@ def test_init_instance_logger_configures_handlers(tmp_path, monkeypatch) -> None
 
     # Capture original logger state so this test does not leak configuration
     # (handlers, levels, propagate flags) into other tests which rely on the
-    # default behavior of foghorn.plugins.base's logger.
-    base_log = logging.getLogger("foghorn.plugins.base")
+    # default behavior of foghorn.plugins.resolve.base's logger.
+    base_log = logging.getLogger("foghorn.plugins.resolve.base")
     orig_level = base_log.level
     orig_handlers = list(base_log.handlers)
     orig_propagate = base_log.propagate
@@ -100,7 +100,7 @@ def test_init_instance_logger_configures_handlers(tmp_path, monkeypatch) -> None
 
             self.records.append(record)
 
-    # Replace the SysLogHandler used within foghorn.plugins.base with the dummy.
+    # Replace the SysLogHandler used within foghorn.plugins.resolve.base with the dummy.
     monkeypatch.setattr(base_mod.logging.handlers, "SysLogHandler", DummySysLogHandler)
 
     log_path = tmp_path / "plugin.log"

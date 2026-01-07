@@ -71,11 +71,13 @@ def web_config(tmp_path: Path) -> Dict[str, Any]:
     (www_root / "index.html").write_text("<html>ok</html>", encoding="utf-8")
 
     return {
-        "webserver": {
-            "enabled": True,
-            "host": "127.0.0.1",
-            "port": 0,
-            "index": True,
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+                "index": True,
+            }
         },
         "foghorn": {"use_asyncio": False},
         "www_root": str(www_root),
@@ -140,7 +142,7 @@ def test_list_plugin_ui_descriptors_and_title_normalisation(
 def test_cache_snapshot_404_and_success(
     monkeypatch: pytest.MonkeyPatch, web_config: Dict[str, Any]
 ) -> None:
-    from foghorn.plugins import base as plugin_base
+    from foghorn.plugins.resolve import base as plugin_base
 
     # First, ensure 404 when DNS_CACHE is missing or lacks helper.
     monkeypatch.setattr(plugin_base, "DNS_CACHE", None, raising=False)

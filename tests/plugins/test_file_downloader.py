@@ -1,5 +1,5 @@
 """
-Brief: Tests for foghorn.plugins.file_downloader.FileDownloader covering helper logic,
+Brief: Tests for foghorn.plugins.resolve.file_downloader.FileDownloader covering helper logic,
 interval handling, and download/validation behavior.
 
 Inputs:
@@ -16,8 +16,8 @@ from datetime import datetime
 import pytest
 import requests
 
-import foghorn.plugins.file_downloader as file_downloader_mod
-from foghorn.plugins.file_downloader import FileDownloader
+import foghorn.plugins.resolve.file_downloader as file_downloader_mod
+from foghorn.plugins.resolve.file_downloader import FileDownloader
 
 
 @pytest.fixture

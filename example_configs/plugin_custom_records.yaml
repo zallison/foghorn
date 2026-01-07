@@ -1,40 +1,21 @@
-# Foghorn example: ZoneRecords plugin (formerly CustomRecords)
-# Demonstrates serving static DNS records and authoritative zones from a local
-# file, plus optional inline overrides in the plugin config.
-
-listen:
-  udp:
-    enabled: true
-    host: 127.0.0.1
-    port: 5353
-
 upstreams:
-  # Upstream is still required for names not covered by CustomRecords.
+  endpoints:
   - host: 1.1.1.1
     port: 53
-
 logging:
-  level: info
-
-
+  python:
+    level: info
 plugins:
-  - module: zone  # ZoneRecords alias (custom/records still supported)
-    config:
-      # Provide one or more records files; lines use:
-      #   <domain>|<qtype>|<ttl>|<value>
-      # example.com|A|300|192.0.2.10
-      file_paths:
-        - ./config/custom-records.txt
-
-      # Optional: add or override individual records directly in config using
-      # the same line format; these are merged after file-backed records with
-      # first-TTL-wins and de-duplicated values.
-      # records:
-      #   - example.com|A|300|192.0.2.20
-      #   - www.example.com|CNAME|300|example.com.
-
-      # Optional: enable live reloads when the records file changes.
-      watchdog_enabled: true
-      watchdog_min_interval_seconds: 1.0
-      # polling can help in container / network FS setups where events are flaky
-      watchdog_poll_interval_seconds: 0.0
+- type: zone
+  config:
+    file_paths:
+    - ./config/custom-records.txt
+    watchdog_enabled: true
+    watchdog_min_interval_seconds: 1.0
+    watchdog_poll_interval_seconds: 0.0
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5353

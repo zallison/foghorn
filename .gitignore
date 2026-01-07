@@ -39,3 +39,5 @@ config.yaml.new
 
 # Profiling artifacts
 foghorn_cpu.svg
+keys
+config

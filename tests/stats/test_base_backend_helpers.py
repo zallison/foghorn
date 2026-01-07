@@ -1,5 +1,5 @@
 """
-Brief: Tests for BaseStatsStoreBackend helper functions and config model.
+Brief: Tests for BaseStatsStore helper functions and config model.
 
 Inputs:
   - None
@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from foghorn.querylog_backends.base import (
-    BaseStatsStoreBackend,
+from foghorn.plugins.querylog.base import (
+    BaseStatsStore,
     StatsStoreBackendConfig,
 )
 
@@ -60,7 +60,7 @@ def test_normalize_page_args_basic(
       - None; asserts the normalized (page, page_size) pair.
     """
 
-    page_i, size_i = BaseStatsStoreBackend._normalize_page_args(page, page_size)
+    page_i, size_i = BaseStatsStore._normalize_page_args(page, page_size)
     assert page_i == expected_page
     assert size_i == expected_size
 
@@ -76,7 +76,7 @@ def test_normalize_page_args_custom_defaults_and_max() -> None:
     """
 
     # Parsing failure falls back to provided defaults.
-    page_i, size_i = BaseStatsStoreBackend._normalize_page_args(
+    page_i, size_i = BaseStatsStore._normalize_page_args(
         page="bad",
         page_size="also-bad",
         default_page=3,
@@ -87,7 +87,7 @@ def test_normalize_page_args_custom_defaults_and_max() -> None:
     assert size_i == 50
 
     # Oversized page_size is clamped to max_page_size.
-    _, size_i2 = BaseStatsStoreBackend._normalize_page_args(
+    _, size_i2 = BaseStatsStore._normalize_page_args(
         page=1,
         page_size=10000,
         default_page=1,
@@ -124,7 +124,7 @@ def test_normalize_interval_args_variants(
       - None; asserts the normalized (start_f, end_f, interval_i) triple.
     """
 
-    start_f, end_f, interval_i = BaseStatsStoreBackend._normalize_interval_args(
+    start_f, end_f, interval_i = BaseStatsStore._normalize_interval_args(
         start_ts, end_ts, interval
     )
     assert start_f == pytest.approx(exp_start)

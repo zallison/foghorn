@@ -8,41 +8,10 @@ Outputs:
   - None (pytest assertions)
 """
 
-import importlib.util
-
-# Load the plugin class directly from source without relying on package discovery
-import os
-import sys
-
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-SRC_DIR = os.path.join(ROOT, "src")
-PKG_DIR = os.path.join(SRC_DIR, "foghorn")
-PLUG_DIR = os.path.join(PKG_DIR, "plugins")
-PLUGIN_PATH = os.path.join(PLUG_DIR, "flaky_server.py")
-
-# Synthesize a local package hierarchy so relative imports resolve inside flaky_server
-import types
-
-foghorn_pkg = types.ModuleType("foghorn")
-foghorn_pkg.__path__ = [PKG_DIR]
-sys.modules["foghorn"] = foghorn_pkg
-
-plugins_pkg = types.ModuleType("foghorn.plugins")
-plugins_pkg.__path__ = [PLUG_DIR]
-sys.modules["foghorn.plugins"] = plugins_pkg
-
-spec = importlib.util.spec_from_file_location(
-    "foghorn.plugins.flaky_server", PLUGIN_PATH
-)
-mod = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = mod
-assert spec.loader is not None
-spec.loader.exec_module(mod)
-FlakyServer = mod.FlakyServer
-
 from dnslib import QTYPE, RCODE, DNSRecord
 
-from foghorn.plugins.base import PluginContext
+from foghorn.plugins.resolve.base import PluginContext
+from foghorn.plugins.resolve.flaky_server import FlakyServer
 
 
 def _mk_query(name="example.com", qtype="A"):

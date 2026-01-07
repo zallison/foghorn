@@ -1,5 +1,5 @@
 """
-Brief: Extended tests for FilterPlugin file-backed inputs (domains, patterns, keywords, IPs).
+Brief: Extended tests for Filter file-backed inputs (domains, patterns, keywords, IPs).
 
 Inputs:
   - None
@@ -13,8 +13,8 @@ from contextlib import closing
 import pytest
 from dnslib import AAAA, QTYPE, RR, A, DNSRecord
 
-from foghorn.plugins.base import PluginContext, PluginDecision
-from foghorn.plugins.filter import FilterPlugin
+from foghorn.plugins.resolve.base import PluginContext, PluginDecision
+from foghorn.plugins.resolve.filter import Filter
 
 
 def _mk_response_with_ips(name, records):
@@ -56,7 +56,7 @@ def test_domains_files_allow_and_block(tmp_path):
     allowf.write_text("ok.com\n")
     blockf.write_text("bad.com\n")
 
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(tmp_path / "bl.db"),
         allowed_domains_files=[str(allowf)],
         blocked_domains_files=[str(blockf)],
@@ -80,7 +80,7 @@ def test_load_list_from_file_json_error_and_missing_domain(tmp_path, caplog):
       - None: Asserts Adblock/AdGuard wrappers removed and bad JSON lines skipped.
     """
     db = tmp_path / "bl.db"
-    p = FilterPlugin(db_path=str(db), default="deny")
+    p = Filter(db_path=str(db), default="deny")
     p.setup()
 
     f = tmp_path / "domains.txt"
@@ -131,7 +131,7 @@ def test_patterns_and_keywords_files(tmp_path, caplog):
     )
     keys.write_text("\nTracker\n#x\nanalytics\n")
 
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(tmp_path / "bl.db"),
         blocked_patterns_files=[str(pats)],
         blocked_keywords_files=[str(keys)],
@@ -155,7 +155,7 @@ def test_load_keywords_from_file_json_error_and_missing_keyword(tmp_path, caplog
       - None: Asserts valid keywords are returned while bad JSON lines are skipped.
     """
     db = tmp_path / "bl.db"
-    p = FilterPlugin(db_path=str(db), default="allow")
+    p = Filter(db_path=str(db), default="allow")
     p.setup()
 
     f = tmp_path / "keywords.jsonl"
@@ -186,7 +186,7 @@ def test_load_list_from_file_treats_bang_as_comment(tmp_path):
       - None: Asserts that only real domains are stored in the DB.
     """
     db = tmp_path / "bl.db"
-    p = FilterPlugin(db_path=str(db), default="deny")
+    p = Filter(db_path=str(db), default="deny")
     p.setup()
 
     f = tmp_path / "domains_bang.txt"
@@ -209,7 +209,7 @@ def test_load_list_from_file_adguard_token_blocks_subdomains(tmp_path):
       - None: Asserts deny decisions for domain and its subdomains.
     """
     db = tmp_path / "bl.db"
-    p = FilterPlugin(db_path=str(db), default="allow")
+    p = Filter(db_path=str(db), default="allow")
     p.setup()
 
     f = tmp_path / "adguard_domains.txt"
@@ -268,7 +268,7 @@ def test_blocked_ips_files_csv_simple_and_jsonl(tmp_path):
         )
     )
 
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(tmp_path / "bl.db"),
         blocked_ips_files=[str(ips), str(jsonl)],
         default="allow",
@@ -327,7 +327,7 @@ def test_glob_expansion_for_new_files(tmp_path):
     (d / "p1.re").write_text("^test$\n")
     (d / "p2.re").write_text("^demo$\n")
 
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(tmp_path / "bl.db"),
         blocked_keywords_files=[str(d / "k*.txt")],
         blocked_patterns_files=[str(d / "p*.re")],
@@ -355,7 +355,7 @@ def test_missing_files_raise(tmp_path):
     Outputs:
       - None: asserts FileNotFoundError while ensuring any opened DB is closed.
     """
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(tmp_path / "bl.db"),
         blocked_patterns_files=[str(tmp_path / "nope.re")],
     )
@@ -375,14 +375,14 @@ def test_expand_globs_fallback_to_os_path_exists(tmp_path, monkeypatch):
     Outputs:
       - None: Asserts direct path is returned when file exists but glob gives no matches.
     """
-    from foghorn.plugins import filter as filter_mod
+    from foghorn.plugins.resolve import filter as filter_mod
 
     f = tmp_path / "one.txt"
     f.write_text("x\n")
 
     # Force glob.glob to return no matches so _expand_globs uses os.path.exists.
     monkeypatch.setattr(filter_mod.glob, "glob", lambda pattern: [])
-    resolved = filter_mod.FilterPlugin._expand_globs([str(f)])
+    resolved = filter_mod.Filter._expand_globs([str(f)])
     assert resolved == [str(f)]
 
 
@@ -395,10 +395,10 @@ def test_load_list_from_file_json_non_object_line(monkeypatch, tmp_path, caplog)
     Outputs:
       - None: Asserts the non-object JSON line is reported and skipped.
     """
-    from foghorn.plugins import filter as filter_mod
+    from foghorn.plugins.resolve import filter as filter_mod
 
     db = tmp_path / "bl_nonobj.db"
-    p = FilterPlugin(db_path=str(db), default="deny")
+    p = Filter(db_path=str(db), default="deny")
     p.setup()
 
     f = tmp_path / "domains_json_nonobj.txt"
@@ -428,7 +428,7 @@ def test_blocked_ips_file_json_non_object_line(monkeypatch, tmp_path, caplog):
     Outputs:
       - None: Asserts the non-object JSON line is reported and skipped.
     """
-    from foghorn.plugins import filter as filter_mod
+    from foghorn.plugins.resolve import filter as filter_mod
 
     jsonl = tmp_path / "ips_nonobj.jsonl"
     jsonl.write_text('{"ip": "203.0.113.1", "action": "deny"}\n')
@@ -440,7 +440,7 @@ def test_blocked_ips_file_json_non_object_line(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(filter_mod.json, "loads", fake_loads)
     caplog.set_level("ERROR")
 
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(tmp_path / "bl_ips_nonobj.db"),
         blocked_ips_files=[str(jsonl)],
         default="allow",

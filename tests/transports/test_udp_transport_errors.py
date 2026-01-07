@@ -10,7 +10,7 @@ Outputs:
 
 import pytest
 
-from foghorn.transports.udp import UDPError, udp_query
+from foghorn.servers.transports.udp import UDPError, udp_query
 
 
 def test_udp_timeout_raises(monkeypatch):

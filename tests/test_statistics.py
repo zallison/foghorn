@@ -161,15 +161,15 @@ class TestStatsCollector:
         """Plugin decisions tracked with action and reason."""
         collector = StatsCollector()
         collector.record_plugin_decision(
-            "FilterPlugin", "block", reason="blocklist", domain="bad.com"
+            "Filter", "block", reason="blocklist", domain="bad.com"
         )
-        collector.record_plugin_decision("FilterPlugin", "allow", reason="allowlist")
+        collector.record_plugin_decision("Filter", "allow", reason="allowlist")
         snapshot = collector.snapshot()
         assert snapshot.totals["blocked"] == 1
         assert snapshot.totals["allowed"] == 1
-        assert snapshot.decisions["FilterPlugin"]["block"] == 1
-        assert snapshot.decisions["FilterPlugin"]["allow"] == 1
-        assert snapshot.decisions["FilterPlugin"]["blocked_by"]["blocklist"] == 1
+        assert snapshot.decisions["Filter"]["block"] == 1
+        assert snapshot.decisions["Filter"]["allow"] == 1
+        assert snapshot.decisions["Filter"]["blocked_by"]["blocklist"] == 1
 
     def test_upstream_results(self):
         """Upstream results tracked per upstream."""

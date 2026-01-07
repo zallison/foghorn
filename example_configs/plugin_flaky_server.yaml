@@ -1,46 +1,33 @@
-# Foghorn example: Flaky server plugin
-# Introduce controlled failures for testing resilience and clients' retry behavior.
-
-listen:
-  udp:
-    enabled: true
-    host: 127.0.0.1
-    port: 5353
-  tcp:
-    enabled: false
-  dot:
-    enabled: false
-
 upstreams:
+  endpoints:
   - host: 1.1.1.1
     port: 53
   - host: 8.8.8.8
     port: 53
-
-dnssec:
-  mode: passthrough
-  validation: upstream_ad
-  udp_payload_size: 1232
-
 logging:
   level: info
-
 plugins:
-  - module: flaky  # FlakyServer alias
-    # pre_priority: 15  # optional: run early so failures happen before other plugins
-    config:
-      # Only apply flaky behavior to these client subnets, using BasePlugin
-      # targets/targets_ignore fields:
-      targets:
-        - 192.0.2.0/24
-        - 2001:db8::/32
-
-      # Probability controls: percentage chance of returning the error
-      servfail_percent: 25.0   # ~25% SERVFAIL
-      nxdomain_percent: 10.0   # ~10% NXDOMAIN
-
-      # Limit to certain query types
-      apply_to_qtypes: ["A", "AAAA"]
-
-      # Optional deterministic seed for reproducible runs
-      # seed: 12345
+- type: flaky
+  config:
+    targets:
+    - 192.0.2.0/24
+    - 2001:db8::/32
+    servfail_percent: 25.0
+    nxdomain_percent: 10.0
+    apply_to_qtypes:
+    - A
+    - AAAA
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5353
+    tcp:
+      enabled: false
+    dot:
+      enabled: false
+  dnssec:
+    mode: passthrough
+    validation: upstream_ad
+    udp_payload_size: 1232

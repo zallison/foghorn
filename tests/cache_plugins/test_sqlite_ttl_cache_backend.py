@@ -13,7 +13,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from foghorn.cache_backends.sqlite_ttl import SQLite3TTLCache
+from foghorn.plugins.cache.backends.sqlite_ttl import SQLite3TTLCache
 
 
 def test_sqlite_ttl_cache_set_get_and_encoding_decoding(tmp_path) -> None:

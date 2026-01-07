@@ -1,4 +1,4 @@
-"""Brief: Unit tests for src.foghorn.current_cache helpers.
+"""Brief: Unit tests for src.foghorn.utils.current_cache helpers.
 
 Inputs:
   - None
@@ -15,15 +15,15 @@ from typing import Any, Optional, Tuple
 
 import pytest
 
-import foghorn.current_cache as current_cache_module
-from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
-from foghorn.current_cache import (
+import foghorn.utils.current_cache as current_cache_module
+from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
+from foghorn.utils.current_cache import (
     TTLCacheAdapter,
     get_current_namespaced_cache,
     module_namespace,
 )
-from foghorn.cache_plugins.base import CachePlugin
-from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins.cache.base import CachePlugin
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 
 
 class _FakeBackendWithMeta:
@@ -329,7 +329,7 @@ def test_module_namespace_returns_stem(path: str, expected: str) -> None:
 
 
 def test_get_current_namespaced_cache_with_in_memory_plugin_shares_store() -> None:
-    """Brief: InMemoryTTLCachePlugin yields a namespaced FoghornTTLCache view.
+    """Brief: InMemoryTTLCache yields a namespaced FoghornTTLCache view.
 
     Inputs:
       - None.
@@ -338,7 +338,7 @@ def test_get_current_namespaced_cache_with_in_memory_plugin_shares_store() -> No
       - None; asserts namespaced views share backing store but isolate keys.
     """
 
-    plugin = InMemoryTTLCachePlugin()
+    plugin = InMemoryTTLCache()
 
     adapter_a = get_current_namespaced_cache(namespace="ns-a", cache_plugin=plugin)
     adapter_b = get_current_namespaced_cache(namespace="ns-b", cache_plugin=plugin)
@@ -412,7 +412,7 @@ def test_get_current_namespaced_cache_falls_back_to_in_memory_when_unknown_backe
 def test_get_current_namespaced_cache_with_sqlite_plugin_uses_sqlite_backend(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
-    """Brief: SQLite3CachePlugin yields a SQLite3TTLCache-backed adapter.
+    """Brief: SQLite3Cache yields a SQLite3TTLCache-backed adapter.
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture used to inject test doubles.
@@ -425,9 +425,9 @@ def test_get_current_namespaced_cache_with_sqlite_plugin_uses_sqlite_backend(
     """
 
     # Ensure the module import used inside get_current_namespaced_cache
-    # succeeds by registering a synthetic foghorn.cache_plugins.sqlite3_cache
-    # module exporting SQLite3CachePlugin.
-    sqlite3_cache_mod = types.ModuleType("foghorn.cache_plugins.sqlite3_cache")
+    # succeeds by registering a synthetic foghorn.plugins.cache.sqlite_cache
+    # module exporting SQLite3Cache.
+    sqlite3_cache_mod = types.ModuleType("foghorn.plugins.cache.sqlite_cache")
 
     class _StubInnerCache:
         """Brief: Minimal inner cache exposing journal_mode for tests.
@@ -442,23 +442,23 @@ def test_get_current_namespaced_cache_with_sqlite_plugin_uses_sqlite_backend(
         def __init__(self, journal_mode: str = "TRUNCATE") -> None:
             self.journal_mode = journal_mode
 
-    class _StubSQLite3CachePlugin:
+    class _StubSQLite3Cache:
         """Brief: Lightweight SQLite plugin stand-in used by tests.
 
         Inputs:
           - db_path: Database path string.
 
         Outputs:
-          - _StubSQLite3CachePlugin instance.
+          - _StubSQLite3Cache instance.
         """
 
         def __init__(self, db_path: str) -> None:
             self.db_path = db_path
             self._cache = _StubInnerCache()
 
-    sqlite3_cache_mod.SQLite3CachePlugin = _StubSQLite3CachePlugin
+    sqlite3_cache_mod.SQLite3Cache = _StubSQLite3Cache
     monkeypatch.setitem(
-        sys.modules, "foghorn.cache_plugins.sqlite3_cache", sqlite3_cache_mod
+        sys.modules, "foghorn.plugins.cache.sqlite_cache", sqlite3_cache_mod
     )
 
     recorded: dict[str, object] = {}
@@ -496,7 +496,7 @@ def test_get_current_namespaced_cache_with_sqlite_plugin_uses_sqlite_backend(
     )
 
     db_path = str(tmp_path / "subdir" / "dns_cache.sqlite3")
-    plugin = _StubSQLite3CachePlugin(db_path=db_path)
+    plugin = _StubSQLite3Cache(db_path=db_path)
 
     adapter = get_current_namespaced_cache(
         namespace="my_namespace", cache_plugin=plugin
@@ -522,7 +522,7 @@ def test_get_current_namespaced_cache_with_sqlite_plugin_missing_db_path_uses_fa
         sqlite plugin has no usable db_path.
     """
 
-    sqlite3_cache_mod = types.ModuleType("foghorn.cache_plugins.sqlite3_cache")
+    sqlite3_cache_mod = types.ModuleType("foghorn.plugins.cache.sqlite_cache")
 
     class _StubInnerCacheNoJournal:
         """Brief: Inner cache without journal_mode, forcing default handling.
@@ -537,23 +537,23 @@ def test_get_current_namespaced_cache_with_sqlite_plugin_missing_db_path_uses_fa
         def __init__(self) -> None:
             self.calls = 0
 
-    class _StubSQLite3CachePluginEmptyDb:
+    class _StubSQLite3CacheEmptyDb:
         """Brief: sqlite plugin stand-in that exposes an empty db_path.
 
         Inputs:
           - None.
 
         Outputs:
-          - _StubSQLite3CachePluginEmptyDb instance.
+          - _StubSQLite3CacheEmptyDb instance.
         """
 
         def __init__(self) -> None:
             self.db_path = ""
             self._cache = _StubInnerCacheNoJournal()
 
-    sqlite3_cache_mod.SQLite3CachePlugin = _StubSQLite3CachePluginEmptyDb
+    sqlite3_cache_mod.SQLite3Cache = _StubSQLite3CacheEmptyDb
     monkeypatch.setitem(
-        sys.modules, "foghorn.cache_plugins.sqlite3_cache", sqlite3_cache_mod
+        sys.modules, "foghorn.plugins.cache.sqlite_cache", sqlite3_cache_mod
     )
 
     def _fail_if_called(*_args: object, **_kwargs: object) -> None:
@@ -571,7 +571,7 @@ def test_get_current_namespaced_cache_with_sqlite_plugin_missing_db_path_uses_fa
 
     monkeypatch.setattr(current_cache_module, "SQLite3TTLCache", _fail_if_called)
 
-    plugin = _StubSQLite3CachePluginEmptyDb()
+    plugin = _StubSQLite3CacheEmptyDb()
 
     adapter = get_current_namespaced_cache(namespace="ns-empty", cache_plugin=plugin)
 
