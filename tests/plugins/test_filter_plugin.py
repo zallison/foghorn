@@ -1,5 +1,5 @@
 """
-Brief: Tests for foghorn.plugins.filter.FilterPlugin covering domain and IP branches.
+Brief: Tests for foghorn.plugins.filter.Filter covering domain and IP branches.
 
 Inputs:
   - None
@@ -14,9 +14,9 @@ from contextlib import closing
 import pytest
 from dnslib import AAAA, QTYPE, RR, TXT, A, DNSRecord, RCODE
 
-from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
-from foghorn.plugins.base import PluginContext, PluginDecision
-from foghorn.plugins.filter import FilterConfig, FilterPlugin
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
+from foghorn.plugins.resolve.base import PluginContext, PluginDecision
+from foghorn.plugins.resolve.filter import FilterConfig, Filter
 
 
 def _mk_query(name="example.com", qtype="A"):
@@ -56,7 +56,7 @@ def test_pre_resolve_block_exact_and_cache(tmp_path):
       - None: Asserts deny and cached deny
     """
     db = tmp_path / "bl.db"
-    p = FilterPlugin(db_path=str(db), blocked_domains=["blocked.com"], default="allow")
+    p = Filter(db_path=str(db), blocked_domains=["blocked.com"], default="allow")
     p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
@@ -82,7 +82,7 @@ def test_pre_resolve_deny_response_refused(tmp_path):
       - None: Asserts override decision and REFUSED rcode.
     """
     db = tmp_path / "bl.db"
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(db),
         blocked_domains=["blocked.com"],
         default="allow",
@@ -114,7 +114,7 @@ def test_pre_resolve_deny_response_ip_override(tmp_path):
       - None: Asserts override with A answer equal to deny_response_ip4.
     """
     db = tmp_path / "bl.db"
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(db),
         blocked_domains=["blocked.com"],
         default="allow",
@@ -147,7 +147,7 @@ def test_pre_resolve_qtype_allowlist_denies_unlisted_qtypes(tmp_path):
       - None: Asserts MX is denied with REFUSED and A is allowed to proceed.
     """
     db = tmp_path / "bl_qtypes_allow.db"
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(db),
         default="allow",
         allow_qtypes=["A"],
@@ -181,7 +181,7 @@ def test_pre_resolve_qtype_denylist_takes_precedence(tmp_path):
       - None: Asserts MX is denied and A is allowed.
     """
     db = tmp_path / "bl_qtypes_deny.db"
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(db),
         default="allow",
         allow_qtypes=["A", "MX"],
@@ -214,7 +214,7 @@ def test_pre_resolve_allow_keyword_and_pattern(tmp_path, caplog):
     """
     db = tmp_path / "bl.db"
     # Include an invalid regex to exercise compile error path (logged)
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(db),
         default="allow",
         blocked_keywords=["bad"],
@@ -242,7 +242,7 @@ def test_load_list_from_file_and_is_allowed_and_errors(tmp_path):
       - None: Asserts is_allowed True/False and exceptions
     """
     db = tmp_path / "bl.db"
-    p = FilterPlugin(db_path=str(db), default="deny")
+    p = Filter(db_path=str(db), default="deny")
     p.setup()
 
     with closing(p.conn):
@@ -276,7 +276,7 @@ def test_post_resolve_deny_overrides_remove_and_replace_paths(tmp_path):
       - None: Asserts deny, NXDOMAIN, and override behaviors
     """
     db = tmp_path / "bl.db"
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(db),
         blocked_ips=[
             {"ip": "1.2.3.4", "action": "deny"},
@@ -320,7 +320,7 @@ def test_post_resolve_deny_response_servfail_for_blocked_ip(tmp_path):
       - None: Asserts override response with SERVFAIL rcode.
     """
     db = tmp_path / "bl.db"
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(db),
         blocked_ips=[{"ip": "1.2.3.4", "action": "deny"}],
         deny_response="servfail",
@@ -349,7 +349,7 @@ def test_post_resolve_replace_version_mismatch_and_invalid_runtime(tmp_path):
       - None: Asserts override with unchanged rdata
     """
     db = tmp_path / "bl.db"
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(db),
         blocked_ips=[
             {"ip": "2001:db8::1", "action": "replace", "replace_with": "127.0.0.1"}
@@ -389,7 +389,7 @@ def test_post_resolve_non_a_aaaa_and_parse_error(tmp_path):
       - None: Asserts TypeError and default decision
     """
     db = tmp_path / "bl.db"
-    p = FilterPlugin(db_path=str(db), blocked_ips=["1.2.3.4"], default="allow")
+    p = Filter(db_path=str(db), blocked_ips=["1.2.3.4"], default="allow")
     plugin = p
     plugin.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
@@ -415,7 +415,7 @@ def test_add_to_cache_and_get_ip_action(tmp_path):
       - None: Asserts cache bytes and actions returned
     """
     db = tmp_path / "bl.db"
-    p = FilterPlugin(db_path=str(db))
+    p = Filter(db_path=str(db))
     plugin = p
     plugin.setup()
 
@@ -457,7 +457,7 @@ def test_init_files_and_invalid_ips_and_actions(tmp_path):
     allowf.write_text("fromfile-allow.com\n")
     blockf.write_text("fromfile-block.com\n")
 
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(tmp_path / "bl.db"),
         default="allow",
         allowed_domains_files=[str(allowf)],
@@ -504,7 +504,7 @@ def test_post_resolve_aaaa_replace_and_mixed_records(tmp_path):
     Outputs:
       - None: Asserts override with AAAA changed and TXT present
     """
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(tmp_path / "bl.db"),
         blocked_ips=[
             {"ip": "2001:db8::2", "action": "replace", "replace_with": "2001:db8::3"}
@@ -540,7 +540,7 @@ def test_post_resolve_none_when_no_rules(tmp_path):
     Outputs:
       - None: Asserts None decision
     """
-    p = FilterPlugin(db_path=str(tmp_path / "bl.db"))
+    p = Filter(db_path=str(tmp_path / "bl.db"))
     plugin = p
     plugin.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
@@ -562,7 +562,7 @@ def test_add_to_cache_error_logs(tmp_path, monkeypatch, caplog):
     Outputs:
       - None: Asserts warning logged
     """
-    p = FilterPlugin(db_path=str(tmp_path / "bl.db"))
+    p = Filter(db_path=str(tmp_path / "bl.db"))
     plugin = p
     plugin.setup()
     caplog.set_level("WARNING")
@@ -589,7 +589,7 @@ def test_pre_resolve_cached_allow_returns_none(tmp_path):
     Outputs:
       - None: Asserts pre_resolve returns None
     """
-    p = FilterPlugin(db_path=str(tmp_path / "bl.db"), default="deny")
+    p = Filter(db_path=str(tmp_path / "bl.db"), default="deny")
     plugin = p
     plugin.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
@@ -611,7 +611,7 @@ def test_post_resolve_pack_failure_returns_deny(tmp_path, monkeypatch):
     Outputs:
       - None: Asserts deny decision
     """
-    plugin = FilterPlugin(
+    plugin = Filter(
         db_path=str(tmp_path / "bl.db"),
         blocked_ips=[
             {"ip": "9.9.9.9", "action": "replace", "replace_with": "127.0.0.1"}
@@ -646,7 +646,7 @@ def test_post_resolve_unknown_action_runtime_returns_none(tmp_path):
     Outputs:
       - None: Asserts decision is None.
     """
-    p = FilterPlugin(db_path=str(tmp_path / "bl.db"))
+    p = Filter(db_path=str(tmp_path / "bl.db"))
     plugin = p
     plugin.setup()
     # Patch with a rule that uses an unknown action (bypassing init normalization)
@@ -673,7 +673,7 @@ def test_post_resolve_unmatched_and_non_ip_records(tmp_path):
     """
 
     db = tmp_path / "bl.db"
-    plugin = FilterPlugin(db_path=str(db), blocked_ips=["1.2.3.4"])
+    plugin = Filter(db_path=str(db), blocked_ips=["1.2.3.4"])
     plugin.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
@@ -720,7 +720,7 @@ def test_glob_expansion_for_allowed_and_blocked_domain_files(tmp_path):
     (block_dir / "block1.txt").write_text("block1.com\n")
     (block_dir / "block2.txt").write_text("block2.com\n")
 
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(tmp_path / "bl.db"),
         default="deny",
         allowed_domains_files=[str(allow_dir / "*.txt")],
@@ -760,7 +760,7 @@ def test_legacy_file_keys_are_ignored_when_new_keys_used(tmp_path):
     # blocklist_files / allowlist_files are not part of the public schema
     # anymore; when passed directly to the plugin they should be ignored
     # entirely rather than causing migration errors or file lookups.
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(tmp_path / "bl_legacy_ignored.db"),
         # Deliberately bogus legacy paths: if these were ever used, FileNotFoundError
         # would be raised by _expand_globs.
@@ -786,22 +786,22 @@ def test_multiple_filter_instances_use_isolated_dbs_by_default(tmp_path):
       - tmp_path: temporary directory (unused, kept for symmetry with other tests).
 
     Outputs:
-      - None: Asserts that two FilterPlugin instances block only their own domains.
+      - None: Asserts that two Filter instances block only their own domains.
     """
     # First plugin blocks p1-block.com only.
-    p1 = FilterPlugin(
+    p1 = Filter(
         default="allow",
         blocked_domains=["p1-block.com"],
-        cache=InMemoryTTLCachePlugin(),
+        cache=InMemoryTTLCache(),
     )
     p1.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     # Second plugin blocks p2-block.com only.
-    p2 = FilterPlugin(
+    p2 = Filter(
         default="allow",
         blocked_domains=["p2-block.com"],
-        cache=InMemoryTTLCachePlugin(),
+        cache=InMemoryTTLCache(),
     )
     p2.setup()
 
@@ -827,7 +827,7 @@ def test_get_config_model_returns_filter_config():
     Outputs:
       - None: Asserts returned model is FilterConfig.
     """
-    assert FilterPlugin.get_config_model() is FilterConfig
+    assert Filter.get_config_model() is FilterConfig
 
 
 def test_setup_invalid_deny_response_defaults_to_nxdomain(tmp_path, caplog):
@@ -840,9 +840,7 @@ def test_setup_invalid_deny_response_defaults_to_nxdomain(tmp_path, caplog):
       - None: Asserts deny_response is normalized and warning logged.
     """
     db = tmp_path / "bl_invalid.db"
-    p = FilterPlugin(
-        db_path=str(db), deny_response="WEIRD", blocked_domains=["blocked.com"]
-    )
+    p = Filter(db_path=str(db), deny_response="WEIRD", blocked_domains=["blocked.com"])
     caplog.set_level("WARNING")
     p.setup()
 
@@ -861,9 +859,7 @@ def test_inline_allowlist_inserted_via_setup(tmp_path):
       - None: Asserts is_allowed honors inline allowed_domains.
     """
     db = tmp_path / "bl_allow_inline.db"
-    p = FilterPlugin(
-        db_path=str(db), default="deny", allowed_domains=["inline-allow.com"]
-    )
+    p = Filter(db_path=str(db), default="deny", allowed_domains=["inline-allow.com"])
     p.setup()
 
     with closing(p.conn):
@@ -881,7 +877,7 @@ def test_pre_and_post_resolve_skip_when_not_target(tmp_path, monkeypatch):
       - None: Asserts both hooks return None when not targeting the client.
     """
     db = tmp_path / "bl_targets.db"
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(db), blocked_domains=["blocked.com"], blocked_ips=["1.2.3.4"]
     )
     p.setup()
@@ -905,7 +901,7 @@ def test_pre_resolve_deny_response_servfail_and_noerror_empty(tmp_path):
       - None: Asserts rcode values and empty answers for noerror_empty.
     """
     db1 = tmp_path / "bl_servfail.db"
-    p1 = FilterPlugin(
+    p1 = Filter(
         db_path=str(db1),
         blocked_domains=["blocked.com"],
         default="allow",
@@ -923,7 +919,7 @@ def test_pre_resolve_deny_response_servfail_and_noerror_empty(tmp_path):
         assert reply1.header.rcode == RCODE.SERVFAIL
 
     db2 = tmp_path / "bl_noerror.db"
-    p2 = FilterPlugin(
+    p2 = Filter(
         db_path=str(db2),
         blocked_domains=["blocked.com"],
         default="allow",
@@ -951,7 +947,7 @@ def test_pre_resolve_ip_mode_for_aaaa_and_other_qtypes(tmp_path):
       - None: Asserts AAAA and non-A/AAAA paths build override responses.
     """
     db = tmp_path / "bl_ipmode.db"
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(db),
         blocked_domains=["blocked.com"],
         default="allow",
@@ -990,7 +986,7 @@ def test_build_deny_decision_pre_unknown_mode_defaults_to_deny(tmp_path):
       - None: Asserts PluginDecision(action='deny').
     """
     db = tmp_path / "bl_unknown_pre.db"
-    p = FilterPlugin(db_path=str(db))
+    p = Filter(db_path=str(db))
     p.setup()
     p.deny_response = "weird-mode"
     ctx = PluginContext(client_ip="1.2.3.4")
@@ -1012,7 +1008,7 @@ def test_post_resolve_deny_response_refused_and_noerror_empty(tmp_path):
       - None: Asserts REFUSED and NOERROR/empty answers.
     """
     db1 = tmp_path / "bl_post_refused.db"
-    p1 = FilterPlugin(
+    p1 = Filter(
         db_path=str(db1),
         blocked_ips=[{"ip": "1.2.3.4", "action": "deny"}],
         deny_response="refused",
@@ -1029,7 +1025,7 @@ def test_post_resolve_deny_response_refused_and_noerror_empty(tmp_path):
         assert rep1.header.rcode == RCODE.REFUSED
 
     db2 = tmp_path / "bl_post_noerror.db"
-    p2 = FilterPlugin(
+    p2 = Filter(
         db_path=str(db2),
         blocked_ips=[{"ip": "1.2.3.4", "action": "deny"}],
         deny_response="noerror_empty",
@@ -1055,7 +1051,7 @@ def test_build_deny_decision_post_unknown_mode_defaults_to_deny(tmp_path):
       - None: Asserts PluginDecision(action='deny').
     """
     db = tmp_path / "bl_unknown_post.db"
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(db),
         blocked_ips=[{"ip": "1.2.3.4", "action": "deny"}],
         deny_response="refused",

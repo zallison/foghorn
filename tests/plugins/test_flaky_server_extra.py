@@ -10,8 +10,8 @@ Outputs:
 
 from dnslib import QTYPE, RCODE, DNSRecord
 
-from foghorn.plugins.base import PluginContext
-from foghorn.plugins.flaky_server import FlakyServer
+from foghorn.plugins.resolve.base import PluginContext
+from foghorn.plugins.resolve.flaky_server import FlakyServer
 
 
 def _mk_query(name="example.com", qtype="A"):

@@ -11,7 +11,7 @@ Outputs:
 from dnslib import QTYPE, RCODE, DNSRecord
 
 import foghorn.servers.server as server_mod
-from foghorn.plugins.base import BasePlugin, PluginDecision
+from foghorn.plugins.resolve.base import BasePlugin, PluginDecision
 from foghorn.servers.server import DNSUDPHandler, compute_effective_ttl
 from foghorn.servers.udp_server import _set_response_id
 

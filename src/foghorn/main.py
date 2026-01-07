@@ -15,12 +15,14 @@ from .config.config_parser import (
     parse_config_file,
 )
 from foghorn.dnssec.dnssec_validate import configure_dnssec_resolver
+from foghorn.utils.register_caches import apply_decorated_cache_overrides
 from .config.logging_config import init_logging
-from .plugins.base import BasePlugin
+from .plugins.resolve.base import BasePlugin
 from .servers.doh_api import start_doh_server
 from .servers.server import DNSServer
 from .servers.webserver import RingBuffer, RuntimeState, start_webserver
-from .stats import StatsCollector, StatsReporter, StatsSQLiteStore
+from .stats import StatsCollector, StatsReporter
+from .plugins.querylog import BaseStatsStore, load_stats_store_backend
 
 
 def _clear_lru_caches(wrappers: Optional[List[object]]):
@@ -48,7 +50,7 @@ def _is_setup_plugin(plugin: BasePlugin) -> bool:
       - bool: True when plugin defines its own setup() implementation.
 
     Example use:
-      >>> from foghorn.plugins.base import BasePlugin
+      >>> from foghorn.plugins.resolve.base import BasePlugin
       >>> class P(BasePlugin):
       ...     def setup(self):
       ...         pass
@@ -167,25 +169,74 @@ def main(argv: List[str] | None = None) -> int:
             "(overrides existing counts when present)."
         ),
     )
+    parser.add_argument(
+        "--config-extras",
+        dest="config_extras",
+        choices=["ignore", "warn", "error"],
+        default="warn",
+        help=(
+            "Policy for unknown config keys not described by the JSON Schema: "
+            "ignore (keep current behaviour), warn (default), or error."
+        ),
+    )
     args = parser.parse_args(argv)
 
     # Load and validate configuration.
     try:
         cfg = parse_config_file(
-            args.config, cli_vars=list(getattr(args, "var", []) or [])
+            args.config,
+            cli_vars=list(getattr(args, "var", []) or []),
+            unknown_keys=str(getattr(args, "config_extras", "warn") or "warn"),
         )
     except ValueError as exc:
         print(str(exc))
         return 1
 
     # Initialize logging before any other operations.
-    foghorn_for_logging = cfg.get("foghorn") or {}
-    if not isinstance(foghorn_for_logging, dict):
-        foghorn_for_logging = {}
-    logging_cfg = foghorn_for_logging.get("logging")
-    init_logging(logging_cfg)
+    server_cfg = cfg.get("server") or {}
+    if not isinstance(server_cfg, dict):
+        raise ValueError("config.server must be a mapping when present")
+
+    logging_cfg = cfg.get("logging") or {}
+    if not isinstance(logging_cfg, dict):
+        raise ValueError("config.logging must be a mapping when present")
+
+    # New layout: Python logging configuration lives under logging.python.
+    # Only this shape is supported; legacy root-level logging keys are no
+    # longer interpreted.
+    python_logging_cfg = logging_cfg.get("python") or {}
+    if not isinstance(python_logging_cfg, dict):
+        python_logging_cfg = {}
+
+    init_logging(python_logging_cfg or None)
+
     logger = logging.getLogger("foghorn.main")
     logger.info("Loaded config from %s", args.config)
+
+    # Apply any configured overrides for decorated caches (registered_cached /
+    # registered_lru_cached) before listeners are started so that diagnostic
+    # caches use operator-selected sizes/TTLs. This is best-effort and
+    # silently ignores malformed entries.
+    try:
+        cache_block = server_cfg.get("cache") if isinstance(server_cfg, dict) else None
+        raw_overrides = []
+        if isinstance(cache_block, dict):
+            # Preferred key: server.cache.func_caches (list of DecoratedCacheOverride).
+            candidate = cache_block.get("func_caches")
+            # Backwards-compatible fallbacks for older configs/tests.
+            if not isinstance(candidate, list):
+                candidate = cache_block.get("modify")
+            if not isinstance(candidate, list):
+                candidate = cache_block.get("decorated_overrides")
+            if isinstance(candidate, list):
+                raw_overrides = [o for o in candidate if isinstance(o, dict)]
+        apply_decorated_cache_overrides(raw_overrides)
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: cache override failures must not block startup
+        logger.debug(
+            "Failed to apply decorated cache overrides from config", exc_info=True
+        )
 
     # Keep references for signal-driven reload/reset and coordinated shutdown.
     # These are captured by inner closures (SIGUSR1/SIGUSR2 handlers and
@@ -194,11 +245,11 @@ def main(argv: List[str] | None = None) -> int:
     cfg_path: str = args.config
     stats_collector: Optional[StatsCollector]
     stats_reporter: Optional[StatsReporter]
-    stats_persistence_store: Optional[StatsSQLiteStore]
+    stats_persistence_store: Optional[BaseStatsStore]
 
     # web_handle is the admin HTTP/web UI handle returned by start_webserver().
     # It is allowed to be None when the webserver is disabled but is treated as
-    # fatal when webserver.enabled is true.
+    # fatal when http.enabled is true.
     web_handle = None
 
     # Shared in-memory log buffer passed into the FastAPI admin app; this is
@@ -208,43 +259,73 @@ def main(argv: List[str] | None = None) -> int:
     # Runtime state used by /ready readiness probes exposed by the admin webserver.
     runtime_state = RuntimeState(startup_complete=False)
 
-    # Normalize listen configuration with backward compatibility.
-    # If listen.udp is present, prefer it; otherwise fall back to legacy listen.host/port.
-    listen_cfg = cfg.get("listen", {}) or {}
-    default_host = str(listen_cfg.get("host", "127.0.0.1"))
-    default_port = int(listen_cfg.get("port", 5335))
+    # Normalize listen configuration.
+    listen_cfg = server_cfg.get("listen") or {}
+    if not isinstance(listen_cfg, dict):
+        listen_cfg = {}
 
-    # Global foghorn runtime options (timeouts, strategy, asyncio usage).
-    foghorn_cfg = cfg.get("foghorn") or {}
-    if not isinstance(foghorn_cfg, dict):
-        raise ValueError("config.foghorn must be a mapping when present")
+    dns_cfg = listen_cfg.get("dns")
+    if not isinstance(dns_cfg, dict):
+        dns_cfg = {}
+
+    # Host/port precedence:
+    #   1) listen.dns.host/port when set
+    #   2) listen.host/port when set
+    #   3) hard-coded defaults 127.0.0.1:5335
+    raw_host = dns_cfg.get("host")
+    if raw_host is None:
+        raw_host = listen_cfg.get("host", "127.0.0.1")
+    raw_port = dns_cfg.get("port")
+    if raw_port is None:
+        raw_port = listen_cfg.get("port", 5335)
+
+    default_host = str(raw_host)
+    try:
+        default_port = int(raw_port)
+    except (TypeError, ValueError):
+        default_port = 5335
+
+    # Resolver configuration (forward vs recursive) with conservative defaults.
+    resolver_cfg = server_cfg.get("resolver") or cfg.get("resolver") or {}
+    if not isinstance(resolver_cfg, dict):
+        raise ValueError("config.server.resolver must be a mapping when present")
 
     def _sub(key, defaults):
         d = listen_cfg.get(key, {}) or {}
         out = {**defaults, **d} if isinstance(d, dict) else defaults
         return out
 
-    # Get listeners configs
-    #
-    # Semantics:
-    #   - UDP remains enabled by default, even when listen.udp is omitted, to
-    #     preserve long-standing behaviour.
-    #   - For TCP/DoT/DoH, presence of a listener subsection implies that the
-    #     listener should be enabled by default unless an explicit
-    #     enabled: false override is provided. This makes configurations like
-    #
-    #         listen:
-    #           tcp:
-    #             host: 0.0.0.0
-    #             port: 5353
-    #
-    #     behave as expected without requiring an explicit enabled: true.
+    udp_section = listen_cfg.get("udp")
+    if isinstance(udp_section, dict):
+        udp_default_enabled = bool(udp_section.get("enabled", True))
+    else:
+        # No explicit UDP listener block; fall back to dns.udp when present,
+        # otherwise preserve the historical default of UDP enabled.
+        if "udp" in dns_cfg:
+            udp_default_enabled = bool(dns_cfg.get("udp"))
+        else:
+            udp_default_enabled = True
+
     udp_cfg = _sub(
-        "udp", {"enabled": True, "host": default_host, "port": default_port or 5335}
+        "udp",
+        {
+            "enabled": udp_default_enabled,
+            "host": default_host,
+            "port": default_port or 5335,
+        },
     )
 
     tcp_section = listen_cfg.get("tcp")
-    tcp_default_enabled = True if isinstance(tcp_section, dict) else False
+    if isinstance(tcp_section, dict):
+        tcp_default_enabled = bool(tcp_section.get("enabled", True))
+    else:
+        # No explicit TCP listener block; fall back to dns.tcp when present,
+        # otherwise preserve the historical default of TCP disabled.
+        if "tcp" in dns_cfg:
+            tcp_default_enabled = bool(dns_cfg.get("tcp"))
+        else:
+            tcp_default_enabled = False
+
     tcp_cfg = _sub(
         "tcp",
         {
@@ -281,26 +362,15 @@ def main(argv: List[str] | None = None) -> int:
         "doh", enabled=bool(doh_cfg.get("enabled", False)), thread=None
     )
 
-    # Resolver configuration (forward vs recursive) with conservative defaults.
-    resolver_cfg = (
-        foghorn_cfg.get("resolver") if isinstance(foghorn_cfg, dict) else None
-    )
-    if resolver_cfg is None:
-        resolver_cfg = cfg.get("resolver") or {}
-    if not isinstance(resolver_cfg, dict):
-        raise ValueError("config.resolver must be a mapping when present")
-
     resolver_mode = str(resolver_cfg.get("mode", "forward")).lower()
     try:
         recursive_max_depth = int(resolver_cfg.get("max_depth", 16))
     except (TypeError, ValueError):
         recursive_max_depth = 16
     try:
-        recursive_timeout_ms = int(
-            resolver_cfg.get("timeout_ms", foghorn_cfg.get("timeout_ms", 2000))
-        )
+        recursive_timeout_ms = int(resolver_cfg.get("timeout_ms", 2000))
     except (TypeError, ValueError):
-        recursive_timeout_ms = int(foghorn_cfg.get("timeout_ms", 2000) or 2000)
+        recursive_timeout_ms = 2000
     try:
         recursive_per_try_timeout_ms = int(
             resolver_cfg.get("per_try_timeout_ms", recursive_timeout_ms)
@@ -313,20 +383,20 @@ def main(argv: List[str] | None = None) -> int:
         upstreams, timeout_ms = normalize_upstream_config(cfg)
     else:
         upstreams = []
-        try:
-            timeout_ms = int(foghorn_cfg.get("timeout_ms", 2000))
-        except (TypeError, ValueError):
-            timeout_ms = 2000
+        timeout_ms = recursive_timeout_ms
 
-    # Upstream selection strategy and concurrency controls
-    upstream_strategy = str(foghorn_cfg.get("upstream_strategy", "failover")).lower()
-    upstream_max_concurrent = int(foghorn_cfg.get("upstream_max_concurrent", 1) or 1)
+    # Upstream selection strategy and concurrency controls (v2 upstreams block).
+    upstream_cfg = cfg.get("upstreams") or {}
+    if not isinstance(upstream_cfg, dict):
+        raise ValueError("config.upstreams must be a mapping when present")
+    upstream_strategy = str(upstream_cfg.get("strategy", "failover")).lower()
+    upstream_max_concurrent = int(upstream_cfg.get("max_concurrent", 1) or 1)
     if upstream_max_concurrent < 1:
         upstream_max_concurrent = 1
 
     # Global knob to disable asyncio-based listeners/admin servers in restricted
     # environments. When false, threaded fallbacks are used where available.
-    use_asyncio = bool(foghorn_cfg.get("use_asyncio", True))
+    use_asyncio = bool(resolver_cfg.get("use_asyncio", True))
 
     # Cache plugin selection.
     #
@@ -335,22 +405,28 @@ def main(argv: List[str] | None = None) -> int:
     #   swap implementations without changing the resolver pipeline.
     #
     # Inputs:
-    #   - cfg['cache']: null | str | mapping
+    #   - server.cache: null | mapping (preferred, v2 layout)
+    #   - cfg['cache']: null | str | mapping (legacy root-level fallback)
     #
     # Outputs:
     #   - cache_plugin: CachePlugin instance
     try:
-        from foghorn.cache_plugins.registry import load_cache_plugin
+        from foghorn.plugins.cache.registry import load_cache_plugin
 
-        cache_plugin = load_cache_plugin(cfg.get("cache"))
+        cache_cfg = None
+        if isinstance(server_cfg, dict):
+            cache_cfg = server_cfg.get("cache")
+        if cache_cfg is None:
+            cache_cfg = cfg.get("cache")
+        cache_plugin = load_cache_plugin(cache_cfg)
     except Exception:
         cache_plugin = None
 
-    # Install the configured cache plugin globally so all transports (UDP/TCP/DoT/DoH)
+    # Install the configured cache plugin globally so alfoghorn.servers.transports (UDP/TCP/DoT/DoH)
     # share it, even when the UDP DNSServer is not started.
     if cache_plugin is not None:
         try:
-            from foghorn.plugins import base as plugin_base
+            from foghorn.plugins.resolve import base as plugin_base
 
             plugin_base.DNS_CACHE = cache_plugin  # type: ignore[assignment]
         except Exception:
@@ -378,91 +454,162 @@ def main(argv: List[str] | None = None) -> int:
         logger.error("Plugin setup failed: %s", e)
         return 1
 
-    # Initialize statistics collection if enabled
-    stats_cfg = cfg.get("statistics", {})
-    stats_enabled = stats_cfg.get("enabled", False)
-    # Optional mode restricting statistics to logging-only behaviour where
-    # background warm-load/rebuild passes are skipped and only insert-style
-    # operations (query_log appends and counter increments) are performed.
-    logging_only = bool(stats_cfg.get("logging_only", False))
-    # Optional mode restricting persistence usage to the raw query_log only.
-    # When true, aggregate counters are not mirrored into the persistent
-    # store; only query_log appends are performed. This implicitly implies
-    # logging_only semantics for startup warm-load/rebuild behaviour.
-    query_log_only = bool(stats_cfg.get("query_log_only", False))
+    # Initialize statistics collection if enabled (v2: root 'stats').
+    stats_cfg = cfg.get("stats", {}) or {}
+    if not isinstance(stats_cfg, dict):
+        stats_cfg = {}
+    if isinstance(stats_cfg, dict):
+        stats_enabled = bool(stats_cfg.get("enabled", True))
+    else:
+        stats_enabled = False
 
-    # Guard against ambiguous/contradictory configurations.
-    if logging_only and query_log_only:
-        raise ValueError(
-            "Invalid statistics configuration: logging_only and query_log_only "
-            "may not both be true; choose at most one."
-        )
+    # Global toggle to keep only the raw query_log in persistence and avoid
+    # mirroring aggregate counters into the backend.
+    logging_query_log_only = bool(logging_cfg.get("query_log_only", False))
 
-    logging_only_effective = bool(logging_only or query_log_only)
+    stats_collector = None
+    stats_reporter = None
+    stats_persistence_store = None
 
     stats_collector = None
     stats_reporter = None
     stats_persistence_store = None
 
     if stats_enabled:
-        # Optional SQLite-backed persistence; the store is responsible for
-        # maintaining long-lived aggregate counts and a raw query_log. The
-        # in-memory StatsCollector remains the live source for periodic
-        # logging and web API snapshots.
-        persistence_cfg = stats_cfg.get("persistence", {}) or {}
-        persistence_enabled = bool(persistence_cfg.get("enabled", True))
+        # Optional persistence store; the store is responsible for maintaining
+        # long-lived aggregate counts and a raw query_log. The in-memory
+        # StatsCollector remains the live source for periodic logging and web
+        # API snapshots.
         stats_persistence_store = None
 
-        if persistence_enabled:
-            db_path = str(persistence_cfg.get("db_path", "./config/var/stats.db"))
-            batch_writes = bool(persistence_cfg.get("batch_writes", True))
-            batch_time_sec = float(persistence_cfg.get("batch_time_sec", 15.0))
-            batch_max_size = int(persistence_cfg.get("batch_max_size", 1000))
+        # When query_log_only is enabled globally, skip background warm-load and
+        # rebuild passes so that the persistence store is only used for
+        # append-only query_log writes.
+        logging_only_effective = bool(logging_query_log_only)
 
-            # Determine whether a rebuild should be forced from CLI/config/env.
-            def _is_truthy_env(val: Optional[str]) -> bool:
-                """Return True if an environment variable string represents a truthy value.
+        # Helper: derive an effective persistence configuration from the new
+        # layout where statistics/query-log backends are described under
+        # logging.backends and stats.source_backend selects the primary backend.
+        def _build_effective_persistence_cfg() -> dict[str, object]:
+            """Brief: Compute the effective statistics persistence configuration.
 
-                Inputs:
-                    val: Environment variable value or None.
+            Inputs:
+              - None (captures cfg/stats_cfg from closure).
 
-                Outputs:
-                    bool: True for common truthy strings (1, true, yes, on), else False.
-                """
-                if val is None:
-                    return False
-                return str(val).strip().lower() in {
-                    "1",
-                    "true",
-                    "t",
-                    "yes",
-                    "y",
-                    "on",
-                }  # pragma: no cover - best effort
+            Outputs:
+              - dict: Configuration mapping suitable for load_stats_store_backend.
+            """
 
-            # Allow force_rebuild to be controlled from three sources, in
-            # increasing precedence order:
-            #   1) statistics.force_rebuild (root-level flag)
-            #   2) statistics.persistence.force_rebuild (legacy location)
-            #   3) FOGHORN_FORCE_REBUILD / --rebuild (highest precedence)
-            force_rebuild_root = bool(stats_cfg.get("force_rebuild", False))
-            force_rebuild_cfg = bool(persistence_cfg.get("force_rebuild", False))
-            force_rebuild_env = _is_truthy_env(os.getenv("FOGHORN_FORCE_REBUILD"))
-            force_rebuild = bool(
-                args.rebuild
-                or force_rebuild_env
-                or force_rebuild_cfg
-                or force_rebuild_root
+            logging_block = cfg.get("logging") or {}
+            if not isinstance(logging_block, dict):
+                return {}
+
+            backends_cfg = logging_block.get("backends") or []
+            if not isinstance(backends_cfg, list) or not backends_cfg:
+                return {}
+
+            async_default = bool(logging_block.get("async", True))
+
+            primary_hint = stats_cfg.get("source_backend")
+            primary_backend = (
+                str(primary_hint).strip() if isinstance(primary_hint, str) else ""
             )
 
-            try:
-                stats_persistence_store = StatsSQLiteStore(
-                    db_path=db_path,
-                    batch_writes=batch_writes,
-                    batch_time_sec=batch_time_sec,
-                    batch_max_size=batch_max_size,
+            normalized_backends: list[dict[str, object]] = []
+            for entry in backends_cfg:
+                if not isinstance(entry, dict):
+                    continue
+
+                backend_name = entry.get("backend")
+                if not backend_name:
+                    continue
+
+                raw_config = entry.get("config")
+                conf: dict[str, object]
+                if isinstance(raw_config, dict):
+                    conf = dict(raw_config)
+                else:
+                    # Accept a flattened layout where backend-specific options
+                    # live alongside id/backend.
+                    conf = {
+                        k: v
+                        for k, v in entry.items()
+                        if k not in {"id", "name", "backend", "config"}
+                    }
+
+                # Propagate the global logging.async flag to backends that do
+                # not opt out explicitly via async_logging.
+                conf.setdefault("async_logging", async_default)
+
+                backend_entry: dict[str, object] = {
+                    "backend": backend_name,
+                    "config": conf,
+                }
+
+                backend_id = entry.get("id") or entry.get("name")
+                if isinstance(backend_id, str) and backend_id.strip():
+                    backend_entry["name"] = backend_id
+
+                normalized_backends.append(backend_entry)
+
+            if not normalized_backends:
+                return {}
+
+            effective: dict[str, object] = {"backends": normalized_backends}
+            if primary_backend:
+                effective["primary_backend"] = primary_backend
+            return effective
+
+        # Determine whether a rebuild should be forced from CLI/config/env.
+        def _is_truthy_env(val: Optional[str]) -> bool:
+            """Return True if an environment variable string represents a truthy value.
+
+            Inputs:
+                val: Environment variable value or None.
+
+            Outputs:
+                bool: True for common truthy strings (1, true, yes, on), else False.
+            """
+
+            if val is None:
+                return False
+            return str(val).strip().lower() in {
+                "1",
+                "true",
+                "t",
+                "yes",
+                "y",
+                "on",
+            }  # pragma: no cover - best effort
+
+        # Allow force_rebuild to be controlled from three sources, in
+        # increasing precedence order:
+        #   1) statistics.force_rebuild (root-level flag)
+        #   2) FOGHORN_FORCE_REBUILD
+        #   3) --rebuild (highest precedence)
+        force_rebuild_root = bool(stats_cfg.get("force_rebuild", False))
+        force_rebuild_env = _is_truthy_env(os.getenv("FOGHORN_FORCE_REBUILD"))
+        force_rebuild = bool(args.rebuild or force_rebuild_env or force_rebuild_root)
+
+        try:
+            # Delegate backend construction (including multi-backend setups) to
+            # the querylog backend loader. This uses logging.backends and
+            # stats.source_backend exclusively.
+            backend_cfg: dict[str, object] = _build_effective_persistence_cfg()
+            if backend_cfg:
+                stats_persistence_store = load_stats_store_backend(backend_cfg)
+            else:
+                stats_persistence_store = None
+
+            if stats_persistence_store is None:
+                logger.info(
+                    "Statistics persistence not configured; running in memory-only mode",
                 )
-                logger.info("Initialized statistics SQLite store at %s", db_path)
+            else:
+                logger.info(
+                    "Initialized statistics backend %s",
+                    stats_persistence_store.__class__.__name__,
+                )
 
                 # Optionally rebuild counts from the query_log when requested or
                 # when counts are empty but query_log has rows. When
@@ -484,15 +631,15 @@ def main(argv: List[str] | None = None) -> int:
                             exc,
                             exc_info=True,
                         )
-            except (
-                Exception
-            ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                logger.error(
-                    "Failed to initialize statistics persistence: %s; continuing without persistence",
-                    exc,
-                    exc_info=True,
-                )
-                stats_persistence_store = None
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+            logger.error(
+                "Failed to initialize statistics persistence: %s; continuing without persistence",
+                exc,
+                exc_info=True,
+            )
+            stats_persistence_store = None
 
         # Initialize in-memory collector, wiring in the persistence store when present.
         ignore_cfg = stats_cfg.get("ignore", {}) or {}
@@ -525,7 +672,7 @@ def main(argv: List[str] | None = None) -> int:
             ignore_single_host=ignore_single_host,
             include_ignored_in_stats=include_in_stats,
             logging_only=logging_only_effective,
-            query_log_only=query_log_only,
+            query_log_only=logging_query_log_only,
         )
 
         # Best-effort warm-load of persisted aggregate counters on startup.
@@ -556,10 +703,27 @@ def main(argv: List[str] | None = None) -> int:
             stats_reporter.interval_seconds,
         )
 
-    # Initialize webserver log buffer (shared with admin HTTP API)
-    web_cfg = cfg.get("webserver", {}) or {}
-    # If a webserver block exists, default enabled to True unless explicitly
-    # disabled with enabled: false. This mirrors the listener expectations and
+    # Initialize webserver log buffer (shared with admin HTTP API).
+    #
+    # Preferred v2 location:
+    #   server:
+    #     http: {...}
+    #
+    # Legacy fallbacks (still accepted for existing configs/tests):
+    #   - root-level http: {...}
+    #   - root-level webserver: {...}
+    server_http = None
+    try:
+        if isinstance(server_cfg, dict):
+            server_http = server_cfg.get("http")
+    except Exception:
+        server_http = None
+
+    web_cfg = server_http or cfg.get("http") or cfg.get("webserver", {}) or {}
+    if not isinstance(web_cfg, dict):
+        web_cfg = {}
+    # If a http block exists, default enabled to True unless explicitly disabled
+    # with enabled: false. This mirrors the listener expectations and
     # start_webserver() behaviour.
     has_web_cfg = bool(web_cfg)
     raw_web_enabled = web_cfg.get("enabled") if isinstance(web_cfg, dict) else None
@@ -601,9 +765,8 @@ def main(argv: List[str] | None = None) -> int:
 
         Notes:
           - Both SIGUSR1 and SIGUSR2 share the same behavior: when statistics
-            are enabled and the configuration flag sigusr2_resets_stats is
-            true, the in-memory statistics are reset. In all cases, active
-            plugins that implement handle_sigusr2() are notified.
+            are enabled and the configuration flags sigusr[12]_resets_stats is
+            true, the in-memory statistics are reset.
         """
 
         nonlocal cfg, stats_collector
@@ -612,11 +775,23 @@ def main(argv: List[str] | None = None) -> int:
         # Conditionally reset statistics based on config; failures here must
         # never prevent plugin notifications from running.
         try:
-            s_cfg = (cfg.get("statistics") or {}) if isinstance(cfg, dict) else {}
+            if isinstance(cfg, dict):
+                raw_stats = cfg.get("stats") or cfg.get("statistics") or {}
+                s_cfg = raw_stats if isinstance(raw_stats, dict) else {}
+            else:
+                s_cfg = {}
+
             enabled = bool(s_cfg.get("enabled", False))
-            # Only sigusr2_resets_stats is supported; legacy reset_on_sigusr1 is
-            # no longer accepted to keep configuration semantics explicit.
-            reset_flag = bool(s_cfg.get("sigusr2_resets_stats", False))
+            # Use sigusr2_resets_stats as the canonical configuration flag for
+            # both SIGUSR1 and SIGUSR2 so that user expectations are consistent
+            # regardless of which signal they choose to send. For
+            # backwards-compatibility, also accept sigusr1_resets_stats as a
+            # deprecated alias.
+            reset_flag = bool(
+                s_cfg.get("sigusr2_resets_stats", False)
+                or s_cfg.get("sigusr1_resets_stats", False)
+            )
+
             if enabled and reset_flag:
                 if stats_collector is not None:
                     try:
@@ -788,12 +963,8 @@ def main(argv: List[str] | None = None) -> int:
     ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
         logger.warning("Could not install SIGINT handler on this platform")
 
-    # DNSSEC config (ignore|passthrough|validate). Prefer nested
-    # foghorn.dnssec but fall back to root-level dnssec for backward
-    # compatibility.
-    dnssec_cfg = foghorn_cfg.get("dnssec") if isinstance(foghorn_cfg, dict) else None
-    if dnssec_cfg is None:
-        dnssec_cfg = cfg.get("dnssec", {}) or {}
+    # DNSSEC config (ignore|passthrough|validate).
+    dnssec_cfg = server_cfg.get("dnssec") or {}
     if not isinstance(dnssec_cfg, dict):
         dnssec_cfg = {}
     dnssec_mode = str(dnssec_cfg.get("mode", "ignore")).lower()
@@ -1061,7 +1232,7 @@ def main(argv: List[str] | None = None) -> int:
 
     try:
         # Keep the main thread in a lightweight keepalive loop while UDP/TCP/DoT
-        # listeners run in the background. This ensures all transports are
+        # listeners run in the background. This ensures alfoghorn.servers.transports are
         # treated consistently and that shutdown is always driven by
         # shutdown_event/termination signals rather than a blocking
         # serve_forever() call.

@@ -1,85 +1,42 @@
-# Foghorn example: Filter plugin
-# Block/allow domains, patterns, keywords, and manipulate returned IPs.
-
-listen:
-  udp:
-    enabled: true
-    host: 127.0.0.1
-    port: 5353
-  tcp:
-    enabled: false
-  dot:
-    enabled: false
-
 upstreams:
-  - { host: 1.1.1.1, port: 53 }
-  - { host: 8.8.8.8, port: 53 }
-
-dnssec:
-  mode: passthrough
-  validation: upstream_ad
-  udp_payload_size: 1232
-
+  endpoints:
+  - host: 1.1.1.1
+    port: 53
+  - host: 8.8.8.8
+    port: 53
 logging:
   level: info
-
 plugins:
-  - module: filter  # FilterPlugin alias
-    # pre_priority: 20  # optional: run after ACL
-    config:
-      # Default policy when no rule matches.
-      default: deny
-
-      # Policy for what DNS response to send when this plugin "denies" a query
-      # (blocked domain or IP). Supported values:
-      #   - nxdomain (default): core server synthesizes NXDOMAIN
-      #   - refused: REFUSED response code
-      #   - servfail: SERVFAIL response code
-      #   - noerror_empty / nodata: NOERROR with an empty answer section
-      #   - ip: synthesize an A/AAAA answer using deny_response_ip4/deny_response_ip6
-      # deny_response: nxdomain
-      # deny_response_ip4: 192.0.2.55
-      # deny_response_ip6: 2001:db8::55
-
-      # Persistent on-disk DB (SQLite) for stats/cache if enabled by plugin.
-      db_path: ./config/var/blocklist.db
-
-      # Cache TTL for in-memory decisions to reduce DB/CPU load.
-      cache_ttl_seconds: 600
-      # cache_max_entries: 100000
-
-      # Exact-domain rules
-      blocked_domains:
-        - tracker.example
-      allowed_domains:
-        - intranet.example
-
-      # Regex-style patterns (Python-style). Escapes shown for dot.
-      blocked_patterns:
-        - ".*\\.ads\\..*"   # any label containing `.ads.`
-
-      # Simple keyword match on the FQDN
-      blocked_keywords:
-        - gambling
-
-      # IP-level actions applied to A/AAAA answers.
-      # - action: remove  -> strip matching IPs from the answer set
-      # - action: deny    -> apply the configured deny_response policy
-      # - action: replace -> substitute with `replace_with`
-      blocked_ips:
-        - ip: "198.51.100.0/24"
-          action: remove
-        - ip: "203.0.113.5"
-          action: replace
-          replace_with: "127.0.0.1"
-
-      # File-based lists (one domain per line; lines beginning with # are comments).
-      # Uncomment to enable:
-      # blocked_domains_files:
-      #   - example_configs/lists/blocklist.txt
-      # allowed_domains_files:
-      #   - example_configs/lists/allowlist.txt
-
-      # Notes:
-      # - IP matching supports IPv4 and IPv6 (CIDR).
-      # - File-based lists are merged with in-config lists; allowlist wins when both match.
+- type: filter
+  config:
+    default: deny
+    db_path: ./config/var/blocklist.db
+    cache_ttl_seconds: 600
+    blocked_domains:
+    - tracker.example
+    allowed_domains:
+    - intranet.example
+    blocked_patterns:
+    - .*\.ads\..*
+    blocked_keywords:
+    - gambling
+    blocked_ips:
+    - ip: 198.51.100.0/24
+      action: remove
+    - ip: 203.0.113.5
+      action: replace
+      replace_with: 127.0.0.1
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5353
+    tcp:
+      enabled: false
+    dot:
+      enabled: false
+  dnssec:
+    mode: passthrough
+    validation: upstream_ad
+    udp_payload_size: 1232

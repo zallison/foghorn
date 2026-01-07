@@ -12,8 +12,8 @@ from contextlib import closing
 
 from dnslib import QTYPE
 
-from foghorn.plugins.base import PluginContext
-from foghorn.plugins.filter import FilterPlugin
+from foghorn.plugins.resolve.base import PluginContext
+from foghorn.plugins.resolve.filter import Filter
 
 
 def test_domains_jsonl_with_modes(tmp_path):
@@ -28,7 +28,7 @@ def test_domains_jsonl_with_modes(tmp_path):
         )
     )
 
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(tmp_path / "bl.db"),
         allowed_domains_files=[str(f)],  # initial mode allow, per-line override applies
         default="deny",
@@ -62,7 +62,7 @@ def test_patterns_keywords_jsonl(tmp_path):
         )
     )
 
-    p = FilterPlugin(
+    p = Filter(
         db_path=str(tmp_path / "bl.db"),
         blocked_patterns_files=[str(pats)],
         blocked_keywords_files=[str(keys)],

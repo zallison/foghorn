@@ -12,13 +12,13 @@ import datetime as dt
 from contextlib import closing
 from unittest.mock import patch
 
-from foghorn.plugins.base import PluginContext
-from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin
+from foghorn.plugins.resolve.base import PluginContext
+from foghorn.plugins.resolve.new_domain_filter import NewDomainFilterExample
 
 
 def test_new_domain_filter_init_defaults(tmp_path):
     """
-    Brief: Verify NewDomainFilterPlugin initializes with defaults.
+    Brief: Verify NewDomainFilterExample initializes with defaults.
 
     Inputs:
       - tmp_path: temporary directory for database
@@ -27,7 +27,7 @@ def test_new_domain_filter_init_defaults(tmp_path):
       - None: Asserts default configuration
     """
     db_path = tmp_path / "whois.db"
-    plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin = NewDomainFilterExample(whois_db_path=str(db_path))
     plugin.setup()
     with closing(plugin._conn):
         assert plugin.threshold_days == 7
@@ -37,7 +37,7 @@ def test_new_domain_filter_init_defaults(tmp_path):
 
 def test_new_domain_filter_init_custom_config(tmp_path):
     """
-    Brief: Verify NewDomainFilterPlugin uses custom config.
+    Brief: Verify NewDomainFilterExample uses custom config.
 
     Inputs:
       - threshold_days, cache settings: custom values
@@ -46,7 +46,7 @@ def test_new_domain_filter_init_custom_config(tmp_path):
       - None: Asserts custom values stored
     """
     db_path = tmp_path / "whois.db"
-    plugin = NewDomainFilterPlugin(
+    plugin = NewDomainFilterExample(
         whois_db_path=str(db_path),
         threshold_days=30,
         whois_cache_ttl_seconds=7200,
@@ -71,7 +71,7 @@ def test_new_domain_filter_pre_resolve_unknown_age_allows(tmp_path, monkeypatch)
       - None: Asserts None returned (allow)
     """
     db_path = tmp_path / "whois.db"
-    plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin = NewDomainFilterExample(whois_db_path=str(db_path))
     plugin.setup()
 
     with closing(plugin._conn):
@@ -95,7 +95,7 @@ def test_new_domain_filter_pre_resolve_old_domain_allows(tmp_path, monkeypatch):
       - None: Asserts None returned (allow)
     """
     db_path = tmp_path / "whois.db"
-    plugin = NewDomainFilterPlugin(whois_db_path=str(db_path), threshold_days=10)
+    plugin = NewDomainFilterExample(whois_db_path=str(db_path), threshold_days=10)
     plugin.setup()
 
     with closing(plugin._conn):
@@ -119,7 +119,7 @@ def test_new_domain_filter_pre_resolve_new_domain_denies(tmp_path, monkeypatch):
       - None: Asserts deny decision
     """
     db_path = tmp_path / "whois.db"
-    plugin = NewDomainFilterPlugin(whois_db_path=str(db_path), threshold_days=10)
+    plugin = NewDomainFilterExample(whois_db_path=str(db_path), threshold_days=10)
     plugin.setup()
 
     with closing(plugin._conn):
@@ -143,7 +143,7 @@ def test_new_domain_filter_domain_age_days(tmp_path, monkeypatch):
       - None: Asserts age calculation
     """
     db_path = tmp_path / "whois.db"
-    plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin = NewDomainFilterExample(whois_db_path=str(db_path))
     plugin.setup()
 
     with closing(plugin._conn):
@@ -153,7 +153,7 @@ def test_new_domain_filter_domain_age_days(tmp_path, monkeypatch):
 
         monkeypatch.setattr(plugin, "_fetch_creation_date", lambda d: created)
 
-        with patch("foghorn.plugins.new_domain_filter.dt.datetime") as mock_dt:
+        with patch("foghorn.plugins.resolve.new_domain_filter.dt.datetime") as mock_dt:
             mock_dt.now.return_value = now
             mock_dt.timezone = dt.timezone
             age = plugin._domain_age_days("example.com")
@@ -173,7 +173,7 @@ def test_new_domain_filter_fetch_creation_date_caching(tmp_path):
       - None: Asserts cache and DB used
     """
     db_path = tmp_path / "whois.db"
-    plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin = NewDomainFilterExample(whois_db_path=str(db_path))
     plugin.setup()
 
     with closing(plugin._conn):
@@ -203,7 +203,7 @@ def test_new_domain_filter_db_operations(tmp_path):
       - None: Asserts DB created and records inserted/retrieved
     """
     db_path = tmp_path / "whois.db"
-    plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin = NewDomainFilterExample(whois_db_path=str(db_path))
     plugin.setup()
 
     with closing(plugin._conn):
@@ -233,7 +233,7 @@ def test_new_domain_filter_db_get_nonexistent(tmp_path):
       - None: Asserts None returned
     """
     db_path = tmp_path / "whois.db"
-    plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin = NewDomainFilterExample(whois_db_path=str(db_path))
     plugin.setup()
 
     with closing(plugin._conn):
@@ -242,8 +242,7 @@ def test_new_domain_filter_db_get_nonexistent(tmp_path):
 
 
 def test_new_domain_filter_whois_lookup_no_libraries(tmp_path, monkeypatch):
-    """
-    Brief: Verify graceful handling when whois libraries unavailable.
+    """Brief: Verify graceful handling when whois libraries unavailable.
 
     Inputs:
       - monkeypatch: to set whois modules to None
@@ -251,14 +250,14 @@ def test_new_domain_filter_whois_lookup_no_libraries(tmp_path, monkeypatch):
     Outputs:
       - None: Asserts None returned
     """
-    import foghorn.plugins.new_domain_filter as ndf_mod
+    import foghorn.plugins.resolve.new_domain_filter as ndf_mod
 
     # Mock both whois libraries as unavailable
     monkeypatch.setattr(ndf_mod, "_whois_mod", None)
     monkeypatch.setattr(ndf_mod, "_pythonwhois_mod", None)
 
     db_path = tmp_path / "whois.db"
-    plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin = NewDomainFilterExample(whois_db_path=str(db_path))
     plugin.setup()
 
     with closing(plugin._conn):
@@ -277,7 +276,7 @@ def test_new_domain_filter_domain_age_exception_handling(tmp_path, monkeypatch):
       - None: Asserts None returned on exception
     """
     db_path = tmp_path / "whois.db"
-    plugin = NewDomainFilterPlugin(whois_db_path=str(db_path))
+    plugin = NewDomainFilterExample(whois_db_path=str(db_path))
     plugin.setup()
 
     with closing(plugin._conn):

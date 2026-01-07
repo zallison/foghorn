@@ -10,7 +10,7 @@ Outputs:
 
 import logging
 
-from foghorn.plugins.base import BasePlugin, PluginContext
+from foghorn.plugins.resolve.base import BasePlugin, PluginContext
 
 
 def test_default_priorities_are_100():
@@ -210,7 +210,7 @@ def test_integration_ordering_post_hooks():
     Brief: Post hooks execute in ascending post_priority order.
 
     Inputs:
-      - LoggerPlugin post=10, FilterPlugin post=100, RewritePlugin post=200
+      - LoggerPlugin post=10, Filter post=100, RewritePlugin post=200
 
     Outputs:
       - None: Asserts post execution order: Logger -> Filter -> Rewrite
@@ -224,7 +224,7 @@ def test_integration_ordering_post_hooks():
             execution_order.append("Logger")
             return None
 
-    class FilterPlugin(BasePlugin):
+    class Filter(BasePlugin):
         post_priority = 100
 
         def post_resolve(self, qname, qtype, response_wire, ctx):
@@ -239,7 +239,7 @@ def test_integration_ordering_post_hooks():
             return None
 
     # Register in arbitrary order
-    plugins = [FilterPlugin(), RewritePlugin(), LoggerPlugin()]
+    plugins = [Filter(), RewritePlugin(), LoggerPlugin()]
 
     # Sort and execute
     ctx = PluginContext(client_ip="127.0.0.1")

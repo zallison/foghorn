@@ -11,17 +11,19 @@ Outputs:
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any, Dict, Optional
 
-from foghorn.querylog_backends import (
-    BaseStatsStoreBackend,
+from foghorn.plugins.querylog import (
+    BaseStatsStore,
     StatsStoreBackendConfig,
     load_stats_store_backend,
-    MultiStatsStoreBackend,
+    MultiStatsStore,
 )
 
 
-class DummyBackend(BaseStatsStoreBackend):
+class DummyBackend(BaseStatsStore):
     """Brief: In-memory dummy backend used to validate loader semantics.
 
     Inputs (constructor):
@@ -151,30 +153,30 @@ def test_loader_legacy_single_sqlite_config_still_works(monkeypatch) -> None:
 
     backend = load_stats_store_backend(cfg)
     assert backend is not None
-    assert isinstance(backend, BaseStatsStoreBackend)
+    assert isinstance(backend, BaseStatsStore)
 
 
 def test_loader_multi_backend_returns_multi_and_respects_order(monkeypatch) -> None:
-    """Brief: statistics.persistence.backends builds a MultiStatsStoreBackend.
+    """Brief: statistics.persistence.backends builds a MultiStatsStore.
 
     Inputs:
       - monkeypatch fixture.
 
     Outputs:
-      - Asserts that the loader returns a MultiStatsStoreBackend with backends
+      - Asserts that the loader returns a MultiStatsStore with backends
         created in the configured order and that reads use the primary.
     """
 
     created: list[DummyBackend] = []
 
-    def _dummy_ctor(cfg: StatsStoreBackendConfig) -> BaseStatsStoreBackend:
+    def _dummy_ctor(cfg: StatsStoreBackendConfig) -> BaseStatsStore:
         # Construct named DummyBackend instances in order.
         name = cfg.name or cfg.backend
         b = DummyBackend(name=name)
         created.append(b)
         return b
 
-    from foghorn import querylog_backends as qlb
+    from foghorn.plugins import querylog as qlb
 
     monkeypatch.setattr(qlb, "_build_backend_from_config", _dummy_ctor)
 
@@ -186,7 +188,7 @@ def test_loader_multi_backend_returns_multi_and_respects_order(monkeypatch) -> N
     }
 
     backend = load_stats_store_backend(persistence_cfg)
-    assert isinstance(backend, MultiStatsStoreBackend)
+    assert isinstance(backend, MultiStatsStore)
 
     # Loader should have built two DummyBackend instances in order.
     assert [b.name for b in created] == ["primary", "secondary"]
@@ -243,14 +245,14 @@ def test_loader_respects_primary_backend_hint(monkeypatch) -> None:
 
     created: list[DummyBackend] = []
 
-    def _dummy_ctor(cfg: StatsStoreBackendConfig) -> BaseStatsStoreBackend:
+    def _dummy_ctor(cfg: StatsStoreBackendConfig) -> BaseStatsStore:
         # Name dummy backends after their configured instance name when present.
         name = cfg.name or cfg.backend
         b = DummyBackend(name=name)
         created.append(b)
         return b
 
-    from foghorn import querylog_backends as qlb
+    from foghorn.plugins import querylog as qlb
 
     monkeypatch.setattr(qlb, "_build_backend_from_config", _dummy_ctor)
 
@@ -264,7 +266,7 @@ def test_loader_respects_primary_backend_hint(monkeypatch) -> None:
     }
 
     backend = load_stats_store_backend(persistence_cfg)
-    assert isinstance(backend, MultiStatsStoreBackend)
+    assert isinstance(backend, MultiStatsStore)
 
     # Loader still builds in declared order.
     assert [b.name for b in created] == ["primary", "secondary"]
@@ -282,3 +284,149 @@ def test_loader_respects_primary_backend_hint(monkeypatch) -> None:
     assert secondary_dummy.calls.get("export_counts", 0) == 1
     assert secondary_dummy.calls.get("select_query_log", 0) == 1
     assert secondary_dummy.calls.get("aggregate_query_log_counts", 0) == 1
+
+
+def test_multi_stats_store_insert_query_log_processed_in_worker_thread(
+    monkeypatch,
+) -> None:
+    """Brief: MultiStatsStore.insert_query_log work runs on the background thread.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that DummyBackend call recording happens from the
+        MultiStatsStore worker thread, not the main test thread.
+    """
+
+    created: list[DummyBackend] = []
+
+    def _dummy_ctor(cfg: StatsStoreBackendConfig) -> BaseStatsStore:
+        name = cfg.name or cfg.backend
+        b = DummyBackend(name=name)
+        created.append(b)
+        return b
+
+    from foghorn.plugins import querylog as qlb
+
+    monkeypatch.setattr(qlb, "_build_backend_from_config", _dummy_ctor)
+
+    persistence_cfg = {
+        "backends": [
+            {"backend": "primary", "config": {}},
+            {"backend": "secondary", "config": {}},
+        ]
+    }
+
+    backend = load_stats_store_backend(persistence_cfg)
+    assert isinstance(backend, MultiStatsStore)
+
+    # Capture the thread names used when DummyBackend records calls.
+    thread_names: list[str] = []
+    original_bump = DummyBackend._bump
+
+    def _bump_with_thread(self: DummyBackend, method: str) -> None:  # type: ignore[no-untyped-def]
+        thread_names.append(threading.current_thread().name)
+        original_bump(self, method)
+
+    monkeypatch.setattr(DummyBackend, "_bump", _bump_with_thread)
+
+    # Enqueue a query-log write and wait for the worker to process it.
+    backend.insert_query_log(
+        ts=0.0,
+        client_ip="127.0.0.1",
+        name="example.com",
+        qtype="A",
+        upstream_id=None,
+        rcode=None,
+        status=None,
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+
+    # Poll for the async worker to record at least one insert_query_log call.
+    deadline = time.time() + 2.0
+    while time.time() < deadline and not any(
+        b.calls.get("insert_query_log", 0) for b in created
+    ):
+        time.sleep(0.01)
+
+    assert any(b.calls.get("insert_query_log", 0) for b in created)
+    # At least one bump should have been recorded from a non-main thread
+    # (MultiStatsStore worker thread).
+    assert any(name != threading.current_thread().name for name in thread_names)
+
+
+def test_multi_stats_store_worker_isolates_backend_failures(monkeypatch) -> None:
+    """Brief: Failure in one backend's _insert_query_log does not block others.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that when one DummyBackend raises from insert_query_log,
+        the other backend still records the call via the worker thread.
+    """
+
+    class FailingBackend(DummyBackend):
+        def _bump(self, method: str) -> None:  # type: ignore[no-untyped-def]
+            # Record that we attempted the call, then raise to simulate failure.
+            super()._bump(method)
+            if method == "insert_query_log":
+                raise RuntimeError("boom")
+
+    created: list[BaseStatsStore] = []
+
+    def _dummy_ctor(cfg: StatsStoreBackendConfig) -> BaseStatsStore:
+        if not created:
+            b: BaseStatsStore = FailingBackend(name="failing")
+        else:
+            b = DummyBackend(name="ok")
+        created.append(b)
+        return b
+
+    from foghorn.plugins import querylog as qlb
+
+    monkeypatch.setattr(qlb, "_build_backend_from_config", _dummy_ctor)
+
+    persistence_cfg = {
+        "backends": [
+            {"backend": "failing", "config": {}},
+            {"backend": "ok", "config": {}},
+        ]
+    }
+
+    backend = load_stats_store_backend(persistence_cfg)
+    assert isinstance(backend, MultiStatsStore)
+
+    backend.insert_query_log(
+        ts=0.0,
+        client_ip="127.0.0.1",
+        name="example.com",
+        qtype="A",
+        upstream_id=None,
+        rcode=None,
+        status=None,
+        error=None,
+        first=None,
+        result_json="{}",
+    )
+
+    # Wait for the worker to process the queued operation.
+    deadline = time.time() + 2.0
+    while time.time() < deadline and (
+        len(created) < 2
+        or created[1].__class__ is DummyBackend
+        and created[1].calls.get("insert_query_log", 0) == 0
+    ):
+        time.sleep(0.01)
+
+    assert len(created) == 2
+    # The failing backend should have attempted insert_query_log once.
+    assert isinstance(created[0], FailingBackend)
+    assert created[0].calls.get("insert_query_log", 0) == 1
+    # The healthy backend should also have seen insert_query_log despite the
+    # exception in the first backend.
+    assert isinstance(created[1], DummyBackend)
+    assert created[1].calls.get("insert_query_log", 0) == 1

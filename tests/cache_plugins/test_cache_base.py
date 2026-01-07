@@ -1,4 +1,4 @@
-"""Brief: Unit tests for foghorn.cache_plugins.base.
+"""Brief: Unit tests for foghorn.plugins.cache.base.
 
 Inputs:
   - None
@@ -13,8 +13,8 @@ import time
 
 import pytest
 
-from foghorn.cache_plugins.base import CachePlugin, cache_aliases
-from foghorn.cache_plugins.in_memory_ttl import InMemoryTTLCachePlugin
+from foghorn.plugins.cache.base import CachePlugin, cache_aliases
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 
 
 def test_cache_aliases_decorator_sets_aliases_and_returns_class() -> None:
@@ -110,7 +110,7 @@ def test_cache_plugin_methods_raise_not_implemented() -> None:
 
 
 def test_in_memory_ttl_cache_snapshot_includes_counters() -> None:
-    """Brief: InMemoryTTLCachePlugin snapshot exposes per-cache counters.
+    """Brief: InMemoryTTLCache snapshot exposes per-cache counters.
 
     Inputs:
       - None.
@@ -119,7 +119,7 @@ def test_in_memory_ttl_cache_snapshot_includes_counters() -> None:
       - None; asserts get_http_snapshot() returns counter fields for primary cache.
     """
 
-    plugin = InMemoryTTLCachePlugin()
+    plugin = InMemoryTTLCache()
 
     # Exercise the cache to ensure counters are non-zero.
     key = ("example.com", 1)
@@ -155,7 +155,7 @@ def test_in_memory_ttl_cache_counts_expired_and_malformed_entries(monkeypatch) -
       - None; asserts malformed expiry is treated as expired and past entries counted.
     """
 
-    plugin = InMemoryTTLCachePlugin()
+    plugin = InMemoryTTLCache()
 
     # Directly mutate the underlying store to inject various expiry shapes.
     store = getattr(plugin._cache, "_store")
@@ -184,10 +184,10 @@ def test_in_memory_ttl_cache_snapshot_includes_plugin_targets_and_decorated(
       - None; asserts caches include plugin_targets rows and decorated rows honor registry.
     """
 
-    plugin = InMemoryTTLCachePlugin()
+    plugin = InMemoryTTLCache()
 
     # Fake a plugin with a FoghornTTLCache-style _targets_cache.
-    from foghorn.cache_backends.foghorn_ttl import FoghornTTLCache
+    from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 
     targets_cache = FoghornTTLCache()
     targets_cache.set(("targets.com", 1), 60, b"wire")
@@ -201,11 +201,11 @@ def test_in_memory_ttl_cache_snapshot_includes_plugin_targets_and_decorated(
     monkeypatch.setattr(udp_mod.DNSUDPHandler, "plugins", [FakePlugin()])
 
     # Fake decorated registry entries.
-    import foghorn.utils.cache_registry as reg_mod
+    import foghorn.utils.register_caches as reg_mod
 
     good_entry = {
         "module": "foghorn.example",
-        "qualname": "fn",
+        "name": "fn",
         "ttl": 30,
         "backend": "ttlcache",
         "maxsize": 128,
@@ -214,7 +214,7 @@ def test_in_memory_ttl_cache_snapshot_includes_plugin_targets_and_decorated(
         "cache_hits": 3,
         "cache_misses": 2,
     }
-    bad_entry = {"module": "", "qualname": ""}
+    bad_entry = {"module": "", "name": ""}
 
     def _fake_get_registered_cached():
         return [good_entry, bad_entry]
@@ -243,7 +243,7 @@ def test_in_memory_ttl_cache_purge_and_admin_descriptor() -> None:
       - None; asserts purge() succeeds and admin UI descriptor has sections.
     """
 
-    plugin = InMemoryTTLCachePlugin()
+    plugin = InMemoryTTLCache()
 
     # purge() delegates to backing cache and returns an int.
     assert isinstance(plugin.purge(), int)

@@ -1,426 +1,386 @@
 # Foghorn Developer Guide
 
-This document contains developer-facing details: architecture, transports, plugins, logging, statistics, signals, and testing. For end‑users and configuration examples, see README.md.
+This document is aimed at contributors and integrators who want to understand how Foghorn is wired internally: where key pieces of code live, how plugins and caches are registered, how statistics backends work, and how to regenerate the configuration schema.
 
-## Breaking changes
+## Table of Contents
 
-This release introduces a few developer-visible breaking changes:
+- [1. High-level architecture](#1-high-level-architecture)
+- [2. Code layout](#2-code-layout)
+- [3. Configuration, schema and validation](#3-configuration-schema-and-validation)
+  - [3.1 Base schema and generator](#31-base-schema-and-generator)
+  - [3.2 How plugins contribute config schemas](#32-how-plugins-contribute-config-schemas)
+- [4. Plugin systems](#4-plugin-systems)
+  - [4.1 Resolve plugins](#41-resolve-plugins)
+  - [4.2 Cache plugins](#42-cache-plugins)
+  - [4.3 Statistics/query-log backends](#43-statisticsquery-log-backends)
+- [5. DNS cache vs function caches](#5-dns-cache-vs-function-caches)
+- [6. Implementing new plugins](#6-implementing-new-plugins)
+  - [6.1 New resolve plugin](#61-new-resolve-plugin)
+  - [6.2 New cache plugin](#62-new-cache-plugin)
+  - [6.3 New stats/query-log backend](#63-new-statsquery-log-backend)
+- [7. Updating the schema generator](#7-updating-the-schema-generator)
+- [8. Makefile and common workflows](#8-makefile-and-common-workflows)
 
-- **Upstream config normalization**: `src/foghorn/main.py.normalize_upstream_config` no longer accepts `cfg['upstream']` as a single mapping with optional `timeout_ms`. Only list-based upstreams are supported; callers must ensure YAML uses the list form.
-- **UpstreamRouterPlugin routes**: `src/foghorn/plugins/upstream_router.py` now normalizes routes exclusively from `routes[*].upstreams`. The legacy `routes[*].upstream` single mapping is removed.
-- **BasePlugin priorities**: `src/foghorn/plugins/base.py` no longer honors the legacy `priority` key. Plugins must use `pre_priority`, `post_priority`, and (for setup-aware plugins) `setup_priority`. All three obey the same clamping semantics (1–255), and `setup_priority` falls back to the config-specified `pre_priority` or to the class attribute when omitted.
-- **DoH server shim**: the legacy asyncio-based `foghorn.doh_server.serve_doh` entrypoint has been removed. All DoH usage should go through `foghorn.doh_api.start_doh_server`; YAML `listen.doh` behavior is unchanged (requests still go through the standard plugin/caching pipeline).
+---
 
-## Architecture Overview
+## 1. High-level architecture
 
-- Entry: `src/foghorn/main.py` parses YAML, initializes logging/plugins, starts listeners, installs signal handlers.
-- Downstream servers (configured via `listen.*`):
-  - UDP: `src/foghorn/servers/udp_server.py` (ThreadingUDPServer wrapper) — handler logic lives in `src/foghorn/servers/server.py`.
-  - TCP: `src/foghorn/servers/tcp_server.py` (length‑prefixed, persistent connections, RFC 7766; asyncio with threaded fallback).
-  - DoT: `src/foghorn/servers/dot_server.py` (TLS, RFC 7858; asyncio).
-  - DoH: `src/foghorn/servers/doh_server.py` (HTTP admin and DNS-over-HTTPS plumbing; RFC 8484).
-- Upstream transports:
-  - UDP: `src/foghorn/transports/udp.py` (dnslib send)
-  - TCP: `src/foghorn/transports/tcp.py` with connection pooling
-  - DoT: `src/foghorn/transports/dot.py` with connection pooling
-  - DoH: `src/foghorn/transports/doh.py` (stdlib http.client; GET/POST; TLS verification controls)
-- Plugins: `src/foghorn/plugins/*`, discovered via `plugins/registry.py`. Hooks: `pre_resolve`, `post_resolve`. Aliases supported (e.g., `acl`, `router`, `new_domain`, `filter`, `custom`, `records`, `docker-hosts`).
-- Cache: cache plugins live in `src/foghorn/cache_plugins/`; `src/foghorn/cache.py` provides internal TTL caches used by the resolver and some plugins.
+The main entry point is `src/foghorn/main.py`. It is responsible for:
 
-## Request Pipeline
+- Parsing CLI arguments and loading the YAML configuration via `foghorn.config.config_parser`.
+- Initializing logging (`foghorn.config.logging_config.init_logging`).
+- Normalizing upstreams (`normalize_upstream_config`) and loading plugins (`load_plugins`).
+- Applying cache overrides for helper functions (`apply_decorated_cache_overrides`).
+- Creating statistics collectors/reporters and wiring a `BaseStatsStore` backend.
+- Starting listeners (UDP, TCP, DoT, DoH) and the admin webserver.
 
-1) Parse query (dnslib)
-2) Pre‑plugins (allow/deny/override)
-3) Cache lookup
-4) Upstream forward with failover (UDP/TCP/DoT/DoH)
-5) Post‑plugins (modify/deny)
-6) Cache store (NOERROR+answers)
-7) Send response (request ID preserved)
+DNS resolution itself is handled by `foghorn.servers.server.DNSServer` and helpers under `src/foghorn/servers`. Resolve plugins sit around that core and can short‑circuit, modify, or observe queries.
 
-When `dnssec.mode` is `validate`, EDNS DO is set and validation depends on `dnssec.validation`:
-- `upstream_ad`: require upstream AD bit; otherwise respond SERVFAIL
-- `local` (experimental): local validation; behavior may change
-- `local_extended`: local validation with additional hardening/coverage; behavior may change
+---
 
-## Transports and Pooling
+## 2. Code layout
 
-- TCP/DoT clients maintain a simple LIFO pool (default `max_connections: 32`, `idle_timeout_ms: 30000`). One in‑flight query per connection; concurrency by acquiring multiple connections.
-- Pools live in module globals keyed by upstream parameters.
-- DoT uses `ssl.SSLContext` with TLS ≥1.2; SNI/verification configurable per upstream (`tls.server_name`, `tls.verify`).
-- DoH client supports POST (binary body) and GET (`?dns=` base64url without padding). TLS verification is configurable via `verify` and optional `ca_file`.
+Important directories and modules:
 
-## Configuration (highlights)
+- `src/foghorn/main.py`
+  - Process entry point; orchestrates config, plugins, cache, stats, and listeners.
+- `src/foghorn/config/`
+  - `config_parser.py`: reads YAML, applies `vars`, validates against JSON Schema, normalizes shapes into the `server`, `upstreams`, `logging`, `stats`, and `plugins` blocks consumed by the rest of the code.
+  - `logging_config.py`: logging setup and per-plugin logger helpers.
+- `src/foghorn/plugins/resolve/`
+  - `base.py`: `BasePlugin`, `PluginContext`, and shared helpers; owns the global `DNS_CACHE` reference by default.
+  - `registry.py`: discovers resolve plugins and resolves aliases.
+  - `*.py`: concrete plugins such as access control, filters, mDNS bridge, etc.
+- `src/foghorn/plugins/cache/`
+  - `base.py`: `CachePlugin` and `cache_aliases` decorator.
+  - `registry.py`: discovers cache plugins and resolves aliases; provides `load_cache_plugin`.
+  - `in_memory_ttl.py`, `sqlite_cache.py`, `redis_cache.py`, `memcached_cache.py`, `mongodb_cache.py`, `none.py`: built‑in DNS cache backends.
+  - `backends/foghorn_ttl.py`, `backends/sqlite_ttl.py`: reusable TTL cache primitives.
+- `src/foghorn/plugins/querylog/`
+  - `base.py`: `BaseStatsStore` and `StatsStoreBackendConfig`.
+  - `registry.py`: discovers stats backends and resolves aliases; provides `discover_stats_backends` and `get_stats_backend_class`.
+  - `sqlite.py`, `mysql_mariadb.py`, `postgresql.py`, `mongodb.py`, `influxdb.py`, `mqtt_logging.py`: built‑in stats/query-log backends.
+- `src/foghorn/utils/register_caches.py`
+  - Registers decorated helper functions (`registered_cached`, `registered_lru_cached`, `registered_foghorn_ttl`, `registered_sqlite_ttl`) and applies config‑driven overrides (`apply_decorated_cache_overrides`).
+- `src/foghorn/stats.py`
+  - Higher-level statistics collector and reporter built on top of `BaseStatsStore`.
+- `src/foghorn/servers/`
+  - `server.py`: core resolver loop, UDP handler glue and adapter for plugins.
+  - `udp_server.py`, `doh_api.py`, and related transport implementations.
+  - `webserver.py`: admin HTTP API and UI, plus `RuntimeState` and log buffer.
 
-- Listeners under `listen.{udp,tcp,dot,doh}` with `enabled`, `host`, `port`. DoT/DoH accept `cert_file` and `key_file` (optional for DoH if plain HTTP is desired). The DoH listener is implemented via `foghorn.doh_api.start_doh_server` and shares the same resolver/plugin pipeline as UDP/TCP/DoT.
-- Upstreams accept optional `transport: udp|tcp|dot|doh`. For DoT set `tls.server_name`, `tls.verify`. For DoH set `url`, optional `method`, `headers`, and `tls.verify`/`tls.ca_file`.
-- `dnssec.mode: ignore|passthrough|validate`, `dnssec.validation: upstream_ad|local|local_extended` (local* are experimental), `dnssec.udp_payload_size` (default 1232).
-- DNS caching is implemented via cache plugins configured under the top-level `cache` key. Built-in cache plugins live in `src/foghorn/cache_plugins/`:
-  - `in_memory_ttl` (default)
-  - `sqlite3` (persistent on-disk)
-  - `redis` / `valkey` (remote; requires the optional Python dependency `redis`)
-  - `none` (disable caching)
-  TTL flooring is configured via the cache plugin: `cache.config.min_cache_ttl` (seconds).
-  See README.md and the runnable examples under `example_configs/cache_*.yaml`.
+---
 
-## Config JSON Schema and plugin schemas
+## 3. Configuration, schema and validation
 
-- The main configuration JSON Schema lives in `assets/config-schema.json` and is loaded by `foghorn.config_schema.validate_config()`.
-- The top-level YAML config optionally supports a `$schema` key (string URI/identifier). This is accepted by the JSON Schema but ignored at runtime; it exists purely for editor/tooling hints.
-- A helper script can generate a combined schema document that includes both the core config schema and per-plugin config schemas under `$defs.plugin_configs`:
-  - Location: `scripts/generate_foghorn_schema.py`
-  - Behavior: loads the existing `assets/config-schema.json`, discovers all plugins via `plugins/registry.py`, and attaches each plugin's config schema (from `get_config_model()` / `get_config_schema()`) into `$defs.plugin_configs`.
-  - In addition, the generator now augments the `statistics.persistence` section of the base schema so tools can see the new backend layout:
-    - `statistics.persistence.primary_backend`: optional string selecting the primary read backend when multiple backends are configured.
-    - `statistics.persistence.backends`: optional array of backend entries, each with:
-      - `name` (optional logical instance name used by `primary_backend`),
-      - `backend` (alias like `sqlite` / `mysql` / `mariadb`, or dotted import path to a concrete `BaseStatsStoreBackend`),
-      - `config` (free-form object passed verbatim to the backend constructor).
-    - When `backends` is omitted, the legacy single-backend SQLite configuration (db_path, batch_writes, batch_time_sec, batch_max_size) remains valid.
-  - Example usage from the project root:
+### 3.1 Base schema and generator
 
-    ```bash
-    PYTHONPATH=src python scripts/generate_foghorn_schema.py -o schema.json
-    ```
+Foghorn validates configuration using a JSON Schema document in `assets/config-schema.json`. This file must not be edited directly in code or by hand.
 
-  - The generated `schema.json` keeps the original top-level structure of `config-schema.json`; the extra `$defs.plugin_configs` node and statistics persistence augmentation are informational only and do not change validation semantics.
+Instead, the project uses a generator script:
 
-## Plugin lifecycle and priorities
+- `scripts/generate_foghorn_schema.py`
+  - Loads the existing base schema from `assets/config-schema.json`.
+  - Discovers resolve plugins via `foghorn.plugins.resolve.registry.discover_plugins()`.
+  - For each plugin, obtains a configuration model or explicit schema and attaches it under `$defs.PluginConfigs`.
+  - Normalizes top-level layout (`vars`, `server`, `upstreams`, `logging`, `stats`, `plugins`) and ensures helper definitions such as `DecoratedCacheOverride`, `PluginInstance`, `upstream_host`, and `upstream_doh` are present.
 
-- Plugins subclass `BasePlugin` and are discovered via `plugins/registry.py` using aliases (e.g., `acl`, `router`, `new_domain`, `filter`).
-- Each plugin instance has three priority attributes:
-  - `pre_priority`: ordering for `pre_resolve` hooks (lower runs first).
-  - `post_priority`: ordering for `post_resolve` hooks (lower runs first).
-  - `setup_priority`: ordering for `setup()` during the startup phase (lower runs first).
-- `BasePlugin.__init__` accepts `pre_priority`, `post_priority`, and `setup_priority` in the plugin config. Values are coerced to integers, clamped to [1, 255], and fall back to class attributes when invalid.
-- `setup_priority` resolution:
-  - Prefer explicit `setup_priority` from config.
-  - Otherwise fall back to config-provided `pre_priority` for setup-aware plugins.
-- Otherwise fall back to the class attribute `setup_priority` (default 100).
-- `main.run_setup_plugins()`:
-  - Filters the instantiated plugin list down to those that override `BasePlugin.setup`.
-  - Collects `(setup_priority, plugin)` pairs and runs `setup()` in ascending `setup_priority` order (stable sort; original registration order is preserved for ties).
-  - Reads `abort_on_failure` from each plugin’s `config` (defaults to `True`); if `setup()` raises and `abort_on_failure` is true, startup is aborted with `RuntimeError`. If `abort_on_failure` is false, the error is logged and startup continues.
-- Example setup ordering (FileDownloader and Filter):
-  - `FileDownloader` defines `setup_priority = 15` so it runs early, downloads lists, and validates them before other plugins.
-  - `FilterPlugin` typically uses a higher `setup_priority` (for example 20), so it runs after FileDownloader and can safely load the downloaded files.
-  - User config may override `setup_priority` on a per-plugin basis when composing plugin chains.
+When you make changes that affect configuration shape, regenerate the schema with either:
 
-## BasePlugin targeting and TTL cache
-
-`BasePlugin` implements optional, shared client‑targeting semantics for all
-plugin subclasses via three configuration keys:
-
-- `targets`: list of CIDR/IP strings (or a single string) defining an allow‑set
-  of client networks for this plugin.
-- `targets_ignore`: list of CIDR/IP strings to exclude from targeting even when
-  they match `targets`.
-- `targets_cache_ttl_seconds`: integer TTL (seconds) for an internal
-  `FoghornTTLCache` that memoizes per‑client decisions.
-
-Runtime behavior (`BasePlugin.targets(ctx) -> bool`):
-
-- When both `_target_networks` and `_ignore_networks` are empty (no config
-  provided), the method returns `True` and bypasses the cache; the plugin
-  applies to all clients.
-- When `targets` and/or `targets_ignore` are configured, the method first
-  checks `_ignore_networks` (deny‑list wins), then `_target_networks`:
-  - `targets` only: client is targeted iff its IP is in at least one target
-	network.
-  - `targets_ignore` only: client is targeted iff its IP is **not** in any
-	ignore network (inverted logic).
-  - both: client is targeted iff it is **not** in any ignore network and is in
-	at least one target network.
-- Decisions are cached per `(client_ip, 0)` key as `'1'`/`'0'` bytes for the
-  configured TTL; cache lookups are a fast path on hot clients under load.
-
-Core plugins that currently respect `targets()` include AccessControl,
-Filter, Greylist, NewDomainFilter, UpstreamRouter, FlakyServer, Examples,
-and EtcHosts. Implementers of new plugins are encouraged to call
-`self.targets(ctx)` early in their `pre_resolve`/`post_resolve` hooks when
-client‑scoped behavior is desired.
-
-## Admin Webserver Endpoints
-
-The admin webserver can run either as a FastAPI app (preferred) or as a
-threaded `http.server` fallback. Both expose the same logical endpoints,
-with some aliases preserved for backwards compatibility.
-
-- Health
-  - `GET /health`, `GET /api/v1/health`
-  - Returns a small JSON liveness payload with `status` and `server_time`.
-
-- Statistics (/stats)
-  - `GET /stats`, `GET /api/v1/stats`
-	- FastAPI: served by `create_app(...).get_stats` using `_get_stats_snapshot_cached`.
-	- Threaded: served by `_ThreadedAdminRequestHandler._handle_stats`.
-	- Response includes `totals`, `rcodes`, `qtypes`, `uniques`, `upstreams`,
-	  `meta` (hostname/IP/version/uptime plus uniques), latency histograms
-	  (`latency`, `latency_recent`), upstream rcodes/qtypes, `qtype_qnames`,
-	  per‑rcode domain/subdomain lists, cache hit/miss domains/subdomains, and
-	  a derived `rate_limit` summary when `cache_stat_rate_limit` is present.
-	- Query params: `reset=true|1|yes` forces a fresh snapshot and reset.
-  - `POST /stats/reset`, `POST /api/v1/stats/reset`
-	- Resets all in‑memory statistics counters for the active `StatsCollector`.
-
-- Traffic summary (/traffic)
-  - `GET /traffic`, `GET /api/v1/traffic`
-  - Returns a lightweight view derived from a stats snapshot: `totals`,
-	`rcodes`, `qtypes`, `top_clients`, `top_domains`, and `latency`, plus
-	basic host metadata.
-
-- Configuration (/config)
-  - Sanitized config
-	- `GET /config`, `GET /api/v1/config`
-	  (FastAPI) – YAML body; uses `_get_sanitized_config_yaml_cached`.
-	- `GET /config` and `GET /config.json` families in the threaded handler
-	  return sanitized YAML or JSON via `sanitize_config`, with values under
-	  keys like `token`, `password`, and `secret` replaced by `***`.
-  - Raw config
-	- `GET /config/raw`, `GET /api/v1/config/raw` (FastAPI) and
-	  `/config_raw` aliases in the threaded handler return the on‑disk YAML
-	  unmodified.
-	- `GET /config/raw.json`, `GET /api/v1/config/raw.json` return both parsed
-	  config (JSON) and the raw YAML string.
-  - Save config
-	- `POST /config/save`, `POST /api/v1/config/save`
-	  - Expects a JSON object with a `raw_yaml` field containing the full
-		configuration document.
-	  - Writes a backup, atomically replaces the active config, and schedules
-		(FastAPI) or immediately sends (threaded handler) SIGHUP via
-		`_schedule_sighup_after_config_save`.
-
-- Logs (/logs)
-  - `GET /logs`, `GET /api/v1/logs`
-  - Returns recent log‑like entries from the in‑memory `RingBuffer`.
-  - Query params: `limit` controls the maximum number of entries returned.
-
-- Rate‑limit inspection (/api/v1/ratelimit)
-  - `GET /api/v1/ratelimit`
-  - Uses `_collect_rate_limit_stats` to summarize `RateLimitPlugin` sqlite
-	profiles across any configured `db_path` values, with a short‑lived
-	in‑memory cache per process.
-
-- Static UI
-  - FastAPI:
-	- `GET /`, `GET /index.html` serve `html/index.html` from the resolved
-	  `www_root` when `webserver.index` is true.
-	- `GET /{path:path}` serves static files from `www_root`, with
-	  path‑traversal protection.
-  - Threaded admin server:
-	- `GET /`, `GET /index.html` via `_handle_index()`.
-	- Other paths under `html/` via `_try_serve_www()`.
-
-- CORS and preflight
-  - `OPTIONS *` is handled in the threaded handler and by FastAPI’s CORS
-	middleware when `webserver.cors.enabled` is true.
-
-Short endpoint summary (canonical forms):
-- `GET  /api/v1/health`           – liveness probe (alias: `/health`).
-- `GET  /api/v1/stats`            – full statistics snapshot (optionally `reset=1`; alias: `/stats`).
-- `POST /api/v1/stats/reset`      – reset stats counters (alias: `/stats/reset`).
-- `GET  /api/v1/traffic`          – lightweight traffic view (alias: `/traffic`).
-- `GET  /api/v1/config`           – sanitized YAML config (alias: `/config`).
-- `GET  /api/v1/config.json`      – sanitized JSON config (alias: `/config.json`).
-- `GET  /api/v1/config/raw`       – raw YAML from disk (aliases: `/config/raw`, `/config_raw`).
-- `GET  /api/v1/config/raw.json`  – raw YAML + parsed config as JSON (aliases: `/config/raw.json`, `/config_raw.json`).
-- `POST /api/v1/config/save`      – write new config (via `raw_yaml`) and trigger SIGHUP (alias: `/config/save`).
-- `GET  /api/v1/logs`             – recent in‑memory log entries (alias: `/logs`).
-- `GET  /api/v1/ratelimit`        – RateLimitPlugin sqlite profile summary.
-- `GET  /` and `/index.html`      – optional HTML dashboard when `webserver.index` is true.
-
-## Logging and Statistics
-
-- Logging is configured via the YAML `logging` section (see README.md for a quickstart). Format uses bracketed levels and UTC timestamps.
-- Statistics: enable with `statistics.enabled`. A `StatsReporter` periodically logs JSON snapshots with counters/histograms. Tunables include `interval_seconds`, `reset_on_log`, `track_uniques`, `include_qtype_breakdown`, `include_top_clients`, `include_top_domains`, `top_n`, and `track_latency`.
-- When `track_latency: true`, two latency histogram fields are emitted:
-  - `latency`: cumulative statistics since start (or last reset if `reset_on_log: true`)
-  - `latency_recent`: statistics only for queries since the last stats emission; always resets after each log interval
-  Both fields have the same schema: `count`, `min_ms`, `max_ms`, `avg_ms`, `p50_ms`, `p90_ms`, `p99_ms`.
-
-## Signals
-
-- SIGUSR1: notifies active plugins (via `handle_sigusr2()`) and, when statistics are enabled with `sigusr2_resets_stats: true`, resets in-memory statistics counters.
-- SIGUSR2: identical behavior to SIGUSR1; retained for backwards compatibility so existing tooling can continue to send either signal.
-- SIGHUP: requests a clean shutdown with exit code 0; intended for supervisors (e.g., systemd) to restart Foghorn with a new configuration. The `/config/save` admin endpoint writes the updated config file and then, after a brief delay, sends SIGHUP to the main process.
-
-Note: some plugins (such as DockerHosts) rely on configuration-driven background
-refresh loops rather than signal-triggered reloads. For those plugins,
-`handle_sigusr2()` remains a no-op unless explicitly overridden.
-
-### DockerHosts TXT internals
-
-DockerHosts builds per-container TXT lines and optional aggregate
-`_containers.<suffix>` TXT owners from docker inspect data. The TXT builder:
-
-- Always includes a stable set of core keys (for example `name`, short `id`,
-  `ans4`/`ans6`, `ports`, `health`, `project-name`, `service`, `int4`/`int6`,
-  `nets`, `endpoint`).
-- Derives `ports` from `NetworkSettings.Ports[*].HostPort` and also exposes the
-  same host ports in the admin snapshot under the `ports` column.
-- Supports user-configurable TXT extensions via `txt_fields` and
-  `txt_fields_replace` in the DockerHosts config.
-
-The `txt_fields` helper evaluates a deliberately small JSONPath-like subset:
-
-- Leading `$` / `$.` is ignored.
-- Dot-separated dict traversal (for example `Config.Image`, `State.Health.Status`,
-  `NetworkSettings.Networks.bridge.IPAddress`).
-- Integer segments index into lists when possible (for example `Config.Env.0`).
-- A special case for Docker label keys that contain dots via
-  `Config.Labels.<full-label-key>`, so callers can use
-  `Config.Labels.com.docker.compose.project` directly.
-
-Values are flattened to strings, deduplicated while preserving order, and joined
-with commas when multiple values are present. When `txt_fields_replace` is true
-and at least one custom field resolves for a container, the core TXT keys are
-suppressed for that container and only the custom key/value pairs are emitted.
-
-## Testing
-
-- Unit tests: run `pytest`.
-- Integration (manual):
-  - TCP: `dig +tcp @127.0.0.1 -p 5353 example.com A`
-  - DoT: `kdig +tls @127.0.0.1 -p 8853 example.com A`
-  - DoH: `curl -s -H 'accept: application/dns-message' --data-binary @query.bin http://127.0.0.1:5380/dns-query`
-  - DNSSEC passthrough: `kdig +dnssec @127.0.0.1 -p 5353 example.com A`
-
-## Development
-
-- Code formatting: run `black src tests`.
-- Plugin development: inherit from `BasePlugin`, implement `pre_resolve` and/or `post_resolve`. Use the alias registry (see `plugins/registry.py`) or full dotted class paths. Prefer the terms “allowlist” and “blocklist” in documentation.
-
-## JSON Lines (JSONL) format
-
-JSON Lines is a convenient format for streaming structured data where each line is an independent JSON object.
-
-- Encoding: UTF-8
-- Structure: one JSON object per line; no outer array or multi-line objects
-- Whitespace: newlines delimit records; trailing spaces are allowed but discouraged
-- Comments: not allowed inside JSON; files may still contain shell-style comments (`# ...`) only when a loader explicitly states it supports them
-- Commas: no trailing commas; each line must be valid JSON by itself
-- Mixing formats: where documented, loaders may accept plain-text lines and JSONL in the same file, detected line-by-line
-
-Why we use it
-- Stream-friendly: process large files incrementally with O(1) memory
-- Append-friendly: safe to append new objects without reformatting
-- Human-diffable: line-oriented diffs stay readable
-
-General guidelines for contributors
-- Keep each line a single JSON object with a minimal schema; avoid nesting unless necessary
-- Validate inputs; on parse errors, prefer logging-and-skip over hard failure for data files
-- Do not retain parser state between calls; each file/line should be handled independently
-- Use allowlist/blocklist terminology in user-facing fields and docs
-
-Examples
-
-Plain JSONL file:
-```json path=null start=null
-{"domain": "good.com", "mode": "allow"}
-{"domain": "bad.com", "mode": "deny"}
-{"domain": "neutral.com"}
+```bash
+# From the project root
+./scripts/generate_foghorn_schema.py -o assets/config-schema.json
+# or
+make schema
 ```
 
-Mixed with plain text (only when the loader documents support):
-```text path=null start=null
-# allowlist
-good.com
-{"domain": "bad.com", "mode": "deny"}
+### 3.2 How plugins contribute config schemas
+
+Plugins can participate in schema generation in two ways:
+
+1. **Typed config model**
+   - Implement a `get_config_model()` `@classmethod` that returns a Pydantic `BaseModel` subclass.
+   - The generator calls `model_json_schema()` (Pydantic v2) or `schema()` (v1) and embeds the result.
+
+2. **Raw JSON Schema**
+   - Implement a `get_config_schema()` `@classmethod` that returns a `dict` JSON Schema.
+
+The generator prefers `get_config_model()` when present, then falls back to `get_config_schema()`.
+
+---
+
+## 4. Plugin systems
+
+### 4.1 Resolve plugins
+
+Resolve plugins live under `src/foghorn/plugins/resolve` and subclass `BasePlugin`.
+
+Key pieces:
+
+- `BasePlugin` in `resolve/base.py`:
+  - Handles per-instance name, logging, and priorities (`pre_priority`, `post_priority`, `setup_priority`).
+  - Implements client targeting via `targets()` using CIDR lists (`targets` and `targets_ignore`).
+  - Implements qtype targeting via `targets_qtype()`.
+  - Provides hook methods:
+    - `pre_resolve(qname, qtype, req, ctx)`
+    - `post_resolve(qname, qtype, response_wire, ctx)`
+    - `setup()`, `handle_sigusr2()`, and optional admin UI descriptor.
+- `plugin_aliases()` decorator in `resolve/base.py` assigns short aliases used in configuration.
+- `resolve/registry.py`:
+  - Walks the `foghorn.plugins` package using `pkgutil.walk_packages`.
+  - Registers each `BasePlugin` subclass under a default alias derived from its class name plus any explicit `aliases` attribute.
+  - `get_plugin_class()` resolves identifiers either as aliases or dotted import paths.
+
+Built‑in resolve plugins include (by alias only):
+
+- `acl`, `prefetch`, `docker`, `hosts`, `examples`, `lists`, `filter`, `flaky`, `greylist_example`, `mdns`, `new_domain`, `rate`, `router`, `zone`.
+
+### 4.2 Cache plugins
+
+Cache plugins live under `src/foghorn/plugins/cache` and subclass `CachePlugin`.
+
+- `CachePlugin` in `cache/base.py` defines the DNS cache interface:
+  - `get(key)`, `get_with_meta(key)`, `set(key, ttl, value)`, `purge()`.
+- `cache_aliases()` decorator assigns short aliases used in configuration.
+- `cache/registry.py`:
+  - Walks `foghorn.plugins.cache` and registers each `CachePlugin` subclass under a default alias plus explicit aliases.
+  - `load_cache_plugin()` accepts `None`, a string alias/path, or a small mapping and returns a configured cache instance.
+
+Built‑in DNS cache plugins include aliases such as:
+
+- `memory` (in-memory TTL cache)
+- `sqlite` / `sqlite3`
+- `redis` / `valkey`
+- `memcached` / `memcache`
+- `mongodb` / `mongo`
+- `none` / `null` / `off` / `disabled` / `no_cache`
+
+### 4.3 Statistics/query-log backends
+
+Statistics and query-log backends live under `src/foghorn/plugins/querylog` and subclass `BaseStatsStore`.
+
+- `BaseStatsStore` in `querylog/base.py` defines the contract used by `StatsCollector` and the web UI.
+- `querylog/registry.py`:
+  - Walks `foghorn.plugins.querylog` and registers each `BaseStatsStore` subclass under a default alias plus explicit aliases.
+  - `get_stats_backend_class()` resolves aliases or dotted import paths.
+  - `load_stats_store_backend()` builds one or more backends from the `logging.backends` config (plus `stats.source_backend`) and wraps multiple backends in a `MultiStatsStore` when needed.
+
+Built‑in backends include aliases such as:
+
+- `sqlite`, `sqlite3`
+- `mysql`, `mariadb`
+- `postgres`, `postgresql`, `pg`
+- `mongo`, `mongodb`
+- `influx`, `influxdb` (logging‑only)
+- `mqtt`, `broker` (logging‑only)
+
+---
+
+## 5. DNS cache vs function caches
+
+There are two distinct caching layers in Foghorn:
+
+1. **DNS response cache** (configured via `server.cache`)
+   - Implemented by `CachePlugin` subclasses.
+   - Used by the resolver to cache full DNS responses keyed by `(qname, qtype)`.
+   - Backends such as the in-memory TTL cache, SQLite, Redis, Memcached, and MongoDB share the same interface.
+
+2. **Function/helper caches** (configured via `server.cache.modify` / `decorated_overrides` / `func_caches`)
+   - Implemented in `foghorn.utils.register_caches`.
+   - Helpers such as `registered_cached`, `registered_lru_cached`, `registered_foghorn_ttl`, and `registered_sqlite_ttl` wrap individual functions or methods.
+   - Each decorated function creates a registry entry containing module, name, backend type (`ttlcache`, `lru_cache`, `foghorn_ttl`, `sqlite_ttl`, `lfu_cache`, `rr_cache`), TTL and maxsize hints, and hit/miss counters.
+   - `apply_decorated_cache_overrides()` reads an array of overrides from configuration and can adjust TTL or maxsize at runtime without code changes.
+
+The JSON Schema exposes a `DecoratedCacheOverride` definition and adds two array properties under `server.cache`:
+
+- `decorated_overrides`: legacy name for overrides.
+- `modify`: preferred name; both share the same item schema.
+
+Example override snippet:
+
+```yaml
+server:
+  cache:
+    modify:
+      - module: foghorn.dnssec.dnssec_validate
+        name: dnssec_validate
+        backend: ttlcache          # ttlcache | lru_cache | foghorn_ttl | sqlite_ttl | lfu_cache | rr_cache
+        ttl: 300
+        maxsize: 1024
+        reset_on_ttl_change: true
 ```
 
-Project-specific notes
-- FilterPlugin is the only component that reads JSONL from external files; specifically the file-backed input fields: allowed_domains_files, blocked_domains_files, blocked_patterns_files, blocked_keywords_files, blocked_ips_files
-- Each FilterPlugin instance uses its own in-memory SQLite DB by default; a shared on-disk DB is only used when a non-empty db_path is explicitly configured for that instance.
-- The core YAML config does not accept JSONL; it only references which files to load
-- Statistics snapshots are logged as single-line JSON objects (conceptually JSONL when collected)
+---
 
-## ZoneRecords plugin internals
+## 6. Implementing new plugins
 
-`ZoneRecords` (formerly `CustomRecords`) is a pre-resolve plugin that answers
-selected queries directly from configured records files and can act as an
-authoritative server for zones defined in those files.
+### 6.1 New resolve plugin
 
-- Location: `src/foghorn/plugins/zone-records.py`
-- Aliases: `zone`, `zone_records`, `custom`, `records`
-- Hooks: implements `setup()` and `pre_resolve()`; no post-resolve hook
+Minimal steps to add a new resolve plugin:
 
-Records files are parsed line-by-line; each non-empty, non-comment line must
-have the shape:
+1. Create a module under `src/foghorn/plugins/resolve`, for example `my_feature.py`.
+2. Subclass `BasePlugin` and assign aliases using `plugin_aliases`.
+3. Implement one or more hooks: `pre_resolve`, `post_resolve`, and optionally `setup`.
+4. Optionally provide a typed config model or JSON Schema for better validation.
 
-`<domain>|<qtype>|<ttl>|<value>`
+Sketch:
 
-- `domain` is normalized to lower-case without a trailing dot for lookup.
-- `qtype` may be a numeric code or mnemonic; resolution uses `dnslib.QTYPE`.
-- `ttl` must be a non-negative integer.
-- `value` is preserved as a string and later converted to RRs via
-  `RR.fromZone` when building responses.
+```python
+from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
-Configuration:
+@plugin_aliases('my_feature')
+class MyFeature(BasePlugin):
+    def pre_resolve(self, qname: str, qtype: int, req: bytes, ctx: PluginContext) -> PluginDecision | None:
+        # Insert logic here
+        return None
+```
 
-- `file_paths`: list of records files. At least one path is required.
-- `watchdog_enabled` (default `True` when omitted): when truthy and
-  `watchdog` is importable, start a per-directory observer that reloads
-  records on writes/creates/moves
-- `watchdog_min_interval_seconds` (default 1.0): minimum spacing between
-  reloads triggered by filesystem events; additional events within the
-  interval schedule a deferred reload via a background timer
-- `watchdog_poll_interval_seconds` (default 0.0): when greater than zero,
-  enables a stat-based polling loop that compares `(inode, size, mtime)`
-  snapshots for each configured file; useful on filesystems where events
-  are unreliable
+The registry will pick the plugin up automatically as long as it lives under `foghorn.plugins.resolve`. Users can then configure:
 
-Semantics:
+```yaml
+plugins:
+  - type: my_feature
+    config:
+      # your fields here
+```
 
-- Records from multiple files are merged in configuration order; for each
-  `(domain, qtype)` key the first TTL is kept and values are de-duplicated
-  while preserving first-seen order across files.
-- `pre_resolve()` performs a read under an optional `_records_lock` and, when
-  a mapping entry exists, constructs an authoritative `DNSRecord` with all
-  configured answers in the stored order and returns
-  `PluginDecision(action="override", response=...)`.
-- Background reloads replace the entire `records` mapping atomically under
-  `_records_lock` to avoid exposing partially updated state.
+To integrate with the schema generator, add:
 
-## FilterPlugin file parsing internals
+- `@classmethod get_config_model(cls) -> BaseModel` returning a Pydantic model, or
+- `@classmethod get_config_schema(cls) -> dict` returning a JSON Schema mapping.
 
-FilterPlugin supports file-backed inputs for domains, patterns, keywords, and IP rules. Parsing is layered to keep responsibilities clear and avoid state leakage.
+### 6.2 New cache plugin
 
-Helpers (in src/foghorn/plugins/filter.py):
-- _expand_globs(paths: list[str]) -> list[str]
-  - Expands globs and validates that each path either exists or matches at least one file; raises FileNotFoundError on misses.
-- _iter_noncomment_lines(path: str) -> Iterator[tuple[int, str]]
-  - Yields (lineno, stripped_line) for non-empty, non-#-comment lines.
-- _load_patterns_from_file(path: str) -> list[Pattern]
-  - Accepts plain lines (regex) and JSON Lines: {"pattern": "...", "flags": ["IGNORECASE"]}; compiles with re.IGNORECASE by default; logs compile errors and skips invalid entries.
-- _load_keywords_from_file(path: str) -> set[str]
-  - Accepts plain lines (keyword) and JSON Lines: {"keyword": "..."}; lowercases and accumulates.
-- _load_blocked_ips_from_file(path: str) -> None
-  - Accepts simple lines (IP or CIDR -> deny), CSV lines (ip,action[,replace_with]), and JSON Lines: {"ip": "...", "action": "deny|remove|replace", "replace_with": "IP"}.
-  - Validates IP/CIDR and replacement IPs; unknown actions default to deny; logs and skips invalid entries.
-- load_list_from_file(filename: str, mode: str = 'deny')
-  - Domains loader; accepts plain lines (domain) and JSON Lines {"domain": "...", "mode": "allow|deny"}; per-line mode overrides provided mode. Persists into SQLite table blocked_domains with last-write-wins semantics.
+Steps:
 
-Domain precedence (implemented in __init__ load order):
-1) allowed_domains_files
-2) blocked_domains_files
-3) inline allowed_domains
-4) inline blocked_domains
+1. Create a module under `src/foghorn/plugins/cache`, for example `my_cache.py`.
+2. Subclass `CachePlugin`.
+3. Decorate the class with `cache_aliases` to declare configuration aliases.
+4. Implement `get`, `get_with_meta`, `set`, and `purge`.
 
-IPs evaluation:
-- Exact IP rules override network rules when both match.
-- If any rule with action=deny matches an answer IP, the entire response is denied.
-- action=remove: answer RRs matching the rule are removed; if all A/AAAA are removed, NXDOMAIN is returned.
-- action=replace: A/AAAA RRs are rewritten to the replacement IP (version must match), producing an override response.
+Example:
 
-Logging and errors:
-- All loaders log file:line for invalid entries and continue.
-- Glob expansion raises FileNotFoundError when nothing matches and the path doesn’t exist.
+```python
+from foghorn.plugins.cache.base import CachePlugin, cache_aliases
 
-Testing notes:
-- tests/plugins/test_filter_plugin.py covers core behavior and error paths.
-- tests/plugins/test_filter_plugin_files_extra.py covers globs and file-backed inputs (plain/CSV).
-- tests/plugins/test_filter_plugin_jsonl.py covers JSON Lines for domains, patterns, keywords.
+@cache_aliases('my_cache')
+class MyCache(CachePlugin):
+    def __init__(self, **config: object) -> None:
+        # store config, open connections, etc.
+        ...
 
-## Future Work
+    def get(self, key):
+        ...
 
-- Full local DNSSEC validation with trust anchor management.
-- Additional metrics endpoint and connection reuse optimizations (e.g., TLS session resumption).
+    def get_with_meta(self, key):
+        ...
+
+    def set(self, key, ttl, value):
+        ...
+
+    def purge(self) -> int:
+        ...
+```
+
+The cache registry will discover this automatically. Operators can then select it via:
+
+```yaml
+server:
+  cache:
+    module: my_cache
+    config:
+      # backend-specific config
+```
+
+### 6.3 New stats/query-log backend
+
+Steps:
+
+1. Create a module under `src/foghorn/plugins/querylog`, for example `my_backend.py`.
+2. Subclass `BaseStatsStore` and implement all required methods.
+3. Provide a short alias tuple, for example `aliases = ('my_backend',)`.
+4. Optionally define a `default_config` mapping used by the loader.
+
+The registry will pick the backend up automatically. A configuration entry might look like:
+
+```yaml
+logging:
+  backends:
+    - id: my-backend
+      backend: my_backend
+      config:
+        # backend-specific settings
+
+stats:
+  source_backend: my-backend
+```
+
+`load_stats_store_backend()` converts the `logging.backends` catalog into either a single backend or a `MultiStatsStore` depending on how many backends are configured (and which one `stats.source_backend` selects as primary).
+
+---
+
+## 7. Updating the schema generator
+
+When you introduce new top-level configuration fields or change important structures (for example, adding new properties under `stats.persistence` or `server.cache`), you may need to update `scripts/generate_foghorn_schema.py`.
+
+Typical changes include:
+
+- Extending `_augment_statistics_persistence_schema()` when new statistics/query-log options are added so they appear under the `stats` block and the `logging.backends` catalog in the schema.
+- Extending `_build_v2_root_schema()` when you want to add or rearrange top-level properties (for example, introducing a new block under `server`).
+- Adjusting how plugin definitions are copied into `$defs.PluginConfigs` when plugin metadata changes.
+
+Workflow:
+
+1. Modify the generator code.
+2. Run the generator:
+
+   ```bash
+   ./scripts/generate_foghorn_schema.py -o assets/config-schema.json
+   ```
+
+3. Review the diff to ensure only the intended parts of the schema changed.
+4. Run tests and, if present, any editor tooling that relies on the schema.
+
+Remember: `assets/config-schema.json` is generated output; never hand-edit it.
+
+---
+
+## 8. Makefile and common workflows
+
+The `Makefile` in the project root provides shortcuts for common tasks. Important targets:
+
+- `make env`
+  - Create a virtual environment in `./venv` and install the package.
+- `make env-dev`
+  - As above, but install in editable mode with development extras (`.[dev]`).
+- `make build`
+  - Ensure `venv` exists and the `foghorn` entrypoint is installed.
+- `make run`
+  - Activate the venv, create `var/` if needed, and run `foghorn --config config/config.yaml`.
+- `make schema`
+  - Run `scripts/generate_foghorn_schema.py` and refresh `assets/config-schema.json`.
+- `make test`
+  - Run pytest with coverage over `src`, reusing the dev environment if present.
+- `make clean`
+  - Remove `venv`, `var`, build artifacts, and common Python cache files.
+- `make docker-build`, `make docker-run`, `make docker-clean`, `make docker-logs`
+  - Build and run the Docker image and follow container logs.
+- `make package-build`, `make package-publish`, `make package-publish-dev`
+  - Build and publish Python packages to PyPI or TestPyPI.
+
+A typical developer loop:
+
+```bash
+# One-time setup
+make env-dev
+
+# Edit code and tests
+
+# Run tests
+make test
+
+# Regenerate schema when config-related code changes
+make schema
+```
+
+With this overview you should be able to navigate the codebase, introduce new plugins and backends, and keep the schema and tooling in sync with runtime behaviour.

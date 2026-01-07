@@ -15,7 +15,7 @@ import threading
 
 from dnslib import QTYPE, DNSRecord
 
-from foghorn.plugins.base import PluginContext
+from foghorn.plugins.resolve.base import PluginContext
 
 
 def test_pre_resolve_override_response_id_matches(tmp_path):
@@ -28,7 +28,7 @@ def test_pre_resolve_override_response_id_matches(tmp_path):
     Outputs:
       - None: asserts response header.id equals request header.id
     """
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
@@ -57,7 +57,7 @@ def test_pre_resolve_parse_failure_returns_override_with_none_response(tmp_path)
     Outputs:
       - None: asserts override decision with response is None
     """
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
@@ -73,6 +73,35 @@ def test_pre_resolve_parse_failure_returns_override_with_none_response(tmp_path)
     assert decision.response is None
 
 
+def test_pre_resolve_ptr_parse_failure_returns_override_with_none_response(tmp_path):
+    """Brief: PTR pre_resolve returns override with None response on parse failure.
+
+    Inputs:
+      - hosts file with IPv4 mapping to generate a reverse pointer.
+
+    Outputs:
+      - None: asserts PTR decision has action 'override' and response is None.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
+    EtcHosts = mod.EtcHosts
+
+    hosts_file = tmp_path / "hosts"
+    hosts_file.write_text("192.0.2.10 ptr.local\n", encoding="utf-8")
+
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
+    plugin.setup()
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # Use the precomputed in-addr.arpa name to hit the PTR branch.
+    ip = "192.0.2.10"
+    ptr_name = ipaddress.ip_address(ip).reverse_pointer
+
+    decision = plugin.pre_resolve(ptr_name, QTYPE.PTR, b"not-a-dns-wire", ctx)
+    assert decision is not None
+    assert decision.action == "override"
+    assert decision.response is None
+
+
 def test_load_hosts_without_lock_sets_mapping(tmp_path):
     """Brief: _load_hosts populates hosts when no _hosts_lock is present.
 
@@ -83,7 +112,7 @@ def test_load_hosts_without_lock_sets_mapping(tmp_path):
       - None; asserts mapping is assigned without using a lock.
     """
 
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
@@ -108,7 +137,7 @@ def test_load_hosts_valueerror_in_reverse_mapping_is_ignored(tmp_path):
       - None; asserts that a ValueError during reverse mapping does not break loading.
     """
 
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
@@ -140,7 +169,7 @@ def test_pre_resolve_without_lock_uses_plain_hosts_lookup():
       - None; asserts that missing qname returns None without errors.
     """
 
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     plugin = EtcHosts.__new__(EtcHosts)  # type: ignore[call-arg]
@@ -165,7 +194,7 @@ def test_watchdog_handler_should_reload_variants(tmp_path):
       - None; asserts False for empty paths and True when src/dest matches.
     """
 
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     watched = tmp_path / "hosts"
@@ -198,7 +227,7 @@ def test_start_watchdog_no_observer_logs_warning(monkeypatch, tmp_path, caplog):
       - None; asserts observer is None and warning message emitted.
     """
 
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
@@ -229,7 +258,7 @@ def test_start_watchdog_with_no_directories(monkeypatch):
       - None; asserts that _observer stays None when file_paths is empty.
     """
 
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     plugin = EtcHosts.__new__(EtcHosts)  # type: ignore[call-arg]
@@ -258,7 +287,7 @@ def test_schedule_debounced_reload_immediate_and_existing_timer(monkeypatch, cap
     import importlib
     from types import SimpleNamespace
 
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     # Synthetic instance with a reload counter
@@ -303,7 +332,7 @@ def test_close_stops_polling_and_cancels_timer(monkeypatch):
 
     import importlib
 
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     plugin = EtcHosts.__new__(EtcHosts)  # type: ignore[call-arg]
@@ -345,7 +374,7 @@ def test_setup_enables_polling_when_interval_configured(tmp_path):
       - None; asserts that poll_stop Event and poll_thread are created.
     """
 
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
@@ -375,7 +404,7 @@ def test_start_polling_variants_for_etc_hosts(tmp_path):
       - None; asserts that threads are only started when both interval and stop_event are set.
     """
 
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
@@ -416,7 +445,7 @@ def test_poll_loop_early_return_and_iteration(tmp_path):
       - None; asserts both the early-return and single-iteration behaviours.
     """
 
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
@@ -454,7 +483,7 @@ def test_have_files_changed_handles_missing_and_oserror(monkeypatch, tmp_path):
       - None; asserts that snapshots are recorded even when stat() fails.
     """
 
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
@@ -497,7 +526,7 @@ def test_etc_hosts_pre_resolve_ptr_from_ipv4(tmp_path):
         pointing at the configured hostname.
     """
 
-    mod = importlib.import_module("foghorn.plugins.etc_hosts")
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
     EtcHosts = mod.EtcHosts
 
     hosts_file = tmp_path / "hosts"
@@ -522,3 +551,102 @@ def test_etc_hosts_pre_resolve_ptr_from_ipv4(tmp_path):
     assert any(
         str(rr.rdata).rstrip(".") == hostname for rr in resp.rr if rr.rtype == QTYPE.PTR
     )
+
+
+def test_get_config_model_returns_etchosts_config():
+    """Brief: get_config_model returns the EtcHostsConfig model class.
+
+    Inputs:
+      - None; calls the classmethod directly.
+
+    Outputs:
+      - None: asserts returned object is the EtcHostsConfig defined in module.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
+    EtcHosts = mod.EtcHosts
+
+    cfg_model = EtcHosts.get_config_model()
+    assert cfg_model is mod.EtcHostsConfig
+
+
+def test_get_http_snapshot_summarizes_entries(tmp_path):
+    """Brief: get_http_snapshot returns summary and entry list for current hosts.
+
+    Inputs:
+      - tmp_path: temporary directory used to build a simple hosts file.
+
+    Outputs:
+      - None: asserts keys present and counts for v4/v6 and reverse entries.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
+    EtcHosts = mod.EtcHosts
+
+    hosts_file = tmp_path / "hosts"
+    hosts_file.write_text("127.0.0.1 www.local\n::1 v6.local\n", encoding="utf-8")
+
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
+    plugin.setup()
+
+    snapshot = plugin.get_http_snapshot()
+    summary = snapshot["summary"]
+    entries = snapshot["entries"]
+
+    assert summary["total_entries"] == len(entries)
+    assert summary["ipv4_entries"] >= 1
+    assert summary["ipv6_entries"] >= 1
+    assert summary["reverse_entries"] >= 1
+
+    names = {e["name"] for e in entries}
+    assert "www.local" in names
+    assert "v6.local" in names
+
+
+def test_get_http_snapshot_without_lock_uses_plain_mapping():
+    """Brief: get_http_snapshot falls back to copies when _hosts_lock is missing.
+
+    Inputs:
+      - None; constructs a synthetic plugin with hosts and _entry_sources only.
+
+    Outputs:
+      - None: asserts snapshot reflects the in-memory hosts mapping.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
+    EtcHosts = mod.EtcHosts
+
+    plugin = EtcHosts.__new__(EtcHosts)  # type: ignore[call-arg]
+    plugin.hosts = {"nolock.local": "10.0.0.1"}
+    plugin._entry_sources = {"nolock.local": "/tmp/hosts"}
+
+    snapshot = plugin.get_http_snapshot()
+    entries = snapshot["entries"]
+    names = {e["name"] for e in entries}
+    assert "nolock.local" in names
+
+
+def test_admin_pages_and_ui_descriptor(tmp_path):
+    """Brief: get_admin_pages and get_admin_ui_descriptor describe hosts admin UI.
+
+    Inputs:
+      - tmp_path: temporary directory for a minimal hosts file.
+
+    Outputs:
+      - None: asserts returned specs contain expected structure and names.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.etc_hosts")
+    EtcHosts = mod.EtcHosts
+
+    hosts_file = tmp_path / "hosts"
+    hosts_file.write_text("127.0.0.1 admin.local\n", encoding="utf-8")
+
+    plugin = EtcHosts(file_paths=[str(hosts_file)])
+    plugin.setup()
+
+    pages = plugin.get_admin_pages()
+    assert len(pages) == 1
+    page = pages[0]
+    assert getattr(page, "slug", None) == "etc-hosts"
+
+    desc = plugin.get_admin_ui_descriptor()
+    assert desc["name"] == plugin.name
+    assert "snapshot" in desc["endpoints"]
+    assert "layout" in desc

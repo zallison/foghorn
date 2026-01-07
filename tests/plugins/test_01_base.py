@@ -1,5 +1,5 @@
 """
-Brief: Tests for foghorn.plugins.base module.
+Brief: Tests for foghorn.plugins.resolve.base module.
 
 Inputs:
   - None
@@ -12,9 +12,9 @@ import logging
 
 from dnslib import QTYPE, DNSRecord
 
-from foghorn.plugins.base import BasePlugin, PluginContext, PluginDecision
-from foghorn.plugins.base import logger as base_logger
-from foghorn.plugins.base import plugin_aliases
+from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
+from foghorn.plugins.resolve.base import logger as base_logger
+from foghorn.plugins.resolve.base import plugin_aliases
 
 
 def test_plugin_decision_creation():
@@ -429,7 +429,7 @@ def test_base_plugin_targets_uses_cache_for_repeated_client(monkeypatch):
 
     # Wrap the module-level ipaddress.ip_address used inside BasePlugin so we
     # can observe how many times it is called for the same client.
-    import foghorn.plugins.base as base_mod  # type: ignore[import]
+    import foghorn.plugins.resolve.base as base_mod  # type: ignore[import]
 
     calls = {"count": 0}
     original_ip_address = base_mod.ipaddress.ip_address

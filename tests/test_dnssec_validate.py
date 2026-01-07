@@ -1087,7 +1087,7 @@ def test_configure_dnssec_resolver_and_resolver_variants(monkeypatch):
     dval.configure_dnssec_resolver([])
 
     # Monkeypatch RecursiveResolver so we do not perform any real network IO.
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     class _FakeRecursiveResolver:
         def __init__(self, *args, **kwargs):  # noqa: D401, ANN001

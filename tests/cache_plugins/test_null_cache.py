@@ -9,8 +9,8 @@ Outputs:
 
 import pytest
 
-from foghorn.cache_plugins.none import NullCache
-from foghorn.cache_plugins.registry import load_cache_plugin
+from foghorn.plugins.cache.none import NullCache
+from foghorn.plugins.cache.registry import load_cache_plugin
 
 
 def test_null_cache_always_misses_and_noops() -> None:

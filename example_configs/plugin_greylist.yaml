@@ -1,43 +1,27 @@
-# Foghorn example: Greylist plugin
-# First time a base-domain is seen: deny (temporary). After duration elapses, permanently allow.
-
-listen:
-  udp:
-    enabled: true
-    host: 127.0.0.1
-    port: 5353
-  tcp:
-    enabled: false
-  dot:
-    enabled: false
-
 upstreams:
+  endpoints:
   - host: 1.1.1.1
     port: 53
   - host: 8.8.8.8
     port: 53
-
-dnssec:
-  mode: passthrough
-  validation: upstream_ad
-  udp_payload_size: 1232
-
 logging:
   level: info
-
 plugins:
-  - module: greylist  # GreylistPlugin alias
-    # pre_priority: 35
-    config:
-      # How long a domain stays in "grey" state before being allowed
-      duration_seconds: 3600
-
-      # Persistent store for state
-      db_path: ./config/var/greylist.db
-
-      # cache_ttl_seconds: 300
-      # cache_max_entries: 100000
-
-      # Notes:
-      # - The plugin typically tracks base domains (e.g., example.com).
-      # - First-seen domains are temporarily denied; after window elapses, allowed thereafter.
+- type: greylist
+  config:
+    duration_seconds: 3600
+    db_path: ./config/var/greylist.db
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5353
+    tcp:
+      enabled: false
+    dot:
+      enabled: false
+  dnssec:
+    mode: passthrough
+    validation: upstream_ad
+    udp_payload_size: 1232

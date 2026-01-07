@@ -1,4 +1,4 @@
-"""Brief: Tests for the MQTT logging-only BaseStatsStoreBackend implementation.
+"""Brief: Tests for the MQTT logging-only BaseStatsStore implementation.
 
 Inputs:
   - None; uses a fake paho-mqtt style client injected via monkeypatch.
@@ -15,8 +15,8 @@ from typing import Any
 
 import pytest
 
-from foghorn.querylog_backends.mqtt_logging import (
-    MqttLoggingBackend,
+from foghorn.plugins.querylog.mqtt_logging import (
+    MqttLogging,
     _import_mqtt_driver,
 )
 
@@ -39,6 +39,7 @@ class _FakeMqttClient:
         self.loop_stopped = False
         self.disconnected = False
         self.publishes: list[tuple[str, str, int, bool]] = []
+        self.wills: list[tuple[str, str, int, bool]] = []
         self.username: str | None = None
         self.password: str | None = None
 
@@ -63,6 +64,11 @@ class _FakeMqttClient:
         self, topic: str, payload: str, qos: int = 0, retain: bool = False
     ) -> None:
         self.publishes.append((topic, payload, int(qos), bool(retain)))
+
+    def will_set(
+        self, topic: str, payload: str, qos: int = 0, retain: bool = False
+    ) -> None:
+        self.wills.append((topic, payload, int(qos), bool(retain)))
 
 
 class _FakeMqttModule:
@@ -118,11 +124,23 @@ def test_mqtt_logging_backend_constructs_and_marks_healthy(
         __import__("sys").modules, "paho.mqtt.client", _FakeMqttModule()
     )
 
-    backend = MqttLoggingBackend(
+    backend = MqttLogging(
         host="mqtt.example", port=1884, topic="foghorn/test", qos=1, retain=True
     )
 
     assert backend.health_check() is True
+
+    # TODO: Once LWT works.
+    ## # Verify that a Last Will and Testament is configured with matching QoS/retain.
+    ## client = backend._client  # type: ignore[attr-defined]
+    ## assert isinstance(client.wills, list)
+    ## assert len(client.wills) == 1
+
+    ## will_topic, _, will_qos, will_retain = client.wills[0]
+    ## assert will_topic == "foghorn/test/meta"
+    ## assert will_qos == 1
+    ## assert will_retain is False
+
     # Close should mark backend unhealthy and stop/disconnect the client.
     backend.close()
     assert backend.health_check() is False
@@ -137,13 +155,14 @@ def test_insert_query_log_publishes_payload_and_parses_result_json(
       - monkeypatch fixture.
 
     Outputs:
-      - None; asserts publish() is called once with the expected topic/payload.
+      - None; asserts publish() is called for the main topic with the expected
+        payload, ignoring the initial log_start meta publish.
     """
 
     fake_module = _FakeMqttModule()
     monkeypatch.setitem(__import__("sys").modules, "paho.mqtt.client", fake_module)
 
-    backend = MqttLoggingBackend(topic="foghorn/query_log", qos=2, retain=False)
+    backend = MqttLogging(topic="foghorn/query_log", qos=2, retain=False)
 
     result_payload = {"answers": ["1.2.3.4"], "dnssec_status": "dnssec_secure"}
     backend.insert_query_log(
@@ -161,9 +180,11 @@ def test_insert_query_log_publishes_payload_and_parses_result_json(
 
     client = backend._client  # type: ignore[attr-defined]
     assert isinstance(client, _FakeMqttClient)
-    assert len(client.publishes) == 1
+    # One publish is for the log_start meta marker; the second is the
+    # insert_query_log payload we care about.
+    assert len(client.publishes) == 2
 
-    topic, payload, qos, retain = client.publishes[0]
+    topic, payload, qos, retain = client.publishes[1]
     assert topic == "foghorn/query_log"
     assert qos == 2
     assert retain is False
@@ -190,15 +211,19 @@ def test_insert_query_log_returns_early_when_unhealthy(
       - monkeypatch fixture.
 
     Outputs:
-      - None; asserts no additional publish calls are made after close().
+      - None; asserts no additional publish calls are made after close(),
+        ignoring the initial log_start meta publish on connect.
     """
 
     monkeypatch.setitem(
         __import__("sys").modules, "paho.mqtt.client", _FakeMqttModule()
     )
 
-    backend = MqttLoggingBackend(topic="foghorn/query_log")
+    backend = MqttLogging(topic="foghorn/query_log")
     client = backend._client  # type: ignore[attr-defined]
+
+    # Capture publish count after initial construction (includes log_start meta).
+    initial_publishes = list(getattr(client, "publishes", []))
 
     # Mark backend unhealthy via close() and verify insert_query_log is a no-op.
     backend.close()
@@ -215,4 +240,6 @@ def test_insert_query_log_returns_early_when_unhealthy(
         result_json="{}",
     )
 
-    assert getattr(client, "publishes", []) == []
+    # No additional publishes should have been recorded beyond the initial
+    # construction-time log_start marker.
+    assert getattr(client, "publishes", []) == initial_publishes

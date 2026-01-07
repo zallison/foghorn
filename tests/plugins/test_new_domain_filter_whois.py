@@ -1,5 +1,5 @@
 """
-Brief: WHOIS-path and age-calculation edge-case tests for NewDomainFilterPlugin.
+Brief: WHOIS-path and age-calculation edge-case tests for NewDomainFilterExample.
 
 Inputs:
   - None
@@ -10,8 +10,8 @@ Outputs:
 
 import datetime as dt
 
-import foghorn.plugins.new_domain_filter as ndf_mod
-from foghorn.plugins.new_domain_filter import NewDomainFilterPlugin as NDF
+import foghorn.plugins.resolve.new_domain_filter as ndf_mod
+from foghorn.plugins.resolve.new_domain_filter import NewDomainFilterExample as NDF
 
 
 def test_whois_lookup_with_whois_returns_min_from_list(monkeypatch):

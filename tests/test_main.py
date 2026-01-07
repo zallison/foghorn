@@ -86,7 +86,7 @@ def test_load_plugins_uses_registry(monkeypatch):
     monkeypatch.setattr(parser_mod, "get_plugin_class", fake_get)
 
     # Patch global cache and cache loader so load_plugins injects a cache instance.
-    import foghorn.plugins.base as plugin_base
+    import foghorn.plugins.resolve.base as plugin_base
 
     global_cache = object()
     plugin_base.DNS_CACHE = global_cache  # type: ignore[assignment]
@@ -165,12 +165,25 @@ def test_main_starts_server_and_handles_keyboardinterrupt(monkeypatch):
       - None: Asserts return code 0 and DNSServer called with expected args
     """
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 777\n"
+        "  cache:\n"
+        "    backend: in_memory_ttl\n"
+        "    config:\n"
+        "      min_cache_ttl: 33\n"
         "upstreams:\n"
-        "  - host: 1.1.1.1\n"
-        "    port: 53\n"
-        "cache:\n  module: in_memory_ttl\n  config:\n    min_cache_ttl: 33\n"
-        "foghorn:\n  timeout_ms: 777\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
         "plugins: []\n"
     )
 
@@ -243,10 +256,21 @@ def test_main_returns_one_on_exception_alt(monkeypatch):
       - None: Asserts return code 1
     """
     yaml_data = (
-        "listen:\n  host: 127.0.0.1\n  port: 5354\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
         "upstreams:\n"
-        "  - host: 1.1.1.1\n"
-        "    port: 53\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
     )
 
     class DummyServer:

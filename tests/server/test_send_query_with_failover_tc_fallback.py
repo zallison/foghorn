@@ -37,7 +37,7 @@ def test_tc_bit_udp_fallbacks_to_tcp(monkeypatch):
         return good
 
     # udp_query is imported locally inside send_query_with_failover, so patch the transport function
-    import foghorn.transports.udp as udp_mod
+    import foghorn.servers.transports.udp as udp_mod
 
     monkeypatch.setattr(udp_mod, "udp_query", fake_udp_query)
     # tcp_query is imported at module level; patch on srv

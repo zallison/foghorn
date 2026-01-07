@@ -1256,7 +1256,7 @@ def test_resolve_www_root_prefers_config_then_env_then_cwd(
     # 1) Config override takes precedence when directory exists
     cfg_root = tmp_path / "cfg_html"
     cfg_root.mkdir()
-    cfg = {"webserver": {"www_root": os.fspath(cfg_root)}}
+    cfg = {"server": {"http": {"www_root": os.fspath(cfg_root)}}}
     resolved_cfg = resolve_www_root(cfg)
     assert resolved_cfg == os.fspath(cfg_root.resolve())
 
@@ -1265,7 +1265,7 @@ def test_resolve_www_root_prefers_config_then_env_then_cwd(
     env_root.mkdir()
     monkeypatch.delenv("FOGHORN_WWW_ROOT", raising=False)
     monkeypatch.setenv("FOGHORN_WWW_ROOT", os.fspath(env_root))
-    resolved_env = resolve_www_root({"webserver": {}})
+    resolved_env = resolve_www_root({"server": {"http": {}}})
     assert resolved_env == os.fspath(env_root.resolve())
 
     # 3) Falling back to ./html relative to current working directory
@@ -1797,16 +1797,16 @@ def test_fastapi_cors_headers_when_enabled(monkeypatch) -> None:
 
 
 def test_start_webserver_returns_none_when_disabled() -> None:
-    """Brief: start_webserver returns None when webserver.enabled is false.
+    """Brief: start_webserver returns None when server.http.enabled is false.
 
     Inputs:
-      - Config with webserver.enabled set to False.
+      - Config with server.http.enabled explicitly set to False.
 
     Outputs:
       - Function returns None and does not attempt to start any server.
     """
 
-    cfg = {"webserver": {"enabled": False}}
+    cfg = {"server": {"http": {"enabled": False}}}
     handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
     assert handle is None
 
@@ -1896,7 +1896,7 @@ def test_start_webserver_uvicorn_path_uses_dummy_server(monkeypatch) -> None:
     dummy_uvicorn = types.SimpleNamespace(Config=DummyConfig, Server=DummyServer)
     monkeypatch.setitem(sys.modules, "uvicorn", dummy_uvicorn)
 
-    cfg = {"webserver": {"enabled": True, "host": "127.0.0.1", "port": 0}}
+    cfg = {"server": {"http": {"enabled": True, "host": "127.0.0.1", "port": 0}}}
     handle = start_webserver(stats=None, config=cfg, log_buffer=RingBuffer())
     assert isinstance(handle, WebServerHandle)
 
@@ -2398,7 +2398,7 @@ def test_start_webserver_permission_error_uses_threaded_fallback(monkeypatch) ->
     )
     monkeypatch.setattr(web_mod.os.path, "exists", lambda p: False, raising=False)
 
-    cfg2 = {"webserver": {"enabled": True}}
+    cfg2 = {"server": {"http": {"enabled": True}}}
     handle = start_webserver(stats=None, config=cfg2, log_buffer=RingBuffer())
 
     assert isinstance(handle, WebServerHandle)
@@ -2445,7 +2445,7 @@ def test_start_webserver_other_asyncio_error_keeps_async_path(monkeypatch) -> No
     dummy_uvicorn2 = types.SimpleNamespace(Config=DummyConfig2, Server=DummyServer2)
     monkeypatch.setitem(sys.modules, "uvicorn", dummy_uvicorn2)
 
-    cfg3 = {"webserver": {"enabled": True, "host": "127.0.0.1", "port": 0}}
+    cfg3 = {"server": {"http": {"enabled": True, "host": "127.0.0.1", "port": 0}}}
     handle = start_webserver(stats=None, config=cfg3, log_buffer=RingBuffer())
     assert isinstance(handle, WebServerHandle)
 
@@ -2492,11 +2492,13 @@ def test_start_webserver_warns_when_public_host_without_auth(
     monkeypatch.setitem(sys.modules, "uvicorn", dummy_uvicorn3)
 
     cfg4 = {
-        "webserver": {
-            "enabled": True,
-            "host": "0.0.0.0",
-            "port": 0,
-            "auth": {"mode": "none"},
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "0.0.0.0",
+                "port": 0,
+                "auth": {"mode": "none"},
+            }
         }
     }
 

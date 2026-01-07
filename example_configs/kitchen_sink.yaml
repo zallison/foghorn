@@ -1,55 +1,23 @@
-# config.yaml – defaults for Foghorn with a minimal plugin set
-# Below are the defaults
-
-listen:
-  udp:
-    enabled: true
-    host: 127.0.0.1
-    port: 5335
-  tcp:
-    enabled: false
-    host: 127.0.0.1
-    port: 5335
-  dot:
-    enabled: false
-    host: 127.0.0.1
-    port: 8853
-    # cert_file: /path/to/cert.pem
-    # key_file: /path/to/key.pem
-  doh:
-    enabled: false
-    host: 127.0.0.1
-    port: 5380
-    # cert_file: /path/to/cert.pem
-    # key_file: /path/to/key.pem
-
 upstreams:
-  # UDP upstream
+  endpoints:
   - host: 8.8.8.8
     port: 53
     transport: udp
-
-  # TCP upstream
   - host: 8.8.4.4
     port: 53
     transport: tcp
     pool:
       max_connections: 32
       idle_timeout_ms: 15000
-
-  # DoT upstream (DNS-over-TLS)
   - host: 1.1.1.1
     port: 853
     transport: dot
     tls:
       server_name: cloudflare-dns.com
       verify: true
-      # ca_file: /etc/ssl/certs/ca-certificates.crt
     pool:
       max_connections: 64
       idle_timeout_ms: 30000
-
-  # DoH upstream (DNS-over-HTTPS)
   - transport: doh
     url: https://dns.google/dns-query
     method: POST
@@ -57,53 +25,164 @@ upstreams:
       user-agent: foghorn
     tls:
       verify: true
-      # ca_file: /etc/ssl/certs/ca-certificates.crt
-
-cache:
-  module: in_memory_ttl
-  config:
-    min_cache_ttl: 60
-
-foghorn:
-  timeout_ms: 2000
-  upstream_strategy: failover
-  upstream_max_concurrent: 1
-  use_asyncio: true
-dnssec:
-  mode: ignore
-  validation: upstream_ad
-  udp_payload_size: 1232
-
+  strategy: failover
+  max_concurrent: 1
 logging:
-  level: info
-  stderr: true
-  # file: /var/log/foghorn/foghorn.log
-  # syslog: true
-
-statistics:
+  python:
+    level: info
+    stderr: true
+  async: true
+  backends:
+    - id: default-stats
+      backend: sqlite
+      config:
+        db_path: ./config/var/stats.db
+        batch_writes: true
+        batch_time_sec: 15.0
+        batch_max_size: 1000
+plugins:
+- type: docker-hosts
+  config:
+    endpoints:
+    - unix:///var/run/docker.sock
+    docker_binary: docker
+    ttl: 300
+    reload_interval_seconds: 60
+- type: hosts
+  config:
+    allow:
+    - 192.0.2.0/24
+    - 2001:db8::/32
+    servfail_percent: 5.0
+    nxdomain_percent: 2.0
+    apply_to_qtypes:
+    - A
+    - AAAA
+- type: file_downloader
+  config:
+    setup_priority: 15
+    download_path: ./config/var/lists
+    interval_days: 1
+    urls:
+    - https://v.firebog.net/hosts/AdguardDNS.txt
+    - https://v.firebog.net/hosts/Easylist.txt
+    - https://v.firebog.net/hosts/Prigent-Ads.txt
+    - https://v.firebog.net/hosts/Prigent-Malware.txt
+- type: filter
+  config:
+    setup_priority: 20
+    default: deny
+    db_path: ./config/var/blocklist.db
+    cache_ttl_seconds: 600
+    blocked_domains:
+    - tracker.example
+    allowed_domains:
+    - intranet.example
+    blocked_patterns:
+    - .*\.ads\..*
+    blocked_keywords:
+    - gambling
+    blocked_ips:
+    - ip: 198.51.100.0/24
+      action: remove
+    - ip: 203.0.113.5
+      action: replace
+      replace_with: 127.0.0.1
+    blocked_domains_files:
+    - ./config/var/lists/AdguardDNS-*.txt
+    - ./config/var/lists/Easylist-*.txt
+    - ./config/var/lists/Prigent-Ads-*.txt
+    - ./config/var/lists/Prigent-Malware-*.txt
+    - ./config/block.txt
+    allowed_domains_files:
+    - ./config/allow.txt
+- type: upstream
+  config:
+    routes:
+    - domain: internal.example
+      upstreams:
+      - host: 10.0.0.2
+        port: 53
+      - host: 10.0.0.3
+        port: 53
+    - suffix: corp
+      upstreams:
+      - host: 10.0.1.1
+        port: 53
+- type: greylist
+  config:
+    duration_seconds: 3600
+    db_path: ./config/var/greylist.db
+- type: new_domain
+  config:
+    threshold_days: 14
+    whois_db_path: ./config/var/whois_cache.db
+- type: etc-hosts
+  config:
+    file_paths:
+    - /etc/hosts
+- type: router
+  config:
+    routes: []
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5335
+    tcp:
+      enabled: false
+      host: 127.0.0.1
+      port: 5335
+    dot:
+      enabled: false
+      host: 127.0.0.1
+      port: 8853
+    doh:
+      enabled: false
+      host: 127.0.0.1
+      port: 5380
+  cache:
+    module: in_memory_ttl
+    config:
+      min_cache_ttl: 60
+  dnssec:
+    mode: ignore
+    validation: upstream_ad
+    udp_payload_size: 1232
+  resolver:
+    timeout_ms: 2000
+    use_asyncio: true
+  http:
+    enabled: false
+    host: 127.0.0.1
+    port: 5380
+    logs:
+      buffer_size: 500
+    system_info_ttl_seconds: 2.0
+    system_metrics_detail: full
+    debug_timings: false
+    index: true
+    auth:
+      mode: none
+    cors:
+      enabled: false
+      allowlist: []
+    redact_keys:
+    - token
+    - password
+    - secret
+stats:
   enabled: false
-  interval_seconds: 300        # 5 minutes
+  interval_seconds: 300
   reset_on_log: false
   include_qtype_breakdown: true
   include_top_clients: true
   include_top_domains: true
   top_n: 10
   track_latency: true
-  # When true, force rebuilding aggregate statistics from the persistent
-  # query_log on startup even when counts already exist.
-  # This is a root-level shortcut for statistics.persistence.force_rebuild
-  # and is overridden by the FOGHORN_FORCE_REBUILD environment variable
-  # and the --rebuild CLI flag when those are present.
   force_rebuild: false
-
-  # Basic persistence configuration: one SQLite backend with batched writes.
-  persistence:
-    enabled: true
-    db_path: ./config/var/stats.db
-    batch_writes: true
-    batch_time_sec: 15.0
-    batch_max_size: 1000
-
+  source_backend: default-stats
   ignore:
     top_clients: []
     top_domains: []
@@ -111,183 +190,3 @@ statistics:
     top_domains_mode: exact
     top_subdomains_mode: exact
     ignore_single_host: false
-
-webserver:
-  enabled: false
-  host: 127.0.0.1
-  port: 5380
-  logs:
-    buffer_size: 500
-  system_info_ttl_seconds: 2.0
-  system_metrics_detail: full
-  debug_timings: false
-  index: true
-
-  auth:
-    mode: none
-    # token: "change-me"
-
-  cors:
-    enabled: false
-    allowlist: []
-
-  redact_keys:
-    - token
-    - password
-    - secret
-
-plugins:
-  # 1) DockerHosts – resolve container hostnames and reverse IPs from Docker
-  - module: docker-hosts
-    pre_priority: 5            # run very early
-    config:
-      endpoints:
-        - unix:///var/run/docker.sock
-        # Example networked endpoints (Docker TCP APIs / proxies)
-        # - tcp://127.0.0.1:2375
-        # - tcp://docker-host.internal:2375
-      docker_binary: docker
-      ttl: 300
-      reload_interval_seconds: 60
-      # Optional: answer using host IP(s) instead of container addresses
-      # so that clients always talk to the host even when container
-      # networks are not directly routable.
-      # use_ipv4: 192.0.2.10
-      # use_ipv6: 2001:db8::10
-
-      # Optional: filter containers by Docker health/state.
-      # Supported: starting, healthy, running, unhealthy
-      # Default: [healthy, running]
-      # health: [healthy, running]
-
-      # Optional: publish an aggregate TXT record at _containers.<suffix>
-      # (or _containers when no suffix is configured) that summarizes all
-      # containers, plus per-container TXT at each hostname.
-      # discovery: true
-
-      # Optional: extend (or replace) the built-in TXT summary using
-      # additional key/value pairs from docker inspect. The "path" syntax
-      # is a small JSONPath-like subset; for example:
-      #   - Config.Image
-      #   - State.Health.Status
-      #   - Config.Labels.com.docker.compose.project
-      # txt_fields:
-      #   - name: image
-      #     path: Config.Image
-      #   - name: project
-      #     path: Config.Labels.com.docker.compose.project
-      # txt_fields_replace: false
-
-  # 2) /etc/hosts resolver – answers from hosts files first when possible
-  - module: hosts
-    pre_priority: 10           # run after DockerHosts
-    config:
-      allow: ["192.0.2.0/24", "2001:db8::/32"]
-      servfail_percent: 5.0
-      nxdomain_percent: 2.0
-      apply_to_qtypes: ["A", "AAAA"]
-      # seed: 42
-
-  # 3) Download curated domain lists before filtering (ensures files exist).
-  # Runs early in setup so files are present before Filter setup.
-  - module: file_downloader
-    config:
-      setup_priority: 15
-      download_path: ./config/var/lists
-      interval_days: 1
-      urls:
-        - https://v.firebog.net/hosts/AdguardDNS.txt
-        - https://v.firebog.net/hosts/Easylist.txt
-        - https://v.firebog.net/hosts/Prigent-Ads.txt
-        - https://v.firebog.net/hosts/Prigent-Malware.txt
-
-  # 4) Filter domains/IPs before routing (policy enforcement)
-  - module: filter
-    pre_priority: 20
-    post_priority: 20
-    config:
-      setup_priority: 20
-      default: deny
-
-      # Optional BasePlugin targeting for this plugin: restrict evaluation to
-      # certain client networks. When omitted, all clients are targeted.
-      # targets:
-      #   - "192.0.2.0/24"    # documentation subnet
-      #   - "2001:db8::/32"   # example IPv6 subnet
-      # targets_ignore:
-      #   - "192.0.2.128/25"  # invert/override targeting for a subrange
-      # targets_cache_ttl_seconds: 300
-      db_path: ./config/var/blocklist.db
-      cache_ttl_seconds: 600
-      blocked_domains: ["tracker.example"]
-      allowed_domains: ["intranet.example"]
-      blocked_patterns: [".*\\.ads\\..*"]
-      blocked_keywords: ["gambling"]
-      blocked_ips:
-        - { ip: "198.51.100.0/24", action: remove }
-        - { ip: "203.0.113.5", action: replace, replace_with: "127.0.0.1" }
-      # Enable external lists (downloaded above to ./config/var/lists/)
-      blocked_domains_files:
-        - ./config/var/lists/AdguardDNS-*.txt
-        - ./config/var/lists/Easylist-*.txt
-        - ./config/var/lists/Prigent-Ads-*.txt
-        - ./config/var/lists/Prigent-Malware-*.txt
-        - ./config/block.txt
-      allowed_domains_files:
-        - ./config/allow.txt
-
-  # 4) Route certain domains to internal upstreams
-  - module: upstream
-    pre_priority: 30
-    config:
-      routes:
-        - domain: "internal.example"
-          upstreams:
-            - { host: "10.0.0.2", port: 53 }
-            - { host: "10.0.0.3", port: 53 }
-        - suffix: "corp"
-          upstreams:
-            - { host: "10.0.1.1", port: 53 }
-
-  # 5) Greylist to slow down first-seen domains
-  - module: greylist
-    pre_priority: 40
-    config:
-      duration_seconds: 3600
-      db_path: ./config/var/greylist.db
-
-  # 6) Block newly registered domains below threshold
-  - module: new_domain
-    pre_priority: 50
-    config:
-      threshold_days: 14
-      whois_db_path: ./config/var/whois_cache.db
-      # whois_cache_ttl_seconds: 3600
-      # whois_refresh_seconds: 86400
-
-  # 7) Local overrides from hosts file (A-only)
-  - module: etc-hosts
-    pre_priority: 55
-    config:
-      # Use file_paths (list) for hosts files; legacy file_path is no longer supported.
-      file_paths:
-        - /etc/hosts
-
-  # 3) Upstream router – send certain suffixes to specific upstreams
-  - module: router
-    pre_priority: 30
-    config:
-      routes: []
-      # Example: internal corp domains to some internal resolver
-      # - suffix: corp.internal
-      #   upstreams:
-      #     - host: 10.0.0.1
-      #       port: 53
-      #     - host: 10.0.0.2
-      #       port: 53
-      #
-      # Example: lab domains to a lab resolver
-      # - suffix: lab.local
-      #   upstreams:
-      #     - host: 192.168.1.1
-      #       port: 53
