@@ -24,9 +24,4 @@ stats:
   top_n: 10
   track_latency: true
   force_rebuild: false
-  persistence:
-    enabled: true
-    db_path: ./config/var/stats.db
-    batch_writes: true
-    batch_time_sec: 15.0
-    batch_max_size: 1000
+  source_backend: primary-mysql
