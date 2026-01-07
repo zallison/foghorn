@@ -54,17 +54,29 @@ The configuration file is validated against a JSON Schema, but you rarely need t
 
 With special thanks to **Fiona** Weatherwax for their contributions and inspiration, to the **dnslib** team for the low level / on wire primitives, and to **dnspython** for the DNSSEC implementation. Additional shout outs to the whole **python community**, and the teams of **fastapi, pydantic, black, ruff, pytest,** and every other giant on whose shoulders I stand.
 
-Also thanks to my junior developer, AI via warp.dev, who keeps my docstrings and unit tests up to date, creates good commit messages, and other janitorial tasks. Also ~~a lot of help with the~~ all the HTML/JS. Because I'm just not good at it.
+Also thanks to my junior developers, AI from both local and remote models, some via warp.dev, who keeps my docstrings and unit tests up to date, creates good commit messages, and other janitorial tasks. Also ~~a lot of help with the~~ all the HTML/JS. Because I'm just not good at it.
 
 ## Upgrading from 0.5.x to 0.6.0
 
-Foghorn v0.6.0 is a **breaking** release. Configuration files written for v0.5.x (including v0.5.4) will not validate against the new schema or start cleanly without changes.
+Foghorn v0.6.0 is a **breaking** release. Configuration files written for v0.5.x
+(including v0.5.4) will not validate against the new schema or start cleanly
+without changes.
 
 At a high level:
 
-- The configuration schema and layout were reorganized so related settings live together. Sections such as `logging`, `stats`, cache configuration, and plugin wiring now follow the structure documented below.
-- Internal modules, classes, and helper functions were moved and renamed for consistency. If you import Foghorn internals or maintain out-of-tree plugins, you may need to update import paths and identifiers.
-- Stats and query-log persistence now run through the `logging.backends` / `stats` model, with optional background async workers.
+- The configuration schema and layout were reorganized so related settings live
+  together more logically (for example `logging`, `stats`, cache configuration,
+  and plugin wiring).
+- Internal modules, classes, and helper functions were moved and renamed for
+  consistency. If you import Foghorn internals or maintain out‑of‑tree plugins,
+  you may need to update import paths and identifiers.
+- Stats and query‑log persistence now run through the `logging.backends` /
+  `stats` model, with optional background async workers and multiple targets.
+
+For existing deployments it is usually faster to start from the updated
+examples in this README and adapt them, instead of trying to retrofit an
+existing 0.5.x configuration.
+
 
 For existing deployments, it is usually faster to start from the updated examples in this README and adapt them to your environment than to retrofit an old 0.5.x configuration.
 

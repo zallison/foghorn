@@ -201,12 +201,7 @@ class BaseStatsStore:
     # Counter API: aggregate counts table
     # ------------------------------------------------------------------
     def increment_count(self, scope: str, key: str, delta: int = 1) -> None:
-        """Brief: Optionally enqueue an aggregate counter increment for async processing.
-
-        When ``self._async_logging`` is truthy (the default), increments are
-        queued to the background worker thread as before. When it is falsy,
-        this method bypasses the queue and calls ``_increment_count``
-        synchronously so that callers observe updates immediately.
+        """Brief: Enqueue an aggregate counter increment for async processing.
 
         Inputs:
           - scope: Logical scope name (for example, "totals", "domains").
@@ -214,20 +209,11 @@ class BaseStatsStore:
           - delta: Increment value (may be negative for decrements).
 
         Outputs:
-          - None. Depending on ``self._async_logging``, either enqueues the
-            operation for the background worker or calls ``_increment_count``
-            synchronously.
+          - None; returns after queuing the operation. The worker thread will
+            later call ``_increment_count`` on this instance. When the queue
+            cannot be used, falls back to calling ``_increment_count``
+            synchronously when available.
         """
-
-        # Allow backends to opt out of async queuing entirely.
-        if not getattr(self, "_async_logging", True):
-            handler = getattr(self, "_increment_count", None)
-            if callable(handler):
-                handler(scope, key, delta)
-                return
-            raise NotImplementedError(
-                "_increment_count() must be implemented by a subclass"
-            )
 
         try:
             self._ensure_worker()
@@ -360,31 +346,11 @@ class BaseStatsStore:
           - result_json: Structured result payload as JSON text.
 
         Outputs:
-          - None. Depending on ``self._async_logging``, either enqueues the
-            operation for the background worker or calls ``_insert_query_log``
-            synchronously.
+          - None; returns after queuing the operation. The worker thread will
+            later call ``_insert_query_log`` on this instance. When the queue
+            cannot be used, falls back to calling ``_insert_query_log``
+            synchronously when available.
         """
-
-        # Allow backends to opt out of async queuing entirely.
-        if not getattr(self, "_async_logging", True):
-            handler = getattr(self, "_insert_query_log", None)
-            if callable(handler):
-                handler(
-                    ts,
-                    client_ip,
-                    name,
-                    qtype,
-                    upstream_id,
-                    rcode,
-                    status,
-                    error,
-                    first,
-                    result_json,
-                )
-                return
-            raise NotImplementedError(
-                "_insert_query_log() must be implemented by a subclass"
-            )
 
         try:
             self._ensure_worker()
