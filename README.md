@@ -409,11 +409,11 @@ server:
 	doh:
 	  enabled: true
 	  host: 127.0.0.1
-	  port: 8053
+	  port: 8443
 	  # No cert_file/key_file here; TLS is terminated at the reverse proxy.
 ```
 
-Your reverse proxy is then configured to listen on `443` with TLS and proxy requests such as `https://dns.example.com/dns-query` to `http://127.0.0.1:8053/dns-query`.
+Your reverse proxy is then configured to listen on `443` with TLS and proxy requests such as `https://dns.example.com/dns-query` to `http://127.0.0.1:8443/dns-query`.
 
 ### 3.5 Helper Make targets for TLS keys and certificates
 
@@ -499,7 +499,7 @@ plugins:
 	config:
 	  file_paths:
 		- /etc/hosts
-		- ./config/hosts.local
+		- ./config/hosts.
 	  ttl: 300
 	  watchdog_enabled: true   # null | true | false
 ```
@@ -615,7 +615,7 @@ Expose mDNS / DNS-SD services as normal DNS records.
 plugins:
   - type: mdns
 	config:
-	  domain: '.local'
+	  domain: '.'
 	  ttl: 120
 	  include_ipv4: true   # true | false
 	  include_ipv6: true   # true | false
@@ -673,7 +673,7 @@ plugins:
 		  upstreams:
 			- host: 10.0.0.53
 			  port: 53
-		- suffix: corp.local
+		- suffix: corp.
 		  upstreams:
 			- host: 192.168.1.1
 			  port: 53
@@ -707,7 +707,7 @@ Goals:
 
 - Cache locally for speed.
 - Forward to a public DoT resolver.
-- No plugins yet.
+- No plugins yet, no logging, no 
 
 ```yaml
 vars:
@@ -718,7 +718,7 @@ server:
 	dns:
 	  udp: {enabled: "true", host: "127.0.0.1", port: 5353}
   cache:
-	module: memory
+	module: memory # Default
 
 upstreams:
   strategy: failover
@@ -731,11 +731,6 @@ upstreams:
 logging:
   python:
 	level: info
-  query_log_only: true
-
-stats:
-  enabled: true
-  source_backend: local-log
 
 plugins: []
 ```
@@ -941,11 +936,11 @@ plugins:
   - type: rate
 	id: smb-rate
 	config:
-	  pre_priority: 90
+	  pre_priority: 5 # Run first thing
 	  mode: per_client
 	  window_seconds: 10
 	  min_enforce_rps: 20.0
-	  deny_response: servfail
+	  deny_response: refused
 ```
 
 ### 5.4 `enterprise`: layered caches and rich stats
@@ -984,7 +979,7 @@ server:
 
 upstreams:
   strategy: round_robin
-  max_concurrent: 4
+  max_concurrent: 2
   endpoints:
 	- host: 10.0.0.53
 	  port: 53
@@ -997,20 +992,17 @@ upstreams:
 	  transport: udp
 	  pool:
 		max_connections: 64
-		idle_timeout_ms: 30000
 	- host: 10.0.2.53
 	  port: 853
 	  transport: dot
 	  tls: {server_name: dns.corp.example, verify: true}
 	  pool:
 		max_connections: 32
-		idle_timeout_ms: 60000
 
 logging:
   python:
 	level: info
   async: true
-  query_log_only: false
   backends:
 	- id: pg_primary
 	  backend: postgr   - id: pg_reporting
