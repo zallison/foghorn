@@ -56,6 +56,18 @@ With special thanks to **Fiona** Weatherwax for their contributions and inspirat
 
 Also thanks to my junior developer, AI via warp.dev, who keeps my docstrings and unit tests up to date, creates good commit messages, and other janitorial tasks. Also ~~a lot of help with the~~ all the HTML/JS. Because I'm just not good at it.
 
+## Upgrading from 0.5.x to 0.6.0
+
+Foghorn v0.6.0 is a **breaking** release. Configuration files written for v0.5.x (including v0.5.4) will not validate against the new schema or start cleanly without changes.
+
+At a high level:
+
+- The configuration schema and layout were reorganized so related settings live together. Sections such as `logging`, `stats`, cache configuration, and plugin wiring now follow the structure documented below.
+- Internal modules, classes, and helper functions were moved and renamed for consistency. If you import Foghorn internals or maintain out-of-tree plugins, you may need to update import paths and identifiers.
+- Stats and query-log persistence now run through the `logging.backends` / `stats` model, with optional background async workers.
+
+For existing deployments, it is usually faster to start from the updated examples in this README and adapt them to your environment than to retrofit an old 0.5.x configuration.
+
 ## 1. Quick start: minimal config
 
 This example listens on all interfaces for UDP/TCP DNS and forwards to a public DoT resolver. It also enables a simple in-memory cache.
@@ -242,7 +254,9 @@ logging:
 ### 2.5 Stats and query log
 
 The `stats` section controls runtime statistics behaviour and selects which
-logging backend to read from.
+logging backend to read from. When `logging.async` is true, writes to
+stats/query-log backends are performed by a background worker so request
+handling stays fast; setting it to `false` forces synchronous writes.
 
 Important fields include:
 
