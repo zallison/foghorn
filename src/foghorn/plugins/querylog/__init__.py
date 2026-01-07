@@ -422,9 +422,18 @@ def load_stats_store_backend(
             cfg = (
                 entry.get("config")
                 if isinstance(entry.get("config"), dict)
-                else {k: v for k, v in entry.items() if k != "backend"}
+                else {k: v for k, v in entry.items() if k not in {"backend", "name", "id"}}
             )
-            model = StatsStoreBackendConfig(backend=backend_name, config=cfg or {})
+            # Prefer an explicit logical instance name when provided so that
+            # primary_backend can reference either a backend alias or a
+            # per-backend id (for example, "local-log"). Accept both "name"
+            # and "id" fields to keep the shape aligned with logging.backends.
+            instance_name = entry.get("name") or entry.get("id")
+            model = StatsStoreBackendConfig(
+                name=instance_name,
+                backend=backend_name,
+                config=cfg or {},
+            )
             backends.append(_build_backend_from_config(model))
 
         if not backends:
@@ -449,5 +458,12 @@ def load_stats_store_backend(
 
     # Legacy single-backend configuration; treat persistence_cfg itself as the
     # SQLite backend config so existing configs continue to work.
-    legacy_model = StatsStoreBackendConfig(backend="sqlite", config=persistence_cfg)
+    legacy_name = None
+    if isinstance(persistence_cfg, dict):
+        legacy_name = persistence_cfg.get("name") or persistence_cfg.get("id")
+    legacy_model = StatsStoreBackendConfig(
+        name=legacy_name,
+        backend="sqlite",
+        config=persistence_cfg or {},
+    )
     return _build_backend_from_config(legacy_model)
