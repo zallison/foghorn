@@ -199,8 +199,17 @@ def main(argv: List[str] | None = None) -> int:
 
     logging_cfg = cfg.get("logging") or {}
     if not isinstance(logging_cfg, dict):
-        logging_cfg = {}
-    init_logging(logging_cfg or None)
+        raise ValueError("config.logging must be a mapping when present")
+
+    # New layout: Python logging configuration lives under logging.python.
+    # Only this shape is supported; legacy root-level logging keys are no
+    # longer interpreted.
+    python_logging_cfg = logging_cfg.get("python") or {}
+    if not isinstance(python_logging_cfg, dict):
+        python_logging_cfg = {}
+
+    init_logging(python_logging_cfg or None)
+
     logger = logging.getLogger("foghorn.main")
     logger.info("Loaded config from %s", args.config)
 
@@ -454,120 +463,183 @@ def main(argv: List[str] | None = None) -> int:
     else:
         stats_enabled = False
 
-    logging_only = bool(stats_cfg.get("logging_only", False))
-    query_log_only = bool(stats_cfg.get("query_log_only", False))
+    # Global toggle to keep only the raw query_log in persistence and avoid
+    # mirroring aggregate counters into the backend.
+    logging_query_log_only = bool(logging_cfg.get("query_log_only", False))
 
-    # Guard against ambiguous/contradictory configurations.
-    if logging_only and query_log_only:
-        raise ValueError(
-            "Invalid statistics configuration: logging_only and query_log_only "
-            "may not both be true; choose at most one."
-        )
-
-    logging_only_effective = bool(logging_only or query_log_only)
+    stats_collector = None
+    stats_reporter = None
+    stats_persistence_store = None
 
     stats_collector = None
     stats_reporter = None
     stats_persistence_store = None
 
     if stats_enabled:
-        # Optional SQLite-backed persistence; the store is responsible for
-        # maintaining long-lived aggregate counts and a raw query_log. The
-        # in-memory StatsCollector remains the live source for periodic
-        # logging and web API snapshots.
-        persistence_cfg = stats_cfg.get("persistence", {}) or {}
-        if isinstance(persistence_cfg, dict):
-            persistence_enabled = bool(persistence_cfg.get("enabled", True))
-        else:
-            False
-
+        # Optional persistence store; the store is responsible for maintaining
+        # long-lived aggregate counts and a raw query_log. The in-memory
+        # StatsCollector remains the live source for periodic logging and web
+        # API snapshots.
         stats_persistence_store = None
 
-        if persistence_enabled:
-            # Determine whether a rebuild should be forced from CLI/config/env.
-            def _is_truthy_env(val: Optional[str]) -> bool:
-                """Return True if an environment variable string represents a truthy value.
+        # When query_log_only is enabled globally, skip background warm-load and
+        # rebuild passes so that the persistence store is only used for
+        # append-only query_log writes.
+        logging_only_effective = bool(logging_query_log_only)
 
-                Inputs:
-                    val: Environment variable value or None.
+        # Helper: derive an effective persistence configuration from the new
+        # layout where statistics/query-log backends are described under
+        # logging.backends and stats.source_backend selects the primary backend.
+        def _build_effective_persistence_cfg() -> dict[str, object]:
+            """Brief: Compute the effective statistics persistence configuration.
 
-                Outputs:
-                    bool: True for common truthy strings (1, true, yes, on), else False.
-                """
-                if val is None:
-                    return False
-                return str(val).strip().lower() in {
-                    "1",
-                    "true",
-                    "t",
-                    "yes",
-                    "y",
-                    "on",
-                }  # pragma: no cover - best effort
+            Inputs:
+              - None (captures cfg/stats_cfg from closure).
 
-            # Allow force_rebuild to be controlled from three sources, in
-            # increasing precedence order:
-            #   1) statistics.force_rebuild (root-level flag)
-            #   2) statistics.persistence.force_rebuild (legacy location)
-            #   3) FOGHORN_FORCE_REBUILD / --rebuild (highest precedence)
-            force_rebuild_root = bool(stats_cfg.get("force_rebuild", False))
-            force_rebuild_cfg = bool(persistence_cfg.get("force_rebuild", False))
-            force_rebuild_env = _is_truthy_env(os.getenv("FOGHORN_FORCE_REBUILD"))
-            force_rebuild = bool(
-                args.rebuild
-                or force_rebuild_env
-                or force_rebuild_cfg
-                or force_rebuild_root
+            Outputs:
+              - dict: Configuration mapping suitable for load_stats_store_backend.
+            """
+
+            logging_block = cfg.get("logging") or {}
+            if not isinstance(logging_block, dict):
+                return {}
+
+            backends_cfg = logging_block.get("backends") or []
+            if not isinstance(backends_cfg, list) or not backends_cfg:
+                return {}
+
+            async_default = bool(logging_block.get("async", True))
+
+            primary_hint = stats_cfg.get("source_backend")
+            primary_backend = (
+                str(primary_hint).strip() if isinstance(primary_hint, str) else ""
             )
 
-            try:
-                # Delegate backend construction (including multi-backend setups)
-                # to the querylog backend loader. This supports both the legacy
-                # single-SQLite configuration (db_path/batch_*) and the newer
-                # statistics.persistence.backends layout.
-                backend_cfg: dict[str, object] = dict(persistence_cfg or {})
-                stats_persistence_store = load_stats_store_backend(backend_cfg)
+            normalized_backends: list[dict[str, object]] = []
+            for entry in backends_cfg:
+                if not isinstance(entry, dict):
+                    continue
 
-                if stats_persistence_store is None:
-                    logger.warning(
-                        "Statistics persistence.enabled is true but no backend "
-                        "was constructed; continuing without persistence",
-                    )
+                backend_name = entry.get("backend")
+                if not backend_name:
+                    continue
+
+                raw_config = entry.get("config")
+                conf: dict[str, object]
+                if isinstance(raw_config, dict):
+                    conf = dict(raw_config)
                 else:
-                    logger.info(
-                        "Initialized statistics backend %s",
-                        stats_persistence_store.__class__.__name__,
-                    )
+                    # Accept a flattened layout where backend-specific options
+                    # live alongside id/backend.
+                    conf = {
+                        k: v
+                        for k, v in entry.items()
+                        if k not in {"id", "name", "backend", "config"}
+                    }
 
-                    # Optionally rebuild counts from the query_log when
-                    # requested or when counts are empty but query_log has
-                    # rows. When statistics.logging_only or
-                    # statistics.query_log_only is enabled, skip this
-                    # background rebuild so that the persistence store is only
-                    # exercised via insert-style operations (query_log
-                    # appends and, in logging_only mode, counter increments).
-                    if not logging_only_effective:
-                        try:
-                            stats_persistence_store.rebuild_counts_if_needed(
-                                force_rebuild=force_rebuild, logger_obj=logger
-                            )
-                        except (
-                            Exception
-                        ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                            logger.error(
-                                "Failed to rebuild statistics counts from query_log: %s",
-                                exc,
-                                exc_info=True,
-                            )
-            except (
-                Exception
-            ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                logger.error(
-                    "Failed to initialize statistics persistence: %s; continuing without persistence",
-                    exc,
-                    exc_info=True,
-                )
+                # Propagate the global logging.async flag to backends that do
+                # not opt out explicitly via async_logging.
+                conf.setdefault("async_logging", async_default)
+
+                backend_entry: dict[str, object] = {
+                    "backend": backend_name,
+                    "config": conf,
+                }
+
+                backend_id = entry.get("id") or entry.get("name")
+                if isinstance(backend_id, str) and backend_id.strip():
+                    backend_entry["name"] = backend_id
+
+                normalized_backends.append(backend_entry)
+
+            if not normalized_backends:
+                return {}
+
+            effective: dict[str, object] = {"backends": normalized_backends}
+            if primary_backend:
+                effective["primary_backend"] = primary_backend
+            return effective
+
+        # Determine whether a rebuild should be forced from CLI/config/env.
+        def _is_truthy_env(val: Optional[str]) -> bool:
+            """Return True if an environment variable string represents a truthy value.
+
+            Inputs:
+                val: Environment variable value or None.
+
+            Outputs:
+                bool: True for common truthy strings (1, true, yes, on), else False.
+            """
+
+            if val is None:
+                return False
+            return str(val).strip().lower() in {
+                "1",
+                "true",
+                "t",
+                "yes",
+                "y",
+                "on",
+            }  # pragma: no cover - best effort
+
+        # Allow force_rebuild to be controlled from three sources, in
+        # increasing precedence order:
+        #   1) statistics.force_rebuild (root-level flag)
+        #   2) FOGHORN_FORCE_REBUILD
+        #   3) --rebuild (highest precedence)
+        force_rebuild_root = bool(stats_cfg.get("force_rebuild", False))
+        force_rebuild_env = _is_truthy_env(os.getenv("FOGHORN_FORCE_REBUILD"))
+        force_rebuild = bool(args.rebuild or force_rebuild_env or force_rebuild_root)
+
+        try:
+            # Delegate backend construction (including multi-backend setups) to
+            # the querylog backend loader. This uses logging.backends and
+            # stats.source_backend exclusively.
+            backend_cfg: dict[str, object] = _build_effective_persistence_cfg()
+            if backend_cfg:
+                stats_persistence_store = load_stats_store_backend(backend_cfg)
+            else:
                 stats_persistence_store = None
+
+            if stats_persistence_store is None:
+                logger.info(
+                    "Statistics persistence not configured; running in memory-only mode",
+                )
+            else:
+                logger.info(
+                    "Initialized statistics backend %s",
+                    stats_persistence_store.__class__.__name__,
+                )
+
+                # Optionally rebuild counts from the query_log when requested or
+                # when counts are empty but query_log has rows. When
+                # statistics.logging_only or statistics.query_log_only is
+                # enabled, skip this background rebuild so that the persistence
+                # store is only exercised via insert-style operations
+                # (query_log appends and, in logging_only mode, counter
+                # increments).
+                if not logging_only_effective:
+                    try:
+                        stats_persistence_store.rebuild_counts_if_needed(
+                            force_rebuild=force_rebuild, logger_obj=logger
+                        )
+                    except (
+                        Exception
+                    ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                        logger.error(
+                            "Failed to rebuild statistics counts from query_log: %s",
+                            exc,
+                            exc_info=True,
+                        )
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+            logger.error(
+                "Failed to initialize statistics persistence: %s; continuing without persistence",
+                exc,
+                exc_info=True,
+            )
+            stats_persistence_store = None
 
         # Initialize in-memory collector, wiring in the persistence store when present.
         ignore_cfg = stats_cfg.get("ignore", {}) or {}
@@ -600,7 +672,7 @@ def main(argv: List[str] | None = None) -> int:
             ignore_single_host=ignore_single_host,
             include_ignored_in_stats=include_in_stats,
             logging_only=logging_only_effective,
-            query_log_only=query_log_only,
+            query_log_only=logging_query_log_only,
         )
 
         # Best-effort warm-load of persisted aggregate counters on startup.
