@@ -217,7 +217,7 @@ def _augment_variables_schema(base: Dict[str, Any]) -> None:
 
 
 def _augment_statistics_persistence_schema(base: Dict[str, Any]) -> None:
-    """Brief: Extend statistics/stats persistence schema with backend configuration.
+    """Brief: Extend statistics/stats schema with persistence and backend configuration.
 
     Inputs:
       - base: Mutable JSON Schema mapping loaded from the base schema file.
@@ -248,37 +248,20 @@ def _augment_statistics_persistence_schema(base: Dict[str, Any]) -> None:
             stats_props = {}
             stats_obj["properties"] = stats_props
 
-        # Optional toggle to restrict runtime statistics behaviour to a
-        # "logging-only" mode where background warm-load/rebuild passes are
-        # skipped and only insert-style operations (query_log appends and
-        # counter increments) are performed. This is written directly into the
-        # base statistics schema so that validation tools always see it as a
-        # first-class optional property, just like other booleans under
-        # statistics.
-        stats_props["logging_only"] = {
-            "type": "boolean",
-            "description": (
-                "When true, restrict statistics to logging-only mode where "
-                "only insert-style operations (query_log appends and "
-                "counter increments) are performed and background warm-load "
-                "or rebuild passes are skipped."
-            ),
-            "default": False,
-        }
-
-        # Optional toggle to restrict persistence usage to the raw query_log
-        # only. When true, aggregate counters are not mirrored into the
-        # persistent store (counts table); only query_log appends are
-        # performed.
-        stats_props["query_log_only"] = {
-            "type": "boolean",
-            "description": (
-                "When true, only the raw query_log is written to the "
-                "persistence backend and aggregate counters are kept "
-                "in-memory only."
-            ),
-            "default": False,
-        }
+        # Primary backend selector for the new layout where statistics and
+        # query-log backends are described under logging.backends and
+        # stats.source_backend picks the primary read backend. This is modeled
+        # as a simple string so operators can reference either a logical backend
+        # id (for example, "local-log") or a backend alias.
+        if "source_backend" not in stats_props:
+            stats_props["source_backend"] = {
+                "type": "string",
+                "description": (
+                    "Identifier of the primary statistics/query-log backend "
+                    "to read from. When logging.backends is configured, this "
+                    "typically matches one of the backends[].id values."
+                ),
+            }
 
         persistence_obj = stats_props.get("persistence")
         if not isinstance(persistence_obj, dict):
@@ -400,7 +383,119 @@ def _build_v2_root_schema(base: Dict[str, Any], plugins: Dict[str, Any]) -> Dict
         if isinstance(server_props, dict) and "cache" in server_props
         else base_props.get("cache", {"type": ["object", "null"]})
     )
-    logging_schema = base_props.get("logging", {"type": "object"})
+    # Logging schema: model both the legacy root-level logging block
+    # (level/stderr/file/syslog) and the new layout where Python logging lives
+    # under logging.python and query/statistics backends are described under
+    # logging.backends.
+    legacy_logging = base_props.get("logging", {"type": "object", "properties": {}})
+    legacy_props = legacy_logging.get("properties", {}) if isinstance(legacy_logging, dict) else {}
+
+    python_logging_schema: Dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "file": legacy_props.get("file", {"type": "string"}),
+            "level": legacy_props.get(
+                "level",
+                {
+                    "type": "string",
+                    "enum": [
+                        "debug",
+                        "info",
+                        "warn",
+                        "warning",
+                        "error",
+                        "crit",
+                        "critical",
+                    ],
+                },
+            ),
+            "stderr": legacy_props.get("stderr", {"type": "boolean"}),
+            "syslog": legacy_props.get("syslog", {"oneOf": [{"type": "boolean"}, {"type": "object"}]}),
+        },
+    }
+
+    logging_schema: Dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "description": (
+            "Global logging configuration. Supports both the legacy root-level "
+            "layout (level/stderr/file/syslog) and the newer layout where "
+            "Python logging lives under logging.python and statistics/query-log "
+            "backends live under logging.backends."
+        ),
+        "properties": {
+            # Legacy root-level Python logging keys remain accepted so existing
+            # configs continue to validate.
+            "file": python_logging_schema["properties"]["file"],
+            "level": python_logging_schema["properties"]["level"],
+            "stderr": python_logging_schema["properties"]["stderr"],
+            "syslog": python_logging_schema["properties"]["syslog"],
+            # New-style Python logging block.
+            "python": python_logging_schema,
+            # Global async flag applied to statistics/query-log backends when
+            # they do not override async_logging explicitly.
+            "async": {
+                "type": "boolean",
+                "description": (
+                    "When true, statistics/query-log backends default to using "
+                    "an async worker queue for high-volume writes. When false, "
+                    "backends perform writes synchronously unless they opt in "
+                    "explicitly via their own async_logging setting."
+                ),
+                "default": True,
+            },
+            # Global toggle for keeping only the raw query_log in persistence
+            # and avoiding mirroring aggregate counters into the backend.
+            "query_log_only": {
+                "type": "boolean",
+                "description": (
+                    "When true, only the raw query_log is written to the "
+                    "configured backends and aggregate counters are kept "
+                    "in-memory only."
+                ),
+                "default": False,
+            },
+            # Backends used for statistics and query logging; each entry maps to
+            # a BaseStatsStore implementation (for example, sqlite, mysql,
+            # mqtt_logging).
+            "backends": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": (
+                                "Logical backend identifier used by "
+                                "stats.source_backend and any future per-server "
+                                "logging selectors."
+                            ),
+                        },
+                        "backend": {
+                            "type": "string",
+                            "description": (
+                                "Backend identifier or dotted import path (for "
+                                "example 'sqlite', 'mysql', 'mqtt_logging')."
+                            ),
+                        },
+                        "config": {
+                            "type": "object",
+                            "description": (
+                                "Backend-specific configuration mapping passed "
+                                "verbatim to the selected BaseStatsStore "
+                                "implementation."
+                            ),
+                            "additionalProperties": True,
+                        },
+                    },
+                    "required": ["backend"],
+                },
+            },
+        },
+    }
+
     statistics_schema = base_props.get("statistics", {"type": "object"})
 
     # Web/admin HTTP schema: only consider server.http in the base schema. If
