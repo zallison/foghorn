@@ -39,6 +39,7 @@ class _FakeMqttClient:
         self.loop_stopped = False
         self.disconnected = False
         self.publishes: list[tuple[str, str, int, bool]] = []
+        self.wills: list[tuple[str, str, int, bool]] = []
         self.username: str | None = None
         self.password: str | None = None
 
@@ -63,6 +64,11 @@ class _FakeMqttClient:
         self, topic: str, payload: str, qos: int = 0, retain: bool = False
     ) -> None:
         self.publishes.append((topic, payload, int(qos), bool(retain)))
+
+    def will_set(
+        self, topic: str, payload: str, qos: int = 0, retain: bool = False
+    ) -> None:
+        self.wills.append((topic, payload, int(qos), bool(retain)))
 
 
 class _FakeMqttModule:
@@ -123,6 +129,18 @@ def test_mqtt_logging_backend_constructs_and_marks_healthy(
     )
 
     assert backend.health_check() is True
+
+    # TODO: Once LWT works.
+    ## # Verify that a Last Will and Testament is configured with matching QoS/retain.
+    ## client = backend._client  # type: ignore[attr-defined]
+    ## assert isinstance(client.wills, list)
+    ## assert len(client.wills) == 1
+
+    ## will_topic, _, will_qos, will_retain = client.wills[0]
+    ## assert will_topic == "foghorn/test/meta"
+    ## assert will_qos == 1
+    ## assert will_retain is False
+
     # Close should mark backend unhealthy and stop/disconnect the client.
     backend.close()
     assert backend.health_check() is False
