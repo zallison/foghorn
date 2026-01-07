@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from foghorn.transports.udp import UDPError, udp_query
+from foghorn.servers.transports.udp import UDPError, udp_query
 
 
 class _UDPStubNewPath:
