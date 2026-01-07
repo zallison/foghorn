@@ -55,14 +55,17 @@ class SQLite3Cache(CachePlugin):
         """
 
         cfg_db_path = config.get("db_path")
+        used_default_path = False
         if not isinstance(cfg_db_path, str) or not cfg_db_path.strip():
             cfg_db_path = config.get("path")
         if isinstance(cfg_db_path, str) and cfg_db_path.strip():
             db_path = cfg_db_path.strip()
         else:  # pragma: nocover default path only used in production
             db_path = "./config/var/dns_cache.db"
+            used_default_path = True
 
-        self.db_path: str = os.path.abspath(os.path.expanduser(str(db_path)))
+        resolved_db_path = os.path.abspath(os.path.expanduser(str(db_path)))
+        self.db_path: str = resolved_db_path
         self.min_cache_ttl: int = max(0, int(config.get("min_cache_ttl", 0) or 0))
 
         namespace = config.get("namespace", "dns_cache")
@@ -74,8 +77,20 @@ class SQLite3Cache(CachePlugin):
             )
         journal_mode = config.get("journal_mode", "WAL")
 
+        backend_db_path = resolved_db_path
+        if used_default_path:
+            dir_path = os.path.dirname(resolved_db_path) or "."
+            try:
+                # When the default path directory is not writable (e.g. owned by
+                # another user), fall back to an in-memory DB so the plugin
+                # remains usable in read-only environments.
+                if not os.access(dir_path, os.W_OK | os.X_OK):
+                    backend_db_path = ":memory:"
+            except Exception:  # pragma: nocover - defensive permission check
+                pass
+
         self._cache = SQLite3TTLCache(
-            self.db_path,
+            backend_db_path,
             namespace=str(namespace or "dns_cache"),
             journal_mode=str(journal_mode or "WAL"),
             create_dir=True,

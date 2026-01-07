@@ -72,6 +72,11 @@ def _is_subdomain(domain: str) -> bool:
 class SqliteStatsStore(BaseStatsStore):
     """SQLite-backed persistent statistics and query-log backend.
 
+    This class is a direct port of the legacy StatsSQLiteStore implementation
+    so that it satisfies the BaseStatsStore interface while preserving
+    existing SQLite behavior.
+    """
+
     # Aliases used by the stats backend registry. The default alias derived from
     # the class name is "sqlite", but we also accept "sqlite3" for convenience.
     aliases = ("sqlite", "sqlite3")
@@ -84,11 +89,6 @@ class SqliteStatsStore(BaseStatsStore):
         "batch_time_sec": 15.0,
         "batch_max_size": 1000,
     }
-
-    This class is a direct port of the legacy StatsSQLiteStore implementation
-    so that it satisfies the BaseStatsStore interface while preserving
-    existing SQLite behavior.
-    """
 
     def __init__(
         self,
@@ -128,13 +128,38 @@ class SqliteStatsStore(BaseStatsStore):
         self._last_flush: float = time.time()
 
     def _init_connection(self) -> sqlite3.Connection:
-        """Create SQLite connection and ensure schema exists."""
+        """Create SQLite connection and ensure schema exists.
+
+        Inputs:
+            None; uses self._db_path.
+
+        Outputs:
+            sqlite3.Connection: Open connection with schema ensured.
+        """
 
         dir_path = os.path.dirname(self._db_path)
         if dir_path:
             os.makedirs(dir_path, exist_ok=True)
 
-        conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        db_path = self._db_path
+        try:
+            # When using the default on-disk path and the directory is not
+            # writable (e.g. created by another user), fall back to an
+            # in-memory database so statistics persistence does not prevent
+            # the process from starting.
+            default_db_path = SqliteStatsStore.default_config.get("db_path")
+            if (
+                isinstance(default_db_path, str)
+                and os.path.abspath(os.path.expanduser(str(db_path)))
+                == os.path.abspath(os.path.expanduser(str(default_db_path)))
+                and dir_path
+                and not os.access(dir_path, os.W_OK | os.X_OK)
+            ):
+                db_path = ":memory:"
+        except Exception:  # pragma: no cover - defensive permission check
+            pass
+
+        conn = sqlite3.connect(db_path, check_same_thread=False)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
         except Exception:  # pragma: no cover - environment specific
