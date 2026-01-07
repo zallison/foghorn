@@ -383,12 +383,14 @@ def _build_v2_root_schema(base: Dict[str, Any], plugins: Dict[str, Any]) -> Dict
         if isinstance(server_props, dict) and "cache" in server_props
         else base_props.get("cache", {"type": ["object", "null"]})
     )
-    # Logging schema: model both the legacy root-level logging block
-    # (level/stderr/file/syslog) and the new layout where Python logging lives
-    # under logging.python and query/statistics backends are described under
-    # logging.backends.
+    # Logging schema: only the v2 layout is modeled here, with Python logging
+    # under logging.python and statistics/query-log backends described under
+    # logging.backends. Legacy root-level logging keys (level/stderr/file/syslog)
+    # are no longer part of the accepted configuration schema.
     legacy_logging = base_props.get("logging", {"type": "object", "properties": {}})
-    legacy_props = legacy_logging.get("properties", {}) if isinstance(legacy_logging, dict) else {}
+    legacy_props = (
+        legacy_logging.get("properties", {}) if isinstance(legacy_logging, dict) else {}
+    )
 
     python_logging_schema: Dict[str, Any] = {
         "type": "object",
@@ -411,7 +413,10 @@ def _build_v2_root_schema(base: Dict[str, Any], plugins: Dict[str, Any]) -> Dict
                 },
             ),
             "stderr": legacy_props.get("stderr", {"type": "boolean"}),
-            "syslog": legacy_props.get("syslog", {"oneOf": [{"type": "boolean"}, {"type": "object"}]}),
+            "syslog": legacy_props.get(
+                "syslog",
+                {"oneOf": [{"type": "boolean"}, {"type": "object"}]},
+            ),
         },
     }
 
@@ -419,19 +424,12 @@ def _build_v2_root_schema(base: Dict[str, Any], plugins: Dict[str, Any]) -> Dict
         "type": "object",
         "additionalProperties": False,
         "description": (
-            "Global logging configuration. Supports both the legacy root-level "
-            "layout (level/stderr/file/syslog) and the newer layout where "
-            "Python logging lives under logging.python and statistics/query-log "
-            "backends live under logging.backends."
+            "Global logging configuration. Python logging lives under "
+            "logging.python and statistics/query-log backends live under "
+            "logging.backends."
         ),
         "properties": {
-            # Legacy root-level Python logging keys remain accepted so existing
-            # configs continue to validate.
-            "file": python_logging_schema["properties"]["file"],
-            "level": python_logging_schema["properties"]["level"],
-            "stderr": python_logging_schema["properties"]["stderr"],
-            "syslog": python_logging_schema["properties"]["syslog"],
-            # New-style Python logging block.
+            # V2 Python logging block (file/level/stderr/syslog).
             "python": python_logging_schema,
             # Global async flag applied to statistics/query-log backends when
             # they do not override async_logging explicitly.

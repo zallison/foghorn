@@ -2540,7 +2540,7 @@
     },
     "logging": {
       "additionalProperties": false,
-      "description": "Global logging configuration. Supports both the legacy root-level layout (level/stderr/file/syslog) and the newer layout where Python logging lives under logging.python and statistics/query-log backends live under logging.backends.",
+      "description": "Global logging configuration. Python logging lives under logging.python and statistics/query-log backends live under logging.backends.",
       "properties": {
         "async": {
           "default": true,
@@ -2571,21 +2571,6 @@
             "type": "object"
           },
           "type": "array"
-        },
-        "file": {
-          "type": "string"
-        },
-        "level": {
-          "enum": [
-            "debug",
-            "info",
-            "warn",
-            "warning",
-            "error",
-            "crit",
-            "critical"
-          ],
-          "type": "string"
         },
         "python": {
           "additionalProperties": false,
@@ -2631,25 +2616,6 @@
           "default": false,
           "description": "When true, only the raw query_log is written to the configured backends and aggregate counters are kept in-memory only.",
           "type": "boolean"
-        },
-        "stderr": {
-          "type": "boolean"
-        },
-        "syslog": {
-          "oneOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "additionalProperties": false,
-              "properties": {
-                "address": {},
-                "facility": {},
-                "tag": {}
-              },
-              "type": "object"
-            }
-          ]
         }
       },
       "type": "object"
