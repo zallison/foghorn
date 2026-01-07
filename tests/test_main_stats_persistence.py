@@ -15,37 +15,42 @@ import foghorn.main as main_mod
 
 
 def test_main_warm_start_loads_latest_snapshot(monkeypatch, tmp_path: Path) -> None:
-    """Brief: When persistence is enabled, main() wires a BaseStatsStore into StatsCollector.
+    """Brief: When a backend is configured, main() wires a BaseStatsStore into StatsCollector.
 
     Inputs:
         monkeypatch/tmp_path fixtures
     Outputs:
-        None; asserts StatsSQLiteStore is constructed and passed through.
+        None; asserts a stats backend is constructed from logging.backends and
+        passed through to StatsCollector/StatsReporter.
     """
-    yaml_data = (
-        "upstreams:\n"
-        "  endpoints:\n"
-        "    - host: 1.1.1.1\n"
-        "      port: 53\n"
-        "  strategy: failover\n"
-        "  max_concurrent: 1\n"
-        "server:\n"
-        "  listen:\n"
-        "    udp:\n"
-        "      enabled: true\n"
-        "      host: 127.0.0.1\n"
-        "      port: 5354\n"
-        "  resolver:\n"
-        "    mode: forward\n"
-        "    timeout_ms: 2000\n"
-        "    use_asyncio: true\n"
-        "stats:\n"
-        "  enabled: true\n"
-        "  interval_seconds: 1\n"
-        "  persistence:\n"
-        f"    enabled: true\n"
-        f"    db_path: {tmp_path}/warm.db\n"
-    )
+    yaml_data = f"""upstreams:
+  endpoints:
+    - host: 1.1.1.1
+      port: 53
+  strategy: failover
+  max_concurrent: 1
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5354
+  resolver:
+    mode: forward
+    timeout_ms: 2000
+    use_asyncio: true
+logging:
+  async: true
+  backends:
+    - id: warm-store
+      backend: sqlite
+      config:
+        db_path: {tmp_path}/warm.db
+stats:
+  enabled: true
+  interval_seconds: 1
+  source_backend: warm-store
+"""
 
     constructed: dict[str, object] = {}
 
@@ -99,10 +104,8 @@ def test_main_warm_start_loads_latest_snapshot(monkeypatch, tmp_path: Path) -> N
     monkeypatch.setattr(main_mod, "StatsReporter", DummyReporter)
 
     def _fake_loader(persistence_cfg: dict[str, object] | None) -> DummyStore | None:
-        # Simulate loader returning a single backend when enabled.
+        # Simulate loader returning a single backend when a backend config is provided.
         if not isinstance(persistence_cfg, dict):
-            return None
-        if not persistence_cfg.get("enabled", True):
             return None
         constructed["store_cfg"] = persistence_cfg
         return DummyStore()
@@ -115,9 +118,13 @@ def test_main_warm_start_loads_latest_snapshot(monkeypatch, tmp_path: Path) -> N
         rc = main_mod.main(["--config", "stats_persist.yaml"])
 
     assert rc == 0
-    # Loader should have been called with the persistence config mapping
+    # Loader should have been called with an effective backend config
     store_cfg = constructed["store_cfg"]
-    assert store_cfg.get("db_path") == f"{tmp_path}/warm.db"
+    backends = store_cfg.get("backends") or []
+    assert isinstance(backends, list) and len(backends) == 1
+    first = backends[0]
+    cfg = first.get("config") or {}
+    assert cfg.get("db_path") == f"{tmp_path}/warm.db"  # type: ignore[index]
     # Collector should have received the store via stats_store kwarg
     ck = constructed["collector_kwargs"]
     assert isinstance(ck.get("stats_store"), DummyStore)
@@ -127,8 +134,8 @@ def test_main_warm_start_loads_latest_snapshot(monkeypatch, tmp_path: Path) -> N
     assert isinstance(constructed["reporter_args"]["persistence_store"], DummyStore)
 
 
-def test_main_persistence_disabled_skips_store(monkeypatch, tmp_path: Path) -> None:
-    """Brief: When statistics.persistence.enabled=false, main() does not create a store.
+def test_main_persistence_unconfigured_skips_store(monkeypatch, tmp_path: Path) -> None:
+    """Brief: When no logging.backends are configured, main() does not create a store.
 
     Inputs:
         monkeypatch/tmp_path fixtures
@@ -155,8 +162,6 @@ def test_main_persistence_disabled_skips_store(monkeypatch, tmp_path: Path) -> N
         "stats:\n"
         "  enabled: true\n"
         "  interval_seconds: 1\n"
-        "  persistence:\n"
-        "    enabled: false\n"
     )
 
     constructed: dict[str, object] = {"store_constructed": False}
@@ -194,9 +199,9 @@ def test_main_persistence_disabled_skips_store(monkeypatch, tmp_path: Path) -> N
         def serve_forever(self) -> None:
             raise KeyboardInterrupt
 
-    def _fake_loader_disabled(persistence_cfg: dict[str, object] | None) -> None:  # pragma: no cover - should not be called when enabled is false
-        # Record that the loader was invoked; in this test config, enabled is
-        # false so main() should skip calling the loader entirely.
+    def _fake_loader_disabled(persistence_cfg: dict[str, object] | None) -> None:  # pragma: no cover - should not be called when no backends are configured
+        # Record that the loader was invoked; in this test config there are no
+        # logging.backends, so main() should skip calling the loader entirely.
         constructed["store_constructed"] = True
         return None
 
