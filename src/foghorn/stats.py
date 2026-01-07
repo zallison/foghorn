@@ -55,7 +55,7 @@ def get_process_uptime_seconds() -> float:
     return max(0.0, time.time() - _PROCESS_START_TIME)
 
 
-@registered_lru_cached(maxsize=10240)
+@registered_lru_cached(maxsize=(16 * 1024))
 def _normalize_domain(domain: str) -> str:
     """
     Normalize domain name for statistics tracking.
@@ -73,7 +73,7 @@ def _normalize_domain(domain: str) -> str:
     return domain.rstrip(".").lower()
 
 
-@registered_lru_cached(maxsize=10240)
+@registered_lru_cached(maxsize=(16 * 1024))
 def _is_subdomain(domain: str) -> bool:
     """Return True if the name should be treated as a subdomain.
 
