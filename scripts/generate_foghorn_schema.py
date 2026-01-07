@@ -68,6 +68,111 @@ def _model_to_json_schema(model_cls: Type[Any]) -> Dict[str, Any]:
     return {}
 
 
+def _enrich_schema_descriptions(schema: Dict[str, Any]) -> None:
+    """Brief: Heuristically populate missing descriptions/default notes.
+
+    Inputs:
+      - schema: Mutable JSON Schema mapping to enrich in place.
+
+    Outputs:
+      - None; ``schema`` is updated in place where descriptions are missing.
+
+    Notes:
+      - This is intentionally conservative: it never overwrites existing
+        ``description`` fields and attempts to keep generated text short.
+      - When possible it adds a brief mention of valid values (for ``enum``)
+        or known subkeys (for ``properties``/``patternProperties``).
+    """
+
+    def _describe_node(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+
+        has_description = isinstance(node.get("description"), str)
+        type_value = node.get("type")
+        enum_values = node.get("enum")
+        properties = node.get("properties") if isinstance(node.get("properties"), dict) else None
+        pattern_props = (
+            node.get("patternProperties")
+            if isinstance(node.get("patternProperties"), dict)
+            else None
+        )
+        default_value = node.get("default") if "default" in node else None
+
+        pieces: list[str] = []
+
+        if not has_description:
+            if isinstance(type_value, str):
+                pieces.append(f"Type: {type_value}.")
+            elif isinstance(type_value, list) and type_value:
+                joined = ", ".join(str(t) for t in type_value)
+                pieces.append(f"Types: {joined}.")
+
+            if isinstance(enum_values, list) and enum_values:
+                # Avoid regenerating if a previous run already added text.
+                pieces.append(
+                    "Valid values: "
+                    + ", ".join(json.dumps(v, ensure_ascii=False) for v in enum_values)
+                    + "."
+                )
+
+            if properties:
+                keys_preview = ", ".join(sorted(properties.keys())[:8])
+                pieces.append(f"Object with subkeys: {keys_preview}.")
+
+            if pattern_props:
+                patterns_preview = ", ".join(sorted(pattern_props.keys())[:4])
+                pieces.append(f"Object with keys matching patterns: {patterns_preview}.")
+
+        # Append a default note even if the node already had a human description,
+        # but avoid duplicating if something similar is present.
+        if default_value is not None:
+            default_str = json.dumps(default_value, ensure_ascii=False)
+            existing = node.get("description", "")
+            default_sentence = f" Default: {default_str}."
+            if default_sentence.strip() not in str(existing):
+                pieces.append(default_sentence.strip())
+
+        if pieces and not has_description:
+            node["description"] = " ".join(pieces)
+        elif pieces and has_description:
+            # Only append default info to existing descriptions.
+            default_sentences = [p for p in pieces if p.startswith("Default:")]
+            if default_sentences:
+                desc = str(node["description"]).rstrip()
+                if not desc.endswith("."):
+                    desc += "."
+                desc += " " + " ".join(default_sentences)
+                node["description"] = desc
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            _describe_node(node)
+
+            # Recurse into common schema containers.
+            for key in ("properties", "patternProperties", "$defs", "definitions"):
+                child = node.get(key)
+                if isinstance(child, dict):
+                    for sub in child.values():
+                        _walk(sub)
+
+            for key in ("items",):
+                child = node.get(key)
+                if isinstance(child, dict):
+                    _walk(child)
+                elif isinstance(child, list):
+                    for sub in child:
+                        _walk(sub)
+
+            for key in ("oneOf", "anyOf", "allOf"):
+                child = node.get(key)
+                if isinstance(child, list):
+                    for sub in child:
+                        _walk(sub)
+
+    _walk(schema)
+
+
 def collect_plugin_schemas() -> Dict[str, Any]:
     """Brief: Discover plugins and build per-plugin configuration schemas.
 
@@ -134,6 +239,11 @@ def collect_plugin_schemas() -> Dict[str, Any]:
                         config_schema = maybe_schema
                 except Exception:  # pragma: no cover - defensive logging only
                     logger.exception("get_config_schema() failed for %s", module_path)
+
+        if isinstance(config_schema, dict):
+            # Best-effort enrichment so each plugin config field has at least a
+            # minimal description and any enum/default information is surfaced.
+            _enrich_schema_descriptions(config_schema)
 
         results[canonical] = {
             "module": module_path,
@@ -741,6 +851,10 @@ def build_document(base_schema_path: Optional[str] = None) -> Dict[str, Any]:
     # Ensure statistics.persistence documents the backend loader options used
     # by foghorn.plugins.querylog.load_stats_store_backend().
     _augment_statistics_persistence_schema(base)
+
+    # Heuristically fill in missing descriptions/default notes across the base
+    # schema so that editor tooling always has something useful to display.
+    _enrich_schema_descriptions(base)
 
     plugins = collect_plugin_schemas()
 

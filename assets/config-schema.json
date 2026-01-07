@@ -80,46 +80,6 @@
         },
         "module": "foghorn.plugins.resolve.access_control.AccessControl"
       },
-      "dns_prefetch": {
-        "aliases": [
-          "dns_prefetch",
-          "prefetch"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for DnsPrefetch.\n\nInputs:\n  - interval_seconds: How often to sample statistics and perform prefetch cycles.\n  - prefetch_top_n: Maximum number of domains considered per cycle based on\n    cache_hit_domains/top_domains statistics.\n  - max_consecutive_misses: Per-domain cap on consecutive prefetch cycles\n    without any observed cache hit; once exceeded, prefetching for that\n    domain is paused until a new cache hit is seen.\n  - qtypes: List of DNS qtype names to prefetch (e.g. [\"A\", \"AAAA\"]).\n\nOutputs:\n  - DnsPrefetchConfig instance with normalized field types.",
-          "properties": {
-            "interval_seconds": {
-              "default": 60.0,
-              "minimum": 1.0,
-              "title": "Interval Seconds",
-              "type": "number"
-            },
-            "max_consecutive_misses": {
-              "default": 5,
-              "minimum": 1,
-              "title": "Max Consecutive Misses",
-              "type": "integer"
-            },
-            "prefetch_top_n": {
-              "default": 100,
-              "minimum": 1,
-              "title": "Prefetch Top N",
-              "type": "integer"
-            },
-            "qtypes": {
-              "items": {
-                "type": "string"
-              },
-              "title": "Qtypes",
-              "type": "array"
-            }
-          },
-          "title": "DnsPrefetchConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.dns_prefetch.DnsPrefetch"
-      },
       "docker_hosts": {
         "aliases": [
           "docker",
@@ -293,53 +253,6 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.etc_hosts.EtcHosts"
-      },
-      "examples": {
-        "aliases": [
-          "examples"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for Examples.\n\nInputs:\n  - max_subdomains: Maximum allowed subdomain depth.\n  - max_length_no_dots: Maximum label length excluding dots.\n  - base_labels: Rightmost labels comprising the base domain.\n  - apply_to_qtypes: Qtypes this plugin applies to.\n  - rewrite_first_ipv4: List of rewrite rules.\n\nOutputs:\n  - ExamplesConfig instance with normalized field types.",
-          "properties": {
-            "apply_to_qtypes": {
-              "items": {
-                "type": "string"
-              },
-              "title": "Apply To Qtypes",
-              "type": "array"
-            },
-            "base_labels": {
-              "default": 2,
-              "minimum": 0,
-              "title": "Base Labels",
-              "type": "integer"
-            },
-            "max_length_no_dots": {
-              "default": 50,
-              "minimum": 0,
-              "title": "Max Length No Dots",
-              "type": "integer"
-            },
-            "max_subdomains": {
-              "default": 5,
-              "minimum": 0,
-              "title": "Max Subdomains",
-              "type": "integer"
-            },
-            "rewrite_first_ipv4": {
-              "items": {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              "title": "Rewrite First Ipv4",
-              "type": "array"
-            }
-          },
-          "title": "ExamplesConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.examples.Examples"
       },
       "file_downloader": {
         "aliases": [
@@ -698,56 +611,6 @@
         },
         "module": "foghorn.plugins.resolve.flaky_server.FlakyServer"
       },
-      "greylist_example": {
-        "aliases": [
-          "greylist_example"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for GreylistExample.\n\nInputs:\n  - duration_seconds: Greylist window in seconds.\n  - duration_hours: Legacy hours-based window.\n  - db_path: Path to sqlite DB.\n  - cache_ttl_seconds: TTL for in-memory cache.\n  - cache_max_entries: Max entries in cache.\n\nOutputs:\n  - GreylistConfig instance with normalized field types.",
-          "properties": {
-            "cache_max_entries": {
-              "default": 100000,
-              "minimum": 0,
-              "title": "Cache Max Entries",
-              "type": "integer"
-            },
-            "cache_ttl_seconds": {
-              "default": 300,
-              "minimum": 0,
-              "title": "Cache Ttl Seconds",
-              "type": "integer"
-            },
-            "db_path": {
-              "default": "./config/var/greylist.db",
-              "title": "Db Path",
-              "type": "string"
-            },
-            "duration_hours": {
-              "default": 24,
-              "minimum": 0,
-              "title": "Duration Hours",
-              "type": "integer"
-            },
-            "duration_seconds": {
-              "anyOf": [
-                {
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Duration Seconds"
-            }
-          },
-          "title": "GreylistConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.greylist.GreylistExample"
-      },
       "mdns_bridge": {
         "aliases": [
           "bonjour",
@@ -826,46 +689,6 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.mdns.MdnsBridge"
-      },
-      "new_domain_filter_example": {
-        "aliases": [
-          "ndf",
-          "new_domain",
-          "new_domain_filter",
-          "new_domain_filter_example"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for NewDomainFilterExample.\n\nInputs:\n  - threshold_days: Minimum allowed domain age in days.\n  - whois_db_path: Path to WHOIS cache DB.\n  - whois_cache_ttl_seconds: In-memory cache TTL.\n  - whois_refresh_seconds: Max age of DB entries before refresh.\n\nOutputs:\n  - NewDomainFilterExampleConfig instance with normalized field types.",
-          "properties": {
-            "threshold_days": {
-              "default": 7,
-              "minimum": 0,
-              "title": "Threshold Days",
-              "type": "integer"
-            },
-            "whois_cache_ttl_seconds": {
-              "default": 3600,
-              "minimum": 0,
-              "title": "Whois Cache Ttl Seconds",
-              "type": "integer"
-            },
-            "whois_db_path": {
-              "default": "./config/var/whois_cache.db",
-              "title": "Whois Db Path",
-              "type": "string"
-            },
-            "whois_refresh_seconds": {
-              "default": 86400,
-              "minimum": 0,
-              "title": "Whois Refresh Seconds",
-              "type": "integer"
-            }
-          },
-          "title": "NewDomainFilterExampleConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.new_domain_filter.NewDomainFilterExample"
       },
       "rate_limit": {
         "aliases": [
@@ -2599,12 +2422,6 @@
                   "type": "boolean"
                 },
                 {
-                  "additionalProperties": false,
-                  "properties": {
-                    "address": {},
-                    "facility": {},
-                    "tag": {}
-                  },
                   "type": "object"
                 }
               ]
