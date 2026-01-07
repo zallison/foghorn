@@ -13,7 +13,7 @@ With built-in admin and API server support, Foghorn empowers you to monitor and 
 The configuration file is validated against a JSON Schema, but you rarely need to read the schema directly. This guide walks through the main sections (`vars`, `server`, `upstreams`, `logging`, `stats`, and `plugins`), then shows concrete examples for every built‑in plugin.
 
 ## Table of Contents
-
+- [0. Thanks](#0-thanks)
 - [1. Quick start: minimal config](#1-quick-start-minimal-config)
 - [2. Configuration layout overview](#2-configuration-layout-overview)
   - [2.1 Top-level keys](#21-top-level-keys)
@@ -49,6 +49,12 @@ The configuration file is validated against a JSON Schema, but you rarely need t
   - [5.4 `enterprise`: layered caches and rich stats](#54-enterprise-layered-caches-and-rich-stats)
 
 ---
+
+## 0. Thanks
+
+With special thanks to **Fiona** Weatherwax for their contributions and inspiration, to the **dnslib** team for the low level / on wire primitives, and to **dnspython** for the DNSSEC implementation. Additional shout outs to the whole **python community**, and the teams of **fastapi, pydantic, black, ruff, pytest,** and every other giant on whose shoulders I stand.
+
+Also thanks to my junior developer, AI via warp.dev, who keeps my docstrings and unit tests up to date, creates good commit messages, and other janitorial tasks. Also ~~a lot of help with the~~ all the HTML/JS. Because I'm just not good at it.
 
 ## 1. Quick start: minimal config
 
@@ -95,6 +101,20 @@ foghorn --config config/config.yaml
 
 From here you layer in plugins to get adblocking, hosts files, per-user allowlists, and more.
 
+### Makefile helpers
+
+For local development there is a `Makefile` with a few convenience targets:
+
+- `make run` – create a venv if needed and start Foghorn with `config/config.yaml`.
+- `make env` / `make env-dev` – create the virtualenv in `./venv` and install dependencies (with dev extras for `env-dev`).
+- `make build` – prepare the development environment (keeps the JSON schema up to date).
+- `make schema` – regenerate `assets/config-schema.json` from the Python code.
+- `make test` – run the test suite with coverage.
+- `make clean` – remove the venv, build artefacts, and temporary files.
+- `make docker`, `make docker-build`, `make docker-run`, `make docker-logs`, `make docker-clean`, `make docker-ship` – build and run Docker images/containers.
+- `make package-build` / `make package-publish` / `make package-publish-dev` – build and (optionally) publish Python packages.
+- `make ssl-cert` – generate a self-signed TLS key and certificate under `./var` using `openssl req -x509`.
+
 ---
 
 ## 2. Configuration layout overview
@@ -114,9 +134,9 @@ Conceptually, a request flows like this:
 
 ```text
 client ---> UDP/TCP/DoH listener
-		---> DNS cache (optional)
+		---> DNS cache (memory, redis, etc) (optional)
 		---> plugins (pre_resolve chain)
-		---> [maybe upstream DNS calls]
+		---> [maybe upstream DNS calls or recursive resolving]
 		---> plugins (post_resolve chain)
 		---> response or deny
 ```
@@ -162,7 +182,7 @@ upstreams:
 	  port: 53        # 853 for DoT
 	  transport: udp  # udp | tcp | dot
 	  tls:
-        server_name: dns.quad9.net
+		server_name: dns.quad9.net
 		verify: true  # true | false
 ```
 
@@ -181,46 +201,78 @@ upstreams:
 
 ### 2.4 Logging
 
-`logging` controls the process-wide logger:
+`logging` controls both the process-wide Python logger **and** the
+statistics/query-log backends.
+
+Python logging (global defaults):
 
 ```yaml
 logging:
-  level: info       # debug | info | warn | error | critical
-  stderr: true      # true | false
-  file: ./var/foghorn.log
-  syslog: false     # false | true | {address, facility, tag}
+  python:
+	level: info       # debug | info | warn | error | critical
+	stderr: true      # true | false
+	file: ./var/foghorn.log
+	syslog: false     # false | true | {address, facility, tag}
 ```
 
-Plugins can also override logging per-instance via their own `config.logging` block.
+Plugins can also override logging per-instance via their own `logging` block on
+the plugin entry, using the same shape as `logging.python`.
+
+`logging.backends` describes where persistent stats/query-log data is written.
+Each entry maps to a statistics backend such as SQLite or MQTT logging:
+
+```yaml
+logging:
+  async: true          # default async behaviour for stats backends
+  query_log_only: false  # false | true
+  backends:
+	- id: local-log
+	  backend: sqlite
+	  config:
+		db_path: ./config/var/stats.db
+		batch_writes: true
+	- id: backup-mqtt
+	  backend: mqtt_logging
+	  config:
+		host: mqtt.internal
+		port: 1883
+		topic: foghorn/query_log
+```
 
 ### 2.5 Stats and query log
 
-The `stats` section controls runtime statistics and persistent query-log backends.
+The `stats` section controls runtime statistics behaviour and selects which
+logging backend to read from.
 
 Important fields include:
 
-- `logging_only`: when true, only write raw query logs or counters; skip heavy background rebuilds.
-- `query_log_only`: when true, do not persist aggregate counts, only the raw query log.
-- `persistence.primary_backend`: which backend to treat as primary when several are configured.
-- `persistence.backends`: list of backend entries.
+- `enabled`: master on/off switch for statistics.
+- `source_backend`: which `logging.backends[*].id` (or backend alias) to treat
+  as the primary read backend.
 
 Example:
 
 ```yaml
-stats:
-  logging_only: false       # false | true
+logging:
+  async: true
   query_log_only: false     # false | true
-  persistence:
-	primary_backend: sqlite # sqlite | mysql | postgres | mongo | influx | mqtt
-	backends:
-	  - backend: sqlite
-		config:
-		  db_path: ./config/var/stats.db
-	  - backend: influx
-		config:
-		  write_url: http://127.0.0.1:8086/api/v2/write
-		  bucket: dns
-		  org: myorg
+  backends:
+	- id: local-log
+	  backend: sqlite
+	  config:
+		db_path: ./config/var/stats.db
+		batch_writes: true
+
+stats:
+  enabled: true
+  source_backend: local-log
+  interval_seconds: 300
+  ignore:
+	include_in_stats: true
+	ignore_single_host: false
+	top_domains_mode: suffix   # exact | suffix
+	top_domains:
+	  - example
 ```
 
 ### 2.6 Plugins
@@ -235,7 +287,7 @@ plugins:
 	setup:
 	  abort_on_failure: true
 	hooks:
-``	  pre_resolve:
+``    pre_resolve:
 		enabled: true
 		priority: 50
 	logging:
@@ -361,6 +413,19 @@ server:
 
 Your reverse proxy is then configured to listen on `443` with TLS and proxy requests such as `https://dns.example.com/dns-query` to `http://127.0.0.1:8053/dns-query`.
 
+### 3.5 Helper Make targets for TLS keys and certificates
+
+For quick local testing, the `Makefile` includes convenience targets that generate a small CA and server key material under `./keys`:
+
+- `make ssl-ca` – create `foghorn_ca.key` and a self-signed `foghorn_ca.crt` with CA key usage.
+- `make ssl-ca-pem` – export the CA certificate as `foghorn_ca.pem` for use as a trust anchor (e.g. `upstreams.*.tls.ca_file`).
+- `make ssl-cert` – create a server key and certificate signed by the local CA, named `foghorn_${CNAME}.key` / `.crt`.
+- `make ssl-server-pem` – build a combined `foghorn_${CNAME}.pem` containing the server certificate and key.
+
+Use `ca.pem` when Foghorn is a TLS **client** and needs to *trust* an internal CA (for example for DoT/DoH upstreams via `tls.ca_file`). Use `server.pem` when Foghorn is acting as a TLS **server** and you need a single file containing both cert and key for a listener.
+
+These are intended for development and lab environments only; for production, use your normal PKI or certificate management.
+
 ---
 
 ## 4. Plugin cookbook
@@ -380,7 +445,7 @@ plugins:
 		- 192.168.1.1 # Overrides the deny below.
 		- 10.0.0.0/8
 	  deny:
-        - 192.168.0.0/16
+		- 192.168.0.0/16
 		- 172.16.0.0/12
 ```
 
@@ -408,7 +473,7 @@ plugins:
 	config:
 	  endpoints:
 		- url: unix:///var/run/docker.sock
-        - url: tcp://my.server.lan:2375
+		- url: tcp://my.server.lan:2375
 	  ttl: 60
 	  health: ['healthy', 'running']
 	  discovery: true   # false | true
@@ -449,17 +514,17 @@ Fetches remote blocklists/allowlists on a schedule and stores them as files for 
 ```yaml
 plugins:
   - type: lists
-    hooks: # Setup early so other plugins have their files available.
-      setup:  { priority: 10 }
+	hooks: # Setup early so other plugins have their files available.
+	  setup:  { priority: 10 }
 	config:
 	  download_path: ./config/var/lists
 	  interval_days: 1
 	  hash_filenames: true # false | true - Multiple "hosts.txt" files easily handled by hashing the URL
 	  urls:
 		- https://example.com/ads.txt
-        - https://example.com/hosts.txt
-        - https://serverA/hosts.txt
-        - https://serverB/hosts.txt
+		- https://example.com/hosts.txt
+		- https://serverA/hosts.txt
+		- https://serverB/hosts.txt
 ```
 
 ### 4.7 Domain filter / adblock (`filter`)
@@ -470,12 +535,12 @@ Flexible domain/IP/pattern filter used to build adblockers and kid-safe DNS.
 plugins:
   - type: filter
 	config:
-    hooks:
-      pre_resolve:  { priority: 25 } # Run early in block queries so other plugins don't do anything
-      post_resolve: { priority: 25 } # if it's blocked.
+	hooks:
+	  pre_resolve:  { priority: 25 } # Run early in block queries so other plugins don't do anything
+	  post_resolve: { priority: 25 } # if it's blocked.
 	  default: aloow  # deny | allow
-      targets:
-          - 10.0.1.0/24 # Kids subnet
+	  targets:
+		  - 10.0.1.0/24 # Kids subnet
 	  ttl: 300
 	  deny_response: nxdomain  # nxdomain | refused | servfail | ip | noerror_empty
 	  deny_response_ip4: 0.0.0.0
@@ -483,9 +548,9 @@ plugins:
 		- ./config/var/lists/*.txt
 	  allowed_domains:
 		- homework.example.org
-      blocked_domains:
-        - how-to-cheat.org
-        - current-game-obession.io
+	  blocked_domains:
+		- how-to-cheat.org
+		- current-game-obession.io
 
 ```
 
@@ -642,10 +707,13 @@ upstreams:
 	  tls: {server_name: "cloudflare-dns.com", verify: true}
 
 logging:
-  level: info
+  python:
+	level: info
+  query_log_only: true
 
 stats:
-  logging_only: true
+  enabled: true
+  source_backend: local-log
 
 plugins: []
 ```
@@ -685,16 +753,19 @@ upstreams:
 	  transport: udp
 
 logging:
-  level: info
+  python:
+	level: info
+  async: true
+  query_log_only: false
+  backends:
+	- id: lan-log
+	  backend: sqlite
+	  config:
+		db_path: ./config/var/stats_lan.db
 
 stats:
-  logging_only: false
-  persistence:
-	primary_backend: sqlite
-	backends:
-	  - backend: sqlite
-		config:
-		  db_path: ./config/var/stats_lan.db
+  enabled: true
+  source_backend: lan-log
 
 plugins:
   - type: lists
@@ -744,7 +815,7 @@ Goals:
 - Persistent DNS cache.
 - Local LAN overrides via hosts, mDNS bridge, and zone records.
 - Simple access control and rate limiting.
-- Query-log persistence in MariaDB/MySQL.
+- Query-log persistence in MariaDB/MySQL (configured via logging.backends).
 
 ```yaml
 vars:
@@ -779,19 +850,22 @@ upstreams:
 	  tls: {server_name: dot2.myisp.example, verify: true}
 
 logging:
-  level: info
+  python:
+	level: info
+  async: true
+  query_log_only: false
+  backends:
+	- id: mariadb
+	  backend: mariadb
+	  config:
+		host: db.internal
+		port: 3306
+		user: foghorn
+		database: foghorn_stats
 
 stats:
-  logging_only: false
-  persistence:
-	primary_backend: mariadb
-	backends:
-	  - backend: mariadb
-		config:
-		  host: db.internal
-		  port: 3306
-		  user: foghorn
-		  database: foghorn_stats
+  enabled: true
+  source_backend: mariadb
 
 plugins:
   - type: acl
@@ -911,35 +985,29 @@ upstreams:
 		idle_timeout_ms: 60000
 
 logging:
-  level: info
-
-stats:
-  logging_only: false
+  python:
+	level: info
+  async: true
   query_log_only: false
-  persistence:
-	primary_backend: pg_primary
-	backends:
-	  - backend: postgres
-		name: pg_primary
-		config:
-		  host: pg-primary.internal
-		  port: 5432
-		  user: foghorn
-		  database: foghorn_stats
-		  connect_kwargs:
-			application_name: foghorn-primary
-	  - backend: postgres
-		name: pg_reporting
-		config:
+  backends:
+	- id: pg_primary
+	  backend: postgr   - id: pg_reporting
+	  backend: postgres
+	  config:
 		  host: pg-reporting.internal
 		  port: 5432
 		  user: foghorn_ro
 		  database: foghorn_stats
-	  - backend: influx
-		config:
+	- id: influx-logging
+	  backend: influx
+	  config:
 		  write_url: http://metrics.internal:8086/api/v2/write
 		  bucket: dns
 		  org: infra
+
+stats:
+  enabled: true
+  source_backend: pg_primary
 
 plugins:
   - type: acl
