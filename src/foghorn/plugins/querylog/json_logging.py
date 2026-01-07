@@ -50,7 +50,7 @@ class JsonLogging(BaseStatsStore):
     """
 
     # Aliases used by the stats backend registry.
-    aliases = ("json",)
+    aliases = ("json", "file")
 
     def __init__(
         self,

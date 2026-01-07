@@ -229,6 +229,24 @@ class PostgresStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Counter API
     # ------------------------------------------------------------------
+    def increment_count(self, scope: str, key: str, delta: int = 1) -> None:
+        """Increment an aggregate counter, synchronously by default.
+
+        Inputs:
+            scope: Logical scope (e.g. "totals").
+            key: Counter key within the scope.
+            delta: Increment value (may be negative).
+
+        Outputs:
+            None; increments immediately when async_logging is False, otherwise
+            enqueues the operation on the BaseStatsStore worker queue.
+        """
+
+        if getattr(self, "_async_logging", False):
+            super().increment_count(scope, key, delta)
+        else:
+            self._increment_count(scope, key, delta)
+
     def _increment_count(self, scope: str, key: str, delta: int = 1) -> None:
         """Increment an aggregate counter in the counts table.
 
@@ -307,6 +325,65 @@ class PostgresStatsStore(BaseStatsStore):
     # ------------------------------------------------------------------
     # Query-log API
     # ------------------------------------------------------------------
+    def insert_query_log(
+        self,
+        ts: float,
+        client_ip: str,
+        name: str,
+        qtype: str,
+        upstream_id: Optional[str],
+        rcode: Optional[str],
+        status: Optional[str],
+        error: Optional[str],
+        first: Optional[str],
+        result_json: str,
+    ) -> None:
+        """Dispatch a DNS query entry synchronously or via async worker.
+
+        Inputs:
+            ts: Unix timestamp (float seconds).
+            client_ip: Client IP address string.
+            name: Normalized query name.
+            qtype: Query type string.
+            upstream_id: Optional upstream identifier.
+            rcode: Optional DNS response code.
+            status: Optional high-level status string.
+            error: Optional error summary.
+            first: Optional first answer value.
+            result_json: JSON-encoded result payload.
+
+        Outputs:
+            None; appends immediately when async_logging is False, otherwise
+            enqueues the operation on the BaseStatsStore worker queue.
+        """
+
+        if getattr(self, "_async_logging", False):
+            super().insert_query_log(
+                ts,
+                client_ip,
+                name,
+                qtype,
+                upstream_id,
+                rcode,
+                status,
+                error,
+                first,
+                result_json,
+            )
+        else:
+            self._insert_query_log(
+                ts,
+                client_ip,
+                name,
+                qtype,
+                upstream_id,
+                rcode,
+                status,
+                error,
+                first,
+                result_json,
+            )
+
     def _insert_query_log(
         self,
         ts: float,
