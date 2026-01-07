@@ -163,7 +163,7 @@ Statistics and query-log backends live under `src/foghorn/plugins/querylog` and 
 - `querylog/registry.py`:
   - Walks `foghorn.plugins.querylog` and registers each `BaseStatsStore` subclass under a default alias plus explicit aliases.
   - `get_stats_backend_class()` resolves aliases or dotted import paths.
-  - `load_stats_store_backend()` builds one or more backends from the `stats.persistence` config and wraps multiple backends in a `MultiStatsStore` when needed.
+  - `load_stats_store_backend()` builds one or more backends from the `logging.backends` config (plus `stats.source_backend`) and wraps multiple backends in a `MultiStatsStore` when needed.
 
 Built‑in backends include aliases such as:
 
@@ -304,15 +304,18 @@ Steps:
 The registry will pick the backend up automatically. A configuration entry might look like:
 
 ```yaml
+logging:
+  backends:
+    - id: my-backend
+      backend: my_backend
+      config:
+        # backend-specific settings
+
 stats:
-  persistence:
-    backends:
-      - backend: my_backend
-        config:
-          # backend-specific settings
+  source_backend: my-backend
 ```
 
-`load_stats_store_backend()` converts `stats.persistence` into either a single backend or a `MultiStatsStore` depending on how many backends are configured.
+`load_stats_store_backend()` converts the `logging.backends` catalog into either a single backend or a `MultiStatsStore` depending on how many backends are configured (and which one `stats.source_backend` selects as primary).
 
 ---
 
@@ -322,7 +325,7 @@ When you introduce new top-level configuration fields or change important struct
 
 Typical changes include:
 
-- Extending `_augment_statistics_persistence_schema()` when new persistence options are added so they appear under `stats.persistence` in the schema.
+- Extending `_augment_statistics_persistence_schema()` when new statistics/query-log options are added so they appear under the `stats` block and the `logging.backends` catalog in the schema.
 - Extending `_build_v2_root_schema()` when you want to add or rearrange top-level properties (for example, introducing a new block under `server`).
 - Adjusting how plugin definitions are copied into `$defs.PluginConfigs` when plugin metadata changes.
 

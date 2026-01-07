@@ -3,7 +3,8 @@ upstreams:
   - host: 1.1.1.1
     port: 53
 logging:
-  level: info
+  python:
+    level: info
 plugins:
 - type: zone
   config:
