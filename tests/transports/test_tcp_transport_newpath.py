@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from foghorn.transports.tcp import (
+from foghorn.servers.transports.tcp import (
     TCPConnectionPool,
     TCPError,
     get_tcp_pool,
@@ -235,7 +235,7 @@ def test_tcp_conn_connection_not_established_newpath():
     """
 
     # Import here to avoid exposing _TCPConn from the public API in normal usage.
-    from foghorn.transports.tcp import _TCPConn as _PrivateTCPConn
+    from foghorn.servers.transports.tcp import _TCPConn as _PrivateTCPConn
 
     conn = _PrivateTCPConn("127.0.0.1", 53)
     with pytest.raises(TCPError):

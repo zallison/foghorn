@@ -13,8 +13,8 @@ from dnslib import QTYPE, RCODE, DNSRecord
 from . import (
     recursive_resolver as _recursive_module,  # Self-import to honour test monkeypatching.
 )
-from .transports.tcp import tcp_query as _tcp_transport_query
-from .transports.udp import udp_query as _udp_transport_query
+from foghorn.servers.transports.tcp import tcp_query as _tcp_transport_query
+from foghorn.servers.transports.udp import udp_query as _udp_transport_query
 
 """Iterative recursive resolver for Foghorn.
 
