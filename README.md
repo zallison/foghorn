@@ -458,6 +458,14 @@ These are intended for development and lab environments only; for production, us
 
 Below are the built‑in plugins, with short descriptions and minimal configs. All examples assume they live in the shared `plugins:` list.
 
+Some resolver filters are shipped as **examples only** and now live under
+`foghorn.plugins.resolve.examples` (for example the DNS prefetch, example
+rewrites, greylist, and new-domain WHOIS filters). They are not wired into a
+running server by default; configuration that references these example types
+will not work unless you first move or copy the corresponding module into
+`foghorn.plugins.resolve`. This is an intentional speed bump so that you review
+and understand what they do before enabling them in your own deployment.
+
 ### 4.1 Access control (`acl`)
 
 IP-based allow/deny control at the edge.
@@ -560,23 +568,35 @@ Flexible domain/IP/pattern filter used to build adblockers and kid-safe DNS.
 ```yaml
 plugins:
   - type: filter
-	config:
-	hooks:
-	  pre_resolve:  { priority: 25 } # Run early in block queries so other plugins don't do anything
-	  post_resolve: { priority: 25 } # if it's blocked.
-	  default: aloow  # deny | allow
-	  targets:
-		  - 10.0.1.0/24 # Kids subnet
-	  ttl: 300
-	  deny_response: nxdomain  # nxdomain | refused | servfail | ip | noerror_empty
-	  deny_response_ip4: 0.0.0.0
-	  blocked_domains_files:
-		- ./config/var/lists/*.txt
-	  allowed_domains:
-		- homework.example.org
-	  blocked_domains:
-		- how-to-cheat.org
-		- current-game-obession.io
+    config:
+      hooks:
+        pre_resolve:  { priority: 25 } # Run early in block queries so other plugins don't do anything
+        post_resolve: { priority: 25 } # Post-resolve IP filtering and policy
+      default: allow  # deny | allow
+      targets:
+        - 10.0.1.0/24 # Kids subnet
+      ttl: 300
+      # When a pre_resolve deny happens, synthesize an IP response pointing at a sinkhole address
+      deny_response: ip  # nxdomain | refused | servfail | ip | noerror_empty
+      deny_response_ip4: 0.0.0.0
+
+      # Post-resolve IP filtering rules (answer inspection)
+      blocked_ips:
+        - ip: 203.0.113.10        # Replace a specific IP with a safer landing page
+          action: replace
+          replace_with: 0.0.0.0
+        - ip: 203.0.113.0/24      # Strip an entire subnet from answers
+          action: remove
+        - ip: 198.51.100.42       # Block a single IP entirely (maps to deny)
+          action: deny
+
+      blocked_domains_files:
+        - ./config/var/lists/*.txt
+      allowed_domains:
+        - homework.example.org
+      blocked_domains:
+        - how-to-cheat.org
+        - current-game-obession.io
 
 ```
 
