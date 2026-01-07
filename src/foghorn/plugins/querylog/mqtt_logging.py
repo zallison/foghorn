@@ -128,6 +128,31 @@ class MqttLogging(BaseStatsStore):
         if username is not None:
             self._client.username_pw_set(username=username, password=password)
 
+        meta_topic = f"{self._topic}/meta"
+
+        # # ### TODO: Figure out why the will fires every other second.
+        # # ## Configure a Last Will and Testament on the same metadata topic so that
+        # # ## consumers can observe unexpected disconnects as a retained event.
+        # # try:
+        # #     if hasattr(self._client, "will_set"):
+        # #         disconnect_payload = {
+        # #             "event": "log_disconnect",
+        # #             "ts": float(time.time()),
+        # #             "version": 1,
+        # #             "hostname": socket.gethostname(),
+        # #         }
+        # #         disconnect_data = json.dumps(
+        # #             disconnect_payload, separators=(",", ":")
+        # #         )
+        # #         self._client.will_set(
+        # #             meta_topic,
+        # #             disconnect_data,
+        # #             qos=self._qos,
+        # #             retain=True,
+        # #         )
+        # # except Exception:  # pragma: no cover - defensive
+        # #     logger.exception("Failed to configure MQTT query_log disconnect LWT")
+
         kw = dict(connect_kwargs or {})
 
         # Establish connection and start the background network loop so that
@@ -145,7 +170,6 @@ class MqttLogging(BaseStatsStore):
                 "hostname": socket.gethostname(),
             }
             start_data = json.dumps(start_payload, separators=(",", ":"))
-            meta_topic = f"{self._topic}/meta"
             self._client.publish(
                 meta_topic,
                 start_data,
