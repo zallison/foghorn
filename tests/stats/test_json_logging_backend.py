@@ -64,7 +64,9 @@ def test_insert_query_log_appends_single_json_line(tmp_path: Path) -> None:
 
     payload = {"answers": ["1.2.3.4"], "dnssec_status": "dnssec_secure"}
 
-    backend.insert_query_log(
+    # Call the private helper directly so that we avoid depending on the async
+    # worker queue timing in tests.
+    backend._insert_query_log(  # type: ignore[attr-defined]
         ts=123.456,
         client_ip="192.0.2.1",
         name="example.com",
@@ -115,7 +117,9 @@ def test_insert_query_log_is_noop_when_unhealthy(tmp_path: Path) -> None:
     backend.close()
     assert backend.health_check() is False
 
-    backend.insert_query_log(
+    # Directly call the private helper to exercise the health_check() guard in a
+    # deterministic way without relying on async processing.
+    backend._insert_query_log(  # type: ignore[attr-defined]
         ts=0.0,
         client_ip="198.51.100.1",
         name="test.example",
@@ -131,3 +135,42 @@ def test_insert_query_log_is_noop_when_unhealthy(tmp_path: Path) -> None:
     # No additional lines should have been added after close().
     final_lines = log_file.read_text(encoding="utf-8").splitlines()
     assert final_lines == initial_lines
+
+
+def test_insert_query_log_handles_invalid_result_json(tmp_path: Path) -> None:
+    """Brief: insert_query_log handles malformed result_json defensively.
+
+    Inputs:
+        tmp_path: pytest-provided temporary directory path.
+
+    Outputs:
+        None; asserts that invalid JSON does not raise and does not attach a
+        result field to the stored record.
+    """
+
+    log_file = tmp_path / "queries.jsonl"
+    backend = JsonLogging(file_path=str(log_file), async_logging=False)
+
+    # Call the private helper directly so that we deterministically exercise the
+    # defensive JSON parsing logic without relying on the async worker queue.
+    backend._insert_query_log(  # type: ignore[attr-defined]
+        ts=123.0,
+        client_ip="203.0.113.1",
+        name="bad-json.example",
+        qtype="A",
+        upstream_id=None,
+        rcode=None,
+        status=None,
+        error=None,
+        first=None,
+        result_json="{this is not valid json}",
+    )
+
+    lines = log_file.read_text(encoding="utf-8").splitlines()
+    # First line is the header; second line should be the JSON payload without
+    # a "result" field when the result_json is malformed.
+    assert len(lines) == 2
+
+    record = json.loads(lines[1])
+    assert record["client_ip"] == "203.0.113.1"
+    assert "result" not in record
