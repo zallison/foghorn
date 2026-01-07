@@ -416,6 +416,10 @@ def test_counts_increment_set_export_and_has_counts(fake_mongo_driver) -> None: 
     backend.increment_count("totals", "a", 3)
     backend.set_count("totals", "b", 7)
 
+    # Wait for the async worker queue to process all pending count operations so
+    # that export_counts() sees the updated values deterministically.
+    backend._op_queue.join()  # type: ignore[attr-defined]
+
     assert backend.has_counts() is True
 
     exported = backend.export_counts()
@@ -458,6 +462,11 @@ def test_query_log_presence_and_selection(fake_mongo_driver) -> None:  # type: i
         first="1.2.3.4",
         result_json="{}",
     )
+
+    # Wait for the async worker queue to process the insert so has_query_log()
+    # observes at least one stored document.
+    backend._op_queue.join()  # type: ignore[attr-defined]
+
     assert backend.has_query_log() is True
 
     # Provide explicit docs for select_query_log to iterate.
@@ -632,6 +641,12 @@ def test_rebuild_counts_from_query_log(fake_mongo_driver) -> None:  # type: igno
     ]
 
     backend.rebuild_counts_from_query_log(logger_obj=None)
+
+    # Wait for the async worker queue to process all increment_count operations
+    # scheduled during the rebuild so that export_counts() sees a consistent
+    # snapshot.
+    backend._op_queue.join()  # type: ignore[attr-defined]
+
     counts = backend.export_counts()
 
     # Totals

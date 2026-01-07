@@ -202,8 +202,8 @@ def test_sqlite_backend_counts_and_export(tmp_path) -> None:
     # Initially no rows.
     assert backend.has_counts() is False
 
-    backend.increment_count("totals", "a", 2)
-    backend.increment_count("totals", "a", 3)
+    backend._increment_count("totals", "a", 2)
+    backend._increment_count("totals", "a", 3)
     backend.set_count("totals", "b", 7)
 
     assert backend.has_counts() is True
@@ -226,7 +226,7 @@ def test_sqlite_backend_insert_and_select_query_log_json_decoding() -> None:
     backend = SqliteStatsStore(":memory:")
 
     # Insert three log rows with different JSON payload shapes.
-    backend.insert_query_log(
+    backend._insert_query_log(
         ts=1.0,
         client_ip="1.2.3.4",
         name="example.com",
@@ -238,7 +238,7 @@ def test_sqlite_backend_insert_and_select_query_log_json_decoding() -> None:
         first="1.2.3.4",
         result_json='{"dnssec_status": "dnssec_secure"}',
     )
-    backend.insert_query_log(
+    backend._insert_query_log(
         ts=2.0,
         client_ip="5.6.7.8",
         name="other.example",
@@ -250,7 +250,7 @@ def test_sqlite_backend_insert_and_select_query_log_json_decoding() -> None:
         first=None,
         result_json="[1, 2, 3]",
     )
-    backend.insert_query_log(
+    backend._insert_query_log(
         ts=3.0,
         client_ip="9.9.9.9",
         name="bad.json",
@@ -356,7 +356,7 @@ def test_sqlite_backend_rebuild_counts_from_query_log() -> None:
 
     backend = SqliteStatsStore(":memory:")
 
-    backend.insert_query_log(
+    backend._insert_query_log(
         ts=1.0,
         client_ip="1.2.3.4",
         name="www.example.com",
@@ -368,7 +368,7 @@ def test_sqlite_backend_rebuild_counts_from_query_log() -> None:
         first="1.2.3.4",
         result_json='{"dnssec_status": "dnssec_secure"}',
     )
-    backend.insert_query_log(
+    backend._insert_query_log(
         ts=2.0,
         client_ip="5.6.7.8",
         name="block.example.com",
@@ -382,6 +382,11 @@ def test_sqlite_backend_rebuild_counts_from_query_log() -> None:
     )
 
     backend.rebuild_counts_from_query_log(logger_obj=None)
+
+    # Wait for the async BaseStatsStore worker to drain all queued increment_count
+    # operations before asserting on the exported counters.
+    backend._op_queue.join()  # type: ignore[attr-defined]
+
     counts = backend.export_counts()
 
     # Totals
@@ -458,7 +463,7 @@ def test_sqlite_backend_batching_execute_flush_and_close(tmp_path) -> None:
     backend = SqliteStatsStore(str(db_path), batch_writes=True, batch_time_sec=3600.0)
 
     # Batched increment should enqueue but not immediately flush due to thresholds.
-    backend.increment_count("totals", "queued", 1)
+    backend._increment_count("totals", "queued", 1)
     assert backend._pending_ops  # type: ignore[attr-defined]
 
     # Manual flush applies operations and clears queue.
