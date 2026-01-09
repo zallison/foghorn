@@ -214,6 +214,52 @@ def test_resolve_query_bytes_stats_outer_exception(
     assert "record_latency" in kinds
 
 
+def test_resolve_query_bytes_query_context_includes_listener_secure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: resolve_query_bytes records listener and secure flags in query context.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that record_query_result receives listener='udp' and
+        secure=False in its result payload for UDP queries.
+    """
+
+    stats = _Stats()
+    DNSUDPHandler.stats_collector = stats
+    DNSUDPHandler.plugins = []
+
+    # Configure a fake upstream so the shared resolver takes the normal
+    # forwarder path and exercises the upstream statistics branch.
+    q = DNSRecord.question("ctx-listener.example", "A")
+    r_ok = q.reply()
+
+    def _forward_ok(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+        return r_ok.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_ok)
+    DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
+
+    resolve_query_bytes(q.pack(), "127.0.0.1", listener="udp", secure=False)
+
+    DNSUDPHandler.stats_collector = None
+
+    # Extract the result payloads from record_query_result calls.
+    results = [
+        kwargs.get("result")
+        for name, (_args, kwargs) in stats.calls
+        if name == "record_query_result"
+    ]
+    assert results, "expected at least one record_query_result call"
+    for ctx in results:
+        assert isinstance(ctx, dict)
+        assert ctx.get("listener") == "udp"
+        # secure is expected to be the boolean False for UDP/TCP listeners.
+        assert ctx.get("secure") is False
+
+
 def test_resolve_query_bytes_recursive_mode_uses_recursive_resolver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
