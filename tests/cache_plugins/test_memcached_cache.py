@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 import sys
+import time as _time_mod
 
 import pytest
 

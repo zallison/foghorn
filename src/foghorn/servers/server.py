@@ -19,7 +19,7 @@ from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecisi
 from foghorn.servers.recursive_resolver import RecursiveResolver
 from foghorn.servers.transports.dot import DoTError, get_dot_pool
 from foghorn.servers.transports.tcp import TCPError, get_tcp_pool, tcp_query
-from foghorn.utils.register_caches import registered_cached
+from foghorn.utils.register_caches import registered_cached, registered_lru_cached
 from .udp_server import DNSUDPHandler
 
 logger = logging.getLogger("foghorn.server")
