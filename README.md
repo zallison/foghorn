@@ -657,16 +657,42 @@ plugins:
 			  port: 53
 ```
 
+<<<<<<< HEAD
 ### 4.10 Inline and file-based records (`zone`)
+=======
+### 4.14 Inline, file-based, and BIND zone records (`zone`)
+>>>>>>> fbd8b7b (feat(zone): Read BIND9 zonefiles)
 
-Define custom records either inline or in zone files.
+Define custom records either:
+
+- Inline using the `records` list and the pipe-delimited format
+  `<domain>|<qtype>|<ttl>|<value>`.
+- From one or more custom records files using `file_paths` (same
+  pipe-delimited format as above).
+- From one or more RFC‑1035 style BIND zonefiles using `bind_paths`
+  (parsed via dnslib; supports `$ORIGIN`, `$TTL`, and normal RR syntax).
+
+All sources are merged into a single internal view per (name, qtype):
+
+- The TTL for each (name, qtype) pair comes from the first occurrence of
+  that pair across all sources in configuration order.
+- Values are kept in first-seen order with duplicates dropped.
+- An SOA record at a name marks the apex of an authoritative zone; inside
+  such a zone the plugin behaves like an authoritative server, including
+  correct NXDOMAIN/NODATA and ANY semantics with SOA in the authority
+  section.
 
 ```yaml
 plugins:
   - type: zone
 	config:
+	  # Optional: pipe-delimited records files
 	  file_paths:
+		- ./config/zones.d/internal.records
+	  # Optional: native BIND zonefiles
+	  bind_paths:
 		- ./config/zones.d/internal.zone
+	  # Optional: inline records
 	  records:
 		- 'printer.lan|A|300|192.168.1.50'
 		- 'files.lan|AAAA|300|2001:db8::50'
