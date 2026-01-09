@@ -89,14 +89,15 @@ These code paths explicitly target RFC 8484 semantics for both client and server
 
 ### 3.1 EDNS(0) – RFC 6891 (Partial)
 
-Foghorn implements a minimal subset of EDNS(0):
+Foghorn implements a minimal but standards-aware subset of EDNS(0):
 
-- Adds or replaces a single OPT record in outgoing queries when DNSSEC is enabled.
-- Uses a configurable `edns_udp_payload` (default 1232) to set the advertised UDP payload size.
-- Sets the DO bit when `dnssec.mode` requires it (see DNSSEC section below).
+- Ensures there is exactly one OPT record in outgoing upstream queries in forward mode.
+- Mirrors a client's EDNS version and advertised UDP payload size when present, clamped by a configurable `edns_udp_payload` (default 1232).
+- When a client does **not** send EDNS, assumes the classic 512-byte UDP size and marks oversized responses as truncated (TC=1) to encourage TCP fallback.
+- Sets the DO bit in EDNS flags when `dnssec.mode` requires it (`passthrough` / `validate`) and clears it in `ignore` mode, while preserving other EDNS flag bits.
 - Does **not** implement advanced EDNS options (cookies, NSID, ECS, extended errors, etc.).
 
-For most modern resolvers and authoritative servers, this minimalist EDNS(0) support is sufficient to enable larger responses and DNSSEC records.
+For most modern resolvers and authoritative servers, this EDNS(0) support is sufficient to enable larger responses and DNSSEC records, while remaining conservative for legacy non-EDNS clients.
 
 ### 3.2 Negative Caching – RFC 2308
 
