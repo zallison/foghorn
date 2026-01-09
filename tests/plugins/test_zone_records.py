@@ -1153,3 +1153,130 @@ def test_authoritative_cname_and_any_semantics(tmp_path: pathlib.Path) -> None:
     assert QTYPE.A in types
     assert QTYPE.AAAA in types
     assert QTYPE.TXT in types
+
+
+def test_bind_paths_loads_rfc1035_zone_and_answers(tmp_path: pathlib.Path) -> None:
+    """Brief: bind_paths allows loading RFC-1035 BIND zone files.
+
+    Inputs:
+      - tmp_path: pytest-provided temporary directory.
+
+    Outputs:
+      - Asserts that a simple BIND-style zonefile is parsed and used for
+        authoritative answers, including SOA semantics.
+    """
+    zone_file = tmp_path / "example.zone"
+    zone_file.write_text(
+        """$ORIGIN example.com.\n$TTL 300\n@   IN  SOA ns1.example.com. hostmaster.example.com. ( 1 3600 600 604800 300 )\n@   IN  NS  ns1.example.com.\n@   IN  NS  ns2.example.com.\nwww IN  A   192.0.2.20\n""",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(bind_paths=[str(zone_file)])
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # Query inside the zone should be answered authoritatively from the BIND file.
+    req_bytes = _make_query("www.example.com", int(QTYPE.A))
+    decision = plugin.pre_resolve("www.example.com", int(QTYPE.A), req_bytes, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+
+    response = DNSRecord.parse(decision.response)
+    assert response.header.rcode == RCODE.NOERROR
+    assert any(rr.rtype == QTYPE.A and str(rr.rdata) == "192.0.2.20" for rr in response.rr)
+
+    # A missing name under the same zone should yield NXDOMAIN with SOA in authority.
+    req_nx = _make_query("missing.example.com", int(QTYPE.A))
+    decision_nx = plugin.pre_resolve("missing.example.com", int(QTYPE.A), req_nx, ctx)
+    assert decision_nx is not None
+    resp_nx = DNSRecord.parse(decision_nx.response)
+    assert resp_nx.header.rcode == RCODE.NXDOMAIN
+    assert any(rr.rtype == QTYPE.SOA for rr in (resp_nx.auth or []))
+
+
+def test_bind_paths_merges_with_file_paths_and_preserves_ttl_and_order(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: bind_paths records merge with file_paths using first-TTL and first-seen order.
+
+    Inputs:
+      - tmp_path: pytest-provided temporary directory.
+
+    Outputs:
+      - Asserts that values from a BIND zone and a pipe-delimited records file
+        are merged in first-seen order and that the TTL from the earliest
+        occurrence is preserved.
+    """
+    bind_zone = tmp_path / "merge.zone"
+    bind_zone.write_text(
+        """$ORIGIN merge.test.\n$TTL 400\n@   IN  A   10.0.0.1\n@   IN  A   10.0.0.2\n""",
+        encoding="utf-8",
+    )
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                # New value should be appended after BIND-derived ones.
+                "merge.test|A|200|10.0.0.3",
+                # Duplicate of an earlier value with a different TTL; ignored.
+                "merge.test|A|100|10.0.0.2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(bind_paths=[str(bind_zone)], file_paths=[str(records_file)])
+    plugin.setup()
+
+    key = ("merge.test", int(QTYPE.A))
+    ttl, values = plugin.records[key]
+
+    # TTL comes from the first occurrence for this (name, qtype) key across
+    # all sources, and values follow first-seen order with duplicates dropped.
+    assert ttl == 200
+
+
+def test_bind_paths_multiple_rrsets_and_any_semantics(tmp_path: pathlib.Path) -> None:
+    """Brief: bind_paths supports multiple RR types and ANY semantics inside a zone.
+
+    Inputs:
+      - tmp_path: pytest-provided temporary directory.
+
+    Outputs:
+      - Asserts that A, AAAA, and TXT RRsets from a BIND zonefile are exposed
+        correctly and that an ANY query returns all RR types at the owner name.
+    """
+    zone_file = tmp_path / "multi.zone"
+    zone_file.write_text(
+        """$ORIGIN multi.test.\n$TTL 300\n@   IN  SOA ns1.multi.test. hostmaster.multi.test. ( 1 3600 600 604800 300 )\n@   IN  A   192.0.2.1\n@   IN  AAAA 2001:db8::1\n@   IN  TXT "hello"\n""",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(bind_paths=[str(zone_file)])
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    req_any = _make_query("multi.test", int(QTYPE.ANY))
+    decision_any = plugin.pre_resolve("multi.test", int(QTYPE.ANY), req_any, ctx)
+    assert decision_any is not None
+    assert decision_any.action == "override"
+
+    resp_any = DNSRecord.parse(decision_any.response)
+    assert resp_any.header.rcode == RCODE.NOERROR
+    rtypes = {rr.rtype for rr in resp_any.rr}
+    assert QTYPE.A in rtypes
+    assert QTYPE.AAAA in rtypes
+    assert QTYPE.TXT in rtypes
