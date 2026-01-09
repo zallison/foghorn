@@ -60,7 +60,6 @@ markers = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"*" = ["E402"]
 "__init__.py" = ["E402"]
 "**/{tests,docs,tools}/*" = ["E402"]
 
