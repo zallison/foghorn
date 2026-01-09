@@ -15,7 +15,6 @@ import time
 import pytest
 
 from foghorn.servers.transports.tcp import (
-    TCPConnectionPool,
     TCPError,
     get_tcp_pool,
     tcp_query,
