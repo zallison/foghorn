@@ -14,7 +14,6 @@ from pathlib import Path
 
 import json
 import runpy
-import sys
 
 
 def _load_schema_module():

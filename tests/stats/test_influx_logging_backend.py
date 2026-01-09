@@ -141,7 +141,7 @@ def test_influx_logging_constructor_posts_start_marker_and_is_healthy(
 
     import foghorn.plugins.querylog.influxdb as influx_mod
 
-    fake_session = _FakeSession()
+    _FakeSession()
 
     def _session_factory(**kwargs: Any) -> _FakeSession:  # type: ignore[no-untyped-def]
         return _FakeSession(**kwargs)
