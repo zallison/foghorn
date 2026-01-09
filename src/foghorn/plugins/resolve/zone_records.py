@@ -31,7 +31,6 @@ class ZoneRecordsConfig(BaseModel):
     """Brief: Typed configuration model for ZoneRecords.
 
     Inputs:
-      - file_path: Legacy single records file path.
       - file_paths: Preferred list of records file paths.
       - records: Optional list of inline records using
         ``<domain>|<qtype>|<ttl>|<value>`` format.
