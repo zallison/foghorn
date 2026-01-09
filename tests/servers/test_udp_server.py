@@ -13,7 +13,7 @@ import threading
 import time
 
 import pytest
-from dnslib import DNSRecord, QTYPE, RCODE
+from dnslib import DNSRecord, QTYPE, RCODE, RR, TXT
 
 from foghorn.servers.udp_server import DNSUDPHandler, serve_udp
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision
@@ -517,3 +517,63 @@ def test_make_servfail_response_preserves_id():
     resp = DNSRecord.parse(wire)
     assert resp.header.rcode == RCODE.SERVFAIL
     assert resp.header.id == 0x5678
+
+
+def test_handle_non_edns_large_response_sets_tc(monkeypatch):
+    """Brief: Non-EDNS clients receive TC=1 when UDP response exceeds 512 bytes.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that a large upstream response triggers TC=1 in the reply.
+    """
+
+    # Build a non-EDNS query (no OPT in additional section).
+    q = DNSRecord.question("big-tc.example", "A")
+
+    # Construct an oversized DNS response by adding a large TXT RR so that the
+    # final wire-format message is comfortably above 512 bytes. dnslib limits
+    # each TXT chunk to 255 bytes, so use multiple chunks.
+    rep = q.reply()
+    rep.add_answer(
+        RR(
+            "big-tc.example",
+            QTYPE.TXT,
+            rdata=TXT(["x" * 255, "y" * 255, "z" * 100]),
+            ttl=60,
+        )
+    )
+    big_wire = rep.pack()
+    assert len(big_wire) > 512
+
+    # Patch the shared resolver so DNSUDPHandler.handle() sees our large
+    # response for this query without talking to real upstreams.
+    import foghorn.servers.server as srv_mod
+
+    monkeypatch.setattr(
+        srv_mod,
+        "resolve_query_bytes",
+        lambda data, client_ip, *a, **k: big_wire,
+    )
+
+    class _Sock:
+        def __init__(self):
+            self.sent = []
+
+        def sendto(self, data, addr):
+            self.sent.append((data, addr))
+
+    sock = _Sock()
+
+    # Build handler instance without invoking BaseRequestHandler.__init__.
+    h = DNSUDPHandler.__new__(DNSUDPHandler)
+    h.request = (q.pack(), sock)
+    h.client_address = ("127.0.0.1", 12345)
+
+    h.handle()
+
+    assert len(sock.sent) == 1
+    sent_wire, addr = sock.sent[0]
+    resp = DNSRecord.parse(sent_wire)
+    assert resp.header.tc == 1
