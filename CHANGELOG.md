@@ -6,10 +6,6 @@ All notable changes to this project will be documented in this file.
 
 > Release notes for changes between **v0.6.0** and **v0.6.1**.
 
-### Breaking
-
-- The zone records resolver no longer accepts a single `file_path` option; configurations must use the `file_paths` list instead.
-
 ### Added
 
 - Listener and security context (`listener`, `secure`) are now threaded through the resolve pipeline and exposed in recorded query results and stats.
