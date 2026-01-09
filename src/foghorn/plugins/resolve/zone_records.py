@@ -32,6 +32,7 @@ class ZoneRecordsConfig(BaseModel):
 
     Inputs:
       - file_paths: Preferred list of records file paths.
+      - bind_paths: Optional list of RFC-1035 style BIND zone files.
       - records: Optional list of inline records using
         ``<domain>|<qtype>|<ttl>|<value>`` format.
       - watchdog_enabled: Enable watchdog-based reloads.
@@ -44,6 +45,7 @@ class ZoneRecordsConfig(BaseModel):
     """
 
     file_paths: Optional[List[str]] = None
+    bind_paths: Optional[List[str]] = None
     records: Optional[List[str]] = None
     watchdog_enabled: Optional[bool] = None
     watchdog_min_interval_seconds: float = Field(default=1.0, ge=0)
@@ -95,21 +97,36 @@ class ZoneRecords(BasePlugin):
             ZoneRecords(file_paths=["/foghorn/conf/var/records.txt", "/etc/records.d/extra.txt"], watchdog_enabled=True)
         """
 
-        # Normalize configuration into a list of paths, allowing either
-        # file_paths or legacy file_path. When neither is provided but inline
-        # records are configured, file-backed paths remain empty.
+        # Normalize configuration into lists of paths, allowing either
+        # file_paths/legacy file_path (custom pipe-delimited format) and/or
+        # bind_paths (RFC-1035 style BIND zone files). When no filesystem
+        # sources are provided but inline records are configured, file-backed
+        # paths remain empty.
         provided_paths = self.config.get("file_paths")
         legacy_path = self.config.get("file_path")
+        bind_paths_cfg = self.config.get("bind_paths")
         inline_records_cfg = self.config.get("records")
+
+        self.file_paths = []
+        self.bind_paths: List[str] = []
 
         if provided_paths is not None or legacy_path is not None:
             self.file_paths = self._normalize_paths(provided_paths, legacy_path)
-        elif inline_records_cfg:
-            # Inline-only configuration; no file-backed records.
-            self.file_paths = []
-        else:
-            # Preserve historical behaviour: fail fast when no sources are set.
-            self.file_paths = self._normalize_paths(None, None)
+
+        if bind_paths_cfg is not None:
+            # bind_paths uses the same normalisation rules as file_paths but has
+            # no legacy single-path equivalent.
+            self.bind_paths = self._normalize_paths(bind_paths_cfg, None)
+
+        if not self.file_paths and not self.bind_paths:
+            if inline_records_cfg:
+                # Inline-only configuration; no file-backed records.
+                self.file_paths = []
+                self.bind_paths = []
+            else:
+                # Preserve historical behaviour: fail fast when no sources are
+                # set at all.
+                self.file_paths = self._normalize_paths(None, None)
 
         # Cache inline records (if any) for use by _load_records().
         try:
@@ -349,13 +366,73 @@ class ZoneRecords(BasePlugin):
             ):
                 zone_soa[domain] = (stored_ttl, values)
 
-        # First, process any configured records files.
+        # First, process any configured records files in the custom
+        # pipe-delimited format.
         for fp in self.file_paths:
             logger.debug("reading recordfile: %s", fp)
             records_path = pathlib.Path(fp)
             with records_path.open("r", encoding="utf-8") as f:
                 for lineno, raw_line in enumerate(f, start=1):
                     _process_line(raw_line, str(records_path), lineno)
+
+        # Next, process any RFC-1035 BIND-style zone files configured via
+        # bind_paths. Each zone file may define one or more zones; we iterate
+        # through the parsed RR objects and merge them into the same mappings
+        # used for the custom format.
+        bind_paths = getattr(self, "bind_paths", None) or []
+        for fp in bind_paths:
+            logger.debug("reading bind zonefile: %s", fp)
+            zone_path = pathlib.Path(fp)
+            try:
+                text = zone_path.read_text(encoding="utf-8")
+            except Exception as exc:
+                raise ValueError(f"Failed to read BIND zone file {zone_path}: {exc}") from exc
+
+            try:
+                rrs = RR.fromZone(text)
+            except Exception as exc:
+                raise ValueError(
+                    f"Failed to parse BIND zone file {zone_path}: {exc}"
+                ) from exc
+
+            for rr in rrs:
+                try:
+                    owner = str(rr.rname).rstrip(".").lower()
+                    qtype_code = int(rr.rtype)
+                    ttl = int(rr.ttl)
+                    value = str(rr.rdata)
+                except Exception as exc:  # pragma: no cover - defensive parsing
+                    logger.warning(
+                        "Skipping RR %r from BIND zone %s due to parse error: %s",
+                        rr,
+                        zone_path,
+                        exc,
+                    )
+                    continue
+
+                key = (owner, int(qtype_code))
+                existing = mapping.get(key)
+
+                if existing is None:
+                    stored_ttl = ttl
+                    values: List[str] = []
+                else:
+                    stored_ttl, values = existing
+
+                if value not in values:
+                    values.append(value)
+
+                mapping[key] = (stored_ttl, values)
+
+                per_name = name_index.setdefault(owner, {})
+                per_name[int(qtype_code)] = (stored_ttl, values)
+
+                if (
+                    soa_code is not None
+                    and int(qtype_code) == int(soa_code)
+                    and owner not in zone_soa
+                ):
+                    zone_soa[owner] = (stored_ttl, values)
 
         # Next, merge any inline records from plugin configuration.
         inline_records = getattr(self, "_inline_records", None) or []
