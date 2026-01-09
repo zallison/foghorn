@@ -449,6 +449,38 @@ def test_resolve_core_dnssec_upstream_ad_shared_helper(monkeypatch):
     assert "record_dnssec_status" in kinds
 
 
+def test_no_upstreams_with_client_edns_preserves_opt_payload(monkeypatch):
+    """Brief: SERVFAIL/no-upstreams path echoes client EDNS OPT and payload size.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that a SERVFAIL response still carries a matching OPT RR.
+    """
+
+    from dnslib import EDNS0 as _EDNS0
+
+    DNSUDPHandler.plugins = []
+    DNSUDPHandler.upstream_addrs = []
+
+    # Build a query with an EDNS0 OPT advertising a custom UDP payload.
+    q = DNSRecord.question("no-up-edns.example", "A")
+    q.add_ar(_EDNS0(udp_len=2048))
+
+    # Use the shared resolver path, which will synthesize SERVFAIL when there
+    # are no upstreams configured.
+    wire = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
+    resp = DNSRecord.parse(wire)
+
+    req_opts = [rr for rr in (q.ar or []) if rr.rtype == QTYPE.OPT]
+    resp_opts = [rr for rr in (resp.ar or []) if rr.rtype == QTYPE.OPT]
+
+    assert len(req_opts) == 1
+    assert len(resp_opts) == 1
+    assert int(resp_opts[0].rclass) == int(req_opts[0].rclass)
+
+
 # ---- DoH branch in send_query_with_failover ----
 def test_send_query_with_failover_doh_success(monkeypatch):
     q = DNSRecord.question("doh.example", "A")
