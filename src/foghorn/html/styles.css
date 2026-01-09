@@ -32,6 +32,22 @@ body {
     color: var(--fg-text);
 }
 
+/* Global link styling: neutral color with subtle underline on hover */
+
+a {
+    color: inherit;
+    text-decoration: underline;
+}
+
+a:hover {
+    color: var(--accent);
+    text-decoration: underline;
+}
+
+a:visited {
+    color: inherit;
+}
+
 /* Header with logo and title on the top line */
 
 .fh-header {

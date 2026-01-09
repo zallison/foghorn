@@ -122,9 +122,9 @@
 	</main>
 
 	<footer class="fh-footer">
-		Foghorn&copy; 2025, Zack Allison. GitHub:
+		Foghorn&copy; 2025-2026 Zack Allison. GitHub:
 		<a href="https://github.com/zallison/foghorn">https://github.com/zallison/foghorn</a>
-		&mdash; Open Source Software: MIT Licence
+		&mdash; <b>Open Source Software: MIT Licence</b>
 	</footer>
 
 	<script>
@@ -2011,9 +2011,9 @@
 					th.textContent = col.label || String(col.key || '');
 					// Optional alignment hint for numeric-heavy columns such as TTL
 					// and Max size in cache tables.
-					if (col.align === 'right') {
-						th.style.textAlign = 'right';
-					}
+						if (col.align === 'right') {
+							th.style.textAlign = 'right';
+						}
 					hrow.appendChild(th);
 				});
 				thead.appendChild(hrow);
@@ -2044,9 +2044,12 @@
 						var joiner = col.join || null;
 						var raw = key ? resolvePath(rowData, key) : null;
 						var td = document.createElement('td');
-						if (col.align === 'right') {
-							td.style.textAlign = 'right';
-						}
+					if (col.align === 'right') {
+						td.style.textAlign = 'right';
+					}
+					if (col.nowrap) {
+						td.style.whiteSpace = 'nowrap';
+					}
 					var text = '';
 					// Special-case: last_seen should be rendered in the user's timezone
 					// as "YYYY-MM-DD HH:MM:SS" and expose the full ISO timestamp via
