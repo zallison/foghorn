@@ -289,7 +289,9 @@ class FileOverDns(BasePlugin):
 
         file_path = mapping.file_path
         if not os.path.isfile(file_path):
-            logger.warning("FileOverDns: file not found for name %s: %s", name_label, file_path)
+            logger.warning(
+                "FileOverDns: file not found for name %s: %s", name_label, file_path
+            )
             return None
 
         try:
@@ -325,10 +327,14 @@ class FileOverDns(BasePlugin):
         try:
             request = DNSRecord.parse(req)
         except Exception as exc:  # pragma: no cover - defensive parsing
-            logger.warning("FileOverDns: failed to parse request for %s: %s", qname, exc)
+            logger.warning(
+                "FileOverDns: failed to parse request for %s: %s", qname, exc
+            )
             return None
 
-        reply = DNSRecord(DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q)
+        reply = DNSRecord(
+            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+        )
 
         # Emit data as one or more TXT answers.
         # - In "base64" mode: fixed-size chunks up to 180 bytes.

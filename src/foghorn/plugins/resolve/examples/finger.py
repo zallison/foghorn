@@ -9,7 +9,12 @@ from typing import List, Optional, Tuple
 from dnslib import QTYPE, RR, TXT, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field, validator
 
-from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
+from foghorn.plugins.resolve.base import (
+    BasePlugin,
+    PluginContext,
+    PluginDecision,
+    plugin_aliases,
+)
 from foghorn.utils.register_caches import registered_lru_cached
 
 logger = logging.getLogger(__name__)
@@ -217,7 +222,9 @@ def _resolve_user_finger_path(username: str) -> Optional[str]:
         # let the caller decide whether the file exists.
         return fallback
     except Exception as exc:  # pragma: no cover - defensive: OS-specific errors
-        logger.warning("Finger: failed to resolve passwd entry for %s: %s", username, exc)
+        logger.warning(
+            "Finger: failed to resolve passwd entry for %s: %s", username, exc
+        )
         return fallback
 
     home = getattr(pw_entry, "pw_dir", None) or ""
@@ -429,7 +436,9 @@ class Finger(BasePlugin):
 
         if not text:
             # Empty content: fall back to normal resolution.
-            logger.debug("Finger: empty .finger content for user %s at %s", username, path)
+            logger.debug(
+                "Finger: empty .finger content for user %s at %s", username, path
+            )
             return None
 
         try:
@@ -438,7 +447,9 @@ class Finger(BasePlugin):
             logger.warning("Finger: failed to parse request for %s: %s", qname, exc)
             return None
 
-        reply = DNSRecord(DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q)
+        reply = DNSRecord(
+            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+        )
         reply.add_answer(
             RR(
                 rname=request.q.qname,

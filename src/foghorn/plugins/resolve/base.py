@@ -398,9 +398,11 @@ class BasePlugin:
 
         # Optional domain targeting: restrict this plugin to specific qname
         # patterns (exact or suffix-based) using normalized lower-case names.
-        self._targets_domains, self._targets_domains_mode = self._normalize_domain_targets(
-            config.get("targets_domains"),
-            mode=config.get("targets_domains_mode", "any"),
+        self._targets_domains, self._targets_domains_mode = (
+            self._normalize_domain_targets(
+                config.get("targets_domains"),
+                mode=config.get("targets_domains_mode", "any"),
+            )
         )
 
         # Optional listener-level targeting: restrict this plugin to specific
@@ -665,7 +667,9 @@ class BasePlugin:
             entries = []
 
         for entry in entries:
-            text = BasePlugin.normalize_qname(entry, lower=True, strip_trailing_dot=True)
+            text = BasePlugin.normalize_qname(
+                entry, lower=True, strip_trailing_dot=True
+            )
             if not text:
                 continue
             domains.append(text)
@@ -807,7 +811,9 @@ class BasePlugin:
                 # No qname context available; treat as non-targeted when an
                 # explicit domain filter exists.
                 return False
-            qtext = BasePlugin.normalize_qname(qname_val, lower=True, strip_trailing_dot=True)
+            qtext = BasePlugin.normalize_qname(
+                qname_val, lower=True, strip_trailing_dot=True
+            )
             if not qtext:
                 return False
 
@@ -815,9 +821,7 @@ class BasePlugin:
                 if qtext not in domains_cfg:
                     return False
             elif domains_mode == "suffix":
-                if not any(
-                    qtext == d or qtext.endswith("." + d) for d in domains_cfg
-                ):
+                if not any(qtext == d or qtext.endswith("." + d) for d in domains_cfg):
                     return False
 
         # Fast path: when no explicit targets or ignores are configured, all

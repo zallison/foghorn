@@ -585,10 +585,11 @@ Injects DNS errors and timeouts for testing client behaviour.
 ```yaml
 plugins:
   - type: flaky
+	id: dev-servfail-5-A-AAAA
 	config:
 	  servfail_percent: 5
 	  nxdomain_percent: 0
-	  timeout_percent: 1
+	  timeout_percent: 0
 	  truncate_percent: 0
 	  noerror_empty_percent: 0
 	  apply_to_qtypes: ['A', 'AAAA']
@@ -597,6 +598,9 @@ plugins:
 ### 4.7 mDNS / Bonjour bridge (`mdns`)
 
 Expose mDNS / DNS-SD services as normal DNS records.
+
+***Note***
+For mDNS / DNS-SD / Bonjour / Zeroconf / Avahi you *must* be on the same L2 network in order to receive (e.g. in Docker you might need to run with --net=host or --net=macvlan)
 
 ```yaml
 plugins:
@@ -617,12 +621,12 @@ Adaptive rate limiting per client or per (client,domain).
 plugins:
   - type: rate
 	config:
-	  mode: per_client        # per_client | per_client_domain | per_domain
+	  mode: per_client  # per_client | per_client_domain | per_domain
 	  window_seconds: 10
 	  warmup_windows: 6
 	  burst_factor: 3.0
 	  min_enforce_rps: 50.0
-	  deny_response: nxdomain # nxdomain | refused | servfail | noerror_empty | ip
+	  deny_response: nxdomain  # nxdomain | refused | servfail | noerror_empty | ip
 	  deny_response_ip4: 0.0.0.0
 	  db_path: ./config/var/rate_limit.db
 ```
@@ -801,18 +805,18 @@ You can then reference these variables elsewhere using `${NAME}` syntax:
 ```yaml
 server:
   listen:
-    dns:
-      udp: { enabled: true, host: 0.0.0.0, port: 53 }
+	dns:
+	  udp: { enabled: true, host: 0.0.0.0, port: 53 }
 
 plugins:
   - type: filter
-    id: main-filter
-    config:
-      targets: ${MAIN_SUBNET}
+	id: main-filter
+	config:
+	  targets: ${MAIN_SUBNET}
   - type: filter
-    id: test-filter
-    config:
-      targets: ${TEST_SUBNET}
+	id: test-filter
+	config:
+	  targets: ${TEST_SUBNET}
 ```
 
 This keeps common values (like subnets) in one place so they are easy to update
@@ -828,23 +832,23 @@ vars:
 
 server:
   listen:
-    dns:
-      udp: { enabled: true, host: 0.0.0.0, port: 53 }
+	dns:
+	  udp: { enabled: true, host: 0.0.0.0, port: 53 }
 
 plugins:
   - type: filter
-    id: adblock
-    config:
-      targets: ${LAN}
-      default: allow
-      # ... normal adblock rules ...
+	id: adblock
+	config:
+	  targets: ${LAN}
+	  default: allow
+	  # ... normal adblock rules ...
 
   - type: filter
-    id: kids-filter
-    config:
-      targets: ${KIDS}
-      default: deny
-      # ... strict allowlist rules for kids ...
+	id: kids-filter
+	config:
+	  targets: ${KIDS}
+	  default: deny
+	  # ... strict allowlist rules for kids ...
 ```
 
 ### 6.3 Why use variables?
@@ -858,7 +862,7 @@ plugins:
   a single base config file and override only the variables per environment.
   - In local dev, you might rely on the `vars:` section.
   - In staging/prod, environment variables or `--var` flags can redefine a few
-    keys (for example, stats database DSN, upstreams, or listen addresses).
+	keys (for example, stats database DSN, upstreams, or listen addresses).
 - **Caveat for IDEs**: Some editors/IDEs run JSON/YAML schema validation on the
   raw file and do not interpolate `${VAR}` placeholders first. In that case the
   config may show spurious validation errors even though Foghorn will load it
