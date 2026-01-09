@@ -9,6 +9,36 @@ logging:
 plugins:
 - type: filter
   config:
+    # Demonstrates all BasePlugin targeting options in a single filter plugin.
+    # 1) Client IP targeting
+    targets:
+    - 10.0.0.0/8
+    - 192.168.0.0/16
+    targets_ignore:
+    - 10.0.10.0/24
+    - 192.168.100.50/32
+    targets_cache_ttl_seconds: 300
+
+    # 2) Listener / security targeting (only secure listeners: DoT/DoH)
+    #    Accepts concrete listeners ["udp", "tcp", "dot", "doh"] or aliases
+    #    such as "secure" (dot+doh) / "unsecure" (udp+tcp).
+    targets_listener:
+    - dot
+    - doh
+
+    # 3) Domain targeting (only *.corp.example and *.internal.corp)
+    targets_domains:
+    - corp.example
+    - internal.corp
+    targets_domains_mode: suffix
+
+    # 4) Qtype targeting (only A/AAAA/PTR)
+    target_qtypes:
+    - A
+    - AAAA
+    - PTR
+
+    # Filter-specific configuration
     default: deny
     db_path: ./config/var/blocklist.db
     cache_ttl_seconds: 600
