@@ -1021,23 +1021,9 @@
           "zone_records"
         ],
         "config_schema": {
-          "additionalProperties": true,
+          "additionalProperties": false,
           "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
           "properties": {
-            "file_path": {
-              "anyOf": [
-                {
-                  "description": "Type: string.",
-                  "type": "string"
-                },
-                {
-                  "description": "Type: null.",
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "File Path"
-            },
             "file_paths": {
               "anyOf": [
                 {

@@ -43,7 +43,6 @@ class ZoneRecordsConfig(BaseModel):
       - ZoneRecordsConfig instance with normalized field types.
     """
 
-    file_path: Optional[str] = None
     file_paths: Optional[List[str]] = None
     records: Optional[List[str]] = None
     watchdog_enabled: Optional[bool] = None
@@ -52,7 +51,7 @@ class ZoneRecordsConfig(BaseModel):
     ttl: int = Field(default=300, ge=0)
 
     class Config:
-        extra = "allow"
+        extra = "forbid"
 
 
 @plugin_aliases("zone", "zone_records", "custom", "records")
@@ -78,7 +77,6 @@ class ZoneRecords(BasePlugin):
         Inputs:
           - file_paths (list[str], optional): List of records file paths
             to load and merge in order (later overrides earlier).
-          - file_path (str, optional): Legacy single records file path.
           - records (list[str], optional): Inline records using
             ``<domain>|<qtype>|<ttl>|<value>`` format; merged after any
             file-backed records.
