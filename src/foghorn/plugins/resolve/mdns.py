@@ -1747,7 +1747,12 @@ class MdnsBridge(BasePlugin):
                         {"key": "host", "label": "Host"},
                         {"key": "ipv4", "label": "IPv4", "join": ", "},
                         {"key": "ipv6", "label": "IPv6", "join": ", "},
-                        {"key": "uptime_human", "label": "Uptime", "align": "right", "nowrap": True},
+                        {
+                            "key": "uptime_human",
+                            "label": "Uptime",
+                            "align": "right",
+                            "nowrap": True,
+                        },
                     ],
                 },
                 {
@@ -1965,7 +1970,9 @@ class MdnsBridge(BasePlugin):
             # first label (the friendly service name).
             svc_type_lower = str(service_type or "").lower()
             host_for_url = str(host_name or "").strip()
-            port_val: Optional[int] = getattr(srv, "port", None) if srv is not None else None
+            port_val: Optional[int] = (
+                getattr(srv, "port", None) if srv is not None else None
+            )
 
             def _build_url() -> Optional[str]:
                 if not host_for_url:
@@ -1987,9 +1994,8 @@ class MdnsBridge(BasePlugin):
                         return f"https://{host_for_url}:{port_val}/"
                     return f"https://{host_for_url}/"
                 # SMB / file sharing.
-                if (
-                    svc_type_lower.endswith("_smb._tcp")
-                    or svc_type_lower.endswith("_microsoft-ds._tcp")
+                if svc_type_lower.endswith("_smb._tcp") or svc_type_lower.endswith(
+                    "_microsoft-ds._tcp"
                 ):
                     if port_val and port_val != 445:
                         return f"smb://{host_for_url}:{port_val}/"

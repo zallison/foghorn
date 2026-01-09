@@ -1070,7 +1070,9 @@ def _resolve_core(
                     ]
                     if not existing_opts:
                         r.add_ar(client_opts[0])
-            except Exception:  # pragma: no cover - defensive: preserve best-effort behaviour
+            except (
+                Exception
+            ):  # pragma: no cover - defensive: preserve best-effort behaviour
                 pass
 
             wire = _set_response_id(r.pack(), req.header.id)

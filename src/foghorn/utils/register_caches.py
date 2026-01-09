@@ -639,7 +639,9 @@ def registered_sqlite_ttl(
             if value is not None:
                 if before_hits is None:
                     try:
-                        entry["cache_hits"] += 1  # pragma: nocover mirrored fallback from Foghorn TTL
+                        entry[
+                            "cache_hits"
+                        ] += 1  # pragma: nocover mirrored fallback from Foghorn TTL
                     except Exception:  # pragma: nocover defensive counter update
                         pass
                 return value  # pragma: nocover mirrored fallback from Foghorn TTL
@@ -677,7 +679,9 @@ def registered_sqlite_ttl(
                     and isinstance(after_hits, int)
                     and after_hits > before_hits
                 ):
-                    entry["cache_hits"] += after_hits - before_hits  # pragma: nocover mirrored aggregator from Foghorn TTL
+                    entry["cache_hits"] += (
+                        after_hits - before_hits
+                    )  # pragma: nocover mirrored aggregator from Foghorn TTL
                 if (
                     isinstance(before_misses, int)
                     and isinstance(after_misses, int)
@@ -685,7 +689,9 @@ def registered_sqlite_ttl(
                 ):
                     entry["cache_misses"] += after_misses - before_misses
                 if cache_miss_local and after_misses is None:
-                    entry["cache_misses"] += 1  # pragma: nocover mirrored aggregator from Foghorn TTL
+                    entry[
+                        "cache_misses"
+                    ] += 1  # pragma: nocover mirrored aggregator from Foghorn TTL
             except Exception:  # pragma: nocover defensive counter update
                 pass
 

@@ -618,10 +618,15 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         # Decide DO flag based on dnssec_mode. For both passthrough and validate
         # modes we must advertise DO=1 so that upstream resolvers return
         # DNSSEC records (and, for upstream_ad, can set the AD bit).
-        do_bit = 0x8000 if str(getattr(self, "dnssec_mode", "ignore")).lower() in (
-            "passthrough",
-            "validate",
-        ) else 0
+        do_bit = (
+            0x8000
+            if str(getattr(self, "dnssec_mode", "ignore")).lower()
+            in (
+                "passthrough",
+                "validate",
+            )
+            else 0
+        )
 
         # Effective server-side maximum UDP payload we are willing to
         # advertise. RFC 6891 requires at least 512 bytes when EDNS is used.
