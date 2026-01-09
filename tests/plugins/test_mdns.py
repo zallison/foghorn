@@ -598,7 +598,10 @@ def test_mdns_bridge_get_http_snapshot_summarizes_services_and_hosts() -> None:
     )
 
     # Ensure the plugin also has an explicit DNS domain configured for summary.
-    plugin._dns_domains = {".zaa"}
+    # Include both the default `.local` domain (where records are stored) and a
+    # custom DNS domain to ensure the snapshot counts services while still
+    # reflecting configured domains.
+    plugin._dns_domains = {".local", ".zaa"}
 
     snap = plugin.get_http_snapshot()
 
@@ -758,3 +761,66 @@ def test_mdns_bridge_get_http_snapshot_uses_state_for_host_last_seen_and_uptime(
     assert down_rec["status"] == "down"
     assert down_rec["ipv4"] == []
     assert down_rec["ipv6"] == []
+
+
+def test_mdns_bridge_uses_default_service_types_when_unconfigured(monkeypatch) -> None:
+    """Brief: When service_types is omitted, DEFAULT_MDNS_SERVICE_TYPES are browsed.
+
+    Inputs:
+      - monkeypatch: pytest fixture used to inject a fake zeroconf module.
+
+    Outputs:
+      - None; asserts that ServiceBrowser is started for at least one default
+        service type.
+    """
+
+    import sys
+    import types
+
+    from foghorn.plugins.resolve import mdns as mdns_mod
+
+    started_types = []
+
+    class DummyZeroconf:
+        def __init__(self, *args, **kwargs) -> None:  # pragma: nocover simple stub
+            pass
+
+        def close(self) -> None:  # pragma: nocover simple stub
+            pass
+
+    class DummyServiceBrowser:
+        def __init__(self, zc, service_type, handlers) -> None:  # type: ignore[no-untyped-def]
+            started_types.append(str(service_type))
+
+    fake_mod = types.ModuleType("zeroconf")
+    fake_mod.IPVersion = types.SimpleNamespace(
+        V4Only=object(),
+        V6Only=object(),
+        All=object(),
+    )
+    fake_mod.InterfaceChoice = types.SimpleNamespace(
+        Default="default",
+        All="all",
+    )
+    fake_mod.ServiceBrowser = DummyServiceBrowser
+    fake_mod.ServiceInfo = object
+    fake_mod.ServiceStateChange = types.SimpleNamespace(
+        Added="Added",
+        Removed="Removed",
+    )
+    fake_mod.Zeroconf = DummyZeroconf
+
+    monkeypatch.setitem(sys.modules, "zeroconf", fake_mod)
+
+    plugin = mdns_mod.MdnsBridge(
+        network_enabled=True,
+        domain=".local",
+    )
+    plugin.setup()
+
+    # Normalize both started types and defaults for comparison.
+    started_norm = {s.rstrip(".").lower() for s in started_types}
+    default_norm = {s.rstrip(".").lower() for s in mdns_mod.DEFAULT_MDNS_SERVICE_TYPES}
+
+    # Expect at least one overlap between started service browsers and defaults.
+    assert default_norm & started_norm
