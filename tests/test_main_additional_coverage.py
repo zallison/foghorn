@@ -40,6 +40,8 @@ class _FakeThreadingModule:
 
     def __getattr__(self, name):  # type: ignore[no-untyped-def]
         return getattr(self._real, name)
+
+
 from foghorn.plugins.cache.none import NullCache
 from foghorn.config.config_parser import normalize_upstream_config
 from foghorn.main import _clear_lru_caches, run_setup_plugins
