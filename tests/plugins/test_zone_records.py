@@ -1187,7 +1187,9 @@ def test_bind_paths_loads_rfc1035_zone_and_answers(tmp_path: pathlib.Path) -> No
 
     response = DNSRecord.parse(decision.response)
     assert response.header.rcode == RCODE.NOERROR
-    assert any(rr.rtype == QTYPE.A and str(rr.rdata) == "192.0.2.20" for rr in response.rr)
+    assert any(
+        rr.rtype == QTYPE.A and str(rr.rdata) == "192.0.2.20" for rr in response.rr
+    )
 
     # A missing name under the same zone should yield NXDOMAIN with SOA in authority.
     req_nx = _make_query("missing.example.com", int(QTYPE.A))
