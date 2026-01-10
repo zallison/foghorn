@@ -132,7 +132,9 @@ def test_finger_pre_resolve_serves_truncated_finger_file(tmp_path, monkeypatch) 
             return str(finger_path)
         return None
 
-    monkeypatch.setattr(mod, "_resolve_user_finger_path", _fake_resolve_user_finger_path)
+    monkeypatch.setattr(
+        mod, "_resolve_user_finger_path", _fake_resolve_user_finger_path
+    )
 
     plugin = Finger(domain="example.test", max_size=8)
     plugin.setup()
@@ -157,7 +159,9 @@ def test_finger_pre_resolve_serves_truncated_finger_file(tmp_path, monkeypatch) 
     assert data_txt == expected
 
 
-def test_finger_pre_resolve_strips_non_printable_characters(tmp_path, monkeypatch) -> None:
+def test_finger_pre_resolve_strips_non_printable_characters(
+    tmp_path, monkeypatch
+) -> None:
     """Brief: Finger TXT answers omit non-printable control characters.
 
     Inputs:
@@ -180,7 +184,9 @@ def test_finger_pre_resolve_strips_non_printable_characters(tmp_path, monkeypatc
     def _fake_resolve_user_finger_path(username: str) -> str | None:
         return str(finger_path)
 
-    monkeypatch.setattr(mod, "_resolve_user_finger_path", _fake_resolve_user_finger_path)
+    monkeypatch.setattr(
+        mod, "_resolve_user_finger_path", _fake_resolve_user_finger_path
+    )
 
     plugin = Finger(domain="example.test")
     plugin.setup()
@@ -226,7 +232,9 @@ def test_finger_pre_resolve_respects_policy_and_targets(tmp_path, monkeypatch) -
 
         return str(finger_path)
 
-    monkeypatch.setattr(mod, "_resolve_user_finger_path", _fake_resolve_user_finger_path)
+    monkeypatch.setattr(
+        mod, "_resolve_user_finger_path", _fake_resolve_user_finger_path
+    )
 
     # Policy: default allow but alice explicitly denied.
     plugin_deny_user = Finger(domain="example.test", deny_users=["alice"])
@@ -243,7 +251,9 @@ def test_finger_pre_resolve_respects_policy_and_targets(tmp_path, monkeypatch) -
 
     qname_bob = "bob.example.test"
     req_bytes_bob = _make_txt_query(qname_bob)
-    decision_bob = plugin_allow_bob.pre_resolve(qname_bob, int(QTYPE.TXT), req_bytes_bob, ctx)
+    decision_bob = plugin_allow_bob.pre_resolve(
+        qname_bob, int(QTYPE.TXT), req_bytes_bob, ctx
+    )
     assert decision_bob is not None
 
     qname_alice = "alice.example.test"
@@ -259,7 +269,9 @@ def test_finger_pre_resolve_respects_policy_and_targets(tmp_path, monkeypatch) -
 
     ctx_not_targeted = PluginContext(client_ip="192.0.2.1")
     assert (
-        plugin_targets.pre_resolve(qname_bob, int(QTYPE.TXT), req_bytes_bob, ctx_not_targeted)
+        plugin_targets.pre_resolve(
+            qname_bob, int(QTYPE.TXT), req_bytes_bob, ctx_not_targeted
+        )
         is None
     )
 
@@ -284,7 +296,9 @@ def test_finger_pre_resolve_ignores_non_txt_qtypes(tmp_path, monkeypatch) -> Non
     def _fake_resolve_user_finger_path(username: str) -> str | None:
         return str(finger_path)
 
-    monkeypatch.setattr(mod, "_resolve_user_finger_path", _fake_resolve_user_finger_path)
+    monkeypatch.setattr(
+        mod, "_resolve_user_finger_path", _fake_resolve_user_finger_path
+    )
 
     plugin = Finger(domain="example.test")
     plugin.setup()

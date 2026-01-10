@@ -136,8 +136,8 @@ def test_file_over_dns_pre_resolve_basic_flow(tmp_path) -> None:
     # Expect data + metadata; small payload should fit one data TXT.
     assert len(txt_answers) == 2
 
-    data_txt = str(txt_answers[0].rdata).strip("\"")
-    meta_txt = str(txt_answers[1].rdata).strip("\"")
+    data_txt = str(txt_answers[0].rdata).strip('"')
+    meta_txt = str(txt_answers[1].rdata).strip('"')
 
     # First TXT record should be base64 of the requested slice.
     import base64
@@ -208,7 +208,7 @@ def test_file_over_dns_pre_resolve_raw_and_chunking(tmp_path) -> None:
     # 180-byte TXT chunks. Newlines should terminate individual TXT records
     # in raw mode.
     data_path = tmp_path / "file.txt"
-    content = (b"line1\n" + b"Y" * 190 + b"\nline2\n" + b"Z" * 190 + b"\n")
+    content = b"line1\n" + b"Y" * 190 + b"\nline2\n" + b"Z" * 190 + b"\n"
     data_path.write_bytes(content)
 
     plugin = FileOverDns(
