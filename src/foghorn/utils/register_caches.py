@@ -5,7 +5,7 @@ import logging
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from cachetools import TTLCache, LFUCache, RRCache, cached
+from cachetools import TTLCache, LFUCache, RRCache, FIFOCache, LRUCache, cached
 from cachetools.keys import hashkey
 
 
@@ -26,6 +26,22 @@ class _LruProxy:
 
     Outputs:
       - _LruProxy instance exposing a mutable ``target`` attribute.
+    """
+
+    __slots__ = ("target",)
+
+    def __init__(self, target: Callable[..., Any]) -> None:
+        self.target = target
+
+
+class _CacheProxy:
+    """Brief: Indirection wrapper so cachetools.cached backends can be swapped.
+
+    Inputs:
+      - target: Initial cachetools.cached wrapper.
+
+    Outputs:
+      - _CacheProxy instance exposing a mutable ``target`` attribute.
     """
 
     __slots__ = ("target",)
@@ -69,6 +85,7 @@ def registered_cached(
     def _outer(func: Callable[..., Any]) -> Callable[..., Any]:
         # Install the underlying cachetools decorator first.
         wrapped = cached(*c_args, **c_kwargs)(func)
+        proxy = _CacheProxy(wrapped)
 
         # Registry entry describing this decorated function. The counters are
         # updated in the wrapper below so that admin snapshots can expose live
@@ -76,6 +93,10 @@ def registered_cached(
         entry: Dict[str, Any] = _make_counter_entry(func)
         entry["cache_args"] = list(c_args) if c_args else []
         entry["cache_kwargs"] = dict(c_kwargs) if c_kwargs else {}
+        # Preserve original function and proxy so overrides can rebuild
+        # cachetools-backed helpers at runtime.
+        entry["_orig_func"] = func
+        entry["_cache_proxy"] = proxy
 
         # Best-effort: when a cache instance is passed as the "cache" argument,
         # record its type so that backend-specific overrides (ttlcache,
@@ -94,6 +115,10 @@ def registered_cached(
             backend_name = "lfu_cache"
         elif isinstance(cache_obj, RRCache):
             backend_name = "rr_cache"
+        elif isinstance(cache_obj, FIFOCache):
+            backend_name = "fifo_cache"
+        elif isinstance(cache_obj, LRUCache):
+            backend_name = "lru_cache"
         if backend_name is not None:
             entry["backend"] = backend_name
 
@@ -150,7 +175,9 @@ def registered_cached(
                 except Exception:  # pragma: nocover defensive key computation
                     had_key = None
 
-            result = wrapped(*args, **kwargs)
+            target = proxy.target
+
+            result = target(*args, **kwargs)
 
             if cache_obj is not None:
                 try:
@@ -328,6 +355,9 @@ def get_registered_cached() -> List[Dict[str, Any]]:
 
         backend = copy.get("backend")
         cache_ref = copy.pop("_cache_ref", None)
+        # Drop internal references that are not part of the public snapshot.
+        copy.pop("_cache_proxy", None)
+        copy.pop("_orig_func", None)
         lru_wrapper = copy.pop("_lru_wrapper_ref", None)
 
         # TTLCache and other mapping-like backends where we have the cache
@@ -354,6 +384,152 @@ def get_registered_cached() -> List[Dict[str, Any]]:
         snapshot.append(copy)
 
     return snapshot
+
+
+# Cachetools-backed backends that can be rebuilt for registered_cached helpers.
+_CACHETOOLS_BACKENDS = {"ttlcache", "lfu_cache", "rr_cache", "fifo_cache", "lru_cache"}
+
+
+def _switch_cachetools_backend_for_entry(
+    *,
+    entry: Dict[str, Any],
+    module: str,
+    name: str,
+    old_backend: Optional[str],
+    new_backend: str,
+    maxsize_val: Optional[int],
+    ttl_val: Optional[int],
+) -> None:
+    """Brief: Rebuild a cachetools.Cache-backed helper with a new backend type.
+
+    Inputs:
+      - entry: Registry entry for a decorated helper using registered_cached.
+      - module: Module name string for logging.
+      - name: Function name string for logging.
+      - old_backend: Existing backend label (e.g. "ttlcache") or None.
+      - new_backend: Target backend label (e.g. "lfu_cache").
+      - maxsize_val: Optional override for logical maxsize.
+      - ttl_val: Optional TTL override (TTLCache only).
+
+    Outputs:
+      - None; best-effort mutation of the entry and underlying cache/proxy.
+    """
+
+    # Only operate on entries created by registered_cached that track both the
+    # original function and a cache proxy + cache reference.
+    orig_func = entry.get("_orig_func")
+    proxy = entry.get("_cache_proxy")
+    cache_ref = entry.get("_cache_ref")
+    if not callable(orig_func) or proxy is None or cache_ref is None:
+        return
+
+    # Map backend labels to concrete cachetools classes.
+    cache_cls = None
+    needs_ttl = False
+    if new_backend == "ttlcache":
+        cache_cls = TTLCache
+        needs_ttl = True
+    elif new_backend == "lfu_cache":
+        cache_cls = LFUCache
+    elif new_backend == "rr_cache":
+        cache_cls = RRCache
+    elif new_backend == "fifo_cache":
+        cache_cls = FIFOCache
+    elif new_backend == "lru_cache":
+        cache_cls = LRUCache
+
+    if cache_cls is None:
+        return
+
+    # Derive effective maxsize from override, registry metadata, or current cache.
+    eff_maxsize: Optional[int] = None
+    if isinstance(maxsize_val, int):
+        eff_maxsize = maxsize_val
+    else:
+        meta_max = entry.get("maxsize")
+        if isinstance(meta_max, int):
+            eff_maxsize = meta_max
+        else:
+            try:
+                eff_maxsize = int(getattr(cache_ref, "maxsize", 0)) or None
+            except Exception:  # pragma: nocover defensive maxsize read
+                eff_maxsize = None
+    if eff_maxsize is None or eff_maxsize <= 0:
+        eff_maxsize = 1024
+
+    # Derive effective TTL for TTLCache targets.
+    eff_ttl: int = 0
+    if needs_ttl:
+        if isinstance(ttl_val, int) and ttl_val >= 0:
+            eff_ttl = ttl_val
+        else:
+            meta_ttl = entry.get("ttl")
+            if isinstance(meta_ttl, int) and meta_ttl >= 0:
+                eff_ttl = meta_ttl
+            else:
+                try:
+                    cache_ttl = getattr(cache_ref, "ttl", None)
+                    if isinstance(cache_ttl, (int, float)) and cache_ttl >= 0:
+                        eff_ttl = int(cache_ttl)
+                except Exception:  # pragma: nocover defensive ttl read
+                    eff_ttl = 0
+        if eff_ttl < 0:
+            eff_ttl = 0
+
+    # Rebuild the cache instance.
+    try:
+        if needs_ttl:
+            new_cache = cache_cls(maxsize=eff_maxsize, ttl=eff_ttl)  # type: ignore[call-arg]
+        else:
+            new_cache = cache_cls(maxsize=eff_maxsize)  # type: ignore[call-arg]
+    except Exception:  # pragma: nocover defensive cache construction
+        _logger.debug(
+            "apply_decorated_cache_overrides: failed to construct new cachetools backend %s for %s.%s",
+            new_backend,
+            module,
+            name,
+            exc_info=True,
+        )
+        return
+
+    # Preserve any explicit key function used by the original decorator.
+    cache_kwargs = entry.get("cache_kwargs") or {}
+    key_fn = cache_kwargs.get("key") if callable(cache_kwargs.get("key")) else None
+
+    try:
+        if key_fn is not None:
+            new_wrapped = cached(cache=new_cache, key=key_fn)(orig_func)
+        else:
+            new_wrapped = cached(cache=new_cache)(orig_func)
+    except Exception:  # pragma: nocover defensive wrapper rebuild
+        _logger.debug(
+            "apply_decorated_cache_overrides: failed to rebuild cachetools wrapper for %s.%s (backend=%s)",
+            module,
+            name,
+            new_backend,
+            exc_info=True,
+        )
+        return
+
+    # Point the proxy at the new wrapper so all existing call sites use it.
+    try:
+        proxy.target = new_wrapped
+    except Exception:  # pragma: nocover defensive proxy update
+        _logger.debug(
+            "apply_decorated_cache_overrides: failed to update cachetools proxy for %s.%s (backend=%s)",
+            module,
+            name,
+            new_backend,
+            exc_info=True,
+        )
+        return
+
+    # Update registry metadata to reflect the new backend and cache instance.
+    entry["backend"] = new_backend
+    entry["_cache_ref"] = new_cache
+    entry["maxsize"] = int(eff_maxsize)
+    if needs_ttl:
+        entry["ttl"] = int(eff_ttl)
 
 
 def _apply_lru_override_for_entry(
@@ -797,7 +973,29 @@ def apply_decorated_cache_overrides(overrides: List[Dict[str, Any]]) -> None:
             if emod != module or eqn != name:
                 continue
 
-            if backend_filter is not None and str(ebackend) != backend_filter:
+            # Optional: when a backend string is provided and differs from the
+            # current backend for a cachetools-backed helper, rebuild the helper
+            # with a new cachetools backend implementation.
+            target_backend = backend_filter
+            if (
+                target_backend is not None
+                and isinstance(ebackend, str)
+                and ebackend in _CACHETOOLS_BACKENDS
+                and target_backend in _CACHETOOLS_BACKENDS
+                and target_backend != ebackend
+            ):
+                _switch_cachetools_backend_for_entry(
+                    entry=entry,
+                    module=emod,
+                    name=eqn,
+                    old_backend=ebackend,
+                    new_backend=target_backend,
+                    maxsize_val=maxsize_val,
+                    ttl_val=ttl_val,
+                )
+                # After a backend switch we skip further per-backend handling,
+                # since the new cache instance and metadata have already been
+                # updated.
                 continue
 
             # TTLCache-backed caches: adjust maxsize/ttl as requested.
@@ -894,9 +1092,9 @@ def apply_decorated_cache_overrides(overrides: List[Dict[str, Any]]) -> None:
 
                 continue
 
-            # LFUCache / RRCache backends from cachetools: support maxsize
-            # overrides and treat ttl as a no-op with a debug log.
-            if ebackend in {"lfu_cache", "rr_cache"}:
+            # LFUCache / RRCache / FIFOCache backends from cachetools: support
+            # maxsize overrides and treat ttl as a no-op with a debug log.
+            if ebackend in {"lfu_cache", "rr_cache", "fifo_cache"}:
                 cache_ref = entry.get("_cache_ref")
                 if maxsize_val is not None and cache_ref is not None:
                     try:
