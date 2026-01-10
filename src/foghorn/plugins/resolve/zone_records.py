@@ -386,7 +386,9 @@ class ZoneRecords(BasePlugin):
             try:
                 text = zone_path.read_text(encoding="utf-8")
             except Exception as exc:
-                raise ValueError(f"Failed to read BIND zone file {zone_path}: {exc}") from exc
+                raise ValueError(
+                    f"Failed to read BIND zone file {zone_path}: {exc}"
+                ) from exc
 
             try:
                 rrs = RR.fromZone(text)
