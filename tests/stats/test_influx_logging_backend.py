@@ -120,7 +120,7 @@ def test_format_line_protocol_includes_tags_fields_and_timestamp() -> None:  # t
     # Fields should contain integer, boolean, and string representations.
     assert "v=1i" in line
     assert "ok=true" in line
-    assert "msg=\"hi there\"" in line
+    assert 'msg="hi there"' in line
     # Final token should be an integer nanosecond timestamp.
     ns_str = line.rsplit(" ", 1)[-1]
     assert ns_str.isdigit()
@@ -146,7 +146,9 @@ def test_influx_logging_constructor_posts_start_marker_and_is_healthy(
     def _session_factory(**kwargs: Any) -> _FakeSession:  # type: ignore[no-untyped-def]
         return _FakeSession(**kwargs)
 
-    monkeypatch.setattr(influx_mod, "requests", types.SimpleNamespace(Session=_session_factory))
+    monkeypatch.setattr(
+        influx_mod, "requests", types.SimpleNamespace(Session=_session_factory)
+    )
 
     backend = InfluxLogging(
         write_url="http://influx.local/write",
@@ -189,7 +191,9 @@ def test_influx_logging_close_marks_unhealthy_and_closes_session(
     def _session_factory(**kwargs: Any) -> _FakeSession:  # type: ignore[no-untyped-def]
         return _FakeSession(**kwargs)
 
-    monkeypatch.setattr(influx_mod, "requests", _types.SimpleNamespace(Session=_session_factory))
+    monkeypatch.setattr(
+        influx_mod, "requests", _types.SimpleNamespace(Session=_session_factory)
+    )
 
     backend = InfluxLogging(write_url="http://influx")
     session = backend._session  # type: ignore[attr-defined]
@@ -219,7 +223,9 @@ def test_insert_query_log_posts_line_protocol_and_parses_result_json(
     def _session_factory(**kwargs: Any) -> _FakeSession:  # type: ignore[no-untyped-def]
         return _FakeSession(**kwargs)
 
-    monkeypatch.setattr(influx_mod, "requests", _types.SimpleNamespace(Session=_session_factory))
+    monkeypatch.setattr(
+        influx_mod, "requests", _types.SimpleNamespace(Session=_session_factory)
+    )
 
     backend = InfluxLogging(write_url="http://influx")
     session = backend._session  # type: ignore[attr-defined]
@@ -246,7 +252,11 @@ def test_insert_query_log_posts_line_protocol_and_parses_result_json(
 
     # Expect two posts total: one meta marker from __init__ and one data point.
     assert len(session.posts) == 2
-    line = session.posts[1]["data"].decode("utf-8") if isinstance(session.posts[1]["data"], bytes) else session.posts[1]["data"]
+    line = (
+        session.posts[1]["data"].decode("utf-8")
+        if isinstance(session.posts[1]["data"], bytes)
+        else session.posts[1]["data"]
+    )
     assert line.startswith("foghorn_query_log,")
     # Tags
     assert "client_ip=192.0.2.1" in line
@@ -256,9 +266,9 @@ def test_insert_query_log_posts_line_protocol_and_parses_result_json(
     assert "status=ok" in line
     # Fields
     assert "count=1i" in line
-    assert "name=\"example.com\"" in line
-    assert "first=\"1.2.3.4\"" in line
-    assert "dnssec_status=\"dnssec_secure\"" in line
+    assert 'name="example.com"' in line
+    assert 'first="1.2.3.4"' in line
+    assert 'dnssec_status="dnssec_secure"' in line
 
 
 def test_insert_query_log_marks_unhealthy_on_http_error(monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
@@ -283,7 +293,9 @@ def test_insert_query_log_marks_unhealthy_on_http_error(monkeypatch: pytest.Monk
     def _session_factory(**kwargs: Any) -> _ErrorSession:  # type: ignore[no-untyped-def]
         return _ErrorSession(**kwargs)
 
-    monkeypatch.setattr(influx_mod, "requests", _types.SimpleNamespace(Session=_session_factory))
+    monkeypatch.setattr(
+        influx_mod, "requests", _types.SimpleNamespace(Session=_session_factory)
+    )
 
     backend = InfluxLogging(write_url="http://influx")
     session = backend._session  # type: ignore[attr-defined]
@@ -323,7 +335,9 @@ def test_insert_query_log_returns_early_when_unhealthy(monkeypatch: pytest.Monke
     def _session_factory(**kwargs: Any) -> _FakeSession:  # type: ignore[no-untyped-def]
         return _FakeSession(**kwargs)
 
-    monkeypatch.setattr(influx_mod, "requests", _types.SimpleNamespace(Session=_session_factory))
+    monkeypatch.setattr(
+        influx_mod, "requests", _types.SimpleNamespace(Session=_session_factory)
+    )
 
     backend = InfluxLogging(write_url="http://influx")
     session = backend._session  # type: ignore[attr-defined]
