@@ -7,8 +7,9 @@ import logging.handlers
 import os
 import sys
 from dataclasses import dataclass
-from typing import ClassVar, Dict, List, Optional, Sequence, Tuple, Union, final
+from typing import ClassVar, Dict, List, Optional, Sequence, Tuple, Union, Set, final
 
+from cachetools import LRUCache
 from dnslib import (  # noqa: F401 - imports are for implementations of this class
     AAAA,
     CNAME,
@@ -24,7 +25,6 @@ from dnslib import (  # noqa: F401 - imports are for implementations of this cla
     DNSRecord,
 )
 
-from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 from foghorn.plugins.cache.base import CachePlugin
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.config.logging_config import BracketLevelFormatter, SyslogFormatter
@@ -414,9 +414,21 @@ class BasePlugin:
 
         # Per-client targeting decisions are cached in-memory to avoid
         # repeatedly parsing IP addresses and scanning CIDR lists under load.
-        # The TTL is configurable via targets_cache_ttl_seconds (default 300s).
+        # Historically this used a TTL cache controlled by
+        # targets_cache_ttl_seconds; it now uses a size-bounded LRU cache for
+        # simpler behaviour under load. The TTL config key is accepted for
+        # backwards compatibility but is no longer used.
         self._targets_cache_ttl: int = int(config.get("targets_cache_ttl_seconds", 300))
-        self._targets_cache: FoghornTTLCache = FoghornTTLCache()
+        self._targets_cache: LRUCache = LRUCache(maxsize=4096)
+        # Lightweight per-cache counters for admin snapshots. These mirror the
+        # naming used by other cache backends (calls_total/cache_hits/cache_misses)
+        # so that the cache admin UI can treat them uniformly.
+        try:
+            self._targets_cache.calls_total = 0
+            self._targets_cache.cache_hits = 0
+            self._targets_cache.cache_misses = 0
+        except Exception:  # pragma: nocover - defensive, attributes are best-effort
+            pass
 
         # Optional qtype targeting: normalize configured target_qtypes into
         # uppercase mnemonic values (e.g., ["A", "AAAA"], or ["*."]). When the
@@ -838,9 +850,16 @@ class BasePlugin:
 
         cache_key = (str(client_ip), 0)
 
-        # Consult per-client TTL cache first to avoid repeated IP parsing and
-        # CIDR scans under sustained load.
+        # Consult per-client cache first to avoid repeated IP parsing and CIDR
+        # scans under sustained load.
         try:
+            # Update best-effort call counter when the cache exposes one.
+            calls_attr = getattr(self._targets_cache, "calls_total", None)
+            if isinstance(calls_attr, int):
+                try:
+                    self._targets_cache.calls_total = calls_attr + 1
+                except Exception:
+                    pass
             cached = self._targets_cache.get(cache_key)
         except (
             Exception
@@ -848,6 +867,13 @@ class BasePlugin:
             cached = None
 
         if cached is not None:
+            # Cache hit: increment hit counter when available.
+            hits_attr = getattr(self._targets_cache, "cache_hits", None)
+            if isinstance(hits_attr, int):
+                try:
+                    self._targets_cache.cache_hits = hits_attr + 1
+                except Exception:
+                    pass
             try:
                 return bool(int(cached.decode()))
             except (
@@ -855,7 +881,15 @@ class BasePlugin:
             ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 pass
 
-        # Cache miss or decode failure: compute targeting decision.
+        # Cache miss or decode failure: compute targeting decision and treat as
+        # a cache miss for counter purposes.
+        misses_attr = getattr(self._targets_cache, "cache_misses", None)
+        if isinstance(misses_attr, int):
+            try:
+                self._targets_cache.cache_misses = misses_attr + 1
+            except Exception:
+                pass
+
         try:
             addr = ipaddress.ip_address(client_ip)
         except Exception:
@@ -872,14 +906,11 @@ class BasePlugin:
                 # Non-empty targets restrict to matching networks.
                 result = any(addr in net for net in self._target_networks)
 
-        # Store decision in TTL cache for subsequent queries from the same
-        # client_ip.
+        # Store decision in the per-client cache for subsequent queries from
+        # the same client_ip. This is a size-bounded LRU cache rather than a
+        # TTL-based cache; entries remain until evicted.
         try:
-            self._targets_cache.set(
-                cache_key,
-                int(self._targets_cache_ttl),
-                b"1" if result else b"0",
-            )
+            self._targets_cache[cache_key] = b"1" if result else b"0"
         except (
             Exception
         ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
