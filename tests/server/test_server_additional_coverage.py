@@ -481,6 +481,49 @@ def test_no_upstreams_with_client_edns_preserves_opt_payload(monkeypatch):
     assert int(resp_opts[0].rclass) == int(req_opts[0].rclass)
 
 
+def test_pre_plugin_deny_with_client_edns_produces_nxdomain_with_opt(monkeypatch):
+    """Brief: Pre-plugin deny path echoes client EDNS OPT into NXDOMAIN.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that a synthetic NXDOMAIN from _resolve_core carries OPT.
+    """
+
+    from dnslib import EDNS0 as _EDNS0
+
+    class _DenyPlugin:
+        pre_priority = 1
+
+        def pre_resolve(self, qname, qtype, data, ctx):  # noqa: D401
+            """Inputs: qname/qtype/wire/ctx. Outputs: deny decision."""
+
+            return srv.PluginDecision(action="deny")
+
+        def post_resolve(self, qname, qtype, data, ctx):  # noqa: D401
+            """Inputs: qname/qtype/wire/ctx. Outputs: no-op decision."""
+
+            return None
+
+    DNSUDPHandler.plugins = [_DenyPlugin()]
+    DNSUDPHandler.upstream_addrs = []
+
+    q = DNSRecord.question("pre-deny-edns.example", "A")
+    q.add_ar(_EDNS0(udp_len=1800))
+
+    result = srv._resolve_core(q.pack(), "127.0.0.1")
+    resp = DNSRecord.parse(result.wire)
+
+    req_opts = [rr for rr in (q.ar or []) if rr.rtype == QTYPE.OPT]
+    resp_opts = [rr for rr in (resp.ar or []) if rr.rtype == QTYPE.OPT]
+
+    assert resp.header.rcode == RCODE.NXDOMAIN
+    assert len(req_opts) == 1
+    assert len(resp_opts) == 1
+    assert int(resp_opts[0].rclass) == int(req_opts[0].rclass)
+
+
 # ---- DoH branch in send_query_with_failover ----
 def test_send_query_with_failover_doh_success(monkeypatch):
     q = DNSRecord.question("doh.example", "A")
@@ -520,6 +563,59 @@ def test_send_query_with_failover_doh_missing_url(monkeypatch):
     )
     # No valid upstream succeeds -> all_failed
     assert resp is None and reason in {"all_failed", "timeout", "servfail"}
+
+
+def test_send_query_with_failover_edns_formerr_udp_fallback(monkeypatch):
+    """Brief: UDP FORMERR responses for EDNS queries trigger a no-EDNS retry.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that a FORMERR+EDNS response leads to a successful
+        fallback query without EDNS.
+    """
+
+    from dnslib import EDNS0 as _EDNS0
+
+    qname = "edns-fallback.example"
+    q = DNSRecord.question(qname, "A")
+    q.add_ar(_EDNS0(udp_len=1232))
+
+    calls = {"edns": 0, "no_edns": 0}
+
+    def _fake_udp_query(host, port, wire, timeout_ms=0):  # noqa: D401
+        """Inputs: host/port/wire. Outputs: FORMERR for EDNS, NOERROR otherwise."""
+
+        msg = DNSRecord.parse(wire)
+        has_opt = any(rr.rtype == QTYPE.OPT for rr in (msg.ar or []))
+        if has_opt:
+            calls["edns"] += 1
+            r = msg.reply()
+            r.header.rcode = RCODE.FORMERR
+            return r.pack()
+        calls["no_edns"] += 1
+        r = msg.reply()
+        r.header.rcode = RCODE.NOERROR
+        return r.pack()
+
+    import foghorn.servers.transports.udp as udp_mod
+
+    monkeypatch.setattr(udp_mod, "udp_query", _fake_udp_query)
+
+    resp, used, reason = send_query_with_failover(
+        q,
+        upstreams=[{"host": "8.8.8.8", "port": 53}],
+        timeout_ms=500,
+        qname=qname,
+        qtype=QTYPE.A,
+    )
+
+    assert reason == "ok"
+    parsed = DNSRecord.parse(resp)
+    assert parsed.header.rcode == RCODE.NOERROR
+    assert calls["edns"] == 1
+    assert calls["no_edns"] == 1
 
 
 # ---- Pool limits error handling and send success ----
