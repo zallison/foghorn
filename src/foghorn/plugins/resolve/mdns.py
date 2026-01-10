@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from dnslib import A, AAAA, PTR, QTYPE, RR, SRV, TXT, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field, validator
 
-from cachetools import TTLCache  # type: ignore[import]
+from cachetools import LRUCache, Cache
 from foghorn.utils.register_caches import registered_cached
 
 from foghorn.plugins.resolve.base import (
@@ -134,9 +134,9 @@ PTR_ADDITIONAL_HOST_LIMIT = 2
 
 # Short-lived caches for hot, pure-ish helper methods. These are strictly
 # internal to the plugin and do not affect resolver statistics semantics.
-_MDNS_NORMALIZE_OWNER_CACHE: TTLCache = TTLCache(maxsize=4096, ttl=3600)
-_MDNS_MIRROR_SUFFIXES_CACHE: TTLCache = TTLCache(maxsize=4096, ttl=3600)
-_MDNS_SANITIZE_QNAME_CACHE: TTLCache = TTLCache(maxsize=2048, ttl=3600)
+_MDNS_NORMALIZE_OWNER_CACHE: Cache = LRUCache(maxsize=4096)
+_MDNS_MIRROR_SUFFIXES_CACHE: Cache = LRUCache(maxsize=4096)
+_MDNS_SANITIZE_QNAME_CACHE: Cache = LRUCache(maxsize=2048)
 
 
 class MdnsBridgeConfig(BaseModel):
