@@ -4,7 +4,8 @@ Foghorn is a versatile DNS server designed for flexibility and performance. Buil
 
 With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/foghorn)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/foghorn)[![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-donate-yellow.svg)](https://www.buymeacoffee.com/foghorndns)
+
 
 <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" width=300px />
 
@@ -161,24 +162,24 @@ Key parts of `server`:
 - `server.cache`
   - `module`: which cache plugin to use.
   - `config`: plugin-specific cache settings.
-    - For the in-memory DNS cache (`module: memory`), the underlying
-      `FoghornTTLCache` supports optional capacity and eviction controls when
-      instantiated from Python code: `maxsize` (positive integer, unbounded when
-      `None` or non-positive) and `eviction_policy` (one of `none`, `lru`,
-      `lfu`, `fifo`, `random`, or `almost_expired`).
+	- For the in-memory DNS cache (`module: memory`), the underlying
+	  `FoghornTTLCache` supports optional capacity and eviction controls when
+	  instantiated from Python code: `maxsize` (positive integer, unbounded when
+	  `None` or non-positive) and `eviction_policy` (one of `none`, `lru`,
+	  `lfu`, `fifo`, `random`, or `almost_expired`).
   - `modify` / `decorated_overrides` / `func_caches`: optional overrides for
-    internal helper caches (functions decorated with `registered_cached`,
-    `registered_lru_cached`, `registered_foghorn_ttl`, or
-    `registered_sqlite_ttl`). These let you tune TTL and maxsize for specific
-    helpers without code changes.
-    - Valid `backend` values for `func_caches` entries are:
-      - `ttlcache` (cachetools.TTLCache)
-      - `lfu_cache` (cachetools.LFUCache)
-      - `rr_cache` (cachetools.RRCache)
-      - `fifo_cache` (cachetools.FIFOCache)
-      - `lru_cache` (cachetools.LRUCache)
-      - `foghorn_ttl` (FoghornTTLCache-based helpers via registered_foghorn_ttl)
-      - `sqlite_ttl` (SQLite3TTLCache-based helpers via registered_sqlite_ttl)
+	internal helper caches (functions decorated with `registered_cached`,
+	`registered_lru_cached`, `registered_foghorn_ttl`, or
+	`registered_sqlite_ttl`). These let you tune TTL and maxsize for specific
+	helpers without code changes.
+	- Valid `backend` values for `func_caches` entries are:
+	  - `ttlcache` (cachetools.TTLCache)
+	  - `lfu_cache` (cachetools.LFUCache)
+	  - `rr_cache` (cachetools.RRCache)
+	  - `fifo_cache` (cachetools.FIFOCache)
+	  - `lru_cache` (cachetools.LRUCache)
+	  - `foghorn_ttl` (FoghornTTLCache-based helpers via registered_foghorn_ttl)
+	  - `sqlite_ttl` (SQLite3TTLCache-based helpers via registered_sqlite_ttl)
 
 Example: increase the TTL and maxsize for a DNSSEC helper cached via
 `cachetools.TTLCache`:
@@ -186,17 +187,17 @@ Example: increase the TTL and maxsize for a DNSSEC helper cached via
 ```yaml
 server:
   cache:
-    module: memory
-    config:
-      min_cache_ttl: 60
+	module: memory
+	config:
+	  min_cache_ttl: 60
 
-    func_caches:
-      - module: foghorn.dnssec.dnssec_validate
-        name: _find_zone_apex_cached
-        backend: ttlcache            # ttlcache | lru_cache | foghorn_ttl | sqlite_ttl | lfu_cache | rr_cache
-        ttl: 300                     # seconds; applies to TTL-style backends
-        maxsize: 2048                # logical max size for this helper cache
-        reset_on_ttl_change: true    # clear TTLCache once when ttl changes
+	func_caches:
+	  - module: foghorn.dnssec.dnssec_validate
+		name: _find_zone_apex_cached
+		backend: ttlcache            # ttlcache | lru_cache | foghorn_ttl | sqlite_ttl | lfu_cache | rr_cache
+		ttl: 300                     # seconds; applies to TTL-style backends
+		maxsize: 2048                # logical max size for this helper cache
+		reset_on_ttl_change: true    # clear TTLCache once when ttl changes
 ```
 
 _Note:_ the `backend` field here selects the **desired cache backend type** for
@@ -317,11 +318,11 @@ stats:
   source_backend: local-log
   interval_seconds: 300
   ignore:
-	include_in_stats: true
+	include_in_stats: true # Just don't display them
 	ignore_single_host: false
 	top_domains_mode: suffix   # exact | suffix
 	top_domains:
-	  - example
+	  - example.com
 ```
 
 ### 2.6 Plugins
@@ -336,7 +337,7 @@ plugins:
 	setup:
 	  abort_on_failure: true
 	hooks:
-``    pre_resolve:
+	  pre_resolve:
 		enabled: true
 		priority: 50
 	logging:
@@ -370,8 +371,7 @@ Targeting:
 	  * `"any"`, `"*"`, or `null`   → no listener restriction.
 - **Domain targeting**:
   - `config.targets_domains`: list (or single string) of domain names to match.
-  - `config.targets_domains_mode`: `"exact"` (qname must equal one of
-	`targets_domains`), `"suffix"` (qname is that domain or ends with
+  - `config.targets_domains_mode`: `"exact"` (qname must equal one of `targets_domains`), `"suffix"` (qname is that domain or ends with
 	`"." + domain`), or `"any"` (no domain restriction).
 - **qtype targeting**:
   - `config.target_qtypes`: list of qtype names or `'*'` for all types, e.g.
@@ -398,10 +398,10 @@ plugins:
 		 - 192.168.0.0/16
 		 - 10.10.10.0/24
 
-	  # JSON Lines
+	   # JSON Lines
 	   targets_ignore: [ "192.168.0.10" ]
 
-	  # Listener / transport targeting: only DoT/DoH
+	   # Listener / transport targeting: only DoT/DoH
 	   targets_listener:
 			- dot
 			- doh
@@ -412,7 +412,7 @@ plugins:
 	   targets_domains_mode: suffix  # any | exact | suffix
 
 	   # qtype targeting: A/AAAA only
-		  target_qtypes: ['A', 'AAAA']  # '*' | ['A'] | ['A', 'AAAA']
+		 target_qtypes: ['A', 'AAAA']  # '*' | ['A'] | ['A', 'AAAA']
 	```
 
 ---
