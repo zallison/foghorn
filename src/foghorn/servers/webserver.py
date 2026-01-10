@@ -226,7 +226,7 @@ class RingBuffer:
                 if overflow > 0:
                     self._items = self._items[overflow:]
 
-    @registered_cached(cache=TTLCache(maxsize=10, ttl=2))
+    @registered_cached(cache=TTLCache(maxsize=1, ttl=10))
     def snapshot(self, limit: Optional[int] = None) -> List[Any]:
         """Return a copy of buffered items, optionally truncated to newest N.
 
@@ -365,6 +365,7 @@ class RuntimeState:
                 error=msg,
             )
 
+    @registered_cached(cache=TTLCache(maxsize=1, ttl=10))
     def snapshot(self) -> dict[str, Any]:
         """Brief: Return a JSON-safe snapshot of current runtime state.
 
@@ -981,7 +982,6 @@ _YAML_LIST_KEY_LINE_RE = re.compile(r"^(\s*)-\s*([^:\s][^:]*)\s*:(.*)$")
 _YAML_LIST_LINE_RE = re.compile(r"^(\s*)-\s*(.*)$")
 
 
-@registered_cached(cache=TTLCache(maxsize=1024, ttl=30))
 def _split_yaml_value_and_comment(rest: str) -> tuple[str, str]:
     """Split the portion of a YAML line after ':' or '-' into value and comment.
 
@@ -1398,7 +1398,7 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-@registered_cached(cache=TTLCache(maxsize=1, ttl=2))
+@registered_cached(cache=TTLCache(maxsize=1, ttl=5))
 def _read_proc_meminfo(path: str = "/proc/meminfo") -> Dict[str, int]:
     """Brief: Parse a /proc/meminfo-style file into byte counts.
 
