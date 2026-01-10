@@ -19,7 +19,7 @@ from dnslib import AAAA, PTR, QTYPE, RR, A, DNSHeader, DNSRecord, TXT
 from pydantic import BaseModel, Field
 
 try:  # cachetools is an optional dependency; fall back to shim when missing.
-    from cachetools import TTLCache  # type: ignore[import]
+    from cachetools import TTLCache, LRUCache, Cache  # type: ignore[import]
     from foghorn.utils.register_caches import registered_cached
 except (
     Exception
@@ -65,8 +65,8 @@ logger = logging.getLogger(__name__)
 
 # Short-lived caches for suffix owner helpers. These are pure string transforms
 # used during periodic reload and do not affect resolver statistics semantics.
-_DOCKER_AGG_OWNER_CACHE: TTLCache = TTLCache(maxsize=1024, ttl=30)
-_DOCKER_HOSTS_OWNER_CACHE: TTLCache = TTLCache(maxsize=1024, ttl=30)
+_DOCKER_AGG_OWNER_CACHE: Cache = LRUCache(maxsize=1024)
+_DOCKER_HOSTS_OWNER_CACHE: Cache = LRUCache(maxsize=1024)
 
 
 class DockerEndpointConfig(BaseModel):
