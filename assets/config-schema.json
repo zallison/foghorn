@@ -1022,8 +1022,26 @@
         ],
         "config_schema": {
           "additionalProperties": false,
-          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
           "properties": {
+            "bind_paths": {
+              "anyOf": [
+                {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Bind Paths"
+            },
             "file_paths": {
               "anyOf": [
                 {

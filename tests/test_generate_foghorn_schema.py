@@ -26,7 +26,9 @@ def _load_schema_module():
       - Module-like object (a dict) containing the script's global namespace.
     """
 
-    script_path = Path(__file__).resolve().parents[1] / "scripts" / "generate_foghorn_schema.py"
+    script_path = (
+        Path(__file__).resolve().parents[1] / "scripts" / "generate_foghorn_schema.py"
+    )
     return runpy.run_path(str(script_path))
 
 
