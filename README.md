@@ -161,7 +161,50 @@ Key parts of `server`:
 - `server.cache`
   - `module`: which cache plugin to use.
   - `config`: plugin-specific cache settings.
-  - `modify` / `decorated_overrides`: optional overrides for internal helper caches.
+    - For the in-memory DNS cache (`module: memory`), the underlying
+      `FoghornTTLCache` supports optional capacity and eviction controls when
+      instantiated from Python code: `maxsize` (positive integer, unbounded when
+      `None` or non-positive) and `eviction_policy` (one of `none`, `lru`,
+      `lfu`, `fifo`, `random`, or `almost_expired`).
+  - `modify` / `decorated_overrides` / `func_caches`: optional overrides for
+    internal helper caches (functions decorated with `registered_cached`,
+    `registered_lru_cached`, `registered_foghorn_ttl`, or
+    `registered_sqlite_ttl`). These let you tune TTL and maxsize for specific
+    helpers without code changes.
+    - Valid `backend` values for `func_caches` entries are:
+      - `ttlcache` (cachetools.TTLCache)
+      - `lfu_cache` (cachetools.LFUCache)
+      - `rr_cache` (cachetools.RRCache)
+      - `fifo_cache` (cachetools.FIFOCache)
+      - `lru_cache` (cachetools.LRUCache)
+      - `foghorn_ttl` (FoghornTTLCache-based helpers via registered_foghorn_ttl)
+      - `sqlite_ttl` (SQLite3TTLCache-based helpers via registered_sqlite_ttl)
+
+Example: increase the TTL and maxsize for a DNSSEC helper cached via
+`cachetools.TTLCache`:
+
+```yaml
+server:
+  cache:
+    module: memory
+    config:
+      min_cache_ttl: 60
+
+    func_caches:
+      - module: foghorn.dnssec.dnssec_validate
+        name: _find_zone_apex_cached
+        backend: ttlcache            # ttlcache | lru_cache | foghorn_ttl | sqlite_ttl | lfu_cache | rr_cache
+        ttl: 300                     # seconds; applies to TTL-style backends
+        maxsize: 2048                # logical max size for this helper cache
+        reset_on_ttl_change: true    # clear TTLCache once when ttl changes
+```
+
+_Note:_ the `backend` field here selects the **desired cache backend type** for
+that helper (matching the "Backend" column in the admin "Decorated caches"
+table). For cachetools-backed helpers wrapped with `registered_cached`, Foghorn
+rebuilds the function's cache at startup so you can switch between
+`ttlcache`, `lfu_cache`, `rr_cache`, `fifo_cache`, and `lru_cache` purely from
+configuration.
 - `server.dnssec`
   - Mode and DNSSEC validation knobs (e.g., UDP payload size).
 - `server.resolver`
