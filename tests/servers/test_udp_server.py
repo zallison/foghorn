@@ -519,6 +519,52 @@ def test_make_servfail_response_preserves_id():
     assert resp.header.id == 0x5678
 
 
+def test_make_nxdomain_response_echoes_client_edns_opt():
+    """Inputs: DNS question with EDNS(0) OPT.
+
+    Outputs: NXDOMAIN response carries a matching OPT RR.
+    """
+
+    from dnslib import EDNS0 as _EDNS0
+
+    handler = _make_handler()
+    req = DNSRecord.question("example.com.")
+    req.add_ar(_EDNS0(udp_len=2048))
+    wire = handler._make_nxdomain_response(req)
+    resp = DNSRecord.parse(wire)
+
+    req_opts = [rr for rr in (req.ar or []) if rr.rtype == QTYPE.OPT]
+    resp_opts = [rr for rr in (resp.ar or []) if rr.rtype == QTYPE.OPT]
+
+    assert resp.header.rcode == RCODE.NXDOMAIN
+    assert len(req_opts) == 1
+    assert len(resp_opts) == 1
+    assert int(resp_opts[0].rclass) == int(req_opts[0].rclass)
+
+
+def test_make_servfail_response_echoes_client_edns_opt():
+    """Inputs: DNS question with EDNS(0) OPT.
+
+    Outputs: SERVFAIL response carries a matching OPT RR.
+    """
+
+    from dnslib import EDNS0 as _EDNS0
+
+    handler = _make_handler()
+    req = DNSRecord.question("example.com.")
+    req.add_ar(_EDNS0(udp_len=2048))
+    wire = handler._make_servfail_response(req)
+    resp = DNSRecord.parse(wire)
+
+    req_opts = [rr for rr in (req.ar or []) if rr.rtype == QTYPE.OPT]
+    resp_opts = [rr for rr in (resp.ar or []) if rr.rtype == QTYPE.OPT]
+
+    assert resp.header.rcode == RCODE.SERVFAIL
+    assert len(req_opts) == 1
+    assert len(resp_opts) == 1
+    assert int(resp_opts[0].rclass) == int(req_opts[0].rclass)
+
+
 def test_handle_non_edns_large_response_sets_tc(monkeypatch):
     """Brief: Non-EDNS clients receive TC=1 when UDP response exceeds 512 bytes.
 
