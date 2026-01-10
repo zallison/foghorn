@@ -67,7 +67,9 @@ class _TCPEchoNewPath:
             try:
                 self.sock.settimeout(0.2)
                 conn, _ = self.sock.accept()
-            except Exception:  # pragma: nocover defensive: spurious timeouts or accept errors are test-environment noise
+            except (
+                Exception
+            ):  # pragma: nocover defensive: spurious timeouts or accept errors are test-environment noise
                 continue
             t = threading.Thread(target=self._conn, args=(conn,), daemon=True)
             t.start()
@@ -92,7 +94,9 @@ class _TCPEchoNewPath:
                 if len(body) != ln:
                     return
                 conn.sendall(hdr + body)
-            except Exception:  # pragma: nocover defensive: safety net around test helper
+            except (
+                Exception
+            ):  # pragma: nocover defensive: safety net around test helper
                 return
 
     def close(self):
@@ -108,7 +112,9 @@ class _TCPEchoNewPath:
         self._stop = True
         try:
             self.sock.close()
-        except Exception:  # pragma: nocover defensive: close failure here is low-value for tests
+        except (
+            Exception
+        ):  # pragma: nocover defensive: close failure here is low-value for tests
             pass
 
 
@@ -168,7 +174,9 @@ def test_tcp_query_network_error_newpath(monkeypatch):
     monkeypatch.setattr(socket, "create_connection", _boom_create_connection)
 
     with pytest.raises(TCPError):
-        tcp_query("127.0.0.1", 9, b"\x12\x34", connect_timeout_ms=10, read_timeout_ms=10)
+        tcp_query(
+            "127.0.0.1", 9, b"\x12\x34", connect_timeout_ms=10, read_timeout_ms=10
+        )
 
 
 def test_recv_exact_helper_newpath(tcp_echo_newpath):
@@ -215,7 +223,9 @@ def test_tcp_pool_newpath(tcp_echo_newpath):
     try:
         r2 = pool.send(q, 500, 500)
         assert r1 == q and r2 == q
-    except TCPError as e:  # pragma: nocover defensive: tolerate rare short-read behaviour under pooled reuse
+    except (
+        TCPError
+    ) as e:  # pragma: nocover defensive: tolerate rare short-read behaviour under pooled reuse
         # In practice the server should echo correctly; allow transient framing errors
         pytest.skip(f"TCP pool short-read edge case: {e}")
 
