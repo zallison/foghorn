@@ -171,7 +171,9 @@ def test_encode_decode_roundtrip_bytes_and_pickled() -> None:
     assert memcached_cache_mod._decode_value(payload2, is_pickle2) == obj
 
 
-def test_memcached_cache_roundtrip_bytes_and_metadata_with_fake_client(monkeypatch) -> None:
+def test_memcached_cache_roundtrip_bytes_and_metadata_with_fake_client(
+    monkeypatch,
+) -> None:
     """Brief: MemcachedCache set/get round-trip bytes and expose TTL metadata.
 
     Inputs:
