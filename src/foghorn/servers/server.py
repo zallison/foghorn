@@ -196,6 +196,45 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
         return wire
 
 
+def _echo_client_edns(req: DNSRecord, resp: DNSRecord) -> None:
+    """Ensure a synthetic response echoes client EDNS(0) OPT when present.
+
+    Inputs:
+      - req: Parsed DNSRecord representing the original client query.
+      - resp: DNSRecord being constructed as the response (mutated in-place).
+
+    Outputs:
+      - None; best-effort injection of an OPT RR from the client when the
+        response does not already contain one.
+
+    This helper is intentionally conservative:
+      - If the client did not send EDNS(0), resp is left unchanged.
+      - If resp already carries an OPT RR, it is left unchanged so upstream or
+        plugin-provided EDNS semantics are preserved.
+    """
+    try:
+        client_opts = [
+            rr
+            for rr in (getattr(req, "ar", None) or [])
+            if getattr(rr, "rtype", None) == QTYPE.OPT
+        ]
+        if not client_opts:
+            return
+        existing_opts = [
+            rr
+            for rr in (getattr(resp, "ar", None) or [])
+            if getattr(rr, "rtype", None) == QTYPE.OPT
+        ]
+        if existing_opts:
+            return
+        # Echo the first client OPT RR to keep behaviour simple and
+        # deterministic; typical queries only carry a single OPT.
+        resp.add_ar(client_opts[0])
+    except Exception:  # pragma: no cover - defensive: best-effort only
+        # EDNS echo should never prevent a response from being generated.
+        return
+
+
 def _set_response_id_bytes(wire: bytes, req_id: int) -> bytes:
     try:
         if len(wire) >= 2:
@@ -242,6 +281,16 @@ def send_query_with_failover(
 
     timeout_sec = timeout_ms / 1000.0
     last_exception: Optional[Exception] = None
+
+    # Precompute whether the original query advertised EDNS(0) via an OPT RR in
+    # the additional section. This is used by the EDNS fallback shim below.
+    try:
+        _query_has_opt = any(
+            getattr(rr, "rtype", None) == QTYPE.OPT
+            for rr in (getattr(query, "ar", None) or [])
+        )
+    except Exception:  # pragma: no cover - defensive: non-DNSRecord queries
+        _query_has_opt = False
 
     try:
         max_c = int(max_concurrent or 1)
@@ -377,9 +426,57 @@ def send_query_with_failover(
                     # Fallback to dnslib's convenience API (used in unit tests)
                     response_wire = query.send(host, int(port), timeout=timeout_sec)
 
-            # Check for SERVFAIL or truncation to trigger fallback
+            # Check for SERVFAIL, EDNS compatibility issues, or truncation to
+            # trigger appropriate fallbacks.
             try:
                 parsed_response = DNSRecord.parse(response_wire)
+
+                # EDNS(0) compatibility shim: if an upstream returns FORMERR in
+                # response to an EDNS-enabled UDP query, retry once without
+                # EDNS. This covers servers that mishandle OPT records.
+                if (
+                    transport == "udp"
+                    and _query_has_opt
+                    and parsed_response.header.rcode == RCODE.FORMERR
+                ):
+                    logger.debug(
+                        "Upstream %s:%d returned FORMERR for EDNS query %s; retrying without EDNS",
+                        host,
+                        port,
+                        qname,
+                    )
+                    try:
+                        from foghorn.servers.transports.udp import (
+                            udp_query as _udp_query,
+                        )
+
+                        no_edns_query = DNSRecord.parse(query.pack())
+                        no_edns_query.ar = [
+                            rr
+                            for rr in (getattr(no_edns_query, "ar", None) or [])
+                            if getattr(rr, "rtype", None) != QTYPE.OPT
+                        ]
+                        response_wire = _udp_query(
+                            host,
+                            int(port),
+                            no_edns_query.pack(),
+                            timeout_ms=timeout_ms,
+                        )
+                        parsed_response = DNSRecord.parse(response_wire)
+                    except Exception as e2:  # pragma: no cover - defensive
+                        last_exception = e2
+                        return None, None, "all_failed"
+
+                    # After fallback, treat SERVFAIL as failure as usual.
+                    if parsed_response.header.rcode == RCODE.SERVFAIL:
+                        last_exception = Exception(
+                            f"FORMERR/SERVFAIL from {host}:{port} without EDNS"
+                        )
+                        return None, None, "all_failed"
+
+                    # Successful non-SERVFAIL response after EDNS fallback.
+                    return response_wire, upstream, "ok"
+
                 if parsed_response.header.rcode == RCODE.SERVFAIL:
                     logger.warning(
                         "Upstream %s:%d returned SERVFAIL for %s, trying next",
@@ -569,6 +666,8 @@ def _resolve_core(
                     # NXDOMAIN deny path
                     r = req.reply()
                     r.header.rcode = RCODE.NXDOMAIN
+                    # Echo client EDNS(0) OPT, when present, into synthetic NXDOMAIN.
+                    _echo_client_edns(req, r)
                     wire = _set_response_id(r.pack(), req.header.id)
                     if stats is not None:
                         try:
@@ -668,7 +767,17 @@ def _resolve_core(
                         rcode_name="NXDOMAIN",
                     )
                 if decision.action == "override" and decision.response is not None:
-                    wire = _set_response_id(decision.response, req.header.id)
+                    # Allow plugins to supply a full wire response, but ensure we
+                    # still echo client EDNS(0) when the override does not carry
+                    # its own OPT record.
+                    resp_wire = decision.response
+                    try:
+                        override_msg = DNSRecord.parse(resp_wire)
+                        _echo_client_edns(req, override_msg)
+                        resp_wire = override_msg.pack()
+                    except Exception:  # pragma: no cover - defensive: parse failure
+                        pass
+                    wire = _set_response_id(resp_wire, req.header.id)
                     if stats is not None:
                         try:
                             parsed = DNSRecord.parse(wire)
@@ -1054,26 +1163,9 @@ def _resolve_core(
             r.header.rcode = RCODE.SERVFAIL
 
             # When synthesizing SERVFAIL (for example, when there are no
-            # upstreams or all upstreams fail), preserve any EDNS(0) OPT record
-            # from the client so payload size and flags are echoed back.
-            try:
-                client_opts = [
-                    rr
-                    for rr in (getattr(req, "ar", None) or [])
-                    if getattr(rr, "rtype", None) == QTYPE.OPT
-                ]
-                if client_opts:
-                    existing_opts = [
-                        rr
-                        for rr in (getattr(r, "ar", None) or [])
-                        if getattr(rr, "rtype", None) == QTYPE.OPT
-                    ]
-                    if not existing_opts:
-                        r.add_ar(client_opts[0])
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: preserve best-effort behaviour
-                pass
+            # upstreams or all upstreams fail), echo any client EDNS(0) OPT RR
+            # into the response so payload size and flags are preserved.
+            _echo_client_edns(req, r)
 
             wire = _set_response_id(r.pack(), req.header.id)
             if stats is not None:
@@ -1162,10 +1254,21 @@ def _resolve_core(
                 if decision.action == "deny":
                     r = req.reply()
                     r.header.rcode = RCODE.NXDOMAIN
+                    # Echo client EDNS(0) OPT into post-plugin NXDOMAIN replies.
+                    _echo_client_edns(req, r)
                     out = r.pack()
                     break
                 if decision.action == "override" and decision.response is not None:
-                    out = decision.response
+                    # Allow plugins to override the wire response while still
+                    # echoing client EDNS(0) when the override does not carry an
+                    # OPT RR of its own.
+                    resp_wire = decision.response
+                    try:
+                        override_msg = DNSRecord.parse(resp_wire)
+                        _echo_client_edns(req, override_msg)
+                        out = override_msg.pack()
+                    except Exception:  # pragma: no cover - defensive: parse failure
+                        out = resp_wire
                     break
                 if decision.action == "allow":
                     # Explicit allow: stop evaluating further post plugins but
@@ -1325,6 +1428,8 @@ def _resolve_core(
             req = DNSRecord.parse(data)
             r = req.reply()
             r.header.rcode = RCODE.SERVFAIL
+            # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL.
+            _echo_client_edns(req, r)
             wire = _set_response_id(r.pack(), req.header.id)
             if stats is not None:
                 try:
