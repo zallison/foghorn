@@ -562,6 +562,13 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         """
         reply = request.reply()
         reply.header.rcode = RCODE.NXDOMAIN
+        # Echo client EDNS(0) OPT, when present, into this synthetic NXDOMAIN.
+        try:
+            from . import server as _server_mod
+
+            _server_mod._echo_client_edns(request, reply)
+        except Exception:  # pragma: no cover - defensive: best-effort only
+            pass
         return _set_response_id(reply.pack(), request.header.id)
 
     def _make_servfail_response(self, request: DNSRecord):
@@ -579,6 +586,13 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         """
         r = request.reply()
         r.header.rcode = RCODE.SERVFAIL
+        # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL.
+        try:
+            from . import server as _server_mod
+
+            _server_mod._echo_client_edns(request, r)
+        except Exception:  # pragma: no cover - defensive: best-effort only
+            pass
         return _set_response_id(r.pack(), request.header.id)
 
     def _ensure_edns(self, req: DNSRecord) -> None:
@@ -725,6 +739,13 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 req = DNSRecord.parse(data)
                 r = req.reply()
                 r.header.rcode = RCODE.SERVFAIL
+                # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL.
+                try:
+                    from . import server as _server_mod
+
+                    _server_mod._echo_client_edns(req, r)
+                except Exception:  # pragma: no cover - defensive: best-effort only
+                    pass
                 wire = _set_response_id(r.pack(), req.header.id)
             except Exception:
                 # Worst-case: echo the original bytes so the socket still sends
