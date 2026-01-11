@@ -562,11 +562,18 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         """
         reply = request.reply()
         reply.header.rcode = RCODE.NXDOMAIN
-        # Echo client EDNS(0) OPT, when present, into this synthetic NXDOMAIN.
+        # Echo client EDNS(0) OPT, when present, into this synthetic NXDOMAIN and
+        # attach a generic policy EDE when enabled.
         try:
             from . import server as _server_mod
 
             _server_mod._echo_client_edns(request, reply)
+            _server_mod._attach_ede_option(
+                request,
+                reply,
+                15,
+                "blocked by policy",
+            )  # Blocked
         except Exception:  # pragma: no cover - defensive: best-effort only
             pass
         return _set_response_id(reply.pack(), request.header.id)
@@ -586,11 +593,18 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         """
         r = request.reply()
         r.header.rcode = RCODE.SERVFAIL
-        # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL.
+        # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL and
+        # attach a generic EDE "Other" code when enabled.
         try:
             from . import server as _server_mod
 
             _server_mod._echo_client_edns(request, r)
+            _server_mod._attach_ede_option(
+                request,
+                r,
+                0,
+                "internal server error",
+            )  # Other
         except Exception:  # pragma: no cover - defensive: best-effort only
             pass
         return _set_response_id(r.pack(), request.header.id)
@@ -739,11 +753,18 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 req = DNSRecord.parse(data)
                 r = req.reply()
                 r.header.rcode = RCODE.SERVFAIL
-                # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL.
+                # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL
+                # and attach a generic EDE "Other" code when enabled.
                 try:
                     from . import server as _server_mod
 
                     _server_mod._echo_client_edns(req, r)
+                    _server_mod._attach_ede_option(
+                        req,
+                        r,
+                        0,
+                        "internal server error",
+                    )  # Other
                 except Exception:  # pragma: no cover - defensive: best-effort only
                     pass
                 wire = _set_response_id(r.pack(), req.header.id)

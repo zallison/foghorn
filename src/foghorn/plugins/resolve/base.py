@@ -121,6 +121,14 @@ class PluginDecision:
       - plugin_label: Optional[str] best-effort label derived from the originating
         plugin instance (typically BasePlugin.name) for use in statistics and
         logging when available.
+      - stat: Optional short string label used for statistics/metrics (for
+        example, "rate_limit" for rate-limit decisions).
+      - ede_code: Optional[int] RFC 8914 Extended DNS Error info-code hint used
+        by the core resolver when synthesizing responses (for example,
+        NXDOMAIN from a deny decision). When omitted, a default mapping based
+        on stat and context is used instead.
+      - ede_text: Optional[str] short human-readable text to include in the EDE
+        EXTRA-TEXT field when ede_code is provided.
 
     Outputs:
       - PluginDecision instance with attributes populated.
@@ -131,6 +139,8 @@ class PluginDecision:
     response: Optional[bytes] = None
     plugin: Optional[type["BasePlugin"]] = None
     plugin_label: Optional[str] = None
+    ede_code: Optional[int] = None
+    ede_text: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Brief: Infer originating plugin metadata when not explicitly provided.

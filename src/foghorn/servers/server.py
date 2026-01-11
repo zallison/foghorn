@@ -6,6 +6,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
     EDNS0,
+    EDNSOption,
     QTYPE,
     RCODE,
     RR,
@@ -232,6 +233,79 @@ def _echo_client_edns(req: DNSRecord, resp: DNSRecord) -> None:
         resp.add_ar(client_opts[0])
     except Exception:  # pragma: no cover - defensive: best-effort only
         # EDNS echo should never prevent a response from being generated.
+        return
+
+
+def _attach_ede_option(
+    req: DNSRecord,
+    resp: DNSRecord,
+    info_code: int,
+    text: Optional[str] = None,
+) -> None:
+    """Brief: Attach an RFC 8914 Extended DNS Error (EDE) option when enabled.
+
+    Inputs:
+      - req: Original client DNS query (parsed DNSRecord).
+      - resp: DNSRecord being constructed as the response (mutated in-place).
+      - info_code: Integer EDE info-code value (0-65535).
+      - text: Optional short UTF-8 string providing human-readable context.
+
+    Outputs:
+      - None; best-effort mutation of resp. On any error, resp is left unchanged.
+
+    Behaviour:
+      - Only runs when DNSUDPHandler.enable_ede is truthy.
+      - Only attaches EDE when the client advertised EDNS(0) via an OPT RR.
+      - Reuses an existing OPT in resp when present; otherwise copies the first
+        client OPT into resp before appending the EDE option.
+    """
+
+    try:
+        if not bool(getattr(DNSUDPHandler, "enable_ede", False)):
+            return
+
+        client_opts = [
+            rr
+            for rr in (getattr(req, "ar", None) or [])
+            if getattr(rr, "rtype", None) == QTYPE.OPT
+        ]
+        if not client_opts:
+            return
+
+        # Locate or create an OPT RR on the response.
+        opt_rr = None
+        for rr in getattr(resp, "ar", None) or []:
+            if getattr(rr, "rtype", None) == QTYPE.OPT:
+                opt_rr = rr
+                break
+        if opt_rr is None:
+            # Conservative: echo the first client OPT into the response, then
+            # re-scan to obtain the actual instance attached to resp.
+            resp.add_ar(client_opts[0])
+            for rr in getattr(resp, "ar", None) or []:
+                if getattr(rr, "rtype", None) == QTYPE.OPT:
+                    opt_rr = rr
+                    break
+        if opt_rr is None:
+            return
+
+        try:
+            code = int(info_code) & 0xFFFF
+        except Exception:
+            code = 0
+        payload = code.to_bytes(2, "big")
+        if text:
+            try:
+                payload += str(text).encode("utf-8")
+            except Exception:
+                # Best-effort: ignore text encoding failures.
+                pass
+
+        # Append the EDE option (option-code 15) to the OPT rdata list.
+        rdata_list = getattr(opt_rr, "rdata", None)
+        if isinstance(rdata_list, list):
+            rdata_list.append(EDNSOption(15, payload))
+    except Exception:  # pragma: no cover - defensive: best-effort only
         return
 
 
@@ -666,8 +740,44 @@ def _resolve_core(
                     # NXDOMAIN deny path
                     r = req.reply()
                     r.header.rcode = RCODE.NXDOMAIN
-                    # Echo client EDNS(0) OPT, when present, into synthetic NXDOMAIN.
+                    # Echo client EDNS(0) OPT, when present, into synthetic NXDOMAIN
+                    # and, when enabled, attach an EDE option describing the
+                    # policy-based deny.
                     _echo_client_edns(req, r)
+                    # Allow plugins to override the EDE info-code/text via
+                    # optional PluginDecision.ede_code / ede_text attributes,
+                    # falling back to a default mapping based on stat when
+                    # they are not provided.
+                    try:
+                        ede_code_hint = getattr(decision, "ede_code", None)
+                    except Exception:
+                        ede_code_hint = None
+                    try:
+                        ede_text_hint = getattr(decision, "ede_text", None)
+                    except Exception:
+                        ede_text_hint = None
+                    if ede_code_hint is not None:
+                        ede_code = int(ede_code_hint)
+                        ede_text = (
+                            str(ede_text_hint)
+                            if ede_text_hint is not None
+                            else "policy deny"
+                        )
+                    else:
+                        try:
+                            stat_label = getattr(decision, "stat", None)
+                        except Exception:
+                            stat_label = None
+                        # Use "Not Ready" (14) for explicit rate limiting when
+                        # decision.stat == "rate_limit"; otherwise treat this as a
+                        # generic policy block (15).
+                        if stat_label == "rate_limit":
+                            ede_code = 14  # Not Ready
+                            ede_text = "rate limit exceeded"
+                        else:
+                            ede_code = 15  # Blocked
+                            ede_text = "blocked by policy"
+                    _attach_ede_option(req, r, ede_code, ede_text)
                     wire = _set_response_id(r.pack(), req.header.id)
                     if stats is not None:
                         try:
@@ -1164,8 +1274,11 @@ def _resolve_core(
 
             # When synthesizing SERVFAIL (for example, when there are no
             # upstreams or all upstreams fail), echo any client EDNS(0) OPT RR
-            # into the response so payload size and flags are preserved.
+            # into the response so payload size and flags are preserved, and
+            # attach an EDE option describing the upstream/network failure when
+            # enabled.
             _echo_client_edns(req, r)
+            _attach_ede_option(req, r, 23, "all upstreams failed")  # Network Error
 
             wire = _set_response_id(r.pack(), req.header.id)
             if stats is not None:
@@ -1254,8 +1367,41 @@ def _resolve_core(
                 if decision.action == "deny":
                     r = req.reply()
                     r.header.rcode = RCODE.NXDOMAIN
-                    # Echo client EDNS(0) OPT into post-plugin NXDOMAIN replies.
+                    # Echo client EDNS(0) OPT into post-plugin NXDOMAIN replies
+                    # and, when enabled, attach an EDE option describing the
+                    # post-resolve policy deny.
                     _echo_client_edns(req, r)
+                    # Allow plugins to override the EDE info-code/text via
+                    # optional PluginDecision.ede_code / ede_text attributes,
+                    # falling back to a default mapping based on stat when
+                    # they are not provided.
+                    try:
+                        ede_code_hint = getattr(decision, "ede_code", None)
+                    except Exception:
+                        ede_code_hint = None
+                    try:
+                        ede_text_hint = getattr(decision, "ede_text", None)
+                    except Exception:
+                        ede_text_hint = None
+                    if ede_code_hint is not None:
+                        ede_code = int(ede_code_hint)
+                        ede_text = (
+                            str(ede_text_hint)
+                            if ede_text_hint is not None
+                            else "policy deny"
+                        )
+                    else:
+                        try:
+                            stat_label = getattr(decision, "stat", None)
+                        except Exception:
+                            stat_label = None
+                        if stat_label == "rate_limit":
+                            ede_code = 14  # Not Ready
+                            ede_text = "rate limit exceeded"
+                        else:
+                            ede_code = 15  # Blocked
+                            ede_text = "blocked by policy"
+                    _attach_ede_option(req, r, ede_code, ede_text)
                     out = r.pack()
                     break
                 if decision.action == "override" and decision.response is not None:
@@ -1428,8 +1574,11 @@ def _resolve_core(
             req = DNSRecord.parse(data)
             r = req.reply()
             r.header.rcode = RCODE.SERVFAIL
-            # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL.
+            # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL,
+            # and, when enabled, attach a generic EDE "Other" code so clients
+            # can distinguish internal errors from upstream failures.
             _echo_client_edns(req, r)
+            _attach_ede_option(req, r, 0, "internal server error")  # Other
             wire = _set_response_id(r.pack(), req.header.id)
             if stats is not None:
                 try:
@@ -1556,6 +1705,7 @@ class DNSServer:
         cache_prefetch_max_ttl: int = 0,
         cache_prefetch_refresh_before_expiry: float = 0.0,
         cache_prefetch_allow_stale_after_expiry: float = 0.0,
+        enable_ede: bool = False,
     ) -> None:
         """Initialize a UDP DNSServer.
 
@@ -1629,6 +1779,13 @@ class DNSServer:
             DNSUDPHandler.edns_udp_payload = max(512, int(edns_udp_payload))
         except Exception:
             DNSUDPHandler.edns_udp_payload = 1232
+        # Extended DNS Errors (RFC 8914) feature gate. When enable_ede is false
+        # the resolver pipeline will not add any EDE options of its own and
+        # will continue to treat upstream EDNS options opaquely.
+        try:
+            DNSUDPHandler.enable_ede = bool(enable_ede)
+        except Exception:
+            DNSUDPHandler.enable_ede = False
         try:
             self.server = socketserver.ThreadingUDPServer((host, port), DNSUDPHandler)
         except PermissionError as e:
