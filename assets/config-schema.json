@@ -2666,6 +2666,11 @@
           "description": "Type: object.",
           "type": "object"
         },
+        "enable_ede": {
+          "default": false,
+          "description": "Enable generation and pass-through of Extended DNS Errors (RFC 8914) for EDNS clients.",
+          "type": "boolean"
+        },
         "http": {
           "description": "Type: object.",
           "type": "object"
