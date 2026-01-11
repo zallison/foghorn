@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - Resolve plugins can optionally target specific domains using `targets_domains` with exact and suffix matching modes, and new example configuration has been added to demonstrate these options.
 - The MDNS resolver now exposes richer snapshot information, including instance HTML/URLs and refined columns in the admin web UI.
 - New example resolve plugins ("file over DNS" and "finger") were added under `foghorn.plugins.resolve.examples`, along with tests.
+- The `zone` records plugin can now load RFC‑1035 style BIND zonefiles via `bind_paths` and merge them with inline and file-based records into a single authoritative view.
 
 ### Changed
 
@@ -22,16 +23,17 @@ All notable changes to this project will be documented in this file.
 - MDNS plugin behavior around default service types and domain suffix handling was refined for more predictable snapshots.
 - Latency histogram buckets were expanded to give more resolution across slower queries.
 - Example plugin filter configuration was updated to use the new targeting options and defaults.
+- TTL cache behavior was refined across the in-memory, SQLite, and Foghorn TTL backends to keep expiry and registry semantics consistent.
 
 ### Fixed
 
 - Fixed several edge cases where EDNS OPT records or DO bits could be lost or misapplied in error and SERVFAIL paths.
 - Corrected UDP handling for large answers without EDNS so that clients reliably see TC=1 and can retry over TCP.
-- Hardened cache-path test coverage and related server paths where EDNS and cache behavior interact.
+- Hardened cache, resolver, server, and transport test coverage, especially where EDNS and cache behavior interact, to catch more edge cases.
 
 ### Documentation
 
-- Updated the top-level README and developer documentation to describe listener/security context, plugin targeting options, and EDNS behavior.
+- Updated the top-level README and developer documentation to describe listener/security context, plugin targeting options, EDNS behavior, and the new zone/BIND zonefile support.
 - Refreshed RFC-style notes to match the current resolver and transport behavior.
 - Regenerated and expanded the JSON configuration schema with per-field type and default annotations to match the new options.
 
