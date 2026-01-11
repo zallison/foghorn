@@ -61,7 +61,29 @@ With special thanks to **Fiona** Weatherwax for their contributions and inspirat
 
 Also thanks to my junior developers, AI from both local and remote models, some via warp.dev, who keeps my docstrings and unit tests up to date, creates good commit messages, and other janitorial tasks. Also ~~a lot of help with the~~ all the HTML/JS. Because I'm just not good at it.
 
-## 1. Quick start: minimal config
+## 1. Quick start
+
+## 1.1 Install
+
+Foghorn can be installed a few different ways, depending on how you prefer to run services:
+
+•  From PyPI (recommended for most users)  
+  Install the latest released version into your Python environment:  
+  pip install foghorn  
+  This gives you the foghorn CLI and library directly on your host system.
+
+•  From source (GitHub)  
+  If you want to track development, hack on plugins, or run a specific commit/branch, clone the repository and install it in editable mode:  
+  git clone https://github.com/zallison/foghorn.git  
+  cd foghorn  
+  pip install -e .  
+  This keeps your local checkout and installed code in sync as you make changes.
+
+•  Prebuilt Docker images (amd64 and armhf)  
+  If you prefer to run Foghorn in a container, prebuilt images for both amd64 and armhf are available on Docker Hub at https://hub.docker.com/r/zallison/foghorn.  
+  Pull the image for your architecture and run it with your configuration mounted as /foghorn/config.yaml, along with any port mappings you need for DNS, DoT/DoH, and the admin web UI.
+
+## 1.2 Minimal config
 
 This example listens on all interfaces for UDP/TCP DNS and forwards to a public DoT resolver. It also enables a simple in-memory cache.
 
