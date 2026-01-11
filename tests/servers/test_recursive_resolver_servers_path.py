@@ -47,7 +47,9 @@ def _make_nxdomain_with_soa(qname: str) -> bytes:
     return r.pack()
 
 
-def test_servers_recursive_udp_and_tcp_wrappers_delegate(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_servers_recursive_udp_and_tcp_wrappers_delegate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Brief: udp_query/tcp_query wrappers in servers path delegate to transports.
 
     Inputs:
@@ -60,7 +62,9 @@ def test_servers_recursive_udp_and_tcp_wrappers_delegate(monkeypatch: pytest.Mon
 
     udp_called: dict[str, Any] = {}
 
-    def fake_udp_query(host: str, port: int, wire: bytes, timeout_ms: int = 0) -> bytes:  # noqa: D401, ANN001
+    def fake_udp_query(
+        host: str, port: int, wire: bytes, timeout_ms: int = 0
+    ) -> bytes:  # noqa: D401, ANN001
         """Return a fixed UDP response and record call arguments."""
 
         udp_called["args"] = (host, port, wire, timeout_ms)
@@ -155,7 +159,9 @@ def test_servers_query_single_udp_and_tcp_flow(monkeypatch: pytest.MonkeyPatch) 
     udp_calls: list[tuple[str, int, bytes, int]] = []
     tcp_calls: list[tuple[str, int, bytes, int, int]] = []
 
-    def fake_udp_query(host: str, port: int, wire: bytes, timeout_ms: int = 0) -> bytes:  # noqa: D401, ANN001
+    def fake_udp_query(
+        host: str, port: int, wire: bytes, timeout_ms: int = 0
+    ) -> bytes:  # noqa: D401, ANN001
         """Return a reply with TC=1 set to trigger TCP fallback."""
 
         udp_calls.append((host, port, wire, timeout_ms))
@@ -205,7 +211,9 @@ def test_servers_query_single_udp_and_tcp_flow(monkeypatch: pytest.MonkeyPatch) 
     assert any(rr.rdata == A("198.51.100.10") for rr in resp.rr)
 
 
-def test_servers_recursive_resolver_positive_referral_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_servers_recursive_resolver_positive_referral_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Brief: servers RecursiveResolver walks root -> TLD -> auth using NS+glue.
 
     Inputs:
@@ -228,7 +236,9 @@ def test_servers_recursive_resolver_positive_referral_chain(monkeypatch: pytest.
         RecursiveResolver, "_choose_initial_servers", fake_choose_initial_servers
     )
 
-    def fake_udp_query(host: str, port: int, wire: bytes, timeout_ms: int = 0) -> bytes:  # noqa: D401, ANN001
+    def fake_udp_query(
+        host: str, port: int, wire: bytes, timeout_ms: int = 0
+    ) -> bytes:  # noqa: D401, ANN001
         """Return synthetic responses for root, TLD, and auth servers."""
 
         q = DNSRecord.parse(wire)
@@ -283,7 +293,9 @@ def test_servers_recursive_resolver_positive_referral_chain(monkeypatch: pytest.
     assert upstream == f"{auth_ip}:53"
 
 
-def test_servers_resolve_root_qname_no_servers_synthesizes_servfail(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_servers_resolve_root_qname_no_servers_synthesizes_servfail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Brief: servers resolve() with no servers returns a synthesized SERVFAIL.
 
     Inputs:

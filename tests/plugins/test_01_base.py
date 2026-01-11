@@ -451,6 +451,46 @@ def test_base_plugin_targets_uses_cache_for_repeated_client(monkeypatch):
     assert calls["count"] == 1
 
 
+def test_base_plugin_targets_listener_secure_and_unsecure() -> None:
+    """Brief: targets() honors targets_listener with secure/unsecure aliases.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts that secure-only and unsecure-only plugins respect
+        listener names and secure/unsecure aliases.
+    """
+
+    # Secure-only plugin: alias "secure" should expand to {"dot", "doh"}.
+    p_secure = BasePlugin(targets_listener="secure")
+    ctx_dot = PluginContext(client_ip="192.0.2.1", listener="dot", secure=True)
+    ctx_doh = PluginContext(client_ip="192.0.2.1", listener="doh", secure=True)
+    ctx_udp = PluginContext(client_ip="192.0.2.1", listener="udp", secure=False)
+    ctx_tcp = PluginContext(client_ip="192.0.2.1", listener="tcp", secure=False)
+    ctx_unknown = PluginContext(client_ip="192.0.2.1")
+
+    assert p_secure.targets(ctx_dot) is True
+    assert p_secure.targets(ctx_doh) is True
+    assert p_secure.targets(ctx_udp) is False
+    assert p_secure.targets(ctx_tcp) is False
+    assert p_secure.targets(ctx_unknown) is False
+
+    # Unsecure-only plugin: alias "unsecure" should expand to {"udp", "tcp"}.
+    p_unsecure = BasePlugin(targets_listener="unsecure")
+    ctx_dot2 = PluginContext(client_ip="192.0.2.2", listener="dot", secure=True)
+    ctx_doh2 = PluginContext(client_ip="192.0.2.2", listener="doh", secure=True)
+    ctx_udp2 = PluginContext(client_ip="192.0.2.2", listener="udp", secure=False)
+    ctx_tcp2 = PluginContext(client_ip="192.0.2.2", listener="tcp", secure=False)
+    ctx_unknown2 = PluginContext(client_ip="192.0.2.2")
+
+    assert p_unsecure.targets(ctx_udp2) is True
+    assert p_unsecure.targets(ctx_tcp2) is True
+    assert p_unsecure.targets(ctx_dot2) is False
+    assert p_unsecure.targets(ctx_doh2) is False
+    assert p_unsecure.targets(ctx_unknown2) is False
+
+
 def _make_raw_query(name: str, qtype: int) -> bytes:
     """Brief: Helper to construct a minimal DNS query wire for BasePlugin tests.
 

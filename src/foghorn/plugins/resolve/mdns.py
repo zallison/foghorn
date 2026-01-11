@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import threading
+import html
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
@@ -10,7 +11,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from dnslib import A, AAAA, PTR, QTYPE, RR, SRV, TXT, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field, validator
 
-from cachetools import TTLCache  # type: ignore[import]
+from cachetools import LRUCache, Cache
 from foghorn.utils.register_caches import registered_cached
 
 from foghorn.plugins.resolve.base import (
@@ -133,9 +134,9 @@ PTR_ADDITIONAL_HOST_LIMIT = 2
 
 # Short-lived caches for hot, pure-ish helper methods. These are strictly
 # internal to the plugin and do not affect resolver statistics semantics.
-_MDNS_NORMALIZE_OWNER_CACHE: TTLCache = TTLCache(maxsize=4096, ttl=3600)
-_MDNS_MIRROR_SUFFIXES_CACHE: TTLCache = TTLCache(maxsize=4096, ttl=3600)
-_MDNS_SANITIZE_QNAME_CACHE: TTLCache = TTLCache(maxsize=2048, ttl=3600)
+_MDNS_NORMALIZE_OWNER_CACHE: Cache = LRUCache(maxsize=4096)
+_MDNS_MIRROR_SUFFIXES_CACHE: Cache = LRUCache(maxsize=4096)
+_MDNS_SANITIZE_QNAME_CACHE: Cache = LRUCache(maxsize=2048)
 
 
 class MdnsBridgeConfig(BaseModel):
@@ -550,18 +551,10 @@ class MdnsBridge(BasePlugin):
             ) from exc
 
         # Optional: directly browse configured service types. When no list is
-        # provided, fall back to a curated default set so users can omit the
-        # field entirely with sane defaults.
+        # provided, fall back to the curated default set defined at module level
+        # so users can omit the field entirely with sane defaults.
         configured_types = list(getattr(self._config_model, "service_types", []) or [])
-        effective_service_types = configured_types
-        if not effective_service_types:
-            try:
-                from foghorn.plugins.mdns import (
-                    DEFAULT_MDNS_SERVICE_TYPES,
-                )  # local import to avoid cycles
-            except Exception:  # pragma: no cover - defensive fallback
-                DEFAULT_MDNS_SERVICE_TYPES = []  # type: ignore[assignment]
-            effective_service_types = list(DEFAULT_MDNS_SERVICE_TYPES)
+        effective_service_types = configured_types or list(DEFAULT_MDNS_SERVICE_TYPES)
 
         for service_type in effective_service_types:
             try:
@@ -1750,12 +1743,16 @@ class MdnsBridge(BasePlugin):
                     "type": "table",
                     "path": "services",
                     "columns": [
-                        {"key": "instance", "label": "Instance"},
-                        {"key": "type", "label": "Type"},
+                        {"key": "instance_html", "label": "Instance", "html": True},
                         {"key": "host", "label": "Host"},
                         {"key": "ipv4", "label": "IPv4", "join": ", "},
                         {"key": "ipv6", "label": "IPv6", "join": ", "},
-                        {"key": "uptime_human", "label": "Uptime", "align": "right"},
+                        {
+                            "key": "uptime_human",
+                            "label": "Uptime",
+                            "align": "right",
+                            "nowrap": True,
+                        },
                     ],
                 },
                 {
@@ -1845,19 +1842,30 @@ class MdnsBridge(BasePlugin):
             }
             state_snapshot: Dict[str, _ServiceState] = dict(self._service_state)
 
-        # Build a unified set of service owners limited to the `.local` mDNS
-        # namespace so the admin view remains focused on what the plugin is
-        # *discovering*, not every DNS suffix it might be serving under.
+        # Build a unified set of service owners limited to names under the
+        # configured DNS suffixes so the admin view reflects what the plugin is
+        # actually serving.
         srv_by_owner: Dict[str, _SrvValue] = {}
         all_owner_names: Set[str] = set()
+        allowed_suffixes: Set[str] = {
+            str(d or "").strip().lower() for d in dns_doms if str(d or "").strip()
+        }
+
+        def _matches_suffix(name: str) -> bool:
+            if not name:
+                return False
+            if not allowed_suffixes:
+                return True
+            return any(name.endswith(suf) for suf in allowed_suffixes)
+
         for owner, srv in srv_items:
             owner_name = str(owner or "").strip().lower()
-            if owner_name and owner_name.endswith(".local"):
+            if owner_name and _matches_suffix(owner_name):
                 srv_by_owner[owner_name] = srv
                 all_owner_names.add(owner_name)
         for owner in state_snapshot.keys():
             owner_name = str(owner or "").strip().lower()
-            if owner_name and owner_name.endswith(".local"):
+            if owner_name and _matches_suffix(owner_name):
                 all_owner_names.add(owner_name)
 
         for owner_name in sorted(all_owner_names):
@@ -1868,13 +1876,15 @@ class MdnsBridge(BasePlugin):
             parts = owner_name.split(".")
             if len(parts) > 1:
                 service_type = ".".join(parts[1:])
-            else:  # pragma: nocover defensive: owner_name always contains at least one dot (".local")
+            else:  # pragma: nocover defensive: owner_name always contains at least one dot
                 service_type = ""
 
             # Present a cleaner service type to the admin UI by stripping the
-            # mDNS suffix; the discovery namespace is already implied.
-            if service_type.endswith(".local"):
-                service_type = service_type[: -len(".local")]
+            # DNS suffix used for serving (for example, ".local" or ".zaa").
+            for suf in sorted(allowed_suffixes, key=len, reverse=True):
+                if suf and service_type.endswith(suf):
+                    service_type = service_type[: -len(suf)]
+                    break
 
             state = state_snapshot.get(owner_name)
             raw_last_seen = state.last_seen if state is not None else ""
@@ -1908,9 +1918,10 @@ class MdnsBridge(BasePlugin):
                 internal_host = (
                     str(getattr(srv, "target", "") or "").rstrip(".").lower()
                 )
-                # Only report host entries that remain in the `.local` namespace to
-                # keep the view consistent with the service filter above.
-                if internal_host and not internal_host.endswith(".local"):
+                # Only report host entries that live under one of the configured
+                # DNS suffixes so the view stays consistent with the service
+                # owner filter above.
+                if internal_host and not _matches_suffix(internal_host):
                     internal_host = ""
 
                 if internal_host:
@@ -1952,6 +1963,64 @@ class MdnsBridge(BasePlugin):
                 "last_seen": last_seen,
                 "status": status,
             }
+
+            # Build HTML for the Instance column. When we can synthesize a URL
+            # from the service type/host/port, render the instance as a link;
+            # otherwise fall back to plain text. In both cases, highlight the
+            # first label (the friendly service name).
+            svc_type_lower = str(service_type or "").lower()
+            host_for_url = str(host_name or "").strip()
+            port_val: Optional[int] = (
+                getattr(srv, "port", None) if srv is not None else None
+            )
+
+            def _build_url() -> Optional[str]:
+                if not host_for_url:
+                    return None
+                # HTTP-style services.
+                if (
+                    svc_type_lower.endswith("_http._tcp")
+                    or svc_type_lower.endswith("_ipp._tcp")
+                    or svc_type_lower.endswith("_ipp-usb._tcp")
+                ):
+                    if port_val and port_val not in (80, 443):
+                        return f"http://{host_for_url}:{port_val}/"
+                    if port_val == 443:
+                        return f"https://{host_for_url}/"
+                    return f"http://{host_for_url}/"
+                # HTTPS services.
+                if svc_type_lower.endswith("_https._tcp"):
+                    if port_val and port_val != 443:
+                        return f"https://{host_for_url}:{port_val}/"
+                    return f"https://{host_for_url}/"
+                # SMB / file sharing.
+                if svc_type_lower.endswith("_smb._tcp") or svc_type_lower.endswith(
+                    "_microsoft-ds._tcp"
+                ):
+                    if port_val and port_val != 445:
+                        return f"smb://{host_for_url}:{port_val}/"
+                    return f"smb://{host_for_url}/"
+                return None
+
+            url = _build_url()
+
+            inst_labels = str(owner_name or "").split(".")
+            if inst_labels:
+                head = html.escape(inst_labels[0])
+                tail_labels = inst_labels[1:]
+                if tail_labels:
+                    tail = ".".join(html.escape(p) for p in tail_labels)
+                    rendered = f"<strong>{head}</strong>.{tail}"
+                else:
+                    rendered = f"<strong>{head}</strong>"
+            else:
+                rendered = html.escape(str(owner_name or ""))
+
+            if url:
+                safe_url = html.escape(url, quote=True)
+                record["instance_html"] = f'<a href="{safe_url}">{rendered}</a>'
+            else:
+                record["instance_html"] = rendered
 
             # Provide the raw ISO-8601 timestamp for frontend formatting in the
             # user's browser timezone and for tooltips.

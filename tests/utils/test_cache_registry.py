@@ -298,15 +298,17 @@ def test_apply_decorated_cache_overrides_validates_override_shapes() -> None:
     cache_reg.apply_decorated_cache_overrides([42])  # type: ignore[list-item]
 
     # Invalid module/name values are skipped without raising.
-    cache_reg.apply_decorated_cache_overrides([
-        {"module": "", "name": "fn"},
-        {"module": __name__, "name": ""},
-    ])
+    cache_reg.apply_decorated_cache_overrides(
+        [
+            {"module": "", "name": "fn"},
+            {"module": __name__, "name": ""},
+        ]
+    )
 
     # Override without a backend exercises backend_filter=None path and import failure handling.
-    cache_reg.apply_decorated_cache_overrides([
-        {"module": "nonexistent.module.path", "name": "fn"}
-    ])
+    cache_reg.apply_decorated_cache_overrides(
+        [{"module": "nonexistent.module.path", "name": "fn"}]
+    )
 
 
 def test_apply_decorated_cache_overrides_updates_ttlcache_maxsize_and_ttl() -> None:

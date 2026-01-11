@@ -422,7 +422,9 @@ def load_stats_store_backend(
             cfg = (
                 entry.get("config")
                 if isinstance(entry.get("config"), dict)
-                else {k: v for k, v in entry.items() if k not in {"backend", "name", "id"}}
+                else {
+                    k: v for k, v in entry.items() if k not in {"backend", "name", "id"}
+                }
             )
             # Prefer an explicit logical instance name when provided so that
             # primary_backend can reference either a backend alias or a

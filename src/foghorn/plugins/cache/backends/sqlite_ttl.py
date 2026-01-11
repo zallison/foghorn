@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 import os
 import pickle
 import sqlite3
 import threading
 import time
 from typing import Any, Optional, Tuple
+
+
+_logger = logging.getLogger(__name__)
 
 
 class SQLite3TTLCache:
@@ -75,6 +79,12 @@ class SQLite3TTLCache:
         self.calls_total: int = 0
         self.cache_hits: int = 0
         self.cache_misses: int = 0
+
+        # Eviction counters (best-effort) for diagnostics.
+        # evictions_total: total rows removed due to TTL expiry.
+        # evictions_ttl: TTL-based purges.
+        self.evictions_total: int = 0
+        self.evictions_ttl: int = 0
 
         self._lock = threading.RLock()
         self._conn = self._init_connection()
@@ -181,45 +191,61 @@ class SQLite3TTLCache:
             )
             row = cur.fetchone()
 
-            if not row:
-                self.cache_misses += 1
-                return None
+        if not row:
+            self.cache_misses += 1
+            return None
 
-            value_blob, value_is_pickle, expiry = row
+        value_blob, value_is_pickle, expiry = row
+        try:
+            expiry_f = float(expiry)
+        except Exception:
+            # Malformed row: drop it and treat as a miss for diagnostics.
+            cur = self._conn.cursor()
+            cur.execute(
+                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                (key_blob, int(key_is_pickle)),
+            )
+            self._conn.commit()
+            self.cache_misses += 1
+            return None
+
+        if now >= expiry_f:
+            cur = self._conn.cursor()
+            cur.execute(
+                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                (key_blob, int(key_is_pickle)),
+            )
+            self._conn.commit()
+            self.cache_misses += 1
             try:
-                expiry_f = float(expiry)
-            except Exception:
-                # Malformed row: drop it and treat as a miss for diagnostics.
-                cur.execute(
-                    f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
-                    (key_blob, int(key_is_pickle)),
-                )
-                self._conn.commit()
-                self.cache_misses += 1
-                return None
-
-            if now >= expiry_f:
-                cur.execute(
-                    f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
-                    (key_blob, int(key_is_pickle)),
-                )
-                self._conn.commit()
-                self.cache_misses += 1
-                return None
-
+                self.evictions_total += 1
+                self.evictions_ttl += 1
+            except Exception:  # pragma: no cover - defensive counters
+                pass
             try:
-                value = self._decode(bytes(value_blob), int(value_is_pickle))
-            except Exception:
-                cur.execute(
-                    f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
-                    (key_blob, int(key_is_pickle)),
+                _logger.debug(
+                    "SQLite3TTLCache TTL eviction (get): ns=%r key_blob_len=%d",
+                    self.namespace,
+                    len(key_blob),
                 )
-                self._conn.commit()
-                self.cache_misses += 1
-                return None
+            except Exception:  # pragma: no cover - defensive logging
+                pass
+            return None
 
-            self.cache_hits += 1
-            return value
+        try:
+            value = self._decode(bytes(value_blob), int(value_is_pickle))
+        except Exception:
+            cur = self._conn.cursor()
+            cur.execute(
+                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                (key_blob, int(key_is_pickle)),
+            )
+            self._conn.commit()
+            self.cache_misses += 1
+            return None
+
+        self.cache_hits += 1
+        return value
 
     def get_with_meta(
         self, key: Any
@@ -354,6 +380,20 @@ class SQLite3TTLCache:
             cur.execute(f"DELETE FROM {table} WHERE expiry <= ?", (float(now),))
             removed = int(cur.rowcount or 0)
             self._conn.commit()
+        if removed > 0:
+            try:
+                self.evictions_total += removed
+                self.evictions_ttl += removed
+            except Exception:  # pragma: no cover - defensive counters
+                pass
+            try:
+                _logger.debug(
+                    "SQLite3TTLCache TTL purge: ns=%r removed=%d",
+                    self.namespace,
+                    removed,
+                )
+            except Exception:  # pragma: no cover - defensive logging
+                pass
         return removed
 
     def close(self) -> None:

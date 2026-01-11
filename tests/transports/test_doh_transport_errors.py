@@ -58,7 +58,8 @@ def test_build_ssl_ctx_no_verify(monkeypatch):
         return "CTX"
 
     monkeypatch.setattr(
-        "foghorn.servers.transports.doh.ssl._create_unverified_context", fake_unverified_context
+        "foghorn.servers.transports.doh.ssl._create_unverified_context",
+        fake_unverified_context,
     )
 
     ctx = _build_ssl_ctx(verify=False, ca_file=None)
@@ -74,7 +75,8 @@ def test_build_ssl_ctx_with_cafile(monkeypatch):
         return "CTX2"
 
     monkeypatch.setattr(
-        "foghorn.servers.transports.doh.ssl.create_default_context", fake_create_default_context
+        "foghorn.servers.transports.doh.ssl.create_default_context",
+        fake_create_default_context,
     )
 
     ctx = _build_ssl_ctx(verify=True, ca_file="/tmp/ca.pem")
@@ -90,7 +92,8 @@ def test_doh_https_tls_error(monkeypatch):
             raise _ssl.SSLError("bad tls")
 
     monkeypatch.setattr(
-        "foghorn.servers.transports.doh.http.client.HTTPSConnection", FailingHTTPSConnection
+        "foghorn.servers.transports.doh.http.client.HTTPSConnection",
+        FailingHTTPSConnection,
     )
 
     with pytest.raises(DoHError) as excinfo:
@@ -105,7 +108,8 @@ def test_doh_https_os_error(monkeypatch):
             raise OSError("boom")
 
     monkeypatch.setattr(
-        "foghorn.servers.transports.doh.http.client.HTTPSConnection", FailingHTTPSConnection
+        "foghorn.servers.transports.doh.http.client.HTTPSConnection",
+        FailingHTTPSConnection,
     )
 
     with pytest.raises(DoHError) as excinfo:

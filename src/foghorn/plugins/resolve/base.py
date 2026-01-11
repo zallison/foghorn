@@ -7,8 +7,9 @@ import logging.handlers
 import os
 import sys
 from dataclasses import dataclass
-from typing import ClassVar, Dict, List, Optional, Sequence, Tuple, Union, final
+from typing import ClassVar, Dict, List, Optional, Sequence, Tuple, Union, Set, final
 
+from cachetools import LRUCache
 from dnslib import (  # noqa: F401 - imports are for implementations of this class
     AAAA,
     CNAME,
@@ -24,7 +25,6 @@ from dnslib import (  # noqa: F401 - imports are for implementations of this cla
     DNSRecord,
 )
 
-from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 from foghorn.plugins.cache.base import CachePlugin
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.config.logging_config import BracketLevelFormatter, SyslogFormatter
@@ -175,9 +175,17 @@ class PluginContext:
 
     Inputs:
       - client_ip: str IP address of the requesting client.
+      - listener: Optional logical inbound listener identifier (for example,
+        "udp", "tcp", "dot", or "doh").
+      - secure: Optional bool indicating whether the inbound transport is secured
+        with TLS (True for DoT/DoH, False for plain UDP/TCP). When not provided,
+        plugins should treat this as "unknown" and avoid assuming security state.
 
     Attributes (inputs to plugins):
       - client_ip: Requestor's IP address.
+      - listener: Optional string naming the listener/transport that received the
+        query.
+      - secure: Optional bool flag for transport security (True/False/None).
       - upstream_candidates: Optional[list[dict]] overrides global upstreams when set;
         each item is {'host': str, 'port': int}. When provided, the server must use
         only these upstreams for this request and return SERVFAIL if all fail.
@@ -188,23 +196,44 @@ class PluginContext:
 
     Example use:
         >>> from foghorn.plugins.resolve.base import PluginContext
-        >>> ctx = PluginContext(client_ip="192.0.2.1")
+        >>> ctx = PluginContext(client_ip="192.0.2.1", listener="udp", secure=False)
         >>> ctx.client_ip
         '192.0.2.1'
+        >>> ctx.listener
+        'udp'
+        >>> ctx.secure
+        False
         >>> ctx.upstream_candidates = [{'host': '10.0.0.1', 'port': 53}]
     """
 
     @final
-    def __init__(self, client_ip: str) -> None:
+    def __init__(
+        self,
+        client_ip: str,
+        listener: Optional[str] = None,
+        secure: Optional[bool] = None,
+    ) -> None:
         """Initialize the PluginContext.
 
         Inputs:
           - client_ip: The IP address of the client that sent the query.
+          - listener: Optional logical listener/transport identifier.
+          - secure: Optional transport security flag (True for TLS, False for
+            cleartext, None when unspecified).
 
         Outputs:
-          - None (sets client_ip, upstream_candidates, upstream_override).
+          - None (sets client_ip, listener, secure, upstream_candidates,
+            upstream_override).
         """
         self.client_ip = client_ip
+        self.listener = listener
+        # Optional per-request qname; core server paths may attach this so that
+        # BasePlugin domain targeting helpers can operate on a normalized name.
+        # Callers that do not set qname will simply bypass domain filters.
+        self.qname: Optional[str] = None
+        # Preserve None when not explicitly provided so callers can distinguish
+        # between "unknown" and an explicit True/False value.
+        self.secure: Optional[bool] = bool(secure) if secure is not None else None
         # Optional per-request upstream candidates override
         self.upstream_candidates: Optional[List[Dict[str, Union[str, int]]]] = None
         # Optional per-request upstream override (host, port) - legacy
@@ -288,6 +317,12 @@ class BasePlugin:
               specifying clients to ignore. When targets is empty and
               targets_ignore is non-empty, targeting is inverted so that all
               clients are targeted except those in targets_ignore.
+            - targets_listener (str | list[str] | None): Optional listener-level
+              targeting. Accepts one or more of {"udp", "tcp", "dot", "doh"}.
+              Aliases:
+                * "secure"              -> ["dot", "doh"]
+                * "unsecure"/"insecure" -> ["udp", "tcp"]
+                * "any" / "*" / None     -> no listener restriction.
 
         Outputs:
           - None (sets self.name, self.config, priority attributes, and target
@@ -361,11 +396,39 @@ class BasePlugin:
         self._target_networks = self._parse_network_list(config.get("targets"))
         self._ignore_networks = self._parse_network_list(config.get("targets_ignore"))
 
+        # Optional domain targeting: restrict this plugin to specific qname
+        # patterns (exact or suffix-based) using normalized lower-case names.
+        self._targets_domains, self._targets_domains_mode = (
+            self._normalize_domain_targets(
+                config.get("targets_domains"),
+                mode=config.get("targets_domains_mode", "any"),
+            )
+        )
+
+        # Optional listener-level targeting: restrict this plugin to specific
+        # listeners (udp/tcp/dot/doh). When the normalized set is empty, listener
+        # type does not affect targeting ("any").
+        self._targets_listeners = self._normalize_listener_target(
+            config.get("targets_listener")
+        )
+
         # Per-client targeting decisions are cached in-memory to avoid
         # repeatedly parsing IP addresses and scanning CIDR lists under load.
-        # The TTL is configurable via targets_cache_ttl_seconds (default 300s).
+        # Historically this used a TTL cache controlled by
+        # targets_cache_ttl_seconds; it now uses a size-bounded LRU cache for
+        # simpler behaviour under load. The TTL config key is accepted for
+        # backwards compatibility but is no longer used.
         self._targets_cache_ttl: int = int(config.get("targets_cache_ttl_seconds", 300))
-        self._targets_cache: FoghornTTLCache = FoghornTTLCache()
+        self._targets_cache: LRUCache = LRUCache(maxsize=4096)
+        # Lightweight per-cache counters for admin snapshots. These mirror the
+        # naming used by other cache backends (calls_total/cache_hits/cache_misses)
+        # so that the cache admin UI can treat them uniformly.
+        try:
+            self._targets_cache.calls_total = 0
+            self._targets_cache.cache_hits = 0
+            self._targets_cache.cache_misses = 0
+        except Exception:  # pragma: nocover - defensive, attributes are best-effort
+            pass
 
         # Optional qtype targeting: normalize configured target_qtypes into
         # uppercase mnemonic values (e.g., ["A", "AAAA"], or ["*."]). When the
@@ -582,24 +645,153 @@ class BasePlugin:
 
         return networks
 
+    @staticmethod
+    def _normalize_domain_targets(
+        raw: object,
+        mode: object = "any",
+    ) -> Tuple[List[str], str]:
+        """Brief: Normalize targets_domains and its mode.
+
+        Inputs:
+          - raw: Configuration value for targets_domains (str or list[str]).
+          - mode: Configuration value for targets_domains_mode.
+
+        Outputs:
+          - (domains, mode):
+            - domains: list of normalized lower-case domain strings.
+            - mode: one of "any", "exact", "suffix".
+        """
+
+        # Normalize domain list
+        domains: List[str] = []
+        entries: List[str]
+        if raw is None:
+            entries = []
+        elif isinstance(raw, str):
+            entries = [raw]
+        elif isinstance(raw, (list, tuple)):
+            entries = [str(x) for x in raw]
+        else:
+            logger.warning(
+                "BasePlugin: ignoring invalid targets_domains value %r (expected str or list)",
+                raw,
+            )
+            entries = []
+
+        for entry in entries:
+            text = BasePlugin.normalize_qname(
+                entry, lower=True, strip_trailing_dot=True
+            )
+            if not text:
+                continue
+            domains.append(text)
+
+        # Normalize mode
+        try:
+            mode_text = str(mode).strip().lower()
+        except Exception:
+            mode_text = "any"
+
+        if not mode_text or mode_text in {"any", "*"}:
+            return domains, "any"
+        if mode_text in {"exact", "eq"}:
+            return domains, "exact"
+        if mode_text in {"suffix", "sub", "domain"}:
+            return domains, "suffix"
+
+        logger.warning(
+            "BasePlugin: unknown targets_domains_mode %r; treating as 'any'",
+            mode,
+        )
+        return domains, "any"
+
+    @staticmethod
+    def _normalize_listener_target(raw: object) -> Set[str]:
+        """Brief: Normalize a targets_listener value into a set of listener names.
+
+        Inputs:
+          - raw: Configuration value for targets_listener.
+
+        Outputs:
+          - set[str]: Normalized listener names in {"udp", "tcp", "dot", "doh"}.
+            An empty set means "any" (no listener restriction).
+        """
+
+        def _add_token(out: Set[str], token: str) -> None:
+            """Expand a single listener token or alias into concrete names."""
+            t = token.strip().lower()
+            if not t:
+                return
+            if t in {"any", "*"}:
+                # Any listener allowed; represented by empty set at the caller.
+                out.clear()
+                return
+            if t in {"udp", "tcp", "dot", "doh"}:
+                out.add(t)
+                return
+            if t == "secure":
+                out.update({"dot", "doh"})
+                return
+            if t in {"unsecure", "insecure"}:
+                out.update({"udp", "tcp"})
+                return
+            logger.warning(
+                "BasePlugin: unknown targets_listener value %r; ignoring", token
+            )
+
+        listeners: Set[str] = set()
+
+        if raw is None:
+            return listeners
+
+        if isinstance(raw, str):
+            _add_token(listeners, raw)
+        elif isinstance(raw, (list, tuple)):
+            for item in raw:
+                try:
+                    text = str(item)
+                except Exception:
+                    logger.warning(
+                        "BasePlugin: ignoring non-string targets_listener entry %r",
+                        item,
+                    )
+                    continue
+                _add_token(listeners, text)
+        else:
+            logger.warning(
+                "BasePlugin: ignoring invalid targets_listener value %r (expected str or list)",
+                raw,
+            )
+
+        # If an "any" token was seen at any point, listeners will have been
+        # cleared by _add_token and the empty set represents "no restriction".
+        return listeners
+
     def targets(self, ctx: PluginContext) -> bool:
         """Brief: Determine whether this plugin targets the given client IP.
 
         Inputs:
-          - ctx: PluginContext providing client_ip for the request.
+          - ctx: PluginContext providing client_ip and listener info for the request.
+            Callers may optionally attach a qname attribute (or similar) when
+            they wish to use domain-based targeting helpers.
 
         Outputs:
           - bool: True if the client should be targeted by this plugin based on
-            targets/targets_ignore configuration; False otherwise.
+            targets/targets_ignore and targets_listener configuration; False
+            otherwise.
 
         Behavior:
           - When "targets" is omitted or empty, all clients are targeted by
-            default.
+            default (subject to targets_listener and targets_domains).
           - When "targets_ignore" is provided without "targets", all clients
             are targeted except those matching any ignore CIDR (inverted
             logic).
           - When both are provided, "targets_ignore" acts as an override to
             exclude specific clients from the targeted set.
+          - When "targets_listener" is set to "secure", only queries where
+            ctx.secure is True are targeted. When set to "unsecure", only
+            queries where ctx.secure is False are targeted. Any other value is
+            treated as "any" and does not restrict targeting by listener.
 
         Example use:
             >>> ctx = PluginContext(client_ip="192.0.2.1")
@@ -607,8 +799,46 @@ class BasePlugin:
             >>> p.targets(ctx)
             True
         """
+        # Listener-level targeting: when configured with one or more concrete
+        # listeners (udp/tcp/dot/doh), require the PluginContext.listener to
+        # match. When the normalized set is empty, listener type does not
+        # affect targeting ("any"). Aliases such as "secure" and "unsecure"
+        # are expanded into the underlying listener names during
+        # initialization.
+        listeners: Set[str] = getattr(self, "_targets_listeners", set())
+        if listeners:
+            listener_name = str(getattr(ctx, "listener", "") or "").strip().lower()
+            if not listener_name or listener_name not in listeners:
+                return False
+
+        # Domain-level targeting: when targets_domains are configured, restrict
+        # this plugin to matching qnames. Callers may attach a qname-like
+        # attribute (for example, ctx.qname) for this purpose; when absent,
+        # domain filters are not applied.
+        domains_cfg: List[str] = getattr(self, "_targets_domains", [])
+        domains_mode: str = getattr(self, "_targets_domains_mode", "any")
+        if domains_cfg and domains_mode != "any":
+            qname_val = getattr(ctx, "qname", None)
+            if qname_val is None:
+                # No qname context available; treat as non-targeted when an
+                # explicit domain filter exists.
+                return False
+            qtext = BasePlugin.normalize_qname(
+                qname_val, lower=True, strip_trailing_dot=True
+            )
+            if not qtext:
+                return False
+
+            if domains_mode == "exact":
+                if qtext not in domains_cfg:
+                    return False
+            elif domains_mode == "suffix":
+                if not any(qtext == d or qtext.endswith("." + d) for d in domains_cfg):
+                    return False
+
         # Fast path: when no explicit targets or ignores are configured, all
-        # clients are targeted and no cache lookups are performed.
+        # clients are targeted (subject to the listener and domain checks above)
+        # and no cache lookups are performed.
         if not self._target_networks and not self._ignore_networks:
             return True
 
@@ -620,9 +850,16 @@ class BasePlugin:
 
         cache_key = (str(client_ip), 0)
 
-        # Consult per-client TTL cache first to avoid repeated IP parsing and
-        # CIDR scans under sustained load.
+        # Consult per-client cache first to avoid repeated IP parsing and CIDR
+        # scans under sustained load.
         try:
+            # Update best-effort call counter when the cache exposes one.
+            calls_attr = getattr(self._targets_cache, "calls_total", None)
+            if isinstance(calls_attr, int):
+                try:
+                    self._targets_cache.calls_total = calls_attr + 1
+                except Exception:
+                    pass
             cached = self._targets_cache.get(cache_key)
         except (
             Exception
@@ -630,6 +867,13 @@ class BasePlugin:
             cached = None
 
         if cached is not None:
+            # Cache hit: increment hit counter when available.
+            hits_attr = getattr(self._targets_cache, "cache_hits", None)
+            if isinstance(hits_attr, int):
+                try:
+                    self._targets_cache.cache_hits = hits_attr + 1
+                except Exception:
+                    pass
             try:
                 return bool(int(cached.decode()))
             except (
@@ -637,7 +881,15 @@ class BasePlugin:
             ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 pass
 
-        # Cache miss or decode failure: compute targeting decision.
+        # Cache miss or decode failure: compute targeting decision and treat as
+        # a cache miss for counter purposes.
+        misses_attr = getattr(self._targets_cache, "cache_misses", None)
+        if isinstance(misses_attr, int):
+            try:
+                self._targets_cache.cache_misses = misses_attr + 1
+            except Exception:
+                pass
+
         try:
             addr = ipaddress.ip_address(client_ip)
         except Exception:
@@ -654,14 +906,11 @@ class BasePlugin:
                 # Non-empty targets restrict to matching networks.
                 result = any(addr in net for net in self._target_networks)
 
-        # Store decision in TTL cache for subsequent queries from the same
-        # client_ip.
+        # Store decision in the per-client cache for subsequent queries from
+        # the same client_ip. This is a size-bounded LRU cache rather than a
+        # TTL-based cache; entries remain until evicted.
         try:
-            self._targets_cache.set(
-                cache_key,
-                int(self._targets_cache_ttl),
-                b"1" if result else b"0",
-            )
+            self._targets_cache[cache_key] = b"1" if result else b"0"
         except (
             Exception
         ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests

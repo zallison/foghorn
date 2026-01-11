@@ -199,7 +199,11 @@ def test_main_persistence_unconfigured_skips_store(monkeypatch, tmp_path: Path) 
         def serve_forever(self) -> None:
             raise KeyboardInterrupt
 
-    def _fake_loader_disabled(persistence_cfg: dict[str, object] | None) -> None:  # pragma: no cover - should not be called when no backends are configured
+    def _fake_loader_disabled(
+        persistence_cfg: dict[str, object] | None,
+    ) -> (
+        None
+    ):  # pragma: no cover - should not be called when no backends are configured
         # Record that the loader was invoked; in this test config there are no
         # logging.backends, so main() should skip calling the loader entirely.
         constructed["store_constructed"] = True

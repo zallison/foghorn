@@ -14,8 +14,6 @@ import json
 import types
 import time
 
-import pytest
-
 
 def _install_fake_paho_client(monkeypatch):
     """Brief: Install a fake paho.mqtt.client module for testing.
