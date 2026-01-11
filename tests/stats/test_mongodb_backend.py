@@ -51,7 +51,9 @@ class _FakeCollection:
         return None
 
     # Counts helpers ---------------------------------------------------------
-    def update_one(self, flt: Dict[str, Any], update: Dict[str, Any], upsert: bool = False) -> None:  # noqa: D401
+    def update_one(
+        self, flt: Dict[str, Any], update: Dict[str, Any], upsert: bool = False
+    ) -> None:  # noqa: D401
         """Brief: Apply $inc/$set updates against the in-memory counts mapping.
 
         Inputs:
@@ -74,7 +76,9 @@ class _FakeCollection:
             cur = int(update["$set"]["value"])
         self.counts[(scope, key)] = cur
 
-    def find_one(self, flt: Dict[str, Any] | None = None, proj: Dict[str, Any] | None = None) -> Optional[Dict[str, Any]]:  # noqa: D401
+    def find_one(
+        self, flt: Dict[str, Any] | None = None, proj: Dict[str, Any] | None = None
+    ) -> Optional[Dict[str, Any]]:  # noqa: D401
         """Brief: Return a single document from counts or query_log.
 
         Inputs:
@@ -91,7 +95,9 @@ class _FakeCollection:
             return {"_id": 1} if self.query_log_rows > 0 else None
         return None
 
-    def find(self, flt: Dict[str, Any] | None = None, proj: Dict[str, Any] | None = None) -> "_FakeCursor":  # noqa: D401
+    def find(
+        self, flt: Dict[str, Any] | None = None, proj: Dict[str, Any] | None = None
+    ) -> "_FakeCursor":  # noqa: D401
         """Brief: Return a cursor over synthetic documents.
 
         Inputs:
@@ -164,7 +170,9 @@ class _FakeCollection:
             # Keep this as a no-op for tests.
             return None
 
-    def aggregate(self, pipeline: Iterable[Dict[str, Any]]) -> Iterable[Dict[str, Any]]:  # noqa: D401
+    def aggregate(
+        self, pipeline: Iterable[Dict[str, Any]]
+    ) -> Iterable[Dict[str, Any]]:  # noqa: D401
         """Brief: Return preconfigured aggregate rows.
 
         Inputs:
@@ -179,7 +187,9 @@ class _FakeCollection:
         if self.aggregate_rows_group is not None:
             out = []
             for bucket, group_value, c in self.aggregate_rows_group:
-                out.append({"_id": {"bucket": bucket, "group_value": group_value}, "c": c})
+                out.append(
+                    {"_id": {"bucket": bucket, "group_value": group_value}, "c": c}
+                )
             return out
         if self.aggregate_rows_nogroup is not None:
             out = []

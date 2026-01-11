@@ -61,11 +61,15 @@ class _UDPStubNewPath:
             try:
                 self.sock.settimeout(0.2)
                 data, peer = self.sock.recvfrom(4096)
-            except Exception:  # pragma: nocover defensive: stub loop ignores spurious timeouts/errors
+            except (
+                Exception
+            ):  # pragma: nocover defensive: stub loop ignores spurious timeouts/errors
                 continue
             try:
                 self.sock.sendto(data, peer)
-            except Exception:  # pragma: nocover defensive: send failures here are environment-specific
+            except (
+                Exception
+            ):  # pragma: nocover defensive: send failures here are environment-specific
                 pass
 
     def close(self):
@@ -81,7 +85,9 @@ class _UDPStubNewPath:
         self._stop = True
         try:
             self.sock.close()
-        except Exception:  # pragma: nocover defensive: close failure here is low-value to test
+        except (
+            Exception
+        ):  # pragma: nocover defensive: close failure here is low-value to test
             pass
 
 
@@ -115,7 +121,9 @@ def test_udp_query_roundtrip_newpath(udp_stub_newpath):
     """
 
     q = b"\x12\x34hello"
-    resp = udp_query(udp_stub_newpath.addr[0], udp_stub_newpath.addr[1], q, timeout_ms=500)
+    resp = udp_query(
+        udp_stub_newpath.addr[0], udp_stub_newpath.addr[1], q, timeout_ms=500
+    )
     assert resp == q
 
 
@@ -148,7 +156,9 @@ def test_udp_timeout_raises_newpath(monkeypatch):
         def sendto(self, *_):
             raise OSError("boom")
 
-        def recvfrom(self, *_):  # pragma: nocover safety: never reached because sendto always fails
+        def recvfrom(
+            self, *_
+        ):  # pragma: nocover safety: never reached because sendto always fails
             raise AssertionError("should not be reached")
 
         def close(self):
@@ -183,7 +193,9 @@ def test_udp_query_source_ip_bind_newpath():
             try:
                 data, peer = srv.recvfrom(2048)
                 srv.sendto(data, peer)
-            except Exception:  # pragma: nocover defensive: ignores spurious timeouts during teardown
+            except (
+                Exception
+            ):  # pragma: nocover defensive: ignores spurious timeouts during teardown
                 pass
 
     t = threading.Thread(target=loop, daemon=True)
@@ -197,5 +209,7 @@ def test_udp_query_source_ip_bind_newpath():
         stopped["v"] = True
         try:
             srv.close()
-        except Exception:  # pragma: nocover defensive: close failure is non-essential to behaviour
+        except (
+            Exception
+        ):  # pragma: nocover defensive: close failure is non-essential to behaviour
             pass

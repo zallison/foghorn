@@ -268,6 +268,13 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             decision = self._apply_pre_plugins(request, qname, qtype, data, ctx)
         """
         # Pre-resolve plugin checks in priority order
+        # Attach qname to the context when available so BasePlugin domain
+        # targeting helpers can operate on it.
+        try:
+            setattr(ctx, "qname", qname)
+        except Exception:  # pragma: no cover - defensive
+            pass
+
         for p in sorted(self.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
@@ -482,6 +489,11 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 setattr(ctx, "_post_override", False)
 
         # Post-resolve plugin hooks in priority order
+        try:
+            setattr(ctx, "qname", qname)
+        except Exception:  # pragma: no cover - defensive
+            pass
+
         for p in sorted(self.plugins, key=lambda p: getattr(p, "post_priority", 50)):
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
@@ -550,6 +562,13 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         """
         reply = request.reply()
         reply.header.rcode = RCODE.NXDOMAIN
+        # Echo client EDNS(0) OPT, when present, into this synthetic NXDOMAIN.
+        try:
+            from . import server as _server_mod
+
+            _server_mod._echo_client_edns(request, reply)
+        except Exception:  # pragma: no cover - defensive: best-effort only
+            pass
         return _set_response_id(reply.pack(), request.header.id)
 
     def _make_servfail_response(self, request: DNSRecord):
@@ -567,44 +586,112 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         """
         r = request.reply()
         r.header.rcode = RCODE.SERVFAIL
+        # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL.
+        try:
+            from . import server as _server_mod
+
+            _server_mod._echo_client_edns(request, r)
+        except Exception:  # pragma: no cover - defensive: best-effort only
+            pass
         return _set_response_id(r.pack(), request.header.id)
 
     def _ensure_edns(self, req: DNSRecord) -> None:
         """
-        Ensure the request carries an EDNS(0) OPT record with configured payload size and DO bit per dnssec_mode.
+        Ensure the request carries an EDNS(0) OPT record with appropriate
+        payload size and DO bit based on dnssec_mode.
 
         Inputs:
-          - req: DNSRecord to mutate.
+          - req: DNSRecord to mutate in-place.
+
         Outputs:
           - None
+
+        Behaviour:
+          - If the client sent an OPT record, mirror its EDNS version and
+            advertised UDP payload size, clamped by this handler's
+            edns_udp_payload when non-zero.
+          - If no OPT was present, add one using edns_udp_payload as the
+            advertised UDP payload (with a minimum of 512 bytes).
+          - In both cases, the DO bit (DNSSEC OK) in the EDNS flags is set or
+            cleared according to dnssec_mode while preserving any other
+            existing EDNS flag bits.
 
         Example:
           >>> self._ensure_edns(req)
         """
-        # Find existing OPT
+        # Locate an existing OPT record, if any, in the additional section.
         opt_idx = None
-        for idx, rr in enumerate(getattr(req, "ar", []) or []):
+        opt_rr = None
+        additional = getattr(req, "ar", []) or []
+        for idx, rr in enumerate(additional):
             if rr.rtype == QTYPE.OPT:
                 opt_idx = idx
+                opt_rr = rr
                 break
 
-        # Decide EDNS flags based on dnssec_mode. For both passthrough and
-        # validate modes we must advertise DO=1 so that upstream resolvers
-        # return DNSSEC records (and, for upstream_ad, can set the AD bit).
-        flags = _edns_flags_for_mode(self.dnssec_mode)
+        # Decide DO flag based on dnssec_mode. For both passthrough and validate
+        # modes we must advertise DO=1 so that upstream resolvers return
+        # DNSSEC records (and, for upstream_ad, can set the AD bit).
+        do_bit = (
+            0x8000
+            if str(getattr(self, "dnssec_mode", "ignore")).lower()
+            in (
+                "passthrough",
+                "validate",
+            )
+            else 0
+        )
 
-        # rclass of OPT holds payload size. Use EDNS0/RR from foghorn.server so
-        # tests that monkeypatch foghorn.server.EDNS0/RR continue to see those
-        # patches when exercising DNSUDPHandler._ensure_edns.
+        # Effective server-side maximum UDP payload we are willing to
+        # advertise. RFC 6891 requires at least 512 bytes when EDNS is used.
+        try:
+            server_max = int(getattr(self, "edns_udp_payload", 1232) or 1232)
+        except Exception:
+            server_max = 1232
+        if server_max < 512:
+            server_max = 512
+
+        # Case 1: client already sent an OPT; adjust its payload and DO bit
+        # while preserving EDNS version, extended RCODE, and other flags.
+        if opt_rr is not None:
+            try:
+                client_payload = int(getattr(opt_rr, "rclass", 0) or 0)
+            except Exception:
+                client_payload = 0
+            if client_payload <= 0:
+                payload = server_max
+            elif server_max > 0:
+                payload = min(client_payload, server_max)
+            else:
+                payload = client_payload
+
+            # Decode EDNS TTL into (ext_rcode, version, flags) so we can
+            # update only the DO bit in the flags field.
+            try:
+                ttl_val = int(getattr(opt_rr, "ttl", 0) or 0)
+            except Exception:
+                ttl_val = 0
+            ext_rcode = (ttl_val >> 24) & 0xFF
+            version = (ttl_val >> 16) & 0xFF
+            flags = ttl_val & 0xFFFF
+            # Clear existing DO bit and inject the desired value.
+            flags = (flags & ~0x8000) | do_bit
+            opt_rr.rclass = payload
+            opt_rr.ttl = (ext_rcode << 24) | (version << 16) | (flags & 0xFFFF)
+            return
+
+        # Case 2: no existing OPT; create one using the foghorn.servers.server
+        # EDNS0 helper so tests that monkeypatch EDNS0 continue to see calls.
         from . import server as _server_mod
 
-        opt_rr = _server_mod.RR(
-            rname=".",
-            rtype=QTYPE.OPT,
-            rclass=int(self.edns_udp_payload),
-            ttl=0,
-            rdata=_server_mod.EDNS0(flags=flags),
-        )
+        payload = server_max
+        flags_str = "do" if do_bit else ""
+
+        # EDNS0() constructs an OPT RR where the advertised UDP payload is
+        # encoded via udp_len/rclass and the DO bit is part of the TTL
+        # bitfield. We leave the EDNS version at its default (0).
+        opt_rr = _server_mod.EDNS0(udp_len=payload, flags=flags_str)
+
         if opt_idx is None:
             req.add_ar(opt_rr)
         else:
@@ -634,7 +721,12 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         try:
             # Delegate to the shared core resolver. Any exceptions inside the
             # resolver are converted to SERVFAIL by _resolve_core.
-            wire = _server_mod.resolve_query_bytes(data, client_ip)
+            wire = _server_mod.resolve_query_bytes(
+                data,
+                client_ip,
+                listener="udp",
+                secure=False,
+            )
             # When plugins request an explicit drop/timeout, the shared
             # resolver returns an empty wire sentinel; in that case we do not
             # send any response so the client observes a timeout.
@@ -647,11 +739,45 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 req = DNSRecord.parse(data)
                 r = req.reply()
                 r.header.rcode = RCODE.SERVFAIL
+                # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL.
+                try:
+                    from . import server as _server_mod
+
+                    _server_mod._echo_client_edns(req, r)
+                except Exception:  # pragma: no cover - defensive: best-effort only
+                    pass
                 wire = _set_response_id(r.pack(), req.header.id)
             except Exception:
                 # Worst-case: echo the original bytes so the socket still sends
                 # something back (useful for diagnosing corruption).
                 wire = data
+
+        # RFC 6891 compliance for non-EDNS clients: when the client did not
+        # advertise EDNS(0) support, avoid sending very large UDP responses.
+        # If the final wire payload exceeds the classic 512-byte limit, mark
+        # the response as truncated (TC=1) so compliant stub resolvers know to
+        # retry over TCP. We do not attempt to re-flow or aggressively truncate
+        # the message here; this is a conservative best-effort signal.
+        try:
+            req = DNSRecord.parse(data)
+        except Exception:  # pragma: no cover - defensive: corrupted query
+            req = None
+
+        if isinstance(req, DNSRecord):
+            # Detect whether the client advertised EDNS(0) via an OPT RR.
+            has_opt = any(
+                getattr(rr, "rtype", None) == QTYPE.OPT
+                for rr in (getattr(req, "ar", None) or [])
+            )
+            # Only apply the 512-byte clamp when the client did not send EDNS.
+            if not has_opt and isinstance(wire, (bytes, bytearray, memoryview)):
+                try:
+                    if len(wire) > 512:
+                        resp = DNSRecord.parse(bytes(wire))
+                        resp.header.tc = 1
+                        wire = _set_response_id(resp.pack(), resp.header.id)
+                except Exception:  # pragma: no cover - defensive: parsing/truncation
+                    pass
 
         sock.sendto(wire, self.client_address)
 

@@ -152,8 +152,19 @@ class InMemoryTTLCache(CachePlugin):
         cache_hits = getattr(self._cache, "cache_hits", None)
         cache_misses = getattr(self._cache, "cache_misses", None)
 
+        # Derive a backend label for the primary DNS cache from the concrete
+        # backing store type so the admin UI can distinguish FoghornTTL from
+        # other in-memory backends.
+        try:
+            cache_type = type(self._cache)
+            backend_label = getattr(cache_type, "__name__", "in_memory")
+            if backend_label == "FoghornTTLCache":
+                backend_label = "FoghornTTL"
+        except Exception:  # pragma: nocover - defensive type introspection
+            backend_label = "in_memory"
+
         summary: dict[str, object] = {
-            "backend": "in_memory",
+            "backend": str(backend_label),
             "namespace": getattr(self._cache, "namespace", None) or "default",
             "total_entries": int(total_entries),
             "live_entries": int(live_entries),
@@ -172,7 +183,7 @@ class InMemoryTTLCache(CachePlugin):
         caches: list[dict[str, object]] = []
 
         def _summarize_foghorn_ttl(label: str, cache_obj: object) -> dict[str, object]:
-            """Brief: Summarize a FoghornTTLCache-style in-memory cache.
+            """Brief: Summarize an in-memory per-entry cache used by plugins.
 
             Inputs:
               - label: Human-friendly cache label.
@@ -183,15 +194,15 @@ class InMemoryTTLCache(CachePlugin):
             """
 
             try:
-                inner_store = getattr(cache_obj, "_store", {}) or {}
+                inner_store = getattr(cache_obj, "_store", None)
                 inner_lock = getattr(cache_obj, "_lock", None)
             except Exception:
-                inner_store = {}
+                inner_store = None
                 inner_lock = None
 
             entries_total = 0
             entries_live = 0
-            entries_expired = 0
+            entries_expired: object = 0
             calls_total_local: object = None
             cache_hits_local: object = None
             cache_misses_local: object = None
@@ -203,26 +214,39 @@ class InMemoryTTLCache(CachePlugin):
             except Exception:  # pragma: no cover - defensive only
                 calls_total_local = cache_hits_local = cache_misses_local = None
 
-            if inner_lock is not None:
-                try:
-                    with inner_lock:
-                        (
-                            entries_total,
-                            entries_live,
-                            entries_expired,
-                        ) = _compute_counts(
-                            inner_store
-                        )  # type: ignore[arg-type]
-                except Exception:
-                    entries_total = entries_live = entries_expired = 0
+            if isinstance(inner_store, dict):
+                # FoghornTTLCache-style backend with explicit expiry metadata.
+                if inner_lock is not None:
+                    try:
+                        with inner_lock:
+                            (
+                                entries_total,
+                                entries_live,
+                                entries_expired,
+                            ) = _compute_counts(
+                                inner_store
+                            )  # type: ignore[arg-type]
+                    except Exception:
+                        entries_total = entries_live = entries_expired = 0
+                else:
+                    (
+                        entries_total,
+                        entries_live,
+                        entries_expired,
+                    ) = _compute_counts(
+                        inner_store
+                    )  # type: ignore[arg-type]
             else:
-                (
-                    entries_total,
-                    entries_live,
-                    entries_expired,
-                ) = _compute_counts(
-                    inner_store
-                )  # type: ignore[arg-type]
+                # Generic mapping-style cache (for example, an LRUCache) where
+                # only current size is known. Treat all entries as live.
+                try:
+                    entries_total = int(len(cache_obj))  # type: ignore[arg-type]
+                except Exception:
+                    entries_total = 0
+                entries_live = entries_total
+                # Non-TTL caches do not expose expired counts; leave expired blank
+                # in the admin UI by using a non-int sentinel.
+                entries_expired = None
 
             # Compute hit percentage when we have both hit/miss counters.
             hit_pct_local: object = None
@@ -236,12 +260,25 @@ class InMemoryTTLCache(CachePlugin):
             except Exception:
                 hit_pct_local = None
 
+            # Derive a backend label from the concrete cache type so the admin
+            # UI reflects whether this is a FoghornTTLCache, LRUCache, etc.
+            try:
+                cache_type = type(cache_obj)
+                backend_label = getattr(cache_type, "__name__", "in_memory_ttl")
+            except Exception:  # pragma: nocover - defensive type introspection
+                backend_label = "in_memory_ttl"
+
             row: dict[str, object] = {
                 "label": str(label),
-                "backend": "in_memory_ttl",
+                "backend": str(backend_label),
                 "entries": int(entries_total),
                 "live_entries": int(entries_live),
-                "expired_entries": int(entries_expired),
+                # When entries_expired is not an int (for example, for non-TTL
+                # caches such as LRU), omit a numeric expired count so the
+                # "Expired" column renders blank in the admin UI.
+                "expired_entries": (
+                    int(entries_expired) if isinstance(entries_expired, int) else None
+                ),
                 "hit_pct": hit_pct_local,
             }
             if isinstance(calls_total_local, int):

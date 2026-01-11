@@ -1078,7 +1078,61 @@ def main(argv: List[str] | None = None) -> int:
     # Resolver adapter for TCP/DoT servers
     import asyncio
 
-    from .servers.server import resolve_query_bytes
+    from .servers.server import resolve_query_bytes as _resolve_query_bytes
+
+    def _resolve_tcp(query_bytes: bytes, client_ip: str) -> bytes:
+        """Brief: Resolve a DNS query received via TCP listener.
+
+        Inputs:
+          - query_bytes: Wire-format DNS query bytes.
+          - client_ip: Client IP address string.
+
+        Outputs:
+          - bytes: Wire-format DNS response produced by the shared resolver.
+        """
+
+        return _resolve_query_bytes(
+            query_bytes,
+            client_ip,
+            listener="tcp",
+            secure=False,
+        )
+
+    def _resolve_dot(query_bytes: bytes, client_ip: str) -> bytes:
+        """Brief: Resolve a DNS query received via DoT (TLS) listener.
+
+        Inputs:
+          - query_bytes: Wire-format DNS query bytes.
+          - client_ip: Client IP address string.
+
+        Outputs:
+          - bytes: Wire-format DNS response produced by the shared resolver.
+        """
+
+        return _resolve_query_bytes(
+            query_bytes,
+            client_ip,
+            listener="dot",
+            secure=True,
+        )
+
+    def _resolve_doh(query_bytes: bytes, client_ip: str) -> bytes:
+        """Brief: Resolve a DNS query received via DoH (HTTPS) listener.
+
+        Inputs:
+          - query_bytes: Wire-format DNS query bytes.
+          - client_ip: Client IP address string.
+
+        Outputs:
+          - bytes: Wire-format DNS response produced by the shared resolver.
+        """
+
+        return _resolve_query_bytes(
+            query_bytes,
+            client_ip,
+            listener="doh",
+            secure=True,
+        )
 
     def _start_asyncio_server(
         coro_factory,
@@ -1128,17 +1182,17 @@ def main(argv: List[str] | None = None) -> int:
         if use_asyncio:
             logger.info("Starting TCP listener on %s:%d (asyncio)", thost, tport)
             _start_asyncio_server(
-                lambda: serve_tcp(thost, tport, resolve_query_bytes),
+                lambda: serve_tcp(thost, tport, _resolve_tcp),
                 name="foghorn-tcp",
                 listener_key="tcp",
                 on_permission_error=lambda: serve_tcp_threaded(
-                    thost, tport, resolve_query_bytes
+                    thost, tport, _resolve_tcp
                 ),
             )
         else:
             logger.info("Starting TCP listener on %s:%d (threaded)", thost, tport)
             t = threading.Thread(
-                target=lambda: serve_tcp_threaded(thost, tport, resolve_query_bytes),
+                target=lambda: serve_tcp_threaded(thost, tport, _resolve_tcp),
                 name="foghorn-tcp-threaded",
                 daemon=True,
             )
@@ -1163,7 +1217,7 @@ def main(argv: List[str] | None = None) -> int:
                 lambda: serve_dot(
                     dhost,
                     dport,
-                    resolve_query_bytes,
+                    _resolve_dot,
                     cert_file=cert_file,
                     key_file=key_file,
                 ),
@@ -1182,7 +1236,7 @@ def main(argv: List[str] | None = None) -> int:
             doh_handle = start_doh_server(
                 h,
                 p,
-                resolve_query_bytes,
+                _resolve_doh,
                 cert_file=cert_file,
                 key_file=key_file,
                 use_asyncio=use_asyncio,

@@ -188,3 +188,57 @@ def test_cache_counters_increment_on_hits_and_misses() -> None:
     assert cache_hits >= 1
     assert cache_misses >= 1
     assert cache_hits + cache_misses <= calls_total
+
+
+def test_cache_lru_eviction_with_maxsize() -> None:
+    """Brief: LRU eviction removes least recently used entries when over capacity.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts older entries are evicted first when maxsize is exceeded.
+    """
+
+    c = FoghornTTLCache(maxsize=2, eviction_policy="lru")
+    k1 = ("lru1.example", 1)
+    k2 = ("lru2.example", 1)
+    k3 = ("lru3.example", 1)
+
+    c.set(k1, 60, b"one")
+    c.set(k2, 60, b"two")
+    # Touch k1 so k2 becomes the least recently used.
+    assert c.get(k1) == b"one"
+
+    # Inserting k3 should force eviction of k2 when maxsize == 2.
+    c.set(k3, 60, b"three")
+
+    assert c.get(k1) == b"one"
+    assert c.get(k2) is None
+    assert c.get(k3) == b"three"
+
+
+def test_cache_fifo_eviction_with_maxsize() -> None:
+    """Brief: FIFO eviction removes oldest inserted entries when over capacity.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts first-in entries are evicted first under FIFO policy.
+    """
+
+    c = FoghornTTLCache(maxsize=2, eviction_policy="fifo")
+    k1 = ("fifo1.example", 1)
+    k2 = ("fifo2.example", 1)
+    k3 = ("fifo3.example", 1)
+
+    c.set(k1, 60, b"one")
+    c.set(k2, 60, b"two")
+    c.set(k3, 60, b"three")
+
+    # Under FIFO, the first inserted key should be evicted when capacity is
+    # exceeded.
+    assert c.get(k1) is None
+    assert c.get(k2) == b"two"
+    assert c.get(k3) == b"three"

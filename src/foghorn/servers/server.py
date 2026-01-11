@@ -19,7 +19,7 @@ from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecisi
 from foghorn.servers.recursive_resolver import RecursiveResolver
 from foghorn.servers.transports.dot import DoTError, get_dot_pool
 from foghorn.servers.transports.tcp import TCPError, get_tcp_pool, tcp_query
-from foghorn.utils.register_caches import registered_cached, registered_lru_cached
+from foghorn.utils.register_caches import registered_cached
 from .udp_server import DNSUDPHandler
 
 logger = logging.getLogger("foghorn.server")
@@ -196,6 +196,45 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
         return wire
 
 
+def _echo_client_edns(req: DNSRecord, resp: DNSRecord) -> None:
+    """Ensure a synthetic response echoes client EDNS(0) OPT when present.
+
+    Inputs:
+      - req: Parsed DNSRecord representing the original client query.
+      - resp: DNSRecord being constructed as the response (mutated in-place).
+
+    Outputs:
+      - None; best-effort injection of an OPT RR from the client when the
+        response does not already contain one.
+
+    This helper is intentionally conservative:
+      - If the client did not send EDNS(0), resp is left unchanged.
+      - If resp already carries an OPT RR, it is left unchanged so upstream or
+        plugin-provided EDNS semantics are preserved.
+    """
+    try:
+        client_opts = [
+            rr
+            for rr in (getattr(req, "ar", None) or [])
+            if getattr(rr, "rtype", None) == QTYPE.OPT
+        ]
+        if not client_opts:
+            return
+        existing_opts = [
+            rr
+            for rr in (getattr(resp, "ar", None) or [])
+            if getattr(rr, "rtype", None) == QTYPE.OPT
+        ]
+        if existing_opts:
+            return
+        # Echo the first client OPT RR to keep behaviour simple and
+        # deterministic; typical queries only carry a single OPT.
+        resp.add_ar(client_opts[0])
+    except Exception:  # pragma: no cover - defensive: best-effort only
+        # EDNS echo should never prevent a response from being generated.
+        return
+
+
 def _set_response_id_bytes(wire: bytes, req_id: int) -> bytes:
     try:
         if len(wire) >= 2:
@@ -242,6 +281,16 @@ def send_query_with_failover(
 
     timeout_sec = timeout_ms / 1000.0
     last_exception: Optional[Exception] = None
+
+    # Precompute whether the original query advertised EDNS(0) via an OPT RR in
+    # the additional section. This is used by the EDNS fallback shim below.
+    try:
+        _query_has_opt = any(
+            getattr(rr, "rtype", None) == QTYPE.OPT
+            for rr in (getattr(query, "ar", None) or [])
+        )
+    except Exception:  # pragma: no cover - defensive: non-DNSRecord queries
+        _query_has_opt = False
 
     try:
         max_c = int(max_concurrent or 1)
@@ -377,9 +426,57 @@ def send_query_with_failover(
                     # Fallback to dnslib's convenience API (used in unit tests)
                     response_wire = query.send(host, int(port), timeout=timeout_sec)
 
-            # Check for SERVFAIL or truncation to trigger fallback
+            # Check for SERVFAIL, EDNS compatibility issues, or truncation to
+            # trigger appropriate fallbacks.
             try:
                 parsed_response = DNSRecord.parse(response_wire)
+
+                # EDNS(0) compatibility shim: if an upstream returns FORMERR in
+                # response to an EDNS-enabled UDP query, retry once without
+                # EDNS. This covers servers that mishandle OPT records.
+                if (
+                    transport == "udp"
+                    and _query_has_opt
+                    and parsed_response.header.rcode == RCODE.FORMERR
+                ):
+                    logger.debug(
+                        "Upstream %s:%d returned FORMERR for EDNS query %s; retrying without EDNS",
+                        host,
+                        port,
+                        qname,
+                    )
+                    try:
+                        from foghorn.servers.transports.udp import (
+                            udp_query as _udp_query,
+                        )
+
+                        no_edns_query = DNSRecord.parse(query.pack())
+                        no_edns_query.ar = [
+                            rr
+                            for rr in (getattr(no_edns_query, "ar", None) or [])
+                            if getattr(rr, "rtype", None) != QTYPE.OPT
+                        ]
+                        response_wire = _udp_query(
+                            host,
+                            int(port),
+                            no_edns_query.pack(),
+                            timeout_ms=timeout_ms,
+                        )
+                        parsed_response = DNSRecord.parse(response_wire)
+                    except Exception as e2:  # pragma: no cover - defensive
+                        last_exception = e2
+                        return None, None, "all_failed"
+
+                    # After fallback, treat SERVFAIL as failure as usual.
+                    if parsed_response.header.rcode == RCODE.SERVFAIL:
+                        last_exception = Exception(
+                            f"FORMERR/SERVFAIL from {host}:{port} without EDNS"
+                        )
+                        return None, None, "all_failed"
+
+                    # Successful non-SERVFAIL response after EDNS fallback.
+                    return response_wire, upstream, "ok"
+
                 if parsed_response.header.rcode == RCODE.SERVFAIL:
                     logger.warning(
                         "Upstream %s:%d returned SERVFAIL for %s, trying next",
@@ -495,7 +592,12 @@ class _ResolveCoreResult(NamedTuple):
     rcode_name: str
 
 
-def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
+def _resolve_core(
+    data: bytes,
+    client_ip: str,
+    listener: Optional[str] = None,
+    secure: Optional[bool] = None,
+) -> _ResolveCoreResult:
     """Shared resolution pipeline used by UDP and non-UDP callers.
 
     Inputs:
@@ -528,7 +630,12 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                 pass
 
         # Pre plugins
-        ctx = PluginContext(client_ip=client_ip)
+        ctx = PluginContext(client_ip=client_ip, listener=listener, secure=secure)
+        # Attach qname so BasePlugin domain-targeting helpers can use it.
+        try:
+            ctx.qname = qname
+        except Exception:  # pragma: no cover - defensive
+            pass
         for p in sorted(
             DNSUDPHandler.plugins, key=lambda p: getattr(p, "pre_priority", 50)
         ):
@@ -559,6 +666,8 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                     # NXDOMAIN deny path
                     r = req.reply()
                     r.header.rcode = RCODE.NXDOMAIN
+                    # Echo client EDNS(0) OPT, when present, into synthetic NXDOMAIN.
+                    _echo_client_edns(req, r)
                     wire = _set_response_id(r.pack(), req.header.id)
                     if stats is not None:
                         try:
@@ -623,6 +732,11 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                                 pass
                             stats.record_response_rcode("NXDOMAIN", qname)
+                            result_ctx = {"source": "pre_plugin", "action": "deny"}
+                            if listener is not None:
+                                result_ctx["listener"] = listener
+                            if secure is not None:
+                                result_ctx["secure"] = bool(secure)
                             stats.record_query_result(
                                 client_ip=client_ip,
                                 qname=qname,
@@ -632,7 +746,7 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                                 status="deny_pre",
                                 error=None,
                                 first=None,
-                                result={"source": "pre_plugin", "action": "deny"},
+                                result=result_ctx,
                             )
                         except (
                             Exception
@@ -653,7 +767,17 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                         rcode_name="NXDOMAIN",
                     )
                 if decision.action == "override" and decision.response is not None:
-                    wire = _set_response_id(decision.response, req.header.id)
+                    # Allow plugins to supply a full wire response, but ensure we
+                    # still echo client EDNS(0) when the override does not carry
+                    # its own OPT record.
+                    resp_wire = decision.response
+                    try:
+                        override_msg = DNSRecord.parse(resp_wire)
+                        _echo_client_edns(req, override_msg)
+                        resp_wire = override_msg.pack()
+                    except Exception:  # pragma: no cover - defensive: parse failure
+                        pass
+                    wire = _set_response_id(resp_wire, req.header.id)
                     if stats is not None:
                         try:
                             parsed = DNSRecord.parse(wire)
@@ -730,10 +854,14 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                                 for rr in (parsed.rr or [])
                             ]
                             first = answers[0]["rdata"] if answers else None
-                            result = {
+                            result_ctx = {
                                 "source": "pre_plugin_override",
                                 "answers": answers,
                             }
+                            if listener is not None:
+                                result_ctx["listener"] = listener
+                            if secure is not None:
+                                result_ctx["secure"] = bool(secure)
                             qtype_name = QTYPE.get(qtype, str(qtype))
                             stats.record_query_result(
                                 client_ip=client_ip,
@@ -744,7 +872,7 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                                 status="override_pre",
                                 error=None,
                                 first=str(first) if first is not None else None,
-                                result=result,
+                                result=result_ctx,
                             )
                         except (
                             Exception
@@ -817,7 +945,11 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                         for rr in (parsed_cached.rr or [])
                     ]
                     first = answers[0]["rdata"] if answers else None
-                    result = {"source": "cache", "answers": answers}
+                    result_ctx = {"source": "cache", "answers": answers}
+                    if listener is not None:
+                        result_ctx["listener"] = listener
+                    if secure is not None:
+                        result_ctx["secure"] = bool(secure)
                     qtype_name = QTYPE.get(qtype, str(qtype))
                     stats.record_query_result(
                         client_ip=client_ip,
@@ -828,7 +960,7 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                         status="cache_hit",
                         error=None,
                         first=str(first) if first is not None else None,
-                        result=result,
+                        result=result_ctx,
                     )
                 except (
                     Exception
@@ -963,9 +1095,13 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
         else:
             # Classic forwarding: EDNS/DNSSEC adjustments (mirror
             # DNSUDPHandler behaviour) followed by send_query_with_failover.
+            # When no upstreams are configured we skip EDNS normalization so that
+            # synthesized SERVFAIL responses can echo the client's original OPT
+            # record unchanged.
+            upstreams = list(getattr(DNSUDPHandler, "upstream_addrs", []) or [])
             try:
                 mode = str(getattr(DNSUDPHandler, "dnssec_mode", "ignore")).lower()
-                if mode in ("ignore", "passthrough", "validate"):
+                if mode in ("ignore", "passthrough", "validate") and upstreams:
                     handler = type("_H", (), {})()
                     handler.dnssec_mode = DNSUDPHandler.dnssec_mode
                     handler.edns_udp_payload = getattr(
@@ -984,7 +1120,6 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
             # it here rather than DNSUDPHandler._forward_with_failover_helper.
             upstream_id = None
             timeout_ms = getattr(DNSUDPHandler, "timeout_ms", 2000)
-            upstreams = list(getattr(DNSUDPHandler, "upstream_addrs", []) or [])
             try:
                 max_concurrent = int(
                     getattr(DNSUDPHandler, "upstream_max_concurrent", 1) or 1
@@ -1026,6 +1161,12 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
         if reply is None:
             r = req.reply()
             r.header.rcode = RCODE.SERVFAIL
+
+            # When synthesizing SERVFAIL (for example, when there are no
+            # upstreams or all upstreams fail), echo any client EDNS(0) OPT RR
+            # into the response so payload size and flags are preserved.
+            _echo_client_edns(req, r)
+
             wire = _set_response_id(r.pack(), req.header.id)
             if stats is not None:
                 try:
@@ -1039,6 +1180,15 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                             pass
                     qtype_name = QTYPE.get(qtype, str(qtype))
                     status = str(reason or "all_failed")
+                    result_ctx = {
+                        "source": "upstream",
+                        "status": status,
+                        "error": "all_upstreams_failed",
+                    }
+                    if listener is not None:
+                        result_ctx["listener"] = listener
+                    if secure is not None:
+                        result_ctx["secure"] = bool(secure)
                     stats.record_query_result(
                         client_ip=client_ip,
                         qname=qname,
@@ -1048,11 +1198,7 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                         status=status,
                         error="all_upstreams_failed",
                         first=None,
-                        result={
-                            "source": "upstream",
-                            "status": status,
-                            "error": "all_upstreams_failed",
-                        },
+                        result=result_ctx,
                     )
                 except (
                     Exception
@@ -1076,7 +1222,11 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
             )
 
         # Post plugins
-        ctx2 = PluginContext(client_ip=client_ip)
+        ctx2 = PluginContext(client_ip=client_ip, listener=listener, secure=secure)
+        try:
+            ctx2.qname = qname
+        except Exception:  # pragma: no cover - defensive
+            pass
         out = reply
         for p in sorted(
             DNSUDPHandler.plugins, key=lambda p: getattr(p, "post_priority", 50)
@@ -1104,10 +1254,21 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                 if decision.action == "deny":
                     r = req.reply()
                     r.header.rcode = RCODE.NXDOMAIN
+                    # Echo client EDNS(0) OPT into post-plugin NXDOMAIN replies.
+                    _echo_client_edns(req, r)
                     out = r.pack()
                     break
                 if decision.action == "override" and decision.response is not None:
-                    out = decision.response
+                    # Allow plugins to override the wire response while still
+                    # echoing client EDNS(0) when the override does not carry an
+                    # OPT RR of its own.
+                    resp_wire = decision.response
+                    try:
+                        override_msg = DNSRecord.parse(resp_wire)
+                        _echo_client_edns(req, override_msg)
+                        out = override_msg.pack()
+                    except Exception:  # pragma: no cover - defensive: parse failure
+                        out = resp_wire
                     break
                 if decision.action == "allow":
                     # Explicit allow: stop evaluating further post plugins but
@@ -1220,9 +1381,13 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                     for rr in (parsed.rr or [])
                 ]
                 first = answers[0]["rdata"] if answers else None
-                result = {"source": "upstream", "answers": answers}
+                result_ctx = {"source": "upstream", "answers": answers}
                 if dnssec_status is not None:
-                    result["dnssec_status"] = dnssec_status
+                    result_ctx["dnssec_status"] = dnssec_status
+                if listener is not None:
+                    result_ctx["listener"] = listener
+                if secure is not None:
+                    result_ctx["secure"] = bool(secure)
                 qtype_name = QTYPE.get(qtype, str(qtype))
                 status = "ok" if rcode_name == "NOERROR" else "error"
                 stats.record_query_result(
@@ -1234,7 +1399,7 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                     status=status,
                     error=None,
                     first=str(first) if first is not None else None,
-                    result=result,
+                    result=result_ctx,
                 )
             except (
                 Exception
@@ -1263,6 +1428,8 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
             req = DNSRecord.parse(data)
             r = req.reply()
             r.header.rcode = RCODE.SERVFAIL
+            # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL.
+            _echo_client_edns(req, r)
             wire = _set_response_id(r.pack(), req.header.id)
             if stats is not None:
                 try:
@@ -1272,6 +1439,11 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                     qname = str(q.qname).rstrip(".")
                     qtype = q.qtype
                     qtype_name = QTYPE.get(qtype, str(qtype))
+                    result_ctx = {"source": "server", "error": "unhandled_exception"}
+                    if listener is not None:
+                        result_ctx["listener"] = listener
+                    if secure is not None:
+                        result_ctx["secure"] = bool(secure)
                     stats.record_query_result(
                         client_ip=client_ip,
                         qname=qname,
@@ -1281,7 +1453,7 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
                         status="error",
                         error=str(e),
                         first=None,
-                        result={"source": "server", "error": "unhandled_exception"},
+                        result=result_ctx,
                     )
                 except (
                     Exception
@@ -1311,12 +1483,22 @@ def _resolve_core(data: bytes, client_ip: str) -> _ResolveCoreResult:
             )
 
 
-def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
+def resolve_query_bytes(
+    data: bytes,
+    client_ip: str,
+    *,
+    listener: Optional[str] = None,
+    secure: Optional[bool] = None,
+) -> bytes:
     """Resolve a single DNS wire query and return wire response.
 
     Inputs:
       - data: Wire-format DNS query bytes.
       - client_ip: String client IP for plugin context, logging, and statistics.
+      - listener: Optional logical inbound listener/transport identifier
+        ("udp", "tcp", "dot", or "doh").
+      - secure: Optional transport security flag (True for TLS-backed
+        listeners, False for plain UDP/TCP, None when unspecified).
     Outputs:
       - bytes: Wire-format DNS response.
 
@@ -1329,7 +1511,7 @@ def resolve_query_bytes(data: bytes, client_ip: str) -> bytes:
     Example:
       >>> resp = resolve_query_bytes(query_bytes, '127.0.0.1')
     """
-    return _resolve_core(data, client_ip).wire
+    return _resolve_core(data, client_ip, listener=listener, secure=secure).wire
 
 
 class DNSServer:

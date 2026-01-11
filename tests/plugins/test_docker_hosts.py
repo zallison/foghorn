@@ -1764,3 +1764,469 @@ def test_docker_hosts_invalid_txt_fields_and_keep_types_log_warnings(caplog):
     messages = [r.getMessage() for r in caplog.records]
     assert any("txt_fields must be a list" in m for m in messages)
     assert any("txt_fields_keep must be a list" in m for m in messages)
+
+
+def test_docker_hosts_invalid_txt_fields_entries_and_keep_list_normalization(
+    monkeypatch, caplog
+):
+    """Brief: setup() handles bad txt_fields list entries and normalizes txt_fields_keep.
+
+    Inputs:
+      - monkeypatch/caplog: pytest fixtures.
+
+    Outputs:
+      - None; asserts warnings for non-dict/missing-name/path entries and that
+        txt_fields_keep drops empty strings and trims whitespace.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(  # type: ignore[arg-type]
+        txt_fields=[
+            "not-a-dict",
+            {"name": "", "path": "Config.Image"},
+            {"name": "image", "path": ""},
+        ],
+        txt_fields_keep=[" ans4 ", "", "endpoint"],
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+
+    # Avoid docker-dependent reload.
+    plugin._reload_from_docker = lambda: None  # type: ignore[assignment]
+
+    caplog.set_level("WARNING", logger=mod.__name__)
+    plugin.setup()
+
+    # All invalid txt_fields entries should have been discarded.
+    assert plugin._txt_fields == []  # type: ignore[attr-defined]
+    # txt_fields_keep should be normalized and empty entries dropped.
+    assert plugin._txt_fields_keep == ["ans4", "endpoint"]  # type: ignore[attr-defined]
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("ignoring non-mapping txt_fields entry" in m for m in messages)
+    assert any("ignoring txt_fields entry missing name/path" in m for m in messages)
+
+
+def test_docker_hosts_health_config_variants(monkeypatch, caplog):
+    """Brief: setup() normalizes health config from str/list/other and logs unsupported.
+
+    Inputs:
+      - monkeypatch/caplog: pytest fixtures.
+
+    Outputs:
+      - None; asserts _health_allowlist for different health forms and warning for
+        unsupported statuses.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    # String health value.
+    plugin_str = DockerHosts(  # type: ignore[arg-type]
+        health="starting",
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+    monkeypatch.setattr(plugin_str, "_reload_from_docker", lambda: None)
+    plugin_str.setup()
+    assert plugin_str._health_allowlist == ["starting"]  # type: ignore[attr-defined]
+
+    # List with duplicates, empties, and unsupported values.
+    plugin_list = DockerHosts(  # type: ignore[arg-type]
+        health=["RUNNING", " ", "bogus", "healthy", "healthy"],
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+    monkeypatch.setattr(plugin_list, "_reload_from_docker", lambda: None)
+
+    caplog.set_level("WARNING", logger=mod.__name__)
+    plugin_list.setup()
+
+    # Order is preserved and duplicates removed.
+    assert plugin_list._health_allowlist == ["running", "healthy"]  # type: ignore[attr-defined]
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("ignoring unsupported health status" in m for m in messages)
+
+    # Non-list/str health is stringified but then filtered against the allowed
+    # set, yielding an empty allowlist.
+    plugin_other = DockerHosts(  # type: ignore[arg-type]
+        health=123,
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+    monkeypatch.setattr(plugin_other, "_reload_from_docker", lambda: None)
+    plugin_other.setup()
+    assert plugin_other._health_allowlist == []  # type: ignore[attr-defined]
+
+
+def test_docker_hosts_suffix_all_dots_normalizes_to_empty_and_names_unsuffixed(
+    monkeypatch,
+):
+    """Brief: Suffix comprised only of dots normalizes to empty and does not alter names.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts _suffix is empty and forward mappings use raw names.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(  # type: ignore[arg-type]
+        suffix="...",
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+
+    containers = _make_example_containers()
+    monkeypatch.setattr(plugin, "_iter_containers_for_endpoint", lambda _ep: containers)
+    plugin.setup()
+
+    assert getattr(plugin, "_suffix") == ""
+    assert "web" in plugin._forward_v4  # type: ignore[attr-defined]
+
+
+def test_docker_hosts_iter_containers_creates_client_and_caches(monkeypatch):
+    """Brief: _iter_containers_for_endpoint lazily creates and caches a Docker client.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that a new client is created and stored when missing.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    class DummyClient:
+        def __init__(self, base_url: str) -> None:  # noqa: D401
+            """Store base_url and expose an empty containers list."""
+
+            self.base_url = base_url
+            self.containers = types.SimpleNamespace(list=lambda: [])
+
+    class DummyDockerModule:
+        def DockerClient(self, base_url: str):  # noqa: D401, N802
+            """Return a dummy client for the requested base_url."""
+
+            return DummyClient(base_url)
+
+    monkeypatch.setattr(mod, "docker", DummyDockerModule(), raising=True)
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+    # Avoid docker-dependent reload in setup.
+    monkeypatch.setattr(plugin, "_reload_from_docker", lambda: None)
+    plugin.setup()
+
+    # Clear any clients created during setup so _iter_containers_for_endpoint
+    # exercises the lazy client creation path.
+    plugin._clients = {}  # type: ignore[attr-defined]
+
+    items = list(
+        plugin._iter_containers_for_endpoint({"url": "unix:///var/run/docker.sock"})
+    )
+    assert items == []
+    assert "unix:///var/run/docker.sock" in plugin._clients  # type: ignore[attr-defined]
+
+
+def test_docker_hosts_discovery_emits_hosts_txt_with_host_ips(monkeypatch):
+    """Brief: discovery mode publishes _hosts.<suffix> TXT with endpoint/host IPs.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts host-level TXT owner has endpoint and ans4/ans6 keys.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    # Avoid talking to a real Docker daemon when creating clients for the tcp
+    # endpoint; use a dummy docker module instead.
+    class DummyClient:
+        def __init__(self, base_url: str) -> None:  # noqa: D401
+            """Store base_url and expose an empty containers list."""
+
+            self.base_url = base_url
+            self.containers = types.SimpleNamespace(list=lambda: [])
+
+    class DummyDockerModule:
+        def DockerClient(self, base_url: str):  # noqa: D401, N802
+            """Return a dummy client for the requested base_url."""
+
+            return DummyClient(base_url)
+
+    monkeypatch.setattr(mod, "docker", DummyDockerModule(), raising=True)
+
+    plugin = DockerHosts(  # type: ignore[arg-type]
+        suffix="docker.mycorp",
+        discovery=True,
+        endpoints=[
+            {
+                "url": "tcp://127.0.0.1:2375",
+                "use_ipv4": "192.0.2.10",
+                "use_ipv6": "2001:db8::10",
+            }
+        ],
+    )
+
+    containers = _make_example_containers()
+    monkeypatch.setattr(plugin, "_iter_containers_for_endpoint", lambda _ep: containers)
+    plugin.setup()
+
+    owner = plugin._hosts_owner_for_suffix("docker.mycorp")  # type: ignore[attr-defined]
+    lines = plugin._aggregate_txt.get(owner, [])  # type: ignore[attr-defined]
+    assert lines
+    joined = " ".join(lines)
+    # Endpoint should be shortened to host-only, without the tcp:// scheme or port.
+    assert "endpoint=127.0.0.1" in joined
+    assert "ans4=192.0.2.10" in joined
+    assert "ans6=2001:db8::10" in joined
+
+
+def test_docker_hosts_strip_env_domain_placeholders_from_names(monkeypatch):
+    """Brief: ${DOMAIN} placeholders are stripped from container names used as labels.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that names ending with "${DOMAIN}"/".${DOMAIN}" are
+        published without the placeholder suffix.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+
+    containers = [
+        {
+            "Id": "c1",
+            "Name": "/web.${DOMAIN}",
+            "Config": {"Hostname": "web.${DOMAIN}"},
+            "NetworkSettings": {
+                "Networks": {"bridge": {"IPAddress": "172.17.0.5"}},
+            },
+        },
+        {
+            "Id": "c2",
+            "Name": "/db${DOMAIN}",
+            "Config": {"Hostname": "db${DOMAIN}"},
+            "NetworkSettings": {
+                "Networks": {"bridge": {"IPAddress": "172.17.0.6"}},
+            },
+        },
+    ]
+
+    monkeypatch.setattr(plugin, "_iter_containers_for_endpoint", lambda _ep: containers)
+    plugin.setup()
+
+    # Placeholder suffixes should be stripped from mapping keys.
+    assert "web" in plugin._forward_v4  # type: ignore[attr-defined]
+    assert "web.${DOMAIN}" not in plugin._forward_v4  # type: ignore[attr-defined]
+    assert "db" in plugin._forward_v4  # type: ignore[attr-defined]
+    assert "db${DOMAIN}" not in plugin._forward_v4  # type: ignore[attr-defined]
+
+
+def test_docker_hosts_http_snapshot_hash_detection_and_suffix_stripping(monkeypatch):
+    """Brief: get_http_snapshot strips suffixes and treats hash-like labels as aliases.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts suffix normalization, hash-like detection, and endpoint view.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+    monkeypatch.setattr(plugin, "_reload_from_docker", lambda: None)
+    plugin.setup()
+
+    with plugin._lock:  # type: ignore[attr-defined]
+        # Configure a plugin-level suffix with extra dots and mixed case.
+        plugin._suffix = ".docker..EXAMPLE."  # type: ignore[attr-defined]
+        # Forward map includes a normal name with suffix, a hash-like alias,
+        # a non-hex long label, and an empty-name entry.
+        plugin._forward_v4 = {  # type: ignore[attr-defined]
+            "web.docker.example": ["192.0.2.1"],
+            "0123456789ab.docker.example": ["192.0.2.2"],
+            "nothexHASHvalue": ["192.0.2.3"],
+            "": ["192.0.2.4"],
+        }
+        plugin._forward_v6 = {}  # type: ignore[attr-defined]
+        plugin._aggregate_txt = {}  # type: ignore[attr-defined]
+        plugin._ttl_v4 = {}  # type: ignore[attr-defined]
+        plugin._ttl_v6 = {}  # type: ignore[attr-defined]
+        plugin._hostports = {}  # type: ignore[attr-defined]
+        plugin._endpoints = [  # type: ignore[attr-defined]
+            {
+                "url": "unix:///var/run/docker.sock",
+                "interval": 5.0,
+                "host_ipv4": None,
+                "host_ipv6": None,
+                "suffix": "docker.example",
+            },
+            "not-a-dict",
+        ]
+
+    snapshot = plugin.get_http_snapshot()
+    summary = snapshot["summary"]
+    rows = snapshot["containers"]
+
+    names = {str(row["name"]) for row in rows}
+    # Suffix should be stripped from display names when it matches plugin suffix.
+    assert "web" in names
+    # Hash-like labels should still appear but not contribute extra container
+    # slots in the summary count.
+    assert any(len(n) >= 12 for n in names)
+
+    assert summary["total_containers"] <= len(rows)
+    # Endpoint view should contain exactly one normalized endpoint dict.
+    assert len(summary["endpoints"]) == 1
+    ep_view = summary["endpoints"][0]
+    assert ep_view["url"] == "unix:///var/run/docker.sock"
+
+
+def test_docker_hosts_pre_resolve_parse_failures_and_txt_includes_a_records(
+    monkeypatch, caplog
+):
+    """Brief: pre_resolve handles parse failures and TXT queries return A/AAAA answers.
+
+    Inputs:
+      - monkeypatch/caplog: pytest fixtures.
+
+    Outputs:
+      - None; asserts override(None) on parse failure and mixed TXT/A/AAAA answers.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+
+    containers = _make_example_containers()
+    monkeypatch.setattr(plugin, "_iter_containers_for_endpoint", lambda _ep: containers)
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # A/AAAA/TXT parse failures log and return override(None).
+    caplog.set_level("WARNING", logger=mod.__name__)
+
+    dec_a = plugin.pre_resolve("web", QTYPE.A, b"not-a-dns-packet", ctx)
+    assert dec_a is not None and dec_a.action == "override" and dec_a.response is None
+
+    dec_aaaa = plugin.pre_resolve("web", QTYPE.AAAA, b"not-a-dns-packet", ctx)
+    assert (
+        dec_aaaa is not None
+        and dec_aaaa.action == "override"
+        and dec_aaaa.response is None
+    )
+
+    dec_txt_fail = plugin.pre_resolve("web", QTYPE.TXT, b"not-a-dns-packet", ctx)
+    assert dec_txt_fail is not None and dec_txt_fail.action == "override"
+    assert dec_txt_fail.response is None
+
+    assert any("parse failure for A" in r.getMessage() for r in caplog.records)
+    assert any("parse failure for AAAA" in r.getMessage() for r in caplog.records)
+    assert any("parse failure for TXT" in r.getMessage() for r in caplog.records)
+
+    # Valid TXT query should include TXT plus A/AAAA answers.
+    q_txt = DNSRecord.question("web", "TXT")
+    dec_txt = plugin.pre_resolve("web", QTYPE.TXT, q_txt.pack(), ctx)
+    assert dec_txt is not None and dec_txt.response is not None
+
+    resp = DNSRecord.parse(dec_txt.response)
+    types = {rr.rtype for rr in resp.rr}
+    assert QTYPE.TXT in types
+    assert QTYPE.A in types or QTYPE.AAAA in types
+
+
+def test_docker_hosts_pre_resolve_ptr_missing_mapping_and_unknown_qtype(monkeypatch):
+    """Brief: pre_resolve returns None for missing PTR mapping and unknown qtypes.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts None when PTR hostname is absent and for non-handled qtypes.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+    monkeypatch.setattr(plugin, "_reload_from_docker", lambda: None)
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # PTR with no reverse mapping.
+    q_ptr = DNSRecord.question("1.0.0.127.in-addr.arpa", "PTR")
+    assert (
+        plugin.pre_resolve("1.0.0.127.in-addr.arpa", QTYPE.PTR, q_ptr.pack(), ctx)
+        is None
+    )
+
+    # Unknown qtype should fall through and return None.
+    q_mx = DNSRecord.question("web", "MX")
+    assert plugin.pre_resolve("web", QTYPE.MX, q_mx.pack(), ctx) is None
+
+
+def test_docker_hosts_pre_resolve_txt_returns_none_when_no_mappings(monkeypatch):
+    """Brief: TXT pre_resolve returns None when no TXT or A/AAAA mappings exist.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts None decision for TXT when plugin has no mappings.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+    monkeypatch.setattr(plugin, "_reload_from_docker", lambda: None)
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    q_txt = DNSRecord.question("missing", "TXT")
+    assert plugin.pre_resolve("missing", QTYPE.TXT, q_txt.pack(), ctx) is None
+
+
+def test_docker_hosts_admin_ui_descriptor_handles_errors_and_empty_name(monkeypatch):
+    """Brief: get_admin_ui_descriptor tolerates get_admin_pages() errors and empty name.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts descriptor still uses a sensible title and snapshot URL.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+    monkeypatch.setattr(plugin, "_reload_from_docker", lambda: None)
+    plugin.setup()
+
+    # Force an error when fetching admin pages and clear the plugin name so the
+    # descriptor falls back to the base title.
+    def boom():  # noqa: D401
+        """Always raise to exercise the exception path."""
+
+        raise RuntimeError("boom")
+
+    plugin.name = ""  # type: ignore[attr-defined]
+    monkeypatch.setattr(plugin, "get_admin_pages", boom)
+
+    desc = plugin.get_admin_ui_descriptor()
+    assert desc["title"] == "Docker"
+    assert desc["endpoints"]["snapshot"].endswith("/docker_hosts")

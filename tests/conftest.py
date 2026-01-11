@@ -36,15 +36,11 @@ try:
     sys.modules["foghorn.plugins.resolve.examples.base"] = _examples_base
 
     # Alias old module paths to their new locations under the examples package.
-    _examples_mod = importlib.import_module(
-        "foghorn.plugins.resolve.examples.examples"
-    )
+    _examples_mod = importlib.import_module("foghorn.plugins.resolve.examples.examples")
     _dns_prefetch_mod = importlib.import_module(
         "foghorn.plugins.resolve.examples.dns_prefetch"
     )
-    _greylist_mod = importlib.import_module(
-        "foghorn.plugins.resolve.examples.greylist"
-    )
+    _greylist_mod = importlib.import_module("foghorn.plugins.resolve.examples.greylist")
     _ndf_mod = importlib.import_module(
         "foghorn.plugins.resolve.examples.new_domain_filter"
     )

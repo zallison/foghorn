@@ -4,7 +4,8 @@ Foghorn is a versatile DNS server designed for flexibility and performance. Buil
 
 With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/foghorn)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/foghorn)[![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-donate-yellow.svg)](https://www.buymeacoffee.com/foghorndns)
+
 
 <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" width=300px />
 
@@ -29,24 +30,28 @@ The configuration file is validated against a JSON Schema, but you rarely need t
   - [3.4 DoH listener behind an HTTP reverse proxy](#34-doh-listener-behind-an-http-reverse-proxy)
 - [4. Plugin cookbook](#4-plugin-cookbook)
   - [4.1 Access control (acl)](#41-access-control-acl)
-  - [4.2 DNS prefetch (prefetch)](#42-dns-prefetch-prefetch)
-  - [4.3 Docker containers (docker)](#43-docker-containers-docker)
-  - [4.4 Hosts files (hosts)](#44-hosts-files-hosts)
-  - [4.5 Example rewrites EXAMPLE(examples)](#45-example-rewrites-examples)
-  - [4.6 List downloader (lists)](#46-list-downloader-lists)
-  - [4.7 Domain filter / adblock (filter)](#47-domain-filter--adblock-filter)
-  - [4.8 Flaky upstream simulator (flaky)](#48-flaky-upstream-simulator-flaky)
-  - [4.9 Greylist new names EXAMPLE (greylist_example)](#49-greylist-new-names-greylist_example)
-  - [4.10 mDNS / Bonjour bridge (mdns)](#410-mdns--bonjour-bridge-mdns)
-  - [4.11 New-domain WHOIS filter EXAMPLE (new_domain)](#411-new-domain-whois-filter-new_domain)
-  - [4.12 Rate limiting (rate)](#412-rate-limiting-rate)
-  - [4.13 Per-domain upstream routing (router)](#413-per-domain-upstream-routing-router)
-  - [4.14 Inline and file-based records (zone)](#414-inline-and-file-based-records-zone)
-- [5. Sample configurations](#5-sample-configurations)
-  - [5.1 `local`: workstation config](#51-local-workstation-config)
-  - [5.2 `lan`: home LAN with adblock and kid filter](#52-lan-home-lan-with-adblock-and-kid-filter)
-  - [5.3 `smb`: small business](#53-smb-small-business)
-  - [5.4 `enterprise`: layered caches and rich stats](#54-enterprise-layered-caches-and-rich-stats)
+  - [4.2 Docker containers (docker)](#42-docker-containers-docker)
+  - [4.3 Hosts files (hosts)](#43-hosts-files-hosts)
+  - [4.4 List downloader (lists)](#44-list-downloader-lists)
+  - [4.5 Domain filter / adblock (filter)](#45-domain-filter--adblock-filter)
+  - [4.6 Flaky upstream simulator (flaky)](#46-flaky-upstream-simulator-flaky)
+  - [4.7 mDNS / Bonjour bridge (mdns)](#47-mdns--bonjour-bridge-mdns)
+  - [4.8 Rate limiting (rate)](#48-rate-limiting-rate)
+  - [4.9 Per-domain upstream routing (router)](#49-per-domain-upstream-routing-router)
+  - [4.10 Inline and file-based records (zone)](#410-inline-and-file-based-records-zone)
+- [5. Example Plugins](#5-example-plugins)
+  - [5.1 DNS prefetch (prefetch)](#51-dns-prefetch-prefetch)
+  - [5.2 Example rewrites (examples)](#52-example-rewrites-examples)
+  - [5.3 Greylist new names (greylist_example)](#53-greylist-new-names-greylist_example)
+  - [5.4 New-domain WHOIS filter (new_domain)](#54-new-domain-whois-filter-new_domain)
+  - [5.5 File over DNS (file_over_dns)](#55-file-over-dns-file_over_dns)
+  - [5.6 Finger over DNS (finger)](#56-finger-over-dns-finger)
+- [6. Variables](#6-variables)
+- [7. Sample configurations](#7-sample-configurations)
+  - [7.1 `local`: workstation config](#71-local-workstation-config)
+  - [7.2 `lan`: home LAN with adblock and kid filter](#72-lan-home-lan-with-adblock-and-kid-filter)
+  - [7.3 `smb`: small business](#73-smb-small-business)
+  - [7.4 `enterprise`: layered caches and rich stats](#74-enterprise-layered-caches-and-rich-stats)
 
 ---
 
@@ -157,7 +162,50 @@ Key parts of `server`:
 - `server.cache`
   - `module`: which cache plugin to use.
   - `config`: plugin-specific cache settings.
-  - `modify` / `decorated_overrides`: optional overrides for internal helper caches.
+	- For the in-memory DNS cache (`module: memory`), the underlying
+	  `FoghornTTLCache` supports optional capacity and eviction controls when
+	  instantiated from Python code: `maxsize` (positive integer, unbounded when
+	  `None` or non-positive) and `eviction_policy` (one of `none`, `lru`,
+	  `lfu`, `fifo`, `random`, or `almost_expired`).
+  - `modify` / `decorated_overrides` / `func_caches`: optional overrides for
+	internal helper caches (functions decorated with `registered_cached`,
+	`registered_lru_cached`, `registered_foghorn_ttl`, or
+	`registered_sqlite_ttl`). These let you tune TTL and maxsize for specific
+	helpers without code changes.
+	- Valid `backend` values for `func_caches` entries are:
+	  - `ttlcache` (cachetools.TTLCache)
+	  - `lfu_cache` (cachetools.LFUCache)
+	  - `rr_cache` (cachetools.RRCache)
+	  - `fifo_cache` (cachetools.FIFOCache)
+	  - `lru_cache` (cachetools.LRUCache)
+	  - `foghorn_ttl` (FoghornTTLCache-based helpers via registered_foghorn_ttl)
+	  - `sqlite_ttl` (SQLite3TTLCache-based helpers via registered_sqlite_ttl)
+
+Example: increase the TTL and maxsize for a DNSSEC helper cached via
+`cachetools.TTLCache`:
+
+```yaml
+server:
+  cache:
+	module: memory
+	config:
+	  min_cache_ttl: 60
+
+	func_caches:
+	  - module: foghorn.dnssec.dnssec_validate
+		name: _find_zone_apex_cached
+		backend: ttlcache            # ttlcache | lru_cache | foghorn_ttl | sqlite_ttl | lfu_cache | rr_cache
+		ttl: 300                     # seconds; applies to TTL-style backends
+		maxsize: 2048                # logical max size for this helper cache
+		reset_on_ttl_change: true    # clear TTLCache once when ttl changes
+```
+
+_Note:_ the `backend` field here selects the **desired cache backend type** for
+that helper (matching the "Backend" column in the admin "Decorated caches"
+table). For cachetools-backed helpers wrapped with `registered_cached`, Foghorn
+rebuilds the function's cache at startup so you can switch between
+`ttlcache`, `lfu_cache`, `rr_cache`, `fifo_cache`, and `lru_cache` purely from
+configuration.
 - `server.dnssec`
   - Mode and DNSSEC validation knobs (e.g., UDP payload size).
 - `server.resolver`
@@ -270,11 +318,11 @@ stats:
   source_backend: local-log
   interval_seconds: 300
   ignore:
-	include_in_stats: true
+	include_in_stats: true # Just don't display them
 	ignore_single_host: false
 	top_domains_mode: suffix   # exact | suffix
 	top_domains:
-	  - example
+	  - example.com
 ```
 
 ### 2.6 Plugins
@@ -289,7 +337,7 @@ plugins:
 	setup:
 	  abort_on_failure: true
 	hooks:
-``    pre_resolve:
+	  pre_resolve:
 		enabled: true
 		priority: 50
 	logging:
@@ -308,32 +356,64 @@ You normally care about:
 - `logging`: per-plugin logging overrides (level, file, stderr, syslog) using the same shape as the global `logging` block.
 - `config`: the actual configuration for that plugin.
 
-Common plugin‑wide options:
+Common plugin‑wide config options:
 
-- **Client targeting** (all resolve plugins honor this):
+Targeting:
+
+- **Client targeting**
   - `config.targets`: list (or single string) of CIDR/IPs to explicitly target. When set, only matching clients are affected.
   - `config.targets_ignore`: list (or single string) of CIDR/IPs to skip. When only `targets_ignore` is set, all other clients are targeted by default.
+- **Listener / transport targeting**:
+  - `config.targets_listener`: restrict a plugin to specific listeners. Accepts one
+	or more of `"udp"`, `"tcp"`, `"dot"`, `"doh"`, or aliases:
+	  * `"secure"`               → `["dot", "doh"]`
+	  * `"unsecure"` / `"insecure"` → `["udp", "tcp"]`
+	  * `"any"`, `"*"`, or `null`   → no listener restriction.
+- **Domain targeting**:
+  - `config.targets_domains`: list (or single string) of domain names to match.
+  - `config.targets_domains_mode`: `"exact"` (qname must equal one of `targets_domains`), `"suffix"` (qname is that domain or ends with
+	`"." + domain`), or `"any"` (no domain restriction).
 - **qtype targeting**:
-  - `config.target_qtypes`: list of qtype names or `'*'` for all types, e.g. `['A', 'AAAA']`, `['MX']` or `['*']`.
-- **Per-plugin logging**:
-  - The `logging` stanza on the plugin instance lets you bump log level or direct output differently from the global logger.
+  - `config.target_qtypes`: list of qtype names or `'*'` for all types, e.g.
+	`['A', 'AAAA']`, `['MX']` or `['*']`.
 
-Example with targeting and qtype selection:
+Logging
+
+- **Per-plugin logging**:
+  - The `logging` stanza on the plugin instance lets you bump log level or direct
+	output differently from the global logger.
+
+Example with all common knobs:
 
 ```yaml
 plugins:
-  - type: filter
-	id: lan-filter
-	enabled: true
-	logging:
-	  level: debug
-	config:
-	  targets:
-		- 192.168.0.0/16
-	  targets_ignore:
-		- 192.168.0.10
-	  target_qtypes: ['A', 'AAAA']  # '*' | ['A'] | ['A', 'AAAA']
-```
+  - type: some-plugin
+	 id: example
+	 enabled: true
+	 logging:
+	   level: debug
+	 config:
+		# Client IP targeting
+	   targets:
+		 - 192.168.0.0/16
+		 - 10.10.10.0/24
+
+	   # JSON Lines
+	   targets_ignore: [ "192.168.0.10" ]
+
+	   # Listener / transport targeting: only DoT/DoH
+	   targets_listener:
+			- dot
+			- doh
+
+	   # Domain targeting: only *.corp.example
+	   targets_domains:
+		 - corp.example
+	   targets_domains_mode: suffix  # any | exact | suffix
+
+	   # qtype targeting: A/AAAA only
+		 target_qtypes: ['A', 'AAAA']  # '*' | ['A'] | ['A', 'AAAA']
+	```
 
 ---
 
@@ -434,14 +514,6 @@ These are intended for development and lab environments only; for production, us
 
 Below are the built‑in plugins, with short descriptions and minimal configs. All examples assume they live in the shared `plugins:` list.
 
-Some resolver filters are shipped as **examples only** and now live under
-`foghorn.plugins.resolve.examples` (for example the DNS prefetch, example
-rewrites, greylist, and new-domain WHOIS filters). They are not wired into a
-running server by default; configuration that references these example types
-will not work unless you first move or copy the corresponding module into
-`foghorn.plugins.resolve`. This is an intentional speed bump so that you review
-and understand what they do before enabling them in your own deployment.
-
 ### 4.1 Access control (`acl`)
 
 IP-based allow/deny control at the edge.
@@ -459,21 +531,7 @@ plugins:
 		- 172.16.0.0/12
 ```
 
-### 4.2 Example: DNS prefetch (`prefetch`)
-
-Prefetches the most popular names from statistics to keep the cache warm.  Not very effecient yet, but it shows the concept
-
-```yaml
-plugins:
-  - type: prefetch
-	config:
-	  interval_seconds: 60
-	  prefetch_top_n: 100
-	  max_consecutive_misses: 5
-	  qtypes: ['A', 'AAAA']
-```
-
-### 4.3 Docker containers (`docker`)
+### 4.2 Docker containers (`docker`)
 
 Expose Docker container names as DNS answers.
 
@@ -489,7 +547,7 @@ plugins:
 	  discovery: true   # false | true
 ```
 
-### 4.4 Hosts files (`hosts`)
+### 4.3 Hosts files (`hosts`)
 
 Serve additional records from one or more hosts-style files.
 
@@ -504,20 +562,7 @@ plugins:
 	  watchdog_enabled: true   # null | true | false
 ```
 
-### 4.5 Example rewrites (`examples`)
-
-A playground plugin that can rewrite responses or demonstrate behaviours.
-
-```yaml
-plugins:
-  - type: examples
-	config:
-	  base_labels: 2
-	  max_subdomains: 5
-	  apply_to_qtypes: ['A']
-```
-
-### 4.6 List downloader (`lists`)
+### 4.4 List downloader (`lists`)
 
 Fetches remote blocklists/allowlists on a schedule and stores them as files for other plugins.
 
@@ -537,7 +582,7 @@ plugins:
 		- https://serverB/hosts.txt
 ```
 
-### 4.7 Domain filter / adblock (`filter`)
+### 4.5 Domain filter / adblock (`filter`)
 
 Flexible domain/IP/pattern filter used to build adblockers and kid-safe DNS.
 
@@ -576,40 +621,29 @@ plugins:
 
 ```
 
-### 4.8 Flaky upstream simulator (`flaky`)
+### 4.6 Flaky upstream simulator (`flaky`)
 
 Injects DNS errors and timeouts for testing client behaviour.
 
 ```yaml
 plugins:
   - type: flaky
+	id: dev-servfail-5-A-AAAA
 	config:
 	  servfail_percent: 5
 	  nxdomain_percent: 0
-	  timeout_percent: 1
+	  timeout_percent: 0
 	  truncate_percent: 0
 	  noerror_empty_percent: 0
 	  apply_to_qtypes: ['A', 'AAAA']
 ```
 
-### 4.9 Greylist new names (`greylist_example`)
-
-Introduces a delay window before new names are allowed.  The origin of the project!  Started as a greylist for security researches working on phishing protection. It would sound an alarm when potential phishing domain names were spotted.  Things like "mycorp.phishing.com".
-The idea was most of these phishing domains don't see any traffic before the campagin is active.
-
-
-```yaml
-plugins:
-  - type: greylist_example
-	config:
-	  db_path: ./config/var/greylist.db
-	  cache_ttl_seconds: 300
-	  duration_hours: 24
-```
-
-### 4.10 mDNS / Bonjour bridge (`mdns`)
+### 4.7 mDNS / Bonjour bridge (`mdns`)
 
 Expose mDNS / DNS-SD services as normal DNS records.
+
+***Note***
+For mDNS / DNS-SD / Bonjour / Zeroconf / Avahi you *must* be on the same L2 network in order to receive (e.g. in Docker you might need to run with --net=host or --net=macvlan)
 
 ```yaml
 plugins:
@@ -622,20 +656,7 @@ plugins:
 	  network_enabled: true
 ```
 
-### 4.11 New-domain WHOIS filter EXAMPLE (`new_domain`)
-
-Blocks domains that appear too new according to WHOIS data.
-
-```yaml
-plugins:
-  - type: new_domain
-	config:
-	  threshold_days: 7
-	  whois_db_path: ./config/var/whois_cache.db
-	  whois_cache_ttl_seconds: 3600
-```
-
-### 4.12 Rate limiting (`rate`)
+### 4.8 Rate limiting (`rate`)
 
 Adaptive rate limiting per client or per (client,domain).
 
@@ -643,17 +664,17 @@ Adaptive rate limiting per client or per (client,domain).
 plugins:
   - type: rate
 	config:
-	  mode: per_client        # per_client | per_client_domain | per_domain
+	  mode: per_client  # per_client | per_client_domain | per_domain
 	  window_seconds: 10
 	  warmup_windows: 6
 	  burst_factor: 3.0
 	  min_enforce_rps: 50.0
-	  deny_response: nxdomain # nxdomain | refused | servfail | noerror_empty | ip
+	  deny_response: nxdomain  # nxdomain | refused | servfail | noerror_empty | ip
 	  deny_response_ip4: 0.0.0.0
 	  db_path: ./config/var/rate_limit.db
 ```
 
-### 4.13 Per-domain upstream routing (`router`)
+### 4.9 Per-domain upstream routing (`router`)
 
 Send different domains to different upstreams.
 
@@ -679,16 +700,42 @@ plugins:
 			  port: 53
 ```
 
-### 4.14 Inline and file-based records (`zone`)
+<<<<<<< HEAD
+### 4.10 Inline and file-based records (`zone`)
+=======
+### 4.14 Inline, file-based, and BIND zone records (`zone`)
+>>>>>>> fbd8b7b (feat(zone): Read BIND9 zonefiles)
 
-Define custom records either inline or in zone files.
+Define custom records either:
+
+- Inline using the `records` list and the pipe-delimited format
+  `<domain>|<qtype>|<ttl>|<value>`.
+- From one or more custom records files using `file_paths` (same
+  pipe-delimited format as above).
+- From one or more RFC‑1035 style BIND zonefiles using `bind_paths`
+  (parsed via dnslib; supports `$ORIGIN`, `$TTL`, and normal RR syntax).
+
+All sources are merged into a single internal view per (name, qtype):
+
+- The TTL for each (name, qtype) pair comes from the first occurrence of
+  that pair across all sources in configuration order.
+- Values are kept in first-seen order with duplicates dropped.
+- An SOA record at a name marks the apex of an authoritative zone; inside
+  such a zone the plugin behaves like an authoritative server, including
+  correct NXDOMAIN/NODATA and ANY semantics with SOA in the authority
+  section.
 
 ```yaml
 plugins:
   - type: zone
 	config:
+	  # Optional: pipe-delimited records files
 	  file_paths:
+		- ./config/zones.d/internal.records
+	  # Optional: native BIND zonefiles
+	  bind_paths:
 		- ./config/zones.d/internal.zone
+	  # Optional: inline records
 	  records:
 		- 'printer.lan|A|300|192.168.1.50'
 		- 'files.lan|AAAA|300|2001:db8::50'
@@ -697,17 +744,212 @@ plugins:
 
 ---
 
-## 5. Sample configurations
+## 5. Example Plugins
+
+Some resolver filters are shipped as **examples only** and now live under
+`foghorn.plugins.resolve.examples` (for example the DNS prefetch, example
+rewrites, greylist, new-domain WHOIS filter, file-over-DNS helper, and
+finger-style user lookup over DNS).
+
+These plugins are functional, but they are intended as reference implementations
+for advanced users. They are not wired into a running server by default; a
+config that references these example types will not work unless you first move
+or copy the corresponding module into `foghorn.plugins.resolve` (or build your
+own plugin based on them).
+
+Treat them as starting points: read the code end‑to‑end, decide whether the
+behaviour and trade‑offs match your environment, and in most cases prefer
+creating your own plugin that uses these as an example rather than dropping
+them directly into production.
+
+### 5.1 DNS prefetch (`prefetch`)
+
+Prefetches the most popular names from statistics to keep the cache warm. Not very efficient yet, but it shows the concept.
+
+```yaml
+plugins:
+  - type: prefetch
+	config:
+	  interval_seconds: 60
+	  prefetch_top_n: 100
+	  max_consecutive_misses: 5
+	  qtypes: ['A', 'AAAA']
+```
+
+### 5.2 Example rewrites (`examples`)
+
+A playground plugin that can rewrite responses or demonstrate behaviours.
+
+```yaml
+plugins:
+  - type: examples
+	config:
+	  base_labels: 2
+	  max_subdomains: 5
+	  apply_to_qtypes: ['A']
+```
+
+### 5.3 Greylist new names (`greylist_example`)
+
+Introduces a delay window before new names are allowed. The origin of the project! Started as a greylist for security researchers working on phishing protection.
+
+```yaml
+plugins:
+  - type: greylist_example
+	config:
+	  db_path: ./config/var/greylist.db
+	  cache_ttl_seconds: 300
+	  duration_hours: 24
+```
+
+### 5.4 New-domain WHOIS filter (`new_domain`)
+
+Blocks domains that appear too new according to WHOIS data.
+
+```yaml
+plugins:
+  - type: new_domain
+	config:
+	  threshold_days: 7
+	  whois_db_path: ./config/var/whois_cache.db
+	  whois_cache_ttl_seconds: 3600
+```
+
+### 5.5 File over DNS (`file_over_dns`)
+
+Serves byte ranges from configured files over TXT DNS queries using a pattern
+like `<name>.<start>.<end>.<rest-of-domain>`.
+
+```yaml
+plugins:
+  - type: file_over_dns
+	config:
+	  files:
+		- name: readme
+		  file_path: ./README.md
+	  ttl: 300
+	  max_chunk_bytes: 1024
+	  format: base64  # base64 | raw
+```
+
+### 5.6 Finger over DNS (`finger`)
+
+Exposes a finger-style view of user information over TXT records for
+`<user>.<domain>` when enabled, reading from per-user files such as
+`$HOME/.finger` or a configured path template.
+
+Exposes a finger-style view of user information over TXT records for
+`<user>.<domain>` when enabled, reading from per-user files such as
+`$HOME/.finger` or a configured path template.
+
+---
+
+## 6. Variables
+
+Foghorn supports a simple variable system so you can avoid repetition, keep
+secrets out of committed configs, and adapt the same config to multiple
+environments (local dev, CI/CD, containers, different sites, and so on).
+
+Variables are resolved in this order (highest priority last):
+
+1. Command-line `--var` / `--vars` flags.
+2. Environment variables.
+3. The `vars:` section at the top of the config file.
+
+Later sources override earlier ones for the same variable name.
+
+### 6.1 Basic usage
+
+At the top of your config:
+
+```yaml
+vars:
+  PROFILE: lan
+  MAIN_SUBNET: 192.168.0.0/16
+  TEST_SUBNET: 192.168.50.0/24
+```
+
+You can then reference these variables elsewhere using `${NAME}` syntax:
+
+```yaml
+server:
+  listen:
+	dns:
+	  udp: { enabled: true, host: 0.0.0.0, port: 53 }
+
+plugins:
+  - type: filter
+	id: main-filter
+	config:
+	  targets: ${MAIN_SUBNET}
+  - type: filter
+	id: test-filter
+	config:
+	  targets: ${TEST_SUBNET}
+```
+
+This keeps common values (like subnets) in one place so they are easy to update
+and reuse.
+
+### 6.2 Named subnets example (kids vs adults)
+
+```yaml
+vars:
+  LAN: 192.168.0.0/16
+  ADULTS: 192.168.1.0/24
+  KIDS: 192.168.2.0/24
+
+server:
+  listen:
+	dns:
+	  udp: { enabled: true, host: 0.0.0.0, port: 53 }
+
+plugins:
+  - type: filter
+	id: adblock
+	config:
+	  targets: ${LAN}
+	  default: allow
+	  # ... normal adblock rules ...
+
+  - type: filter
+	id: kids-filter
+	config:
+	  targets: ${KIDS}
+	  default: deny
+	  # ... strict allowlist rules for kids ...
+```
+
+### 6.3 Why use variables?
+
+- **Less repetition**: Define shared values (subnets, hostnames, DNS names) once
+  and reuse them throughout the config.
+- **Safer secrets**: Keep API tokens, passwords, and other sensitive data out of
+  the main config by passing them via environment variables or command-line
+  overrides.
+- **Environment-specific overrides**: In CI/CD or container setups you can keep
+  a single base config file and override only the variables per environment.
+  - In local dev, you might rely on the `vars:` section.
+  - In staging/prod, environment variables or `--var` flags can redefine a few
+	keys (for example, stats database DSN, upstreams, or listen addresses).
+- **Caveat for IDEs**: Some editors/IDEs run JSON/YAML schema validation on the
+  raw file and do not interpolate `${VAR}` placeholders first. In that case the
+  config may show spurious validation errors even though Foghorn will load it
+  correctly at runtime.
+
+---
+
+## 7. Sample configurations
 
 These sketches show how all the pieces fit together. Adjust paths and IPs to match your environment.
 
-### 5.1 `local`: workstation config
+### 7.1 `local`: workstation config
 
 Goals:
 
 - Cache locally for speed.
 - Forward to a public DoT resolver.
-- No plugins yet, no logging, no 
+- No plugins yet, no logging, no
 
 ```yaml
 vars:
@@ -735,7 +977,7 @@ logging:
 plugins: []
 ```
 
-### 5.2 `lan`: home LAN with adblock and kid filter
+### 7.2 `lan`: home LAN with adblock and kid filter
 
 Goals:
 
@@ -825,7 +1067,7 @@ plugins:
 			  port: 53
 ```
 
-### 5.3 `smb`: small business
+### 7.3 `smb`: small business
 
 Goals:
 
@@ -943,7 +1185,7 @@ plugins:
 	  deny_response: refused
 ```
 
-### 5.4 `enterprise`: layered caches and rich stats
+### 7.4 `enterprise`: layered caches and rich stats
 
 Goals:
 

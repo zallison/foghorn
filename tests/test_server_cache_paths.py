@@ -63,32 +63,15 @@ def test_handle_calls_ensure_edns_passthrough_no_crash(monkeypatch):
     assert len(sock.sent) >= 1
 
 
-def test_ensure_edns_adds_and_replaces_opt_record(monkeypatch):
-    """Brief: _ensure_edns adds OPT when missing and replaces existing OPT record.
+def test_ensure_edns_adds_opt_when_missing_and_sets_payload_and_do():
+    """Brief: _ensure_edns adds a single OPT with payload and DO based on dnssec_mode.
 
     Inputs:
       - None
 
     Outputs:
-      - None; asserts resulting additional section contains a single OPT with payload size.
+      - None; asserts a single OPT exists with rclass=edns_udp_payload and DO bit mapping.
     """
-
-    # Replace EDNS0 used inside server._ensure_edns with a lightweight stub that
-    # accepts integer flags; the tests only inspect rclass, not encoded bytes.
-    class _FakeEDNS0:
-        def __init__(self, *a, **k):  # pragma: no cover - simple container
-            self.args = (a, k)
-
-    class _FakeRR:
-        def __init__(self, rname, rtype, rclass, ttl, rdata):  # pragma: no cover
-            self.rname = rname
-            self.rtype = rtype
-            self.rclass = rclass
-            self.ttl = ttl
-            self.rdata = rdata
-
-    monkeypatch.setattr("foghorn.servers.server.EDNS0", _FakeEDNS0)
-    monkeypatch.setattr("foghorn.servers.server.RR", _FakeRR)
 
     class _Shim:
         cache = plugin_base.DNS_CACHE
@@ -99,25 +82,61 @@ def test_ensure_edns_adds_and_replaces_opt_record(monkeypatch):
         def _ensure_edns(self, req):
             return DNSUDPHandler._ensure_edns(self, req)
 
-    # Case 1: no existing OPT -> one OPT added
-    q1 = DNSRecord.question("opt-add.example", "A")
-    s = _Shim()
+    # Case 1: dnssec_mode=ignore -> DO bit cleared
+    q1 = DNSRecord.question("opt-add-ignore.example", "A")
+    s1 = _Shim()
+    s1.dnssec_mode = "ignore"
     assert not q1.ar
-    s._ensure_edns(q1)
+    s1._ensure_edns(q1)
     opts = [rr for rr in (q1.ar or []) if rr.rtype == QTYPE.OPT]
     assert len(opts) == 1
-    assert int(opts[0].rclass) == s.edns_udp_payload
+    opt = opts[0]
+    assert int(opt.rclass) == s1.edns_udp_payload
+    # Low 16 bits of TTL carry EDNS flags; DO must be cleared.
+    assert (int(getattr(opt, "ttl", 0)) & 0x8000) == 0
 
-    # Case 2: existing OPT present -> replaced with new payload
-    q2 = DNSRecord.question("opt-replace.example", "A")
-
-    class _ExistingOpt:
-        def __init__(self):
-            self.rtype = QTYPE.OPT
-            self.rclass = 4096
-
-    q2.ar = [_ExistingOpt()]
-    s._ensure_edns(q2)
+    # Case 2: dnssec_mode=validate -> DO bit set
+    q2 = DNSRecord.question("opt-add-validate.example", "A")
+    s2 = _Shim()
+    s2.dnssec_mode = "validate"
+    s2._ensure_edns(q2)
     opts2 = [rr for rr in (q2.ar or []) if rr.rtype == QTYPE.OPT]
     assert len(opts2) == 1
-    assert int(opts2[0].rclass) == s.edns_udp_payload
+    opt2 = opts2[0]
+    assert int(opt2.rclass) == s2.edns_udp_payload
+    assert (int(getattr(opt2, "ttl", 0)) & 0x8000) == 0x8000
+
+
+def test_ensure_edns_respects_client_payload_and_clamps_to_server_max():
+    """Brief: _ensure_edns mirrors client UDP payload, clamped by edns_udp_payload.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None; asserts resulting OPT rclass is min(client_payload, server_max).
+    """
+
+    class _Shim:
+        cache = plugin_base.DNS_CACHE
+        min_cache_ttl = 60
+        dnssec_mode = "ignore"
+        edns_udp_payload = 1600
+
+        def _ensure_edns(self, req):
+            return DNSUDPHandler._ensure_edns(self, req)
+
+    from dnslib import EDNS0 as _EDNS0
+
+    # Client advertises a larger payload than server_max; we should clamp.
+    q = DNSRecord.question("opt-clamp.example", "A")
+    q.add_ar(_EDNS0(udp_len=4096))
+
+    s = _Shim()
+    s._ensure_edns(q)
+    opts = [rr for rr in (q.ar or []) if rr.rtype == QTYPE.OPT]
+    assert len(opts) == 1
+    opt = opts[0]
+    assert int(opt.rclass) == s.edns_udp_payload
+    # DO bit remains cleared in ignore mode.
+    assert (int(getattr(opt, "ttl", 0)) & 0x8000) == 0

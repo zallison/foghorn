@@ -56,7 +56,9 @@
           "description": "Brief: Typed configuration model for AccessControl used for startup validation.\n\nInputs:\n  - default: Default policy (\"allow\" or \"deny\").\n  - allow: List of CIDR/IP strings to allow.\n  - deny: List of CIDR/IP strings to deny.\n\nOutputs:\n  - AccessControlConfig instance with normalized types.",
           "properties": {
             "allow": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Allow",
@@ -64,11 +66,14 @@
             },
             "default": {
               "default": "allow",
+              "description": "Type: string. Default: \"allow\".",
               "title": "Default",
               "type": "string"
             },
             "deny": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Deny",
@@ -92,6 +97,7 @@
               "properties": {
                 "reload_interval_second": {
                   "default": 60.0,
+                  "description": "Type: number. Default: 60.0.",
                   "minimum": 0,
                   "title": "Reload Interval Second",
                   "type": "number"
@@ -99,10 +105,12 @@
                 "ttl": {
                   "anyOf": [
                     {
+                      "description": "Type: integer.",
                       "minimum": 0,
                       "type": "integer"
                     },
                     {
+                      "description": "Type: null.",
                       "type": "null"
                     }
                   ],
@@ -110,15 +118,18 @@
                   "title": "Ttl"
                 },
                 "url": {
+                  "description": "Type: string.",
                   "title": "Url",
                   "type": "string"
                 },
                 "use_ipv4": {
                   "anyOf": [
                     {
+                      "description": "Type: string.",
                       "type": "string"
                     },
                     {
+                      "description": "Type: null.",
                       "type": "null"
                     }
                   ],
@@ -128,9 +139,11 @@
                 "use_ipv6": {
                   "anyOf": [
                     {
+                      "description": "Type: string.",
                       "type": "string"
                     },
                     {
+                      "description": "Type: null.",
                       "type": "null"
                     }
                   ],
@@ -150,10 +163,12 @@
           "properties": {
             "discovery": {
               "default": false,
+              "description": "Type: boolean. Default: false.",
               "title": "Discovery",
               "type": "boolean"
             },
             "endpoints": {
+              "description": "Type: array.",
               "items": {
                 "$ref": "#/$defs/DockerEndpointConfig"
               },
@@ -161,7 +176,9 @@
               "type": "array"
             },
             "health": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Health",
@@ -169,6 +186,7 @@
             },
             "ttl": {
               "default": 300,
+              "description": "Type: integer. Default: 300.",
               "minimum": 0,
               "title": "Ttl",
               "type": "integer"
@@ -194,9 +212,11 @@
             "file_path": {
               "anyOf": [
                 {
+                  "description": "Type: string.",
                   "type": "string"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -206,12 +226,15 @@
             "file_paths": {
               "anyOf": [
                 {
+                  "description": "Type: array.",
                   "items": {
+                    "description": "Type: string.",
                     "type": "string"
                   },
                   "type": "array"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -220,6 +243,7 @@
             },
             "ttl": {
               "default": 300,
+              "description": "Type: integer. Default: 300.",
               "minimum": 0,
               "title": "Ttl",
               "type": "integer"
@@ -227,9 +251,11 @@
             "watchdog_enabled": {
               "anyOf": [
                 {
+                  "description": "Type: boolean.",
                   "type": "boolean"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -238,12 +264,14 @@
             },
             "watchdog_min_interval_seconds": {
               "default": 1.0,
+              "description": "Type: number. Default: 1.0.",
               "minimum": 0,
               "title": "Watchdog Min Interval Seconds",
               "type": "number"
             },
             "watchdog_poll_interval_seconds": {
               "default": 0.0,
+              "description": "Type: number. Default: 0.0.",
               "minimum": 0,
               "title": "Watchdog Poll Interval Seconds",
               "type": "number"
@@ -266,32 +294,39 @@
             "add_comment": {
               "anyOf": [
                 {
+                  "description": "Type: boolean.",
                   "type": "boolean"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
               "default": false,
+              "description": "Default: false.",
               "title": "Add Comment"
             },
             "download_path": {
               "default": "./config/var/lists",
+              "description": "Type: string. Default: \"./config/var/lists\".",
               "title": "Download Path",
               "type": "string"
             },
             "hash_filenames": {
               "default": false,
+              "description": "Type: boolean. Default: false.",
               "title": "Hash Filenames",
               "type": "boolean"
             },
             "interval_days": {
               "anyOf": [
                 {
+                  "description": "Type: number.",
                   "minimum": 0,
                   "type": "number"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -301,10 +336,12 @@
             "interval_seconds": {
               "anyOf": [
                 {
+                  "description": "Type: integer.",
                   "minimum": 0,
                   "type": "integer"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -312,13 +349,16 @@
               "title": "Interval Seconds"
             },
             "url_files": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Url Files",
               "type": "array"
             },
             "urls": {
+              "description": "Type: array.",
               "items": {},
               "title": "Urls",
               "type": "array"
@@ -340,41 +380,52 @@
           "description": "Brief: Typed configuration model for Filter.\n\nInputs:\n  - cache_ttl_seconds: TTL for domain cache.\n  - db_path: Optional path to blocklist SQLite DB. When omitted or empty,\n    the plugin uses a per-instance in-memory database so that multiple\n    Filter instances do not share state by default.\n  - default: Default policy (\"allow\" or \"deny\").\n  - ttl: TTL for synthesized responses.\n  - deny_response: Policy for deny responses.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs for IP-mode denies.\n  - allow_qtypes / deny_qtypes: Optional lists of DNS qtype names to allow or deny.\n  - *_domains_files: List paths for loading allow/block lists from files.\n  - blocked_domains / allowed_domains: Inline domain lists.\n  - blocked_patterns / blocked_patterns_files: Regexes.\n  - blocked_keywords / blocked_keywords_files: Keywords.\n  - blocked_ips / blocked_ips_files: IP rules.\n\nOutputs:\n  - FilterConfig instance with normalized field types.",
           "properties": {
             "allowed_domains": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Allowed Domains",
               "type": "array"
             },
             "allowed_domains_files": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Allowed Domains Files",
               "type": "array"
             },
             "blocked_domains": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Blocked Domains",
               "type": "array"
             },
             "blocked_domains_files": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Blocked Domains Files",
               "type": "array"
             },
             "blocked_ips": {
+              "description": "Type: array.",
               "items": {
                 "anyOf": [
                   {
+                    "description": "Type: string.",
                     "type": "string"
                   },
                   {
                     "additionalProperties": true,
+                    "description": "Type: object.",
                     "type": "object"
                   }
                 ]
@@ -383,35 +434,45 @@
               "type": "array"
             },
             "blocked_ips_files": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Blocked Ips Files",
               "type": "array"
             },
             "blocked_keywords": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Blocked Keywords",
               "type": "array"
             },
             "blocked_keywords_files": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Blocked Keywords Files",
               "type": "array"
             },
             "blocked_patterns": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Blocked Patterns",
               "type": "array"
             },
             "blocked_patterns_files": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Blocked Patterns Files",
@@ -419,12 +480,14 @@
             },
             "cache_ttl_seconds": {
               "default": 600,
+              "description": "Type: integer. Default: 600.",
               "minimum": 0,
               "title": "Cache Ttl Seconds",
               "type": "integer"
             },
             "clear": {
               "default": 1,
+              "description": "Type: integer. Default: 1.",
               "minimum": 0,
               "title": "Clear",
               "type": "integer"
@@ -432,9 +495,11 @@
             "db_path": {
               "anyOf": [
                 {
+                  "description": "Type: string.",
                   "type": "string"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -443,20 +508,24 @@
             },
             "default": {
               "default": "deny",
+              "description": "Type: string. Default: \"deny\".",
               "title": "Default",
               "type": "string"
             },
             "deny_response": {
               "default": "nxdomain",
+              "description": "Type: string. Default: \"nxdomain\".",
               "title": "Deny Response",
               "type": "string"
             },
             "deny_response_ip4": {
               "anyOf": [
                 {
+                  "description": "Type: string.",
                   "type": "string"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -466,9 +535,11 @@
             "deny_response_ip6": {
               "anyOf": [
                 {
+                  "description": "Type: string.",
                   "type": "string"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -477,6 +548,7 @@
             },
             "ttl": {
               "default": 300,
+              "description": "Type: integer. Default: 300.",
               "minimum": 0,
               "title": "Ttl",
               "type": "integer"
@@ -498,7 +570,9 @@
           "description": "Brief: Typed configuration model for FlakyServer.\n\nInputs:\n  - servfail_one_in / nxdomain_one_in: Legacy 1-in-N probabilities for\n    SERVFAIL/NXDOMAIN (still accepted; converted to percentages).\n  - servfail_percent / nxdomain_percent: Percent probabilities (0\u2013100) for\n    SERVFAIL/NXDOMAIN draws; override the legacy one-in-N fields when set.\n  - timeout_percent: Percent probability (0\u2013100) of dropping the query and\n    sending no response (client observes a timeout).\n  - truncate_percent: Percent probability (0\u2013100) of setting the TC bit on\n    responses to encourage client fallback to TCP.\n  - formerr_percent: Percent probability (0\u2013100) of replying with FORMERR\n    instead of forwarding.\n  - noerror_empty_percent: Percent probability (0\u2013100) of replying with\n    NOERROR and an empty answer section.\n  - apply_to_qtypes: Qtypes this plugin applies to.\n  - fuzz_percent: Percent of matching responses to fuzz at the byte level.\n  - min_fuzz_bytes / max_fuzz_bytes: Bounds for how many bytes to mutate\n    when fuzzing a response.\n  - wrong_qtype_percent: Percent of matching responses whose question\n    qtype is rewritten to a different RR type.\n  - fuzz_actions: Fuzz primitives to use (e.g. [\"bit_flip\", \"swap_bytes\"]).\n  - seed: Optional RNG seed.\n\nOutputs:\n  - FlakyServerConfig instance with normalized field types.",
           "properties": {
             "apply_to_qtypes": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Apply To Qtypes",
@@ -506,13 +580,16 @@
             },
             "formerr_percent": {
               "default": 0.0,
+              "description": "Type: number. Default: 0.0.",
               "maximum": 100.0,
               "minimum": 0.0,
               "title": "Formerr Percent",
               "type": "number"
             },
             "fuzz_actions": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Fuzz Actions",
@@ -520,6 +597,7 @@
             },
             "fuzz_percent": {
               "default": 0.0,
+              "description": "Type: number. Default: 0.0.",
               "maximum": 100.0,
               "minimum": 0.0,
               "title": "Fuzz Percent",
@@ -527,18 +605,21 @@
             },
             "max_fuzz_bytes": {
               "default": 4,
+              "description": "Type: integer. Default: 4.",
               "minimum": 1,
               "title": "Max Fuzz Bytes",
               "type": "integer"
             },
             "min_fuzz_bytes": {
               "default": 1,
+              "description": "Type: integer. Default: 1.",
               "minimum": 1,
               "title": "Min Fuzz Bytes",
               "type": "integer"
             },
             "noerror_empty_percent": {
               "default": 0.0,
+              "description": "Type: number. Default: 0.0.",
               "maximum": 100.0,
               "minimum": 0.0,
               "title": "Noerror Empty Percent",
@@ -547,11 +628,13 @@
             "nxdomain_percent": {
               "anyOf": [
                 {
+                  "description": "Type: number.",
                   "maximum": 100.0,
                   "minimum": 0.0,
                   "type": "number"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -561,9 +644,11 @@
             "seed": {
               "anyOf": [
                 {
+                  "description": "Type: integer.",
                   "type": "integer"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -573,11 +658,13 @@
             "servfail_percent": {
               "anyOf": [
                 {
+                  "description": "Type: number.",
                   "maximum": 100.0,
                   "minimum": 0.0,
                   "type": "number"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -586,6 +673,7 @@
             },
             "timeout_percent": {
               "default": 0.0,
+              "description": "Type: number. Default: 0.0.",
               "maximum": 100.0,
               "minimum": 0.0,
               "title": "Timeout Percent",
@@ -593,6 +681,7 @@
             },
             "truncate_percent": {
               "default": 0.0,
+              "description": "Type: number. Default: 0.0.",
               "maximum": 100.0,
               "minimum": 0.0,
               "title": "Truncate Percent",
@@ -600,6 +689,7 @@
             },
             "wrong_qtype_percent": {
               "default": 0.0,
+              "description": "Type: number. Default: 0.0.",
               "maximum": 100.0,
               "minimum": 0.0,
               "title": "Wrong Qtype Percent",
@@ -626,32 +716,39 @@
           "properties": {
             "domain": {
               "default": ".local",
+              "description": "Type: string. Default: \".local\".",
               "title": "Domain",
               "type": "string"
             },
             "include_ipv4": {
               "default": true,
+              "description": "Type: boolean. Default: true.",
               "title": "Include Ipv4",
               "type": "boolean"
             },
             "include_ipv6": {
               "default": true,
+              "description": "Type: boolean. Default: true.",
               "title": "Include Ipv6",
               "type": "boolean"
             },
             "info_timeout_ms": {
               "default": 1500,
+              "description": "Type: integer. Default: 1500.",
               "minimum": 0,
               "title": "Info Timeout Ms",
               "type": "integer"
             },
             "network_enabled": {
               "default": true,
+              "description": "Type: boolean. Default: true.",
               "title": "Network Enabled",
               "type": "boolean"
             },
             "service_types": {
+              "description": "Type: array.",
               "items": {
+                "description": "Type: string.",
                 "type": "string"
               },
               "title": "Service Types",
@@ -659,20 +756,24 @@
             },
             "ttl": {
               "default": 300,
+              "description": "Type: integer. Default: 300.",
               "minimum": 0,
               "title": "Ttl",
               "type": "integer"
             },
             "zeroconf_interfaces": {
               "default": "default",
+              "description": "Default: \"default\".",
               "title": "Zeroconf Interfaces"
             },
             "zeroconf_ip_version": {
               "anyOf": [
                 {
+                  "description": "Type: string.",
                   "type": "string"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -681,6 +782,7 @@
             },
             "zeroconf_unicast": {
               "default": false,
+              "description": "Type: boolean. Default: false.",
               "title": "Zeroconf Unicast",
               "type": "boolean"
             }
@@ -702,6 +804,7 @@
           "properties": {
             "alpha": {
               "default": 0.2,
+              "description": "Type: number. Default: 0.2.",
               "maximum": 1.0,
               "minimum": 0.0,
               "title": "Alpha",
@@ -710,11 +813,13 @@
             "alpha_down": {
               "anyOf": [
                 {
+                  "description": "Type: number.",
                   "maximum": 1.0,
                   "minimum": 0.0,
                   "type": "number"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -723,26 +828,31 @@
             },
             "burst_factor": {
               "default": 3.0,
+              "description": "Type: number. Default: 3.0.",
               "minimum": 1.0,
               "title": "Burst Factor",
               "type": "number"
             },
             "db_path": {
               "default": "./config/var/rate_limit.db",
+              "description": "Type: string. Default: \"./config/var/rate_limit.db\".",
               "title": "Db Path",
               "type": "string"
             },
             "deny_response": {
               "default": "nxdomain",
+              "description": "Type: string. Default: \"nxdomain\".",
               "title": "Deny Response",
               "type": "string"
             },
             "deny_response_ip4": {
               "anyOf": [
                 {
+                  "description": "Type: string.",
                   "type": "string"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -752,9 +862,11 @@
             "deny_response_ip6": {
               "anyOf": [
                 {
+                  "description": "Type: string.",
                   "type": "string"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -763,35 +875,41 @@
             },
             "global_max_rps": {
               "default": 5000.0,
+              "description": "Type: number. Default: 5000.0.",
               "minimum": 0.0,
               "title": "Global Max Rps",
               "type": "number"
             },
             "min_enforce_rps": {
               "default": 50.0,
+              "description": "Type: number. Default: 50.0.",
               "minimum": 0.0,
               "title": "Min Enforce Rps",
               "type": "number"
             },
             "mode": {
               "default": "per_client",
+              "description": "Type: string. Default: \"per_client\".",
               "title": "Mode",
               "type": "string"
             },
             "ttl": {
               "default": 60,
+              "description": "Type: integer. Default: 60.",
               "minimum": 0,
               "title": "Ttl",
               "type": "integer"
             },
             "warmup_windows": {
               "default": 6,
+              "description": "Type: integer. Default: 6.",
               "minimum": 0,
               "title": "Warmup Windows",
               "type": "integer"
             },
             "window_seconds": {
               "default": 10,
+              "description": "Type: integer. Default: 10.",
               "minimum": 1,
               "title": "Window Seconds",
               "type": "integer"
@@ -817,9 +935,11 @@
                 "domain": {
                   "anyOf": [
                     {
+                      "description": "Type: string.",
                       "type": "string"
                     },
                     {
+                      "description": "Type: null.",
                       "type": "null"
                     }
                   ],
@@ -829,9 +949,11 @@
                 "suffix": {
                   "anyOf": [
                     {
+                      "description": "Type: string.",
                       "type": "string"
                     },
                     {
+                      "description": "Type: null.",
                       "type": "null"
                     }
                   ],
@@ -839,6 +961,7 @@
                   "title": "Suffix"
                 },
                 "upstreams": {
+                  "description": "Type: array.",
                   "items": {
                     "$ref": "#/$defs/UpstreamRouteTarget"
                   },
@@ -853,10 +976,12 @@
               "description": "Brief: Single upstream target host/port pair.\n\nInputs:\n  - host: Upstream DNS host.\n  - port: Upstream DNS port.\n\nOutputs:\n  - UpstreamRouteTarget instance with normalized types.",
               "properties": {
                 "host": {
+                  "description": "Type: string.",
                   "title": "Host",
                   "type": "string"
                 },
                 "port": {
+                  "description": "Type: integer.",
                   "maximum": 65535,
                   "minimum": 1,
                   "title": "Port",
@@ -875,6 +1000,7 @@
           "description": "Brief: Typed configuration model for UpstreamRouter.\n\nInputs:\n  - routes: List of UpstreamRoute definitions.\n\nOutputs:\n  - UpstreamRouterConfig instance with normalized field types.",
           "properties": {
             "routes": {
+              "description": "Type: array.",
               "items": {
                 "$ref": "#/$defs/UpstreamRoute"
               },
@@ -895,30 +1021,39 @@
           "zone_records"
         ],
         "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_path: Legacy single records file path.\n  - file_paths: Preferred list of records file paths.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
+          "additionalProperties": false,
+          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
           "properties": {
-            "file_path": {
+            "bind_paths": {
               "anyOf": [
                 {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "File Path"
-            },
-            "file_paths": {
-              "anyOf": [
-                {
+                  "description": "Type: array.",
                   "items": {
+                    "description": "Type: string.",
                     "type": "string"
                   },
                   "type": "array"
                 },
                 {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Bind Paths"
+            },
+            "file_paths": {
+              "anyOf": [
+                {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -928,12 +1063,15 @@
             "records": {
               "anyOf": [
                 {
+                  "description": "Type: array.",
                   "items": {
+                    "description": "Type: string.",
                     "type": "string"
                   },
                   "type": "array"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -942,6 +1080,7 @@
             },
             "ttl": {
               "default": 300,
+              "description": "Type: integer. Default: 300.",
               "minimum": 0,
               "title": "Ttl",
               "type": "integer"
@@ -949,9 +1088,11 @@
             "watchdog_enabled": {
               "anyOf": [
                 {
+                  "description": "Type: boolean.",
                   "type": "boolean"
                 },
                 {
+                  "description": "Type: null.",
                   "type": "null"
                 }
               ],
@@ -960,12 +1101,14 @@
             },
             "watchdog_min_interval_seconds": {
               "default": 1.0,
+              "description": "Type: number. Default: 1.0.",
               "minimum": 0,
               "title": "Watchdog Min Interval Seconds",
               "type": "number"
             },
             "watchdog_poll_interval_seconds": {
               "default": 0.0,
+              "description": "Type: number. Default: 0.0.",
               "minimum": 0,
               "title": "Watchdog Poll Interval Seconds",
               "type": "number"
@@ -1020,20 +1163,26 @@
     },
     "listener_doh": {
       "additionalProperties": false,
+      "description": "Type: object. Object with subkeys: cert_file, enabled, host, key_file, port.",
       "properties": {
         "cert_file": {
+          "description": "Type: string.",
           "type": "string"
         },
         "enabled": {
+          "description": "Type: boolean.",
           "type": "boolean"
         },
         "host": {
+          "description": "Type: string.",
           "type": "string"
         },
         "key_file": {
+          "description": "Type: string.",
           "type": "string"
         },
         "port": {
+          "description": "Type: integer.",
           "maximum": 65535,
           "minimum": 1,
           "type": "integer"
@@ -1043,20 +1192,26 @@
     },
     "listener_dot": {
       "additionalProperties": false,
+      "description": "Type: object. Object with subkeys: cert_file, enabled, host, key_file, port.",
       "properties": {
         "cert_file": {
+          "description": "Type: string.",
           "type": "string"
         },
         "enabled": {
+          "description": "Type: boolean.",
           "type": "boolean"
         },
         "host": {
+          "description": "Type: string.",
           "type": "string"
         },
         "key_file": {
+          "description": "Type: string.",
           "type": "string"
         },
         "port": {
+          "description": "Type: integer.",
           "maximum": 65535,
           "minimum": 1,
           "type": "integer"
@@ -1066,14 +1221,18 @@
     },
     "listener_tcp": {
       "additionalProperties": false,
+      "description": "Type: object. Object with subkeys: enabled, host, port.",
       "properties": {
         "enabled": {
+          "description": "Type: boolean.",
           "type": "boolean"
         },
         "host": {
+          "description": "Type: string.",
           "type": "string"
         },
         "port": {
+          "description": "Type: integer.",
           "maximum": 65535,
           "minimum": 1,
           "type": "integer"
@@ -1083,14 +1242,18 @@
     },
     "listener_udp": {
       "additionalProperties": false,
+      "description": "Type: object. Object with subkeys: enabled, host, port.",
       "properties": {
         "enabled": {
+          "description": "Type: boolean.",
           "type": "boolean"
         },
         "host": {
+          "description": "Type: string.",
           "type": "string"
         },
         "port": {
+          "description": "Type: integer.",
           "maximum": 65535,
           "minimum": 1,
           "type": "integer"
@@ -2210,39 +2373,50 @@
     "plugin_entry": {
       "oneOf": [
         {
+          "description": "Type: string.",
           "minLength": 1,
           "type": "string"
         },
         {
           "additionalProperties": false,
+          "description": "Type: object. Object with subkeys: comment, config, enabled, module, name, post_priority, pre_priority, priority.",
           "properties": {
             "comment": {
+              "description": "Type: string.",
               "type": "string"
             },
             "config": {
+              "description": "Type: object.",
               "type": "object"
             },
             "enabled": {
+              "description": "Type: boolean.",
               "type": "boolean"
             },
             "module": {
+              "description": "Type: string.",
               "minLength": 1,
               "type": "string"
             },
             "name": {
+              "description": "Type: string.",
               "minLength": 1,
               "type": "string"
             },
             "post_priority": {
+              "description": "Type: integer.",
               "type": "integer"
             },
             "pre_priority": {
+              "description": "Type: integer.",
               "type": "integer"
             },
             "priority": {
+              "description": "Type: integer.",
               "type": "integer"
             },
             "setup_priority": {
+              "description": "Type: integer.",
               "type": "integer"
             }
           },
@@ -2255,14 +2429,17 @@
     },
     "upstream_doh": {
       "additionalProperties": false,
+      "description": "Type: object. Object with subkeys: headers, method, tls, transport, url.",
       "properties": {
         "headers": {
           "additionalProperties": {
             "type": "string"
           },
+          "description": "Type: object.",
           "type": "object"
         },
         "method": {
+          "description": "Type: string. Valid values: \"GET\", \"POST\".",
           "enum": [
             "GET",
             "POST"
@@ -2271,11 +2448,14 @@
         },
         "tls": {
           "additionalProperties": false,
+          "description": "Type: object. Object with subkeys: ca_file, verify.",
           "properties": {
             "ca_file": {
+              "description": "Type: string.",
               "type": "string"
             },
             "verify": {
+              "description": "Type: boolean.",
               "type": "boolean"
             }
           },
@@ -2283,9 +2463,11 @@
         },
         "transport": {
           "const": "doh",
+          "description": "Type: string.",
           "type": "string"
         },
         "url": {
+          "description": "Type: string.",
           "minLength": 1,
           "type": "string"
         }
@@ -2298,19 +2480,24 @@
     },
     "upstream_host": {
       "additionalProperties": false,
+      "description": "Type: object. Object with subkeys: host, pool, port, tls, transport.",
       "properties": {
         "host": {
+          "description": "Type: string.",
           "minLength": 1,
           "type": "string"
         },
         "pool": {
           "additionalProperties": false,
+          "description": "Type: object. Object with subkeys: idle_timeout_ms, max_connections.",
           "properties": {
             "idle_timeout_ms": {
+              "description": "Type: integer.",
               "minimum": 0,
               "type": "integer"
             },
             "max_connections": {
+              "description": "Type: integer.",
               "minimum": 1,
               "type": "integer"
             }
@@ -2318,20 +2505,25 @@
           "type": "object"
         },
         "port": {
+          "description": "Type: integer.",
           "maximum": 65535,
           "minimum": 1,
           "type": "integer"
         },
         "tls": {
           "additionalProperties": false,
+          "description": "Type: object. Object with subkeys: ca_file, server_name, verify.",
           "properties": {
             "ca_file": {
+              "description": "Type: string.",
               "type": "string"
             },
             "server_name": {
+              "description": "Type: string.",
               "type": "string"
             },
             "verify": {
+              "description": "Type: boolean.",
               "type": "boolean"
             }
           },
@@ -2339,6 +2531,7 @@
         },
         "transport": {
           "default": "udp",
+          "description": "Type: string. Valid values: \"udp\", \"tcp\", \"dot\". Default: \"udp\".",
           "enum": [
             "udp",
             "tcp",
@@ -2447,6 +2640,7 @@
       "additionalProperties": false,
       "properties": {
         "cache": {
+          "description": "Types: object, null. Object with subkeys: decorated_overrides, modify.",
           "properties": {
             "decorated_overrides": {
               "description": "Optional list of overrides for decorated caches (functions wrapped by registered_cached/registered_lru_cached). Each entry may target a specific module+name pair and override backend-specific settings such as maxsize or TTL.",
@@ -2469,15 +2663,19 @@
           ]
         },
         "dnssec": {
+          "description": "Type: object.",
           "type": "object"
         },
         "http": {
+          "description": "Type: object.",
           "type": "object"
         },
         "listen": {
+          "description": "Type: object.",
           "type": "object"
         },
         "resolver": {
+          "description": "Type: object.",
           "type": "object"
         }
       },

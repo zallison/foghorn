@@ -21,14 +21,12 @@ import re
 from typing import Dict, Iterable, Type
 
 from .base import BaseStatsStore
-from foghorn.utils.register_caches import registered_lru_cached
 
 
 _CAMEL_1 = re.compile(r"(.)([A-Z][a-z]+)")
 _CAMEL_2 = re.compile(r"([a-z0-9])([A-Z])")
 
 
-@registered_lru_cached(maxsize=1024)
 def _camel_to_snake(name: str) -> str:
     """Brief: Convert CamelCase class names to snake_case aliases.
 
@@ -44,7 +42,6 @@ def _camel_to_snake(name: str) -> str:
     return s2.lower()
 
 
-@registered_lru_cached(maxsize=1024)
 def _default_alias_for(cls: Type[BaseStatsStore]) -> str:
     """Brief: Derive a default alias for a BaseStatsStore subclass.
 
@@ -64,7 +61,6 @@ def _default_alias_for(cls: Type[BaseStatsStore]) -> str:
     return _camel_to_snake(name)
 
 
-@registered_lru_cached(maxsize=1024)
 def _normalize(alias: str) -> str:
     """Brief: Normalize backend alias strings for registry keys.
 
@@ -95,7 +91,6 @@ def _iter_backend_modules(
         yield modinfo.name
 
 
-@registered_lru_cached(maxsize=8)
 def discover_stats_backends(
     package_name: str = "foghorn.plugins.querylog",
 ) -> Dict[str, Type[BaseStatsStore]]:

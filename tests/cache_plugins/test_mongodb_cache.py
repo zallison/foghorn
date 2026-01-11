@@ -38,7 +38,9 @@ class FakeMongoCollection:
         self.raise_on_replace_one = False
         self.raise_on_create_index = False
 
-    def create_index(self, field: str, expireAfterSeconds: int = 0) -> None:  # noqa: N803
+    def create_index(
+        self, field: str, expireAfterSeconds: int = 0
+    ) -> None:  # noqa: N803
         """Brief: Record requested TTL index creation.
 
         Inputs:
@@ -53,7 +55,9 @@ class FakeMongoCollection:
             raise RuntimeError("create_index failed")
         self.create_index_calls.append((field, int(expireAfterSeconds)))
 
-    def find_one(self, filter: Dict[str, Any], projection: Optional[Dict[str, int]] = None) -> Optional[Dict[str, Any]]:  # noqa: D417
+    def find_one(
+        self, filter: Dict[str, Any], projection: Optional[Dict[str, int]] = None
+    ) -> Optional[Dict[str, Any]]:  # noqa: D417
         """Brief: Return a stored document by _id.
 
         Inputs:
@@ -69,7 +73,9 @@ class FakeMongoCollection:
         doc_id = filter.get("_id")
         return self.docs.get(doc_id)
 
-    def replace_one(self, filter: Dict[str, Any], doc: Dict[str, Any], upsert: bool = True) -> None:
+    def replace_one(
+        self, filter: Dict[str, Any], doc: Dict[str, Any], upsert: bool = True
+    ) -> None:
         """Brief: Upsert a document by _id.
 
         Inputs:
@@ -229,7 +235,9 @@ def _fake_pymongo_module_with_failing_index() -> object:
             coll.raise_on_create_index = True
             return coll
 
-    return type("FakePymongoModuleFailingIndex", (), {"MongoClient": ClientWithFailingIndex})()
+    return type(
+        "FakePymongoModuleFailingIndex", (), {"MongoClient": ClientWithFailingIndex}
+    )()
 
 
 def test_registry_resolves_mongodb_aliases_to_plugin_class() -> None:
@@ -357,7 +365,9 @@ def test_mongodb_cache_init_uses_uri_and_creates_ttl_index(monkeypatch) -> None:
     )
 
     uri = "mongodb://localhost:27017"
-    plugin = mongodb_cache_mod.MongoDBCache(uri=uri, database="db", collection="col", min_cache_ttl=-5)
+    plugin = mongodb_cache_mod.MongoDBCache(
+        uri=uri, database="db", collection="col", min_cache_ttl=-5
+    )
 
     assert plugin.min_cache_ttl == 0
 
@@ -411,7 +421,9 @@ def test_mongodb_cache_init_tolerates_ttl_index_errors(monkeypatch) -> None:
     _ = mongodb_cache_mod.MongoDBCache(uri="mongodb://localhost:27017")
 
 
-def _make_plugin_with_fake_mongo(monkeypatch) -> tuple[mongodb_cache_mod.MongoDBCache, FakeMongoCollection]:
+def _make_plugin_with_fake_mongo(
+    monkeypatch,
+) -> tuple[mongodb_cache_mod.MongoDBCache, FakeMongoCollection]:
     """Brief: Helper to build a MongoDBCache wired to FakeMongoCollection.
 
     Inputs:
@@ -445,7 +457,9 @@ def test_mongodb_cache_mongo_id_for_key_wraps_stable_digest(monkeypatch) -> None
 
     plugin, _ = _make_plugin_with_fake_mongo(monkeypatch)
     key = ("example.com", 1)
-    assert plugin._mongo_id_for_key(key) == mongodb_cache_mod._stable_digest_for_key(key)
+    assert plugin._mongo_id_for_key(key) == mongodb_cache_mod._stable_digest_for_key(
+        key
+    )
 
 
 def test_mongodb_cache_get_and_get_with_meta_roundtrip(monkeypatch) -> None:
@@ -695,8 +709,14 @@ def test_mongodb_cache_purge_variants(monkeypatch) -> None:
     plugin, coll = _make_plugin_with_fake_mongo(monkeypatch)
 
     now = mongodb_cache_mod._dt.datetime.utcnow()
-    coll.docs["a"] = {"_id": "a", "expires_at": now - mongodb_cache_mod._dt.timedelta(seconds=1)}
-    coll.docs["b"] = {"_id": "b", "expires_at": now + mongodb_cache_mod._dt.timedelta(seconds=10)}
+    coll.docs["a"] = {
+        "_id": "a",
+        "expires_at": now - mongodb_cache_mod._dt.timedelta(seconds=1),
+    }
+    coll.docs["b"] = {
+        "_id": "b",
+        "expires_at": now + mongodb_cache_mod._dt.timedelta(seconds=10),
+    }
 
     removed = plugin.purge()
     assert isinstance(removed, int) and removed >= 1
