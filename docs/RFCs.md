@@ -17,7 +17,7 @@ This document summarizes how Foghorn’s behavior maps onto major DNS-related RF
 | 4033–4035 | DNSSEC protocol/records/validation              | Experimental / partial               |
 |      6891 | Extension Mechanisms for DNS (EDNS(0))          | Partially implemented (minimal EDNS) |
 |      7873 | Domain Name System (DNS) Cookies                | Not implemented                      |
-|      8914 | Extended DNS Errors                             | Not implemented                      |
+||      8914 | Extended DNS Errors                             | Partially implemented (EDE for policy/upstream failures) |
 |      5936 | DNS Zone Transfer Protocol (AXFR/IXFR)          | Not implemented / out of scope       |
 |      9230 | Oblivious DNS over HTTPS (ODoH)                 | Not implemented / out of scope       |
 |      9250 | DNS over QUIC (DoQ)                             | Not implemented / out of scope       |
@@ -161,8 +161,8 @@ The following RFCs (and related features) are not implemented directly in Foghor
 - **RFC 7873 – DNS Cookies**
   - No DNS Cookies support on either downstream or upstream sides.
 
-- **RFC 8914 – Extended DNS Errors (EDE)**
-  - No generation or parsing of extended error codes; responses may still carry EDE from upstreams, but Foghorn treats them as opaque.
+- **RFC 8914 – Extended DNS Errors**
+-  - When `server.enable_ede` is true and the client advertises EDNS(0), Foghorn can attach RFC 8914 Extended DNS Error (EDE) options to certain synthetic responses (for example, policy denies, rate limits, and upstream failures) while leaving RCODE semantics unchanged. Upstream-provided EDE options are forwarded opaquely. Full DNSSEC-related EDE coverage is not implemented.
 
 - **RFC 9230 – Oblivious DoH (ODoH)**
   - No ODoH support; DoH is implemented as standard RFC 8484 client/server.
