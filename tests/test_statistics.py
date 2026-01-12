@@ -331,6 +331,48 @@ class TestStatsCollector:
         assert snapshot.totals["dnssec_bogus"] == 1
         assert snapshot.totals["dnssec_indeterminate"] == 1
 
+    def test_record_ede_code_and_snapshot(self) -> None:
+        """Brief: record_ede_code tracks EDE counters and exposes ede_totals.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None; asserts ede_* totals are incremented and surfaced in snapshots.
+        """
+
+        collector = StatsCollector()
+        # Invalid/negative values are ignored.
+        collector.record_ede_code("")
+        collector.record_ede_code(-1)
+        # Two calls for the same info-code should accumulate under ede_15.
+        collector.record_ede_code(15)
+        collector.record_ede_code("15")
+
+        snapshot = collector.snapshot()
+        assert snapshot.totals["ede_15"] == 2
+        assert snapshot.ede_totals is not None
+        assert snapshot.ede_totals["ede_15"] == 2
+
+    def test_format_snapshot_json_includes_ede_section(self) -> None:
+        """Brief: format_snapshot_json emits a top-level ede object when present.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None; asserts ede section mirrors snapshot.ede_totals.
+        """
+
+        collector = StatsCollector()
+        collector.record_ede_code(23)
+        snap = collector.snapshot()
+        json_str = format_snapshot_json(snap)
+        parsed = json.loads(json_str)
+
+        assert "ede" in parsed
+        assert parsed["ede"]["ede_23"] == 1
+
     def test_unique_tracking(self):
         """Unique clients and domains tracked."""
         collector = StatsCollector(track_uniques=True)

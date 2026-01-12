@@ -323,6 +323,51 @@ def test_stats_and_traffic_with_collector() -> None:
     assert "latency" in traffic_data
 
 
+def test_traffic_includes_ede_and_dnssec_when_present() -> None:
+    """Brief: /traffic exposes dnssec and ede mappings when snapshot provides them.
+
+    Inputs:
+      - StatsCollector with DNSSEC and EDE activity recorded.
+
+    Outputs:
+      - /traffic JSON contains dnssec and ede objects mirroring snapshot aggregates.
+    """
+
+    collector = StatsCollector()
+    # Record one bogus DNSSEC verdict and a couple of EDE info-codes so the
+    # snapshot exposes both dnssec_totals and ede_totals.
+    collector.record_dnssec_status("dnssec_bogus")
+    collector.record_ede_code(15)
+    collector.record_ede_code("23")
+
+    app = create_app(
+        stats=collector,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+    )
+    client = TestClient(app)
+
+    resp = client.get("/traffic")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # Core traffic keys still present.
+    assert "totals" in data
+    assert "rcodes" in data
+    assert "qtypes" in data
+
+    # New higher-level aggregates are exposed when available.
+    assert "dnssec" in data
+    assert isinstance(data["dnssec"], dict)
+    assert data["dnssec"].get("dnssec_bogus") == 1
+
+    assert "ede" in data
+    assert isinstance(data["ede"], dict)
+    # Exact per-code totals are implementation-defined but the keys must exist.
+    assert "ede_15" in data["ede"]
+    assert "ede_23" in data["ede"]
+
+
 def test_stats_includes_upstreams_and_upstream_rcodes() -> None:
     """Brief: /stats must expose upstreams, upstream_rcodes, upstream_qtypes, and qtype_qnames fields.
 

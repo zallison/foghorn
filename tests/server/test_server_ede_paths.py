@@ -294,3 +294,56 @@ def test_resolve_core_outer_exception_attaches_other_ede(monkeypatch):
     code, text = edes[0]
     assert code == 0
     assert "internal" in text.lower() or "error" in text.lower()
+
+
+def test_dnssec_bogus_attaches_dnssec_ede(monkeypatch):
+    """Brief: dnssec_bogus classification results in a DNSSEC Bogus EDE only.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Asserts NOERROR with an EDE code 6 when dnssec_status is dnssec_bogus.
+    """
+
+    _setup_shared(enable_ede=True)
+    # Ensure DNSSEC validation is active and uses local classification.
+    srv.DNSUDPHandler.dnssec_mode = "validate"
+    srv.DNSUDPHandler.dnssec_validation = "local"
+
+    # Stub classify_dnssec_status to always return dnssec_bogus so that the
+    # resolver attaches a DNSSEC Bogus EDE without needing real DNSSEC material.
+    import foghorn.dnssec.dnssec_validate as dval
+
+    monkeypatch.setattr(
+        dval,
+        "classify_dnssec_status",
+        lambda dnssec_mode, dnssec_validation, qname_text, qtype_num, response_wire, udp_payload_size=1232: "dnssec_bogus",
+    )
+
+    # Upstream path returns a simple NOERROR A answer so that the pipeline
+    # exercises the standard upstream stats and DNSSEC classification path.
+    q = _make_edns_query("dnssec-bogus.example")
+    # A simple NOERROR reply without real DNSSEC material is sufficient here;
+    # classify_dnssec_status is stubbed to force a dnssec_bogus verdict.
+    ok = q.reply()
+    ok_wire = ok.pack()
+
+    def fake_forward(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None
+    ):  # noqa: ANN001
+        return ok_wire, {"host": "8.8.8.8", "port": 53}, "ok"
+
+    monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
+    srv.DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+
+    result = srv._resolve_core(q.pack(), "127.0.0.1")
+    resp = DNSRecord.parse(result.wire)
+
+    # Underlying answer remains NOERROR but carries a DNSSEC Bogus EDE.
+    assert resp.header.rcode == RCODE.NOERROR
+    edes = _extract_ede_options(resp)
+    assert edes, "expected at least one EDE option"
+    code, text = edes[0]
+    assert code == 6
+    assert "bogus" in text.lower() or "dnssec" in text.lower()

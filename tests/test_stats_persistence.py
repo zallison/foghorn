@@ -265,6 +265,40 @@ def test_sqlite_store_rebuild_counts_records_dnssec_status(tmp_path: Path) -> No
     assert totals.get("dnssec_bogus") == 1
 
 
+def test_sqlite_store_rebuild_counts_records_ede_code(tmp_path: Path) -> None:
+    """Brief: rebuild_counts_from_query_log aggregates ede_code from result_json.
+
+    This ensures that rows with an ede_code field in result_json increment the
+    corresponding totals.ede_<code> counter during rebuild.
+    """
+    db_path = tmp_path / "stats_rebuild_ede.db"
+    store = StatsSQLiteStore(db_path=str(db_path))
+
+    try:
+        # Insert a single log row with an ede_code in result_json.
+        store.insert_query_log(
+            ts=1763364639.350,
+            client_ip="192.0.2.21",
+            name="ede.example",
+            qtype="A",
+            upstream_id="8.8.8.8:53",
+            rcode="SERVFAIL",
+            status="error",
+            error="all_upstreams_failed",
+            first=None,
+            result_json='{"answers":[],"ede_code":23}',
+        )
+
+        store.rebuild_counts_from_query_log()
+        counts = store.export_counts()
+        totals = counts.get("totals", {})
+    finally:
+        store.close()
+
+    # One ede_code row should produce ede_23 == 1.
+    assert totals.get("ede_23") == 1
+
+
 def test_sqlite_store_batched_execute_and_flush(tmp_path: Path) -> None:
     """Brief: Batched SQLite store queues and flushes operations as thresholds are met.
 
