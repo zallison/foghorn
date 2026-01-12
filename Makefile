@@ -184,9 +184,14 @@ docker-run: docker-build
 .PHONY: docker-run-not-host
 docker-run-not-host: docker-build
 	docker rm -f foghorn
-	docker run -d --privileged --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ \
-		-p 5353:5353 -p ${UDPPORT}:5333/udp -p ${TCPPORT}:5333/tcp -p ${ADMINPORT}:8053/tcp \
-	 	-v /etc/hosts:/etc/hosts:ro --restart unless-stopped ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker run -d --privileged --name foghorn \
+	    -v ${CONTAINER_DATA}:/foghorn/config/ \
+		-p ${UDPPORT}:5333/udp \
+		-p ${TCPPORT}:5333/tcp \
+		-p ${ADMINPORT}:8053/tcp \
+	 	-v /etc/hosts:/etc/hosts:ro \
+		--restart unless-stopped \
+		${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 .PHONY: docker-logs
 docker-logs:
