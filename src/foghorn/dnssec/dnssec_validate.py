@@ -538,7 +538,7 @@ def _validate_chain(
                 )
             except Exception as e:
                 # If missing/invalid, fail
-                logger.debug(
+                logger.warn(
                     "_validate_chain: DNSKEY self-signature validation failed for %s: %s",
                     child,
                     e,
