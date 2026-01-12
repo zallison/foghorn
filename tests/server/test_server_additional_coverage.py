@@ -481,7 +481,76 @@ def test_no_upstreams_with_client_edns_preserves_opt_payload(monkeypatch):
     assert int(resp_opts[0].rclass) == int(req_opts[0].rclass)
 
 
-def test_pre_plugin_deny_with_client_edns_produces_nxdomain_with_opt(monkeypatch):
+def test_schedule_cache_refresh_runs_worker_and_ignores_errors(monkeypatch):
+    """Brief: _schedule_cache_refresh spawns a worker that calls resolve_query_bytes.
+
+    Inputs:
+        - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+        - None; asserts that resolve_query_bytes is invoked even when it raises.
+    """
+
+    calls: dict[str, list[tuple[bytes, str]]] = {"seen": []}
+
+    def _fake_resolve(
+        data: bytes, client_ip: str, *, listener=None, secure=None
+    ) -> bytes:  # noqa: D401, ANN001
+        """Inputs: data/client_ip. Outputs: raises after recording call."""
+
+        calls["seen"].append((data, client_ip))
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(srv, "resolve_query_bytes", _fake_resolve)
+
+    # Replace threading.Thread so that the worker runs synchronously for coverage.
+    class _FakeThread:
+        def __init__(self, target, name=None, daemon=None):  # noqa: D401, ANN001
+            """Record target/name/daemon and immediately run the worker."""
+
+            assert callable(target)
+            self.target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self) -> None:
+            self.target()
+
+    monkeypatch.setattr(srv.threading, "Thread", _FakeThread)
+
+    q = DNSRecord.question("refresh.example", "A")
+    wire = q.pack()
+
+    srv._schedule_cache_refresh(wire, "127.0.0.1")
+
+    assert calls["seen"] == [(wire, "127.0.0.1")]
+
+
+def test_set_response_id_bytes_normal_and_short():
+    """Brief: _set_response_id_bytes rewrites first two bytes only when long enough.
+
+    Inputs:
+        - None (pure function under test).
+
+    Outputs:
+        - None; asserts both normal and short-wire behaviors.
+    """
+
+    # Normal case: two or more bytes.
+    original = b"\x12\x34rest"
+    out = srv._set_response_id_bytes(original, 0xBEEF)
+    assert out[:2] == bytes([0xBE, 0xEF])
+    assert out[2:] == b"rest"
+
+    # Short wire: returned unchanged.
+    short = b"\x01"
+    out_short = srv._set_response_id_bytes(short, 0xBEEF)
+    assert out_short == short
+
+
+def test_handle_pre_plugin_deny_with_client_edns_produces_nxdomain_with_opt(
+    monkeypatch,
+):
     """Brief: Pre-plugin deny path echoes client EDNS OPT into NXDOMAIN.
 
     Inputs:
@@ -569,11 +638,11 @@ def test_send_query_with_failover_edns_formerr_udp_fallback(monkeypatch):
     """Brief: UDP FORMERR responses for EDNS queries trigger a no-EDNS retry.
 
     Inputs:
-      - monkeypatch: pytest monkeypatch fixture.
+        - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None; asserts that a FORMERR+EDNS response leads to a successful
-        fallback query without EDNS.
+        - None; asserts that a FORMERR+EDNS response leads to a successful
+          fallback query without EDNS.
     """
 
     from dnslib import EDNS0 as _EDNS0
@@ -616,6 +685,93 @@ def test_send_query_with_failover_edns_formerr_udp_fallback(monkeypatch):
     assert parsed.header.rcode == RCODE.NOERROR
     assert calls["edns"] == 1
     assert calls["no_edns"] == 1
+
+
+def test_send_query_with_failover_edns_formerr_then_servfail(monkeypatch):
+    """Brief: EDNS FORMERR fallback that still yields SERVFAIL is treated as failure.
+
+    Inputs:
+        - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+        - None; asserts that a FORMERR+EDNS response followed by SERVFAIL
+          without EDNS returns all_failed.
+    """
+
+    from dnslib import EDNS0 as _EDNS0
+
+    qname = "edns-fallback-servfail.example"
+    q = DNSRecord.question(qname, "A")
+    q.add_ar(_EDNS0(udp_len=1232))
+
+    def _fake_udp_query(host, port, wire, timeout_ms=0):
+        msg = DNSRecord.parse(wire)
+        has_opt = any(rr.rtype == QTYPE.OPT for rr in (msg.ar or []))
+        r = msg.reply()
+        if has_opt:
+            r.header.rcode = RCODE.FORMERR
+        else:
+            r.header.rcode = RCODE.SERVFAIL
+        return r.pack()
+
+    import foghorn.servers.transports.udp as udp_mod
+
+    monkeypatch.setattr(udp_mod, "udp_query", _fake_udp_query)
+
+    resp, used, reason = send_query_with_failover(
+        q,
+        upstreams=[{"host": "8.8.8.8", "port": 53}],
+        timeout_ms=500,
+        qname=qname,
+        qtype=QTYPE.A,
+    )
+
+    assert resp is None
+    assert used is None
+    assert reason == "all_failed"
+
+
+def test_send_query_with_failover_truncated_udp_falls_back_to_tcp(monkeypatch):
+    """Brief: Truncated UDP responses (TC=1) are retried over TCP.
+
+    Inputs:
+        - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+        - None; asserts that TC=1 over UDP leads to a TCP retry and success.
+    """
+
+    qname = "trunc-fallback.example"
+    q = DNSRecord.question(qname, "A")
+
+    def _fake_udp_query(host, port, wire, timeout_ms=0):
+        msg = DNSRecord.parse(wire)
+        r = msg.reply()
+        r.header.tc = 1
+        return r.pack()
+
+    def _fake_tcp_query(host, port, wire, connect_timeout_ms=0, read_timeout_ms=0):
+        msg = DNSRecord.parse(wire)
+        r = msg.reply()
+        r.header.rcode = RCODE.NOERROR
+        return r.pack()
+
+    import foghorn.servers.transports.udp as udp_mod
+
+    monkeypatch.setattr(udp_mod, "udp_query", _fake_udp_query)
+    monkeypatch.setattr(srv, "tcp_query", _fake_tcp_query)
+
+    resp, used, reason = send_query_with_failover(
+        q,
+        upstreams=[{"host": "8.8.8.8", "port": 53, "transport": "udp"}],
+        timeout_ms=500,
+        qname=qname,
+        qtype=QTYPE.A,
+    )
+
+    assert reason == "ok"
+    assert used["transport"] == "tcp"
+    assert DNSRecord.parse(resp).header.rcode == RCODE.NOERROR
 
 
 # ---- Pool limits error handling and send success ----
