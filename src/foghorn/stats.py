@@ -437,6 +437,11 @@ class StatsSnapshot:
     # UI rendering; the same keys remain present under ``totals`` for
     # backwards-compatibility.
     dnssec_totals: Optional[Dict[str, int]] = None
+    # Optional EDE status counters (subset of totals where keys start with
+    # "ede_"). This mirrors dnssec_totals so that Extended DNS Errors can be
+    # surfaced explicitly in snapshot-based APIs without changing the shape of
+    # the underlying totals mapping.
+    ede_totals: Optional[Dict[str, int]] = None
 
 
 class StatsSQLiteStore:
@@ -1405,9 +1410,15 @@ class StatsSQLiteStore:
 
                 # DNSSEC outcome (when present in result_json)
                 if result_json:
+                    dnssec_status = None
+                    payload: Any = None
                     try:
                         payload = json.loads(result_json)
-                        dnssec_status = payload.get("dnssec_status")
+                        dnssec_status = (
+                            payload.get("dnssec_status")
+                            if isinstance(payload, dict)
+                            else None
+                        )
                     except Exception:
                         dnssec_status = None
 
@@ -1421,6 +1432,25 @@ class StatsSQLiteStore:
                         # dnssec_status values are already fully-qualified
                         # keys in the new scheme (for example, 'dnssec_secure').
                         self.increment_count("totals", dnssec_status, 1)
+
+                    # Extended DNS Errors (EDE) derived from result_json, when
+                    # present, are aggregated into totals.ede_<code> counters so
+                    # warm-loaded statistics expose the same view as the live
+                    # StatsCollector record_ede_code() path.
+                    ede_val = None
+                    if isinstance(payload, dict):
+                        try:
+                            ede_val = payload.get("ede_code")
+                        except Exception:
+                            ede_val = None
+                    if ede_val is not None:
+                        try:
+                            ede_code_int = int(ede_val)
+                        except (TypeError, ValueError):
+                            ede_code_int = None
+                        if ede_code_int is not None and ede_code_int >= 0:
+                            ede_key = f"ede_{ede_code_int}"
+                            self.increment_count("totals", ede_key, 1)
 
             # Ensure any batched operations are flushed so that export_counts()
             # immediately observes the recomputed aggregates when this method
@@ -2084,6 +2114,42 @@ class StatsCollector:
                 ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                     logger.debug(
                         "StatsCollector: failed to persist dnssec_status", exc_info=True
+                    )
+
+    def record_ede_code(self, info_code: int | str) -> None:
+        """Record an Extended DNS Error (EDE) info-code.
+
+        Inputs:
+            info_code: Integer or string EDE info-code value from RFC 8914
+                (for example, 15 for "Blocked", 23 for "Network Error").
+
+        Outputs:
+            None; updates totals.ede_* counters in memory and, when a
+            StatsSQLiteStore is attached, mirrors them into the persistent
+            "totals" scope so that warm-load and rebuild semantics stay
+            aligned with snapshot and /stats consumers.
+        """
+        if info_code is None:
+            return
+
+        try:
+            code_int = int(info_code)
+        except (TypeError, ValueError):
+            return
+
+        if code_int < 0:
+            return
+
+        key = f"ede_{code_int}"
+        with self._lock:
+            self._totals[key] += 1
+
+            if self._store is not None and not self.query_log_only:
+                try:
+                    self._store.increment_count("totals", key)
+                except Exception:  # pragma: no cover - defensive logging only
+                    logger.debug(
+                        "StatsCollector: failed to persist ede_code", exc_info=True
                     )
 
     def record_cache_stat(self, label: str) -> None:
@@ -2997,6 +3063,21 @@ class StatsCollector:
             if dnssec_subset:
                 dnssec_totals = dnssec_subset
 
+            # Extract EDE-related counters (keys beginning with "ede_") into a
+            # dedicated mapping while leaving them under ``totals`` so existing
+            # dashboards that read totals directly continue to work.
+            ede_totals: Optional[Dict[str, int]] = None
+            try:
+                ede_subset = {
+                    k: int(v)
+                    for k, v in totals.items()
+                    if isinstance(v, (int, float)) and str(k).startswith("ede_")
+                }
+            except Exception:
+                ede_subset = {}
+            if ede_subset:
+                ede_totals = ede_subset
+
             snapshot = StatsSnapshot(
                 created_at=time.time(),
                 totals=totals,
@@ -3021,6 +3102,7 @@ class StatsCollector:
                 cache_miss_subdomains=cache_miss_subdomains,
                 rate_limit=rate_limit,
                 dnssec_totals=dnssec_totals,
+                ede_totals=ede_totals,
             )
 
             # Reset if requested
@@ -3562,6 +3644,11 @@ def format_snapshot_json(snapshot: StatsSnapshot) -> str:
     # When available, expose DNSSEC totals as a dedicated top-level object.
     if getattr(snapshot, "dnssec_totals", None):
         output["dnssec"] = snapshot.dnssec_totals
+
+    # When available, expose EDE totals as a dedicated top-level object so
+    # dashboards can graph Extended DNS Errors without parsing totals.* keys.
+    if getattr(snapshot, "ede_totals", None):
+        output["ede"] = snapshot.ede_totals
 
     if snapshot.uniques:
         output["uniques"] = snapshot.uniques
