@@ -4,7 +4,7 @@ Foghorn is a versatile DNS server designed for flexibility and performance. Buil
 
 With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/foghorn)[![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-donate-yellow.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml)  ![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-donate-yellow.svg)](https://www.buymeacoffee.com/foghorndns)
 
 
 <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" width=300px />
@@ -69,23 +69,23 @@ Also thanks to my junior developers, AI from both local and remote models, some 
 
 Foghorn can be installed a few different ways, depending on how you prefer to run services:
 
-•  From PyPI (recommended for most users)  
+•  From PyPI (recommended for most users)
 ```bash
-  Install the latest released version into your Python environment:  
-  pip install foghorn  
+  Install the latest released version into your Python environment:
+  pip install foghorn
   This gives you the foghorn CLI and library directly on your host system.
 ```
-•  From source (GitHub)  
-  If you want to track development, hack on plugins, or run a specific commit/branch, clone the repository and install it in editable mode: 
+•  From source (GitHub)
+  If you want to track development, hack on plugins, or run a specific commit/branch, clone the repository and install it in editable mode:
   ```bash
-  git clone https://github.com/zallison/foghorn.git  
-  cd foghorn  
+  git clone https://github.com/zallison/foghorn.git
+  cd foghorn
   pip install -e .
   ```
   This keeps your local checkout and installed code in sync as you make changes.
 
-•  Prebuilt Docker images (amd64 and armhf)  
-  If you prefer to run Foghorn in a container, prebuilt images for both amd64 and armhf are available on Docker Hub at https://hub.docker.com/r/zallison/foghorn.  
+•  Prebuilt Docker images (amd64 and armhf)
+  If you prefer to run Foghorn in a container, prebuilt images for both amd64 and armhf are available on Docker Hub at https://hub.docker.com/r/zallison/foghorn.
   Pull the image for your architecture and run it with your configuration mounted as /foghorn/config.yaml, along with any port mappings you need for DNS, DoT/DoH, and the admin web UI.
 
    ```bash
