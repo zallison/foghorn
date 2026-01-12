@@ -1283,6 +1283,87 @@ def test_bind_paths_multiple_rrsets_and_any_semantics(tmp_path: pathlib.Path) ->
     assert QTYPE.TXT in rtypes
 
 
+def test_custom_sshfp_and_openpgpkey_records(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: ZoneRecords can load and serve SSHFP and OPENPGPKEY custom records.
+
+    Inputs:
+      - tmp_path: pytest temporary directory for creating a temporary records
+        file.
+
+    Outputs:
+      - Asserts that SSHFP and OPENPGPKEY records defined in the custom
+        pipe-delimited format are parsed into ``plugin.records`` and that
+        ``pre_resolve`` returns correctly typed RRs with the expected RDATA.
+    """
+
+    file_path = tmp_path / "records.txt"
+    file_path.write_text(
+        "\n".join(
+            [
+                # SSHFP: algorithm 1 (RSA), hash type 1 (SHA-1), example hex
+                # digest.
+                "sshfp.example|SSHFP|600|1 1 1234567890abcdef1234567890abcdef12345678",
+                # OPENPGPKEY: hex-encoded key material; dnslib will expose this
+                # as generic "# <len> <hex>" text when building RDATA.
+                "openpgp.example|OPENPGPKEY|300|0A0B0C",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(file_path)])
+    plugin.setup()
+
+    # SSHFP record must be present in the internal mapping with the expected
+    # TTL and value string (note that we store the original hex casing here).
+    sshfp_key = ("sshfp.example", int(QTYPE.SSHFP))
+    ssh_ttl, ssh_values = plugin.records[sshfp_key]
+    assert ssh_ttl == 600
+    assert ssh_values == ["1 1 1234567890abcdef1234567890abcdef12345678"]
+
+    # OPENPGPKEY record must also be present with its hex RDATA in the
+    # internal mapping (generic "#" form is only used when answering).
+    openpgp_key = ("openpgp.example", int(QTYPE.OPENPGPKEY))
+    open_ttl, open_values = plugin.records[openpgp_key]
+    assert open_ttl == 300
+    assert open_values == ["0A0B0C"]
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # Verify that an SSHFP query is answered with an SSHFP RR carrying the
+    # expected RDATA (dnslib normalizes the hex digest to uppercase when
+    # formatting back to text).
+    ssh_req = _make_query("sshfp.example", int(QTYPE.SSHFP))
+    ssh_decision = plugin.pre_resolve("sshfp.example", int(QTYPE.SSHFP), ssh_req, ctx)
+    assert ssh_decision is not None
+    assert ssh_decision.action == "override"
+    ssh_resp = DNSRecord.parse(ssh_decision.response)
+    ssh_rdatas = [
+        str(rr.rdata) for rr in ssh_resp.rr if int(rr.rtype) == int(QTYPE.SSHFP)
+    ]
+    assert ssh_rdatas == ["1 1 1234567890ABCDEF1234567890ABCDEF12345678"]
+
+    # Verify that an OPENPGPKEY query returns a RR with type OPENPGPKEY and
+    # that its textual RDATA round-trips the generic form we provided.
+    open_req = _make_query("openpgp.example", int(QTYPE.OPENPGPKEY))
+    open_decision = plugin.pre_resolve(
+        "openpgp.example", int(QTYPE.OPENPGPKEY), open_req, ctx
+    )
+    assert open_decision is not None
+    assert open_decision.action == "override"
+    open_resp = DNSRecord.parse(open_decision.response)
+    open_rdatas = [
+        str(rr.rdata) for rr in open_resp.rr if int(rr.rtype) == int(QTYPE.OPENPGPKEY)
+    ]
+    assert open_rdatas == ["\\# 3 0A0B0C"]
+
+
 def test_normalize_axfr_config_valid_and_invalid_entries() -> None:
     """Brief: _normalize_axfr_config returns only well-formed zones and masters.
 
