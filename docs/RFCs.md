@@ -155,8 +155,8 @@ This mode is explicitly marked **experimental** and does not claim complete cove
 The following RFCs (and related features) are not implemented directly in Foghorn at this time:
 
 - **RFC 5936 – DNS Zone Transfer Protocol (AXFR/IXFR)**
-  - No explicit AXFR/IXFR server or client.
-  - Foghorn can serve static records via the ZoneRecords plugin but does not perform zone transfers.
+  - No AXFR/IXFR server implementation. Foghorn does **not** answer AXFR/IXFR queries from downstream clients.
+  - A limited AXFR **client** is available for the `ZoneRecords` plugin: when configured, it can perform a full TCP-based AXFR at startup for one or more zones and merge the transferred RRsets into the in-memory zone data alongside local zonefiles and inline records. There is no IXFR support and no incremental refresh loop yet.
 
 - **RFC 7873 – DNS Cookies**
   - No DNS Cookies support on either downstream or upstream sides.
@@ -179,6 +179,103 @@ Other newer or specialized DNS-related RFCs not listed above should be assumed *
 - For typical stub resolver usage over UDP/TCP/DoT/DoH, Foghorn behaves like a standards-compliant caching resolver with policy hooks.
 - Negative and referral caching follow RFC 2308 semantics for SOA/NS-based TTLs.
 - DNSSEC is best used in **passthrough/upstream-validated** mode for now; local validation exists but is experimental.
-- Advanced DNS extensions (cookies, extended errors, DoQ, ODoH, zone transfers) are out of scope at present.
+- Advanced DNS extensions (cookies, extended errors, DoQ, ODoH) are out of scope at present.
+- Zone transfers are supported in a **limited client-only form**: the `ZoneRecords` plugin can optionally perform AXFR at startup to hydrate or refresh authoritative zones, but Foghorn does not currently act as an AXFR/IXFR server.
+
+---
+
+## 7. Configuring ZoneRecords AXFR (client-only)
+
+The `ZoneRecords` plugin can consume static records from:
+- custom pipe-delimited files (`file_paths` / `file_path`),
+- RFC 1035-style BIND zone files (`bind_paths`), and
+- inline `records` entries,
+
+and, when enabled, can also merge in data from upstream AXFR masters at startup.
+
+### 7.1 Hybrid zonefile + AXFR workflow
+
+A common deployment looks like this:
+
+- Seed zones from local BIND-style files for `example.com` and friends.
+- At startup, perform AXFR from one or more authoritative masters.
+- Overlay transferred RRsets on top of the file-backed data.
+- Finally, apply any inline `records` overrides.
+
+Example plugin entry (YAML):
+
+```yaml
+plugins:
+  - name: example-zones
+    plugin: zone_records
+    config:
+      bind_paths:
+        - /etc/foghorn/zones/example.com.zone
+        - /etc/foghorn/zones/example.net.zone
+
+      # Optional: additional inline records in the custom pipe-delimited format
+      records:
+        - "example.com|TXT|300|managed by foghorn"
+
+      # Optional AXFR-backed zones; loaded **once** during startup.
+      axfr_zones:
+        - zone: example.com
+          masters:
+            - host: 192.0.2.10   # primary master
+              port: 53
+              timeout_ms: 5000   # shared connect/read timeout
+            - host: 192.0.2.11   # secondary master (fallback)
+              port: 53
+        - zone: example.net
+          masters:
+            - host: 2001:db8::53
+              port: 53
+              timeout_ms: 8000
+```
+
+Semantics:
+
+- For each `axfr_zones` entry:
+  - `zone` is the apex (with or without a trailing dot; it is normalized internally).
+  - `masters` is a list of masters. Each master supports:
+    - `host` (required): IPv4/IPv6 address or hostname,
+    - `port` (optional): defaults to 53 for TCP and 853 for DoT in typical deployments,
+    - `timeout_ms` (optional): shared connect/read timeout in milliseconds (default 5000),
+    - `transport` (optional): `tcp` (default) or `dot` (DNS-over-TLS),
+    - `server_name` (optional, DoT only): TLS SNI / verification name,
+    - `verify` (optional, DoT only): whether to verify TLS certificates (default true),
+    - `ca_file` (optional, DoT only): path to a CA bundle.
+- On `ZoneRecords.setup()`:
+  - All configured file and BIND sources are loaded first.
+  - Then AXFR is attempted for each configured zone (first master that succeeds wins).
+  - Transferred RRsets are merged into the same internal maps used for file/BIND/inline data.
+  - Any inline `records` are applied last as overrides.
+- AXFR is **only performed once** at startup; watchdog and polling reloads continue to watch local files only and do not re-transfer zones yet.
+
+DoT example:
+
+```yaml
+plugins:
+  - name: example-zones-dot
+    plugin: zone_records
+    config:
+      axfr_zones:
+        - zone: example.com
+          masters:
+            - host: 192.0.2.10
+              port: 53
+              transport: tcp
+            - host: 2001:db8::1
+              port: 853
+              transport: dot
+              server_name: axfr.example.com
+              verify: true
+              ca_file: /etc/ssl/certs/ca-bundle.crt
+```
+
+Limitations:
+
+- No IXFR, TSIG, or incremental refresh loop.
+- No AXFR/IXFR server role; downstream clients cannot request zone transfers from Foghorn directly.
 
 This document should be updated whenever Foghorn’s DNS behavior meaningfully changes with respect to any of the listed RFCs.
