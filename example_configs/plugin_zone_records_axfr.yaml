@@ -1,0 +1,35 @@
+upstreams:
+  endpoints:
+    - host: 1.1.1.1
+      port: 53
+      transport: udp
+  strategy: failover
+  max_concurrent: 1
+
+logging:
+  python:
+    level: info
+
+plugins:
+  - type: zone
+    config:
+      # Seed records from local files/BIND zones if desired. This example keeps
+      # it minimal and uses only AXFR-backed zones.
+      axfr_zones:
+        - zone: example.com
+          masters:
+            - host: 192.0.2.10
+              port: 53
+              timeout_ms: 5000
+        - zone: example.net.
+          masters:
+            - host: 2001:db8::53
+              port: 53
+              timeout_ms: 8000
+
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5353

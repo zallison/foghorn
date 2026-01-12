@@ -10,6 +10,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from dnslib import QTYPE, RCODE, RR, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field
 
+from foghorn.servers.transports.axfr import AXFRError, axfr_transfer
+
 try:  # watchdog is used for cross-platform file watching
     from watchdog.events import FileSystemEventHandler
     from watchdog.observers import Observer
@@ -39,6 +41,10 @@ class ZoneRecordsConfig(BaseModel):
       - watchdog_min_interval_seconds: Minimum seconds between reloads.
       - watchdog_poll_interval_seconds: Optional polling interval.
       - ttl: Default TTL in seconds.
+      - axfr_zones: Optional list of AXFR-backed zones, each item being a
+        mapping with at least ``zone`` and ``masters`` keys. This field is
+        normalized by ZoneRecords at runtime and is not yet described in the
+        JSON Schema.
 
     Outputs:
       - ZoneRecordsConfig instance with normalized field types.
@@ -51,6 +57,10 @@ class ZoneRecordsConfig(BaseModel):
     watchdog_min_interval_seconds: float = Field(default=1.0, ge=0)
     watchdog_poll_interval_seconds: float = Field(default=0.0, ge=0)
     ttl: int = Field(default=300, ge=0)
+    # Keep axfr_zones as a generic list-of-mappings so existing config
+    # validation continues to work; ZoneRecords performs additional
+    # normalization in setup().
+    axfr_zones: Optional[List[Dict[str, object]]] = None
 
     class Config:
         extra = "forbid"
@@ -106,6 +116,7 @@ class ZoneRecords(BasePlugin):
         legacy_path = self.config.get("file_path")
         bind_paths_cfg = self.config.get("bind_paths")
         inline_records_cfg = self.config.get("records")
+        axfr_cfg = self.config.get("axfr_zones")
 
         self.file_paths = []
         self.bind_paths: List[str] = []
@@ -133,6 +144,12 @@ class ZoneRecords(BasePlugin):
             self._inline_records = list(inline_records_cfg or [])
         except Exception:  # pragma: no cover - defensive: config may be non-iterable
             self._inline_records = []
+
+        # Normalize any AXFR-backed zones once; these are loaded during the
+        # initial _load_records() call and intentionally skipped on subsequent
+        # reloads so watchdog and polling remain file-based.
+        self._axfr_zones = self._normalize_axfr_config(axfr_cfg)
+        self._axfr_loaded_once = False
 
         # Internal synchronization and state
         self._records_lock = threading.RLock()
@@ -222,11 +239,137 @@ class ZoneRecords(BasePlugin):
         paths = list(dict.fromkeys(paths))
         return paths
 
+    def _normalize_axfr_config(self, raw: object) -> List[Dict[str, object]]:
+        """Brief: Normalize raw axfr_zones config into a list of zones.
+
+        Inputs:
+          - raw: Value from self.config.get("axfr_zones"). Expected to be a
+            list of mappings, each with a "zone" key and a "masters" key.
+
+        Outputs:
+          - list[dict]: Each entry contains:
+              - "zone": lowercased apex without trailing dot.
+              - "masters": list of mappings with at least:
+                  - "host": master host/IP string.
+                  - "port": integer port (default 53).
+                  - "timeout_ms": integer timeout in milliseconds (default 5000).
+                  - "transport": "tcp" (default) or "dot" for DNS-over-TLS.
+                  - "server_name": optional TLS SNI name for DoT.
+                  - "verify": boolean TLS verification flag for DoT.
+                  - "ca_file": optional CA bundle path for DoT.
+        """
+
+        if raw is None:
+            return []
+
+        zones: List[Dict[str, object]] = []
+
+        if not isinstance(raw, list):
+            logger.warning(
+                "ZoneRecords axfr_zones ignored: expected list, got %r", type(raw)
+            )
+            return zones
+
+        for idx, entry in enumerate(raw):
+            if not isinstance(entry, dict):
+                logger.warning(
+                    "ZoneRecords axfr_zones[%d] ignored: expected mapping, got %r",
+                    idx,
+                    type(entry),
+                )
+                continue
+
+            zone_val = entry.get("zone")
+            masters_val = entry.get("masters")
+
+            zone_text = (
+                str(zone_val).rstrip(".").lower() if zone_val is not None else ""
+            )
+            if not zone_text:
+                logger.warning(
+                    "ZoneRecords axfr_zones[%d] ignored: missing or empty 'zone'", idx
+                )
+                continue
+
+            masters: List[Dict[str, object]] = []
+            if isinstance(masters_val, dict):
+                masters_val = [masters_val]
+            if isinstance(masters_val, list):
+                for midx, m in enumerate(masters_val):
+                    if not isinstance(m, dict):
+                        logger.warning(
+                            "ZoneRecords axfr_zones[%d].masters[%d] ignored: expected mapping, got %r",
+                            idx,
+                            midx,
+                            type(m),
+                        )
+                        continue
+                    host = m.get("host")
+                    if not host:
+                        logger.warning(
+                            "ZoneRecords axfr_zones[%d].masters[%d] ignored: missing 'host'",
+                            idx,
+                            midx,
+                        )
+                        continue
+                    port = m.get("port", 53)
+                    timeout_ms = m.get("timeout_ms", 5000)
+                    transport = str(m.get("transport", "tcp")).lower()
+                    if transport not in {"tcp", "dot"}:
+                        logger.warning(
+                            "ZoneRecords axfr_zones[%d].masters[%d] ignored: unsupported transport %r",
+                            idx,
+                            midx,
+                            transport,
+                        )
+                        continue
+                    server_name = m.get("server_name")
+                    verify_flag = m.get("verify", True)
+                    ca_file = m.get("ca_file")
+                    try:
+                        port_i = int(port)
+                        timeout_i = int(timeout_ms)
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "ZoneRecords axfr_zones[%d].masters[%d] ignored: invalid port/timeout %r/%r",
+                            idx,
+                            midx,
+                            port,
+                            timeout_ms,
+                        )
+                        continue
+                    masters.append(
+                        {
+                            "host": str(host),
+                            "port": port_i,
+                            "timeout_ms": timeout_i,
+                            "transport": transport,
+                            "server_name": (
+                                str(server_name) if server_name is not None else None
+                            ),
+                            "verify": bool(verify_flag),
+                            "ca_file": str(ca_file) if ca_file is not None else None,
+                        }
+                    )
+
+            if not masters:
+                logger.warning(
+                    "ZoneRecords axfr_zones[%d] for %s ignored: no usable masters",
+                    idx,
+                    zone_text,
+                )
+                continue
+
+            zones.append({"zone": zone_text, "masters": masters})
+
+        return zones
+
     def _load_records(self) -> None:
         """Brief: Read custom records files and build lookup structures.
 
         Inputs:
-          - None (uses self.file_paths and any inline records from config).
+          - None (uses self.file_paths, any inline records from config, and,
+            on the first call after setup(), any configured AXFR-backed zones).
 
         Outputs:
           - None (populates:
@@ -245,6 +388,12 @@ class ZoneRecords(BasePlugin):
         mapping: Dict[Tuple[str, int], Tuple[int, List[str]]] = {}
         name_index: Dict[str, Dict[int, Tuple[int, List[str]]]] = {}
         zone_soa: Dict[str, Tuple[int, List[str]]] = {}
+
+        # AXFR-backed zones are loaded only once, during the initial
+        # _load_records() following setup(). Watchdog and polling reloads keep
+        # using on-disk sources.
+        axfr_zones = getattr(self, "_axfr_zones", None) or []
+        do_axfr = bool(axfr_zones) and not getattr(self, "_axfr_loaded_once", False)
 
         # Resolve the SOA type code using getattr with a safe default and fall
         # back to QTYPE.get so that tests which monkeypatch QTYPE continue to
@@ -435,6 +584,125 @@ class ZoneRecords(BasePlugin):
                     and owner not in zone_soa
                 ):
                     zone_soa[owner] = (stored_ttl, values)
+
+        # After file- and BIND-backed zones, optionally overlay any
+        # AXFR-backed zones on top. Inline records are merged last so that
+        # per-instance overrides still win over transferred data.
+        if do_axfr:
+            for zone_cfg in axfr_zones:
+                zone_name = zone_cfg.get("zone")
+                masters = zone_cfg.get("masters") or []
+                if not zone_name or not isinstance(masters, list):
+                    continue
+                zone_text = str(zone_name).rstrip(".").lower()
+                if not zone_text:
+                    continue
+
+                transferred: Optional[List[RR]] = None
+                last_error: Optional[Exception] = None
+
+                for m in masters:
+                    if not isinstance(m, dict):
+                        continue
+                    host = m.get("host")
+                    port = m.get("port", 53)
+                    timeout_ms = m.get("timeout_ms", 5000)
+                    transport = str(m.get("transport", "tcp")).lower()
+                    server_name = m.get("server_name")
+                    verify_flag = m.get("verify", True)
+                    ca_file = m.get("ca_file")
+                    if not host:
+                        continue
+                    try:
+                        port_i = int(port)
+                        timeout_i = int(timeout_ms)
+                    except (TypeError, ValueError):
+                        continue
+
+                    try:
+                        logger.info(
+                            "ZoneRecords AXFR: transferring %s from %s:%d via %s",
+                            zone_text,
+                            host,
+                            port_i,
+                            transport,
+                        )
+                        transferred = axfr_transfer(
+                            str(host),
+                            port_i,
+                            zone_text,
+                            transport=transport,
+                            server_name=(
+                                str(server_name) if server_name is not None else None
+                            ),
+                            verify=bool(verify_flag),
+                            ca_file=str(ca_file) if ca_file is not None else None,
+                            connect_timeout_ms=timeout_i,
+                            read_timeout_ms=timeout_i,
+                        )
+                        break
+                    except AXFRError as exc:
+                        last_error = exc
+                        logger.warning(
+                            "ZoneRecords AXFR: failed transfer for %s from %s:%d via %s: %s",
+                            zone_text,
+                            host,
+                            port_i,
+                            transport,
+                            exc,
+                        )
+
+                if not transferred:
+                    if last_error is not None:
+                        logger.warning(
+                            "ZoneRecords AXFR: giving up on %s after error: %s",
+                            zone_text,
+                            last_error,
+                        )
+                    continue
+
+                for rr in transferred:
+                    try:
+                        owner = str(rr.rname).rstrip(".").lower()
+                        qtype_code = int(rr.rtype)
+                        ttl = int(rr.ttl)
+                        value = str(rr.rdata)
+                    except Exception as exc:  # pragma: no cover - defensive parsing
+                        logger.warning(
+                            "Skipping RR %r from AXFR zone %s due to parse error: %s",
+                            rr,
+                            zone_text,
+                            exc,
+                        )
+                        continue
+
+                    key = (owner, int(qtype_code))
+                    existing = mapping.get(key)
+
+                    if existing is None:
+                        stored_ttl = ttl
+                        values_ax: List[str] = []
+                    else:
+                        stored_ttl, values_ax = existing
+
+                    if value not in values_ax:
+                        values_ax.append(value)
+
+                    mapping[key] = (stored_ttl, values_ax)
+
+                    per_name_ax = name_index.setdefault(owner, {})
+                    per_name_ax[int(qtype_code)] = (stored_ttl, values_ax)
+
+                    if (
+                        soa_code is not None
+                        and int(qtype_code) == int(soa_code)
+                        and owner not in zone_soa
+                    ):
+                        zone_soa[owner] = (stored_ttl, values_ax)
+
+            # Mark that we have attempted AXFR loading so subsequent reloads do
+            # not re-transfer zones.
+            self._axfr_loaded_once = True
 
         # Next, merge any inline records from plugin configuration.
         inline_records = getattr(self, "_inline_records", None) or []
