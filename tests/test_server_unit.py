@@ -229,10 +229,10 @@ def test_dnsserver_edns_udp_payload_config_and_fallback(monkeypatch):
     """Brief: DNSServer applies edns_udp_payload and falls back to default on error.
 
     Inputs:
-      - monkeypatch: pytest monkeypatch fixture.
+        - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None; asserts DNSUDPHandler.edns_udp_payload is set or reset as expected.
+        - None; asserts DNSUDPHandler.edns_udp_payload configuration and stop().
     """
 
     import foghorn.servers.server as srv_mod
@@ -241,6 +241,14 @@ def test_dnsserver_edns_udp_payload_config_and_fallback(monkeypatch):
     class _DummyServer:
         def __init__(self, *a, **kw):
             self.daemon_threads = False
+            self._shutdown_called = False
+            self._close_called = False
+
+        def shutdown(self) -> None:
+            self._shutdown_called = True
+
+        def server_close(self) -> None:
+            self._close_called = True
 
     # Avoid binding real UDP sockets in tests by patching the UDP server module
     monkeypatch.setattr(udp_srv_mod.socketserver, "ThreadingUDPServer", _DummyServer)
@@ -248,14 +256,22 @@ def test_dnsserver_edns_udp_payload_config_and_fallback(monkeypatch):
     # Normal numeric edns_udp_payload
     srv_mod.DNSUDPHandler.edns_udp_payload = 0
     srv_mod.DNSUDPHandler.dnssec_mode = "ignore"
-    srv_mod.DNSServer("127.0.0.1", 0, [], [], edns_udp_payload=1500)
+    server1 = srv_mod.DNSServer("127.0.0.1", 0, [], [], edns_udp_payload=1500)
     assert srv_mod.DNSUDPHandler.dnssec_mode == "ignore"
     assert srv_mod.DNSUDPHandler.edns_udp_payload == 1500
 
     # Non-int -> fallback to default 1232
     srv_mod.DNSUDPHandler.edns_udp_payload = 0
-    srv_mod.DNSServer("127.0.0.1", 0, [], [], edns_udp_payload="not-an-int")
+    server2 = srv_mod.DNSServer("127.0.0.1", 0, [], [], edns_udp_payload="not-an-int")
     assert srv_mod.DNSUDPHandler.edns_udp_payload == 1232
+
+    # stop() should call shutdown() and server_close() on both instances.
+    server1.stop()
+    server2.stop()
+    assert server1.server._shutdown_called is True
+    assert server1.server._close_called is True
+    assert server2.server._shutdown_called is True
+    assert server2.server._close_called is True
 
 
 def _make_handler_for_cache_tests(min_cache_ttl: int):
