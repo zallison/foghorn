@@ -258,3 +258,29 @@ def test_start_webserver_threaded_fallback(
 
     assert isinstance(handle, DummyHandle)
     assert calls["n"] == 2
+
+
+def test_admin_index_html_includes_ede_tooltips_and_section_title() -> None:
+    """Brief: Built-in admin HTML index exposes EDE tooltips and section wiring.
+
+    Inputs:
+      - None; reads the packaged html/index.html resolved via resolve_www_root.
+
+    Outputs:
+      - Asserts that STATS_TOOLTIPS defines ede_* entries and that an
+        "Extended DNS Errors (EDE)" section title is present in the markup.
+    """
+
+    from foghorn.servers import webserver as ws
+
+    html_root = Path(ws.resolve_www_root({}))
+    index_path = html_root / "index.html"
+    text = index_path.read_text(encoding="utf-8")
+
+    # Section header used by the dashboard when rendering per-EDE totals.
+    assert "Extended DNS Errors (EDE)" in text
+
+    # STATS_TOOLTIPS entries for common EDE codes must be present so the UI can
+    # surface helpful hover text for per-code counters.
+    for key in ["ede_0", "ede_6", "ede_14", "ede_15", "ede_23"]:
+        assert f"{key}:" in text

@@ -200,6 +200,11 @@
 				dnssec_unsigned: 'Responses from zones that are not signed with DNSSEC (unsigned but not an error).',
 				dnssec_bogus: 'Responses that failed DNSSEC validation (bogus).',
 				dnssec_indeterminate: 'Responses where DNSSEC status could not be determined (indeterminate).',
+				ede_0: 'Extended DNS Error code 0 (Other); generic internal failure or unexpected resolver error.',
+				ede_6: 'Extended DNS Error code 6 (DNSSEC Bogus); validation failed for the response.',
+				ede_14: 'Extended DNS Error code 14 (Not Ready); commonly used for policy or rate-limit style denies.',
+				ede_15: 'Extended DNS Error code 15 (Blocked); query was blocked by policy.',
+				ede_23: 'Extended DNS Error code 23 (Network Error); all configured upstreams failed.',
 			};
 			var lastDiskConfigObj = null;
 			var lastDiskRawYaml = null;
@@ -1271,9 +1276,11 @@
 				appendProcessGroup(data.system);
 
 				// For Totals, hide certain internal-pre cache counters from the UI and
-				// peel off DNSSEC-specific counters into their own mapping.
+				// peel off DNSSEC- and EDE-specific counters into their own mappings so
+				// they can be displayed in dedicated sections.
 				var totalsForDisplay = {};
 				var dnssecTotalsFromTotals = {};
+				var edeTotalsFromTotals = {};
 				if (data.totals && typeof data.totals === 'object') {
 					Object.keys(data.totals).forEach(function (key) {
 						if (
@@ -1285,6 +1292,10 @@
 						}
 						if (key.indexOf('dnssec_') === 0) {
 							dnssecTotalsFromTotals[key] = data.totals[key];
+							return;
+						}
+						if (key.indexOf('ede_') === 0) {
+							edeTotalsFromTotals[key] = data.totals[key];
 							return;
 						}
 						totalsForDisplay[key] = data.totals[key];
@@ -1305,6 +1316,18 @@
 				}
 				if (dnssecMapping && Object.keys(dnssecMapping).length) {
 					appendDictGroup('DNSSEC', dnssecMapping);
+				}
+
+				// Prefer a dedicated ede object from the API when present; fall back to
+				// EDE counters discovered under totals when the older schema is used.
+				var edeMapping = null;
+				if (data.ede && typeof data.ede === 'object') {
+					edeMapping = data.ede;
+				} else if (edeTotalsFromTotals && Object.keys(edeTotalsFromTotals).length) {
+					edeMapping = edeTotalsFromTotals;
+				}
+				if (edeMapping && Object.keys(edeMapping).length) {
+					appendDictGroup('Extended DNS Errors (EDE)', edeMapping);
 				}
 
 				appendUpstreamsGroup(data.upstreams || {}, data.upstream_rcodes || {});
