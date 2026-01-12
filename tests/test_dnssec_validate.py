@@ -52,6 +52,7 @@ def test_fetch_delegates_to_resolver_resolve():
     r = _R()
     name = dns.name.from_text("example.com.")
     out = dval._fetch(r, name, "DNSKEY")
+    assert name
     assert out == "ok"
     assert r.calls == [(name, "DNSKEY", True)]
 
