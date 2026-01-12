@@ -139,14 +139,18 @@ def _compute_negative_ttl(resp: DNSRecord, fallback_ttl: int) -> int:
                     )
                     if isinstance(minimum, (int, float)):
                         soa_ttls.append(int(minimum))
-                except Exception:
+                except (
+                    Exception
+                ):  # pragma: nocover - defensive: authority SOA parsing failure falls back to fallback_ttl
                     continue
             elif rr.rtype == QTYPE.NS:
                 try:
                     ttl_val = getattr(rr, "ttl", None)
                     if isinstance(ttl_val, (int, float)):
                         ns_ttls.append(int(ttl_val))
-                except Exception:
+                except (
+                    Exception
+                ):  # pragma: nocover - defensive: authority NS parsing failure falls back to fallback_ttl
                     continue
 
         # Prefer SOA-derived TTLs for true negative caching per RFC 2308.
@@ -160,7 +164,9 @@ def _compute_negative_ttl(resp: DNSRecord, fallback_ttl: int) -> int:
             return max(0, min(candidates))
 
         return max(0, int(fallback_ttl))
-    except Exception:
+    except (
+        Exception
+    ):  # pragma: nocover - defensive: negative TTL computation failure falls back to caller-provided TTL
         return max(0, int(fallback_ttl))
 
 
@@ -1797,11 +1803,15 @@ class DNSServer:
                 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 
                 cache = InMemoryTTLCache()
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: nocover - defensive: cache backend import failure is environment-specific
                 cache = None
         try:
             plugin_base.DNS_CACHE = cache  # type: ignore[assignment]
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: assignment failure is environment-specific and low-value for tests
             pass
 
         DNSUDPHandler.upstream_addrs = upstreams  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
@@ -1824,39 +1834,53 @@ class DNSServer:
         DNSUDPHandler.cache_prefetch_enabled = bool(cache_prefetch_enabled)
         try:
             DNSUDPHandler.cache_prefetch_min_ttl = max(0, int(cache_prefetch_min_ttl))
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: bad prefetch min TTL config falls back to 0
             DNSUDPHandler.cache_prefetch_min_ttl = 0
         try:
             DNSUDPHandler.cache_prefetch_max_ttl = max(0, int(cache_prefetch_max_ttl))
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: bad prefetch max TTL config falls back to 0
             DNSUDPHandler.cache_prefetch_max_ttl = 0
         try:
             DNSUDPHandler.cache_prefetch_refresh_before_expiry = max(
                 0.0, float(cache_prefetch_refresh_before_expiry)
             )
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: bad prefetch before-expiry window config falls back to 0.0
             DNSUDPHandler.cache_prefetch_refresh_before_expiry = 0.0
         try:
             DNSUDPHandler.cache_prefetch_allow_stale_after_expiry = max(
                 0.0, float(cache_prefetch_allow_stale_after_expiry)
             )
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: bad stale-after-expiry window config falls back to 0.0
             DNSUDPHandler.cache_prefetch_allow_stale_after_expiry = 0.0
 
         try:
             DNSUDPHandler.upstream_max_concurrent = max(1, int(upstream_max_concurrent))
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: invalid upstream concurrency config falls back to 1
             DNSUDPHandler.upstream_max_concurrent = 1
         try:
             DNSUDPHandler.edns_udp_payload = max(512, int(edns_udp_payload))
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: invalid EDNS UDP payload config falls back to default
             DNSUDPHandler.edns_udp_payload = 1232
         # Extended DNS Errors (RFC 8914) feature gate. When enable_ede is false
         # the resolver pipeline will not add any EDE options of its own and
         # will continue to treat upstream EDNS options opaquely.
         try:
             DNSUDPHandler.enable_ede = bool(enable_ede)
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: invalid enable_ede config falls back to False
             DNSUDPHandler.enable_ede = False
         try:
             self.server = socketserver.ThreadingUDPServer((host, port), DNSUDPHandler)
