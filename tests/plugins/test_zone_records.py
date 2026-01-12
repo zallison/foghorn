@@ -4,8 +4,7 @@ import pathlib
 import threading
 
 import pytest
-from dnslib import QTYPE, RCODE, DNSRecord
-
+from dnslib import QTYPE, RCODE, DNSRecord, RR
 from foghorn.plugins.resolve.base import PluginContext
 
 
@@ -1251,7 +1250,7 @@ def test_bind_paths_multiple_rrsets_and_any_semantics(tmp_path: pathlib.Path) ->
     """Brief: bind_paths supports multiple RR types and ANY semantics inside a zone.
 
     Inputs:
-      - tmp_path: pytest-provided temporary directory.
+      - tmp_path: pytest temporary directory.
 
     Outputs:
       - Asserts that A, AAAA, and TXT RRsets from a BIND zonefile are exposed
@@ -1282,3 +1281,214 @@ def test_bind_paths_multiple_rrsets_and_any_semantics(tmp_path: pathlib.Path) ->
     assert QTYPE.A in rtypes
     assert QTYPE.AAAA in rtypes
     assert QTYPE.TXT in rtypes
+
+
+def test_normalize_axfr_config_valid_and_invalid_entries() -> None:
+    """Brief: _normalize_axfr_config returns only well-formed zones and masters.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that valid entries are normalized and invalid ones dropped.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    # Construct a bare instance so we can call the helper directly.
+    plugin = ZoneRecords.__new__(ZoneRecords)
+
+    raw = [
+        {
+            "zone": "Example.COM.",
+            "masters": [
+                {"host": "192.0.2.1", "port": "53", "timeout_ms": "2500"},
+                {"host": "192.0.2.2"},  # uses defaults
+            ],
+        },
+        {
+            # Missing zone -> ignored.
+            "masters": [{"host": "203.0.113.1", "port": 53}],
+        },
+        {
+            "zone": "bad.example",
+            # masters is not a list or mapping -> ignored.
+            "masters": "not-a-list",
+        },
+    ]
+
+    zones = plugin._normalize_axfr_config(raw)
+    assert len(zones) == 1
+    z = zones[0]
+    assert z["zone"] == "example.com"
+    masters = z["masters"]
+    assert isinstance(masters, list)
+    assert masters[0]["host"] == "192.0.2.1"
+    assert masters[0]["port"] == 53
+    assert masters[0]["timeout_ms"] == 2500
+    # Second master picked up with default port/timeout and tcp transport.
+    assert masters[1]["host"] == "192.0.2.2"
+    assert masters[1]["port"] == 53
+    assert masters[1]["timeout_ms"] == 5000
+    assert masters[1]["transport"] == "tcp"
+
+
+def test_normalize_axfr_config_supports_dot_and_tls_fields() -> None:
+    """Brief: _normalize_axfr_config preserves transport and TLS-related fields.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that DoT masters keep transport/server_name/verify/ca_file.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords.__new__(ZoneRecords)
+
+    raw = [
+        {
+            "zone": "tls.example",
+            "masters": [
+                {
+                    "host": "dot-master.example",
+                    "port": 853,
+                    "timeout_ms": 7000,
+                    "transport": "dot",
+                    "server_name": "axfr.tls.example",
+                    "verify": False,
+                    "ca_file": "/tmp/ca.pem",
+                },
+                {
+                    # Unsupported transport -> ignored at normalisation time.
+                    "host": "ignored.example",
+                    "port": 853,
+                    "transport": "udp",
+                },
+            ],
+        }
+    ]
+
+    zones = plugin._normalize_axfr_config(raw)
+    assert len(zones) == 1
+    z = zones[0]
+    assert z["zone"] == "tls.example"
+    masters = z["masters"]
+    assert len(masters) == 1
+    m = masters[0]
+    assert m["host"] == "dot-master.example"
+    assert m["port"] == 853
+    assert m["timeout_ms"] == 7000
+    assert m["transport"] == "dot"
+    assert m["server_name"] == "axfr.tls.example"
+    assert m["verify"] is False
+    assert m["ca_file"] == "/tmp/ca.pem"
+
+
+def test_load_records_axfr_overlays_and_only_runs_once(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """Brief: Initial _load_records overlays AXFR data once and does not re-transfer.
+
+    Inputs:
+      - monkeypatch: pytest fixture for patching axfr_transfer.
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that axfr_transfer is called on setup() and skipped on reload,
+        and that transferred RRs are visible in records after setup.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    # Seed a simple file-backed record so setup() does not fail.
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("seed.test|A|300|192.0.2.10\n", encoding="utf-8")
+
+    # Build a minimal synthetic AXFR RRset for axfr.test. For integration with
+    # ZoneRecords we only need a usable A RR; SOA handling is exercised in
+    # dedicated axfr_transfer tests.
+    from dnslib import A as _A
+
+    axfr_rrs = [
+        RR("host.axfr.test.", QTYPE.A, rdata=_A("203.0.113.5"), ttl=123),
+    ]
+
+    calls = {"n": 0}
+
+    def fake_axfr_transfer(host, port, zone, **kwargs):  # noqa: ARG001
+        # Ensure we default to TCP when no transport is specified in config.
+        assert kwargs.get("transport", "tcp") == "tcp"
+        calls["n"] += 1
+        return axfr_rrs
+
+    monkeypatch.setattr(mod, "axfr_transfer", fake_axfr_transfer)
+
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        axfr_zones=[
+            {
+                "zone": "axfr.test.",
+                "masters": [
+                    {"host": "192.0.2.1", "port": 53, "timeout_ms": 4000},
+                ],
+            }
+        ],
+    )
+    plugin.setup()
+
+    # AXFR was attempted once during initial load.
+    assert calls["n"] == 1
+    assert getattr(plugin, "_axfr_loaded_once", False) is True
+
+    # Transferred A record should be present in the records mapping.
+    key = ("host.axfr.test", int(QTYPE.A))
+    assert key in plugin.records
+    ttl, values = plugin.records[key]
+    assert ttl == 123
+    assert values == ["203.0.113.5"]
+
+    # Subsequent reload must not re-run AXFR.
+    plugin._load_records()
+    assert calls["n"] == 1
+
+
+def test_load_records_axfr_errors_do_not_abort(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """Brief: AXFR errors are logged but do not prevent file-backed records from loading.
+
+    Inputs:
+      - monkeypatch: pytest fixture.
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that when axfr_transfer raises AXFRError, setup() still succeeds
+        and file-backed records are present, while AXFR zones are skipped.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("seed-only.test|A|300|192.0.2.10\n", encoding="utf-8")
+
+    def failing_axfr(*a, **k):  # noqa: ARG001
+        raise mod.AXFRError("boom")
+
+    monkeypatch.setattr(mod, "axfr_transfer", failing_axfr)
+
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        axfr_zones=[
+            {
+                "zone": "axfr-fail.test",
+                "masters": [{"host": "192.0.2.99", "port": 53}],
+            }
+        ],
+    )
+    plugin.setup()
+
+    # File-backed record is still loaded.
+    key = ("seed-only.test", int(QTYPE.A))
+    assert plugin.records[key][1] == ["192.0.2.10"]
