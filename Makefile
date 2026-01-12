@@ -11,8 +11,6 @@ CONTAINER_NAME ?= foghorn
 # Location of container config/data.
 CONTAINER_DATA ?= ./.docker
 
-
-
 LISTEN ?= 0.0.0.0
 FH_PRIORITY ?= 100
 CNAME ?= $(shell hostname)
