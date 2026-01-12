@@ -684,6 +684,12 @@ def _resolve_core(
 
     stats = getattr(DNSUDPHandler, "stats_collector", None)
     t0 = _time.perf_counter() if stats is not None else None
+    # Optional EDE info-code/text for logging and metrics when responses carry
+    # Extended DNS Errors (RFC 8914). This is populated in specific branches
+    # (for example, DNSSEC bogus classification) and mirrored into stats and
+    # query_log result payloads when present.
+    ede_code_for_logs: Optional[int] = None
+    ede_text_for_logs: Optional[str] = None
 
     try:
         rcode_name = "UNKNOWN"
@@ -782,6 +788,16 @@ def _resolve_core(
                     if stats is not None:
                         try:
                             qtype_name = QTYPE.get(qtype, str(qtype))
+                            # Track the EDE info-code used for this synthetic
+                            # NXDOMAIN so metrics and warm-loaded aggregates can
+                            # expose EDE volumes alongside rcodes.
+                            try:
+                                if hasattr(stats, "record_ede_code"):
+                                    stats.record_ede_code(ede_code)
+                            except (
+                                Exception
+                            ):  # pragma: no cover - defensive metrics hook
+                                pass
                             try:
                                 # Pre-plugin deny bypasses cache; count it as
                                 # a cache_null response and bump the
@@ -842,7 +858,12 @@ def _resolve_core(
                             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                                 pass
                             stats.record_response_rcode("NXDOMAIN", qname)
-                            result_ctx = {"source": "pre_plugin", "action": "deny"}
+                            result_ctx = {
+                                "source": "pre_plugin",
+                                "action": "deny",
+                                "ede_code": int(ede_code),
+                                "ede_text": str(ede_text),
+                            }
                             if listener is not None:
                                 result_ctx["listener"] = listener
                             if secure is not None:
@@ -1278,11 +1299,21 @@ def _resolve_core(
             # attach an EDE option describing the upstream/network failure when
             # enabled.
             _echo_client_edns(req, r)
-            _attach_ede_option(req, r, 23, "all upstreams failed")  # Network Error
+            ede_code = 23
+            ede_text = "all upstreams failed"
+            _attach_ede_option(req, r, ede_code, ede_text)  # Network Error
 
             wire = _set_response_id(r.pack(), req.header.id)
             if stats is not None:
                 try:
+                    # Record both rcode and EDE info-code for this synthetic
+                    # SERVFAIL so that metrics and query_log consumers can
+                    # distinguish upstream/network failures from other errors.
+                    if hasattr(stats, "record_ede_code"):
+                        try:
+                            stats.record_ede_code(ede_code)
+                        except Exception:  # pragma: no cover - defensive metrics hook
+                            pass
                     stats.record_response_rcode("SERVFAIL", qname)
                     if upstream_id:
                         try:
@@ -1297,6 +1328,8 @@ def _resolve_core(
                         "source": "upstream",
                         "status": status,
                         "error": "all_upstreams_failed",
+                        "ede_code": int(ede_code),
+                        "ede_text": str(ede_text),
                     }
                     if listener is not None:
                         result_ctx["listener"] = listener
@@ -1453,6 +1486,12 @@ def _resolve_core(
                     Exception
                 ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                     pass
+            # When DNSSEC validation classifies a response as bogus under
+            # dnssec_mode='validate', attach an RFC 8914 EDE code 6 (DNSSEC
+            # Bogus) so clients and metrics can distinguish these failures.
+            if dnssec_status == "dnssec_bogus":
+                ede_code_for_logs = 6
+                ede_text_for_logs = "DNSSEC validation failed (bogus)"
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
@@ -1495,6 +1534,21 @@ def _resolve_core(
                 cache = getattr(plugin_base, "DNS_CACHE", None)
                 if cache is not None:
                     cache.set(cache_key, int(ttl), out)
+
+            # Attach a DNSSEC-related EDE only for explicitly bogus
+            # classifications. This is done after caching decisions so TTL
+            # handling remains unchanged.
+            if dnssec_status == "dnssec_bogus" and ede_code_for_logs is not None:
+                try:
+                    _attach_ede_option(
+                        req,
+                        r,
+                        int(ede_code_for_logs),
+                        str(ede_text_for_logs or "DNSSEC validation failed (bogus)"),
+                    )
+                    out = r.pack()
+                except Exception:  # pragma: no cover - defensive: best-effort only
+                    pass
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
@@ -1508,6 +1562,13 @@ def _resolve_core(
             try:
                 parsed = DNSRecord.parse(wire)
                 rcode_name = RCODE.get(parsed.header.rcode, str(parsed.header.rcode))
+                # Mirror any attached EDE info-code into stats totals when
+                # available so that EDE volumes can be graphed alongside rcodes.
+                if ede_code_for_logs is not None and hasattr(stats, "record_ede_code"):
+                    try:
+                        stats.record_ede_code(ede_code_for_logs)
+                    except Exception:  # pragma: no cover - defensive metrics hook
+                        pass
                 stats.record_response_rcode(rcode_name, qname)
                 if upstream_id:
                     try:
@@ -1530,6 +1591,10 @@ def _resolve_core(
                 result_ctx = {"source": "upstream", "answers": answers}
                 if dnssec_status is not None:
                     result_ctx["dnssec_status"] = dnssec_status
+                if ede_code_for_logs is not None:
+                    result_ctx["ede_code"] = int(ede_code_for_logs)
+                    if ede_text_for_logs is not None:
+                        result_ctx["ede_text"] = str(ede_text_for_logs)
                 if listener is not None:
                     result_ctx["listener"] = listener
                 if secure is not None:
@@ -1578,10 +1643,17 @@ def _resolve_core(
             # and, when enabled, attach a generic EDE "Other" code so clients
             # can distinguish internal errors from upstream failures.
             _echo_client_edns(req, r)
-            _attach_ede_option(req, r, 0, "internal server error")  # Other
+            ede_code = 0
+            ede_text = "internal server error"
+            _attach_ede_option(req, r, ede_code, ede_text)  # Other
             wire = _set_response_id(r.pack(), req.header.id)
             if stats is not None:
                 try:
+                    if hasattr(stats, "record_ede_code"):
+                        try:
+                            stats.record_ede_code(ede_code)
+                        except Exception:  # pragma: no cover - defensive metrics hook
+                            pass
                     stats.record_response_rcode("SERVFAIL")
                     # Attempt to recover qname/qtype for logging
                     q = req.questions[0]

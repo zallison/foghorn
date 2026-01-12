@@ -777,6 +777,10 @@ def _build_stats_payload_from_snapshot(
     if dnssec_totals:
         payload["dnssec"] = dnssec_totals
 
+    ede_totals = getattr(snap, "ede_totals", None)
+    if ede_totals:
+        payload["ede"] = ede_totals
+
     return payload
 
 
@@ -794,7 +798,10 @@ def _build_traffic_payload_from_snapshot(
       - top: Max number of items in top lists.
 
     Outputs:
-      - Dict suitable for JSON serialization.
+      - Dict suitable for JSON serialization. The payload always includes
+        ``totals``, ``rcodes``, ``qtypes``, ``top_clients``, ``top_domains``,
+        and ``latency`` when available, and conditionally exposes DNSSEC and
+        Extended DNS Error (EDE) aggregates when present on the snapshot.
 
     Notes:
       - FastAPI includes a meta block; the threaded fallback historically did not.
@@ -817,6 +824,19 @@ def _build_traffic_payload_from_snapshot(
         "top_domains": top_domains,
         "latency": snap.latency_stats,
     }
+
+    # Surface DNSSEC/EDE aggregates alongside the core traffic view so
+    # higher-level dashboards (including the HTML admin UI and any callers of
+    # /traffic) can graph per-status/per-EDE breakdowns without needing the
+    # full /stats payload.
+    dnssec_totals = getattr(snap, "dnssec_totals", None)
+    if dnssec_totals:
+        payload["dnssec"] = dnssec_totals
+
+    ede_totals = getattr(snap, "ede_totals", None)
+    if ede_totals:
+        payload["ede"] = ede_totals
+
     if meta is not None:
         payload["meta"] = meta
     return payload
