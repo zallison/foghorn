@@ -71,8 +71,7 @@ test: $(VENV)/bin/foghorn env-dev
 	@echo "=== Running tests (short) ==="
 	. ${VENV}/bin/activate
 	${VENV}/bin/pytest --cov=src --cov-report=json --ff tests && \
-	    export COVERAGE=$(jq .totals.percent_covered_display < coverage.json | tr -d \") && \
-	    sed -i -e 's|https://img.shields.io/badge/test_coverage-[0-9]+-darkgreen|https://img.shields.io/badge/test_coverage-${COVERAGE}-darkgreen|g' README.md
+	    export COVERAGE=$$(jq .totals.percent_covered_display < coverage.json | tr -d '\"') && sed -i -e "s|https://img.shields.io/badge/test_coverage-[0-9]*-darkgreen|https://img.shields.io/badge/test_coverage-$${COVERAGE}-darkgreen|g" README.md && echo -e "Total Test Coverage: $${COVERAGE}%. For fill coverage info run:\n \"./${VENV}/pytest --cov=src --cov-report=term-missing\" to see full coverage information."
 
 # ------------------------------------------------------------
 # Clean temporary artefacts
@@ -92,6 +91,8 @@ clean:
 # ###############
 # ---------------
 # OpenSSL Keys
+#  - Generates CA
+#  - make ssl-cert
 # ---------------
 # ###############
 
@@ -99,12 +100,12 @@ KEYDIR ?=  ./keys
 CA_KEY ?=  ${KEYDIR}/foghorn_ca.key
 CA_CERT ?= ${KEYDIR}/foghorn_ca.crt
 CA_PEM ?=  ${KEYDIR}/foghorn_ca.pem
-SERVER ?=  ${KEYDIR}/foghorn_${CNAME}
+SERVER :=  ${KEYDIR}/foghorn_${CNAME}
 SERVER_PEM ?= ${KEYDIR}/${SERVER}.pem
 
 .PHONY: cert ca key_dir clean_keys ssl-ca-pem ssl-cert-pem
 
-ssl-key-dir: ${KEYDIR}
+ssl-key-dir: ssl-key-dir
 	mkdir -p ${KEYDIR}
 
 # Build only the CA key and certificate
@@ -142,7 +143,7 @@ ${SERVER}.crt: ${SERVER}.csr | $(CA_CERT)
 
 ${SERVER}.csr: ${SERVER}.key
 	@echo "== Generating ${SERVER}.csr"
-	openssl req -new -key ${SERVER}.key -out ${SERVER}.csr -subj "/O=Foghorn/CN=${TLS_CNAME}"
+	openssl req -new -key ${SERVER}.key -out ${SERVER}.csr -subj "/O=Foghorn/CN=${CNAME}"
 
 ${SERVER}.key: ${CA_CERT}
 	@echo "== Generating ${SERVER}.key"
@@ -167,9 +168,35 @@ ssl-clean-keys:
 # ################
 
 
+# ---------------
+# Github Helpers
+# ---------------
+
+.PHONY: github-push
+github-push: clean tests
+	git add -A
+	git diff --quiet --cached && git diff --quiet --exit-code && git status --porcelain --ignore-submodules=all | grep -q . || { \
+		echo "ERROR: Repository has uncommitted changes or untracked files. Commit or stash them before pushing."; \
+		exit 1; \
+	}
+	git push origin $(shell git rev-parse --abbrev-ref HEAD)
+
+
+# GitHub PR creation target
+create-pr:
+	@echo "Creating GitHub PR for $(shell git rev-parse --abbrev-ref HEAD) branch..."
+	@PR_BODY="$(shell echo '## Changes\n\n$(shell git log --oneline $(shell git merge-base HEAD origin/$(shell git rev-parse --abbrev-ref HEAD))..HEAD)')"
+	@PR_TITLE="$(shell echo '$(shell git rev-parse --abbrev-ref HEAD): $(shell git log -1 --pretty=%s)')"
+	@curl -X POST \
+		-H "Authorization: token $(shell echo ${GITHUB_TOKEN} | base64)" \
+		-H "Accept: application/vnd.github.v3+json" \
+		-d "{\"title\": \"$(PR_TITLE)\", \"body\": \"$(PR_BODY)\", \"head\": \"$(shell git rev-parse --abbrev-ref HEAD)\", \"base\": \"main\"}" \
+		https://api.github.com/repos/PREFIX/Container_name/pulls
+
+
 
 # ---------------
-# Docker
+# Docker Helpers
 # ---------------
 .PHONY: docker
 docker: clean docker-build docker-run docker-logs
@@ -212,6 +239,10 @@ docker-logs:
 docker-ship: clean docker-build
 	docker push ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
+# ---------------
+# Packaging
+# ---------------
+
 .PHONY: package-build
 package-build: env-dev
 	python -m build
@@ -223,6 +254,11 @@ package-publish: package-build
 .PHONY: package-publish-dev
 package-publish-dev: package-build
 	twine upload --repository testpypi dist/* --verbose
+
+
+# ----------------------
+# end of code, show help
+# ----------------------
 
 
 # ------------------------------------------------------------
@@ -256,26 +292,5 @@ help:
 	@echo "  package-publish - Publish the package to pypi"
 	@echo "  package-publish-dev - Publish the package to testpypi"
 
-# TODO: github-push, github-pr, github-merge, and github
 
-
-.PHONY: github-push
-github-push: clean tests
-	git add -A
-	git diff --quiet --cached && git diff --quiet --exit-code && git status --porcelain --ignore-submodules=all | grep -q . || { \
-		echo "ERROR: Repository has uncommitted changes or untracked files. Commit or stash them before pushing."; \
-		exit 1; \
-	}
-	git push origin $(shell git rev-parse --abbrev-ref HEAD)
-
-
-# GitHub PR creation target
-create-pr:
-	@echo "Creating GitHub PR for $(shell git rev-parse --abbrev-ref HEAD) branch..."
-	@PR_BODY="$(shell echo '## Changes\n\n$(shell git log --oneline $(shell git merge-base HEAD origin/$(shell git rev-parse --abbrev-ref HEAD))..HEAD)')"
-	@PR_TITLE="$(shell echo '$(shell git rev-parse --abbrev-ref HEAD): $(shell git log -1 --pretty=%s)')"
-	@curl -X POST \
-		-H "Authorization: token $(shell echo ${GITHUB_TOKEN} | base64)" \
-		-H "Accept: application/vnd.github.v3+json" \
-		-d "{\"title\": \"$(PR_TITLE)\", \"body\": \"$(PR_BODY)\", \"head\": \"$(shell git rev-parse --abbrev-ref HEAD)\", \"base\": \"main\"}" \
-		https://api.github.com/repos/PREFIX/Container_name/pulls
+# EOF
