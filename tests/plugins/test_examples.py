@@ -247,7 +247,19 @@ def test_examples_plugin_post_resolve_no_rewrite_rules():
     ctx = PluginContext(client_ip="127.0.0.1")
     query = DNSRecord.question("example.com", "A")
     response = query.reply()
-    response.add_answer(*DNSRecord.parse(query.send("1.1.1.1", 53)).rr)
+
+    # Build a synthetic A answer locally to avoid external network dependency.
+    from dnslib import RR
+
+    response.add_answer(
+        RR(
+            rname="example.com",
+            rtype=QTYPE.A,
+            rclass=1,
+            ttl=60,
+            rdata=A("93.184.216.34"),
+        )
+    )
     decision = plugin.post_resolve("example.com", QTYPE.A, response.pack(), ctx)
     # Without rewrite rules, should return None
     assert decision is None
