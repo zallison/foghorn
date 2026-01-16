@@ -143,7 +143,11 @@ Clients without DO=1 receive only the base RRsets without signatures.
   - Optional list of zones fetched via AXFR at startup. Each entry should include:
     - `zone: str` – zone apex (e.g. `"example.com"`, `"0.0.10.in-addr.arpa"`).
     - `upstreams: list[object]` – authoritative servers to AXFR from; each upstream supports at least `host`, `port` (default `53`), `timeout_ms` (default `5000`), and optional DoT fields (`transport`, `server_name`, `verify`, `ca_file`).
-    - `allow_no_dnssec: bool` – when `false`, reject transfers from zones without valid DNSSEC (future feature; default `true` preserves current behaviour).
+    - `allow_no_dnssec: bool` – hint for future DNSSEC policies. Currently all zones are
+      loaded regardless of DNSSEC state; Foghorn classifies each AXFR-backed
+      zone as having `dnssec_state=present|partial|none` and logs a warning when
+      DNSKEY/RRSIG data is missing or incomplete, especially when
+      `allow_no_dnssec` is `false`.
   - AXFR-backed zones are loaded once during initial setup; subsequent reloads come from local files/inline records.
 - `watchdog_enabled: bool | null`
   - When `true`, and `watchdog` is present, start filesystem watchers for
@@ -170,6 +174,12 @@ Clients without DO=1 receive only the base RRsets without signatures.
   authoritative zones.
 - Zone transfers (AXFR/IXFR) are fetched via the optional `axfr_zones` config at
   startup; subsequent reloads only use local files and inline records.
+- When a zone apex carries an SOA record (from any source), ZoneRecords marks
+  that apex as authoritative. The core server exposes a simple AXFR/IXFR server
+  for such zones over DNS-over-TCP and DoT: AXFR/IXFR queries are answered by
+  streaming the zone contents provided by `iter_zone_rrs_for_transfer()`,
+  bounded by matching SOA records. IXFR is currently implemented as a full
+  AXFR-style transfer (no deltas).
 
 #### Precedence
 
