@@ -2,6 +2,7 @@ import importlib
 import os
 import pathlib
 import threading
+import logging
 
 import pytest
 from dnslib import QTYPE, RCODE, DNSRecord, RR
@@ -1836,3 +1837,139 @@ def test_normalize_axfr_config_allow_no_dnssec_field() -> None:
     # Explicit True.
     assert zones[2]["zone"] == "explicit.example"
     assert zones[2]["allow_no_dnssec"] is True
+
+
+def test_zonefile_dnssec_classification_logs_state(
+    tmp_path: pathlib.Path, caplog
+) -> None:
+    """Brief: DNSSEC classification for zonefile/inline zones logs dnssec_state.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+      - caplog: pytest logging capture fixture.
+
+    Outputs:
+      - Asserts that loading a signed zone from file emits a log line containing
+        the dnssec_state classification.
+    """
+    from foghorn.plugins.resolve.zone_records import ZoneRecords
+
+    records_file = tmp_path / "signed.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. ( 1 3600 600 604800 300 )"
+                ),
+                (
+                    "example.com|DNSKEY|300|256 3 13 "
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAA=="
+                ),
+                (
+                    "example.com|RRSIG|300|DNSKEY 13 2 300 "
+                    "20260201000000 20260101000000 12345 example.com. "
+                    "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+                    "BBBBBBBBBBBBBBBBBBBBBBBBBB=="
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.INFO):
+        plugin = ZoneRecords(file_paths=[str(records_file)])
+        plugin.setup()
+
+    # Ensure at least one log line mentions dnssec_state for this zone.
+    assert "dnssec_state=" in caplog.text
+
+
+def test_iter_zone_rrs_for_transfer_non_authoritative(tmp_path: pathlib.Path) -> None:
+    """Brief: iter_zone_rrs_for_transfer returns None for non-authoritative zones.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a ZoneRecords instance with an SOA for example.com does not
+        claim authority for unrelated zones when exporting for AXFR.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "zone.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. ( 1 3600 600 604800 300 )"
+                ),
+                "example.com|A|300|192.0.2.10",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    # Zone apex is example.com, so a different zone name should not be treated
+    # as authoritative by this plugin.
+    assert plugin.iter_zone_rrs_for_transfer("other.example") is None
+
+
+def test_iter_zone_rrs_for_transfer_exports_zone_rrs(tmp_path: pathlib.Path) -> None:
+    """Brief: iter_zone_rrs_for_transfer exports all RRs inside an authoritative zone.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that exported RRs include the apex SOA and in-zone data and omit
+        names outside the zone.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "zone.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. ( 1 3600 600 604800 300 )"
+                ),
+                "example.com|NS|300|ns1.example.com.",
+                "example.com|A|300|192.0.2.10",
+                "www.example.com|A|300|192.0.2.20",
+                # Outside the zone; should not be exported when iterating example.com.
+                "other.com|A|300|198.51.100.1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    rrs = plugin.iter_zone_rrs_for_transfer("example.com")
+    assert rrs is not None
+    owners = {str(rr.rname).rstrip(".").lower() for rr in rrs}
+    types = {rr.rtype for rr in rrs}
+
+    # Only in-zone owners should be present.
+    assert "example.com" in owners
+    assert "www.example.com" in owners
+    assert "other.com" not in owners
+
+    # We should at least see SOA and A RR types in the export.
+    from dnslib import QTYPE as _Q
+
+    assert _Q.SOA in types
+    assert _Q.A in types
