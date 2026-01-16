@@ -174,21 +174,32 @@ class UpstreamRouter(BasePlugin):
                     s = s[1:]
                 route["suffix"] = s
 
-            # Modern multiple-upstreams format only
-            upstream_candidates: List[Dict[str, int | str]] = []
+            # Modern multiple-upstreams format only. Preserve any additional
+            # upstream configuration keys (transport/tls/method/headers/etc.) so
+            # that routes can use the same rich upstream definitions as the
+            # top-level `upstreams` block.
+            upstream_candidates: List[Dict[str, object]] = []
             multiple_upstreams = r.get("upstreams")
             if multiple_upstreams and isinstance(multiple_upstreams, list):
                 for up in multiple_upstreams:
-                    if isinstance(up, dict):
-                        host = up.get("host")
-                        port = up.get("port")
-                        if host and port is not None:
-                            try:
-                                upstream_candidates.append(
-                                    {"host": str(host), "port": int(port)}
-                                )
-                            except (ValueError, TypeError):
-                                continue
+                    if not isinstance(up, dict):
+                        continue
+
+                    host = up.get("host")
+                    port = up.get("port")
+                    if not host or port is None:
+                        continue
+
+                    try:
+                        # Start from the original mapping so we keep fields like
+                        # transport/tls/method/headers, then normalize host/port.
+                        normalized: Dict[str, object] = dict(up)
+                        normalized["host"] = str(host)
+                        normalized["port"] = int(port)
+                    except (TypeError, ValueError):
+                        continue
+
+                    upstream_candidates.append(normalized)
 
             # Only add route if we have valid matching criteria and at least one upstream
             if upstream_candidates and ("domain" in route or "suffix" in route):
