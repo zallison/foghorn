@@ -352,3 +352,67 @@ def test_serve_tcp_threaded_binds_handler_and_closes(monkeypatch) -> None:
     # Handler resolver should be wired to provided resolver
     assert created["handler_cls"].resolver(b"q", "1.2.3.4") == b"resp"
     assert created["server"].daemon_threads is True
+
+
+def test__tcphandler_streams_axfr(monkeypatch) -> None:
+    """Brief: _TCPHandler.handle streams AXFR responses using iter_axfr_messages.
+
+    Inputs:
+      - monkeypatch: pytest fixture.
+
+    Outputs:
+      - None; asserts that multiple frames are written for AXFR.
+    """
+
+    class _Sock:
+        def __init__(self):
+            self.timeout = None
+            self.sent = []
+
+        def settimeout(self, t: float) -> None:
+            self.timeout = t
+
+        def sendall(self, data: bytes) -> None:
+            self.sent.append(data)
+
+    # Build a minimal AXFR query.
+    from dnslib import DNSRecord
+
+    q = DNSRecord.question("example.com.", qtype="AXFR")
+    body = q.pack()
+    frame = len(body).to_bytes(2, "big") + body
+
+    calls = {"n": 0, "iter": 0}
+
+    def fake_recv_exact(sock, n):  # noqa: ARG001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return frame[:2]
+        if calls["n"] == 2:
+            return frame[2:]
+        return b""
+
+    monkeypatch.setattr(tcp_server_mod, "_recv_exact", fake_recv_exact)
+
+    # Fake iter_axfr_messages to emit two messages without relying on dnslib RR/A.
+    def fake_iter_axfr_messages(req):  # noqa: D401,ARG001
+        """Inputs: req. Outputs: two AXFR response wires."""
+
+        calls["iter"] += 1
+        # Content does not matter for _TCPHandler; any non-empty wire is fine.
+        return [b"\x00" * 12, b"\x01" * 12]
+
+    import foghorn.servers.server as srv_mod
+
+    monkeypatch.setattr(srv_mod, "iter_axfr_messages", fake_iter_axfr_messages)
+
+    sock = _Sock()
+    tcp_server_mod._TCPHandler(sock, ("1.2.3.4", 5353), None)
+
+    # AXFR helper should have been invoked once.
+    assert calls["iter"] == 1
+
+    # Two length-prefixed frames should have been sent.
+    assert len(sock.sent) == 2
+    for payload in sock.sent:
+        assert len(payload) >= 4
