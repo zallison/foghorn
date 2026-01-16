@@ -6,9 +6,9 @@ With built-in admin and API server support, Foghorn empowers you to monitor and 
 
 [![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml)  ![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-donate-yellow.svg)](https://www.buymeacoffee.com/foghorndns)
 
+![Test Coverage](https://img.shields.io/badge/test_coverage-81-darkgreen)
 
 <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" width=300px />
-
 
 
 The configuration file is validated against a JSON Schema, but you rarely need to read the schema directly. This guide walks through the main sections (`vars`, `server`, `upstreams`, `logging`, `stats`, and `plugins`), then shows concrete examples for every built‑in plugin.
@@ -731,11 +731,7 @@ plugins:
 			  port: 53
 ```
 
-<<<<<<< HEAD
 ### 4.10 Inline and file-based records (`zone`)
-=======
-### 4.14 Inline, file-based, and BIND zone records (`zone`)
->>>>>>> fbd8b7b (feat(zone): Read BIND9 zonefiles)
 
 Define custom records either:
 
@@ -1357,3 +1353,8 @@ plugins:
 ```
 
 From here you can mix and match plugins, caches, and stats backends to shape Foghorn into exactly the DNS service you need.
+
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Coverage](https://img.shields.io/badge/test_coverage-91-darkgreen) ![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GREY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn) [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-donate-yellow.svg)](https://www.buymeacoffee.com/foghorndns)  [![Github](https://img.shields.io/github/stars/zallison/foghorn.svg)](https://github.com/zallison/foghorn)
+
+## Stargazers over time
+[![Stargazers over time](https://starchart.cc/zallison/foghorn.svg?variant=adaptive)](https://starchart.cc/zallison/foghorn)
