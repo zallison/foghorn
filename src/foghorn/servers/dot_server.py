@@ -48,6 +48,9 @@ async def _handle_conn(
     peer = writer.get_extra_info("peername")
     client_ip = peer[0] if isinstance(peer, tuple) else "0.0.0.0"
     try:
+        from dnslib import DNSRecord, QTYPE
+        from foghorn.servers import server as _server_mod
+
         while True:
             hdr = await asyncio.wait_for(_read_exact(reader, 2), timeout=idle_timeout)
             if len(hdr) != 2:
@@ -60,6 +63,28 @@ async def _handle_conn(
             )
             if len(query) != ln:  # pragma: no cover - network error
                 break
+
+            is_transfer = False
+            req: Optional[DNSRecord]
+            try:
+                req = DNSRecord.parse(query)
+                if getattr(req, "questions", None):
+                    q = req.questions[0]
+                    qtype = q.qtype
+                    if qtype in (QTYPE.AXFR, QTYPE.IXFR):
+                        is_transfer = True
+            except Exception:  # pragma: no cover - defensive parse failure
+                req = None
+
+            if is_transfer and req is not None:
+                messages = _server_mod.iter_axfr_messages(req)
+                for wire in messages:
+                    if not wire:
+                        continue
+                    writer.write(len(wire).to_bytes(2, "big") + wire)
+                    await writer.drain()
+                break
+
             response = await asyncio.get_running_loop().run_in_executor(
                 None, resolver, query, client_ip
             )
