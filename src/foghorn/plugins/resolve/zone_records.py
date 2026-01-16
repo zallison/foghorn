@@ -212,8 +212,8 @@ class ZoneRecords(BasePlugin):
             self.bind_paths = self._normalize_paths(bind_paths_cfg, None)
 
         if not self.file_paths and not self.bind_paths:
-            if inline_records_cfg:
-                # Inline-only configuration; no file-backed records.
+            if inline_records_cfg or axfr_cfg:
+                # Inline-only or AXFR-only configuration; no file-backed records.
                 self.file_paths = []
                 self.bind_paths = []
             else:
@@ -496,6 +496,10 @@ class ZoneRecords(BasePlugin):
         mapping: Dict[Tuple[str, int], Tuple[int, List[str]]] = {}
         name_index: Dict[str, Dict[int, Tuple[int, List[str]]]] = {}
         zone_soa: Dict[str, Tuple[int, List[str]]] = {}
+        # Track which zone apexes have already had DNSSEC classification applied
+        # via the AXFR path so that we can avoid duplicate logging when we later
+        # classify zones built from local files/BIND/inline data.
+        dnssec_classified_axfr: set[str] = set()
 
         # AXFR-backed zones are loaded only once, during the initial
         # _load_records() following setup(). Watchdog and polling reloads keep
@@ -767,6 +771,80 @@ class ZoneRecords(BasePlugin):
                         )
                     continue
 
+                # Minimal DNSSEC classification for AXFR-backed zones: check
+                # whether apex DNSKEY and/or RRSIG RRsets are present. This does
+                # not perform full cryptographic verification; it only
+                # distinguishes between "no DNSSEC", "partial" (one of
+                # DNSKEY/RRSIG missing), and "present".
+                try:
+                    apex_owner = zone_text.rstrip(".")
+                    has_dnskey = False
+                    has_rrsig = False
+                    try:
+                        dnskey_code = int(QTYPE.DNSKEY)
+                    except Exception:  # pragma: no cover - defensive
+                        dnskey_code = 48
+                    try:
+                        rrsig_code = int(QTYPE.RRSIG)
+                    except Exception:  # pragma: no cover - defensive
+                        rrsig_code = 46
+
+                    for rr in transferred:
+                        try:
+                            owner_norm = str(rr.rname).rstrip(".").lower()
+                        except Exception:  # pragma: no cover - defensive
+                            owner_norm = str(rr.rname).lower()
+                        if owner_norm != apex_owner:
+                            continue
+                        if int(rr.rtype) == int(dnskey_code):
+                            has_dnskey = True
+                        if int(rr.rtype) == int(rrsig_code):
+                            has_rrsig = True
+
+                    if has_dnskey and has_rrsig:
+                        dnssec_state = "present"
+                    elif has_dnskey or has_rrsig:
+                        dnssec_state = "partial"
+                    else:
+                        dnssec_state = "none"
+
+                    allow_no_dnssec = bool(zone_cfg.get("allow_no_dnssec", True))
+                    if dnssec_state in {"none", "partial"}:
+                        # For now we always load the zone but surface a warning
+                        # when DNSSEC data is missing or incomplete. The
+                        # allow_no_dnssec flag can be used by future callers to
+                        # tighten this into a hard reject policy without
+                        # changing config shape.
+                        if not allow_no_dnssec:
+                            logger.warning(
+                                "ZoneRecords AXFR: zone %s has dnssec_state=%s with "
+                                "allow_no_dnssec=False; loading anyway",
+                                zone_text,
+                                dnssec_state,
+                            )
+                        else:
+                            logger.info(
+                                "ZoneRecords AXFR: zone %s has dnssec_state=%s; "
+                                "proceeding (allow_no_dnssec=True)",
+                                zone_text,
+                                dnssec_state,
+                            )
+                    else:
+                        logger.info(
+                            "ZoneRecords AXFR: zone %s has dnssec_state=present",
+                            zone_text,
+                        )
+                    # Remember that we have classified this apex so that the
+                    # later per-zone classification pass does not emit
+                    # duplicate log lines for the same zone.
+                    dnssec_classified_axfr.add(zone_text)
+                except Exception:  # pragma: no cover - defensive logging only
+                    logger.warning(
+                        "ZoneRecords AXFR: failed to classify DNSSEC state for %s",
+                        zone_text,
+                        exc_info=True,
+                    )
+
                 for rr in transferred:
                     try:
                         owner = str(rr.rname).rstrip(".").lower()
@@ -827,6 +905,43 @@ class ZoneRecords(BasePlugin):
                 continue
             _process_line(text, "inline-config-records", lineno)
 
+        # After building mappings from all sources, classify DNSSEC state for
+        # each authoritative zone apex derived from local sources (file_paths,
+        # bind_paths, inline records). Zones that were already classified via
+        # the AXFR path above are skipped to avoid duplicate log messages.
+        try:
+            try:
+                dnskey_code_all = int(QTYPE.DNSKEY)
+            except Exception:  # pragma: no cover - defensive
+                dnskey_code_all = 48
+            try:
+                rrsig_code_all = int(QTYPE.RRSIG)
+            except Exception:  # pragma: no cover - defensive
+                rrsig_code_all = 46
+
+            for apex_owner in list(zone_soa.keys()):
+                if apex_owner in dnssec_classified_axfr:
+                    continue
+                owner_rrsets = name_index.get(apex_owner, {}) or {}
+                has_dnskey = int(dnskey_code_all) in owner_rrsets
+                has_rrsig = int(rrsig_code_all) in owner_rrsets
+                if has_dnskey and has_rrsig:
+                    dnssec_state = "present"
+                elif has_dnskey or has_rrsig:
+                    dnssec_state = "partial"
+                else:
+                    dnssec_state = "none"
+                logger.info(
+                    "ZoneRecords zone %s has dnssec_state=%s (file/bind/inline)",
+                    apex_owner,
+                    dnssec_state,
+                )
+        except Exception:  # pragma: no cover - defensive logging only
+            logger.warning(
+                "ZoneRecords: failed to classify DNSSEC state for local zones",
+                exc_info=True,
+            )
+
         lock = getattr(self, "_records_lock", None)
 
         if lock is None:
@@ -862,6 +977,75 @@ class ZoneRecords(BasePlugin):
                 if best is None or len(apex) > len(best):
                     best = apex
         return best
+
+    def iter_zone_rrs_for_transfer(self, zone_apex: str) -> Optional[List[RR]]:
+        """Brief: Export authoritative RRsets for a zone for AXFR/IXFR.
+
+        Inputs:
+          - zone_apex: Zone apex name (with or without trailing dot), case-
+            insensitive.
+
+        Outputs:
+          - list[RR]: All RRs in the zone suitable for AXFR/IXFR transfer, or
+            None when this plugin is not authoritative for the requested apex.
+
+        Notes:
+          - The returned list is a snapshot built under the records lock so
+            mid-transfer reloads do not change the view.
+          - DNSSEC-related RR types (for example, DNSKEY, RRSIG) are included
+            when present in the zone data; AXFR-specific DNSSEC policy is
+            intentionally out of scope for this helper.
+        """
+
+        # Normalize apex and check whether this plugin is authoritative.
+        apex = str(zone_apex).rstrip(".").lower() if zone_apex is not None else ""
+        if not apex:
+            return None
+
+        lock = getattr(self, "_records_lock", None)
+
+        if lock is None:
+            name_index = dict(getattr(self, "_name_index", {}) or {})
+            zone_soa = dict(getattr(self, "_zone_soa", {}) or {})
+        else:
+            with lock:
+                name_index = dict(getattr(self, "_name_index", {}) or {})
+                zone_soa = dict(getattr(self, "_zone_soa", {}) or {})
+
+        if apex not in zone_soa:
+            return None
+
+        rrs: List[RR] = []
+
+        # Walk all owners inside this zone. An owner belongs to the zone when it
+        # is equal to the apex or is a strict subdomain.
+        for owner, rrsets in name_index.items():
+            try:
+                owner_norm = str(owner).rstrip(".").lower()
+            except Exception:  # pragma: no cover - defensive
+                owner_norm = str(owner).lower()
+
+            if owner_norm != apex and not owner_norm.endswith("." + apex):
+                continue
+
+            for qtype_code, (ttl, values) in rrsets.items():
+                rr_type_name = QTYPE.get(qtype_code, str(qtype_code))
+                for value in values:
+                    zone_line = f"{owner_norm}. {ttl} IN {rr_type_name} {value}"
+                    try:
+                        parsed = RR.fromZone(zone_line)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning(
+                            "ZoneRecords transfer: skipping RR %r for %s type %s: %s",
+                            value,
+                            owner_norm,
+                            rr_type_name,
+                            exc,
+                        )
+                        continue
+                    rrs.extend(parsed)
+
+        return rrs
 
     def _client_wants_dnssec(self, request: object) -> bool:
         """Brief: Detect whether the client wants DNSSEC records via EDNS(0) DO bit.
