@@ -125,6 +125,13 @@ def test_find_zone_apex_cached_success_and_failure(monkeypatch):
       - None; asserts both cached helper paths.
     """
 
+    # Clear any cached entries so this test is independent of prior calls and
+    # does not accidentally reuse a different apex from earlier tests.
+    func = getattr(dval, "_find_zone_apex_cached")
+    cache_obj = getattr(func, "cache", None)
+    if hasattr(cache_obj, "clear"):
+        cache_obj.clear()
+
     apex = dns.name.from_text("example.com.")
 
     def _fake_resolver(payload_size):
