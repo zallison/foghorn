@@ -4,9 +4,7 @@ Foghorn is a versatile DNS server designed for flexibility and performance. Buil
 
 With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml)  ![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-donate-yellow.svg)](https://www.buymeacoffee.com/foghorndns)
-
-![Test Coverage](https://img.shields.io/badge/test_coverage-81-darkgreen)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml)  [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-donate-yellow.svg)](https://www.buymeacoffee.com/foghorndns) ![Test Coverage](https://img.shields.io/badge/test_coverage-91-darkgreen)
 
 <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" width=300px />
 
@@ -150,6 +148,12 @@ For local development there is a `Makefile` with a few convenience targets:
 - `make docker`, `make docker-build`, `make docker-run`, `make docker-logs`, `make docker-clean`, `make docker-ship` – build and run Docker images/containers.
 - `make package-build` / `make package-publish` / `make package-publish-dev` – build and (optionally) publish Python packages.
 - `make ssl-cert` – generate a self-signed TLS key and certificate under `./var` using `openssl req -x509`.
+
+---
+
+## Additional Documentation
+
+- [OpenSSL make targets (made easy)](docs/open-ssl-make-easy.md)
 
 ---
 
@@ -532,8 +536,8 @@ For quick local testing, the `Makefile` includes convenience targets that genera
 
 - `make ssl-ca` – create `foghorn_ca.key` and a self-signed `foghorn_ca.crt` with CA key usage.
 - `make ssl-ca-pem` – export the CA certificate as `foghorn_ca.pem` for use as a trust anchor (e.g. `upstreams.*.tls.ca_file`).
-- `make ssl-cert` – create a server key and certificate signed by the local CA, named `foghorn_${CNAME}.key` / `.crt`.
-- `make ssl-server-pem` – build a combined `foghorn_${CNAME}.pem` containing the server certificate and key.
+- `make ssl-cert CNAME=myserver` – create a server key and certificate signed by the local CA, named `foghorn_${CNAME}.key` / `.crt`.
+- `make ssl-server-pem CNAME=myserver` – build a combined `foghorn_${CNAME}.pem` containing the server certificate and key.
 
 Use `ca.pem` when Foghorn is a TLS **client** and needs to *trust* an internal CA (for example for DoT/DoH upstreams via `tls.ca_file`). Use `server.pem` when Foghorn is acting as a TLS **server** and you need a single file containing both cert and key for a listener.
 
@@ -751,6 +755,9 @@ All sources are merged into a single internal view per (name, qtype):
   such a zone the plugin behaves like an authoritative server, including
   correct NXDOMAIN/NODATA and ANY semantics with SOA in the authority
   section.
+- For zones with an SOA apex and a TCP/DoT listener enabled, Foghorn also
+  answers AXFR/IXFR for that zone using the same ZoneRecords data. IXFR is
+  currently implemented as a full AXFR-style transfer.
 
 ```yaml
 plugins:
@@ -1354,7 +1361,7 @@ plugins:
 
 From here you can mix and match plugins, caches, and stats backends to shape Foghorn into exactly the DNS service you need.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Coverage](https://img.shields.io/badge/test_coverage-91-darkgreen) ![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GREY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn) [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-donate-yellow.svg)](https://www.buymeacoffee.com/foghorndns)  [![Github](https://img.shields.io/github/stars/zallison/foghorn.svg)](https://github.com/zallison/foghorn)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml)  [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-donate-yellow.svg)](https://www.buymeacoffee.com/foghorndns) ![Test Coverage](https://img.shields.io/badge/test_coverage-91-darkgreen)
 
 ## Stargazers over time
 [![Stargazers over time](https://starchart.cc/zallison/foghorn.svg?variant=adaptive)](https://starchart.cc/zallison/foghorn)
