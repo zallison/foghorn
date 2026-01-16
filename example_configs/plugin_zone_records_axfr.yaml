@@ -17,12 +17,12 @@ plugins:
       # it minimal and uses only AXFR-backed zones.
       axfr_zones:
         - zone: example.com
-          masters:
+          upstreams:
             - host: 192.0.2.10
               port: 53
               timeout_ms: 5000
         - zone: example.net.
-          masters:
+          upstreams:
             - host: 2001:db8::53
               port: 53
               timeout_ms: 8000
