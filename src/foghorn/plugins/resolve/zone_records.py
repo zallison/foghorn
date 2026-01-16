@@ -29,6 +29,75 @@ from foghorn.plugins.resolve.base import (
 logger = logging.getLogger(__name__)
 
 
+class AxfrUpstreamConfig(BaseModel):
+    """Brief: Configuration for a single AXFR upstream server.
+
+    Inputs:
+      - host: Upstream authoritative server hostname or IP.
+      - port: TCP port (default 53).
+      - timeout_ms: Transfer timeout in milliseconds (default 5000).
+      - transport: "tcp" (default) or "dot" for DNS-over-TLS.
+      - server_name: Optional TLS SNI name for DoT.
+      - verify: TLS certificate verification for DoT (default True).
+      - ca_file: Optional CA bundle path for DoT.
+
+    Outputs:
+      - AxfrUpstreamConfig instance.
+    """
+
+    host: str = Field(..., description="Upstream authoritative server hostname or IP.")
+    port: int = Field(default=53, ge=1, le=65535, description="TCP port.")
+    timeout_ms: int = Field(
+        default=5000, ge=0, description="Transfer timeout in milliseconds."
+    )
+    transport: str = Field(default="tcp", description="Transport: 'tcp' or 'dot'.")
+    server_name: Optional[str] = Field(
+        default=None, description="TLS SNI name for DoT."
+    )
+    verify: bool = Field(
+        default=True, description="TLS certificate verification for DoT."
+    )
+    ca_file: Optional[str] = Field(default=None, description="CA bundle path for DoT.")
+
+    class Config:
+        extra = "forbid"
+
+
+class AxfrZoneConfig(BaseModel):
+    """Brief: Configuration for a single AXFR-backed zone.
+
+    Inputs:
+      - zone: Zone apex (e.g. "example.com").
+      - upstreams: List of upstream servers to transfer from.
+      - masters: Legacy alias for upstreams (deprecated).
+      - allow_no_dnssec: Accept transfer even if DNSSEC is missing or invalid
+        (default True). When False, zones without valid DNSSEC will be rejected
+        once DNSSEC validation for AXFR is implemented.
+
+    Outputs:
+      - AxfrZoneConfig instance.
+    """
+
+    zone: str = Field(..., description="Zone apex (e.g. 'example.com').")
+    upstreams: Optional[List[AxfrUpstreamConfig]] = Field(
+        default=None, description="List of upstream servers to transfer from."
+    )
+    masters: Optional[List[AxfrUpstreamConfig]] = Field(
+        default=None, description="Legacy alias for upstreams (deprecated)."
+    )
+    allow_no_dnssec: bool = Field(
+        default=True,
+        description=(
+            "Accept transfer even if DNSSEC is missing or invalid. When False, "
+            "zones without valid DNSSEC will be rejected once DNSSEC validation "
+            "for AXFR is implemented."
+        ),
+    )
+
+    class Config:
+        extra = "forbid"
+
+
 class ZoneRecordsConfig(BaseModel):
     """Brief: Typed configuration model for ZoneRecords.
 
@@ -41,10 +110,23 @@ class ZoneRecordsConfig(BaseModel):
       - watchdog_min_interval_seconds: Minimum seconds between reloads.
       - watchdog_poll_interval_seconds: Optional polling interval.
       - ttl: Default TTL in seconds.
-      - axfr_zones: Optional list of AXFR-backed zones, each item being a
-        mapping with at least ``zone`` and ``masters`` keys. This field is
-        normalized by ZoneRecords at runtime and is not yet described in the
-        JSON Schema.
+      - axfr_zones: Optional list of AXFR-backed zones.
+
+    Example:
+      Minimal AXFR-only configuration (YAML):
+
+        plugins:
+          - type: zone
+            hooks:
+              pre_resolve: { priority: 60 }
+            config:
+              axfr_zones:
+                - zone: example.com
+                  allow_no_dnssec: false
+                  upstreams:
+                    - host: 192.0.2.10
+                      port: 53
+                      timeout_ms: 5000
 
     Outputs:
       - ZoneRecordsConfig instance with normalized field types.
@@ -57,10 +139,10 @@ class ZoneRecordsConfig(BaseModel):
     watchdog_min_interval_seconds: float = Field(default=1.0, ge=0)
     watchdog_poll_interval_seconds: float = Field(default=0.0, ge=0)
     ttl: int = Field(default=300, ge=0)
-    # Keep axfr_zones as a generic list-of-mappings so existing config
-    # validation continues to work; ZoneRecords performs additional
-    # normalization in setup().
-    axfr_zones: Optional[List[Dict[str, object]]] = None
+    # Typed AXFR zones configuration with allow_no_dnssec support.
+    # Runtime normalization in _normalize_axfr_config() handles both typed
+    # and untyped dict inputs for backwards compatibility.
+    axfr_zones: Optional[List[AxfrZoneConfig]] = None
 
     class Config:
         extra = "forbid"
@@ -244,13 +326,21 @@ class ZoneRecords(BasePlugin):
 
         Inputs:
           - raw: Value from self.config.get("axfr_zones"). Expected to be a
-            list of mappings, each with a "zone" key and a "masters" key.
+            list of mappings, each with a "zone" key and an "upstreams" key.
+            For backward compatibility a legacy "masters" key is also
+            accepted and treated as "upstreams".
 
         Outputs:
           - list[dict]: Each entry contains:
               - "zone": lowercased apex without trailing dot.
-              - "masters": list of mappings with at least:
-                  - "host": master host/IP string.
+              - "allow_no_dnssec": boolean (default True) controlling whether
+                to accept transfers from zones that are unsigned or fail DNSSEC
+                validation. When True (the default), transfers are accepted
+                even without valid DNSSEC, matching current behaviour. When
+                False, once DNSSEC validation for AXFR is implemented, zones
+                without valid DNSSEC will be rejected.
+              - "upstreams": list of mappings with at least:
+                  - "host": upstream authoritative host/IP string.
                   - "port": integer port (default 53).
                   - "timeout_ms": integer timeout in milliseconds (default 5000).
                   - "transport": "tcp" (default) or "dot" for DNS-over-TLS.
@@ -280,7 +370,11 @@ class ZoneRecords(BasePlugin):
                 continue
 
             zone_val = entry.get("zone")
-            masters_val = entry.get("masters")
+            # Prefer the new "upstreams" key, but continue to accept legacy
+            # "masters" for backwards compatibility with existing configs.
+            masters_val = entry.get("upstreams")
+            if masters_val is None and "masters" in entry:
+                masters_val = entry.get("masters")
 
             zone_text = (
                 str(zone_val).rstrip(".").lower() if zone_val is not None else ""
@@ -291,14 +385,14 @@ class ZoneRecords(BasePlugin):
                 )
                 continue
 
-            masters: List[Dict[str, object]] = []
+            upstreams: List[Dict[str, object]] = []
             if isinstance(masters_val, dict):
                 masters_val = [masters_val]
             if isinstance(masters_val, list):
                 for midx, m in enumerate(masters_val):
                     if not isinstance(m, dict):
                         logger.warning(
-                            "ZoneRecords axfr_zones[%d].masters[%d] ignored: expected mapping, got %r",
+                            "ZoneRecords axfr_zones[%d].upstreams[%d] ignored: expected mapping, got %r",
                             idx,
                             midx,
                             type(m),
@@ -307,7 +401,7 @@ class ZoneRecords(BasePlugin):
                     host = m.get("host")
                     if not host:
                         logger.warning(
-                            "ZoneRecords axfr_zones[%d].masters[%d] ignored: missing 'host'",
+                            "ZoneRecords axfr_zones[%d].upstreams[%d] ignored: missing 'host'",
                             idx,
                             midx,
                         )
@@ -317,7 +411,7 @@ class ZoneRecords(BasePlugin):
                     transport = str(m.get("transport", "tcp")).lower()
                     if transport not in {"tcp", "dot"}:
                         logger.warning(
-                            "ZoneRecords axfr_zones[%d].masters[%d] ignored: unsupported transport %r",
+                            "ZoneRecords axfr_zones[%d].upstreams[%d] ignored: unsupported transport %r",
                             idx,
                             midx,
                             transport,
@@ -331,14 +425,14 @@ class ZoneRecords(BasePlugin):
                         timeout_i = int(timeout_ms)
                     except (TypeError, ValueError):
                         logger.warning(
-                            "ZoneRecords axfr_zones[%d].masters[%d] ignored: invalid port/timeout %r/%r",
+                            "ZoneRecords axfr_zones[%d].upstreams[%d] ignored: invalid port/timeout %r/%r",
                             idx,
                             midx,
                             port,
                             timeout_ms,
                         )
                         continue
-                    masters.append(
+                    upstreams.append(
                         {
                             "host": str(host),
                             "port": port_i,
@@ -352,15 +446,29 @@ class ZoneRecords(BasePlugin):
                         }
                     )
 
-            if not masters:
+            if not upstreams:
                 logger.warning(
-                    "ZoneRecords axfr_zones[%d] for %s ignored: no usable masters",
+                    "ZoneRecords axfr_zones[%d] for %s ignored: no usable upstreams",
                     idx,
                     zone_text,
                 )
                 continue
 
-            zones.append({"zone": zone_text, "masters": masters})
+            # allow_no_dnssec controls whether to accept an AXFR even when DNSSEC
+            # is missing or invalid. Default True preserves current behaviour.
+            allow_no_dnssec_val = entry.get("allow_no_dnssec")
+            if allow_no_dnssec_val is None:
+                allow_no_dnssec = True
+            else:
+                allow_no_dnssec = bool(allow_no_dnssec_val)
+
+            zones.append(
+                {
+                    "zone": zone_text,
+                    "upstreams": upstreams,
+                    "allow_no_dnssec": allow_no_dnssec,
+                }
+            )
 
         return zones
 
@@ -515,8 +623,9 @@ class ZoneRecords(BasePlugin):
             ):
                 zone_soa[domain] = (stored_ttl, values)
 
-        # First, process any configured records files in the custom
-        # pipe-delimited format.
+        # First, merge custom pipe-delimited files. Earlier sources keep
+        # precedence for TTL; existing values are preserved with new ones
+        # appended.
         for fp in self.file_paths:
             logger.debug("reading recordfile: %s", fp)
             records_path = pathlib.Path(fp)
@@ -524,10 +633,7 @@ class ZoneRecords(BasePlugin):
                 for lineno, raw_line in enumerate(f, start=1):
                     _process_line(raw_line, str(records_path), lineno)
 
-        # Next, process any RFC-1035 BIND-style zone files configured via
-        # bind_paths. Each zone file may define one or more zones; we iterate
-        # through the parsed RR objects and merge them into the same mappings
-        # used for the custom format.
+        # Next, merge any RFC-1035 BIND-style zone files.
         bind_paths = getattr(self, "bind_paths", None) or []
         for fp in bind_paths:
             logger.debug("reading bind zonefile: %s", fp)
@@ -591,8 +697,8 @@ class ZoneRecords(BasePlugin):
         if do_axfr:
             for zone_cfg in axfr_zones:
                 zone_name = zone_cfg.get("zone")
-                masters = zone_cfg.get("masters") or []
-                if not zone_name or not isinstance(masters, list):
+                upstreams = zone_cfg.get("upstreams") or []
+                if not zone_name or not isinstance(upstreams, list):
                     continue
                 zone_text = str(zone_name).rstrip(".").lower()
                 if not zone_text:
@@ -601,7 +707,7 @@ class ZoneRecords(BasePlugin):
                 transferred: Optional[List[RR]] = None
                 last_error: Optional[Exception] = None
 
-                for m in masters:
+                for m in upstreams:
                     if not isinstance(m, dict):
                         continue
                     host = m.get("host")
@@ -704,7 +810,9 @@ class ZoneRecords(BasePlugin):
             # not re-transfer zones.
             self._axfr_loaded_once = True
 
-        # Next, merge any inline records from plugin configuration.
+        # Finally, merge any inline records from plugin configuration. These
+        # are processed last so that per-instance overrides win over file-,
+        # BIND-, and AXFR-backed data.
         inline_records = getattr(self, "_inline_records", None) or []
         for lineno, raw_line in enumerate(inline_records, start=1):
             try:
@@ -755,6 +863,33 @@ class ZoneRecords(BasePlugin):
                     best = apex
         return best
 
+    def _client_wants_dnssec(self, request: object) -> bool:
+        """Brief: Detect whether the client wants DNSSEC records via EDNS(0) DO bit.
+
+        Inputs:
+          - request: Parsed DNSRecord or raw bytes from the client query.
+
+        Outputs:
+          - bool: True if the client sent an OPT RR with DO=1, False otherwise.
+        """
+        try:
+            # Support both parsed DNSRecord and raw bytes.
+            if isinstance(request, (bytes, bytearray)):
+                request = DNSRecord.parse(request)
+
+            for rr in getattr(request, "ar", None) or []:
+                if getattr(rr, "rtype", None) != QTYPE.OPT:
+                    continue
+                # EDNS flags are encoded in the TTL field of the OPT RR.
+                # DO bit is bit 15 (0x8000) of the flags portion (lower 16 bits).
+                ttl_val = int(getattr(rr, "ttl", 0) or 0)
+                flags = ttl_val & 0xFFFF
+                if flags & 0x8000:
+                    return True
+        except Exception:  # pragma: no cover - defensive
+            pass
+        return False
+
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
@@ -779,6 +914,8 @@ class ZoneRecords(BasePlugin):
           - For names outside any authoritative zone, preserve the historical
             behaviour and only answer when there is an exact (name, qtype)
             entry, falling through to upstreams otherwise.
+          - When the client advertises EDNS(0) with DO=1, include RRSIG and
+            DNSKEY RRsets from the zone data in positive answers.
         """
         # Normalize domain to a consistent lookup key.
         try:
@@ -870,6 +1007,9 @@ class ZoneRecords(BasePlugin):
             logger.warning("ZoneRecords parse failure (authoritative path): %s", e)
             return None
 
+        # Detect whether the client wants DNSSEC records via EDNS(0) DO bit.
+        want_dnssec = self._client_wants_dnssec(request)
+
         owner = str(request.q.qname).rstrip(".") + "."
         reply = DNSRecord(
             DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
@@ -877,6 +1017,57 @@ class ZoneRecords(BasePlugin):
 
         rrsets = name_index.get(name, {})
         cname_code = int(QTYPE.CNAME)
+
+        # DNSSEC RR type codes for filtering and inclusion.
+        try:
+            rrsig_code = int(QTYPE.RRSIG)
+        except Exception:  # pragma: no cover - defensive
+            rrsig_code = 46
+        try:
+            dnskey_code = int(QTYPE.DNSKEY)
+        except Exception:  # pragma: no cover - defensive
+            dnskey_code = 48
+
+        def _add_dnssec_rrsets(
+            reply: DNSRecord,
+            owner_name: str,
+            owner_rrsets: Dict[int, Tuple[int, List[str]]],
+            zone_apex_name: str,
+        ) -> None:
+            """Brief: Append RRSIG (and DNSKEY at apex) RRsets when present.
+
+            Inputs:
+              - reply: DNSRecord being built.
+              - owner_name: Owner name with trailing dot.
+              - owner_rrsets: RRsets dict for this owner.
+              - zone_apex_name: Apex of the authoritative zone (no trailing dot).
+
+            Outputs:
+              - None; mutates reply by adding RRSIG/DNSKEY answers.
+            """
+            # Add any RRSIG RRsets at this owner.
+            if rrsig_code in owner_rrsets:
+                ttl_rrsig, vals_rrsig = owner_rrsets[rrsig_code]
+                _add_rrset(reply, owner_name, rrsig_code, ttl_rrsig, list(vals_rrsig))
+            # At the zone apex, also include DNSKEY RRsets when present.
+            owner_normalized = owner_name.rstrip(".").lower()
+            if owner_normalized == zone_apex_name:
+                apex_rrsets = name_index.get(zone_apex_name, {})
+                if dnskey_code in apex_rrsets:
+                    ttl_dk, vals_dk = apex_rrsets[dnskey_code]
+                    _add_rrset(reply, owner_name, dnskey_code, ttl_dk, list(vals_dk))
+                # Include RRSIG covering DNSKEY at apex if present.
+                if rrsig_code in apex_rrsets:
+                    ttl_rrsig_apex, vals_rrsig_apex = apex_rrsets[rrsig_code]
+                    # Avoid duplicate addition if owner is already the apex.
+                    if owner_normalized != name:
+                        _add_rrset(
+                            reply,
+                            owner_name,
+                            rrsig_code,
+                            ttl_rrsig_apex,
+                            list(vals_rrsig_apex),
+                        )
 
         # CNAME at owner name: always answer with CNAME regardless of qtype.
         if cname_code in rrsets:
@@ -893,6 +1084,9 @@ class ZoneRecords(BasePlugin):
             added = _add_rrset(reply, owner, cname_code, ttl_cname, list(cname_values))
             if not added:
                 return None
+            # When client wants DNSSEC, add RRSIG for the CNAME.
+            if want_dnssec:
+                _add_dnssec_rrsets(reply, owner, rrsets, zone_apex)
             return PluginDecision(action="override", response=reply.pack())
 
         # No CNAME at this owner; distinguish positive, NODATA, and NXDOMAIN.
@@ -905,12 +1099,18 @@ class ZoneRecords(BasePlugin):
                         added_any = True
                 if not added_any:
                     return None
+                # When client wants DNSSEC, add RRSIG/DNSKEY RRsets.
+                if want_dnssec:
+                    _add_dnssec_rrsets(reply, owner, rrsets, zone_apex)
                 return PluginDecision(action="override", response=reply.pack())
 
             if qtype_int in rrsets:
                 ttl_rr, values_rr = rrsets[qtype_int]
                 if not _add_rrset(reply, owner, qtype_int, ttl_rr, list(values_rr)):
                     return None
+                # When client wants DNSSEC, add RRSIG/DNSKEY RRsets.
+                if want_dnssec:
+                    _add_dnssec_rrsets(reply, owner, rrsets, zone_apex)
                 return PluginDecision(action="override", response=reply.pack())
 
             # NODATA: name exists in zone but requested type is absent.

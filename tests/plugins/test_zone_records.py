@@ -1365,7 +1365,7 @@ def test_custom_sshfp_and_openpgpkey_records(
 
 
 def test_normalize_axfr_config_valid_and_invalid_entries() -> None:
-    """Brief: _normalize_axfr_config returns only well-formed zones and masters.
+    """Brief: _normalize_axfr_config returns only well-formed zones and upstreams.
 
     Inputs:
       - None.
@@ -1382,19 +1382,19 @@ def test_normalize_axfr_config_valid_and_invalid_entries() -> None:
     raw = [
         {
             "zone": "Example.COM.",
-            "masters": [
+            "upstreams": [
                 {"host": "192.0.2.1", "port": "53", "timeout_ms": "2500"},
                 {"host": "192.0.2.2"},  # uses defaults
             ],
         },
         {
             # Missing zone -> ignored.
-            "masters": [{"host": "203.0.113.1", "port": 53}],
+            "upstreams": [{"host": "203.0.113.1", "port": 53}],
         },
         {
             "zone": "bad.example",
-            # masters is not a list or mapping -> ignored.
-            "masters": "not-a-list",
+            # upstreams is not a list or mapping -> ignored.
+            "upstreams": "not-a-list",
         },
     ]
 
@@ -1402,16 +1402,16 @@ def test_normalize_axfr_config_valid_and_invalid_entries() -> None:
     assert len(zones) == 1
     z = zones[0]
     assert z["zone"] == "example.com"
-    masters = z["masters"]
-    assert isinstance(masters, list)
-    assert masters[0]["host"] == "192.0.2.1"
-    assert masters[0]["port"] == 53
-    assert masters[0]["timeout_ms"] == 2500
-    # Second master picked up with default port/timeout and tcp transport.
-    assert masters[1]["host"] == "192.0.2.2"
-    assert masters[1]["port"] == 53
-    assert masters[1]["timeout_ms"] == 5000
-    assert masters[1]["transport"] == "tcp"
+    upstreams = z["upstreams"]
+    assert isinstance(upstreams, list)
+    assert upstreams[0]["host"] == "192.0.2.1"
+    assert upstreams[0]["port"] == 53
+    assert upstreams[0]["timeout_ms"] == 2500
+    # Second upstream picked up with default port/timeout and tcp transport.
+    assert upstreams[1]["host"] == "192.0.2.2"
+    assert upstreams[1]["port"] == 53
+    assert upstreams[1]["timeout_ms"] == 5000
+    assert upstreams[1]["transport"] == "tcp"
 
 
 def test_normalize_axfr_config_supports_dot_and_tls_fields() -> None:
@@ -1431,7 +1431,7 @@ def test_normalize_axfr_config_supports_dot_and_tls_fields() -> None:
     raw = [
         {
             "zone": "tls.example",
-            "masters": [
+            "upstreams": [
                 {
                     "host": "dot-master.example",
                     "port": 853,
@@ -1455,9 +1455,9 @@ def test_normalize_axfr_config_supports_dot_and_tls_fields() -> None:
     assert len(zones) == 1
     z = zones[0]
     assert z["zone"] == "tls.example"
-    masters = z["masters"]
-    assert len(masters) == 1
-    m = masters[0]
+    upstreams = z["upstreams"]
+    assert len(upstreams) == 1
+    m = upstreams[0]
     assert m["host"] == "dot-master.example"
     assert m["port"] == 853
     assert m["timeout_ms"] == 7000
@@ -1511,7 +1511,7 @@ def test_load_records_axfr_overlays_and_only_runs_once(
         axfr_zones=[
             {
                 "zone": "axfr.test.",
-                "masters": [
+                "upstreams": [
                     {"host": "192.0.2.1", "port": 53, "timeout_ms": 4000},
                 ],
             }
@@ -1564,7 +1564,7 @@ def test_load_records_axfr_errors_do_not_abort(
         axfr_zones=[
             {
                 "zone": "axfr-fail.test",
-                "masters": [{"host": "192.0.2.99", "port": 53}],
+                "upstreams": [{"host": "192.0.2.99", "port": 53}],
             }
         ],
     )
@@ -1573,3 +1573,266 @@ def test_load_records_axfr_errors_do_not_abort(
     # File-backed record is still loaded.
     key = ("seed-only.test", int(QTYPE.A))
     assert plugin.records[key][1] == ["192.0.2.10"]
+
+
+def _make_query_with_do_bit(name: str, qtype: int) -> bytes:
+    """Create a DNS query with the DNSSEC OK (DO) bit set.
+
+    Inputs:
+      name: Domain name to query.
+      qtype: Numeric DNS record type code.
+
+    Outputs:
+      Raw DNS query bytes with EDNS(0) OPT RR and DO=1.
+    """
+    from dnslib import EDNS0, DNSRecord
+
+    qtype_name = QTYPE.get(qtype, str(qtype))
+    q = DNSRecord.question(name, qtype=qtype_name)
+    # Add EDNS(0) OPT RR with DO bit set (flags=0x8000).
+    q.add_ar(EDNS0(flags="do", udp_len=4096))
+    return q.pack()
+
+
+def test_client_wants_dnssec_detection(tmp_path: pathlib.Path) -> None:
+    """Brief: _client_wants_dnssec correctly detects DO bit in EDNS(0) OPT RR.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts True when DO=1, False when no EDNS or DO=0.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|192.0.2.1\n", encoding="utf-8")
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    # Query with DO=1 should return True.
+    do_query = _make_query_with_do_bit("example.com", int(QTYPE.A))
+    assert plugin._client_wants_dnssec(do_query) is True
+
+    # Query without EDNS should return False.
+    plain_query = _make_query("example.com", int(QTYPE.A))
+    assert plugin._client_wants_dnssec(plain_query) is False
+
+    # Malformed bytes should return False gracefully.
+    assert plugin._client_wants_dnssec(b"not-valid-dns") is False
+
+
+def test_dnssec_rrsig_returned_when_do_bit_set(tmp_path: pathlib.Path) -> None:
+    """Brief: ZoneRecords returns RRSIG records when DO=1 and signatures are present.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a query with DO=1 returns RRSIG alongside A records when
+        the zone contains pre-computed signatures.
+    """
+    # Create a zone with A record and corresponding RRSIG.
+    records_file = tmp_path / "signed.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. ( 1 3600 600 604800 300 )"
+                ),
+                "example.com|A|300|192.0.2.1",
+                # Simplified RRSIG covering A RRset (algorithm 13 = ECDSAP256SHA256).
+                (
+                    "example.com|RRSIG|300|A 13 2 300 "
+                    "20260201000000 20260101000000 12345 example.com. "
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # Query with DO=1.
+    req_with_do = _make_query_with_do_bit("example.com", int(QTYPE.A))
+    decision = plugin.pre_resolve("example.com", int(QTYPE.A), req_with_do, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+
+    response = DNSRecord.parse(decision.response)
+    rtypes = {rr.rtype for rr in response.rr}
+
+    # Both A and RRSIG should be present.
+    assert QTYPE.A in rtypes
+    assert QTYPE.RRSIG in rtypes
+
+
+def test_dnssec_rrsig_omitted_when_do_bit_not_set(tmp_path: pathlib.Path) -> None:
+    """Brief: ZoneRecords omits RRSIG records when DO=0 or no EDNS.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a query without DO=1 returns only A records, not RRSIG.
+    """
+    records_file = tmp_path / "signed.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. ( 1 3600 600 604800 300 )"
+                ),
+                "example.com|A|300|192.0.2.1",
+                (
+                    "example.com|RRSIG|300|A 13 2 300 "
+                    "20260201000000 20260101000000 12345 example.com. "
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # Query without DO bit.
+    req_no_do = _make_query("example.com", int(QTYPE.A))
+    decision = plugin.pre_resolve("example.com", int(QTYPE.A), req_no_do, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+
+    response = DNSRecord.parse(decision.response)
+    rtypes = {rr.rtype for rr in response.rr}
+
+    # Only A should be present, not RRSIG.
+    assert QTYPE.A in rtypes
+    assert QTYPE.RRSIG not in rtypes
+
+
+def test_dnssec_dnskey_returned_at_apex_with_do_bit(tmp_path: pathlib.Path) -> None:
+    """Brief: ZoneRecords returns DNSKEY at apex when DO=1 and keys are present.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a DNSKEY query with DO=1 at zone apex returns DNSKEY and
+        its RRSIG.
+    """
+    records_file = tmp_path / "signed.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. ( 1 3600 600 604800 300 )"
+                ),
+                # DNSKEY at apex (ZSK with flags 256).
+                (
+                    "example.com|DNSKEY|300|256 3 13 "
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAA=="
+                ),
+                # RRSIG covering DNSKEY.
+                (
+                    "example.com|RRSIG|300|DNSKEY 13 2 300 "
+                    "20260201000000 20260101000000 12345 example.com. "
+                    "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+                    "BBBBBBBBBBBBBBBBBBBBBBBBBB=="
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # Query for DNSKEY with DO=1.
+    req_dnskey = _make_query_with_do_bit("example.com", int(QTYPE.DNSKEY))
+    decision = plugin.pre_resolve("example.com", int(QTYPE.DNSKEY), req_dnskey, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+
+    response = DNSRecord.parse(decision.response)
+    rtypes = {rr.rtype for rr in response.rr}
+
+    # Both DNSKEY and RRSIG should be present.
+    assert QTYPE.DNSKEY in rtypes
+    assert QTYPE.RRSIG in rtypes
+
+
+def test_normalize_axfr_config_allow_no_dnssec_field() -> None:
+    """Brief: _normalize_axfr_config parses allow_no_dnssec correctly.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that allow_no_dnssec defaults to True and can be set to False.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords.__new__(ZoneRecords)
+
+    raw = [
+        {
+            "zone": "default.example",
+            "upstreams": [{"host": "192.0.2.1"}],
+            # No allow_no_dnssec -> defaults to True.
+        },
+        {
+            "zone": "strict.example",
+            "upstreams": [{"host": "192.0.2.2"}],
+            "allow_no_dnssec": False,
+        },
+        {
+            "zone": "explicit.example",
+            "upstreams": [{"host": "192.0.2.3"}],
+            "allow_no_dnssec": True,
+        },
+    ]
+
+    zones = plugin._normalize_axfr_config(raw)
+    assert len(zones) == 3
+
+    # Default case.
+    assert zones[0]["zone"] == "default.example"
+    assert zones[0]["allow_no_dnssec"] is True
+
+    # Explicit False.
+    assert zones[1]["zone"] == "strict.example"
+    assert zones[1]["allow_no_dnssec"] is False
+
+    # Explicit True.
+    assert zones[2]["zone"] == "explicit.example"
+    assert zones[2]["allow_no_dnssec"] is True
