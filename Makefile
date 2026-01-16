@@ -70,8 +70,9 @@ tests: test
 test: $(VENV)/bin/foghorn env-dev
 	@echo "=== Running tests (short) ==="
 	. ${VENV}/bin/activate
-	${VENV}/bin/pytest --cov=src --cov-report=term-missing --ff tests
-
+	${VENV}/bin/pytest --cov=src --cov-report=json --ff tests && \
+	    export COVERAGE=$(jq .totals.percent_covered_display < coverage.json | tr -d \") && \
+	    sed -i -e 's|https://img.shields.io/badge/test_coverage-[0-9]+-darkgreen|https://img.shields.io/badge/test_coverage-${COVERAGE}-darkgreen|g' README.md
 
 # ------------------------------------------------------------
 # Clean temporary artefacts
@@ -79,7 +80,7 @@ test: $(VENV)/bin/foghorn env-dev
 .PHONY: clean
 clean:
 	@echo "=== Removing virtual environment and var directory ==="
-	rm -rf $(VENV) var build docker-build
+	rm -rf $(VENV) var build docker-build coverage.json schema.json dist 2> /dev/null
 	@echo "=== Removing temporary files and byte‑code ==="
 # Delete __pycache__ directories
 	find . -type d -name "__pycache__" -exec rm -rf {} +;
@@ -88,10 +89,12 @@ clean:
 	\( -name '*.pyc' -o -name '*.tmp' -o -name '*~' -o -name '#*' -o -name '*.swp' \) -delete
 
 
-
+# ###############
 # ---------------
 # OpenSSL Keys
 # ---------------
+# ###############
+
 KEYDIR ?=  ./keys
 CA_KEY ?=  ${KEYDIR}/foghorn_ca.key
 CA_CERT ?= ${KEYDIR}/foghorn_ca.crt
@@ -157,6 +160,14 @@ $(SERVER_PEM): ${SERVER}.crt ${SERVER}.key
 ssl-clean-keys:
 	rm -f ${KEYDIR}/*.key ${KEYDIR}/*.csr ${KEYDIR}/*.crt ${KEYDIR}/*.srl
 
+# ################
+# ----------------
+# End openssl keys
+# ----------------
+# ################
+
+
+
 # ---------------
 # Docker
 # ---------------
@@ -219,26 +230,52 @@ package-publish-dev: package-build
 # ------------------------------------------------------------
 .PHONY: help
 help:
-	@echo "Makefile targets:"
-	@echo "  run            - Execute foghorn --config config/config.yaml (depends on build)"
-	@echo "  env            - Create virtual environment in $(VENV)"
+	@echo "Building, testing, and running:"
 	@echo "  build          - Build and prepare the development environment (includes schema generation)"
-	@echo "  schema         - Regenerate assets/config-schema.json from the Python code"
-	@echo "  test           - Run pytest with coverage"
 	@echo "  clean          - Remove venv/, var/, build/, and temp files"
-	@echo "  docker         - Clean image, build it, run container, then follow logs"
+	@echo "  env            - Create virtual environment in $(VENV)"
+	@echo "  env-dev        - Install project in editable mode with dev dependencies into $(VENV)"
+	@echo "  run            - Execute foghorn --config config/config.yaml (depends on build)"
+	@echo "  schema         - Regenerate assets/config-schema.json"
+	@echo "  test           - Run pytest with coverage"
+	@echo "Build and run containers:"
+	@echo "  docker-build   - Build docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
+	@echo "  docker-clean   - Remove docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
+	@echo "  docker-logs    - Follow docker container logs"
+	@echo "  docker-run     - Run docker container (ports 53/udp, 53/tcp, 8053/tcp)"
+	@echo "  docker         - Docker start to finish: clean → build → run → logs"
+	@echo "OpenSSL CA and signed certs:"
 	@echo "  ssl-ca         - Generate only the CA key and certificate under ${KEYDIR} (.crt)"
 	@echo "  ssl-ca-pem     - Generate a PEM-encoded CA certificate ${CA_PEM} for use as a trust anchor"
 	@echo "  ssl-cert       - Generate a CA and server certificate/key pair under ${KEYDIR} for CN=${CNAME} (.crt/.key)"
 	@echo "  ssl-cert-pem   - Generate a combined server PEM (${SERVER_PEM}) containing cert + key"
 	@echo "  ssl-clean_keys - Remove generated CA and server key/cert files from ${KEYDIR}"
-	@echo "  docker-build   - Build docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
-	@echo "  docker-clean   - Remove docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
-	@echo "  docker-run     - Run docker container (ports 53/udp, 53/tcp, 8053/tcp)"
-	@echo "  docker-logs    - Follow docker container logs"
-	@echo "Dev targets:"
-	@echo "  env-dev        - Install project in editable mode with dev dependencies into $(VENV)"
+	@echo "Package targets:"
 	@echo "  docker-ship    - Clean, build, and push docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
 	@echo "  package-build  - Build the Python package into dist/"
-	@echo "  package-publish - Publish the package to PyPI"
-	@echo "  package-publish-dev - Publish the package to TestPyPI"
+	@echo "  package-publish - Publish the package to pypi"
+	@echo "  package-publish-dev - Publish the package to testpypi"
+
+# TODO: github-push, github-pr, github-merge, and github
+
+
+.PHONY: github-push
+github-push: clean tests
+	git add -A
+	git diff --quiet --cached && git diff --quiet --exit-code && git status --porcelain --ignore-submodules=all | grep -q . || { \
+		echo "ERROR: Repository has uncommitted changes or untracked files. Commit or stash them before pushing."; \
+		exit 1; \
+	}
+	git push origin $(shell git rev-parse --abbrev-ref HEAD)
+
+
+# GitHub PR creation target
+create-pr:
+	@echo "Creating GitHub PR for $(shell git rev-parse --abbrev-ref HEAD) branch..."
+	@PR_BODY="$(shell echo '## Changes\n\n$(shell git log --oneline $(shell git merge-base HEAD origin/$(shell git rev-parse --abbrev-ref HEAD))..HEAD)')"
+	@PR_TITLE="$(shell echo '$(shell git rev-parse --abbrev-ref HEAD): $(shell git log -1 --pretty=%s)')"
+	@curl -X POST \
+		-H "Authorization: token $(shell echo ${GITHUB_TOKEN} | base64)" \
+		-H "Accept: application/vnd.github.v3+json" \
+		-d "{\"title\": \"$(PR_TITLE)\", \"body\": \"$(PR_BODY)\", \"head\": \"$(shell git rev-parse --abbrev-ref HEAD)\", \"base\": \"main\"}" \
+		https://api.github.com/repos/PREFIX/Container_name/pulls
