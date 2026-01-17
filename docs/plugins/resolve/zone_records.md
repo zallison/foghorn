@@ -94,7 +94,7 @@ with the DO (DNSSEC OK) bit set.
 
 ### Static DNSSEC Signing
 
-DNSSEC signatures must be pre-generated offline using the provided helper script:
+DNSSEC signatures can be pre-generated offline using the provided helper script:
 
 ```bash path=null start=null
 # Generate keys and sign a zone file
@@ -107,6 +107,39 @@ python scripts/generate_zone_dnssec.py \
 
 The signed zone file contains DNSKEY and RRSIG records that ZoneRecords serves
 automatically when clients request DNSSEC.
+
+### Optional DNSSEC Auto-Signing
+
+When the `dnssec_signing.enabled` config flag is set to true, ZoneRecords will
+attempt to synthesize DNSKEY and RRSIG records for authoritative zones at
+load/reload time using the same primitives as the helper script. Example:
+
+```yaml path=null start=null
+plugins:
+  - type: zone_records
+    hooks:
+      pre_resolve: { priority: 60 }
+    config:
+      file_paths:
+        - ./config/var/example.com.txt
+      dnssec_signing:
+        enabled: true
+        keys_dir: ./keys
+        algorithm: ECDSAP256SHA256
+        generate: maybe   # yes | no | maybe
+        validity_days: 30
+```
+
+Keys are stored per-zone under `keys_dir` using the same naming convention as
+`scripts/generate_zone_dnssec.py`. The `generate` policy controls how keys are
+managed:
+
+- `yes`: always generate new keys for the zone (overwriting any existing files).
+- `no`: never generate; existing keys must already be present.
+- `maybe`: reuse keys when present; generate new keys only when missing.
+
+If DNSSEC auto-signing fails for a zone (for example, missing dependencies or
+invalid records), ZoneRecords logs a warning and leaves that zone unsigned.
 
 ### Client DO Bit Detection
 
