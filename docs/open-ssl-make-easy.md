@@ -213,6 +213,7 @@ make ssl-server-pem CNAME=server
 After running this:
 - Import `${KEYDIR}/foghorn_ca.pem` into your client or OS trust store.
 - Configure your server to use `${KEYDIR}/foghorn_server.pem`.
+- Additional runs create more keys signed by same CA.
 
 ### 2. Step-by-step manual flow
 

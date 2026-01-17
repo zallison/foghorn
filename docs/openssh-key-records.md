@@ -138,7 +138,7 @@ A simple workflow:
 1. After changing host keys on the server, regenerate SSHFP records:
 
    ```sh
-   ssh-keyscan -D example.com > sshfp-example.com.txt
+   ssh-keyscan -D 192.168.1.0/24 > sshfp-subnet-example.com.txt
    ```
 
 2. Review the file for correctness.
