@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.2] - 2026-01-17
+
+> Release notes for changes between **v0.6.1** and **v0.6.2**.
+
+### Added
+
+- Introduced a shared `dnssec.zone_signer` helper module that centralizes DNSKEY/key management, zone signing, and DS record generation for tools and plugins.
+- Added optional DNSSEC auto-signing support to the `resolve.zone_records` plugin via a `dnssec_signing` configuration block.
+- Extended top-level Makefile targets to drive DNSSEC key and zone signing workflows.
+
+### Changed
+
+- Refactored the `scripts/generate_zone_dnssec.py` CLI to delegate signing to the shared helper module while preserving its external behavior.
+
+### Documentation
+
+- Updated DNSSEC and zone plugin documentation to describe the new signing helpers and configuration options.
+- Tweaked README status badges and coverage badge styling.
+
 ## [0.6.1] - 2026-01-09
 
 > Release notes for changes between **v0.6.0** and **v0.6.1**.
