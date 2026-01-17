@@ -98,6 +98,46 @@ class AxfrZoneConfig(BaseModel):
         extra = "forbid"
 
 
+class ZoneDnssecSigningConfig(BaseModel):
+    """Brief: DNSSEC auto-signing configuration for ZoneRecords.
+
+    Inputs:
+      - enabled: Enable automatic DNSSEC signing for authoritative zones.
+      - keys_dir: Optional base directory for per-zone key files.
+      - algorithm: DNSSEC algorithm name (e.g. "ECDSAP256SHA256").
+      - generate: Key generation policy ("yes", "no", or "maybe").
+      - validity_days: Signature validity window in days.
+
+    Outputs:
+      - Parsed ZoneDnssecSigningConfig instance used by the config schema.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable automatic DNSSEC signing for authoritative zones.",
+    )
+    keys_dir: Optional[str] = Field(
+        default=None,
+        description="Directory to read/write DNSSEC keys; defaults to the working directory when omitted.",
+    )
+    algorithm: str = Field(
+        default="ECDSAP256SHA256",
+        description="DNSSEC algorithm name (e.g. 'ECDSAP256SHA256', 'RSASHA256').",
+    )
+    generate: str = Field(
+        default="maybe",
+        description="Key generation policy: 'yes' (always new), 'no' (never), 'maybe' (generate when missing).",
+    )
+    validity_days: int = Field(
+        default=30,
+        ge=1,
+        description="Signature validity window in days.",
+    )
+
+    class Config:
+        extra = "forbid"
+
+
 class ZoneRecordsConfig(BaseModel):
     """Brief: Typed configuration model for ZoneRecords.
 
@@ -143,6 +183,10 @@ class ZoneRecordsConfig(BaseModel):
     # Runtime normalization in _normalize_axfr_config() handles both typed
     # and untyped dict inputs for backwards compatibility.
     axfr_zones: Optional[List[AxfrZoneConfig]] = None
+    # Optional DNSSEC auto-signing configuration. When enabled, ZoneRecords
+    # attempts to synthesize DNSKEY/RRSIG material for authoritative zones at
+    # load time using foghorn.dnssec.zone_signer.
+    dnssec_signing: Optional[ZoneDnssecSigningConfig] = None
 
     class Config:
         extra = "forbid"
@@ -941,6 +985,167 @@ class ZoneRecords(BasePlugin):
                 "ZoneRecords: failed to classify DNSSEC state for local zones",
                 exc_info=True,
             )
+
+        # Optional DNSSEC auto-signing of authoritative zones when configured.
+        dnssec_cfg_raw = (
+            self.config.get("dnssec_signing") if hasattr(self, "config") else None
+        )
+        enabled = False
+        if isinstance(dnssec_cfg_raw, dict):
+            enabled = bool(dnssec_cfg_raw.get("enabled", False))
+        if enabled:
+            try:
+                import datetime as _dt
+
+                import dns.name as _dns_name
+                import dns.rdata as _dns_rdata
+                import dns.rdataclass as _dns_rdataclass
+                import dns.rdatatype as _dns_rdatatype
+                import dns.rrset as _dns_rrset
+                import dns.zone as _dns_zone
+
+                from foghorn.dnssec import zone_signer as _zs
+
+                keys_dir_cfg = dnssec_cfg_raw.get("keys_dir")
+                algorithm = dnssec_cfg_raw.get("algorithm") or "ECDSAP256SHA256"
+                generate_policy = dnssec_cfg_raw.get("generate") or "maybe"
+                validity_days = int(dnssec_cfg_raw.get("validity_days") or 30)
+
+                for apex_owner in list(zone_soa.keys()):
+                    origin_text = apex_owner.rstrip(".").lower() + "."
+                    origin = _dns_name.from_text(origin_text)
+
+                    zone_obj = _dns_zone.Zone(origin)
+
+                    for owner, rrsets in name_index.items():
+                        try:
+                            owner_norm = str(owner).rstrip(".").lower()
+                        except Exception:  # pragma: no cover - defensive
+                            owner_norm = str(owner).lower()
+
+                        if owner_norm != apex_owner and not owner_norm.endswith(
+                            "." + apex_owner
+                        ):
+                            continue
+
+                        owner_name = _dns_name.from_text(owner_norm + ".")
+                        node_obj = zone_obj.find_node(owner_name, create=True)
+
+                        for qtype_code, (ttl_val, vals) in rrsets.items():
+                            if int(qtype_code) == int(rrsig_code_all):
+                                continue
+                            if int(qtype_code) == int(dnskey_code_all):
+                                continue
+
+                            rr_type_name = QTYPE.get(qtype_code, str(qtype_code))
+                            try:
+                                rdtype = _dns_rdatatype.from_text(str(rr_type_name))
+                            except Exception:  # pragma: no cover - defensive
+                                continue
+
+                            rrset_obj = _dns_rrset.RRset(
+                                owner_name,
+                                _dns_rdataclass.IN,
+                                rdtype,
+                            )
+                            for v in list(vals):
+                                try:
+                                    rdata_obj = _dns_rdata.from_text(
+                                        _dns_rdataclass.IN, rdtype, str(v)
+                                    )
+                                except Exception:  # pragma: no cover - defensive
+                                    continue
+                                rrset_obj.add(rdata_obj, int(ttl_val))
+
+                            node_obj.replace_rdataset(rrset_obj)
+
+                    if keys_dir_cfg is not None:
+                        keys_dir_path = pathlib.Path(str(keys_dir_cfg)).expanduser()
+                    else:
+                        keys_dir_path = pathlib.Path(".")
+
+                    try:
+                        (
+                            ksk_private,
+                            zsk_private,
+                            ksk_dnskey,
+                            zsk_dnskey,
+                        ) = _zs.ensure_zone_keys(
+                            origin_text,
+                            keys_dir_path,
+                            algorithm=algorithm,
+                            generate_policy=generate_policy,
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning(
+                            "ZoneRecords DNSSEC auto-sign skipped for %s: %s",
+                            apex_owner,
+                            exc,
+                        )
+                        continue
+
+                    now = _dt.datetime.utcnow()
+                    inception = now - _dt.timedelta(hours=1)
+                    expiration = now + _dt.timedelta(days=validity_days)
+                    alg_enum = _zs.ALGORITHM_MAP[algorithm][0]
+
+                    _zs.sign_zone(
+                        zone_obj,
+                        origin,
+                        ksk_private,
+                        zsk_private,
+                        ksk_dnskey,
+                        zsk_dnskey,
+                        alg_enum,
+                        inception,
+                        expiration,
+                    )
+
+                    for owner_name, node_obj in zone_obj.items():
+                        try:
+                            owner_norm = owner_name.to_text().rstrip(".").lower()
+                        except Exception:  # pragma: no cover - defensive
+                            owner_norm = str(owner_name).rstrip(".").lower()
+
+                        for rdataset in node_obj:
+                            if rdataset.rdtype not in (
+                                _dns_rdatatype.DNSKEY,
+                                _dns_rdatatype.RRSIG,
+                            ):
+                                continue
+
+                            if rdataset.rdtype == _dns_rdatatype.DNSKEY:
+                                qcode = int(dnskey_code_all)
+                            else:
+                                qcode = int(rrsig_code_all)
+                                if (owner_norm, qcode) in mapping:
+                                    continue
+
+                            key = (owner_norm, qcode)
+                            existing = mapping.get(key)
+                            if existing is None:
+                                stored_ttl = int(getattr(rdataset, "ttl", 0) or 0)
+                                vals_list: List[str] = []
+                            else:
+                                stored_ttl, vals_list = existing
+
+                            for rdata_obj in list(rdataset):
+                                try:
+                                    value_text = rdata_obj.to_text()
+                                except Exception:  # pragma: no cover - defensive
+                                    continue
+                                if value_text not in vals_list:
+                                    vals_list.append(value_text)
+
+                            mapping[key] = (stored_ttl, vals_list)
+                            per_name = name_index.setdefault(owner_norm, {})
+                            per_name[qcode] = (stored_ttl, vals_list)
+
+            except Exception:  # pragma: no cover - defensive logging only
+                logger.warning(
+                    "ZoneRecords: DNSSEC auto-signing failed; leaving zones unsigned",
+                    exc_info=True,
+                )
 
         lock = getattr(self, "_records_lock", None)
 
