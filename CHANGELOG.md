@@ -11,14 +11,26 @@ All notable changes to this project will be documented in this file.
 - Introduced a shared `dnssec.zone_signer` helper module that centralizes DNSKEY/key management, zone signing, and DS record generation for tools and plugins.
 - Added optional DNSSEC auto-signing support to the `resolve.zone_records` plugin via a `dnssec_signing` configuration block.
 - Extended top-level Makefile targets to drive DNSSEC key and zone signing workflows.
+- Added RFC8914 Extended DNS Errors (EDE) support throughout the resolver, controlled by a new `server.enable_ede` flag, and wired into stats snapshots and the admin UI.
+- Added AXFR and IXFR support, including a TCP/DoT AXFR transport client, ZoneRecords AXFR integration, and example configs/tests for full-zone transfers.
+- Added SSH host key utilities and resolver plugin, SSHFP/OPENPGPKEY record support in zones.
+- Added DNSSEC-aware AXFR upstream helpers and signing automation for BIND-style zones consumed by `resolve.zone_records`.
 
 ### Changed
 
-- Refactored the `scripts/generate_zone_dnssec.py` CLI to delegate signing to the shared helper module while preserving its external behavior.
+- Refactored the `scripts/generate_zone_dnssec.py` into `dnssec.zone_signer`, now it's just a wrapper.
+- Tightened DNS server failover, EDNS handling, and DNSSEC validation logging to make error behavior and diagnostics more robust.
+- Treated TCP connection resets as short reads in the network stack to reduce spurious errors when clients close connections abruptly.
+- Updated packaging metadata, Makefile helpers, and coverage settings to support the new DNSSEC, EDE, and AXFR tooling while keeping CI artifacts out of the tree.
 
 ### Documentation
 
 - Updated DNSSEC and zone plugin documentation to describe the new signing helpers and configuration options.
+- Documented RFC8914 EDE behavior, how to enable it in configuration, and how it appears in stats and the admin UI.
+- Expanded AXFR/IXFR documentation, including examples for ZoneRecords participation in full-zone transfers and DNSSEC-aware AXFR upstreams.
+  - IXFR requests are answered with AXFR.
+  - No client support for IXFR yet.
+- Documented new OpenSSL/SSHFP helpers and resolver plugins, refreshed DNS RFC compliance notes, and updated screenshots and BMC imagery.
 - Tweaked README status badges and coverage badge styling.
 
 ## [0.6.1] - 2026-01-09
