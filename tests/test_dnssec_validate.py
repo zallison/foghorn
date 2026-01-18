@@ -52,6 +52,7 @@ def test_fetch_delegates_to_resolver_resolve():
     r = _R()
     name = dns.name.from_text("example.com.")
     out = dval._fetch(r, name, "DNSKEY")
+    assert name
     assert out == "ok"
     assert r.calls == [(name, "DNSKEY", True)]
 
@@ -123,6 +124,13 @@ def test_find_zone_apex_cached_success_and_failure(monkeypatch):
     Outputs:
       - None; asserts both cached helper paths.
     """
+
+    # Clear any cached entries so this test is independent of prior calls and
+    # does not accidentally reuse a different apex from earlier tests.
+    func = getattr(dval, "_find_zone_apex_cached")
+    cache_obj = getattr(func, "cache", None)
+    if hasattr(cache_obj, "clear"):
+        cache_obj.clear()
 
     apex = dns.name.from_text("example.com.")
 

@@ -2,13 +2,11 @@
 
 Foghorn is a versatile DNS server designed for flexibility and performance. Built on a robust caching forwarder or recursive resolver foundation, it seamlessly integrates with YAML-based configuration and modular plugins to transform into a powerful ad-blocker, local hosts service, kid-safe filter. Fine-tune its capabilities with a Redis backend, InfluxDB logging, and customizable function-cache sizes tailored to your specific needs.
 
-With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard.
+With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard. Newer releases add DNSSEC signing helpers, zone transfers (AXFR/IXFR), RFC 8914 Extended DNS Errors (EDE), and SSH host key utilities so you can treat DNS as a first-class security and operations tool.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/foghorn)[![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-donate-yellow.svg)](https://www.buymeacoffee.com/foghorndns)
-
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-91%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" width=300px />
-
 
 
 The configuration file is validated against a JSON Schema, but you rarely need to read the schema directly. This guide walks through the main sections (`vars`, `server`, `upstreams`, `logging`, `stats`, and `plugins`), then shows concrete examples for every built‑in plugin.
@@ -55,6 +53,16 @@ The configuration file is validated against a JSON Schema, but you rarely need t
   - [7.3 `smb`: small business](#73-smb-small-business)
   - [7.4 `enterprise`: layered caches and rich stats](#74-enterprise-layered-caches-and-rich-stats)
 
+## Additonal Documentation
+
+- [Developer notes and contribution guide](docs/README-DEV.md)
+- [Makefile targets and build helpers](docs/MAKEFILE.md)
+- [Pi-hole replacement example configuration](docs/PiholeConfig.md)
+- [OpenSSL make targets (certificate helpers)](docs/open-ssl-make-easy.md)
+- [DNS RFC compliance, EDNS/EDE, and AXFR/IXFR notes](docs/RFCs.md)
+- [SSH host keys, SSHFP records, and DNSSEC integration](docs/openssh-key-records.md)
+
+
 ---
 
 ## 0. Thanks
@@ -69,23 +77,23 @@ Also thanks to my junior developers, AI from both local and remote models, some 
 
 Foghorn can be installed a few different ways, depending on how you prefer to run services:
 
-•  From PyPI (recommended for most users)  
+•  From PyPI (recommended for most users)
 ```bash
-  Install the latest released version into your Python environment:  
-  pip install foghorn  
+  Install the latest released version into your Python environment:
+  pip install foghorn
   This gives you the foghorn CLI and library directly on your host system.
 ```
-•  From source (GitHub)  
-  If you want to track development, hack on plugins, or run a specific commit/branch, clone the repository and install it in editable mode: 
+•  From source (GitHub)
+  If you want to track development, hack on plugins, or run a specific commit/branch, clone the repository and install it in editable mode:
   ```bash
-  git clone https://github.com/zallison/foghorn.git  
-  cd foghorn  
+  git clone https://github.com/zallison/foghorn.git
+  cd foghorn
   pip install -e .
   ```
   This keeps your local checkout and installed code in sync as you make changes.
 
-•  Prebuilt Docker images (amd64 and armhf)  
-  If you prefer to run Foghorn in a container, prebuilt images for both amd64 and armhf are available on Docker Hub at https://hub.docker.com/r/zallison/foghorn.  
+•  Prebuilt Docker images (amd64 and armhf)
+  If you prefer to run Foghorn in a container, prebuilt images for both amd64 and armhf are available on Docker Hub at https://hub.docker.com/r/zallison/foghorn.
   Pull the image for your architecture and run it with your configuration mounted as /foghorn/config.yaml, along with any port mappings you need for DNS, DoT/DoH, and the admin web UI.
 
    ```bash
@@ -146,10 +154,19 @@ For local development there is a `Makefile` with a few convenience targets:
 - `make build` – prepare the development environment (keeps the JSON schema up to date).
 - `make schema` – regenerate `assets/config-schema.json` from the Python code.
 - `make test` – run the test suite with coverage.
+- `make dnssec-sign-zone` – sign a BIND-style zone file with DNSSEC using the bundled helper script, writing a signed zone that can be served by the ZoneRecords plugin.
 - `make clean` – remove the venv, build artefacts, and temporary files.
 - `make docker`, `make docker-build`, `make docker-run`, `make docker-logs`, `make docker-clean`, `make docker-ship` – build and run Docker images/containers.
 - `make package-build` / `make package-publish` / `make package-publish-dev` – build and (optionally) publish Python packages.
 - `make ssl-cert` – generate a self-signed TLS key and certificate under `./var` using `openssl req -x509`.
+
+---
+
+## Additional Documentation
+
+- [OpenSSL make targets (made easy)](docs/open-ssl-make-easy.md)
+- [DNS RFC compliance and protocol notes (including EDE and AXFR)](docs/RFCs.md)
+- [SSH host keys, SSHFP records, and DNSSEC integration](docs/openssh-key-records.md)
 
 ---
 
@@ -239,6 +256,8 @@ rebuilds the function's cache at startup so you can switch between
 configuration.
 - `server.dnssec`
   - Mode and DNSSEC validation knobs (e.g., UDP payload size).
+- `server.enable_ede`
+  - Optional toggle for RFC 8914 Extended DNS Errors; when true and the client advertises EDNS(0), Foghorn can attach EDE options to certain policy or upstream-failure responses and surface per-code stats in the admin UI.
 - `server.resolver`
   - Timeouts, recursion depth, and whether Foghorn runs as a forwarder or recursive resolver.
 - `server.http`
@@ -532,8 +551,8 @@ For quick local testing, the `Makefile` includes convenience targets that genera
 
 - `make ssl-ca` – create `foghorn_ca.key` and a self-signed `foghorn_ca.crt` with CA key usage.
 - `make ssl-ca-pem` – export the CA certificate as `foghorn_ca.pem` for use as a trust anchor (e.g. `upstreams.*.tls.ca_file`).
-- `make ssl-cert` – create a server key and certificate signed by the local CA, named `foghorn_${CNAME}.key` / `.crt`.
-- `make ssl-server-pem` – build a combined `foghorn_${CNAME}.pem` containing the server certificate and key.
+- `make ssl-cert CNAME=myserver` – create a server key and certificate signed by the local CA, named `foghorn_${CNAME}.key` / `.crt`.
+- `make ssl-server-pem CNAME=myserver` – build a combined `foghorn_${CNAME}.pem` containing the server certificate and key.
 
 Use `ca.pem` when Foghorn is a TLS **client** and needs to *trust* an internal CA (for example for DoT/DoH upstreams via `tls.ca_file`). Use `server.pem` when Foghorn is acting as a TLS **server** and you need a single file containing both cert and key for a listener.
 
@@ -731,11 +750,7 @@ plugins:
 			  port: 53
 ```
 
-<<<<<<< HEAD
 ### 4.10 Inline and file-based records (`zone`)
-=======
-### 4.14 Inline, file-based, and BIND zone records (`zone`)
->>>>>>> fbd8b7b (feat(zone): Read BIND9 zonefiles)
 
 Define custom records either:
 
@@ -755,6 +770,10 @@ All sources are merged into a single internal view per (name, qtype):
   such a zone the plugin behaves like an authoritative server, including
   correct NXDOMAIN/NODATA and ANY semantics with SOA in the authority
   section.
+- For zones with an SOA apex and a TCP/DoT listener enabled, Foghorn also
+  answers AXFR/IXFR for that zone using the same ZoneRecords data.
+- IXFR server side currently implemented as a full AXFR-style transfer.
+- IXFR client side is not yet supported.
 
 ```yaml
 plugins:
@@ -1357,3 +1376,8 @@ plugins:
 ```
 
 From here you can mix and match plugins, caches, and stats backends to shape Foghorn into exactly the DNS service you need.
+
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-91%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+
+## Stargazers over time
+[![Stargazers over time](https://starchart.cc/zallison/foghorn.svg?variant=adaptive)](https://starchart.cc/zallison/foghorn)

@@ -41,3 +41,4 @@ config.yaml.new
 foghorn_cpu.svg
 keys
 config
+/coverage.json

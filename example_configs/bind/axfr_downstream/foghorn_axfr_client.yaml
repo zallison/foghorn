@@ -1,0 +1,36 @@
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5360
+    tcp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5360
+  dnssec:
+    mode: ignore
+    validation: upstream_ad
+    udp_payload_size: 1232
+  resolver:
+    timeout_ms: 2000
+    use_asyncio: true
+
+upstreams:
+  endpoints:
+    - host: 1.1.1.1
+      port: 53
+  strategy: failover
+  max_concurrent: 1
+
+logging:
+  python:
+    level: debug
+
+plugins:
+  - type: zone
+    config:
+      # Serve axfr-test.test from the local BIND-style zone file.
+      bind_paths:
+        - ./example_configs/bind/axfr_downstream/zones/db.axfr-test.test
+      watchdog_enabled: false

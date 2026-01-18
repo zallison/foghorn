@@ -233,6 +233,34 @@ def test_tcp_pool_newpath(tcp_echo_newpath):
     assert get_tcp_pool(host, port) is pool
 
 
+def test_recv_exact_connection_reset_newpath():
+    """Brief: Ensure _recv_exact treats ConnectionResetError as a short read.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None
+    """
+
+    class _ResettingSocket:
+        """Brief: Fake socket that always raises ConnectionResetError on recv.
+
+        Inputs:
+          - None
+
+        Outputs:
+          - None
+        """
+
+        def recv(self, _n: int) -> bytes:  # pragma: nocover - trivial helper
+            raise ConnectionResetError("boom")
+
+    sock = _ResettingSocket()
+    data = _recv_exact(sock, 4)
+    assert data == b""
+
+
 def test_tcp_conn_connection_not_established_newpath():
     """Brief: Ensure _TCPConn.send fails when not connected.
 

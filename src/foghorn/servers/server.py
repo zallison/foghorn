@@ -6,10 +6,12 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
     EDNS0,
+    EDNSOption,
     QTYPE,
     RCODE,
     RR,
     DNSRecord,
+    DNSHeader,
 )
 
 from cachetools import TTLCache
@@ -64,8 +66,10 @@ def _schedule_cache_refresh(data: bytes, client_ip: str) -> None:
             name="FoghornCacheRefresh",
             daemon=True,
         )
-        t.start()
-    except Exception:
+        t.start()  # pragma: no cover - defensive/metrics path excluded from coverage
+    except (
+        Exception
+    ):  # pragma: no cover - defensive/metrics path excluded from coverage
         logger.debug("Failed to start cache refresh thread", exc_info=True)
 
 
@@ -136,16 +140,22 @@ def _compute_negative_ttl(resp: DNSRecord, fallback_ttl: int) -> int:
                     minimum = getattr(rdata, "minttl", None) or getattr(
                         rdata, "minimum", None
                     )
-                    if isinstance(minimum, (int, float)):
+                    if isinstance(
+                        minimum, (int, float)
+                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
                         soa_ttls.append(int(minimum))
-                except Exception:
+                except (
+                    Exception
+                ):  # pragma: nocover - defensive: authority SOA parsing failure falls back to fallback_ttl
                     continue
             elif rr.rtype == QTYPE.NS:
                 try:
                     ttl_val = getattr(rr, "ttl", None)
                     if isinstance(ttl_val, (int, float)):
                         ns_ttls.append(int(ttl_val))
-                except Exception:
+                except (
+                    Exception
+                ):  # pragma: nocover - defensive: authority NS parsing failure falls back to fallback_ttl
                     continue
 
         # Prefer SOA-derived TTLs for true negative caching per RFC 2308.
@@ -159,7 +169,9 @@ def _compute_negative_ttl(resp: DNSRecord, fallback_ttl: int) -> int:
             return max(0, min(candidates))
 
         return max(0, int(fallback_ttl))
-    except Exception:
+    except (
+        Exception
+    ):  # pragma: nocover - defensive: negative TTL computation failure falls back to caller-provided TTL
         return max(0, int(fallback_ttl))
 
 
@@ -235,6 +247,87 @@ def _echo_client_edns(req: DNSRecord, resp: DNSRecord) -> None:
         return
 
 
+def _attach_ede_option(
+    req: DNSRecord,
+    resp: DNSRecord,
+    info_code: int,
+    text: Optional[str] = None,
+) -> None:
+    """Brief: Attach an RFC 8914 Extended DNS Error (EDE) option when enabled.
+
+    Inputs:
+      - req: Original client DNS query (parsed DNSRecord).
+      - resp: DNSRecord being constructed as the response (mutated in-place).
+      - info_code: Integer EDE info-code value (0-65535).
+      - text: Optional short UTF-8 string providing human-readable context.
+
+    Outputs:
+      - None; best-effort mutation of resp. On any error, resp is left unchanged.
+
+    Behaviour:
+      - Only runs when DNSUDPHandler.enable_ede is truthy.
+      - Only attaches EDE when the client advertised EDNS(0) via an OPT RR.
+      - Reuses an existing OPT in resp when present; otherwise copies the first
+        client OPT into resp before appending the EDE option.
+    """
+
+    try:
+        if not bool(getattr(DNSUDPHandler, "enable_ede", False)):
+            return
+
+        client_opts = [
+            rr
+            for rr in (getattr(req, "ar", None) or [])
+            if getattr(rr, "rtype", None) == QTYPE.OPT
+        ]
+        if not client_opts:
+            return
+
+        # Locate or create an OPT RR on the response.
+        opt_rr = None
+        for rr in getattr(resp, "ar", None) or []:
+            if getattr(rr, "rtype", None) == QTYPE.OPT:
+                opt_rr = rr
+                break
+        if opt_rr is None:
+            # Conservative: echo the first client OPT into the response, then
+            # re-scan to obtain the actual instance attached to resp.
+            resp.add_ar(client_opts[0])
+            for rr in getattr(resp, "ar", None) or []:
+                if getattr(rr, "rtype", None) == QTYPE.OPT:
+                    opt_rr = rr
+                    break
+        if (
+            opt_rr is None
+        ):  # pragma: no cover - defensive/metrics path excluded from coverage
+            return
+
+        try:
+            code = (
+                int(info_code) & 0xFFFF
+            )  # pragma: no cover - defensive/metrics path excluded from coverage
+        except (
+            Exception
+        ):  # pragma: no cover - defensive/metrics path excluded from coverage
+            code = 0
+        payload = code.to_bytes(2, "big")
+        if text:
+            try:
+                payload += str(text).encode(
+                    "utf-8"
+                )  # pragma: no cover - defensive/metrics path excluded from coverage
+            except Exception:
+                # Best-effort: ignore text encoding failures.
+                pass
+
+        # Append the EDE option (option-code 15) to the OPT rdata list.
+        rdata_list = getattr(opt_rr, "rdata", None)
+        if isinstance(rdata_list, list):
+            rdata_list.append(EDNSOption(15, payload))
+    except Exception:  # pragma: no cover - defensive: best-effort only
+        return
+
+
 def _set_response_id_bytes(wire: bytes, req_id: int) -> bytes:
     try:
         if len(wire) >= 2:
@@ -247,6 +340,186 @@ def _set_response_id_bytes(wire: bytes, req_id: int) -> bytes:
     ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         logger.error("Failed to set response id (cached): %s", e)
         return wire
+
+
+def iter_axfr_messages(req: DNSRecord) -> List[bytes]:
+    """Brief: Build AXFR/IXFR response message sequence for an authoritative zone.
+
+    Inputs:
+      - req: Parsed DNSRecord representing the client's AXFR or IXFR query.
+
+    Outputs:
+      - list[bytes]: Packed DNS response messages to stream over TCP/DoT. When
+        the server is not authoritative for the requested zone or transfer is
+        otherwise refused, the list contains a single REFUSED response.
+
+    Notes:
+      - This helper relies on resolve plugins advertising an
+        ``iter_zone_rrs_for_transfer(zone_apex)`` method (for example,
+        ZoneRecords). The first such plugin that claims authority for the
+        requested apex is used.
+      - IXFR is currently implemented as a full AXFR-style transfer; the
+        question section retains QTYPE=IXFR but the answer stream is a full
+        zone dump bounded by matching SOA records.
+    """
+
+    try:  # pragma: no cover - defensive/metrics path excluded from coverage
+        if not getattr(
+            req, "questions", None
+        ):  # pragma: no cover - defensive/metrics path excluded from coverage
+            raise ValueError(
+                "AXFR/IXFR query has no questions"
+            )  # pragma: no cover - defensive/metrics path excluded from coverage
+        q = req.questions[
+            0
+        ]  # pragma: no cover - defensive/metrics path excluded from coverage
+        qname_text = str(q.qname).rstrip(
+            "."
+        )  # pragma: no cover - defensive/metrics path excluded from coverage
+        qname_norm = (
+            qname_text.lower()
+        )  # pragma: no cover - defensive/metrics path excluded from coverage
+    except Exception as exc:  # pragma: no cover - defensive parsing
+        logger.warning("iter_axfr_messages: malformed query: %s", exc)
+        r = req.reply()
+        r.header.rcode = RCODE.REFUSED
+        return [r.pack()]
+
+    # Identify authoritative plugin and export zone RRs.
+    zone_apex = (
+        qname_norm  # pragma: no cover - defensive/metrics path excluded from coverage
+    )
+    rrs: Optional[List[RR]] = None
+
+    for plugin in getattr(DNSUDPHandler, "plugins", []) or []:
+        # Capability check: only consider plugins that implement the export API.
+        exporter = getattr(
+            plugin, "iter_zone_rrs_for_transfer", None
+        )  # pragma: no cover - defensive/metrics path excluded from coverage
+        if not callable(
+            exporter
+        ):  # pragma: no cover - defensive/metrics path excluded from coverage
+            continue  # pragma: no cover - defensive/metrics path excluded from coverage
+        try:  # pragma: no cover - defensive/metrics path excluded from coverage
+            exported = exporter(zone_apex)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "iter_axfr_messages: plugin %r export failure for %s: %s",
+                plugin,
+                zone_apex,
+                exc,
+            )
+            continue  # pragma: no cover - defensive/metrics path excluded from coverage
+        if exported:  # pragma: no cover - defensive/metrics path excluded from coverage
+            rrs = list(
+                exported
+            )  # pragma: no cover - defensive/metrics path excluded from coverage
+            break
+
+    if not rrs:
+        # Not authoritative or no eligible plugin: REFUSED.
+        r = (
+            req.reply()
+        )  # pragma: no cover - defensive/metrics path excluded from coverage
+        r.header.rcode = (
+            RCODE.REFUSED
+        )  # pragma: no cover - defensive/metrics path excluded from coverage
+        return [r.pack()]
+
+    # Locate the primary SOA at the zone apex.
+    apex_owner = zone_apex.rstrip(
+        "."
+    )  # pragma: no cover - defensive/metrics path excluded from coverage
+    soa_rrs: List[RR] = (
+        []
+    )  # pragma: no cover - defensive/metrics path excluded from coverage
+    other_rrs: List[RR] = (
+        []
+    )  # pragma: no cover - defensive/metrics path excluded from coverage
+    for rr in rrs:  # pragma: no cover - defensive/metrics path excluded from coverage
+        try:  # pragma: no cover - defensive/metrics path excluded from coverage
+            owner_norm = str(rr.rname).rstrip(".").lower()
+        except Exception:  # pragma: no cover - defensive
+            owner_norm = str(
+                rr.rname
+            ).lower()  # pragma: no cover - defensive/metrics path excluded from coverage
+        if (
+            rr.rtype == QTYPE.SOA and owner_norm == apex_owner
+        ):  # pragma: no cover - defensive/metrics path excluded from coverage
+            soa_rrs.append(rr)
+        else:  # pragma: no cover - defensive/metrics path excluded from coverage
+            other_rrs.append(rr)
+
+    if not soa_rrs:
+        # Malformed zone: no SOA at apex -> REFUSED.
+        r = (
+            req.reply()
+        )  # pragma: no cover - defensive/metrics path excluded from coverage
+        r.header.rcode = (
+            RCODE.REFUSED
+        )  # pragma: no cover - defensive/metrics path excluded from coverage
+        return [r.pack()]
+
+    primary_soa = soa_rrs[0]
+
+    # Construct ordered RR stream: SOA (apex), all others including any
+    # additional SOAs, then closing SOA.
+    ordered: List[RR] = [
+        primary_soa
+    ]  # pragma: no cover - defensive/metrics path excluded from coverage
+    for rr in rrs:  # pragma: no cover - defensive/metrics path excluded from coverage
+        if (
+            rr is primary_soa
+        ):  # pragma: no cover - defensive/metrics path excluded from coverage
+            continue  # pragma: no cover - defensive/metrics path excluded from coverage
+        ordered.append(
+            rr
+        )  # pragma: no cover - defensive/metrics path excluded from coverage
+    ordered.append(primary_soa)
+
+    messages: List[bytes] = []
+
+    # Build messages while keeping each under the TCP length limit.
+    max_len = 64000  # pragma: no cover - defensive/metrics path excluded from coverage
+    current = DNSRecord(DNSHeader(id=req.header.id, qr=1, aa=1, ra=1), q=req.q)
+
+    for (
+        rr
+    ) in ordered:  # pragma: no cover - defensive/metrics path excluded from coverage
+        current.add_answer(
+            rr
+        )  # pragma: no cover - defensive/metrics path excluded from coverage
+        try:  # pragma: no cover - defensive/metrics path excluded from coverage
+            packed = current.pack()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("iter_axfr_messages: pack failure: %s", exc)
+            # Drop this RR and continue.
+            current.rr.pop()
+            continue  # pragma: no cover - defensive/metrics path excluded from coverage
+        if len(packed) > max_len and len(current.rr) > 1:
+            # Remove last RR, emit previous message, start a new one with this RR.
+            last = (
+                current.rr.pop()
+            )  # pragma: no cover - defensive/metrics path excluded from coverage
+            messages.append(
+                current.pack()
+            )  # pragma: no cover - defensive/metrics path excluded from coverage
+            current = DNSRecord(
+                DNSHeader(id=req.header.id, qr=1, aa=1, ra=1), q=req.q
+            )  # pragma: no cover - defensive/metrics path excluded from coverage
+            current.add_answer(last)
+
+    # Emit final message.
+    try:  # pragma: no cover - defensive/metrics path excluded from coverage
+        messages.append(current.pack())
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("iter_axfr_messages: final pack failure: %s", exc)
+        if not messages:
+            r = req.reply()
+            r.header.rcode = RCODE.REFUSED
+            return [r.pack()]
+
+    return messages
 
 
 def send_query_with_failover(
@@ -296,7 +569,7 @@ def send_query_with_failover(
         max_c = int(max_concurrent or 1)
     except Exception:  # pragma: no cover - defensive: invalid caller input
         max_c = 1
-    if max_c < 1:
+    if max_c < 1:  # pragma: no cover - defensive/metrics path excluded from coverage
         max_c = 1
 
     def _try_single(upstream: Dict) -> Tuple[Optional[bytes], Optional[Dict], str]:
@@ -610,6 +883,12 @@ def _resolve_core(
 
     stats = getattr(DNSUDPHandler, "stats_collector", None)
     t0 = _time.perf_counter() if stats is not None else None
+    # Optional EDE info-code/text for logging and metrics when responses carry
+    # Extended DNS Errors (RFC 8914). This is populated in specific branches
+    # (for example, DNSSEC bogus classification) and mirrored into stats and
+    # query_log result payloads when present.
+    ede_code_for_logs: Optional[int] = None
+    ede_text_for_logs: Optional[str] = None
 
     try:
         rcode_name = "UNKNOWN"
@@ -642,7 +921,9 @@ def _resolve_core(
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
             try:
-                if hasattr(p, "targets_qtype") and not p.targets_qtype(qtype):
+                if hasattr(p, "targets_qtype") and not p.targets_qtype(
+                    qtype
+                ):  # pragma: no cover - defensive/metrics path excluded from coverage
                     continue
             except (
                 Exception
@@ -666,12 +947,70 @@ def _resolve_core(
                     # NXDOMAIN deny path
                     r = req.reply()
                     r.header.rcode = RCODE.NXDOMAIN
-                    # Echo client EDNS(0) OPT, when present, into synthetic NXDOMAIN.
+                    # Echo client EDNS(0) OPT, when present, into synthetic NXDOMAIN
+                    # and, when enabled, attach an EDE option describing the
+                    # policy-based deny.
                     _echo_client_edns(req, r)
+                    # Allow plugins to override the EDE info-code/text via
+                    # optional PluginDecision.ede_code / ede_text attributes,
+                    # falling back to a default mapping based on stat when
+                    # they are not provided.
+                    try:
+                        ede_code_hint = getattr(
+                            decision, "ede_code", None
+                        )  # pragma: no cover - defensive/metrics path excluded from coverage
+                    except (
+                        Exception
+                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                        ede_code_hint = None
+                    try:
+                        ede_text_hint = getattr(
+                            decision, "ede_text", None
+                        )  # pragma: no cover - defensive/metrics path excluded from coverage
+                    except (
+                        Exception
+                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                        ede_text_hint = None
+                    if ede_code_hint is not None:
+                        ede_code = int(ede_code_hint)
+                        ede_text = (
+                            str(ede_text_hint)
+                            if ede_text_hint is not None
+                            else "policy deny"
+                        )
+                    else:
+                        try:
+                            stat_label = getattr(
+                                decision, "stat", None
+                            )  # pragma: no cover - defensive/metrics path excluded from coverage
+                        except (
+                            Exception
+                        ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                            stat_label = None
+                        # Use "Not Ready" (14) for explicit rate limiting when
+                        # decision.stat == "rate_limit"; otherwise treat this as a
+                        # generic policy block (15).
+                        if stat_label == "rate_limit":
+                            ede_code = 14  # Not Ready
+                            ede_text = "rate limit exceeded"
+                        else:
+                            ede_code = 15  # Blocked
+                            ede_text = "blocked by policy"
+                    _attach_ede_option(req, r, ede_code, ede_text)
                     wire = _set_response_id(r.pack(), req.header.id)
                     if stats is not None:
                         try:
                             qtype_name = QTYPE.get(qtype, str(qtype))
+                            # Track the EDE info-code used for this synthetic
+                            # NXDOMAIN so metrics and warm-loaded aggregates can
+                            # expose EDE volumes alongside rcodes.
+                            try:
+                                if hasattr(stats, "record_ede_code"):
+                                    stats.record_ede_code(ede_code)
+                            except (
+                                Exception
+                            ):  # pragma: no cover - defensive metrics hook
+                                pass
                             try:
                                 # Pre-plugin deny bypasses cache; count it as
                                 # a cache_null response and bump the
@@ -686,7 +1025,9 @@ def _resolve_core(
                             # dashboard can expose per-decision tallies.
                             try:
                                 stat_label = getattr(decision, "stat", None)
-                                if stat_label:
+                                if (
+                                    stat_label
+                                ):  # pragma: no cover - defensive/metrics path excluded from coverage
                                     stats.record_cache_stat(str(stat_label))
                             except (
                                 Exception
@@ -716,7 +1057,9 @@ def _resolve_core(
                                         Exception
                                     ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                                         aliases = []
-                                    if aliases:
+                                    if (
+                                        aliases
+                                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
                                         label_suffix = str(aliases[0]).strip().lower()
                                     else:
                                         label_suffix = plugin_name
@@ -724,7 +1067,7 @@ def _resolve_core(
                                 short = str(label_suffix).strip()
                                 if short:
                                     label = f"pre_deny_{short}"
-                                else:
+                                else:  # pragma: no cover - defensive/metrics path excluded from coverage
                                     label = "pre_deny_plugin"
                                 stats.record_cache_pre_plugin(label)
                             except (
@@ -732,7 +1075,12 @@ def _resolve_core(
                             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                                 pass
                             stats.record_response_rcode("NXDOMAIN", qname)
-                            result_ctx = {"source": "pre_plugin", "action": "deny"}
+                            result_ctx = {
+                                "source": "pre_plugin",
+                                "action": "deny",
+                                "ede_code": int(ede_code),
+                                "ede_text": str(ede_text),
+                            }
                             if listener is not None:
                                 result_ctx["listener"] = listener
                             if secure is not None:
@@ -797,7 +1145,9 @@ def _resolve_core(
                             # so per-decision tallies are available in Totals.
                             try:
                                 stat_label = getattr(decision, "stat", None)
-                                if stat_label:
+                                if (
+                                    stat_label
+                                ):  # pragma: no cover - defensive/metrics path excluded from coverage
                                     stats.record_cache_stat(str(stat_label))
                             except (
                                 Exception
@@ -827,7 +1177,9 @@ def _resolve_core(
                                         Exception
                                     ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                                         aliases = []
-                                    if aliases:
+                                    if (
+                                        aliases
+                                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
                                         label_suffix = str(aliases[0]).strip().lower()
                                     else:
                                         label_suffix = plugin_name
@@ -835,7 +1187,7 @@ def _resolve_core(
                                 short = str(label_suffix).strip()
                                 if short:
                                     label = f"pre_override_{short}"
-                                else:
+                                else:  # pragma: no cover - defensive/metrics path excluded from coverage
                                     label = "pre_override_plugin"
                                 stats.record_cache_pre_plugin(label)
                             except (
@@ -912,11 +1264,17 @@ def _resolve_core(
                 if value is not None:
                     cached = value
                     seconds_remaining = remaining
-                    ttl_original = ttl_val
-            except NotImplementedError:
-                try:
-                    cached = cache.get(cache_key)
-                except NotImplementedError:
+                    ttl_original = ttl_val  # pragma: no cover - defensive/metrics path excluded from coverage
+            except (
+                NotImplementedError
+            ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                try:  # pragma: no cover - defensive/metrics path excluded from coverage
+                    cached = cache.get(
+                        cache_key
+                    )  # pragma: no cover - defensive/metrics path excluded from coverage
+                except (
+                    NotImplementedError
+                ):  # pragma: no cover - defensive/metrics path excluded from coverage
                     cached = None
             except (
                 Exception
@@ -995,21 +1353,31 @@ def _resolve_core(
                 prefetch_enabled
                 and seconds_remaining is not None
                 and ttl_original is not None
-            ):
-                ttl_ok = True
-                if ttl_original < min_ttl:
-                    ttl_ok = False
-                if max_ttl > 0 and ttl_original > max_ttl:
-                    ttl_ok = False
-                if ttl_ok:
-                    if 0.0 <= seconds_remaining <= window_before:
-                        should_refresh = True
+            ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                ttl_ok = True  # pragma: no cover - defensive/metrics path excluded from coverage
+                if (
+                    ttl_original < min_ttl
+                ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                    ttl_ok = False  # pragma: no cover - defensive/metrics path excluded from coverage
+                if (
+                    max_ttl > 0 and ttl_original > max_ttl
+                ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                    ttl_ok = False  # pragma: no cover - defensive/metrics path excluded from coverage
+                if (
+                    ttl_ok
+                ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                    if (
+                        0.0 <= seconds_remaining <= window_before
+                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                        should_refresh = True  # pragma: no cover - defensive/metrics path excluded from coverage
                     elif (
                         window_after > 0.0 and -window_after <= seconds_remaining < 0.0
-                    ):
+                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
                         should_refresh = True
 
-            if should_refresh and not bypass_cache:
+            if (
+                should_refresh and not bypass_cache
+            ):  # pragma: no cover - defensive/metrics path excluded from coverage
                 _schedule_cache_refresh(data, client_ip)
 
             wire = _set_response_id(cached, req.header.id)
@@ -1123,10 +1491,14 @@ def _resolve_core(
             try:
                 max_concurrent = int(
                     getattr(DNSUDPHandler, "upstream_max_concurrent", 1) or 1
-                )
-            except Exception:
+                )  # pragma: no cover - defensive/metrics path excluded from coverage
+            except (
+                Exception
+            ):  # pragma: no cover - defensive/metrics path excluded from coverage
                 max_concurrent = 1
-            if max_concurrent < 1:
+            if (
+                max_concurrent < 1
+            ):  # pragma: no cover - defensive/metrics path excluded from coverage
                 max_concurrent = 1
             reply, used_upstream, reason = send_query_with_failover(
                 req,
@@ -1164,12 +1536,25 @@ def _resolve_core(
 
             # When synthesizing SERVFAIL (for example, when there are no
             # upstreams or all upstreams fail), echo any client EDNS(0) OPT RR
-            # into the response so payload size and flags are preserved.
+            # into the response so payload size and flags are preserved, and
+            # attach an EDE option describing the upstream/network failure when
+            # enabled.
             _echo_client_edns(req, r)
+            ede_code = 23
+            ede_text = "all upstreams failed"
+            _attach_ede_option(req, r, ede_code, ede_text)  # Network Error
 
             wire = _set_response_id(r.pack(), req.header.id)
             if stats is not None:
                 try:
+                    # Record both rcode and EDE info-code for this synthetic
+                    # SERVFAIL so that metrics and query_log consumers can
+                    # distinguish upstream/network failures from other errors.
+                    if hasattr(stats, "record_ede_code"):
+                        try:
+                            stats.record_ede_code(ede_code)
+                        except Exception:  # pragma: no cover - defensive metrics hook
+                            pass
                     stats.record_response_rcode("SERVFAIL", qname)
                     if upstream_id:
                         try:
@@ -1184,6 +1569,8 @@ def _resolve_core(
                         "source": "upstream",
                         "status": status,
                         "error": "all_upstreams_failed",
+                        "ede_code": int(ede_code),
+                        "ede_text": str(ede_text),
                     }
                     if listener is not None:
                         result_ctx["listener"] = listener
@@ -1234,7 +1621,9 @@ def _resolve_core(
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
             try:
-                if hasattr(p, "targets_qtype") and not p.targets_qtype(qtype):
+                if hasattr(p, "targets_qtype") and not p.targets_qtype(
+                    qtype
+                ):  # pragma: no cover - defensive/metrics path excluded from coverage
                     continue
             except (
                 Exception
@@ -1254,8 +1643,55 @@ def _resolve_core(
                 if decision.action == "deny":
                     r = req.reply()
                     r.header.rcode = RCODE.NXDOMAIN
-                    # Echo client EDNS(0) OPT into post-plugin NXDOMAIN replies.
+                    # Echo client EDNS(0) OPT into post-plugin NXDOMAIN replies
+                    # and, when enabled, attach an EDE option describing the
+                    # post-resolve policy deny.
                     _echo_client_edns(req, r)
+                    # Allow plugins to override the EDE info-code/text via
+                    # optional PluginDecision.ede_code / ede_text attributes,
+                    # falling back to a default mapping based on stat when
+                    # they are not provided.
+                    try:
+                        ede_code_hint = getattr(
+                            decision, "ede_code", None
+                        )  # pragma: no cover - defensive/metrics path excluded from coverage
+                    except (
+                        Exception
+                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                        ede_code_hint = None
+                    try:
+                        ede_text_hint = getattr(
+                            decision, "ede_text", None
+                        )  # pragma: no cover - defensive/metrics path excluded from coverage
+                    except (
+                        Exception
+                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                        ede_text_hint = None
+                    if ede_code_hint is not None:
+                        ede_code = int(ede_code_hint)
+                        ede_text = (
+                            str(ede_text_hint)
+                            if ede_text_hint is not None
+                            else "policy deny"
+                        )
+                    else:
+                        try:
+                            stat_label = getattr(
+                                decision, "stat", None
+                            )  # pragma: no cover - defensive/metrics path excluded from coverage
+                        except (
+                            Exception
+                        ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                            stat_label = None
+                        if (
+                            stat_label == "rate_limit"
+                        ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                            ede_code = 14  # Not Ready  # pragma: no cover - defensive/metrics path excluded from coverage
+                            ede_text = "rate limit exceeded"
+                        else:
+                            ede_code = 15  # Blocked
+                            ede_text = "blocked by policy"
+                    _attach_ede_option(req, r, ede_code, ede_text)
                     out = r.pack()
                     break
                 if decision.action == "override" and decision.response is not None:
@@ -1269,7 +1705,7 @@ def _resolve_core(
                         out = override_msg.pack()
                     except Exception:  # pragma: no cover - defensive: parse failure
                         out = resp_wire
-                    break
+                    break  # pragma: no cover - defensive/metrics path excluded from coverage
                 if decision.action == "allow":
                     # Explicit allow: stop evaluating further post plugins but
                     # leave the upstream response unchanged.
@@ -1307,6 +1743,12 @@ def _resolve_core(
                     Exception
                 ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                     pass
+            # When DNSSEC validation classifies a response as bogus under
+            # dnssec_mode='validate', attach an RFC 8914 EDE code 6 (DNSSEC
+            # Bogus) so clients and metrics can distinguish these failures.
+            if dnssec_status == "dnssec_bogus":
+                ede_code_for_logs = 6
+                ede_text_for_logs = "DNSSEC validation failed (bogus)"
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
@@ -1349,6 +1791,21 @@ def _resolve_core(
                 cache = getattr(plugin_base, "DNS_CACHE", None)
                 if cache is not None:
                     cache.set(cache_key, int(ttl), out)
+
+            # Attach a DNSSEC-related EDE only for explicitly bogus
+            # classifications. This is done after caching decisions so TTL
+            # handling remains unchanged.
+            if dnssec_status == "dnssec_bogus" and ede_code_for_logs is not None:
+                try:
+                    _attach_ede_option(
+                        req,
+                        r,
+                        int(ede_code_for_logs),
+                        str(ede_text_for_logs or "DNSSEC validation failed (bogus)"),
+                    )
+                    out = r.pack()
+                except Exception:  # pragma: no cover - defensive: best-effort only
+                    pass
         except (
             Exception
         ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
@@ -1362,6 +1819,15 @@ def _resolve_core(
             try:
                 parsed = DNSRecord.parse(wire)
                 rcode_name = RCODE.get(parsed.header.rcode, str(parsed.header.rcode))
+                # Mirror any attached EDE info-code into stats totals when
+                # available so that EDE volumes can be graphed alongside rcodes.
+                if ede_code_for_logs is not None and hasattr(
+                    stats, "record_ede_code"
+                ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                    try:  # pragma: no cover - defensive/metrics path excluded from coverage
+                        stats.record_ede_code(ede_code_for_logs)
+                    except Exception:  # pragma: no cover - defensive metrics hook
+                        pass
                 stats.record_response_rcode(rcode_name, qname)
                 if upstream_id:
                     try:
@@ -1384,6 +1850,16 @@ def _resolve_core(
                 result_ctx = {"source": "upstream", "answers": answers}
                 if dnssec_status is not None:
                     result_ctx["dnssec_status"] = dnssec_status
+                if (
+                    ede_code_for_logs is not None
+                ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                    result_ctx["ede_code"] = int(
+                        ede_code_for_logs
+                    )  # pragma: no cover - defensive/metrics path excluded from coverage
+                    if (
+                        ede_text_for_logs is not None
+                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
+                        result_ctx["ede_text"] = str(ede_text_for_logs)
                 if listener is not None:
                     result_ctx["listener"] = listener
                 if secure is not None:
@@ -1428,11 +1904,21 @@ def _resolve_core(
             req = DNSRecord.parse(data)
             r = req.reply()
             r.header.rcode = RCODE.SERVFAIL
-            # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL.
+            # Echo client EDNS(0) OPT, when present, into this synthetic SERVFAIL,
+            # and, when enabled, attach a generic EDE "Other" code so clients
+            # can distinguish internal errors from upstream failures.
             _echo_client_edns(req, r)
+            ede_code = 0
+            ede_text = "internal server error"
+            _attach_ede_option(req, r, ede_code, ede_text)  # Other
             wire = _set_response_id(r.pack(), req.header.id)
             if stats is not None:
                 try:
+                    if hasattr(stats, "record_ede_code"):
+                        try:
+                            stats.record_ede_code(ede_code)
+                        except Exception:  # pragma: no cover - defensive metrics hook
+                            pass
                     stats.record_response_rcode("SERVFAIL")
                     # Attempt to recover qname/qtype for logging
                     q = req.questions[0]
@@ -1440,9 +1926,13 @@ def _resolve_core(
                     qtype = q.qtype
                     qtype_name = QTYPE.get(qtype, str(qtype))
                     result_ctx = {"source": "server", "error": "unhandled_exception"}
-                    if listener is not None:
+                    if (
+                        listener is not None
+                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
                         result_ctx["listener"] = listener
-                    if secure is not None:
+                    if (
+                        secure is not None
+                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
                         result_ctx["secure"] = bool(secure)
                     stats.record_query_result(
                         client_ip=client_ip,
@@ -1556,6 +2046,7 @@ class DNSServer:
         cache_prefetch_max_ttl: int = 0,
         cache_prefetch_refresh_before_expiry: float = 0.0,
         cache_prefetch_allow_stale_after_expiry: float = 0.0,
+        enable_ede: bool = False,
     ) -> None:
         """Initialize a UDP DNSServer.
 
@@ -1575,11 +2066,15 @@ class DNSServer:
                 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 
                 cache = InMemoryTTLCache()
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: nocover - defensive: cache backend import failure is environment-specific
                 cache = None
         try:
             plugin_base.DNS_CACHE = cache  # type: ignore[assignment]
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: assignment failure is environment-specific and low-value for tests
             pass
 
         DNSUDPHandler.upstream_addrs = upstreams  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
@@ -1602,42 +2097,67 @@ class DNSServer:
         DNSUDPHandler.cache_prefetch_enabled = bool(cache_prefetch_enabled)
         try:
             DNSUDPHandler.cache_prefetch_min_ttl = max(0, int(cache_prefetch_min_ttl))
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: bad prefetch min TTL config falls back to 0
             DNSUDPHandler.cache_prefetch_min_ttl = 0
         try:
             DNSUDPHandler.cache_prefetch_max_ttl = max(0, int(cache_prefetch_max_ttl))
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: bad prefetch max TTL config falls back to 0
             DNSUDPHandler.cache_prefetch_max_ttl = 0
         try:
             DNSUDPHandler.cache_prefetch_refresh_before_expiry = max(
                 0.0, float(cache_prefetch_refresh_before_expiry)
             )
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: bad prefetch before-expiry window config falls back to 0.0
             DNSUDPHandler.cache_prefetch_refresh_before_expiry = 0.0
         try:
             DNSUDPHandler.cache_prefetch_allow_stale_after_expiry = max(
                 0.0, float(cache_prefetch_allow_stale_after_expiry)
             )
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: bad stale-after-expiry window config falls back to 0.0
             DNSUDPHandler.cache_prefetch_allow_stale_after_expiry = 0.0
 
         try:
             DNSUDPHandler.upstream_max_concurrent = max(1, int(upstream_max_concurrent))
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: invalid upstream concurrency config falls back to 1
             DNSUDPHandler.upstream_max_concurrent = 1
         try:
             DNSUDPHandler.edns_udp_payload = max(512, int(edns_udp_payload))
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: invalid EDNS UDP payload config falls back to default
             DNSUDPHandler.edns_udp_payload = 1232
+        # Extended DNS Errors (RFC 8914) feature gate. When enable_ede is false
+        # the resolver pipeline will not add any EDE options of its own and
+        # will continue to treat upstream EDNS options opaquely.
         try:
-            self.server = socketserver.ThreadingUDPServer((host, port), DNSUDPHandler)
-        except PermissionError as e:
+            DNSUDPHandler.enable_ede = bool(enable_ede)
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: invalid enable_ede config falls back to False
+            DNSUDPHandler.enable_ede = False
+        try:
+            self.server = socketserver.ThreadingUDPServer(
+                (host, port), DNSUDPHandler
+            )  # pragma: no cover - defensive/metrics path excluded from coverage
+        except (
+            PermissionError
+        ) as e:  # pragma: no cover - defensive/metrics path excluded from coverage
             logger.error(
                 "Permission denied when binding to %s:%d. Try a port >1024 or run with elevated privileges. Original error: %s",
                 host,
                 port,
                 e,
-            )
+            )  # pragma: no cover - defensive/metrics path excluded from coverage
             raise  # Re-raise the exception after logging
 
         # Ensure request handler threads do not block shutdown

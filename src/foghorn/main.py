@@ -971,6 +971,11 @@ def main(argv: List[str] | None = None) -> int:
     edns_payload = int(dnssec_cfg.get("udp_payload_size", 1232))
     dnssec_validation = str(dnssec_cfg.get("validation", "upstream_ad")).lower()
 
+    # Extended DNS Errors (RFC 8914) feature gate. When false, the resolver
+    # will not add any EDE options of its own and will continue to treat
+    # upstream EDNS options opaquely.
+    enable_ede = bool(server_cfg.get("enable_ede", False))
+
     # When performing local DNSSEC validation (including local_extended), point
     # the validator's internal resolver at the configured upstream hosts so that
     # chain validation and extended lookups use the same recursive resolvers as
@@ -1020,6 +1025,7 @@ def main(argv: List[str] | None = None) -> int:
             recursive_max_depth=recursive_max_depth,
             recursive_timeout_ms=recursive_timeout_ms,
             recursive_per_try_timeout_ms=recursive_per_try_timeout_ms,
+            enable_ede=enable_ede,
         )
 
     # Log startup info

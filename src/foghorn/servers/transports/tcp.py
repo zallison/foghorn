@@ -244,8 +244,7 @@ def tcp_query(
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
-    """
-    Receive exactly n bytes from a blocking socket.
+    """Receive exactly n bytes from a blocking socket.
 
     Inputs:
       - sock: Socket
@@ -259,7 +258,15 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
     remaining = n
     chunks = []
     while remaining > 0:
-        chunk = sock.recv(remaining)
+        try:
+            chunk = sock.recv(remaining)
+        except ConnectionResetError:
+            # Treat connection resets as an EOF/short read so callers see a
+            # truncated result instead of a low-level socket error. This aligns
+            # with the expectation that _recv_exact returns whatever was
+            # received before EOF and lets higher layers raise TCPError for
+            # short reads.
+            break
         if not chunk:
             break
         chunks.append(chunk)

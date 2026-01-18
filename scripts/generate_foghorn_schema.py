@@ -91,7 +91,9 @@ def _enrich_schema_descriptions(schema: Dict[str, Any]) -> None:
         has_description = isinstance(node.get("description"), str)
         type_value = node.get("type")
         enum_values = node.get("enum")
-        properties = node.get("properties") if isinstance(node.get("properties"), dict) else None
+        properties = (
+            node.get("properties") if isinstance(node.get("properties"), dict) else None
+        )
         pattern_props = (
             node.get("patternProperties")
             if isinstance(node.get("patternProperties"), dict)
@@ -122,7 +124,9 @@ def _enrich_schema_descriptions(schema: Dict[str, Any]) -> None:
 
             if pattern_props:
                 patterns_preview = ", ".join(sorted(pattern_props.keys())[:4])
-                pieces.append(f"Object with keys matching patterns: {patterns_preview}.")
+                pieces.append(
+                    f"Object with keys matching patterns: {patterns_preview}."
+                )
 
         # Append a default note even if the node already had a human description,
         # but avoid duplicating if something similar is present.
@@ -445,7 +449,9 @@ def _augment_statistics_persistence_schema(base: Dict[str, Any]) -> None:
         logger.exception("Failed to augment statistics.persistence schema")
 
 
-def _build_v2_root_schema(base: Dict[str, Any], plugins: Dict[str, Any]) -> Dict[str, Any]:
+def _build_v2_root_schema(
+    base: Dict[str, Any], plugins: Dict[str, Any]
+) -> Dict[str, Any]:
     """Brief: Construct the v2 root JSON Schema from a v1-like base + plugin defs.
 
     Inputs:
@@ -471,7 +477,9 @@ def _build_v2_root_schema(base: Dict[str, Any], plugins: Dict[str, Any]) -> Dict
     # server.* instead. Prefer the nested forms when available for forward
     # compatibility while still accepting older base schemas.
     server_obj = base_props.get("server")
-    server_props = server_obj.get("properties") if isinstance(server_obj, dict) else None
+    server_props = (
+        server_obj.get("properties") if isinstance(server_obj, dict) else None
+    )
 
     dnssec_schema = (
         server_props.get("dnssec")  # type: ignore[union-attr]
@@ -615,7 +623,9 @@ def _build_v2_root_schema(base: Dict[str, Any], plugins: Dict[str, Any]) -> Dict
         webserver_schema = {"type": "object"}
 
     # Variable schema: prefer modern 'vars', then legacy 'variables'.
-    variables_schema = base_props.get("vars", base_props.get("variables", {"type": "object"}))
+    variables_schema = base_props.get(
+        "vars", base_props.get("variables", {"type": "object"})
+    )
 
     # Upstreams v2: wrap endpoints + strategy/max_concurrent while reusing
     # upstream_host/upstream_doh defs from $defs.
@@ -812,6 +822,14 @@ def _build_v2_root_schema(base: Dict[str, Any], plugins: Dict[str, Any]) -> Dict
                     "cache": cache_schema,
                     # Preferred v2 placement for admin HTTP/web UI config.
                     "http": webserver_schema,
+                    # Feature gate for Extended DNS Errors (RFC 8914). When true,
+                    # the resolver pipeline is allowed to attach EDE options to
+                    # responses for EDNS-capable clients.
+                    "enable_ede": {
+                        "type": "boolean",
+                        "description": "Enable generation and pass-through of Extended DNS Errors (RFC 8914) for EDNS clients.",
+                        "default": False,
+                    },
                 },
             },
             "upstreams": upstreams_v2,
