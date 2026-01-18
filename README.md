@@ -2,7 +2,7 @@
 
 Foghorn is a versatile DNS server designed for flexibility and performance. Built on a robust caching forwarder or recursive resolver foundation, it seamlessly integrates with YAML-based configuration and modular plugins to transform into a powerful ad-blocker, local hosts service, kid-safe filter. Fine-tune its capabilities with a Redis backend, InfluxDB logging, and customizable function-cache sizes tailored to your specific needs.
 
-With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard.
+With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard. Newer releases add DNSSEC signing helpers, zone transfers (AXFR/IXFR), RFC 8914 Extended DNS Errors (EDE), and SSH host key utilities so you can treat DNS as a first-class security and operations tool.
 
 [![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-91%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
@@ -52,6 +52,16 @@ The configuration file is validated against a JSON Schema, but you rarely need t
   - [7.2 `lan`: home LAN with adblock and kid filter](#72-lan-home-lan-with-adblock-and-kid-filter)
   - [7.3 `smb`: small business](#73-smb-small-business)
   - [7.4 `enterprise`: layered caches and rich stats](#74-enterprise-layered-caches-and-rich-stats)
+
+## Additonal Documentation
+
+- [Developer notes and contribution guide](docs/README-DEV.md)
+- [Makefile targets and build helpers](docs/MAKEFILE.md)
+- [Pi-hole replacement example configuration](docs/PiholeConfig.md)
+- [OpenSSL make targets (certificate helpers)](docs/open-ssl-make-easy.md)
+- [DNS RFC compliance, EDNS/EDE, and AXFR/IXFR notes](docs/RFCs.md)
+- [SSH host keys, SSHFP records, and DNSSEC integration](docs/openssh-key-records.md)
+
 
 ---
 
@@ -144,6 +154,7 @@ For local development there is a `Makefile` with a few convenience targets:
 - `make build` – prepare the development environment (keeps the JSON schema up to date).
 - `make schema` – regenerate `assets/config-schema.json` from the Python code.
 - `make test` – run the test suite with coverage.
+- `make dnssec-sign-zone` – sign a BIND-style zone file with DNSSEC using the bundled helper script, writing a signed zone that can be served by the ZoneRecords plugin.
 - `make clean` – remove the venv, build artefacts, and temporary files.
 - `make docker`, `make docker-build`, `make docker-run`, `make docker-logs`, `make docker-clean`, `make docker-ship` – build and run Docker images/containers.
 - `make package-build` / `make package-publish` / `make package-publish-dev` – build and (optionally) publish Python packages.
@@ -154,6 +165,8 @@ For local development there is a `Makefile` with a few convenience targets:
 ## Additional Documentation
 
 - [OpenSSL make targets (made easy)](docs/open-ssl-make-easy.md)
+- [DNS RFC compliance and protocol notes (including EDE and AXFR)](docs/RFCs.md)
+- [SSH host keys, SSHFP records, and DNSSEC integration](docs/openssh-key-records.md)
 
 ---
 
@@ -243,6 +256,8 @@ rebuilds the function's cache at startup so you can switch between
 configuration.
 - `server.dnssec`
   - Mode and DNSSEC validation knobs (e.g., UDP payload size).
+- `server.enable_ede`
+  - Optional toggle for RFC 8914 Extended DNS Errors; when true and the client advertises EDNS(0), Foghorn can attach EDE options to certain policy or upstream-failure responses and surface per-code stats in the admin UI.
 - `server.resolver`
   - Timeouts, recursion depth, and whether Foghorn runs as a forwarder or recursive resolver.
 - `server.http`
@@ -756,8 +771,9 @@ All sources are merged into a single internal view per (name, qtype):
   correct NXDOMAIN/NODATA and ANY semantics with SOA in the authority
   section.
 - For zones with an SOA apex and a TCP/DoT listener enabled, Foghorn also
-  answers AXFR/IXFR for that zone using the same ZoneRecords data. IXFR is
-  currently implemented as a full AXFR-style transfer.
+  answers AXFR/IXFR for that zone using the same ZoneRecords data.
+- IXFR server side currently implemented as a full AXFR-style transfer.
+- IXFR client side is not yet supported.
 
 ```yaml
 plugins:
