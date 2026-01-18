@@ -10,6 +10,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from dnslib import QTYPE, RCODE, RR, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field
 
+from foghorn.servers.transports.axfr import AXFRError, axfr_transfer
+
 try:  # watchdog is used for cross-platform file watching
     from watchdog.events import FileSystemEventHandler
     from watchdog.observers import Observer
@@ -27,6 +29,115 @@ from foghorn.plugins.resolve.base import (
 logger = logging.getLogger(__name__)
 
 
+class AxfrUpstreamConfig(BaseModel):
+    """Brief: Configuration for a single AXFR upstream server.
+
+    Inputs:
+      - host: Upstream authoritative server hostname or IP.
+      - port: TCP port (default 53).
+      - timeout_ms: Transfer timeout in milliseconds (default 5000).
+      - transport: "tcp" (default) or "dot" for DNS-over-TLS.
+      - server_name: Optional TLS SNI name for DoT.
+      - verify: TLS certificate verification for DoT (default True).
+      - ca_file: Optional CA bundle path for DoT.
+
+    Outputs:
+      - AxfrUpstreamConfig instance.
+    """
+
+    host: str = Field(..., description="Upstream authoritative server hostname or IP.")
+    port: int = Field(default=53, ge=1, le=65535, description="TCP port.")
+    timeout_ms: int = Field(
+        default=5000, ge=0, description="Transfer timeout in milliseconds."
+    )
+    transport: str = Field(default="tcp", description="Transport: 'tcp' or 'dot'.")
+    server_name: Optional[str] = Field(
+        default=None, description="TLS SNI name for DoT."
+    )
+    verify: bool = Field(
+        default=True, description="TLS certificate verification for DoT."
+    )
+    ca_file: Optional[str] = Field(default=None, description="CA bundle path for DoT.")
+
+    class Config:
+        extra = "forbid"
+
+
+class AxfrZoneConfig(BaseModel):
+    """Brief: Configuration for a single AXFR-backed zone.
+
+    Inputs:
+      - zone: Zone apex (e.g. "example.com").
+      - upstreams: List of upstream servers to transfer from.
+      - masters: Legacy alias for upstreams (deprecated).
+      - allow_no_dnssec: Accept transfer even if DNSSEC is missing or invalid
+        (default True). When False, zones without valid DNSSEC will be rejected
+        once DNSSEC validation for AXFR is implemented.
+
+    Outputs:
+      - AxfrZoneConfig instance.
+    """
+
+    zone: str = Field(..., description="Zone apex (e.g. 'example.com').")
+    upstreams: Optional[List[AxfrUpstreamConfig]] = Field(
+        default=None, description="List of upstream servers to transfer from."
+    )
+    masters: Optional[List[AxfrUpstreamConfig]] = Field(
+        default=None, description="Legacy alias for upstreams (deprecated)."
+    )
+    allow_no_dnssec: bool = Field(
+        default=True,
+        description=(
+            "Accept transfer even if DNSSEC is missing or invalid. When False, "
+            "zones without valid DNSSEC will be rejected once DNSSEC validation "
+            "for AXFR is implemented."
+        ),
+    )
+
+    class Config:
+        extra = "forbid"
+
+
+class ZoneDnssecSigningConfig(BaseModel):
+    """Brief: DNSSEC auto-signing configuration for ZoneRecords.
+
+    Inputs:
+      - enabled: Enable automatic DNSSEC signing for authoritative zones.
+      - keys_dir: Optional base directory for per-zone key files.
+      - algorithm: DNSSEC algorithm name (e.g. "ECDSAP256SHA256").
+      - generate: Key generation policy ("yes", "no", or "maybe").
+      - validity_days: Signature validity window in days.
+
+    Outputs:
+      - Parsed ZoneDnssecSigningConfig instance used by the config schema.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable automatic DNSSEC signing for authoritative zones.",
+    )
+    keys_dir: Optional[str] = Field(
+        default=None,
+        description="Directory to read/write DNSSEC keys; defaults to the working directory when omitted.",
+    )
+    algorithm: str = Field(
+        default="ECDSAP256SHA256",
+        description="DNSSEC algorithm name (e.g. 'ECDSAP256SHA256', 'RSASHA256').",
+    )
+    generate: str = Field(
+        default="maybe",
+        description="Key generation policy: 'yes' (always new), 'no' (never), 'maybe' (generate when missing).",
+    )
+    validity_days: int = Field(
+        default=30,
+        ge=1,
+        description="Signature validity window in days.",
+    )
+
+    class Config:
+        extra = "forbid"
+
+
 class ZoneRecordsConfig(BaseModel):
     """Brief: Typed configuration model for ZoneRecords.
 
@@ -39,6 +150,23 @@ class ZoneRecordsConfig(BaseModel):
       - watchdog_min_interval_seconds: Minimum seconds between reloads.
       - watchdog_poll_interval_seconds: Optional polling interval.
       - ttl: Default TTL in seconds.
+      - axfr_zones: Optional list of AXFR-backed zones.
+
+    Example:
+      Minimal AXFR-only configuration (YAML):
+
+        plugins:
+          - type: zone
+            hooks:
+              pre_resolve: { priority: 60 }
+            config:
+              axfr_zones:
+                - zone: example.com
+                  allow_no_dnssec: false
+                  upstreams:
+                    - host: 192.0.2.10
+                      port: 53
+                      timeout_ms: 5000
 
     Outputs:
       - ZoneRecordsConfig instance with normalized field types.
@@ -51,6 +179,14 @@ class ZoneRecordsConfig(BaseModel):
     watchdog_min_interval_seconds: float = Field(default=1.0, ge=0)
     watchdog_poll_interval_seconds: float = Field(default=0.0, ge=0)
     ttl: int = Field(default=300, ge=0)
+    # Typed AXFR zones configuration with allow_no_dnssec support.
+    # Runtime normalization in _normalize_axfr_config() handles both typed
+    # and untyped dict inputs for backwards compatibility.
+    axfr_zones: Optional[List[AxfrZoneConfig]] = None
+    # Optional DNSSEC auto-signing configuration. When enabled, ZoneRecords
+    # attempts to synthesize DNSKEY/RRSIG material for authoritative zones at
+    # load time using foghorn.dnssec.zone_signer.
+    dnssec_signing: Optional[ZoneDnssecSigningConfig] = None
 
     class Config:
         extra = "forbid"
@@ -106,6 +242,7 @@ class ZoneRecords(BasePlugin):
         legacy_path = self.config.get("file_path")
         bind_paths_cfg = self.config.get("bind_paths")
         inline_records_cfg = self.config.get("records")
+        axfr_cfg = self.config.get("axfr_zones")
 
         self.file_paths = []
         self.bind_paths: List[str] = []
@@ -119,8 +256,8 @@ class ZoneRecords(BasePlugin):
             self.bind_paths = self._normalize_paths(bind_paths_cfg, None)
 
         if not self.file_paths and not self.bind_paths:
-            if inline_records_cfg:
-                # Inline-only configuration; no file-backed records.
+            if inline_records_cfg or axfr_cfg:
+                # Inline-only or AXFR-only configuration; no file-backed records.
                 self.file_paths = []
                 self.bind_paths = []
             else:
@@ -133,6 +270,12 @@ class ZoneRecords(BasePlugin):
             self._inline_records = list(inline_records_cfg or [])
         except Exception:  # pragma: no cover - defensive: config may be non-iterable
             self._inline_records = []
+
+        # Normalize any AXFR-backed zones once; these are loaded during the
+        # initial _load_records() call and intentionally skipped on subsequent
+        # reloads so watchdog and polling remain file-based.
+        self._axfr_zones = self._normalize_axfr_config(axfr_cfg)
+        self._axfr_loaded_once = False
 
         # Internal synchronization and state
         self._records_lock = threading.RLock()
@@ -222,11 +365,163 @@ class ZoneRecords(BasePlugin):
         paths = list(dict.fromkeys(paths))
         return paths
 
+    def _normalize_axfr_config(self, raw: object) -> List[Dict[str, object]]:
+        """Brief: Normalize raw axfr_zones config into a list of zones.
+
+        Inputs:
+          - raw: Value from self.config.get("axfr_zones"). Expected to be a
+            list of mappings, each with a "zone" key and an "upstreams" key.
+            For backward compatibility a legacy "masters" key is also
+            accepted and treated as "upstreams".
+
+        Outputs:
+          - list[dict]: Each entry contains:
+              - "zone": lowercased apex without trailing dot.
+              - "allow_no_dnssec": boolean (default True) controlling whether
+                to accept transfers from zones that are unsigned or fail DNSSEC
+                validation. When True (the default), transfers are accepted
+                even without valid DNSSEC, matching current behaviour. When
+                False, once DNSSEC validation for AXFR is implemented, zones
+                without valid DNSSEC will be rejected.
+              - "upstreams": list of mappings with at least:
+                  - "host": upstream authoritative host/IP string.
+                  - "port": integer port (default 53).
+                  - "timeout_ms": integer timeout in milliseconds (default 5000).
+                  - "transport": "tcp" (default) or "dot" for DNS-over-TLS.
+                  - "server_name": optional TLS SNI name for DoT.
+                  - "verify": boolean TLS verification flag for DoT.
+                  - "ca_file": optional CA bundle path for DoT.
+        """
+
+        if raw is None:
+            return []
+
+        zones: List[Dict[str, object]] = []
+
+        if not isinstance(raw, list):
+            logger.warning(
+                "ZoneRecords axfr_zones ignored: expected list, got %r", type(raw)
+            )
+            return zones
+
+        for idx, entry in enumerate(raw):
+            if not isinstance(entry, dict):
+                logger.warning(
+                    "ZoneRecords axfr_zones[%d] ignored: expected mapping, got %r",
+                    idx,
+                    type(entry),
+                )
+                continue
+
+            zone_val = entry.get("zone")
+            # Prefer the new "upstreams" key, but continue to accept legacy
+            # "masters" for backwards compatibility with existing configs.
+            masters_val = entry.get("upstreams")
+            if masters_val is None and "masters" in entry:
+                masters_val = entry.get("masters")
+
+            zone_text = (
+                str(zone_val).rstrip(".").lower() if zone_val is not None else ""
+            )
+            if not zone_text:
+                logger.warning(
+                    "ZoneRecords axfr_zones[%d] ignored: missing or empty 'zone'", idx
+                )
+                continue
+
+            upstreams: List[Dict[str, object]] = []
+            if isinstance(masters_val, dict):
+                masters_val = [masters_val]
+            if isinstance(masters_val, list):
+                for midx, m in enumerate(masters_val):
+                    if not isinstance(m, dict):
+                        logger.warning(
+                            "ZoneRecords axfr_zones[%d].upstreams[%d] ignored: expected mapping, got %r",
+                            idx,
+                            midx,
+                            type(m),
+                        )
+                        continue
+                    host = m.get("host")
+                    if not host:
+                        logger.warning(
+                            "ZoneRecords axfr_zones[%d].upstreams[%d] ignored: missing 'host'",
+                            idx,
+                            midx,
+                        )
+                        continue
+                    port = m.get("port", 53)
+                    timeout_ms = m.get("timeout_ms", 5000)
+                    transport = str(m.get("transport", "tcp")).lower()
+                    if transport not in {"tcp", "dot"}:
+                        logger.warning(
+                            "ZoneRecords axfr_zones[%d].upstreams[%d] ignored: unsupported transport %r",
+                            idx,
+                            midx,
+                            transport,
+                        )
+                        continue
+                    server_name = m.get("server_name")
+                    verify_flag = m.get("verify", True)
+                    ca_file = m.get("ca_file")
+                    try:
+                        port_i = int(port)
+                        timeout_i = int(timeout_ms)
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "ZoneRecords axfr_zones[%d].upstreams[%d] ignored: invalid port/timeout %r/%r",
+                            idx,
+                            midx,
+                            port,
+                            timeout_ms,
+                        )
+                        continue
+                    upstreams.append(
+                        {
+                            "host": str(host),
+                            "port": port_i,
+                            "timeout_ms": timeout_i,
+                            "transport": transport,
+                            "server_name": (
+                                str(server_name) if server_name is not None else None
+                            ),
+                            "verify": bool(verify_flag),
+                            "ca_file": str(ca_file) if ca_file is not None else None,
+                        }
+                    )
+
+            if not upstreams:
+                logger.warning(
+                    "ZoneRecords axfr_zones[%d] for %s ignored: no usable upstreams",
+                    idx,
+                    zone_text,
+                )
+                continue
+
+            # allow_no_dnssec controls whether to accept an AXFR even when DNSSEC
+            # is missing or invalid. Default True preserves current behaviour.
+            allow_no_dnssec_val = entry.get("allow_no_dnssec")
+            if allow_no_dnssec_val is None:
+                allow_no_dnssec = True
+            else:
+                allow_no_dnssec = bool(allow_no_dnssec_val)
+
+            zones.append(
+                {
+                    "zone": zone_text,
+                    "upstreams": upstreams,
+                    "allow_no_dnssec": allow_no_dnssec,
+                }
+            )
+
+        return zones
+
     def _load_records(self) -> None:
         """Brief: Read custom records files and build lookup structures.
 
         Inputs:
-          - None (uses self.file_paths and any inline records from config).
+          - None (uses self.file_paths, any inline records from config, and,
+            on the first call after setup(), any configured AXFR-backed zones).
 
         Outputs:
           - None (populates:
@@ -245,6 +540,16 @@ class ZoneRecords(BasePlugin):
         mapping: Dict[Tuple[str, int], Tuple[int, List[str]]] = {}
         name_index: Dict[str, Dict[int, Tuple[int, List[str]]]] = {}
         zone_soa: Dict[str, Tuple[int, List[str]]] = {}
+        # Track which zone apexes have already had DNSSEC classification applied
+        # via the AXFR path so that we can avoid duplicate logging when we later
+        # classify zones built from local files/BIND/inline data.
+        dnssec_classified_axfr: set[str] = set()
+
+        # AXFR-backed zones are loaded only once, during the initial
+        # _load_records() following setup(). Watchdog and polling reloads keep
+        # using on-disk sources.
+        axfr_zones = getattr(self, "_axfr_zones", None) or []
+        do_axfr = bool(axfr_zones) and not getattr(self, "_axfr_loaded_once", False)
 
         # Resolve the SOA type code using getattr with a safe default and fall
         # back to QTYPE.get so that tests which monkeypatch QTYPE continue to
@@ -366,8 +671,9 @@ class ZoneRecords(BasePlugin):
             ):
                 zone_soa[domain] = (stored_ttl, values)
 
-        # First, process any configured records files in the custom
-        # pipe-delimited format.
+        # First, merge custom pipe-delimited files. Earlier sources keep
+        # precedence for TTL; existing values are preserved with new ones
+        # appended.
         for fp in self.file_paths:
             logger.debug("reading recordfile: %s", fp)
             records_path = pathlib.Path(fp)
@@ -375,10 +681,7 @@ class ZoneRecords(BasePlugin):
                 for lineno, raw_line in enumerate(f, start=1):
                     _process_line(raw_line, str(records_path), lineno)
 
-        # Next, process any RFC-1035 BIND-style zone files configured via
-        # bind_paths. Each zone file may define one or more zones; we iterate
-        # through the parsed RR objects and merge them into the same mappings
-        # used for the custom format.
+        # Next, merge any RFC-1035 BIND-style zone files.
         bind_paths = getattr(self, "bind_paths", None) or []
         for fp in bind_paths:
             logger.debug("reading bind zonefile: %s", fp)
@@ -436,7 +739,202 @@ class ZoneRecords(BasePlugin):
                 ):
                     zone_soa[owner] = (stored_ttl, values)
 
-        # Next, merge any inline records from plugin configuration.
+        # After file- and BIND-backed zones, optionally overlay any
+        # AXFR-backed zones on top. Inline records are merged last so that
+        # per-instance overrides still win over transferred data.
+        if do_axfr:
+            for zone_cfg in axfr_zones:
+                zone_name = zone_cfg.get("zone")
+                upstreams = zone_cfg.get("upstreams") or []
+                if not zone_name or not isinstance(upstreams, list):
+                    continue
+                zone_text = str(zone_name).rstrip(".").lower()
+                if not zone_text:
+                    continue
+
+                transferred: Optional[List[RR]] = None
+                last_error: Optional[Exception] = None
+
+                for m in upstreams:
+                    if not isinstance(m, dict):
+                        continue
+                    host = m.get("host")
+                    port = m.get("port", 53)
+                    timeout_ms = m.get("timeout_ms", 5000)
+                    transport = str(m.get("transport", "tcp")).lower()
+                    server_name = m.get("server_name")
+                    verify_flag = m.get("verify", True)
+                    ca_file = m.get("ca_file")
+                    if not host:
+                        continue
+                    try:
+                        port_i = int(port)
+                        timeout_i = int(timeout_ms)
+                    except (TypeError, ValueError):
+                        continue
+
+                    try:
+                        logger.info(
+                            "ZoneRecords AXFR: transferring %s from %s:%d via %s",
+                            zone_text,
+                            host,
+                            port_i,
+                            transport,
+                        )
+                        transferred = axfr_transfer(
+                            str(host),
+                            port_i,
+                            zone_text,
+                            transport=transport,
+                            server_name=(
+                                str(server_name) if server_name is not None else None
+                            ),
+                            verify=bool(verify_flag),
+                            ca_file=str(ca_file) if ca_file is not None else None,
+                            connect_timeout_ms=timeout_i,
+                            read_timeout_ms=timeout_i,
+                        )
+                        break
+                    except AXFRError as exc:
+                        last_error = exc
+                        logger.warning(
+                            "ZoneRecords AXFR: failed transfer for %s from %s:%d via %s: %s",
+                            zone_text,
+                            host,
+                            port_i,
+                            transport,
+                            exc,
+                        )
+
+                if not transferred:
+                    if last_error is not None:
+                        logger.warning(
+                            "ZoneRecords AXFR: giving up on %s after error: %s",
+                            zone_text,
+                            last_error,
+                        )
+                    continue
+
+                # Minimal DNSSEC classification for AXFR-backed zones: check
+                # whether apex DNSKEY and/or RRSIG RRsets are present. This does
+                # not perform full cryptographic verification; it only
+                # distinguishes between "no DNSSEC", "partial" (one of
+                # DNSKEY/RRSIG missing), and "present".
+                try:
+                    apex_owner = zone_text.rstrip(".")
+                    has_dnskey = False
+                    has_rrsig = False
+                    try:
+                        dnskey_code = int(QTYPE.DNSKEY)
+                    except Exception:  # pragma: no cover - defensive
+                        dnskey_code = 48
+                    try:
+                        rrsig_code = int(QTYPE.RRSIG)
+                    except Exception:  # pragma: no cover - defensive
+                        rrsig_code = 46
+
+                    for rr in transferred:
+                        try:
+                            owner_norm = str(rr.rname).rstrip(".").lower()
+                        except Exception:  # pragma: no cover - defensive
+                            owner_norm = str(rr.rname).lower()
+                        if owner_norm != apex_owner:
+                            continue
+                        if int(rr.rtype) == int(dnskey_code):
+                            has_dnskey = True
+                        if int(rr.rtype) == int(rrsig_code):
+                            has_rrsig = True
+
+                    if has_dnskey and has_rrsig:
+                        dnssec_state = "present"
+                    elif has_dnskey or has_rrsig:
+                        dnssec_state = "partial"
+                    else:
+                        dnssec_state = "none"
+
+                    allow_no_dnssec = bool(zone_cfg.get("allow_no_dnssec", True))
+                    if dnssec_state in {"none", "partial"}:
+                        # For now we always load the zone but surface a warning
+                        # when DNSSEC data is missing or incomplete. The
+                        # allow_no_dnssec flag can be used by future callers to
+                        # tighten this into a hard reject policy without
+                        # changing config shape.
+                        if not allow_no_dnssec:
+                            logger.warning(
+                                "ZoneRecords AXFR: zone %s has dnssec_state=%s with "
+                                "allow_no_dnssec=False; loading anyway",
+                                zone_text,
+                                dnssec_state,
+                            )
+                        else:
+                            logger.info(
+                                "ZoneRecords AXFR: zone %s has dnssec_state=%s; "
+                                "proceeding (allow_no_dnssec=True)",
+                                zone_text,
+                                dnssec_state,
+                            )
+                    else:
+                        logger.info(
+                            "ZoneRecords AXFR: zone %s has dnssec_state=present",
+                            zone_text,
+                        )
+                    # Remember that we have classified this apex so that the
+                    # later per-zone classification pass does not emit
+                    # duplicate log lines for the same zone.
+                    dnssec_classified_axfr.add(zone_text)
+                except Exception:  # pragma: no cover - defensive logging only
+                    logger.warning(
+                        "ZoneRecords AXFR: failed to classify DNSSEC state for %s",
+                        zone_text,
+                        exc_info=True,
+                    )
+
+                for rr in transferred:
+                    try:
+                        owner = str(rr.rname).rstrip(".").lower()
+                        qtype_code = int(rr.rtype)
+                        ttl = int(rr.ttl)
+                        value = str(rr.rdata)
+                    except Exception as exc:  # pragma: no cover - defensive parsing
+                        logger.warning(
+                            "Skipping RR %r from AXFR zone %s due to parse error: %s",
+                            rr,
+                            zone_text,
+                            exc,
+                        )
+                        continue
+
+                    key = (owner, int(qtype_code))
+                    existing = mapping.get(key)
+
+                    if existing is None:
+                        stored_ttl = ttl
+                        values_ax: List[str] = []
+                    else:
+                        stored_ttl, values_ax = existing
+
+                    if value not in values_ax:
+                        values_ax.append(value)
+
+                    mapping[key] = (stored_ttl, values_ax)
+
+                    per_name_ax = name_index.setdefault(owner, {})
+                    per_name_ax[int(qtype_code)] = (stored_ttl, values_ax)
+
+                    if (
+                        soa_code is not None
+                        and int(qtype_code) == int(soa_code)
+                        and owner not in zone_soa
+                    ):
+                        zone_soa[owner] = (stored_ttl, values_ax)
+
+            # Mark that we have attempted AXFR loading so subsequent reloads do
+            # not re-transfer zones.
+            self._axfr_loaded_once = True
+
+        # Finally, merge any inline records from plugin configuration. These
+        # are processed last so that per-instance overrides win over file-,
+        # BIND-, and AXFR-backed data.
         inline_records = getattr(self, "_inline_records", None) or []
         for lineno, raw_line in enumerate(inline_records, start=1):
             try:
@@ -450,6 +948,204 @@ class ZoneRecords(BasePlugin):
                 )
                 continue
             _process_line(text, "inline-config-records", lineno)
+
+        # After building mappings from all sources, classify DNSSEC state for
+        # each authoritative zone apex derived from local sources (file_paths,
+        # bind_paths, inline records). Zones that were already classified via
+        # the AXFR path above are skipped to avoid duplicate log messages.
+        try:
+            try:
+                dnskey_code_all = int(QTYPE.DNSKEY)
+            except Exception:  # pragma: no cover - defensive
+                dnskey_code_all = 48
+            try:
+                rrsig_code_all = int(QTYPE.RRSIG)
+            except Exception:  # pragma: no cover - defensive
+                rrsig_code_all = 46
+
+            for apex_owner in list(zone_soa.keys()):
+                if apex_owner in dnssec_classified_axfr:
+                    continue
+                owner_rrsets = name_index.get(apex_owner, {}) or {}
+                has_dnskey = int(dnskey_code_all) in owner_rrsets
+                has_rrsig = int(rrsig_code_all) in owner_rrsets
+                if has_dnskey and has_rrsig:
+                    dnssec_state = "present"
+                elif has_dnskey or has_rrsig:
+                    dnssec_state = "partial"
+                else:
+                    dnssec_state = "none"
+                logger.info(
+                    "ZoneRecords zone %s has dnssec_state=%s (file/bind/inline)",
+                    apex_owner,
+                    dnssec_state,
+                )
+        except Exception:  # pragma: no cover - defensive logging only
+            logger.warning(
+                "ZoneRecords: failed to classify DNSSEC state for local zones",
+                exc_info=True,
+            )
+
+        # Optional DNSSEC auto-signing of authoritative zones when configured.
+        dnssec_cfg_raw = (
+            self.config.get("dnssec_signing") if hasattr(self, "config") else None
+        )
+        enabled = False
+        if isinstance(dnssec_cfg_raw, dict):
+            enabled = bool(dnssec_cfg_raw.get("enabled", False))
+        if enabled:
+            try:
+                import datetime as _dt
+
+                import dns.name as _dns_name
+                import dns.rdata as _dns_rdata
+                import dns.rdataclass as _dns_rdataclass
+                import dns.rdatatype as _dns_rdatatype
+                import dns.rrset as _dns_rrset
+                import dns.zone as _dns_zone
+
+                from foghorn.dnssec import zone_signer as _zs
+
+                keys_dir_cfg = dnssec_cfg_raw.get("keys_dir")
+                algorithm = dnssec_cfg_raw.get("algorithm") or "ECDSAP256SHA256"
+                generate_policy = dnssec_cfg_raw.get("generate") or "maybe"
+                validity_days = int(dnssec_cfg_raw.get("validity_days") or 30)
+
+                for apex_owner in list(zone_soa.keys()):
+                    origin_text = apex_owner.rstrip(".").lower() + "."
+                    origin = _dns_name.from_text(origin_text)
+
+                    zone_obj = _dns_zone.Zone(origin)
+
+                    for owner, rrsets in name_index.items():
+                        try:
+                            owner_norm = str(owner).rstrip(".").lower()
+                        except Exception:  # pragma: no cover - defensive
+                            owner_norm = str(owner).lower()
+
+                        if owner_norm != apex_owner and not owner_norm.endswith(
+                            "." + apex_owner
+                        ):
+                            continue
+
+                        owner_name = _dns_name.from_text(owner_norm + ".")
+                        node_obj = zone_obj.find_node(owner_name, create=True)
+
+                        for qtype_code, (ttl_val, vals) in rrsets.items():
+                            if int(qtype_code) == int(rrsig_code_all):
+                                continue
+                            if int(qtype_code) == int(dnskey_code_all):
+                                continue
+
+                            rr_type_name = QTYPE.get(qtype_code, str(qtype_code))
+                            try:
+                                rdtype = _dns_rdatatype.from_text(str(rr_type_name))
+                            except Exception:  # pragma: no cover - defensive
+                                continue
+
+                            rrset_obj = _dns_rrset.RRset(
+                                owner_name,
+                                _dns_rdataclass.IN,
+                                rdtype,
+                            )
+                            for v in list(vals):
+                                try:
+                                    rdata_obj = _dns_rdata.from_text(
+                                        _dns_rdataclass.IN, rdtype, str(v)
+                                    )
+                                except Exception:  # pragma: no cover - defensive
+                                    continue
+                                rrset_obj.add(rdata_obj, int(ttl_val))
+
+                            node_obj.replace_rdataset(rrset_obj)
+
+                    if keys_dir_cfg is not None:
+                        keys_dir_path = pathlib.Path(str(keys_dir_cfg)).expanduser()
+                    else:
+                        keys_dir_path = pathlib.Path(".")
+
+                    try:
+                        (
+                            ksk_private,
+                            zsk_private,
+                            ksk_dnskey,
+                            zsk_dnskey,
+                        ) = _zs.ensure_zone_keys(
+                            origin_text,
+                            keys_dir_path,
+                            algorithm=algorithm,
+                            generate_policy=generate_policy,
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning(
+                            "ZoneRecords DNSSEC auto-sign skipped for %s: %s",
+                            apex_owner,
+                            exc,
+                        )
+                        continue
+
+                    now = _dt.datetime.utcnow()
+                    inception = now - _dt.timedelta(hours=1)
+                    expiration = now + _dt.timedelta(days=validity_days)
+                    alg_enum = _zs.ALGORITHM_MAP[algorithm][0]
+
+                    _zs.sign_zone(
+                        zone_obj,
+                        origin,
+                        ksk_private,
+                        zsk_private,
+                        ksk_dnskey,
+                        zsk_dnskey,
+                        alg_enum,
+                        inception,
+                        expiration,
+                    )
+
+                    for owner_name, node_obj in zone_obj.items():
+                        try:
+                            owner_norm = owner_name.to_text().rstrip(".").lower()
+                        except Exception:  # pragma: no cover - defensive
+                            owner_norm = str(owner_name).rstrip(".").lower()
+
+                        for rdataset in node_obj:
+                            if rdataset.rdtype not in (
+                                _dns_rdatatype.DNSKEY,
+                                _dns_rdatatype.RRSIG,
+                            ):
+                                continue
+
+                            if rdataset.rdtype == _dns_rdatatype.DNSKEY:
+                                qcode = int(dnskey_code_all)
+                            else:
+                                qcode = int(rrsig_code_all)
+                                if (owner_norm, qcode) in mapping:
+                                    continue
+
+                            key = (owner_norm, qcode)
+                            existing = mapping.get(key)
+                            if existing is None:
+                                stored_ttl = int(getattr(rdataset, "ttl", 0) or 0)
+                                vals_list: List[str] = []
+                            else:
+                                stored_ttl, vals_list = existing
+
+                            for rdata_obj in list(rdataset):
+                                try:
+                                    value_text = rdata_obj.to_text()
+                                except Exception:  # pragma: no cover - defensive
+                                    continue
+                                if value_text not in vals_list:
+                                    vals_list.append(value_text)
+
+                            mapping[key] = (stored_ttl, vals_list)
+                            per_name = name_index.setdefault(owner_norm, {})
+                            per_name[qcode] = (stored_ttl, vals_list)
+
+            except Exception:  # pragma: no cover - defensive logging only
+                logger.warning(
+                    "ZoneRecords: DNSSEC auto-signing failed; leaving zones unsigned",
+                    exc_info=True,
+                )
 
         lock = getattr(self, "_records_lock", None)
 
@@ -487,6 +1183,102 @@ class ZoneRecords(BasePlugin):
                     best = apex
         return best
 
+    def iter_zone_rrs_for_transfer(self, zone_apex: str) -> Optional[List[RR]]:
+        """Brief: Export authoritative RRsets for a zone for AXFR/IXFR.
+
+        Inputs:
+          - zone_apex: Zone apex name (with or without trailing dot), case-
+            insensitive.
+
+        Outputs:
+          - list[RR]: All RRs in the zone suitable for AXFR/IXFR transfer, or
+            None when this plugin is not authoritative for the requested apex.
+
+        Notes:
+          - The returned list is a snapshot built under the records lock so
+            mid-transfer reloads do not change the view.
+          - DNSSEC-related RR types (for example, DNSKEY, RRSIG) are included
+            when present in the zone data; AXFR-specific DNSSEC policy is
+            intentionally out of scope for this helper.
+        """
+
+        # Normalize apex and check whether this plugin is authoritative.
+        apex = str(zone_apex).rstrip(".").lower() if zone_apex is not None else ""
+        if not apex:
+            return None
+
+        lock = getattr(self, "_records_lock", None)
+
+        if lock is None:
+            name_index = dict(getattr(self, "_name_index", {}) or {})
+            zone_soa = dict(getattr(self, "_zone_soa", {}) or {})
+        else:
+            with lock:
+                name_index = dict(getattr(self, "_name_index", {}) or {})
+                zone_soa = dict(getattr(self, "_zone_soa", {}) or {})
+
+        if apex not in zone_soa:
+            return None
+
+        rrs: List[RR] = []
+
+        # Walk all owners inside this zone. An owner belongs to the zone when it
+        # is equal to the apex or is a strict subdomain.
+        for owner, rrsets in name_index.items():
+            try:
+                owner_norm = str(owner).rstrip(".").lower()
+            except Exception:  # pragma: no cover - defensive
+                owner_norm = str(owner).lower()
+
+            if owner_norm != apex and not owner_norm.endswith("." + apex):
+                continue
+
+            for qtype_code, (ttl, values) in rrsets.items():
+                rr_type_name = QTYPE.get(qtype_code, str(qtype_code))
+                for value in values:
+                    zone_line = f"{owner_norm}. {ttl} IN {rr_type_name} {value}"
+                    try:
+                        parsed = RR.fromZone(zone_line)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning(
+                            "ZoneRecords transfer: skipping RR %r for %s type %s: %s",
+                            value,
+                            owner_norm,
+                            rr_type_name,
+                            exc,
+                        )
+                        continue
+                    rrs.extend(parsed)
+
+        return rrs
+
+    def _client_wants_dnssec(self, request: object) -> bool:
+        """Brief: Detect whether the client wants DNSSEC records via EDNS(0) DO bit.
+
+        Inputs:
+          - request: Parsed DNSRecord or raw bytes from the client query.
+
+        Outputs:
+          - bool: True if the client sent an OPT RR with DO=1, False otherwise.
+        """
+        try:
+            # Support both parsed DNSRecord and raw bytes.
+            if isinstance(request, (bytes, bytearray)):
+                request = DNSRecord.parse(request)
+
+            for rr in getattr(request, "ar", None) or []:
+                if getattr(rr, "rtype", None) != QTYPE.OPT:
+                    continue
+                # EDNS flags are encoded in the TTL field of the OPT RR.
+                # DO bit is bit 15 (0x8000) of the flags portion (lower 16 bits).
+                ttl_val = int(getattr(rr, "ttl", 0) or 0)
+                flags = ttl_val & 0xFFFF
+                if flags & 0x8000:
+                    return True
+        except Exception:  # pragma: no cover - defensive
+            pass
+        return False
+
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
@@ -511,6 +1303,8 @@ class ZoneRecords(BasePlugin):
           - For names outside any authoritative zone, preserve the historical
             behaviour and only answer when there is an exact (name, qtype)
             entry, falling through to upstreams otherwise.
+          - When the client advertises EDNS(0) with DO=1, include RRSIG and
+            DNSKEY RRsets from the zone data in positive answers.
         """
         # Normalize domain to a consistent lookup key.
         try:
@@ -602,6 +1396,9 @@ class ZoneRecords(BasePlugin):
             logger.warning("ZoneRecords parse failure (authoritative path): %s", e)
             return None
 
+        # Detect whether the client wants DNSSEC records via EDNS(0) DO bit.
+        want_dnssec = self._client_wants_dnssec(request)
+
         owner = str(request.q.qname).rstrip(".") + "."
         reply = DNSRecord(
             DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
@@ -609,6 +1406,57 @@ class ZoneRecords(BasePlugin):
 
         rrsets = name_index.get(name, {})
         cname_code = int(QTYPE.CNAME)
+
+        # DNSSEC RR type codes for filtering and inclusion.
+        try:
+            rrsig_code = int(QTYPE.RRSIG)
+        except Exception:  # pragma: no cover - defensive
+            rrsig_code = 46
+        try:
+            dnskey_code = int(QTYPE.DNSKEY)
+        except Exception:  # pragma: no cover - defensive
+            dnskey_code = 48
+
+        def _add_dnssec_rrsets(
+            reply: DNSRecord,
+            owner_name: str,
+            owner_rrsets: Dict[int, Tuple[int, List[str]]],
+            zone_apex_name: str,
+        ) -> None:
+            """Brief: Append RRSIG (and DNSKEY at apex) RRsets when present.
+
+            Inputs:
+              - reply: DNSRecord being built.
+              - owner_name: Owner name with trailing dot.
+              - owner_rrsets: RRsets dict for this owner.
+              - zone_apex_name: Apex of the authoritative zone (no trailing dot).
+
+            Outputs:
+              - None; mutates reply by adding RRSIG/DNSKEY answers.
+            """
+            # Add any RRSIG RRsets at this owner.
+            if rrsig_code in owner_rrsets:
+                ttl_rrsig, vals_rrsig = owner_rrsets[rrsig_code]
+                _add_rrset(reply, owner_name, rrsig_code, ttl_rrsig, list(vals_rrsig))
+            # At the zone apex, also include DNSKEY RRsets when present.
+            owner_normalized = owner_name.rstrip(".").lower()
+            if owner_normalized == zone_apex_name:
+                apex_rrsets = name_index.get(zone_apex_name, {})
+                if dnskey_code in apex_rrsets:
+                    ttl_dk, vals_dk = apex_rrsets[dnskey_code]
+                    _add_rrset(reply, owner_name, dnskey_code, ttl_dk, list(vals_dk))
+                # Include RRSIG covering DNSKEY at apex if present.
+                if rrsig_code in apex_rrsets:
+                    ttl_rrsig_apex, vals_rrsig_apex = apex_rrsets[rrsig_code]
+                    # Avoid duplicate addition if owner is already the apex.
+                    if owner_normalized != name:
+                        _add_rrset(
+                            reply,
+                            owner_name,
+                            rrsig_code,
+                            ttl_rrsig_apex,
+                            list(vals_rrsig_apex),
+                        )
 
         # CNAME at owner name: always answer with CNAME regardless of qtype.
         if cname_code in rrsets:
@@ -625,6 +1473,9 @@ class ZoneRecords(BasePlugin):
             added = _add_rrset(reply, owner, cname_code, ttl_cname, list(cname_values))
             if not added:
                 return None
+            # When client wants DNSSEC, add RRSIG for the CNAME.
+            if want_dnssec:
+                _add_dnssec_rrsets(reply, owner, rrsets, zone_apex)
             return PluginDecision(action="override", response=reply.pack())
 
         # No CNAME at this owner; distinguish positive, NODATA, and NXDOMAIN.
@@ -637,12 +1488,18 @@ class ZoneRecords(BasePlugin):
                         added_any = True
                 if not added_any:
                     return None
+                # When client wants DNSSEC, add RRSIG/DNSKEY RRsets.
+                if want_dnssec:
+                    _add_dnssec_rrsets(reply, owner, rrsets, zone_apex)
                 return PluginDecision(action="override", response=reply.pack())
 
             if qtype_int in rrsets:
                 ttl_rr, values_rr = rrsets[qtype_int]
                 if not _add_rrset(reply, owner, qtype_int, ttl_rr, list(values_rr)):
                     return None
+                # When client wants DNSSEC, add RRSIG/DNSKEY RRsets.
+                if want_dnssec:
+                    _add_dnssec_rrsets(reply, owner, rrsets, zone_apex)
                 return PluginDecision(action="override", response=reply.pack())
 
             # NODATA: name exists in zone but requested type is absent.

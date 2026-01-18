@@ -920,6 +920,64 @@
         },
         "module": "foghorn.plugins.resolve.rate_limit.RateLimit"
       },
+      "ssh_keys": {
+        "aliases": [
+          "ssh_keys"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for SshKeys.\n\nInputs:\n  - targets: List of IPs, CIDR ranges, and/or hostnames to scan.\n  - scan_threads: Maximum number of concurrent SSH probes.\n  - ttl: DNS TTL to apply to synthesized SSHFP answers.\n  - db_path: Filesystem path to the sqlite database storing SSH keys.\n  - port: SSH TCP port used when probing hosts.\n  - timeout_seconds: Socket/handshake timeout when fetching keys.\n\nOutputs:\n  - SshKeysConfig instance with normalized field types.",
+          "properties": {
+            "db_path": {
+              "default": "./config/var/ssh_keys.db",
+              "description": "Type: string. Default: \"./config/var/ssh_keys.db\".",
+              "title": "Db Path",
+              "type": "string"
+            },
+            "port": {
+              "default": 22,
+              "description": "Type: integer. Default: 22.",
+              "maximum": 65535,
+              "minimum": 1,
+              "title": "Port",
+              "type": "integer"
+            },
+            "scan_threads": {
+              "default": 4,
+              "description": "Type: integer. Default: 4.",
+              "minimum": 1,
+              "title": "Scan Threads",
+              "type": "integer"
+            },
+            "targets": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Targets",
+              "type": "array"
+            },
+            "timeout_seconds": {
+              "default": 5.0,
+              "description": "Type: number. Default: 5.0.",
+              "minimum": 0.1,
+              "title": "Timeout Seconds",
+              "type": "number"
+            },
+            "ttl": {
+              "default": 300,
+              "description": "Type: integer. Default: 300.",
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            }
+          },
+          "title": "SshKeysConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.resolve.ssh_keys.SshKeys"
+      },
       "upstream_router": {
         "aliases": [
           "router",
@@ -1021,9 +1079,159 @@
           "zone_records"
         ],
         "config_schema": {
+          "$defs": {
+            "AxfrUpstreamConfig": {
+              "additionalProperties": false,
+              "description": "Brief: Configuration for a single AXFR upstream server.\n\nInputs:\n  - host: Upstream authoritative server hostname or IP.\n  - port: TCP port (default 53).\n  - timeout_ms: Transfer timeout in milliseconds (default 5000).\n  - transport: \"tcp\" (default) or \"dot\" for DNS-over-TLS.\n  - server_name: Optional TLS SNI name for DoT.\n  - verify: TLS certificate verification for DoT (default True).\n  - ca_file: Optional CA bundle path for DoT.\n\nOutputs:\n  - AxfrUpstreamConfig instance.",
+              "properties": {
+                "ca_file": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "CA bundle path for DoT.",
+                  "title": "Ca File"
+                },
+                "host": {
+                  "description": "Upstream authoritative server hostname or IP.",
+                  "title": "Host",
+                  "type": "string"
+                },
+                "port": {
+                  "default": 53,
+                  "description": "TCP port. Default: 53.",
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "title": "Port",
+                  "type": "integer"
+                },
+                "server_name": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "TLS SNI name for DoT.",
+                  "title": "Server Name"
+                },
+                "timeout_ms": {
+                  "default": 5000,
+                  "description": "Transfer timeout in milliseconds. Default: 5000.",
+                  "minimum": 0,
+                  "title": "Timeout Ms",
+                  "type": "integer"
+                },
+                "transport": {
+                  "default": "tcp",
+                  "description": "Transport: 'tcp' or 'dot'. Default: \"tcp\".",
+                  "title": "Transport",
+                  "type": "string"
+                },
+                "verify": {
+                  "default": true,
+                  "description": "TLS certificate verification for DoT. Default: true.",
+                  "title": "Verify",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "host"
+              ],
+              "title": "AxfrUpstreamConfig",
+              "type": "object"
+            },
+            "AxfrZoneConfig": {
+              "additionalProperties": false,
+              "description": "Brief: Configuration for a single AXFR-backed zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - upstreams: List of upstream servers to transfer from.\n  - masters: Legacy alias for upstreams (deprecated).\n  - allow_no_dnssec: Accept transfer even if DNSSEC is missing or invalid\n    (default True). When False, zones without valid DNSSEC will be rejected\n    once DNSSEC validation for AXFR is implemented.\n\nOutputs:\n  - AxfrZoneConfig instance.",
+              "properties": {
+                "allow_no_dnssec": {
+                  "default": true,
+                  "description": "Accept transfer even if DNSSEC is missing or invalid. When False, zones without valid DNSSEC will be rejected once DNSSEC validation for AXFR is implemented. Default: true.",
+                  "title": "Allow No Dnssec",
+                  "type": "boolean"
+                },
+                "masters": {
+                  "anyOf": [
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "$ref": "#/$defs/AxfrUpstreamConfig"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Legacy alias for upstreams (deprecated).",
+                  "title": "Masters"
+                },
+                "upstreams": {
+                  "anyOf": [
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "$ref": "#/$defs/AxfrUpstreamConfig"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "List of upstream servers to transfer from.",
+                  "title": "Upstreams"
+                },
+                "zone": {
+                  "description": "Zone apex (e.g. 'example.com').",
+                  "title": "Zone",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "zone"
+              ],
+              "title": "AxfrZoneConfig",
+              "type": "object"
+            }
+          },
           "additionalProperties": false,
-          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n  - axfr_zones: Optional list of AXFR-backed zones.\n\nExample:\n  Minimal AXFR-only configuration (YAML):\n\n    plugins:\n      - type: zone\n        hooks:\n          pre_resolve: { priority: 60 }\n        config:\n          axfr_zones:\n            - zone: example.com\n              allow_no_dnssec: false\n              upstreams:\n                - host: 192.0.2.10\n                  port: 53\n                  timeout_ms: 5000\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
           "properties": {
+            "axfr_zones": {
+              "anyOf": [
+                {
+                  "description": "Type: array.",
+                  "items": {
+                    "$ref": "#/$defs/AxfrZoneConfig"
+                  },
+                  "type": "array"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Axfr Zones"
+            },
             "bind_paths": {
               "anyOf": [
                 {
@@ -2665,6 +2873,11 @@
         "dnssec": {
           "description": "Type: object.",
           "type": "object"
+        },
+        "enable_ede": {
+          "default": false,
+          "description": "Enable generation and pass-through of Extended DNS Errors (RFC 8914) for EDNS clients.",
+          "type": "boolean"
         },
         "http": {
           "description": "Type: object.",

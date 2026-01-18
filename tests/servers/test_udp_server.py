@@ -13,7 +13,7 @@ import threading
 import time
 
 import pytest
-from dnslib import DNSRecord, QTYPE, RCODE, RR, TXT
+from dnslib import DNSRecord, QTYPE, RCODE, RR, TXT, EDNSOption
 
 from foghorn.servers.udp_server import DNSUDPHandler, serve_udp
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision
@@ -545,7 +545,8 @@ def test_make_nxdomain_response_echoes_client_edns_opt():
 def test_make_servfail_response_echoes_client_edns_opt():
     """Inputs: DNS question with EDNS(0) OPT.
 
-    Outputs: SERVFAIL response carries a matching OPT RR.
+    Outputs:
+        SERVFAIL response carries a matching OPT RR.
     """
 
     from dnslib import EDNS0 as _EDNS0
@@ -563,6 +564,150 @@ def test_make_servfail_response_echoes_client_edns_opt():
     assert len(req_opts) == 1
     assert len(resp_opts) == 1
     assert int(resp_opts[0].rclass) == int(req_opts[0].rclass)
+
+
+def _extract_ede_from_wire(wire: bytes):
+    """Inputs: DNS response wire.
+
+    Outputs:
+        List of (info_code, text) for all EDE (option-code 15) options.
+    """
+
+    rec = DNSRecord.parse(wire)
+    out = []
+    for rr in rec.ar or []:
+        if rr.rtype != QTYPE.OPT:
+            continue
+        for opt in getattr(rr, "rdata", []) or []:
+            if not isinstance(opt, EDNSOption):
+                continue
+            if int(getattr(opt, "code", 0)) != 15:
+                continue
+            data = bytes(getattr(opt, "data", b""))
+            if len(data) < 2:
+                continue
+            code = int.from_bytes(data[:2], "big")
+            text = ""
+            if len(data) > 2:
+                try:
+                    text = data[2:].decode("utf-8", errors="replace")
+                except Exception:
+                    text = ""
+            out.append((code, text))
+    return out
+
+
+def test_make_nxdomain_response_includes_ede_when_enabled(monkeypatch):
+    """Brief: _make_nxdomain_response attaches a generic Blocked EDE for EDNS clients.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Asserts NXDOMAIN with EDE code 15 when enable_ede is True and EDNS is used.
+    """
+
+    from dnslib import EDNS0 as _EDNS0
+
+    # Ensure EDE is enabled on the handler class.
+    DNSUDPHandler.enable_ede = True
+
+    handler = _make_handler()
+    req = DNSRecord.question("ede-nxdomain.example")
+    req.add_ar(_EDNS0(udp_len=1800))
+
+    wire = handler._make_nxdomain_response(req)
+    resp = DNSRecord.parse(wire)
+
+    assert resp.header.rcode == RCODE.NXDOMAIN
+    edes = _extract_ede_from_wire(wire)
+    assert edes, "expected at least one EDE option"
+    code, text = edes[0]
+    assert code == 15
+    assert "blocked" in text.lower()
+
+
+def test_make_servfail_response_includes_ede_when_enabled(monkeypatch):
+    """Brief: _make_servfail_response attaches a generic Other EDE for EDNS clients.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Asserts SERVFAIL with EDE code 0 when enable_ede is True and EDNS is used.
+    """
+
+    from dnslib import EDNS0 as _EDNS0
+
+    DNSUDPHandler.enable_ede = True
+
+    handler = _make_handler()
+    req = DNSRecord.question("ede-servfail.example")
+    req.add_ar(_EDNS0(udp_len=1800))
+
+    wire = handler._make_servfail_response(req)
+    resp = DNSRecord.parse(wire)
+
+    assert resp.header.rcode == RCODE.SERVFAIL
+    edes = _extract_ede_from_wire(wire)
+    assert edes, "expected at least one EDE option"
+    code, text = edes[0]
+    assert code == 0
+    assert "internal" in text.lower() or "error" in text.lower()
+
+
+def test_udp_handle_outer_exception_attaches_other_ede(monkeypatch):
+    """Brief: UDP handler outer exception path attaches a generic Other EDE.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Asserts SERVFAIL with EDE code 0 when shared resolver raises.
+    """
+
+    from dnslib import EDNS0 as _EDNS0
+
+    import foghorn.servers.server as srv_mod
+
+    DNSUDPHandler.enable_ede = True
+
+    # Force resolve_query_bytes to raise so DNSUDPHandler.handle() exercises its
+    # outer exception path.
+    def boom(*a, **k):  # noqa: D401, ANN001
+        """Always raise to simulate an unexpected shared resolver error."""
+
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(srv_mod, "resolve_query_bytes", boom)
+
+    class _Sock:
+        def __init__(self):
+            self.sent = []
+
+        def sendto(self, data, addr):
+            self.sent.append((data, addr))
+
+    sock = _Sock()
+
+    q = DNSRecord.question("ede-udp-outer.example")
+    q.add_ar(_EDNS0(udp_len=1232))
+
+    h = DNSUDPHandler.__new__(DNSUDPHandler)
+    h.request = (q.pack(), sock)
+    h.client_address = ("127.0.0.1", 12345)
+
+    h.handle()
+
+    assert sock.sent, "expected a response to be sent"
+    wire, addr = sock.sent[-1]
+    resp = DNSRecord.parse(wire)
+    assert resp.header.rcode == RCODE.SERVFAIL
+    edes = _extract_ede_from_wire(wire)
+    assert edes, "expected at least one EDE option"
+    code, text = edes[0]
+    assert code == 0
+    assert "internal" in text.lower() or "error" in text.lower()
 
 
 def test_handle_non_edns_large_response_sets_tc(monkeypatch):

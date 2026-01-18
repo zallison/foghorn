@@ -21,6 +21,9 @@ class _TCPHandler(socketserver.BaseRequestHandler):
 
     def handle(self) -> None:
         try:
+            from dnslib import DNSRecord, QTYPE
+            from foghorn.servers import server as _server_mod
+
             sock = self.request  # type: ignore
             # Set a modest timeout to avoid permanent hangs
             sock.settimeout(15)
@@ -39,6 +42,30 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                 body = _recv_exact(sock, ln)
                 if len(body) != ln:  # pragma: no cover - network error
                     break
+
+                is_transfer = False
+                try:
+                    req = DNSRecord.parse(body)
+                    if getattr(req, "questions", None):
+                        q = req.questions[0]
+                        qtype = q.qtype
+                        if qtype in (QTYPE.AXFR, QTYPE.IXFR):
+                            is_transfer = True
+                except Exception:  # pragma: no cover - defensive parse failure
+                    req = None
+
+                if is_transfer and req is not None:
+                    # Stream AXFR/IXFR messages using the shared helper so TCP
+                    # and DoT use the same zone-transfer semantics.
+                    messages = _server_mod.iter_axfr_messages(req)
+                    for wire in messages:
+                        if not wire:
+                            continue
+                        sock.sendall(len(wire).to_bytes(2, "big") + wire)
+                    # AXFR/IXFR consumes this connection; do not process
+                    # additional queries on the same TCP stream.
+                    break
+
                 resp = self.resolver(body, peer_ip)
                 # Treat an empty response as an explicit drop/timeout request
                 # from the shared resolver: do not send a DNS message so the
@@ -169,7 +196,43 @@ async def _handle_conn(
             )
             if len(query) != ln:
                 break
-            # Resolve
+
+            # Detect AXFR/IXFR and stream via shared helper when requested.
+            is_transfer = False
+            req = None
+            try:
+                from dnslib import (
+                    DNSRecord,
+                    QTYPE,
+                )  # local import for parity with threaded handler
+                from foghorn.servers import server as _server_mod
+
+                req = DNSRecord.parse(query)
+                if getattr(req, "questions", None):
+                    q = req.questions[0]
+                    qtype = q.qtype
+                    if qtype in (QTYPE.AXFR, QTYPE.IXFR):
+                        is_transfer = True
+            except Exception:  # pragma: no cover - defensive parse failure
+                req = None
+
+            if is_transfer and req is not None:
+                try:
+                    messages = _server_mod.iter_axfr_messages(req)
+                    for wire in messages:
+                        if not wire:
+                            continue
+                        writer.write(len(wire).to_bytes(2, "big") + wire)
+                        await writer.drain()
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: AXFR failure falls back to closing
+                    pass
+                # AXFR/IXFR consumes this connection; do not process further
+                # queries on the same TCP stream.
+                break
+
+            # Resolve normal (non-transfer) queries via the shared resolver.
             response = await asyncio.get_running_loop().run_in_executor(
                 None, resolver, query, client_ip
             )

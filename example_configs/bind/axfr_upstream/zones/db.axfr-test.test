@@ -1,0 +1,55 @@
+$TTL 3600
+@   IN  SOA ns1.axfr-test.test. hostmaster.axfr-test.test. (
+        2026011701 ; serial
+        7200       ; refresh
+        3600       ; retry
+        1209600    ; expire
+        3600 )     ; minimum
+
+        IN  NS      ns1.axfr-test.test.
+        IN  NS      ns2.axfr-test.test.
+
+ns1     IN  A       192.0.2.1
+ns2     IN  A       192.0.2.2
+
+; Web servers
+www         IN  A       192.0.2.10
+www         IN  A       192.0.2.11
+api         IN  A       192.0.2.12
+@           IN  AAAA    2001:db8::1
+www         IN  AAAA    2001:db8::10
+
+; Mail
+@           IN  MX 10   mail.axfr-test.test.
+@           IN  MX 20   backup-mx.axfr-test.test.
+mail        IN  A       192.0.2.20
+backup-mx   IN  A       192.0.2.21
+
+; Text records
+@           IN  TXT     "v=spf1 mx -all"
+info        IN  TXT     "Example AXFR test zone"
+
+; SRV records
+_sip._tcp           IN SRV 10 60 5060 sip1.axfr-test.test.
+_sip._tcp           IN SRV 20 40 5060 sip2.axfr-test.test.
+sip1                IN A   192.0.2.30
+sip2                IN A   192.0.2.31
+
+; CNAME chain
+web-alias   IN  CNAME   www.axfr-test.test.
+db          IN  CNAME   db-primary.axfr-test.test.
+db-primary  IN  A       192.0.2.40
+
+; Subdomains and delegation
+eu          IN  NS      ns1.eu.axfr-test.test.
+eu          IN  NS      ns2.eu.axfr-test.test.
+ns1.eu      IN  A       192.0.2.50
+ns2.eu      IN  A       192.0.2.51
+www.eu      IN  A       192.0.2.52
+
+; Wildcard
+*.wild      IN  A       192.0.2.60
+
+; Various TTLs
+shortttl    300 IN  A   192.0.2.70
+longttl     86400 IN A  192.0.2.71

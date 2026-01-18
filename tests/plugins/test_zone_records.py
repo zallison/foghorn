@@ -2,10 +2,10 @@ import importlib
 import os
 import pathlib
 import threading
+import logging
 
 import pytest
-from dnslib import QTYPE, RCODE, DNSRecord
-
+from dnslib import QTYPE, RCODE, DNSRecord, RR
 from foghorn.plugins.resolve.base import PluginContext
 
 
@@ -1251,7 +1251,7 @@ def test_bind_paths_multiple_rrsets_and_any_semantics(tmp_path: pathlib.Path) ->
     """Brief: bind_paths supports multiple RR types and ANY semantics inside a zone.
 
     Inputs:
-      - tmp_path: pytest-provided temporary directory.
+      - tmp_path: pytest temporary directory.
 
     Outputs:
       - Asserts that A, AAAA, and TXT RRsets from a BIND zonefile are exposed
@@ -1282,3 +1282,694 @@ def test_bind_paths_multiple_rrsets_and_any_semantics(tmp_path: pathlib.Path) ->
     assert QTYPE.A in rtypes
     assert QTYPE.AAAA in rtypes
     assert QTYPE.TXT in rtypes
+
+
+def test_custom_sshfp_and_openpgpkey_records(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: ZoneRecords can load and serve SSHFP and OPENPGPKEY custom records.
+
+    Inputs:
+      - tmp_path: pytest temporary directory for creating a temporary records
+        file.
+
+    Outputs:
+      - Asserts that SSHFP and OPENPGPKEY records defined in the custom
+        pipe-delimited format are parsed into ``plugin.records`` and that
+        ``pre_resolve`` returns correctly typed RRs with the expected RDATA.
+    """
+
+    file_path = tmp_path / "records.txt"
+    file_path.write_text(
+        "\n".join(
+            [
+                # SSHFP: algorithm 1 (RSA), hash type 1 (SHA-1), example hex
+                # digest.
+                "sshfp.example|SSHFP|600|1 1 1234567890abcdef1234567890abcdef12345678",
+                # OPENPGPKEY: hex-encoded key material; dnslib will expose this
+                # as generic "# <len> <hex>" text when building RDATA.
+                "openpgp.example|OPENPGPKEY|300|0A0B0C",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(file_path)])
+    plugin.setup()
+
+    # SSHFP record must be present in the internal mapping with the expected
+    # TTL and value string (note that we store the original hex casing here).
+    sshfp_key = ("sshfp.example", int(QTYPE.SSHFP))
+    ssh_ttl, ssh_values = plugin.records[sshfp_key]
+    assert ssh_ttl == 600
+    assert ssh_values == ["1 1 1234567890abcdef1234567890abcdef12345678"]
+
+    # OPENPGPKEY record must also be present with its hex RDATA in the
+    # internal mapping (generic "#" form is only used when answering).
+    openpgp_key = ("openpgp.example", int(QTYPE.OPENPGPKEY))
+    open_ttl, open_values = plugin.records[openpgp_key]
+    assert open_ttl == 300
+    assert open_values == ["0A0B0C"]
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # Verify that an SSHFP query is answered with an SSHFP RR carrying the
+    # expected RDATA (dnslib normalizes the hex digest to uppercase when
+    # formatting back to text).
+    ssh_req = _make_query("sshfp.example", int(QTYPE.SSHFP))
+    ssh_decision = plugin.pre_resolve("sshfp.example", int(QTYPE.SSHFP), ssh_req, ctx)
+    assert ssh_decision is not None
+    assert ssh_decision.action == "override"
+    ssh_resp = DNSRecord.parse(ssh_decision.response)
+    ssh_rdatas = [
+        str(rr.rdata) for rr in ssh_resp.rr if int(rr.rtype) == int(QTYPE.SSHFP)
+    ]
+    assert ssh_rdatas == ["1 1 1234567890ABCDEF1234567890ABCDEF12345678"]
+
+    # Verify that an OPENPGPKEY query returns a RR with type OPENPGPKEY and
+    # that its textual RDATA round-trips the generic form we provided.
+    open_req = _make_query("openpgp.example", int(QTYPE.OPENPGPKEY))
+    open_decision = plugin.pre_resolve(
+        "openpgp.example", int(QTYPE.OPENPGPKEY), open_req, ctx
+    )
+    assert open_decision is not None
+    assert open_decision.action == "override"
+    open_resp = DNSRecord.parse(open_decision.response)
+    open_rdatas = [
+        str(rr.rdata) for rr in open_resp.rr if int(rr.rtype) == int(QTYPE.OPENPGPKEY)
+    ]
+    assert open_rdatas == ["\\# 3 0A0B0C"]
+
+
+def test_normalize_axfr_config_valid_and_invalid_entries() -> None:
+    """Brief: _normalize_axfr_config returns only well-formed zones and upstreams.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that valid entries are normalized and invalid ones dropped.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    # Construct a bare instance so we can call the helper directly.
+    plugin = ZoneRecords.__new__(ZoneRecords)
+
+    raw = [
+        {
+            "zone": "Example.COM.",
+            "upstreams": [
+                {"host": "192.0.2.1", "port": "53", "timeout_ms": "2500"},
+                {"host": "192.0.2.2"},  # uses defaults
+            ],
+        },
+        {
+            # Missing zone -> ignored.
+            "upstreams": [{"host": "203.0.113.1", "port": 53}],
+        },
+        {
+            "zone": "bad.example",
+            # upstreams is not a list or mapping -> ignored.
+            "upstreams": "not-a-list",
+        },
+    ]
+
+    zones = plugin._normalize_axfr_config(raw)
+    assert len(zones) == 1
+    z = zones[0]
+    assert z["zone"] == "example.com"
+    upstreams = z["upstreams"]
+    assert isinstance(upstreams, list)
+    assert upstreams[0]["host"] == "192.0.2.1"
+    assert upstreams[0]["port"] == 53
+    assert upstreams[0]["timeout_ms"] == 2500
+    # Second upstream picked up with default port/timeout and tcp transport.
+    assert upstreams[1]["host"] == "192.0.2.2"
+    assert upstreams[1]["port"] == 53
+    assert upstreams[1]["timeout_ms"] == 5000
+    assert upstreams[1]["transport"] == "tcp"
+
+
+def test_normalize_axfr_config_supports_dot_and_tls_fields() -> None:
+    """Brief: _normalize_axfr_config preserves transport and TLS-related fields.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that DoT masters keep transport/server_name/verify/ca_file.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords.__new__(ZoneRecords)
+
+    raw = [
+        {
+            "zone": "tls.example",
+            "upstreams": [
+                {
+                    "host": "dot-master.example",
+                    "port": 853,
+                    "timeout_ms": 7000,
+                    "transport": "dot",
+                    "server_name": "axfr.tls.example",
+                    "verify": False,
+                    "ca_file": "/tmp/ca.pem",
+                },
+                {
+                    # Unsupported transport -> ignored at normalisation time.
+                    "host": "ignored.example",
+                    "port": 853,
+                    "transport": "udp",
+                },
+            ],
+        }
+    ]
+
+    zones = plugin._normalize_axfr_config(raw)
+    assert len(zones) == 1
+    z = zones[0]
+    assert z["zone"] == "tls.example"
+    upstreams = z["upstreams"]
+    assert len(upstreams) == 1
+    m = upstreams[0]
+    assert m["host"] == "dot-master.example"
+    assert m["port"] == 853
+    assert m["timeout_ms"] == 7000
+    assert m["transport"] == "dot"
+    assert m["server_name"] == "axfr.tls.example"
+    assert m["verify"] is False
+    assert m["ca_file"] == "/tmp/ca.pem"
+
+
+def test_load_records_axfr_overlays_and_only_runs_once(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """Brief: Initial _load_records overlays AXFR data once and does not re-transfer.
+
+    Inputs:
+      - monkeypatch: pytest fixture for patching axfr_transfer.
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that axfr_transfer is called on setup() and skipped on reload,
+        and that transferred RRs are visible in records after setup.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    # Seed a simple file-backed record so setup() does not fail.
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("seed.test|A|300|192.0.2.10\n", encoding="utf-8")
+
+    # Build a minimal synthetic AXFR RRset for axfr.test. For integration with
+    # ZoneRecords we only need a usable A RR; SOA handling is exercised in
+    # dedicated axfr_transfer tests.
+    from dnslib import A as _A
+
+    axfr_rrs = [
+        RR("host.axfr.test.", QTYPE.A, rdata=_A("203.0.113.5"), ttl=123),
+    ]
+
+    calls = {"n": 0}
+
+    def fake_axfr_transfer(host, port, zone, **kwargs):  # noqa: ARG001
+        # Ensure we default to TCP when no transport is specified in config.
+        assert kwargs.get("transport", "tcp") == "tcp"
+        calls["n"] += 1
+        return axfr_rrs
+
+    monkeypatch.setattr(mod, "axfr_transfer", fake_axfr_transfer)
+
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        axfr_zones=[
+            {
+                "zone": "axfr.test.",
+                "upstreams": [
+                    {"host": "192.0.2.1", "port": 53, "timeout_ms": 4000},
+                ],
+            }
+        ],
+    )
+    plugin.setup()
+
+    # AXFR was attempted once during initial load.
+    assert calls["n"] == 1
+    assert getattr(plugin, "_axfr_loaded_once", False) is True
+
+    # Transferred A record should be present in the records mapping.
+    key = ("host.axfr.test", int(QTYPE.A))
+    assert key in plugin.records
+    ttl, values = plugin.records[key]
+    assert ttl == 123
+    assert values == ["203.0.113.5"]
+
+    # Subsequent reload must not re-run AXFR.
+    plugin._load_records()
+    assert calls["n"] == 1
+
+
+def test_load_records_axfr_errors_do_not_abort(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """Brief: AXFR errors are logged but do not prevent file-backed records from loading.
+
+    Inputs:
+      - monkeypatch: pytest fixture.
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that when axfr_transfer raises AXFRError, setup() still succeeds
+        and file-backed records are present, while AXFR zones are skipped.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("seed-only.test|A|300|192.0.2.10\n", encoding="utf-8")
+
+    def failing_axfr(*a, **k):  # noqa: ARG001
+        raise mod.AXFRError("boom")
+
+    monkeypatch.setattr(mod, "axfr_transfer", failing_axfr)
+
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        axfr_zones=[
+            {
+                "zone": "axfr-fail.test",
+                "upstreams": [{"host": "192.0.2.99", "port": 53}],
+            }
+        ],
+    )
+    plugin.setup()
+
+    # File-backed record is still loaded.
+    key = ("seed-only.test", int(QTYPE.A))
+    assert plugin.records[key][1] == ["192.0.2.10"]
+
+
+def _make_query_with_do_bit(name: str, qtype: int) -> bytes:
+    """Create a DNS query with the DNSSEC OK (DO) bit set.
+
+    Inputs:
+      name: Domain name to query.
+      qtype: Numeric DNS record type code.
+
+    Outputs:
+      Raw DNS query bytes with EDNS(0) OPT RR and DO=1.
+    """
+    from dnslib import EDNS0, DNSRecord
+
+    qtype_name = QTYPE.get(qtype, str(qtype))
+    q = DNSRecord.question(name, qtype=qtype_name)
+    # Add EDNS(0) OPT RR with DO bit set (flags=0x8000).
+    q.add_ar(EDNS0(flags="do", udp_len=4096))
+    return q.pack()
+
+
+def test_client_wants_dnssec_detection(tmp_path: pathlib.Path) -> None:
+    """Brief: _client_wants_dnssec correctly detects DO bit in EDNS(0) OPT RR.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts True when DO=1, False when no EDNS or DO=0.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|192.0.2.1\n", encoding="utf-8")
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    # Query with DO=1 should return True.
+    do_query = _make_query_with_do_bit("example.com", int(QTYPE.A))
+    assert plugin._client_wants_dnssec(do_query) is True
+
+    # Query without EDNS should return False.
+    plain_query = _make_query("example.com", int(QTYPE.A))
+    assert plugin._client_wants_dnssec(plain_query) is False
+
+    # Malformed bytes should return False gracefully.
+    assert plugin._client_wants_dnssec(b"not-valid-dns") is False
+
+
+def test_dnssec_rrsig_returned_when_do_bit_set(tmp_path: pathlib.Path) -> None:
+    """Brief: ZoneRecords returns RRSIG records when DO=1 and signatures are present.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a query with DO=1 returns RRSIG alongside A records when
+        the zone contains pre-computed signatures.
+    """
+    # Create a zone with A record and corresponding RRSIG.
+    records_file = tmp_path / "signed.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. ( 1 3600 600 604800 300 )"
+                ),
+                "example.com|A|300|192.0.2.1",
+                # Simplified RRSIG covering A RRset (algorithm 13 = ECDSAP256SHA256).
+                (
+                    "example.com|RRSIG|300|A 13 2 300 "
+                    "20260201000000 20260101000000 12345 example.com. "
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # Query with DO=1.
+    req_with_do = _make_query_with_do_bit("example.com", int(QTYPE.A))
+    decision = plugin.pre_resolve("example.com", int(QTYPE.A), req_with_do, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+
+    response = DNSRecord.parse(decision.response)
+    rtypes = {rr.rtype for rr in response.rr}
+
+    # Both A and RRSIG should be present.
+    assert QTYPE.A in rtypes
+    assert QTYPE.RRSIG in rtypes
+
+
+def test_dnssec_rrsig_omitted_when_do_bit_not_set(tmp_path: pathlib.Path) -> None:
+    """Brief: ZoneRecords omits RRSIG records when DO=0 or no EDNS.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a query without DO=1 returns only A records, not RRSIG.
+    """
+    records_file = tmp_path / "signed.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. ( 1 3600 600 604800 300 )"
+                ),
+                "example.com|A|300|192.0.2.1",
+                (
+                    "example.com|RRSIG|300|A 13 2 300 "
+                    "20260201000000 20260101000000 12345 example.com. "
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # Query without DO bit.
+    req_no_do = _make_query("example.com", int(QTYPE.A))
+    decision = plugin.pre_resolve("example.com", int(QTYPE.A), req_no_do, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+
+    response = DNSRecord.parse(decision.response)
+    rtypes = {rr.rtype for rr in response.rr}
+
+    # Only A should be present, not RRSIG.
+    assert QTYPE.A in rtypes
+    assert QTYPE.RRSIG not in rtypes
+
+
+def test_dnssec_dnskey_returned_at_apex_with_do_bit(tmp_path: pathlib.Path) -> None:
+    """Brief: ZoneRecords returns DNSKEY at apex when DO=1 and keys are present.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a DNSKEY query with DO=1 at zone apex returns DNSKEY and
+        its RRSIG.
+    """
+    records_file = tmp_path / "signed.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. ( 1 3600 600 604800 300 )"
+                ),
+                # DNSKEY at apex (ZSK with flags 256).
+                (
+                    "example.com|DNSKEY|300|256 3 13 "
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAA=="
+                ),
+                # RRSIG covering DNSKEY.
+                (
+                    "example.com|RRSIG|300|DNSKEY 13 2 300 "
+                    "20260201000000 20260101000000 12345 example.com. "
+                    "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+                    "BBBBBBBBBBBBBBBBBBBBBBBBBB=="
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # Query for DNSKEY with DO=1.
+    req_dnskey = _make_query_with_do_bit("example.com", int(QTYPE.DNSKEY))
+    decision = plugin.pre_resolve("example.com", int(QTYPE.DNSKEY), req_dnskey, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+
+    response = DNSRecord.parse(decision.response)
+    rtypes = {rr.rtype for rr in response.rr}
+
+    # Both DNSKEY and RRSIG should be present.
+    assert QTYPE.DNSKEY in rtypes
+    assert QTYPE.RRSIG in rtypes
+
+
+def test_normalize_axfr_config_allow_no_dnssec_field() -> None:
+    """Brief: _normalize_axfr_config parses allow_no_dnssec correctly.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that allow_no_dnssec defaults to True and can be set to False.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords.__new__(ZoneRecords)
+
+    raw = [
+        {
+            "zone": "default.example",
+            "upstreams": [{"host": "192.0.2.1"}],
+            # No allow_no_dnssec -> defaults to True.
+        },
+        {
+            "zone": "strict.example",
+            "upstreams": [{"host": "192.0.2.2"}],
+            "allow_no_dnssec": False,
+        },
+        {
+            "zone": "explicit.example",
+            "upstreams": [{"host": "192.0.2.3"}],
+            "allow_no_dnssec": True,
+        },
+    ]
+
+    zones = plugin._normalize_axfr_config(raw)
+    assert len(zones) == 3
+
+    # Default case.
+    assert zones[0]["zone"] == "default.example"
+    assert zones[0]["allow_no_dnssec"] is True
+
+    # Explicit False.
+    assert zones[1]["zone"] == "strict.example"
+    assert zones[1]["allow_no_dnssec"] is False
+
+    # Explicit True.
+    assert zones[2]["zone"] == "explicit.example"
+    assert zones[2]["allow_no_dnssec"] is True
+
+
+def test_zonefile_dnssec_classification_logs_state(
+    tmp_path: pathlib.Path, caplog
+) -> None:
+    """Brief: DNSSEC classification for zonefile/inline zones logs dnssec_state.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+      - caplog: pytest logging capture fixture.
+
+    Outputs:
+      - Asserts that loading a signed zone from file emits a log line containing
+        the dnssec_state classification.
+    """
+    from foghorn.plugins.resolve.zone_records import ZoneRecords
+
+    records_file = tmp_path / "signed.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. ( 1 3600 600 604800 300 )"
+                ),
+                (
+                    "example.com|DNSKEY|300|256 3 13 "
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAA=="
+                ),
+                (
+                    "example.com|RRSIG|300|DNSKEY 13 2 300 "
+                    "20260201000000 20260101000000 12345 example.com. "
+                    "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+                    "BBBBBBBBBBBBBBBBBBBBBBBBBB=="
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.INFO):
+        plugin = ZoneRecords(file_paths=[str(records_file)])
+        plugin.setup()
+
+    # Ensure at least one log line mentions dnssec_state for this zone.
+    assert "dnssec_state=" in caplog.text
+
+
+def test_iter_zone_rrs_for_transfer_non_authoritative(tmp_path: pathlib.Path) -> None:
+    """Brief: iter_zone_rrs_for_transfer returns None for non-authoritative zones.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a ZoneRecords instance with an SOA for example.com does not
+        claim authority for unrelated zones when exporting for AXFR.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "zone.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. ( 1 3600 600 604800 300 )"
+                ),
+                "example.com|A|300|192.0.2.10",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    # Zone apex is example.com, so a different zone name should not be treated
+    # as authoritative by this plugin.
+    assert plugin.iter_zone_rrs_for_transfer("other.example") is None
+
+
+def test_iter_zone_rrs_for_transfer_exports_zone_rrs(tmp_path: pathlib.Path) -> None:
+    """Brief: iter_zone_rrs_for_transfer exports all RRs inside an authoritative zone.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that exported RRs include the apex SOA and in-zone data and omit
+        names outside the zone.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "zone.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. ( 1 3600 600 604800 300 )"
+                ),
+                "example.com|NS|300|ns1.example.com.",
+                "example.com|A|300|192.0.2.10",
+                "www.example.com|A|300|192.0.2.20",
+                # Outside the zone; should not be exported when iterating example.com.
+                "other.com|A|300|198.51.100.1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    rrs = plugin.iter_zone_rrs_for_transfer("example.com")
+    assert rrs is not None
+    owners = {str(rr.rname).rstrip(".").lower() for rr in rrs}
+    types = {rr.rtype for rr in rrs}
+
+    # Only in-zone owners should be present.
+    assert "example.com" in owners
+    assert "www.example.com" in owners
+    assert "other.com" not in owners
+
+    # We should at least see SOA and A RR types in the export.
+    from dnslib import QTYPE as _Q
+
+    assert _Q.SOA in types
+    assert _Q.A in types
