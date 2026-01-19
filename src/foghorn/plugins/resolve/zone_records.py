@@ -5,6 +5,7 @@ import os
 import pathlib
 import threading
 import time
+import ipaddress
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from dnslib import QTYPE, RCODE, RR, DNSHeader, DNSRecord
@@ -107,6 +108,8 @@ class ZoneDnssecSigningConfig(BaseModel):
       - algorithm: DNSSEC algorithm name (e.g. "ECDSAP256SHA256").
       - generate: Key generation policy ("yes", "no", or "maybe").
       - validity_days: Signature validity window in days.
+      - use_tld: Optional single-label TLD (e.g. "zaa", "corp") to treat as
+        an inferred apex for SSHFP-only zones when synthesizing SOA records.
 
     Outputs:
       - Parsed ZoneDnssecSigningConfig instance used by the config schema.
@@ -132,6 +135,14 @@ class ZoneDnssecSigningConfig(BaseModel):
         default=30,
         ge=1,
         description="Signature validity window in days.",
+    )
+    use_tld: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional single-label TLD (e.g. 'zaa', 'corp') that ZoneRecords "
+            "may treat as an inferred zone apex when synthesizing SOA records "
+            "for SSHFP-only data."
+        ),
     )
 
     class Config:
@@ -613,11 +624,28 @@ class ZoneRecords(BasePlugin):
                 qtype_code = int(qtype_raw)
             else:
                 name = qtype_raw.upper()
+                # Map mnemonic qtype names to numeric codes in a way that avoids
+                # dnslib raising its own DNSError (for example, "QTYPE: Invalid reverse lookup")
+                # for unknown or class-like tokens such as "IN". We prefer
+                # getattr(QTYPE, name) when it returns an int, and fall back to
+                # QTYPE.get(name, None). Any exception or non-int result is
+                # treated as an unknown qtype and turned into a clean ValueError
+                # below.
+                qtype_code = None
                 try:
-                    qtype_code = int(getattr(QTYPE, name))
-                except AttributeError:
-                    qtype_val = QTYPE.get(name, None)
-                    qtype_code = int(qtype_val) if isinstance(qtype_val, int) else None
+                    attr_val = getattr(QTYPE, name)
+                except Exception:
+                    attr_val = None
+                if isinstance(attr_val, int):
+                    qtype_code = int(attr_val)
+                else:
+                    try:
+                        qtype_val = QTYPE.get(name, None)
+                    except Exception:
+                        qtype_val = None
+                    if isinstance(qtype_val, int):
+                        qtype_code = int(qtype_val)
+
             if qtype_code is None:
                 raise ValueError(
                     f"Source {source_label} malformed line {lineno}: "
@@ -949,6 +977,169 @@ class ZoneRecords(BasePlugin):
                 continue
             _process_line(text, "inline-config-records", lineno)
 
+        # If no SOA records were explicitly defined but we have SSHFP RRsets,
+        # attempt to infer a reasonable zone apex from SSHFP owner names and
+        # synthesize a minimal SOA there. This makes it easier to use
+        # ZoneRecords for small SSHFP-only zones without hand-writing SOA
+        # records, while still enabling DNSSEC auto-signing and authoritative
+        # behaviour.
+        if not zone_soa:
+            try:
+                try:
+                    sshfp_code = int(QTYPE.SSHFP)
+                except Exception:  # pragma: no cover - defensive
+                    sshfp_code = None
+
+                sshfp_names: List[str] = []
+                if sshfp_code is not None:
+                    for (owner_name, qcode), (_ttl_val, _vals) in mapping.items():
+                        if int(qcode) == int(sshfp_code):
+                            sshfp_names.append(str(owner_name))
+
+                if sshfp_names:
+                    # Compute a common suffix across SSHFP owner names and use
+                    # that as the synthesized apex when it has at least two
+                    # labels (to avoid creating an apex like "com").
+                    label_lists = [
+                        str(n).rstrip(".").lower().split(".") for n in sshfp_names
+                    ]
+                    common_suffix_rev: List[str] = list(reversed(label_lists[0]))
+                    for labels in label_lists[1:]:
+                        rev = list(reversed(labels))
+                        i = 0
+                        while (
+                            i < len(common_suffix_rev)
+                            and i < len(rev)
+                            and common_suffix_rev[i] == rev[i]
+                        ):
+                            i += 1
+                        common_suffix_rev = common_suffix_rev[:i]
+                        if not common_suffix_rev:
+                            break
+
+                    # Decide whether this common suffix is an acceptable
+                    # synthesized apex. We always accept suffixes with two or
+                    # more labels (e.g. "sshfp.test"). When the suffix is a
+                    # single label, we only accept it when it matches the
+                    # configured use_tld option (for example, "zaa" or
+                    # "corp"), allowing private TLD-style zones.
+                    accept_suffix = False
+                    if len(common_suffix_rev) >= 2:
+                        accept_suffix = True
+                    elif len(common_suffix_rev) == 1:
+                        # For single-label suffixes (e.g. "zaa", "corp"), only
+                        # accept them as an apex when explicitly configured via
+                        # dnssec_signing.use_tld so operators can opt in to
+                        # private TLD-style zones.
+                        try:
+                            cfg = getattr(self, "config", {})  # type: ignore[union-attr]
+                            dnssec_cfg = (
+                                cfg.get("dnssec_signing")
+                                if isinstance(cfg, dict)
+                                else None
+                            )
+                            cfg_tld = None
+                            if isinstance(dnssec_cfg, dict):
+                                cfg_tld = dnssec_cfg.get("use_tld")
+                        except Exception:  # pragma: no cover - defensive
+                            cfg_tld = None
+                        if cfg_tld:
+                            suffix_label = common_suffix_rev[0].lower()
+                            if suffix_label == str(cfg_tld).rstrip(".").lower():
+                                accept_suffix = True
+
+                    if accept_suffix:
+                        inferred_apex = ".".join(reversed(common_suffix_rev))
+                        if inferred_apex not in zone_soa:
+                            # Use the plugin-level default TTL for the SOA when
+                            # available; fall back to 300s.
+                            try:
+                                default_ttl = int(self.config.get("ttl", 300))  # type: ignore[union-attr]
+                            except Exception:  # pragma: no cover - defensive
+                                default_ttl = 300
+                            # Construct a very simple SOA with a fixed serial
+                            # and conservative timers; operators can override by
+                            # adding an explicit SOA line if needed.
+                            soa_rdata = (
+                                f"ns1.{inferred_apex}. hostmaster.{inferred_apex}. "
+                                "1 3600 600 604800 300"
+                            )
+                            synthetic_line = (
+                                f"{inferred_apex}|SOA|{default_ttl}|{soa_rdata}"
+                            )
+                            _process_line(synthetic_line, "auto-soa", 0)
+            except Exception:  # pragma: no cover - defensive logging only
+                logger.warning(
+                    "ZoneRecords: failed to synthesize SOA for SSHFP-only zone",
+                    exc_info=True,
+                )
+
+        # Auto-generate reverse PTR records for A and AAAA RRsets only.
+        #
+        # For each owner with A/AAAA records whose rdata parses as an IP
+        # address, synthesize a PTR RR in the corresponding in-addr.arpa or
+        # ip6.arpa zone, pointing back to the owner name. Explicit PTR records
+        # from any source are preserved: they determine the TTL and initial
+        # values; generated PTR targets are only appended when not already
+        # present.
+        try:
+            try:
+                a_code = int(QTYPE.A)
+            except Exception:  # pragma: no cover - defensive
+                a_code = 1
+            try:
+                aaaa_code = int(QTYPE.AAAA)
+            except Exception:  # pragma: no cover - defensive
+                aaaa_code = 28
+            try:
+                ptr_code = int(QTYPE.PTR)
+            except Exception:  # pragma: no cover - defensive
+                ptr_code = 12
+
+            for owner_name, rrsets in list(name_index.items()):
+                # owner_name is already normalized (no trailing dot, lowercased).
+                owner_norm = str(owner_name).rstrip(".").lower()
+
+                for rr_qtype in (a_code, aaaa_code):
+                    if rr_qtype not in rrsets:
+                        continue
+                    ttl_val, vals = rrsets[rr_qtype]
+                    for v in list(vals):
+                        try:
+                            ip_obj = ipaddress.ip_address(str(v))
+                        except ValueError:
+                            # Not a literal IP; do not attempt to synthesize PTR.
+                            continue
+
+                        # Only generate PTR when the RR type matches the IP
+                        # family (A+IPv4, AAAA+IPv6).
+                        if ip_obj.version == 4 and rr_qtype != a_code:
+                            continue
+                        if ip_obj.version == 6 and rr_qtype != aaaa_code:
+                            continue
+
+                        reverse_owner = ip_obj.reverse_pointer.rstrip(".").lower()
+                        ptr_target = owner_norm + "."
+                        key_ptr = (reverse_owner, int(ptr_code))
+                        existing_ptr = mapping.get(key_ptr)
+                        if existing_ptr is None:
+                            stored_ttl = int(ttl_val)
+                            ptr_vals: List[str] = []
+                        else:
+                            stored_ttl, ptr_vals = existing_ptr
+
+                        if ptr_target not in ptr_vals:
+                            ptr_vals.append(ptr_target)
+
+                        mapping[key_ptr] = (stored_ttl, ptr_vals)
+                        per_name_ptr = name_index.setdefault(reverse_owner, {})
+                        per_name_ptr[int(ptr_code)] = (stored_ttl, ptr_vals)
+        except Exception:  # pragma: no cover - defensive logging only
+            logger.warning(
+                "ZoneRecords: failed to auto-generate PTR records from A/AAAA",
+                exc_info=True,
+            )
+
         # After building mappings from all sources, classify DNSSEC state for
         # each authoritative zone apex derived from local sources (file_paths,
         # bind_paths, inline records). Zones that were already classified via
@@ -1118,8 +1309,6 @@ class ZoneRecords(BasePlugin):
                                 qcode = int(dnskey_code_all)
                             else:
                                 qcode = int(rrsig_code_all)
-                                if (owner_norm, qcode) in mapping:
-                                    continue
 
                             key = (owner_norm, qcode)
                             existing = mapping.get(key)
@@ -1147,17 +1336,112 @@ class ZoneRecords(BasePlugin):
                     exc_info=True,
                 )
 
+        # Build a helper mapping that groups RRsets by qtype and owner name
+        # and, when RRSIGs exist for a particular RRset, associates the RRSIG
+        # records with the covered qtype. This is used at query time to build
+        # answer sections and attach the corresponding RRSIGs as additional
+        # records without having to re-parse textual representations.
+        try:
+            try:
+                rrsig_code_idx = int(QTYPE.RRSIG)
+            except Exception:  # pragma: no cover - defensive
+                rrsig_code_idx = 46
+
+            # First, index RRSIG rdata by (owner, covered_type).
+            rrsig_cover: Dict[Tuple[str, int], List[Tuple[int, str]]] = {}
+            for (owner_name_idx, qcode_idx), (ttl_idx, vals_idx) in mapping.items():
+                if int(qcode_idx) != int(rrsig_code_idx):
+                    continue
+                owner_norm_idx = str(owner_name_idx).rstrip(".").lower()
+                for v_idx in list(vals_idx):
+                    try:
+                        parts = str(v_idx).split()
+                    except Exception:  # pragma: no cover - defensive
+                        continue
+                    if not parts:
+                        continue
+                    covered_name = parts[0].upper()
+                    covered_code: Optional[int] = None
+                    try:
+                        attr_val = getattr(QTYPE, covered_name)
+                    except Exception:
+                        attr_val = None
+                    if isinstance(attr_val, int):
+                        covered_code = int(attr_val)
+                    else:
+                        try:
+                            qval = QTYPE.get(covered_name, None)
+                        except Exception:
+                            qval = None
+                        if isinstance(qval, int):
+                            covered_code = int(qval)
+                    if covered_code is None:
+                        continue
+                    key_idx = (owner_norm_idx, covered_code)
+                    bucket = rrsig_cover.setdefault(key_idx, [])
+                    bucket.append((int(ttl_idx), str(v_idx)))
+
+            # Next, pre-build dnslib.RR objects for each (qtype, owner) pair,
+            # appending any matching RRSIGs for the covered type. The resulting
+            # structure is stored on self.mapping as:
+            #   self.mapping[qtype][owner_without_trailing_dot] -> List[RR]
+            mapping_by_qtype: Dict[int, Dict[str, List[RR]]] = {}
+            for (owner_name_idx, qcode_idx), (ttl_idx, vals_idx) in mapping.items():
+                owner_norm_idx = str(owner_name_idx).rstrip(".").lower()
+                qcode_int = int(qcode_idx)
+
+                # Skip bare RRSIG RRsets here; they are attached to the covered
+                # type's bucket using rrsig_cover above.
+                if qcode_int == int(rrsig_code_idx):
+                    continue
+
+                rr_type_name_idx = QTYPE.get(qcode_int, str(qcode_int))
+                rr_list: List[RR] = []
+
+                # Base RRset for this owner/qtype.
+                for v_idx in list(vals_idx):
+                    zone_line_idx = f"{owner_norm_idx}. {int(ttl_idx)} IN {rr_type_name_idx} {v_idx}"
+                    try:
+                        built = RR.fromZone(zone_line_idx)
+                    except Exception:  # pragma: no cover - defensive
+                        continue
+                    rr_list.extend(built)
+
+                # Attach any RRSIGs that cover this RRset, if present.
+                sig_entries = rrsig_cover.get((owner_norm_idx, qcode_int), [])
+                for ttl_sig, v_sig in sig_entries:
+                    zone_line_sig = f"{owner_norm_idx}. {int(ttl_sig)} IN RRSIG {v_sig}"
+                    try:
+                        built_sig = RR.fromZone(zone_line_sig)
+                    except Exception:  # pragma: no cover - defensive
+                        continue
+                    rr_list.extend(built_sig)
+
+                if not rr_list:
+                    continue
+
+                by_name = mapping_by_qtype.setdefault(qcode_int, {})
+                by_name[owner_norm_idx] = rr_list
+        except Exception:  # pragma: no cover - defensive logging only
+            logger.warning(
+                "ZoneRecords: failed to build DNSSEC helper mapping; falling back to per-query construction",
+                exc_info=True,
+            )
+            mapping_by_qtype = {}
+
         lock = getattr(self, "_records_lock", None)
 
         if lock is None:
             self.records = mapping
             self._name_index = name_index
             self._zone_soa = zone_soa
+            self.mapping = mapping_by_qtype
         else:
             with lock:
                 self.records = mapping
                 self._name_index = name_index
                 self._zone_soa = zone_soa
+                self.mapping = mapping_by_qtype
 
     def _find_zone_for_name(self, name: str) -> Optional[str]:
         """Brief: Find the longest-matching authoritative zone apex for a name.
@@ -1332,7 +1616,9 @@ class ZoneRecords(BasePlugin):
 
         zone_apex = self._find_zone_for_name(name)
 
-        # Helper to build RRs from a single RRset.
+        # Helper to build RRs from a single RRset, preferring the pre-built
+        # self.mapping index when available so that RRSIGs can be attached as
+        # additional records alongside their covered RRsets.
         def _add_rrset(
             reply: DNSRecord,
             owner_name: str,
@@ -1340,7 +1626,40 @@ class ZoneRecords(BasePlugin):
             ttl: int,
             values: List[str],
         ) -> bool:
+            owner_key = str(owner_name).rstrip(".").lower()
             added_any = False
+
+            # Prefer the helper mapping constructed at load time when present.
+            try:
+                mapping_by_qtype = getattr(self, "mapping", None)
+            except Exception:  # pragma: no cover - defensive
+                mapping_by_qtype = None
+
+            if isinstance(mapping_by_qtype, dict):
+                by_name = mapping_by_qtype.get(int(rr_qtype), {}) or {}
+                rrs = by_name.get(owner_key)
+                if rrs:
+                    try:
+                        try:
+                            rrsig_code_loc = int(QTYPE.RRSIG)
+                        except Exception:  # pragma: no cover - defensive
+                            rrsig_code_loc = 46
+                    except Exception:  # pragma: no cover - defensive
+                        rrsig_code_loc = 46
+
+                    for rr in list(rrs):
+                        rtype = int(getattr(rr, "rtype", 0) or 0)
+                        if rtype == int(rrsig_code_loc):
+                            # Attach signatures as additional records.
+                            reply.add_ar(rr)
+                        else:
+                            reply.add_answer(rr)
+                        added_any = True
+
+            if added_any:
+                return True
+
+            # Fallback: construct RRs from textual TTL/value pairs as before.
             rr_type_name = QTYPE.get(rr_qtype, str(rr_qtype))
             for value in values:
                 zone_line = f"{owner_name} {ttl} IN {rr_type_name} {value}"
@@ -1399,6 +1718,23 @@ class ZoneRecords(BasePlugin):
         # Detect whether the client wants DNSSEC records via EDNS(0) DO bit.
         want_dnssec = self._client_wants_dnssec(request)
 
+        # When ZoneRecords DNSSEC auto-signing is enabled for authoritative
+        # zones, treat DNSSEC material (RRSIG/DNSKEY) as always desired so that
+        # A/AAAA and other answers include their covering signatures even when
+        # stub resolvers do not explicitly set the DO bit. Keep track of this as
+        # a separate flag so that legacy behaviour (RRSIGs only when DO=1) is
+        # preserved for zones that are merely pre-signed via inline records.
+        dnssec_signing_enabled = False
+        try:
+            dnssec_cfg = (
+                self.config.get("dnssec_signing") if hasattr(self, "config") else None
+            )
+            if isinstance(dnssec_cfg, dict) and dnssec_cfg.get("enabled"):
+                dnssec_signing_enabled = True
+                want_dnssec = True
+        except Exception:  # pragma: no cover - defensive: config inspection only
+            dnssec_signing_enabled = False
+
         owner = str(request.q.qname).rstrip(".") + "."
         reply = DNSRecord(
             DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
@@ -1408,10 +1744,6 @@ class ZoneRecords(BasePlugin):
         cname_code = int(QTYPE.CNAME)
 
         # DNSSEC RR type codes for filtering and inclusion.
-        try:
-            rrsig_code = int(QTYPE.RRSIG)
-        except Exception:  # pragma: no cover - defensive
-            rrsig_code = 46
         try:
             dnskey_code = int(QTYPE.DNSKEY)
         except Exception:  # pragma: no cover - defensive
@@ -1423,7 +1755,7 @@ class ZoneRecords(BasePlugin):
             owner_rrsets: Dict[int, Tuple[int, List[str]]],
             zone_apex_name: str,
         ) -> None:
-            """Brief: Append RRSIG (and DNSKEY at apex) RRsets when present.
+            """Brief: Append DNSSEC RRsets when present.
 
             Inputs:
               - reply: DNSRecord being built.
@@ -1432,31 +1764,23 @@ class ZoneRecords(BasePlugin):
               - zone_apex_name: Apex of the authoritative zone (no trailing dot).
 
             Outputs:
-              - None; mutates reply by adding RRSIG/DNSKEY answers.
+              - None; mutates reply by adding DNSKEY answers when appropriate.
+
+            Notes:
+              - Per-RRset RRSIGs (for A, SSHFP, DNSKEY, etc.) are attached via
+                the pre-built helper mapping in _add_rrset, so this helper must
+                not blindly add all owner RRSIGs again.
             """
-            # Add any RRSIG RRsets at this owner.
-            if rrsig_code in owner_rrsets:
-                ttl_rrsig, vals_rrsig = owner_rrsets[rrsig_code]
-                _add_rrset(reply, owner_name, rrsig_code, ttl_rrsig, list(vals_rrsig))
-            # At the zone apex, also include DNSKEY RRsets when present.
             owner_normalized = owner_name.rstrip(".").lower()
+
+            # At the zone apex, include DNSKEY RRsets when present; their
+            # signatures will be attached by _add_rrset using self.mapping
+            # where available.
             if owner_normalized == zone_apex_name:
                 apex_rrsets = name_index.get(zone_apex_name, {})
                 if dnskey_code in apex_rrsets:
                     ttl_dk, vals_dk = apex_rrsets[dnskey_code]
                     _add_rrset(reply, owner_name, dnskey_code, ttl_dk, list(vals_dk))
-                # Include RRSIG covering DNSKEY at apex if present.
-                if rrsig_code in apex_rrsets:
-                    ttl_rrsig_apex, vals_rrsig_apex = apex_rrsets[rrsig_code]
-                    # Avoid duplicate addition if owner is already the apex.
-                    if owner_normalized != name:
-                        _add_rrset(
-                            reply,
-                            owner_name,
-                            rrsig_code,
-                            ttl_rrsig_apex,
-                            list(vals_rrsig_apex),
-                        )
 
         # CNAME at owner name: always answer with CNAME regardless of qtype.
         if cname_code in rrsets:
@@ -1497,8 +1821,20 @@ class ZoneRecords(BasePlugin):
                 ttl_rr, values_rr = rrsets[qtype_int]
                 if not _add_rrset(reply, owner, qtype_int, ttl_rr, list(values_rr)):
                     return None
-                # When client wants DNSSEC, add RRSIG/DNSKEY RRsets.
-                if want_dnssec:
+                # For A answers in zones that this plugin has auto-signed via
+                # dnssec_signing, always attach covering RRSIGs/DNSKEY when
+                # available so that zonefiles behave like signed authoritative
+                # zones even when stub resolvers do not explicitly request
+                # DNSSEC. For other qtypes, or when dnssec_signing is not
+                # enabled, we continue to honour the client's DO/"want DNSSEC"
+                # preference to preserve existing behaviour.
+                try:
+                    a_code = int(QTYPE.A)
+                except Exception:  # pragma: no cover - defensive
+                    a_code = 1
+                if qtype_int == a_code and dnssec_signing_enabled:
+                    _add_dnssec_rrsets(reply, owner, rrsets, zone_apex)
+                elif want_dnssec:
                     _add_dnssec_rrsets(reply, owner, rrsets, zone_apex)
                 return PluginDecision(action="override", response=reply.pack())
 

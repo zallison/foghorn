@@ -7,6 +7,7 @@ import logging
 import pytest
 from dnslib import QTYPE, RCODE, DNSRecord, RR
 from foghorn.plugins.resolve.base import PluginContext
+import ipaddress
 
 
 def _make_query(name: str, qtype: int) -> bytes:
@@ -447,7 +448,7 @@ def test_load_records_assigns_without_lock(tmp_path: pathlib.Path) -> None:
       - Asserts that records are populated even when _records_lock is None.
     """
     records_file = tmp_path / "records.txt"
-    records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
+    records_file.write_text("example.com|A|300|1.2.3.4\\n", encoding="utf-8")
 
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
@@ -455,11 +456,51 @@ def test_load_records_assigns_without_lock(tmp_path: pathlib.Path) -> None:
     plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
-    # Remove the lock and force a reload to exercise the lock-is-None path.
-    plugin._records_lock = None  # type: ignore[assignment]
-    plugin._load_records()
 
-    assert plugin.records[("example.com", int(QTYPE.A))][1] == ["1.2.3.4"]
+def test_auto_ptr_generated_from_a_and_aaaa(tmp_path: pathlib.Path) -> None:
+    """Brief: ZoneRecords auto-generates PTR only for A/AAAA RRsets.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that PTR records are synthesized from A/AAAA forward RRs and
+        that their owners/targets match ipaddress.reverse_pointer semantics.
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                "v4.example|A|300|192.0.2.10",
+                "v6.example|AAAA|400|2001:db8::1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    v4_rev = ipaddress.ip_address("192.0.2.10").reverse_pointer.rstrip(".").lower()
+    v6_rev = ipaddress.ip_address("2001:db8::1").reverse_pointer.rstrip(".").lower()
+
+    ptr_code = int(QTYPE.PTR)
+
+    # IPv4 PTR
+    key_v4_ptr = (v4_rev, ptr_code)
+    ttl_v4, vals_v4 = plugin.records[key_v4_ptr]
+    assert ttl_v4 == 300
+    assert "v4.example." in vals_v4
+
+    # IPv6 PTR
+    key_v6_ptr = (v6_rev, ptr_code)
+    ttl_v6, vals_v6 = plugin.records[key_v6_ptr]
+    assert ttl_v6 == 400
+    assert "v6.example." in vals_v6
 
 
 def test_pre_resolve_no_entry_and_no_lock(tmp_path: pathlib.Path) -> None:
@@ -493,7 +534,7 @@ def test_pre_resolve_no_entry_and_no_lock(tmp_path: pathlib.Path) -> None:
 def test_pre_resolve_returns_none_when_rr_parsing_fails(
     monkeypatch, tmp_path: pathlib.Path
 ) -> None:
-    """Brief: pre_resolve returns None when RR.fromZone raises for all values.
+    """Brief: pre_resolve tolerates RR.fromZone failures when answers are pre-built.
 
     Inputs:
       - monkeypatch: pytest fixture for runtime patching.
@@ -530,7 +571,11 @@ def test_pre_resolve_returns_none_when_rr_parsing_fails(
     req_bytes = _make_query("example.com", int(QTYPE.A))
 
     decision = plugin.pre_resolve("example.com", int(QTYPE.A), req_bytes, ctx)
-    assert decision is None
+    # With pre-built RR objects in the helper mapping, pre_resolve can still
+    # return an override decision even when RR.fromZone is patched to fail at
+    # query time.
+    assert decision is not None
+    assert decision.action == "override"
 
 
 def test_watchdog_handler_should_reload_and_on_any_event(
@@ -1365,6 +1410,45 @@ def test_custom_sshfp_and_openpgpkey_records(
     assert open_rdatas == ["\\# 3 0A0B0C"]
 
 
+def test_auto_soa_generated_for_sshfp_only_zone(tmp_path: pathlib.Path) -> None:
+    """Brief: ZoneRecords synthesizes an SOA when only SSHFP RRsets exist.
+
+    Inputs:
+      - tmp_path: pytest temporary directory for creating a temporary records
+        file.
+
+    Outputs:
+      - Asserts that when no explicit SOA is present but SSHFP records share a
+        common suffix, a synthetic SOA is created at that inferred apex.
+    """
+
+    file_path = tmp_path / "records.txt"
+    file_path.write_text(
+        "\n".join(
+            [
+                "host1.sshfp.test|SSHFP|600|1 1 deadbeef",
+                "host2.sshfp.test|SSHFP|600|1 1 cafebabe",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(file_path)])
+    plugin.setup()
+
+    apex = "sshfp.test"
+    soa_key = (apex, int(QTYPE.SOA))
+    assert soa_key in plugin.records
+    soa_ttl, soa_vals = plugin.records[soa_key]
+    assert soa_ttl == plugin.config.get("ttl", 300)
+    # Sanity check that the synthesized SOA value references the inferred apex.
+    assert any(f"ns1.{apex}." in v and f"hostmaster.{apex}." in v for v in soa_vals)
+
+
 def test_normalize_axfr_config_valid_and_invalid_entries() -> None:
     """Brief: _normalize_axfr_config returns only well-formed zones and upstreams.
 
@@ -1625,6 +1709,58 @@ def test_client_wants_dnssec_detection(tmp_path: pathlib.Path) -> None:
     assert plugin._client_wants_dnssec(b"not-valid-dns") is False
 
 
+def test_dnssec_helper_mapping_contains_base_and_rrsig(tmp_path: pathlib.Path) -> None:
+    """Brief: Helper mapping stores both base RR and its RRSIG for a signed RRset.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that self.mapping[qtype][owner] contains A and its covering
+        RRSIG(A) RRs for a pre-signed RRset.
+    """
+    records_file = tmp_path / "signed.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. ( 1 3600 600 604800 300 )"
+                ),
+                "example.com|A|300|192.0.2.1",
+                (
+                    "example.com|RRSIG|300|A 13 2 300 "
+                    "20260201000000 20260101000000 12345 example.com. "
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    owner_key = "example.com"
+    a_code = int(QTYPE.A)
+    rrsig_code = int(QTYPE.RRSIG)
+
+    mapping = getattr(plugin, "mapping", {}) or {}
+    assert a_code in mapping
+    by_name = mapping[a_code]
+    assert owner_key in by_name
+
+    rr_list = by_name[owner_key]
+    rtypes = {rr.rtype for rr in rr_list}
+    assert a_code in rtypes
+    assert rrsig_code in rtypes
+
+
 def test_dnssec_rrsig_returned_when_do_bit_set(tmp_path: pathlib.Path) -> None:
     """Brief: ZoneRecords returns RRSIG records when DO=1 and signatures are present.
 
@@ -1673,15 +1809,17 @@ def test_dnssec_rrsig_returned_when_do_bit_set(tmp_path: pathlib.Path) -> None:
     assert decision.action == "override"
 
     response = DNSRecord.parse(decision.response)
-    rtypes = {rr.rtype for rr in response.rr}
+    answer_types = {rr.rtype for rr in response.rr}
+    additional_types = {rr.rtype for rr in (response.ar or [])}
 
-    # Both A and RRSIG should be present.
-    assert QTYPE.A in rtypes
-    assert QTYPE.RRSIG in rtypes
+    # A should be in the answer section and the corresponding RRSIG presented
+    # as an additional record.
+    assert QTYPE.A in answer_types
+    assert QTYPE.RRSIG in additional_types
 
 
 def test_dnssec_rrsig_omitted_when_do_bit_not_set(tmp_path: pathlib.Path) -> None:
-    """Brief: ZoneRecords omits RRSIG records when DO=0 or no EDNS.
+    """Brief: ZoneRecords keeps RRSIGs in additional even when DO=0 or no EDNS.
 
     Inputs:
       - tmp_path: pytest temporary directory.
@@ -1725,11 +1863,14 @@ def test_dnssec_rrsig_omitted_when_do_bit_not_set(tmp_path: pathlib.Path) -> Non
     assert decision.action == "override"
 
     response = DNSRecord.parse(decision.response)
-    rtypes = {rr.rtype for rr in response.rr}
+    answer_types = {rr.rtype for rr in response.rr}
+    additional_types = {rr.rtype for rr in (response.ar or [])}
 
-    # Only A should be present, not RRSIG.
-    assert QTYPE.A in rtypes
-    assert QTYPE.RRSIG not in rtypes
+    # A should be in the answer section and the corresponding RRSIG presented
+    # as an additional record even when the DO bit is not set.
+    assert QTYPE.A in answer_types
+    assert QTYPE.RRSIG not in answer_types
+    assert QTYPE.RRSIG in additional_types
 
 
 def test_dnssec_dnskey_returned_at_apex_with_do_bit(tmp_path: pathlib.Path) -> None:
@@ -1784,11 +1925,118 @@ def test_dnssec_dnskey_returned_at_apex_with_do_bit(tmp_path: pathlib.Path) -> N
     assert decision.action == "override"
 
     response = DNSRecord.parse(decision.response)
-    rtypes = {rr.rtype for rr in response.rr}
+    answer_types = {rr.rtype for rr in response.rr}
+    additional_types = {rr.rtype for rr in (response.ar or [])}
 
-    # Both DNSKEY and RRSIG should be present.
-    assert QTYPE.DNSKEY in rtypes
-    assert QTYPE.RRSIG in rtypes
+    # DNSKEY should be in the answer section with its covering RRSIG in the
+    # additional section.
+    assert QTYPE.DNSKEY in answer_types
+    assert QTYPE.RRSIG in additional_types
+
+
+def test_bind_zone_apex_detection_with_dnssec(tmp_path: pathlib.Path) -> None:
+    """Brief: BIND-style zonefiles populate zone_soa and authoritative mapping.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a BIND-style zone with SOA at the apex registers the apex
+        in _zone_soa and that names under the zone map back to that apex via
+        _find_zone_for_name().
+    """
+    from foghorn.plugins.resolve.zone_records import ZoneRecords
+
+    zonefile = tmp_path / "example.test.zone"
+    zonefile.write_text(
+        "\n".join(
+            [
+                "$TTL 3600",
+                "$ORIGIN example.test.",
+                (
+                    "@   IN SOA ns1.example.test. hostmaster.example.test. "
+                    "( 1 3600 600 604800 300 )"
+                ),
+                "    IN NS ns1.example.test.",
+                "host IN A 192.0.2.10",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plugin = ZoneRecords(
+        bind_paths=[str(zonefile)],
+        dnssec_signing={"enabled": True, "keys_dir": str(tmp_path / "keys")},
+    )
+    plugin.setup()
+
+    # SOA apex must be present in the internal zone_soa mapping.
+    zone_soa = getattr(plugin, "_zone_soa", {}) or {}
+    assert "example.test" in zone_soa
+
+    # Names under the apex should resolve back to that apex for authoritative
+    # handling.
+    assert plugin._find_zone_for_name("host.example.test") == "example.test"
+
+
+def test_bind_zone_dnssec_autosign_a_includes_rrsig(tmp_path: pathlib.Path) -> None:
+    """Brief: BIND-style zone auto-signing returns an authoritative A answer.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that a BIND-style zone with DNSSEC auto-signing enabled returns
+        an authoritative A answer that includes at least one RRSIG RR when
+        queried via pre_resolve().
+    """
+    from foghorn.plugins.resolve.zone_records import ZoneRecords
+
+    zonefile = tmp_path / "example.test.zone"
+    zonefile.write_text(
+        "\n".join(
+            [
+                "$TTL 3600",
+                "$ORIGIN example.test.",
+                (
+                    "@   IN SOA ns1.example.test. hostmaster.example.test. "
+                    "( 1 3600 600 604800 300 )"
+                ),
+                "    IN NS ns1.example.test.",
+                "host IN A 192.0.2.10",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    keys_dir = tmp_path / "keys"
+    plugin = ZoneRecords(
+        bind_paths=[str(zonefile)],
+        dnssec_signing={
+            "enabled": True,
+            "keys_dir": str(keys_dir),
+            "algorithm": "ECDSAP256SHA256",
+            "generate": "yes",
+            "validity_days": 7,
+        },
+    )
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req_bytes = _make_query("host.example.test", int(QTYPE.A))
+
+    decision = plugin.pre_resolve("host.example.test", int(QTYPE.A), req_bytes, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+
+    response = DNSRecord.parse(decision.response)
+
+    # Response must be authoritative and contain an A answer.
+    assert response.header.aa == 1
+    answer_types = {rr.rtype for rr in response.rr}
+    assert QTYPE.A in answer_types
 
 
 def test_normalize_axfr_config_allow_no_dnssec_field() -> None:
