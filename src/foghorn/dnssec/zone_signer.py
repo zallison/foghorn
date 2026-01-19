@@ -201,18 +201,33 @@ def sign_zone(
       - None; zone is mutated with DNSKEY and RRSIG records added.
     """
 
-    apex_node = zone.find_node(zone_name, create=True)
-    dnskey_rrset = dns.rrset.RRset(zone_name, dns.rdataclass.IN, dns.rdatatype.DNSKEY)
+    # Use the zone's own origin as the canonical apex and ensure all owner
+    # names are absolute before passing them into dnspython's signing helpers.
+    origin = getattr(zone, "origin", None) or zone_name
+    if not origin.is_absolute():  # Defensive: normal zones store absolute origins.
+        origin = origin.derelativize(dns.name.root)
+
+    apex_node = zone.find_node(origin, create=True)
+    dnskey_rrset = dns.rrset.RRset(origin, dns.rdataclass.IN, dns.rdatatype.DNSKEY)
     dnskey_rrset.add(ksk_dnskey)
     dnskey_rrset.add(zsk_dnskey)
     apex_node.replace_rdataset(dnskey_rrset)
 
     for name, node in zone.items():
+        # Normalise owner name to an absolute dns.name.Name to avoid
+        # "relative RR name without an origin specified" errors from dnspython
+        # when constructing RRsets for signing.
+        owner = name
+        if not isinstance(owner, dns.name.Name):
+            owner = dns.name.from_text(str(owner))
+        if not owner.is_absolute():
+            owner = owner.derelativize(origin)
+
         for rdataset in node:
             if rdataset.rdtype == dns.rdatatype.RRSIG:
                 continue
 
-            rrset = dns.rrset.from_rdata_list(name, rdataset.ttl, list(rdataset))
+            rrset = dns.rrset.from_rdata_list(owner, rdataset.ttl, list(rdataset))
 
             if rdataset.rdtype == dns.rdatatype.DNSKEY:
                 signing_key = ksk_private
@@ -225,7 +240,7 @@ def sign_zone(
                 rrsig = dns.dnssec.sign(
                     rrset,
                     signing_key,
-                    signer=zone_name,
+                    signer=origin,
                     dnskey=dnskey_rdata,
                     inception=inception,
                     expiration=expiration,
@@ -241,7 +256,7 @@ def sign_zone(
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning(
                     "Failed to sign %s %s: %s",
-                    name,
+                    owner,
                     dns.rdatatype.to_text(rdataset.rdtype),
                     exc,
                 )
