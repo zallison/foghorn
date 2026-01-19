@@ -205,6 +205,10 @@ Clients without DO=1 receive only the base RRsets without signatures.
 - Zone apex SOA records are tracked separately for SOA queries and are used to
   build proper NOERROR/NODATA and NXDOMAIN authority sections for names inside
   authoritative zones.
+- A and AAAA RRsets automatically synthesize reverse PTR records whose
+  owners follow `ipaddress.ip_address(...).reverse_pointer` semantics and
+  whose targets point back to the forward owner name. Explicit PTR records
+  retain precedence: they define the TTL and are not overwritten.
 - Zone transfers (AXFR/IXFR) are fetched via the optional `axfr_zones` config at
   startup; subsequent reloads only use local files and inline records.
 - When a zone apex carries an SOA record (from any source), ZoneRecords marks

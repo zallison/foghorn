@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.3] - 2026-01-19
+
+> Release notes for changes between **v0.6.2** and **v0.6.3**.
+
+### Added
+
+- Added configurable DNSSEC signing for zones via a new `ZoneDnssecSigningConfig` block, including algorithm selection, keys directory, enable/disable flag, and validity controls.
+- Introduced enhanced DNSSEC-aware behavior in the `resolve.zone_records` plugin, including precomputed mappings for RRsets and RRSIGs and DO-bit-aware responses.
+- Added automatic PTR record generation from A/AAAA records in `resolve.zone_records` when configured.
+- Added an `sshfp_scan` helper script and `ssh_keyscan` utility module for generating SSHFP records from remote hosts.
+
+### Changed
+
+- Updated the DNSSEC zone signer helper to normalize zone origins, ensure apex nodes exist, and consistently construct DNSKEY and RRSIG RRsets for signed zones.
+- Refined `resolve.zone_records` DNSSEC handling so RRSIG and DNSKEY data is surfaced only when appropriate and existing behavior is preserved when DNSSEC helpers are unavailable.
+
+### Tests
+
+- Extended `tests/plugins/test_zone_records.py` to cover DNSSEC mappings, DO-bit behavior, SOA synthesis for SSHFP-only zones, and automatic PTR generation.
+- Added tests for the new `sshfp_scan` script and `ssh_keyscan` utility under `tests/scripts`, validating SSHFP output and error handling.
+
+### Documentation
+
+- Updated Makefile documentation to match current targets and DNSSEC/tooling helpers.
+- Refreshed `zone_records` plugin documentation to describe DNSSEC, PTR auto-generation, and SSHFP interactions.
+- Updated Pihole and RFC-style documentation to reflect the new DNSSEC tooling and behavior.
+
 ## [0.6.2] - 2026-01-17
 
 > Release notes for changes between **v0.6.1** and **v0.6.2**.

@@ -17,16 +17,18 @@ Every Foghorn configuration begins with:
 Minimal configuration:
 
 ```yaml
-listen:
-  udp:
-	enabled: true
-	host: 0.0.0.0
-	port: 5335
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 0.0.0.0
+      port: 5335
 
 upstreams:
-  - host: 8.8.8.8
-	port: 53
-	transport: udp
+  endpoints:
+    - host: 8.8.8.8
+      port: 53
+      transport: udp
 ```
 
 ### What this does
@@ -35,7 +37,7 @@ Foghorn listens on UDP port `5335` and forwards all DNS queries to Google DNS.
 
 ```
 +--------+    +-----------+    +------------+
-| Client | →  | UDP :5335 | -> | 8.8.8.8:53 |
+| Client | →  | UDP :5335 | →  | 8.8.8.8:53 |
 +--------+    +-----------+    +------------+
 ```
 
@@ -72,14 +74,15 @@ Example configuration:
 
 ```yaml
 plugins:
-  - module: file_downloader
-	config:
-	  setup_priority: 10 # Run early so files are available for other plugins
-	  download_path: ./config/var/lists
-	  urls:
-		- https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
-	  interval_days: 1
-	  hash_filenames: true
+  - type: file_downloader
+    hooks:
+      setup: { priority: 10 }  # Run early so files are available for other plugins
+    config:
+      download_path: ./config/var/lists
+      urls:
+        - https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
+      interval_days: 1
+      hash_filenames: true
 ```
 
 ### What this does
@@ -104,20 +107,20 @@ Example configuration:
 
 ```yaml
 plugins:
-  - module: filter
-	config:
-	  # N.B. This could all just be "priority: 20"
-	  setup_priority: 20 # Load after the files have been downloaded
-	  pre_priority: 20   # Run early, before any other lookups happen
-	  post_priority: 20  # Run early in post-resolve to deny/modify responses
-	  default: allow
-	  deny_response: nxdomain
-	  blocked_domains_files:
-		./config/var/lists/* # Globs supported
-		# If using hashed filenames:
-		# - ./config/var/lists/hosts-....-.txt
-		# If not using hashed filenames:
-		# - ./config/var/lists/hosts.txt
+  - type: filter
+    hooks:
+      setup:        { priority: 20 }  # Load after the files have been downloaded
+      pre_resolve:  { priority: 20 }  # Run early, before any other lookups happen
+      post_resolve: { priority: 20 }  # Run early in post-resolve to deny/modify responses
+    config:
+      default: allow
+      deny_response: nxdomain
+      blocked_domains_files:
+        - ./config/var/lists/*  # Globs supported
+        # If using hashed filenames:
+        # - ./config/var/lists/hosts-....-.txt
+        # If not using hashed filenames:
+        # - ./config/var/lists/hosts.txt
 ```
 
 ### What this does
@@ -151,11 +154,13 @@ Example configuration:
 
 ```yaml
 plugins:
-  - module: etc-hosts
-	config: # Default values below
-	  file_paths:
-		- /etc/hosts
-	  ttl: 300
+  - type: etc_hosts
+    hooks:
+      pre_resolve: { priority: 10 }  # Resolve local names first
+    config:  # Default values below
+      file_paths:
+        - /etc/hosts
+      ttl: 300
 ```
 
 ### What this does
@@ -183,43 +188,48 @@ The following configuration combines downloading blocklists, local hosts, and
 filtering behavior.
 
 ```yaml
-listen:
-  udp:
-	enabled: true
-	host: 0.0.0.0
-	port: 53
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 0.0.0.0
+      port: 53
 
 upstreams:
-  - host: 1.1.1.1
-	port: 53
-	transport: udp
+  endpoints:
+    - host: 1.1.1.1
+      port: 53
+      transport: udp
 
 plugins:
-  - module: file_downloader
-	config:
-	  setup_priority: 10
-	  download_path: ./config/var/lists
-	  urls:
-		- https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
-	  interval_days: 1
-	  hash_filenames: true
+  - type: file_downloader
+    hooks:
+      setup: { priority: 10 }
+    config:
+      download_path: ./config/var/lists
+      urls:
+        - https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
+      interval_days: 1
+      hash_filenames: true
 
-  - module: etc-hosts
-	config:
-	  pre_priority: 10 # Resolve local names first
-	  file_paths:
-		- /etc/hosts
-	  ttl: 300
+  - type: etc_hosts
+    hooks:
+      pre_resolve: { priority: 10 }  # Resolve local names first
+    config:
+      file_paths:
+        - /etc/hosts
+      ttl: 300
 
-  - module: filter
-	config:
-	  setup_priority: 20
-	  pre_priority: 20
-	  post_priority: 20
-	  default: allow
-	  deny_response: nxdomain
-	  blocked_domains_files:
-		- ./config/var/lists/hosts-*
+  - type: filter
+    hooks:
+      setup:        { priority: 20 }
+      pre_resolve:  { priority: 20 }
+      post_resolve: { priority: 20 }
+    config:
+      default: allow
+      deny_response: nxdomain
+      blocked_domains_files:
+        - ./config/var/lists/hosts-*
 ```
 
 ---
@@ -250,12 +260,12 @@ For static internal DNS zones, use the `ZoneRecords` plugin.
 Example configuration:
 
 ```yaml
-plugins: # priorites defaults to 100 (out of 255),
-  - module: zone
-	config:
-	  file_paths:
-		- ./config/var/zone-records.txt
-	  ttl: 300
+plugins:  # priorities default to 100 (out of 255)
+  - type: zone
+    config:
+      file_paths:
+        - ./config/var/zone-records.txt
+      ttl: 300
 ```
 
 Example `./config/var/zone-records.txt` entries:
@@ -289,14 +299,14 @@ Example configuration:
 
 ```yaml
 plugins:
-  - module: docker-hosts
-	config:
-	  # Optional: append a suffix so container "web" becomes "web.docker.local".
-	  suffix: docker.lan
-	  endpoints:
-		- url: unix:///var/run/docker.sock
-		  reload_interval_second: 30
-	  ttl: 300
+  - type: docker_hosts
+    config:
+      # Optional: append a suffix so container "web" becomes "web.docker.local".
+      suffix: docker.lan
+      endpoints:
+        - url: unix:///var/run/docker.sock
+          reload_interval_second: 30
+      ttl: 300
 ```
 
 ### What this does
