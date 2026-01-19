@@ -1698,7 +1698,7 @@ class ZoneRecords(BasePlugin):
                 return None
 
             reply = DNSRecord(
-                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=1), q=request.q
             )
             owner = str(request.q.qname).rstrip(".") + "."
 
@@ -1737,7 +1737,7 @@ class ZoneRecords(BasePlugin):
 
         owner = str(request.q.qname).rstrip(".") + "."
         reply = DNSRecord(
-            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=1), q=request.q
         )
 
         rrsets = name_index.get(name, {})
