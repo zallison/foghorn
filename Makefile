@@ -63,7 +63,7 @@ vars-print-all: vars-make vars-docker vars-ssl vars-python
 # Print a variable by name: make var-print-FOO
 .PHONY: var-print-%
 var-print-%:
-	@echo "- $* is a $(flavor $*) var set to [$($*)]"
+	@printf "%-15s= %s\n" "$*" "$($*)"
 
 # Header sections
 .PHONY: vars-header-%
