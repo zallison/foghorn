@@ -1295,7 +1295,20 @@ class ZoneRecords(BasePlugin):
 
                     for owner_name, node_obj in zone_obj.items():
                         try:
-                            owner_norm = owner_name.to_text().rstrip(".").lower()
+                            # Normalise owner names to absolute DNS names before
+                            # deriving the internal key so that apex records are
+                            # stored under the real zone apex (e.g. "zaa")
+                            # rather than BIND-style relative forms such as
+                            # "@". This ensures later lookups using the
+                            # authoritative apex string can find DNSKEY/RRSIG
+                            # RRsets correctly.
+                            if isinstance(owner_name, _dns_name.Name):
+                                owner_abs = owner_name
+                            else:
+                                owner_abs = _dns_name.from_text(str(owner_name))
+                            if not owner_abs.is_absolute():
+                                owner_abs = owner_abs.derelativize(origin)
+                            owner_norm = owner_abs.to_text().rstrip(".").lower()
                         except Exception:  # pragma: no cover - defensive
                             owner_norm = str(owner_name).rstrip(".").lower()
 
