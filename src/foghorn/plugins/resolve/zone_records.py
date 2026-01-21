@@ -1353,8 +1353,8 @@ class ZoneRecords(BasePlugin):
         # Build a helper mapping that groups RRsets by qtype and owner name
         # and, when RRSIGs exist for a particular RRset, associates the RRSIG
         # records with the covered qtype. This is used at query time to build
-        # answer sections and attach the corresponding RRSIGs as additional
-        # records without having to re-parse textual representations.
+        # answer sections and attach the corresponding RRSIGs alongside their
+        # covered RRsets without having to re-parse textual representations.
         try:
             try:
                 rrsig_code_idx = int(QTYPE.RRSIG)
