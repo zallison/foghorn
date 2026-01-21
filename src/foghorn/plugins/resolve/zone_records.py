@@ -1361,8 +1361,11 @@ class ZoneRecords(BasePlugin):
             except Exception:  # pragma: no cover - defensive
                 rrsig_code_idx = 46
 
-            # First, index RRSIG rdata by (owner, covered_type).
-            rrsig_cover: Dict[Tuple[str, int], List[Tuple[int, str]]] = {}
+            # First, index RRSIG rdata by (owner, covered_type). We only track
+            # the presentation text here; the TTL for signatures is derived from
+            # the covered RRset's TTL when we build the per-qtype mapping so
+            # that RRSIG TTLs match their RRset, defaulting to 300 when needed.
+            rrsig_cover: Dict[Tuple[str, int], List[str]] = {}
             for (owner_name_idx, qcode_idx), (ttl_idx, vals_idx) in mapping.items():
                 if int(qcode_idx) != int(rrsig_code_idx):
                     continue
@@ -1393,7 +1396,7 @@ class ZoneRecords(BasePlugin):
                         continue
                     key_idx = (owner_norm_idx, covered_code)
                     bucket = rrsig_cover.setdefault(key_idx, [])
-                    bucket.append((int(ttl_idx), str(v_idx)))
+                    bucket.append(str(v_idx))
 
             # Next, pre-build dnslib.RR objects for each (qtype, owner) pair,
             # appending any matching RRSIGs for the covered type. The resulting
@@ -1421,10 +1424,13 @@ class ZoneRecords(BasePlugin):
                         continue
                     rr_list.extend(built)
 
-                # Attach any RRSIGs that cover this RRset, if present.
+                # Attach any RRSIGs that cover this RRset, if present. Use the
+                # same TTL as the covered RRset (ttl_idx), falling back to 300
+                # when the stored TTL is zero or missing.
                 sig_entries = rrsig_cover.get((owner_norm_idx, qcode_int), [])
-                for ttl_sig, v_sig in sig_entries:
-                    zone_line_sig = f"{owner_norm_idx}. {int(ttl_sig)} IN RRSIG {v_sig}"
+                for v_sig in sig_entries:
+                    ttl_sig = int(ttl_idx) or 300
+                    zone_line_sig = f"{owner_norm_idx}. {ttl_sig} IN RRSIG {v_sig}"
                     try:
                         built_sig = RR.fromZone(zone_line_sig)
                     except Exception:  # pragma: no cover - defensive
