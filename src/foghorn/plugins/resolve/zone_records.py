@@ -1631,8 +1631,8 @@ class ZoneRecords(BasePlugin):
         zone_apex = self._find_zone_for_name(name)
 
         # Helper to build RRs from a single RRset, preferring the pre-built
-        # self.mapping index when available so that RRSIGs can be attached as
-        # additional records alongside their covered RRsets.
+        # self.mapping index when available so that RRSIGs can be attached
+        # alongside their covered RRsets.
         def _add_rrset(
             reply: DNSRecord,
             owner_name: str,
@@ -1653,21 +1653,11 @@ class ZoneRecords(BasePlugin):
                 by_name = mapping_by_qtype.get(int(rr_qtype), {}) or {}
                 rrs = by_name.get(owner_key)
                 if rrs:
-                    try:
-                        try:
-                            rrsig_code_loc = int(QTYPE.RRSIG)
-                        except Exception:  # pragma: no cover - defensive
-                            rrsig_code_loc = 46
-                    except Exception:  # pragma: no cover - defensive
-                        rrsig_code_loc = 46
-
                     for rr in list(rrs):
-                        rtype = int(getattr(rr, "rtype", 0) or 0)
-                        if rtype == int(rrsig_code_loc):
-                            # Attach signatures as additional records.
-                            reply.add_ar(rr)
-                        else:
-                            reply.add_answer(rr)
+                        # Return both the covered RRset and any associated RRSIGs
+                        # in the ANSWER section so responses resemble typical
+                        # authoritative DNSSEC behaviour.
+                        reply.add_answer(rr)
                         added_any = True
 
             if added_any:
