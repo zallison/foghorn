@@ -101,12 +101,21 @@ def save_key(
 
     Outputs:
       - Path to saved key file.
+
+    Notes:
+      - New-style filenames are `domainkey_<apex>.<key_type>.key` where
+        `<apex>` is the zone name with trailing dot removed and dots
+        replaced by underscores.
+      - Older releases used a `K<apex>.<key_type>.key` pattern; keys written
+        by those versions are still loaded via ``load_key`` for backwards
+        compatibility but new keys are written with the `domainkey_` prefix.
     """
 
     key_dir.mkdir(parents=True, exist_ok=True)
     sanitized_zone = _sanitize_zone_name(zone_name)
-    key_path = key_dir / f"K{sanitized_zone}.{key_type}.key"
-    meta_path = key_dir / f"K{sanitized_zone}.{key_type}.meta.json"
+    base_name = f"domainkey_{sanitized_zone}"
+    key_path = key_dir / f"{base_name}.{key_type}.key"
+    meta_path = key_dir / f"{base_name}.{key_type}.meta.json"
 
     pem_bytes = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
@@ -138,12 +147,24 @@ def load_key(key_dir: Path, zone_name: str, key_type: str) -> Optional[object]:
 
     Outputs:
       - Private key object if found, None otherwise.
+
+    Notes:
+      - Prefer new-style `domainkey_<apex>.<key_type>.key` filenames but
+        fall back to the legacy `K<apex>.<key_type>.key` pattern when the
+        new-style file is not present, so existing key directories created
+        by older releases remain usable.
     """
 
     sanitized_zone = _sanitize_zone_name(zone_name)
-    key_path = key_dir / f"K{sanitized_zone}.{key_type}.key"
+    primary_base = f"domainkey_{sanitized_zone}"
+    legacy_base = f"K{sanitized_zone}"
+
+    key_path = key_dir / f"{primary_base}.{key_type}.key"
     if not key_path.exists():
-        return None
+        legacy_path = key_dir / f"{legacy_base}.{key_type}.key"
+        if not legacy_path.exists():
+            return None
+        key_path = legacy_path
 
     pem_bytes = key_path.read_bytes()
     try:
