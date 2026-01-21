@@ -979,31 +979,30 @@ class ZoneRecords(BasePlugin):
                 continue
             _process_line(text, "inline-config-records", lineno)
 
-        # If no SOA records were explicitly defined but we have SSHFP RRsets,
-        # attempt to infer a reasonable zone apex from SSHFP owner names and
+        # If no SOA records were explicitly defined but we have at least one
+        # RRset, attempt to infer a reasonable zone apex from owner names and
         # synthesize a minimal SOA there. This makes it easier to use
-        # ZoneRecords for small SSHFP-only zones without hand-writing SOA
-        # records, while still enabling DNSSEC auto-signing and authoritative
-        # behaviour.
+        # ZoneRecords for small zones without hand-writing SOA records, while
+        # still enabling DNSSEC auto-signing and authoritative behaviour.
         if not zone_soa:
             try:
-                try:
-                    sshfp_code = int(QTYPE.SSHFP)
-                except Exception:  # pragma: no cover - defensive
-                    sshfp_code = None
+                # Prefer SSHFP owner names when present (historical behaviour);
+                # otherwise fall back to all non-SOA owner names.
+                candidate_names: List[str] = []
 
-                sshfp_names: List[str] = []
-                if sshfp_code is not None:
-                    for (owner_name, qcode), (_ttl_val, _vals) in mapping.items():
-                        if int(qcode) == int(sshfp_code):
-                            sshfp_names.append(str(owner_name))
+                for (owner_name, qcode), (_ttl_val, _vals) in mapping.items():
+                    # Skip any explicit SOA owner; those already define an
+                    # authoritative apex when present.
+                    if soa_code is not None and int(qcode) == int(soa_code):
+                        continue
+                    candidate_names.append(str(owner_name))
 
-                if sshfp_names:
-                    # Compute a common suffix across SSHFP owner names and use
-                    # that as the synthesized apex when it has at least two
+                if candidate_names:
+                    # Compute a common suffix across candidate owner names and
+                    # use that as the synthesized apex when it has at least two
                     # labels (to avoid creating an apex like "com").
                     label_lists = [
-                        str(n).rstrip(".").lower().split(".") for n in sshfp_names
+                        str(n).rstrip(".").lower().split(".") for n in candidate_names
                     ]
                     common_suffix_rev: List[str] = list(reversed(label_lists[0]))
                     for labels in label_lists[1:]:
@@ -1029,7 +1028,7 @@ class ZoneRecords(BasePlugin):
                     if len(common_suffix_rev) >= 2:
                         accept_suffix = True
                     elif len(common_suffix_rev) == 1:
-                        # For single-label suffixes (e.g. "zaa", "corp"), only
+                        # For single-label suffixes (e.g. ".lan", ".corp"), only
                         # accept them as an apex when explicitly configured via
                         # dnssec_signing.use_tld so operators can opt in to
                         # private TLD-style zones.
@@ -1072,7 +1071,7 @@ class ZoneRecords(BasePlugin):
                             _process_line(synthetic_line, "auto-soa", 0)
             except Exception:  # pragma: no cover - defensive logging only
                 logger.warning(
-                    "ZoneRecords: failed to synthesize SOA for SSHFP-only zone",
+                    "ZoneRecords: failed to synthesize SOA for inferred zone apex",
                     exc_info=True,
                 )
 
