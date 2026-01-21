@@ -1670,6 +1670,35 @@ class ZoneRecords(BasePlugin):
             owner_key = str(owner_name).rstrip(".").lower()
             added_any = False
 
+            # Determine the numeric RRSIG type code once so we can reliably
+            # distinguish signature RRs from their covered RRsets when adding
+            # them to the reply sections.
+            try:
+                rrsig_code_local = int(QTYPE.RRSIG)
+            except Exception:  # pragma: no cover - defensive
+                rrsig_code_local = 46
+
+            def _add_rr_to_reply(rr: RR) -> None:
+                """Route DNSSEC signatures to the additional section.
+
+                Inputs:
+                  - rr: Fully constructed dnslib.RR instance.
+
+                Outputs:
+                  - None; mutates ``reply`` in-place by appending either to the
+                    answer or additional section.
+                """
+
+                try:
+                    rr_type_int = int(getattr(rr, "rtype", 0))
+                except Exception:  # pragma: no cover - defensive
+                    rr_type_int = 0
+
+                if rr_type_int == rrsig_code_local:
+                    reply.add_ar(rr)
+                else:
+                    reply.add_answer(rr)
+
             # Prefer the helper mapping constructed at load time when present.
             try:
                 mapping_by_qtype = getattr(self, "mapping", None)
@@ -1681,7 +1710,7 @@ class ZoneRecords(BasePlugin):
                 rrs = by_name.get(owner_key)
                 if rrs:
                     for rr in list(rrs):
-                        reply.add_answer(rr)
+                        _add_rr_to_reply(rr)
                         added_any = True
 
             if added_any:
@@ -1702,7 +1731,7 @@ class ZoneRecords(BasePlugin):
                     )
                     continue
                 for rr in rrs:
-                    reply.add_answer(rr)
+                    _add_rr_to_reply(rr)
                     added_any = True
             return added_any
 
