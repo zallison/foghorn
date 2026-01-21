@@ -200,7 +200,9 @@ class ZoneRecordsConfig(BaseModel):
     dnssec_signing: Optional[ZoneDnssecSigningConfig] = None
 
     class Config:
-        extra = "forbid"
+        # Allow BasePlugin-level options (targets, targets_domains, logging, etc.)
+        # to flow through this typed config model without validation errors.
+        extra = "allow"
 
 
 @plugin_aliases("zone", "zone_records", "custom", "records")
