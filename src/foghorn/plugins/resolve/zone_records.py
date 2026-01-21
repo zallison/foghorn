@@ -1620,6 +1620,27 @@ class ZoneRecords(BasePlugin):
 
         qtype_int = int(qtype)
         type_name = QTYPE.get(qtype_int, str(qtype_int))
+
+        # Attach qname to the context so BasePlugin can enforce domain-level
+        # targeting (targets_domains/targets_domains_mode) via self.targets.
+        try:
+            if ctx is not None:
+                setattr(ctx, "qname", qname)
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+        # Honour BasePlugin client/listener/domain targeting. When no targets
+        # are configured, this is a cheap no-op and always returns True.
+        try:
+            if ctx is not None and not self.targets(ctx):
+                return None
+        except Exception:  # pragma: no cover - defensive
+            # If targeting evaluation fails for any reason, fall back to the
+            # historical behaviour of applying ZoneRecords globally.
+            logger.warning(
+                "ZoneRecords: targets() evaluation failed; applying globally",
+                exc_info=True,
+            )
         logger.debug("pre-resolve zone-records %s %s", name, type_name)
 
         # Safe concurrent read from mappings when a watcher may be reloading.
@@ -1660,9 +1681,6 @@ class ZoneRecords(BasePlugin):
                 rrs = by_name.get(owner_key)
                 if rrs:
                     for rr in list(rrs):
-                        # Return both the covered RRset and any associated RRSIGs
-                        # in the ANSWER section so responses resemble typical
-                        # authoritative DNSSEC behaviour.
                         reply.add_answer(rr)
                         added_any = True
 
