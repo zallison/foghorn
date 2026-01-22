@@ -250,12 +250,12 @@ Example plugin entry (YAML):
 
 ```yaml
 plugins:
-  - name: example-zones
-	plugin: zone_records
-	config:
-	  bind_paths:
-		- /etc/foghorn/zones/example.com.zone
-		- /etc/foghorn/zones/example.net.zone
+  - id: example-zones
+    type: zone_records
+    config:
+      bind_paths:
+        - /etc/foghorn/zones/example.com.zone
+        - /etc/foghorn/zones/example.net.zone
 
 	  # Optional: additional inline records in the custom pipe-delimited format
 	  records:
@@ -300,21 +300,21 @@ DoT example:
 
 ```yaml
 plugins:
-  - name: example-zones-dot
-	plugin: zone_records
-	config:
-	  axfr_zones:
-		- zone: example.com
-		  upstreams:
-			- host: 192.0.2.10
-			  port: 53
-			  transport: tcp
-			- host: 2001:db8::1
-			  port: 853
-			  transport: dot
-			  server_name: axfr.example.com
-			  verify: true
-			  ca_file: /etc/ssl/certs/ca-bundle.crt
+  - id: example-zones-dot
+    type: zone_records
+    config:
+      axfr_zones:
+        - zone: example.com
+          upstreams:
+            - host: 192.0.2.10
+              port: 53
+              transport: tcp
+            - host: 2001:db8::1
+              port: 853
+              transport: dot
+              server_name: axfr.example.com
+              verify: true
+              ca_file: /etc/ssl/certs/ca-bundle.crt
 ```
 
 ### 7.2 DNSSEC for Synthetic Zones

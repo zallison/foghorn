@@ -256,6 +256,18 @@ rebuilds the function's cache at startup so you can switch between
 configuration.
 - `server.dnssec`
   - Mode and DNSSEC validation knobs (e.g., UDP payload size).
+
+#### glibc, `trust-ad`, and the DNSSEC AD bit
+
+On Linux systems that use glibc, applications (including `ssh` when using SSHFP records) only see the DNSSEC AD bit when the resolver is explicitly configured to trust it. If you run Foghorn (or another validating resolver that honors the upstream AD bit) and want glibc clients to accept that AD as trustworthy, point `/etc/resolv.conf` at Foghorn and add `trust-ad` to the options line:
+
+```text
+nameserver 127.0.0.1
+options edns0 trust-ad
+```
+
+Without `trust-ad`, glibc clears the AD flag before handing answers to applications, so tools like OpenSSH will ignore SSHFP records even when Foghorn has validated them.
+
 - `server.enable_ede`
   - Optional toggle for RFC 8914 Extended DNS Errors; when true and the client advertises EDNS(0), Foghorn can attach EDE options to certain policy or upstream-failure responses and surface per-code stats in the admin UI.
 - `server.resolver`

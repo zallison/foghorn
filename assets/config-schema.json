@@ -1210,6 +1210,69 @@
               ],
               "title": "AxfrZoneConfig",
               "type": "object"
+            },
+            "ZoneDnssecSigningConfig": {
+              "additionalProperties": false,
+              "description": "Brief: DNSSEC auto-signing configuration for ZoneRecords.\n\nInputs:\n  - enabled: Enable automatic DNSSEC signing for authoritative zones.\n  - keys_dir: Optional base directory for per-zone key files.\n  - algorithm: DNSSEC algorithm name (e.g. \"ECDSAP256SHA256\").\n  - generate: Key generation policy (\"yes\", \"no\", or \"maybe\").\n  - validity_days: Signature validity window in days.\n  - use_tld: Optional single-label TLD (e.g. \"zaa\", \"corp\") to treat as\n    an inferred apex for SSHFP-only zones when synthesizing SOA records.\n\nOutputs:\n  - Parsed ZoneDnssecSigningConfig instance used by the config schema.",
+              "properties": {
+                "algorithm": {
+                  "default": "ECDSAP256SHA256",
+                  "description": "DNSSEC algorithm name (e.g. 'ECDSAP256SHA256', 'RSASHA256'). Default: \"ECDSAP256SHA256\".",
+                  "title": "Algorithm",
+                  "type": "string"
+                },
+                "enabled": {
+                  "default": false,
+                  "description": "Enable automatic DNSSEC signing for authoritative zones. Default: false.",
+                  "title": "Enabled",
+                  "type": "boolean"
+                },
+                "generate": {
+                  "default": "maybe",
+                  "description": "Key generation policy: 'yes' (always new), 'no' (never), 'maybe' (generate when missing). Default: \"maybe\".",
+                  "title": "Generate",
+                  "type": "string"
+                },
+                "keys_dir": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Directory to read/write DNSSEC keys; defaults to the working directory when omitted.",
+                  "title": "Keys Dir"
+                },
+                "use_tld": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional single-label TLD (e.g. 'zaa', 'corp') that ZoneRecords may treat as an inferred zone apex when synthesizing SOA records for SSHFP-only data.",
+                  "title": "Use Tld"
+                },
+                "validity_days": {
+                  "default": 30,
+                  "description": "Signature validity window in days. Default: 30.",
+                  "minimum": 1,
+                  "title": "Validity Days",
+                  "type": "integer"
+                }
+              },
+              "title": "ZoneDnssecSigningConfig",
+              "type": "object"
             }
           },
           "additionalProperties": false,
@@ -1249,6 +1312,18 @@
               ],
               "default": null,
               "title": "Bind Paths"
+            },
+            "dnssec_signing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ZoneDnssecSigningConfig"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null
             },
             "file_paths": {
               "anyOf": [
