@@ -92,9 +92,9 @@ www IN  A   192.0.2.2
     # Check that RRSIG records are present.
     assert "RRSIG" in signed_content, "RRSIG not found in signed zone"
 
-    # Check that key files were created.
-    ksk_key = keys_dir / "Kexample_test.ksk.key"
-    zsk_key = keys_dir / "Kexample_test.zsk.key"
+    # Check that key files were created with the new domainkey_<apex> pattern.
+    ksk_key = keys_dir / "domainkey_example_test.ksk.key"
+    zsk_key = keys_dir / "domainkey_example_test.zsk.key"
     assert ksk_key.exists(), "KSK key file not created"
     assert zsk_key.exists(), "ZSK key file not created"
 

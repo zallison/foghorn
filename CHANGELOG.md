@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.3] - 2026-01-19
+
+> Release notes for changes between **v0.6.2** and **v0.6.3**.
+
+### Added
+
+- Added configurable DNSSEC signing for zones via a new `ZoneDnssecSigningConfig` block, including algorithm selection, keys directory, enable/disable flag, and validity controls.
+- Introduced enhanced DNSSEC-aware behavior in the `resolve.zone_records` plugin, including precomputed mappings for RRsets and RRSIGs and DO-bit-aware responses.
+- Added automatic PTR record generation from A/AAAA records in `resolve.zone_records` when configured.
+- Added an `sshfp_scan` helper script and `ssh_keyscan` utility module for generating SSHFP records from remote hosts.
+- Marked authoritative responses from `resolve.zone_records` as authenticated (AD=1) when they come from signed zones, so DNSSEC-aware stub resolvers and tools like OpenSSH (when combined with `trust-ad`) can rely on them.
+
+### Changed
+
+- Updated the DNSSEC zone signer helper to normalize zone origins, ensure apex nodes exist, and consistently construct DNSKEY and RRSIG RRsets for signed zones.
+- Refined `resolve.zone_records` DNSSEC handling so RRSIG and DNSKEY data is surfaced only when appropriate and existing behavior is preserved when DNSSEC helpers are unavailable.
+- Improved `resolve.zone_records` DNSSEC answer construction so that, where possible, RRSIGs are attached directly alongside their covered RRsets in the ANSWER section with sensible TTLs.
+
+### Fixed
+
+- Allowed BasePlugin-level options such as `targets`, `targets_domains`, and per-plugin `logging` to flow through the typed `ZoneRecordsConfig` by relaxing its `extra` handling, fixing validation failures for common configs.
+- Fixed SOA synthesis and apex inference for SSHFP-only or partial zones so that `resolve.zone_records` can infer a reasonable zone apex and behave authoritatively (including DNSSEC auto-signing) even when no explicit SOA is present.
+- Normalized DNSSEC owner names for apex DNSKEY/RRSIG RRsets so that signed material is stored under the real zone apex instead of BIND-style `@` owners, ensuring later lookups can find and serve DNSSEC data correctly.
+- Corrected `resolve.zone_records` DNSSEC answer paths so RRSIG records for A/SSHFP and other RRsets are returned in the ANSWER section alongside their covered records and inherit the RRset TTL by default.
+- Updated `resolve.zone_records.pre_resolve` to honor BasePlugin client, listener, and domain targeting helpers (`targets`, `targets_listener`, and `targets_domains`), so zone data is only applied to matching queries.
+
+### Tests
+
+- Extended `tests/plugins/test_zone_records.py` to cover DNSSEC mappings, DO-bit behavior, SOA synthesis, automatic PTR generation, and the new targeting/normalization behaviors.
+- Added tests for the new `sshfp_scan` script and `ssh_keyscan` utility under `tests/scripts`, validating SSHFP output and error handling.
+
+### Documentation
+
+- Updated Makefile documentation to match current targets and DNSSEC/tooling helpers.
+- Refreshed `zone_records` plugin documentation to describe DNSSEC, PTR auto-generation, targeting, and SSHFP interactions.
+- Updated Pihole and RFC-style documentation to reflect the new DNSSEC tooling and behavior.
+- Documented glibc `trust-ad` behavior in `README.md`, including how to configure `/etc/resolv.conf` so glibc-based applications such as OpenSSH can accept the AD bit from a validating Foghorn instance.
+
 ## [0.6.2] - 2026-01-17
 
 > Release notes for changes between **v0.6.1** and **v0.6.2**.
