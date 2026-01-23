@@ -1666,6 +1666,7 @@ class ZoneRecords(BasePlugin):
             rr_qtype: int,
             ttl: int,
             values: List[str],
+            include_dnssec: bool,
         ) -> bool:
             owner_key = str(owner_name).rstrip(".").lower()
             added_any = False
@@ -1679,14 +1680,15 @@ class ZoneRecords(BasePlugin):
                 rrsig_code_local = 46
 
             def _add_rr_to_reply(rr: RR) -> None:
-                """Route DNSSEC signatures to the additional section.
+                """Append RR to the answer section, optionally filtering RRSIGs.
 
                 Inputs:
                   - rr: Fully constructed dnslib.RR instance.
 
                 Outputs:
-                  - None; mutates ``reply`` in-place by appending either to the
-                    answer or additional section.
+                  - None; mutates ``reply`` in-place by appending to the answer
+                  section. RRSIGs are suppressed entirely when DNSSEC is not
+                  requested via the DO bit.
                 """
 
                 try:
@@ -1694,10 +1696,15 @@ class ZoneRecords(BasePlugin):
                 except Exception:  # pragma: no cover - defensive
                     rr_type_int = 0
 
-                if rr_type_int == rrsig_code_local:
-                    reply.add_ar(rr)
-                else:
-                    reply.add_answer(rr)
+                # When the client has not requested DNSSEC (DO=0) and the RR is
+                # an RRSIG, suppress the signature entirely in order to comply
+                # with RFC 4035 section 3.2. We still honour explicit DNSSEC
+                # queries (for example, QTYPE=RRSIG) by passing
+                # include_dnssec=True from the call site in those cases.
+                if rr_type_int == rrsig_code_local and not include_dnssec:
+                    return
+
+                reply.add_answer(rr)
 
             # Prefer the helper mapping constructed at load time when present.
             try:
@@ -1754,12 +1761,24 @@ class ZoneRecords(BasePlugin):
                 logger.warning("ZoneRecords parse failure: %s", e)
                 return None
 
+            # Honour the client's EDNS(0) DO bit even on the non-authoritative
+            # path so that RRSIG and other DNSSEC-only material are suppressed
+            # when DNSSEC is not requested.
+            want_dnssec_legacy = self._client_wants_dnssec(request)
+
             reply = DNSRecord(
                 DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=1), q=request.q
             )
             owner = str(request.q.qname).rstrip(".") + "."
 
-            added = _add_rrset(reply, owner, qtype_int, ttl, list(values))
+            added = _add_rrset(
+                reply,
+                owner,
+                qtype_int,
+                ttl,
+                list(values),
+                include_dnssec=want_dnssec_legacy or False,
+            )
             if not added:
                 return None
 
@@ -1776,11 +1795,10 @@ class ZoneRecords(BasePlugin):
         want_dnssec = self._client_wants_dnssec(request)
 
         # When ZoneRecords DNSSEC auto-signing is enabled for authoritative
-        # zones, treat DNSSEC material (RRSIG/DNSKEY) as always desired so that
-        # A/AAAA and other answers include their covering signatures even when
-        # stub resolvers do not explicitly set the DO bit. Keep track of this as
-        # a separate flag so that legacy behaviour (RRSIGs only when DO=1) is
-        # preserved for zones that are merely pre-signed via inline records.
+        # zones, we still honour the client's DO bit. Auto-signing controls how
+        # zone data is generated, not whether DNSSEC RRs are sent on the wire;
+        # RFC 4035 requires that DNSSEC RRs (for example, RRSIG/NSEC) are only
+        # included when the client explicitly requests DNSSEC.
         dnssec_signing_enabled = False
         try:
             dnssec_cfg = (
@@ -1788,7 +1806,6 @@ class ZoneRecords(BasePlugin):
             )
             if isinstance(dnssec_cfg, dict) and dnssec_cfg.get("enabled"):
                 dnssec_signing_enabled = True
-                want_dnssec = True
         except Exception:  # pragma: no cover - defensive: config inspection only
             dnssec_signing_enabled = False
 
@@ -1796,6 +1813,8 @@ class ZoneRecords(BasePlugin):
         reply = DNSRecord(
             DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=1), q=request.q
         )
+
+        want_dnssec = want_dnssec and dnssec_signing_enabled
 
         rrsets = name_index.get(name, {})
         cname_code = int(QTYPE.CNAME)
@@ -1805,6 +1824,48 @@ class ZoneRecords(BasePlugin):
             dnskey_code = int(QTYPE.DNSKEY)
         except Exception:  # pragma: no cover - defensive
             dnskey_code = 48
+
+        def _is_dnssec_rrtype(code: int) -> bool:
+            """Return True when *code* represents a DNSSEC-related RR type.
+
+            This helper is intentionally conservative: it recognises a core set
+            of DNSSEC RR types (DNSKEY, RRSIG, NSEC, NSEC3, NSEC3PARAM, DS) and
+            falls back to well-known numeric codes when the dnslib QTYPE
+            attributes are not available.
+            """
+
+            try:
+                c = int(code)
+            except Exception:  # pragma: no cover - defensive
+                return False
+
+            codes: List[int] = []
+            try:
+                codes.append(int(QTYPE.DNSKEY))
+            except Exception:  # pragma: no cover - defensive
+                codes.append(48)
+            try:
+                codes.append(int(QTYPE.RRSIG))
+            except Exception:  # pragma: no cover - defensive
+                codes.append(46)
+            try:
+                codes.append(int(QTYPE.NSEC))
+            except Exception:  # pragma: no cover - defensive
+                codes.append(47)
+            try:
+                codes.append(int(QTYPE.NSEC3))
+            except Exception:  # pragma: no cover - defensive
+                codes.append(50)
+            try:
+                codes.append(int(QTYPE.NSEC3PARAM))
+            except Exception:  # pragma: no cover - defensive
+                codes.append(51)
+            try:
+                codes.append(int(QTYPE.DS))
+            except Exception:  # pragma: no cover - defensive
+                codes.append(43)
+
+            return c in set(codes)
 
         def _add_dnssec_rrsets(
             reply: DNSRecord,
@@ -1837,7 +1898,14 @@ class ZoneRecords(BasePlugin):
                 apex_rrsets = name_index.get(zone_apex_name, {})
                 if dnskey_code in apex_rrsets:
                     ttl_dk, vals_dk = apex_rrsets[dnskey_code]
-                    _add_rrset(reply, owner_name, dnskey_code, ttl_dk, list(vals_dk))
+                    _add_rrset(
+                        reply,
+                        owner_name,
+                        dnskey_code,
+                        ttl_dk,
+                        list(vals_dk),
+                        include_dnssec=True,
+                    )
 
         # CNAME at owner name: always answer with CNAME regardless of qtype.
         if cname_code in rrsets:
@@ -1851,7 +1919,14 @@ class ZoneRecords(BasePlugin):
                     zone_apex,
                     name,
                 )
-            added = _add_rrset(reply, owner, cname_code, ttl_cname, list(cname_values))
+            added = _add_rrset(
+                reply,
+                owner,
+                cname_code,
+                ttl_cname,
+                list(cname_values),
+                include_dnssec=want_dnssec,
+            )
             if not added:
                 return None
             # When client wants DNSSEC, add RRSIG for the CNAME.
@@ -1865,7 +1940,20 @@ class ZoneRecords(BasePlugin):
             if qtype_int == int(QTYPE.ANY):
                 added_any = False
                 for rr_qtype, (ttl_rr, values_rr) in rrsets.items():
-                    if _add_rrset(reply, owner, rr_qtype, ttl_rr, list(values_rr)):
+                    # For QTYPE=ANY with DO=0, suppress DNSSEC-only RR types
+                    # (RRSIG, NSEC, DNSKEY, etc.) to honour RFC 4035. When the
+                    # client has explicitly requested DNSSEC via the DO bit we
+                    # include them normally.
+                    if not want_dnssec and _is_dnssec_rrtype(rr_qtype):
+                        continue
+                    if _add_rrset(
+                        reply,
+                        owner,
+                        rr_qtype,
+                        ttl_rr,
+                        list(values_rr),
+                        include_dnssec=want_dnssec,
+                    ):
                         added_any = True
                 if not added_any:
                     return None
@@ -1876,22 +1964,25 @@ class ZoneRecords(BasePlugin):
 
             if qtype_int in rrsets:
                 ttl_rr, values_rr = rrsets[qtype_int]
-                if not _add_rrset(reply, owner, qtype_int, ttl_rr, list(values_rr)):
+                # For DNSSEC RR types queried directly (for example,
+                # QTYPE=DNSKEY/RRSIG/NSEC), always allow signatures to be
+                # returned regardless of DO so that explicit DNSSEC queries are
+                # satisfied. For all other types, include_dnssec follows the
+                # client's DO bit.
+                include_dnssec = want_dnssec or _is_dnssec_rrtype(qtype_int)
+                if not _add_rrset(
+                    reply,
+                    owner,
+                    qtype_int,
+                    ttl_rr,
+                    list(values_rr),
+                    include_dnssec=include_dnssec,
+                ):
                     return None
-                # For A answers in zones that this plugin has auto-signed via
-                # dnssec_signing, always attach covering RRSIGs/DNSKEY when
-                # available so that zonefiles behave like signed authoritative
-                # zones even when stub resolvers do not explicitly request
-                # DNSSEC. For other qtypes, or when dnssec_signing is not
-                # enabled, we continue to honour the client's DO/"want DNSSEC"
-                # preference to preserve existing behaviour.
-                try:
-                    a_code = int(QTYPE.A)
-                except Exception:  # pragma: no cover - defensive
-                    a_code = 1
-                if qtype_int == a_code and dnssec_signing_enabled:
-                    _add_dnssec_rrsets(reply, owner, rrsets, zone_apex)
-                elif want_dnssec:
+                # When DNSSEC is requested (DO=1) or the zone has been
+                # auto-signed and the client has explicitly asked for DNSSEC,
+                # attach DNSKEY/RRSIG RRsets for the owner as appropriate.
+                if want_dnssec:
                     _add_dnssec_rrsets(reply, owner, rrsets, zone_apex)
                 return PluginDecision(action="override", response=reply.pack())
 
