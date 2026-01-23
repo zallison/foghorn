@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import List, Tuple
 
 import pytest
-from dnslib import DNSRecord, EDNS0, EDNSOption, QTYPE, RCODE
+from dnslib import DNSRecord, EDNS0, EDNSOption, OPCODE, QTYPE, RCODE
 
 import foghorn.servers.server as srv
 
@@ -347,3 +347,189 @@ def test_dnssec_bogus_attaches_dnssec_ede(monkeypatch):
     code, text = edes[0]
     assert code == 6
     assert "bogus" in text.lower() or "dnssec" in text.lower()
+
+
+def _make_notify_query(name: str = "notify.example") -> DNSRecord:
+    """Brief: Build a NOTIFY opcode query with EDNS(0) enabled.
+
+    Inputs:
+      - name: Zone name used in the SOA-style question.
+
+    Outputs:
+      - DNSRecord representing a NOTIFY for the given name.
+    """
+
+    q = _make_edns_query(name, "SOA")
+    # Switch opcode from QUERY to NOTIFY so the core resolver takes the
+    # notification path while preserving the rest of the question.
+    q.header.opcode = OPCODE.NOTIFY
+    return q
+
+
+def test_notify_over_udp_is_refused_with_ede() -> None:
+    """Brief: UDP NOTIFY queries are refused with a Not Supported EDE when enabled.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts REFUSED and EDE code 22 for EDNS clients on UDP listener.
+    """
+
+    _setup_shared(enable_ede=True)
+    q = _make_notify_query("notify-udp.example")
+
+    result = srv._resolve_core(q.pack(), "192.0.2.10", listener="udp")
+    resp = DNSRecord.parse(result.wire)
+
+    assert resp.header.rcode == RCODE.REFUSED
+    edes = _extract_ede_options(resp)
+    assert edes, "expected at least one EDE option on UDP NOTIFY"
+    code, text = edes[0]
+    assert code == 22
+    assert "notify" in text.lower()
+
+
+def test_notify_unknown_sender_over_tcp_is_refused_with_ede() -> None:
+    """Brief: Non-UDP NOTIFY from an unknown sender is refused with a Blocked EDE.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts REFUSED and EDE code 15 for EDNS clients on non-UDP listeners.
+    """
+
+    _setup_shared(enable_ede=True)
+    # Configure a different upstream host so the sender IP does not match.
+    srv.DNSUDPHandler.upstream_addrs = [{"host": "192.0.2.200", "port": 53}]
+
+    q = _make_notify_query("notify-unknown.example")
+
+    result = srv._resolve_core(q.pack(), "192.0.2.10", listener="tcp")
+    resp = DNSRecord.parse(result.wire)
+
+    assert resp.header.rcode == RCODE.REFUSED
+    edes = _extract_ede_options(resp)
+    assert edes, "expected at least one EDE option on unknown-sender NOTIFY"
+    code, text = edes[0]
+    assert code == 15
+    assert "upstream" in text.lower() or "notify" in text.lower()
+
+
+def test_notify_known_sender_logs_and_acks_noerror(caplog) -> None:
+    """Brief: Non-UDP NOTIFY from a configured upstream is logged and acknowledged.
+
+    Inputs:
+      - caplog: Pytest logging capture fixture.
+
+    Outputs:
+      - Asserts NOERROR response and a critical log mentioning NOTIFY.
+    """
+
+    _setup_shared(enable_ede=False)
+    # Sender IP matches configured upstream host directly.
+    sender_ip = "198.51.100.5"
+    srv.DNSUDPHandler.upstream_addrs = [{"host": sender_ip, "port": 53}]
+
+    # Clear any prior LRU cache entries so upstream mapping reflects this config.
+    resolver = getattr(srv, "_resolve_notify_sender_upstream", None)
+    if resolver is not None and hasattr(resolver, "cache_clear"):
+        resolver.cache_clear()
+
+    q = _make_notify_query("notify-known.example")
+
+    with caplog.at_level("CRITICAL", logger="foghorn.server"):
+        result = srv._resolve_core(q.pack(), sender_ip, listener="tcp")
+
+    resp = DNSRecord.parse(result.wire)
+    assert resp.header.rcode == RCODE.NOERROR
+
+    messages = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "NOTIFY" in messages or "notify" in messages
+
+
+def test_notify_known_sender_triggers_axfr_refresh(monkeypatch, tmp_path) -> None:
+    """Brief: Non-UDP NOTIFY from a configured upstream triggers AXFR refresh.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture used to stub AXFR and threading.
+      - tmp_path: Pytest temporary directory used for a minimal records file.
+
+    Outputs:
+      - Asserts that an AXFR-backed ZoneRecords plugin performs a new AXFR
+        transfer when a matching NOTIFY is received from a configured upstream.
+    """
+
+    _setup_shared(enable_ede=False)
+
+    # Seed a simple file-backed record so ZoneRecords.setup() succeeds.
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("seed.test|A|300|192.0.2.10\n", encoding="utf-8")
+
+    # Prepare a ZoneRecords plugin with a single AXFR-backed zone whose masters
+    # include the NOTIFY sender IP.
+    import foghorn.plugins.resolve.zone_records as mod
+
+    ZoneRecords = mod.ZoneRecords
+
+    calls = {"axfr": 0}
+
+    def fake_axfr_transfer(host, port, zone, **kwargs):  # noqa: ANN001,ARG001
+        """Inputs: host/port/zone/kwargs. Outputs: minimal synthetic AXFR RRset."""
+
+        from dnslib import A as _A, RR as _RR
+
+        calls["axfr"] += 1
+        return [_RR("host.%s." % zone, QTYPE.A, rdata=_A("203.0.113.5"), ttl=123)]
+
+    monkeypatch.setattr(mod, "axfr_transfer", fake_axfr_transfer)
+
+    sender_ip = "198.51.100.5"
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        axfr_zones=[
+            {
+                "zone": "notify-known.example",
+                "upstreams": [{"host": sender_ip, "port": 53}],
+            }
+        ],
+    )
+    plugin.setup()
+
+    # Initial setup performs one AXFR.
+    assert calls["axfr"] == 1
+
+    # Wire the plugin into DNSUDPHandler so NOTIFY handling can find it.
+    srv.DNSUDPHandler.plugins = [plugin]
+    srv.DNSUDPHandler.upstream_addrs = [{"host": sender_ip, "port": 53}]
+
+    # Ensure NOTIFY sender resolution uses the current upstream config.
+    resolver = getattr(srv, "_resolve_notify_sender_upstream", None)
+    if resolver is not None and hasattr(resolver, "cache_clear"):
+        resolver.cache_clear()
+
+    # Make background AXFR refresh deterministic by replacing Thread with a stub
+    # that runs the target synchronously when start() is called.
+    class _ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None):  # noqa: D401,ANN001
+            """Inputs: target/name/daemon. Outputs: thread-like stub."""
+
+            self._target = target
+
+        def start(self) -> None:  # noqa: D401
+            """Inputs: None. Outputs: immediately runs the target callable."""
+
+            if callable(self._target):
+                self._target()
+
+    monkeypatch.setattr(srv.threading, "Thread", _ImmediateThread)
+
+    q = _make_notify_query("notify-known.example")
+    result = srv._resolve_core(q.pack(), sender_ip, listener="tcp")
+
+    resp = DNSRecord.parse(result.wire)
+    assert resp.header.rcode == RCODE.NOERROR
+
+    # AXFR should have been invoked again by the NOTIFY handler.
+    assert calls["axfr"] >= 2

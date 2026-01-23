@@ -1797,7 +1797,11 @@ def test_dnssec_rrsig_returned_when_do_bit_set(tmp_path: pathlib.Path) -> None:
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    keys_dir = tmp_path / "keys"
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        dnssec_signing={"enabled": True, "keys_dir": str(keys_dir)},
+    )
     plugin.setup()
 
     ctx = PluginContext(client_ip="127.0.0.1")
@@ -1810,22 +1814,21 @@ def test_dnssec_rrsig_returned_when_do_bit_set(tmp_path: pathlib.Path) -> None:
 
     response = DNSRecord.parse(decision.response)
     answer_types = {rr.rtype for rr in response.rr}
-    additional_types = {rr.rtype for rr in (response.ar or [])}
 
     # A should be in the answer section and the corresponding RRSIG presented
     # as an additional record.
     assert QTYPE.A in answer_types
-    assert QTYPE.RRSIG in additional_types
+    assert QTYPE.RRSIG in answer_types
 
 
 def test_dnssec_rrsig_omitted_when_do_bit_not_set(tmp_path: pathlib.Path) -> None:
-    """Brief: ZoneRecords keeps RRSIGs in additional even when DO=0 or no EDNS.
+    """Brief: ZoneRecords omits RRSIGs when DO=0 or no EDNS.
 
     Inputs:
       - tmp_path: pytest temporary directory.
 
     Outputs:
-      - Asserts that a query without DO=1 returns only A records, not RRSIG.
+      - Asserts that a query without DO=1 returns only A records and no RRSIG.
     """
     records_file = tmp_path / "signed.txt"
     records_file.write_text(
@@ -1866,11 +1869,11 @@ def test_dnssec_rrsig_omitted_when_do_bit_not_set(tmp_path: pathlib.Path) -> Non
     answer_types = {rr.rtype for rr in response.rr}
     additional_types = {rr.rtype for rr in (response.ar or [])}
 
-    # A should be in the answer section and the corresponding RRSIG presented
-    # as an additional record even when the DO bit is not set.
+    # A should be in the answer section and no RRSIG records returned when the
+    # DO bit is not set.
     assert QTYPE.A in answer_types
     assert QTYPE.RRSIG not in answer_types
-    assert QTYPE.RRSIG in additional_types
+    assert QTYPE.RRSIG not in additional_types
 
 
 def test_dnssec_dnskey_returned_at_apex_with_do_bit(tmp_path: pathlib.Path) -> None:
@@ -1926,12 +1929,11 @@ def test_dnssec_dnskey_returned_at_apex_with_do_bit(tmp_path: pathlib.Path) -> N
 
     response = DNSRecord.parse(decision.response)
     answer_types = {rr.rtype for rr in response.rr}
-    additional_types = {rr.rtype for rr in (response.ar or [])}
 
     # DNSKEY should be in the answer section with its covering RRSIG in the
     # additional section.
     assert QTYPE.DNSKEY in answer_types
-    assert QTYPE.RRSIG in additional_types
+    assert QTYPE.RRSIG in answer_types
 
 
 def test_bind_zone_apex_detection_with_dnssec(tmp_path: pathlib.Path) -> None:

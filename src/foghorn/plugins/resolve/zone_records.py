@@ -296,6 +296,13 @@ class ZoneRecords(BasePlugin):
         self.records: Dict[Tuple[str, int], Tuple[int, List[str]]] = {}
         self._observer = None
 
+        # Optional background AXFR polling state; initialised when
+        # _start_axfr_polling() finds at least one zone with
+        # poll_interval_seconds > 0.
+        self._axfr_poll_stop = None
+        self._axfr_poll_thread = None
+        self._axfr_poll_interval = 0.0
+
         # Watchdog reload debouncing: avoid tight reload loops when a single
         # change event causes additional filesystem notifications (e.g. from
         # our own reload reads).
@@ -340,10 +347,17 @@ class ZoneRecords(BasePlugin):
         # _reload_records_from_watchdog.
         if self._poll_interval > 0.0:
             logger.warning(
-                "ZoneRecords Watchdog falling back to polling every {self._poll_interval}"
+                "ZoneRecords Watchdog falling back to polling every %s",
+                self._poll_interval,
             )
             self._poll_stop = threading.Event()
             self._start_polling()
+
+        # Optional periodic AXFR polling for configured axfr_zones entries that
+        # specify poll_interval_seconds > 0. This uses the minimum positive
+        # interval across all zones and reuses _load_records() so that AXFR
+        # overlays, inline records, and file/BIND-backed data stay consistent.
+        self._start_axfr_polling()
 
     def _normalize_paths(
         self, file_paths: Optional[Iterable[str]], legacy: Optional[str]
@@ -433,6 +447,21 @@ class ZoneRecords(BasePlugin):
             if masters_val is None and "masters" in entry:
                 masters_val = entry.get("masters")
 
+            # Optional per-zone polling interval (seconds). When > 0, a
+            # background AXFR poller periodically re-runs transfers for all
+            # configured zones using the minimum positive interval across
+            # axfr_zones entries.
+            poll_interval_val = entry.get("poll_interval_seconds")
+            poll_interval: Optional[int]
+            try:
+                poll_interval = (
+                    int(poll_interval_val) if poll_interval_val is not None else None
+                )
+            except (TypeError, ValueError):
+                poll_interval = None
+            if poll_interval is not None and poll_interval <= 0:
+                poll_interval = None
+
             zone_text = (
                 str(zone_val).rstrip(".").lower() if zone_val is not None else ""
             )
@@ -519,13 +548,15 @@ class ZoneRecords(BasePlugin):
             else:
                 allow_no_dnssec = bool(allow_no_dnssec_val)
 
-            zones.append(
-                {
-                    "zone": zone_text,
-                    "upstreams": upstreams,
-                    "allow_no_dnssec": allow_no_dnssec,
-                }
-            )
+            zone_cfg: Dict[str, object] = {
+                "zone": zone_text,
+                "upstreams": upstreams,
+                "allow_no_dnssec": allow_no_dnssec,
+            }
+            if poll_interval is not None:
+                zone_cfg["poll_interval_seconds"] = int(poll_interval)
+
+            zones.append(zone_cfg)
 
         return zones
 
@@ -1814,7 +1845,17 @@ class ZoneRecords(BasePlugin):
             DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=1), q=request.q
         )
 
-        want_dnssec = want_dnssec and dnssec_signing_enabled
+        # Only include DNSSEC RRs when both of the following are true:
+        #   - The client explicitly requested DNSSEC via the EDNS(0) DO bit
+        #     (want_dnssec=True).
+        #   - DNSSEC auto-signing is enabled for this plugin instance
+        #     (dnssec_signing.enabled=True), meaning the zone data is expected
+        #     to carry correct signatures and keys.
+        #
+        # Pre-computed DNSSEC material from files/BIND zones remains loaded into
+        # the internal mappings, but is only sent to clients when this combined
+        # condition is satisfied.
+        want_dnssec = bool(want_dnssec and dnssec_signing_enabled)
 
         rrsets = name_index.get(name, {})
         cname_code = int(QTYPE.CNAME)
@@ -2180,6 +2221,84 @@ class ZoneRecords(BasePlugin):
             # Wait with wakeup on stop event or timeout.
             stop_event.wait(interval)
 
+    def _start_axfr_polling(self) -> None:
+        """Brief: Start a background thread to periodically refresh AXFR zones.
+
+        Inputs:
+          - None (uses self._axfr_zones and optional poll_interval_seconds in
+            their configuration).
+
+        Outputs:
+          - None; when at least one axfr_zones entry has poll_interval_seconds
+            > 0, spawns a daemon thread that re-runs AXFR at the minimum
+            configured interval.
+        """
+
+        zones = getattr(self, "_axfr_zones", None) or []
+        min_interval: Optional[int] = None
+        for z in zones:
+            try:
+                raw = z.get("poll_interval_seconds", 0)  # type: ignore[assignment]
+            except Exception:  # pragma: no cover - defensive
+                raw = 0
+            try:
+                interval = int(raw or 0)
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                interval = 0
+            if interval > 0 and (min_interval is None or interval < min_interval):
+                min_interval = interval
+
+        if not min_interval:
+            return
+
+        try:
+            self._axfr_poll_interval = float(min_interval)
+        except Exception:  # pragma: no cover - defensive
+            self._axfr_poll_interval = float(min_interval or 0)
+        stop_event = threading.Event()
+        self._axfr_poll_stop = stop_event
+
+        def _loop() -> None:
+            """Brief: Background loop that periodically re-runs AXFR transfers.
+
+            Inputs:
+              - None (closes over self and _axfr_poll_* attributes).
+
+            Outputs:
+              - None; exits when the stop event is set.
+            """
+
+            interval = float(getattr(self, "_axfr_poll_interval", 0.0) or 0.0)
+            if interval <= 0.0:
+                return
+            ev = getattr(self, "_axfr_poll_stop", None)
+            if ev is None:
+                return
+
+            # Initial AXFR has already been performed during setup() via
+            # _load_records(); wait for the first full interval before polling
+            # again so we do not immediately trigger a second transfer.
+            while not ev.wait(interval):
+                try:
+                    logger.info(
+                        "ZoneRecords AXFR: polling all configured axfr_zones (interval=%ss)",
+                        interval,
+                    )
+                    # Allow AXFR-backed zones to run again on the next
+                    # _load_records() call.
+                    setattr(self, "_axfr_loaded_once", False)
+                    self._load_records()
+                except Exception:  # pragma: no cover - defensive logging only
+                    logger.warning(
+                        "ZoneRecords AXFR: error during scheduled AXFR poll",
+                        exc_info=True,
+                    )
+
+        thread = threading.Thread(target=_loop, name="ZoneRecordsAxfrPoller")
+        thread.daemon = True
+        self._axfr_poll_thread = thread
+        thread.start()
+
     def _have_files_changed(self) -> bool:
         """Brief: Detect whether any configured records files have changed on disk.
 
@@ -2341,6 +2460,22 @@ class ZoneRecords(BasePlugin):
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
             self._poll_thread = None
+
+        # Stop AXFR polling loop, if configured.
+        axfr_stop = getattr(self, "_axfr_poll_stop", None)
+        if axfr_stop is not None:
+            try:
+                axfr_stop.set()
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        axfr_thread = getattr(self, "_axfr_poll_thread", None)
+        if axfr_thread is not None:
+            try:
+                axfr_thread.join(timeout=2.0)
+            except Exception:  # pragma: no cover - defensive
+                pass
+            self._axfr_poll_thread = None
 
         # Cancel any outstanding deferred reload timer so it does not fire
         # after resources have been torn down.
