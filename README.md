@@ -1309,7 +1309,8 @@ logging:
   async: true
   backends:
 	- id: pg_primary
-	  backend: postgr   - id: pg_reporting
+	  backend: postgr
+	- id: pg_reporting
 	  backend: postgres
 	  config:
 		  host: pg-reporting.internal
@@ -1330,16 +1331,18 @@ stats:
 plugins:
   - type: acl
 	id: lan-only
+	hooks:
+	  pre_resolve: { priority: 10 }
 	config:
-	  pre_priority: 10
 	  default: deny
 	  allow:
 		- ${LAN}
 
   - type: docker
 	id: lan-docker
+	hooks:
+	  pre_resolve: { priority: 20 }
 	config:
-	  pre_priority: 20
 	  targets: ${LAN}
 	  endpoints:
 		- url: unix:///var/run/docker.sock
@@ -1347,13 +1350,15 @@ plugins:
 
   - type: mdns
 	id: enterprise-mdns
-	config:
-	  pre_priority: 30
+	hooks:
+	  pre_resolve: { priority: 30 }
 	  domain: 'devices.lan'
 	  ttl: 120
 
   - type: zone
 	id: zone-1-office
+	hooks:
+	  pre_resolve: { priority: 40 }
 	config:
 	  pre_priority: 40
 	  targets: ${OFFICE}
@@ -1362,16 +1367,19 @@ plugins:
 
   - type: zone
 	id: zone-2-remote
+	hooks:
+	  pre_resolve:
+		priority: 41
 	config:
-	  pre_priority: 41
 	  targets: ${OFFICE_REMOTE}
 	  file_paths:
 		- ./config/zones.d/zone-2.zone
 
   - type: router
 	id: corp-router
+	hooks:
+	  pre_resolve: { priority: 60 }
 	config:
-	  pre_priority: 60
 	  routes:
 		- suffix: corp.example
 		  upstreams:
@@ -1380,8 +1388,9 @@ plugins:
 
   - type: filter
 	id: global-filter
+	hooks:
+	  pre_resolve: { priority: 80 }
 	config:
-	  pre_priority: 80
 	  default: allow
 	  blocked_domains_files:
 		- ./config/var/lists/global_block.txt
