@@ -42,7 +42,7 @@ SERVER_PEM ?= ${SERVER}.pem
 ## Python
 #########
 # Build the project: create a venv, install the package in editable mode
-# Name of the virtual‑env directory
+# Name of the virtual-env directory
 VENV ?= ./venv
 
 ## END VARIABLES
@@ -162,7 +162,7 @@ test: $(VENV)/bin/foghorn env-dev
 .PHONY: clean
 clean:
 	@echo "=== Removing virtual environment and var directory ==="
-	rm -rf $(VENV) var build docker-build coverage.json schema.json dist 2> /dev/null
+	rm -rf $(VENV) var build docker-build coverage.json schema.json dist
 	@echo "=== Removing temporary files and byte‑code ==="
 # Delete __pycache__ directories
 	find . -type d -name "__pycache__" -exec rm -rf {} +;
