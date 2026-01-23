@@ -631,6 +631,68 @@ def _build_v2_root_schema(
     # upstream_host/upstream_doh defs from $defs.
     defs = base.setdefault("$defs", {})
 
+    # Ensure upstream_host definition exposes an optional notify block used for
+    # NOTIFY handling. This preserves any existing upstream_host shape and only
+    # augments its properties.
+    upstream_host_def = defs.get("upstream_host")
+    if isinstance(upstream_host_def, dict):
+        host_props = upstream_host_def.setdefault("properties", {})
+        if isinstance(host_props, dict):
+            notify_schema = {
+                "type": "object",
+                "additionalProperties": False,
+                "description": (
+                    "Optional NOTIFY policy for this upstream. allow_zones may "
+                    "be 'none', 'all', '*' or a list of zone suffixes (for "
+                    "example ['.lan', '.mycorp']). allow_hosts/block_hosts are "
+                    "optional hostname allow/block lists."
+                ),
+                "properties": {
+                    "allow_zones": {
+                        "oneOf": [
+                            {
+                                "type": "string",
+                                "enum": ["none", "all", "*"],
+                                "description": (
+                                    "String policy for accepted NOTIFY zones: "
+                                    "'none' to refuse all, 'all' or '*' to "
+                                    "accept all zones."
+                                ),
+                            },
+                            {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "Explicit list of zone names or suffixes "
+                                    "from which NOTIFY will be accepted."
+                                ),
+                            },
+                        ],
+                        "default": "all",
+                    },
+                    "allow_hosts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional list of hostnames that are allowed to "
+                            "send NOTIFY for this upstream."
+                        ),
+                    },
+                    "block_hosts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional list of hostnames whose NOTIFY messages "
+                            "should always be refused, even if otherwise "
+                            "allowed."
+                        ),
+                    },
+                },
+            }
+            # Only inject notify when not already present so repeated schema
+            # generation remains idempotent.
+            host_props.setdefault("notify", notify_schema)
+
     # Decorated cache overrides are modelled via a dedicated definition so that
     # both tooling and runtime helpers share the same canonical module+name
     # shape. Always override any existing definition to keep the schema in sync
