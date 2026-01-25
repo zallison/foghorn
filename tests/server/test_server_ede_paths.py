@@ -533,3 +533,104 @@ def test_notify_known_sender_triggers_axfr_refresh(monkeypatch, tmp_path) -> Non
 
     # AXFR should have been invoked again by the NOTIFY handler.
     assert calls["axfr"] >= 2
+
+
+def test_notify_sends_axfr_to_correct_upstream(monkeypatch, tmp_path) -> None:
+    """Brief: NOTIFY triggers AXFR to the upstream specified in zone config.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture used to capture AXFR calls.
+      - tmp_path: Pytest temporary directory used for a minimal records file.
+
+    Outputs:
+      - Asserts that axfr_transfer is called with the correct host, port, and
+        zone name as specified in the plugin's axfr_zones configuration.
+    """
+
+    _setup_shared(enable_ede=False)
+
+    # Seed a simple file-backed record so ZoneRecords.setup() succeeds.
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("seed.test|A|300|192.0.2.10\n", encoding="utf-8")
+
+    import foghorn.plugins.resolve.zone_records as mod
+
+    ZoneRecords = mod.ZoneRecords
+
+    # Capture all calls to axfr_transfer with their arguments.
+    axfr_calls: list = []
+
+    def fake_axfr_transfer(host, port, zone, **kwargs):  # noqa: ANN001
+        """Inputs: host/port/zone/kwargs. Outputs: minimal synthetic AXFR RRset."""
+
+        from dnslib import A as _A, RR as _RR
+
+        axfr_calls.append({"host": host, "port": port, "zone": zone, "kwargs": kwargs})
+        return [_RR("host.%s." % zone, QTYPE.A, rdata=_A("203.0.113.5"), ttl=123)]
+
+    monkeypatch.setattr(mod, "axfr_transfer", fake_axfr_transfer)
+
+    # Configure with a specific upstream host and port for AXFR.
+    axfr_host = "192.0.2.53"
+    axfr_port = 5353
+    zone_name = "notify-axfr.example"
+
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        axfr_zones=[
+            {
+                "zone": zone_name,
+                "upstreams": [{"host": axfr_host, "port": axfr_port}],
+            }
+        ],
+    )
+    plugin.setup()
+
+    # Initial setup performs one AXFR - verify it used the correct upstream.
+    assert len(axfr_calls) == 1
+    initial_call = axfr_calls[0]
+    assert initial_call["host"] == axfr_host
+    assert initial_call["port"] == axfr_port
+    assert initial_call["zone"] == zone_name.lower()
+
+    # Wire the plugin into DNSUDPHandler so NOTIFY handling can find it.
+    # The NOTIFY sender IP must match a configured upstream for authorization.
+    sender_ip = axfr_host
+    srv.DNSUDPHandler.plugins = [plugin]
+    srv.DNSUDPHandler.upstream_addrs = [{"host": sender_ip, "port": 53}]
+
+    # Ensure NOTIFY sender resolution uses the current upstream config.
+    resolver = getattr(srv, "_resolve_notify_sender_upstream", None)
+    if resolver is not None and hasattr(resolver, "cache_clear"):
+        resolver.cache_clear()
+
+    # Make background AXFR refresh deterministic.
+    class _ImmediateThread:
+        def __init__(self, target=None, name=None, daemon=None):  # noqa: D401,ANN001
+            """Inputs: target/name/daemon. Outputs: thread-like stub."""
+
+            self._target = target
+
+        def start(self) -> None:  # noqa: D401
+            """Inputs: None. Outputs: immediately runs the target callable."""
+
+            if callable(self._target):
+                self._target()
+
+    monkeypatch.setattr(srv.threading, "Thread", _ImmediateThread)
+
+    # Send NOTIFY for the zone.
+    q = _make_notify_query(zone_name)
+    result = srv._resolve_core(q.pack(), sender_ip, listener="tcp")
+
+    resp = DNSRecord.parse(result.wire)
+    assert resp.header.rcode == RCODE.NOERROR
+
+    # AXFR should have been invoked again by the NOTIFY handler.
+    assert len(axfr_calls) >= 2
+
+    # Verify the refresh AXFR used the correct upstream.
+    refresh_call = axfr_calls[-1]
+    assert refresh_call["host"] == axfr_host
+    assert refresh_call["port"] == axfr_port
+    assert refresh_call["zone"] == zone_name.lower()
