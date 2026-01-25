@@ -385,7 +385,9 @@ class ZoneRecords(BasePlugin):
         if legacy:
             # legacy is kept only for the internal API; external configs must use
             # file_paths and should never set legacy.
-            paths.append(os.path.expanduser(str(legacy)))
+            paths.append(
+                os.path.expanduser(str(legacy))
+            )  # pragma: nocover legacy single-path config behaviour
         if not paths:
             raise ValueError(f"No paths given {self.config}")
         # De-duplicate while preserving order
