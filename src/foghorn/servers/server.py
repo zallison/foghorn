@@ -1707,6 +1707,51 @@ def _resolve_core(
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
+        # Block forwarding of .local queries unless forward_local is True.
+        # RFC 6762 reserves .local for mDNS; forwarding to upstream resolvers
+        # can cause delays and incorrect answers.
+        forward_local = bool(getattr(DNSUDPHandler, "forward_local", False))
+        qname_lower = qname.lower()
+        if not forward_local and (
+            qname_lower.endswith(".local") or qname_lower == "local"
+        ):
+            r = req.reply()
+            r.header.rcode = RCODE.NXDOMAIN
+            _echo_client_edns(req, r)
+            _attach_ede_option(
+                req, r, 21, ".local not forwarded (RFC 6762)"
+            )  # Not Authoritative
+            wire = _set_response_id(r.pack(), req.header.id)
+            if stats is not None:
+                try:
+                    qtype_name = QTYPE.get(qtype, str(qtype))
+                    stats.record_response_rcode("NXDOMAIN", qname)
+                    stats.record_query_result(
+                        client_ip=client_ip,
+                        qname=qname,
+                        qtype=qtype_name,
+                        rcode="NXDOMAIN",
+                        upstream_id=None,
+                        status="local_blocked",
+                        error=None,
+                        first=None,
+                        result={"source": "local_blocked"},
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            if stats is not None and t0 is not None:
+                try:
+                    t1 = _time.perf_counter()
+                    stats.record_latency(t1 - t0)
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            return _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=None,
+                rcode_name="NXDOMAIN",
+            )
+
         reply: Optional[bytes] = None
         used_upstream: Optional[Dict] = None
         reason: Optional[str] = None
@@ -2349,6 +2394,7 @@ class DNSServer:
         cache_prefetch_refresh_before_expiry: float = 0.0,
         cache_prefetch_allow_stale_after_expiry: float = 0.0,
         enable_ede: bool = False,
+        forward_local: bool = False,
     ) -> None:
         """Initialize a UDP DNSServer.
 
@@ -2447,6 +2493,12 @@ class DNSServer:
             Exception
         ):  # pragma: nocover - defensive: invalid enable_ede config falls back to False
             DNSUDPHandler.enable_ede = False
+        try:
+            DNSUDPHandler.forward_local = bool(forward_local)
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: invalid forward_local config falls back to False
+            DNSUDPHandler.forward_local = False
         try:
             self.server = socketserver.ThreadingUDPServer(
                 (host, port), DNSUDPHandler

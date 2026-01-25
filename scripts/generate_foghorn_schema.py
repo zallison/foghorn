@@ -892,6 +892,14 @@ def _build_v2_root_schema(
                         "description": "Enable generation and pass-through of Extended DNS Errors (RFC 8914) for EDNS clients.",
                         "default": False,
                     },
+                    # RFC 6762 specifies that .local is reserved for mDNS. By
+                    # default Foghorn blocks forwarding .local queries to
+                    # upstream resolvers; set this to true to allow forwarding.
+                    "forward_local": {
+                        "type": "boolean",
+                        "description": "Allow forwarding .local queries to upstream resolvers. Default false blocks them per RFC 6762.",
+                        "default": False,
+                    },
                 },
             },
             "upstreams": upstreams_v2,
