@@ -334,3 +334,122 @@ def test_resolve_query_bytes_recursive_mode_uses_recursive_resolver(
 
     # Restore resolver_mode so other tests see default behaviour.
     DNSUDPHandler.resolver_mode = "forward"
+
+
+def test_forward_local_false_blocks_local_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: .local queries return NXDOMAIN when forward_local is false.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that .local queries return NXDOMAIN without contacting
+        upstreams when forward_local is false (the default).
+    """
+
+    # Track whether upstreams are contacted.
+    upstream_calls = {"n": 0}
+
+    def _fail_send(*_a, **_k):  # noqa: ANN001
+        upstream_calls["n"] += 1
+        raise AssertionError("send_query_with_failover should not be called")
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _fail_send)
+
+    DNSUDPHandler.plugins = []
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+    DNSUDPHandler.forward_local = False  # default
+
+    # Query for a .local name should be blocked.
+    q = DNSRecord.question("myhost.local.", "A")
+    resp = resolve_query_bytes(q.pack(), "127.0.0.1")
+    out = DNSRecord.parse(resp)
+    assert out.header.rcode == RCODE.NXDOMAIN
+    assert upstream_calls["n"] == 0
+
+    # Also test bare "local" TLD.
+    q2 = DNSRecord.question("local", "A")
+    resp2 = resolve_query_bytes(q2.pack(), "127.0.0.1")
+    out2 = DNSRecord.parse(resp2)
+    assert out2.header.rcode == RCODE.NXDOMAIN
+    assert upstream_calls["n"] == 0
+
+
+def test_forward_local_true_allows_local_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: .local queries are forwarded when forward_local is true.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that .local queries are forwarded to upstreams when
+        forward_local is true.
+    """
+
+    # Fake upstream response.
+    q = DNSRecord.question("myhost.local.", "A")
+    r_ok = q.reply()
+    r_ok.add_answer(RR("myhost.local.", QTYPE.A, rdata=A("192.168.1.1"), ttl=60))
+
+    upstream_calls = {"n": 0}
+
+    def _forward_ok(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+        upstream_calls["n"] += 1
+        return r_ok.pack(), {"host": "8.8.8.8", "port": 53}, "ok"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_ok)
+
+    DNSUDPHandler.plugins = []
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+    DNSUDPHandler.forward_local = True
+
+    resp = resolve_query_bytes(q.pack(), "127.0.0.1")
+    out = DNSRecord.parse(resp)
+    assert out.header.rcode == RCODE.NOERROR
+    assert upstream_calls["n"] == 1
+    assert any(rr.rdata == A("192.168.1.1") for rr in out.rr)
+
+    # Restore default.
+    DNSUDPHandler.forward_local = False
+
+
+def test_forward_local_blocking_does_not_affect_non_local_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: Non-.local queries are forwarded regardless of forward_local.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that .com queries are still forwarded when
+        forward_local is false.
+    """
+
+    q = DNSRecord.question("example.com.", "A")
+    r_ok = q.reply()
+    r_ok.add_answer(RR("example.com.", QTYPE.A, rdata=A("93.184.216.34"), ttl=60))
+
+    upstream_calls = {"n": 0}
+
+    def _forward_ok(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+        upstream_calls["n"] += 1
+        return r_ok.pack(), {"host": "8.8.8.8", "port": 53}, "ok"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_ok)
+
+    DNSUDPHandler.plugins = []
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+    DNSUDPHandler.forward_local = False
+
+    resp = resolve_query_bytes(q.pack(), "127.0.0.1")
+    out = DNSRecord.parse(resp)
+    assert out.header.rcode == RCODE.NOERROR
+    assert upstream_calls["n"] == 1
