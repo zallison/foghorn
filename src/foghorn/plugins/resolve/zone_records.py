@@ -194,6 +194,42 @@ class ZoneRecordsConfig(BaseModel):
     # Runtime normalization in _normalize_axfr_config() handles both typed
     # and untyped dict inputs for backwards compatibility.
     axfr_zones: Optional[List[AxfrZoneConfig]] = None
+    # Optional list of downstream servers that should receive DNS NOTIFY when
+    # ZoneRecords detects a zone refresh (for example, after AXFR overlays).
+    # Entries share the same shape as AxfrUpstreamConfig and support TCP and
+    # DNS-over-TLS (DoT) transports.
+    axfr_notify: Optional[List[AxfrUpstreamConfig]] = Field(
+        default=None,
+        description=(
+            "Optional list of NOTIFY recipients for AXFR-backed zones. Each "
+            "entry uses the same host/port/transport/server_name/verify/ca_file "
+            "shape as axfr_zones[].upstreams. Only 'tcp' and 'dot' transports "
+            "are supported for outbound NOTIFY."
+        ),
+    )
+    # When true, any client that performs an AXFR/IXFR transfer from this
+    # ZoneRecords instance is remembered as a NOTIFY target for its zone using
+    # its source IP and the default TCP port 53.
+    axfr_notify_all: bool = Field(
+        default=False,
+        description=(
+            "When true, automatically learn NOTIFY targets from AXFR/IXFR "
+            "clients by recording their source IPs as downstream secondaries."
+        ),
+    )
+    # Optional delay (in seconds) after an AXFR/IXFR transfer from a client
+    # before sending a NOTIFY back to that client. This can be used to "
+    # "periodically re-notify secondaries so they can verify they remain in "
+    # "sync even when upstream NOTIFYs are missed."
+    axfr_notify_scheduled: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Optional delay in seconds after serving AXFR/IXFR to a client "
+            "before sending a follow-up NOTIFY for the transferred zone. "
+            "Ignored when null or zero."
+        ),
+    )
     # Optional DNSSEC auto-signing configuration. When enabled, ZoneRecords
     # attempts to synthesize DNSKEY/RRSIG material for authoritative zones at
     # load time using foghorn.dnssec.zone_signer.
@@ -289,6 +325,27 @@ class ZoneRecords(BasePlugin):
         # reloads so watchdog and polling remain file-based.
         self._axfr_zones = self._normalize_axfr_config(axfr_cfg)
         self._axfr_loaded_once = False
+
+        # Outbound NOTIFY configuration and state for AXFR-backed zones and
+        # learned AXFR clients.
+        self._axfr_notify_static_targets = self._normalize_axfr_notify_targets(
+            self.config.get("axfr_notify")
+        )
+        self._axfr_notify_all = bool(self.config.get("axfr_notify_all", False))
+        notify_delay_raw = self.config.get("axfr_notify_scheduled")
+        try:
+            notify_delay = (
+                int(notify_delay_raw) if notify_delay_raw is not None else None
+            )
+        except (TypeError, ValueError):
+            notify_delay = None
+        if notify_delay is not None and notify_delay <= 0:
+            notify_delay = None
+        self._axfr_notify_delay = notify_delay
+        # Per-zone learned NOTIFY targets and per-target health tracking.
+        self._axfr_notify_learned: Dict[str, Dict[str, Dict[str, object]]] = {}
+        self._axfr_notify_health: Dict[str, Dict[str, object]] = {}
+        self._axfr_notify_lock = threading.RLock()
 
         # Internal synchronization and state
         self._records_lock = threading.RLock()
@@ -393,6 +450,128 @@ class ZoneRecords(BasePlugin):
         # De-duplicate while preserving order
         paths = list(dict.fromkeys(paths))
         return paths
+
+    def _normalize_axfr_notify_targets(self, raw: object) -> List[Dict[str, object]]:
+        """Brief: Normalize axfr_notify targets into upstream-like mappings.
+
+        Inputs:
+          - raw: Value from self.config.get("axfr_notify"). Expected to be a
+            list of mappings or AxfrUpstreamConfig instances with at least a
+            "host" key.
+
+        Outputs:
+          - list[dict]: Each entry contains:
+              - "host": target hostname or IP.
+              - "port": integer port (default 53).
+              - "timeout_ms": integer timeout in milliseconds (default 2000).
+              - "transport": "tcp" (default) or "dot" for DNS-over-TLS.
+              - "server_name": optional TLS SNI name for DoT.
+              - "verify": boolean TLS verification flag for DoT.
+              - "ca_file": optional CA bundle path for DoT.
+        """
+
+        targets: List[Dict[str, object]] = []
+        if raw is None:
+            return targets
+
+        items = raw
+        # Allow a single mapping/typed object as shorthand for a list.
+        if isinstance(items, dict) or hasattr(items, "host"):
+            items = [items]
+
+        if not isinstance(items, list):
+            logger.warning(
+                "ZoneRecords axfr_notify ignored: expected list, got %r", type(items)
+            )
+            return targets
+
+        for idx, entry in enumerate(items):
+            host: Optional[str]
+            port_val: object
+            timeout_val: object
+            transport_val: object
+            server_name_val: Optional[str]
+            verify_val: object
+            ca_file_val: object
+
+            # Support both typed AxfrUpstreamConfig and plain dicts.
+            if isinstance(entry, AxfrUpstreamConfig):
+                host = entry.host
+                port_val = entry.port
+                timeout_val = entry.timeout_ms
+                transport_val = entry.transport
+                server_name_val = entry.server_name
+                verify_val = entry.verify
+                ca_file_val = entry.ca_file
+            elif hasattr(entry, "host") and hasattr(entry, "port"):
+                try:
+                    host = str(getattr(entry, "host"))
+                except Exception:
+                    host = None
+                port_val = getattr(entry, "port", 53)
+                timeout_val = getattr(entry, "timeout_ms", 2000)
+                transport_val = getattr(entry, "transport", "tcp")
+                server_name_val = getattr(entry, "server_name", None)
+                verify_val = getattr(entry, "verify", True)
+                ca_file_val = getattr(entry, "ca_file", None)
+            elif isinstance(entry, dict):
+                host = entry.get("host")  # type: ignore[assignment]
+                port_val = entry.get("port", 53)
+                timeout_val = entry.get("timeout_ms", 2000)
+                transport_val = entry.get("transport", "tcp")
+                server_name_val = entry.get("server_name")  # type: ignore[assignment]
+                verify_val = entry.get("verify", True)
+                ca_file_val = entry.get("ca_file")  # type: ignore[assignment]
+            else:
+                logger.warning(
+                    "ZoneRecords axfr_notify[%d] ignored: expected mapping or AxfrUpstreamConfig, got %r",
+                    idx,
+                    type(entry),
+                )
+                continue
+
+            if not host:
+                logger.warning(
+                    "ZoneRecords axfr_notify[%d] ignored: missing 'host'", idx
+                )
+                continue
+
+            transport = str(transport_val or "tcp").lower()
+            if transport not in {"tcp", "dot"}:
+                logger.warning(
+                    "ZoneRecords axfr_notify[%d] ignored: unsupported transport %r",
+                    idx,
+                    transport,
+                )
+                continue
+
+            try:
+                port_i = int(port_val)
+                timeout_i = int(timeout_val)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "ZoneRecords axfr_notify[%d] ignored: invalid port/timeout %r/%r",
+                    idx,
+                    port_val,
+                    timeout_val,
+                )
+                continue
+
+            targets.append(
+                {
+                    "host": str(host),
+                    "port": port_i,
+                    "timeout_ms": timeout_i,
+                    "transport": transport,
+                    "server_name": (
+                        str(server_name_val) if server_name_val is not None else None
+                    ),
+                    "verify": bool(verify_val),
+                    "ca_file": (str(ca_file_val) if ca_file_val is not None else None),
+                }
+            )
+
+        return targets
 
     def _normalize_axfr_config(self, raw: object) -> List[Dict[str, object]]:
         """Brief: Normalize raw axfr_zones config into a list of zones.
@@ -1520,12 +1699,17 @@ class ZoneRecords(BasePlugin):
                     best = apex
         return best
 
-    def iter_zone_rrs_for_transfer(self, zone_apex: str) -> Optional[List[RR]]:
+    def iter_zone_rrs_for_transfer(
+        self, zone_apex: str, client_ip: Optional[str] = None
+    ) -> Optional[List[RR]]:
         """Brief: Export authoritative RRsets for a zone for AXFR/IXFR.
 
         Inputs:
           - zone_apex: Zone apex name (with or without trailing dot), case-
             insensitive.
+          - client_ip: Optional IP address of the AXFR/IXFR client; when
+            provided and axfr_notify_all is enabled, this is recorded as a
+            learned NOTIFY target for the zone.
 
         Outputs:
           - list[RR]: All RRs in the zone suitable for AXFR/IXFR transfer, or
@@ -1543,6 +1727,19 @@ class ZoneRecords(BasePlugin):
         apex = str(zone_apex).rstrip(".").lower() if zone_apex is not None else ""
         if not apex:
             return None
+
+        # Optionally remember the AXFR client as a NOTIFY target when
+        # axfr_notify_all is enabled.
+        if client_ip and getattr(self, "_axfr_notify_all", False):
+            try:
+                self._record_axfr_client(apex, client_ip)
+            except Exception:  # pragma: no cover - defensive logging only
+                logger.warning(
+                    "ZoneRecords: failed to record AXFR client %s for zone %s",
+                    client_ip,
+                    apex,
+                    exc_info=True,
+                )
 
         lock = getattr(self, "_records_lock", None)
 
@@ -1588,6 +1785,60 @@ class ZoneRecords(BasePlugin):
                     rrs.extend(parsed)
 
         return rrs
+
+    def _record_axfr_client(self, zone_apex: str, client_ip: str) -> None:
+        """Brief: Track an AXFR/IXFR client as a potential NOTIFY target.
+
+        Inputs:
+          - zone_apex: Normalized zone apex name (lowercase, no trailing dot).
+          - client_ip: Source IP address of the AXFR/IXFR client.
+
+        Outputs:
+          - None; updates learned NOTIFY targets and may schedule a delayed
+            NOTIFY when axfr_notify_scheduled is configured.
+        """
+
+        try:
+            zone_norm = str(zone_apex).rstrip(".").lower()
+        except Exception:
+            zone_norm = str(zone_apex).lower()
+        if not zone_norm:
+            return
+
+        try:
+            host = str(client_ip).strip()
+        except Exception:
+            host = str(client_ip)
+        if not host:
+            return
+
+        # Learned targets always use TCP port 53 by default. Operators that need
+        # a different port or transport can configure explicit axfr_notify
+        # entries.
+        target: Dict[str, object] = {
+            "host": host,
+            "port": 53,
+            "timeout_ms": 2000,
+            "transport": "tcp",
+            "server_name": None,
+            "verify": True,
+            "ca_file": None,
+        }
+        key = f"{host}:53/tcp"
+
+        lock = getattr(self, "_axfr_notify_lock", None)
+        if lock is None:
+            return
+
+        with lock:
+            per_zone = self._axfr_notify_learned.setdefault(zone_norm, {})
+            per_zone[key] = target
+
+        # Optionally schedule a delayed NOTIFY back to this client to ensure it
+        # can re-validate zone state after a transfer.
+        delay = getattr(self, "_axfr_notify_delay", None)
+        if delay is not None and delay > 0:
+            self._schedule_delayed_notify(zone_norm, target, float(delay))
 
     def _client_wants_dnssec(self, request: object) -> bool:
         """Brief: Detect whether the client wants DNSSEC records via EDNS(0) DO bit.
