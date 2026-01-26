@@ -627,6 +627,65 @@ def _build_v2_root_schema(
         "vars", base_props.get("variables", {"type": "object"})
     )
 
+    # ZoneRecords plugin schema: ensure axfr_notify options are documented when
+    # the plugin is present in the base schema.
+    zone_plugin = None
+    if isinstance(base_props.get("plugins"), dict):
+        plugins_schema = base_props["plugins"]
+        if isinstance(plugins_schema.get("items"), dict):
+            plugin_items = plugins_schema["items"]
+            props = (
+                plugin_items.get("properties")
+                if isinstance(plugin_items, dict)
+                else None
+            )
+            if isinstance(props, dict) and isinstance(props.get("config"), dict):
+                cfg_props = props["config"].get("properties")
+                if isinstance(cfg_props, dict):
+                    zone_plugin = cfg_props.get("zone")
+    if isinstance(zone_plugin, dict):
+        zone_cfg_props = zone_plugin.get("properties") or {}
+        if isinstance(zone_cfg_props, dict):
+            # axfr_notify: list of upstream-like objects for NOTIFY recipients.
+            zone_cfg_props.setdefault(
+                "axfr_notify",
+                {
+                    "type": "array",
+                    "description": (
+                        "Optional list of NOTIFY recipients for AXFR-backed zones. "
+                        "Each entry reuses the upstream_host shape (host/port/transport/"
+                        "server_name/verify/ca_file) and is limited to TCP and DoT."
+                    ),
+                    "items": {"$ref": "#/$defs/upstream_host"},
+                },
+            )
+            # axfr_notify_all: learn NOTIFY targets from AXFR/IXFR clients.
+            zone_cfg_props.setdefault(
+                "axfr_notify_all",
+                {
+                    "type": "boolean",
+                    "description": (
+                        "When true, any client that performs AXFR/IXFR from this "
+                        "server is remembered as a NOTIFY target for its zone "
+                        "using its source IP and TCP port 53."
+                    ),
+                    "default": False,
+                },
+            )
+            # axfr_notify_scheduled: delay before sending follow-up NOTIFY.
+            zone_cfg_props.setdefault(
+                "axfr_notify_scheduled",
+                {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Optional delay in seconds after serving AXFR/IXFR to a "
+                        "client before sending a follow-up NOTIFY for that zone. "
+                        "Ignored when null or zero."
+                    ),
+                },
+            )
+
     # Upstreams v2: wrap endpoints + strategy/max_concurrent while reusing
     # upstream_host/upstream_doh defs from $defs.
     defs = base.setdefault("$defs", {})
