@@ -546,11 +546,12 @@ def _set_response_id_bytes(wire: bytes, req_id: int) -> bytes:
         return wire
 
 
-def iter_axfr_messages(req: DNSRecord) -> List[bytes]:
+def iter_axfr_messages(req: DNSRecord, client_ip: str | None = None) -> List[bytes]:
     """Brief: Build AXFR/IXFR response message sequence for an authoritative zone.
 
     Inputs:
       - req: Parsed DNSRecord representing the client's AXFR or IXFR query.
+      - client_ip: Optional source IP address of the AXFR/IXFR client.
 
     Outputs:
       - list[bytes]: Packed DNS response messages to stream over TCP/DoT. When
@@ -559,9 +560,9 @@ def iter_axfr_messages(req: DNSRecord) -> List[bytes]:
 
     Notes:
       - This helper relies on resolve plugins advertising an
-        ``iter_zone_rrs_for_transfer(zone_apex)`` method (for example,
-        ZoneRecords). The first such plugin that claims authority for the
-        requested apex is used.
+        ``iter_zone_rrs_for_transfer(zone_apex, client_ip=None)`` method (for
+        example, ZoneRecords). The first such plugin that claims authority for
+        the requested apex is used.
       - IXFR is currently implemented as a full AXFR-style transfer; the
         question section retains QTYPE=IXFR but the answer stream is a full
         zone dump bounded by matching SOA records.
@@ -605,7 +606,13 @@ def iter_axfr_messages(req: DNSRecord) -> List[bytes]:
         ):  # pragma: no cover - defensive/metrics path excluded from coverage
             continue  # pragma: no cover - defensive/metrics path excluded from coverage
         try:  # pragma: no cover - defensive/metrics path excluded from coverage
-            exported = exporter(zone_apex)
+            # Prefer the newer two-argument form when available so plugins can
+            # learn AXFR clients; fall back to the legacy single-argument call
+            # for older plugins.
+            try:
+                exported = exporter(zone_apex, client_ip)
+            except TypeError:
+                exported = exporter(zone_apex)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
                 "iter_axfr_messages: plugin %r export failure for %s: %s",
