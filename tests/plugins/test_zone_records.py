@@ -578,6 +578,112 @@ def test_pre_resolve_returns_none_when_rr_parsing_fails(
     assert decision.action == "override"
 
 
+def test_axfr_notify_static_targets_normalized(tmp_path: pathlib.Path) -> None:
+    """Brief: axfr_notify entries are normalized into upstream-like mappings.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts that axfr_notify is converted into host/port/transport mappings
+        on the ZoneRecords instance.
+    """
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|192.0.2.10\n", encoding="utf-8")
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        axfr_notify=[
+            {"host": "198.51.100.10", "port": 53, "transport": "tcp"},
+            {
+                "host": "198.51.100.20",
+                "port": 853,
+                "transport": "dot",
+                "server_name": "sec2.example",
+                "verify": False,
+                "ca_file": "/tmp/ca.pem",
+            },
+        ],
+    )
+    plugin.setup()
+
+    targets = getattr(plugin, "_axfr_notify_static_targets", None)
+    assert isinstance(targets, list)
+    assert len(targets) == 2
+
+    t1, t2 = targets
+    assert t1["host"] == "198.51.100.10"
+    assert t1["port"] == 53
+    assert t1["transport"] == "tcp"
+
+    assert t2["host"] == "198.51.100.20"
+    assert t2["port"] == 853
+    assert t2["transport"] == "dot"
+    assert t2["server_name"] == "sec2.example"
+    assert t2["verify"] is False
+    assert t2["ca_file"] == "/tmp/ca.pem"
+
+
+def test_axfr_notify_all_learns_axfr_client_and_sends_notify(monkeypatch, tmp_path):
+    """Brief: axfr_notify_all learns AXFR clients and schedules NOTIFY.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that iter_zone_rrs_for_transfer() records the AXFR client as a
+        learned NOTIFY target and triggers a NOTIFY send via the helper.
+    """
+
+    records_file = tmp_path / "records.txt"
+    # Minimal SOA so ZoneRecords is authoritative for the zone.
+    records_file.write_text(
+        "notify.example|SOA|300|ns1.notify.example. hostmaster.notify.example. 1 3600 600 604800 300\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)], axfr_notify_all=True, axfr_notify_scheduled=0
+    )
+    plugin.setup()
+
+    calls = []
+
+    def fake_send_notify(zone_apex, target):  # noqa: D401,ANN001
+        """Record NOTIFY sends instead of performing network I/O."""
+
+        calls.append((zone_apex, dict(target)))
+
+    monkeypatch.setattr(
+        plugin, "_send_notify_to_target", fake_send_notify, raising=True
+    )
+
+    # Pretend an AXFR client pulled the zone.
+    client_ip = "203.0.113.5"
+    rrs = plugin.iter_zone_rrs_for_transfer("notify.example", client_ip=client_ip)
+    assert rrs is not None and rrs, "expected authoritative RRset for notify.example"
+
+    # Learned targets should include the client.
+    learned = getattr(plugin, "_axfr_notify_learned", {})
+    assert "notify.example" in learned or "notify.example" in {
+        k.rstrip(".") for k in learned.keys()
+    }
+
+    # With axfr_notify_scheduled=0 we treat delay as immediate and expect at
+    # least one NOTIFY send for this client.
+    assert calls, "expected at least one NOTIFY send for learned AXFR client"
+    zones = {z for (z, _t) in calls}
+    assert any(z.startswith("notify.example") for z in zones)
+
+
 def test_watchdog_handler_should_reload_and_on_any_event(
     tmp_path: pathlib.Path,
 ) -> None:
