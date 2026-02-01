@@ -79,9 +79,20 @@ def resolve_www_root(config: Dict[str, Any] | None = None) -> str:
     if cwd_html.is_dir():
         return str(cwd_html.resolve())
 
-    # 4) Fallback to package-relative html directory within the installed package
+    # 4) Fallback to package-relative html directory within the installed
+    #    foghorn package. This resolves to:
+    #      - src/foghorn/html when running from source, or
+    #      - <site-packages>/foghorn/html when installed.
     here = Path(__file__).resolve()
-    pkg_html = here.parent.parent / "html"
+    try:
+        import foghorn  # type: ignore[import]
+
+        pkg_root = Path(foghorn.__file__).resolve().parent
+    except Exception:  # pragma: no cover - defensive: import/path edge cases
+        # Fallback to resolving relative to this module:
+        # .../foghorn/servers/webserver/http_helpers.py -> .../foghorn
+        pkg_root = here.parent.parent
+    pkg_html = pkg_root / "html"
     return str(pkg_html.resolve())
 
 
