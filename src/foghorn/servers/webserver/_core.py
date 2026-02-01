@@ -30,10 +30,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
 import yaml
 from cachetools import TTLCache
-
 from foghorn.utils.register_caches import registered_cached, registered_lru_cached
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -125,11 +123,6 @@ from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 from ..udp_server import DNSUDPHandler
 from ...plugins.resolve.base import AdminPageSpec
 
-try:
-    import psutil  # type: ignore[import]
-except Exception:  # pragma: no cover - optional dependency fallback
-    psutil = None  # type: ignore[assignment]
-
 
 logger = logging.getLogger("foghorn.webserver")
 
@@ -149,19 +142,6 @@ _CONFIG_TEXT_CACHE_LOCK = _config_helpers._CONFIG_TEXT_CACHE_LOCK
 _last_config_text_key = None  # type: ignore[assignment]
 _last_config_text = None  # type: ignore[assignment]
 _last_config_text_ts = 0.0
-
-
-def _get_sanitized_config_yaml_cached(
-    cfg: Dict[str, Any], cfg_path: str | None, redact_keys: List[str] | None
-) -> str:
-    """Return sanitized configuration YAML text with a short-lived cache.
-
-    This thin wrapper delegates to config_helpers while keeping historical
-    access patterns working for callers that reference
-    foghorn.servers.webserver._get_sanitized_config_yaml_cached().
-    """
-
-    return _config_helpers._get_sanitized_config_yaml_cached(cfg, cfg_path, redact_keys)
 
 
 def create_app(
@@ -2223,68 +2203,6 @@ def _start_admin_server_threaded(
     thread.start()
     logger.info("Started threaded admin webserver on %s:%d", host, port)
     return WebServerHandle(thread, server=httpd)
-
-
-class WebServerHandle:
-    """Handle for a background admin webserver thread.
-
-    Inputs (constructor):
-      - thread: Thread object running the HTTP/uvicorn server loop.
-      - server: Optional server instance with shutdown/server_close methods.
-
-    Outputs:
-      - WebServerHandle instance with stop() and is_running().
-
-    Example:
-      >>> # created via start_webserver() in main
-    """
-
-    def __init__(self, thread: threading.Thread, server: Any | None = None) -> None:
-        self._thread = thread
-        self._server = server
-
-    def is_running(self) -> bool:
-        """Return True if the underlying thread is alive.
-
-        Inputs: none
-        Outputs: bool indicating thread liveness.
-        """
-
-        return self._thread.is_alive()
-
-    def stop(self, timeout: float = 5.0) -> None:
-        """Best-effort stop; shuts down server if possible and waits for thread.
-
-        Inputs:
-          - timeout: Seconds to wait for thread to exit.
-
-        Outputs:
-          - None
-
-        Notes:
-          - For uvicorn-based servers, this relies on process lifetime matching
-            server lifetime and only joins the thread.
-          - For threaded HTTP fallbacks, this also calls shutdown/server_close
-            on the underlying server instance when present.
-        """
-
-        try:
-            if self._server is not None:
-                try:
-                    shutdown = getattr(self._server, "shutdown", None)
-                    if callable(shutdown):
-                        shutdown()
-
-                    close = getattr(self._server, "server_close", None)
-                    if callable(close):
-                        close()
-                except Exception:
-                    logger.exception("Error while shutting down webserver instance")
-            # Always wait for the thread to exit, regardless of whether
-            # a server instance was attached or shutdown raised.
-            self._thread.join(timeout=timeout)
-        except Exception:
-            logger.exception("Error while stopping webserver thread")
 
 
 def start_webserver(

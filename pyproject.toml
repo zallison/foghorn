@@ -67,8 +67,10 @@ addopts = "--ff --maxfail=1 --disable-warnings"
 
 [tool.ruff.lint.per-file-ignores]
 "*" = ["E402"]
+"src/foghorn/plugins/resolve/*" = ["E402", "F401"]
 "__init__.py" = ["E402"]
 "**/{tests,docs,tools}/*" = ["E402"]
+"src/foghorn/servers/webserver/*.py" = ["F401", "F811"]
 
 [tool.isort]
 profile = "black"

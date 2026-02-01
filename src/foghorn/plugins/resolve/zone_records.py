@@ -2123,19 +2123,19 @@ class ZoneRecords(BasePlugin):
 
             Notes:
               - Per-RRset RRSIGs (for A, SSHFP, DNSKEY, etc.) are attached via
-                the pre-built helper mapping in _add_rrset, so this helper must
-                not blindly add all owner RRSIGs again.
+                the pre-built helper mapping in _add_rrset_to_reply, so this
+                helper must not blindly add all owner RRSIGs again.
             """
             owner_normalized = owner_name.rstrip(".").lower()
 
             # At the zone apex, include DNSKEY RRsets when present; their
-            # signatures will be attached by _add_rrset using self.mapping
-            # where available.
+            # signatures will be attached by _add_rrset_to_reply using
+            # self.mapping where available.
             if owner_normalized == zone_apex_name:
                 apex_rrsets = name_index.get(zone_apex_name, {})
                 if dnskey_code in apex_rrsets:
                     ttl_dk, vals_dk = apex_rrsets[dnskey_code]
-                    _add_rrset(
+                    self._add_rrset_to_reply(
                         reply,
                         owner_name,
                         dnskey_code,
