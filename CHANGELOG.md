@@ -11,16 +11,20 @@ All notable changes to this project will be documented in this file.
 - Added `forward_local` server configuration option to control whether `.local` queries are forwarded to upstream resolvers. When disabled (default), `.local` queries return NXDOMAIN with an RFC 6762 EDE note unless answered by a plugin like MdnsBridge.
 - Extended MdnsBridge plugin to synthesize service-type PTR records from the SRV cache when explicit PTRs are missing, enabling DNS-SD enumeration for discovered services.
 - Added browse-name aliasing in MdnsBridge to map `_dns_sd._tcp.<suffix>` and `_tcp.<suffix>` queries to their RFC 6763 equivalents.
+- Added `dnssec.zone_helpers` module and an AXFR/DNSSEC overlay for the `resolve.zone_records` plugin so signed zones from AXFR-aware upstreams and tooling can be consumed and served with DNSSEC data.
+- Added a new HTTP webserver implementation split into `_core`, runtime, threaded server, routing, and helper modules, plus a minimal HTML index for the admin and stats web UI.
 
 ### Tests
 
 - Added tests for `forward_local` behavior in the query resolution pipeline, covering blocked and allowed `.local` forwarding scenarios.
 - Added comprehensive tests for MdnsBridge DNS-SD aliasing and PTR fallback enumeration from SRV cache.
 - Added unit tests for the `ssh_keyscan` utility module covering key fetch, error handling, and SSHFP record generation.
+- Extended `tests/plugins/test_zone_records.py` to cover reload-triggered NOTIFY behavior and ensure both static and learned NOTIFY targets are exercised.
 
 ### Changed
 
 - Updated README test coverage badge from 91% to 90%.
+- Refactored the `resolve.zone_records` plugin to snapshot zone state across reloads, compute changed zones, and send DNS NOTIFY only for zones that changed, including DNSSEC-aware helpers for serving signed RRsets.
 
 ## [0.6.3] - 2026-01-19
 
