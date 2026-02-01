@@ -684,6 +684,145 @@ def test_axfr_notify_all_learns_axfr_client_and_sends_notify(monkeypatch, tmp_pa
     assert any(z.startswith("notify.example") for z in zones)
 
 
+def test_reload_records_from_watchdog_sends_notify_for_changed_zones(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """Brief: _reload_records_from_watchdog sends NOTIFY for changed zones.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - tmp_path: pytest temporary directory containing a records file.
+
+    Outputs:
+      - Asserts that, after a zone file change and a reload, ZoneRecords calls
+        _send_notify_for_zones() with the apex of the updated zone.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "records.txt"
+    # Initial SOA + A record for example.com.
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. 1 3600 600 604800 300"
+                ),
+                "example.com|A|300|192.0.2.1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    # Mutate the zone file so that the apex RRset changes.
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. 1 3600 600 604800 300"
+                ),
+                # Change the A record value so the zone snapshot differs.
+                "example.com|A|300|192.0.2.2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    notified = {"zones": None}
+
+    def fake_send_for_zones(zones: list[str]) -> None:  # noqa: D401
+        """Capture the list of zone apexes passed to _send_notify_for_zones."""
+
+        notified["zones"] = list(zones)
+
+    plugin._send_notify_for_zones = fake_send_for_zones  # type: ignore[assignment]
+
+    # Force immediate reload path by disabling the minimum interval.
+    plugin._watchdog_min_interval = 0.0  # type: ignore[assignment]
+    plugin._last_watchdog_reload_ts = 0.0  # type: ignore[assignment]
+
+    plugin._reload_records_from_watchdog()
+
+    zones = notified["zones"]
+    assert zones is not None and "example.com" in zones
+
+
+def test_send_notify_for_zones_uses_static_and_learned_targets(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """Brief: _send_notify_for_zones sends NOTIFY to static and learned targets.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that both axfr_notify (static) and learned axfr_notify_all
+        targets are used when sending NOTIFY for a changed zone.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "notify.example|SOA|300|ns1.notify.example. hostmaster.notify.example. 1 3600 600 604800 300\n",
+        encoding="utf-8",
+    )
+
+    # Configure one static axfr_notify target; learned targets will be injected
+    # directly into the plugin's state.
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        axfr_notify=[{"host": "198.51.100.10", "port": 53, "transport": "tcp"}],
+    )
+    plugin.setup()
+
+    # Inject a learned target for the same zone.
+    learned = getattr(plugin, "_axfr_notify_learned", None)
+    assert isinstance(learned, dict)
+    learned["notify.example"] = {
+        "203.0.113.5:53/tcp": {
+            "host": "203.0.113.5",
+            "port": 53,
+            "timeout_ms": 2000,
+            "transport": "tcp",
+            "server_name": None,
+            "verify": True,
+            "ca_file": None,
+        }
+    }
+
+    calls: list[tuple[str, dict]] = []
+
+    def fake_send_notify(zone_apex: str, target: dict) -> None:  # noqa: D401
+        """Record NOTIFY sends instead of performing network I/O."""
+
+        calls.append((zone_apex, dict(target)))
+
+    monkeypatch.setattr(
+        plugin, "_send_notify_to_target", fake_send_notify, raising=True
+    )
+
+    plugin._send_notify_for_zones(["notify.example"])
+
+    # Expect at least one call for the static target and one for the learned one.
+    assert calls, "expected at least one NOTIFY send"
+    zones = {z for (z, _t) in calls}
+    assert any(z.startswith("notify.example") for z in zones)
+    hosts = {t["host"] for (_z, t) in calls}
+    assert "198.51.100.10" in hosts
+    assert "203.0.113.5" in hosts
+
+
 def test_watchdog_handler_should_reload_and_on_any_event(
     tmp_path: pathlib.Path,
 ) -> None:
