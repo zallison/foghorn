@@ -8,10 +8,13 @@ import time
 import ipaddress
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from dnslib import QTYPE, RCODE, RR, DNSHeader, DNSRecord
+from dnslib import OPCODE, QTYPE, RCODE, RR, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field
 
 from foghorn.servers.transports.axfr import AXFRError, axfr_transfer
+from foghorn.servers.transports.tcp import tcp_query
+from foghorn.servers.transports.dot import dot_query
+from foghorn.plugins.resolve import zone_records_axfr_dnssec as _axfr_dnssec
 
 try:  # watchdog is used for cross-platform file watching
     from watchdog.events import FileSystemEventHandler
@@ -339,7 +342,9 @@ class ZoneRecords(BasePlugin):
             )
         except (TypeError, ValueError):
             notify_delay = None
-        if notify_delay is not None and notify_delay <= 0:
+        # Negative values are treated as "disabled"; zero means "immediate"
+        # and positive values schedule a delayed NOTIFY.
+        if notify_delay is not None and notify_delay < 0:
             notify_delay = None
         self._axfr_notify_delay = notify_delay
         # Per-zone learned NOTIFY targets and per-target health tracking.
@@ -741,6 +746,133 @@ class ZoneRecords(BasePlugin):
 
         return zones
 
+    def _process_record_line(
+        self,
+        raw_line: str,
+        source_label: str,
+        lineno: int,
+        mapping: Dict[Tuple[str, int], Tuple[int, List[str]]],
+        name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
+        zone_soa: Dict[str, Tuple[int, List[str]]],
+        soa_code: Optional[int],
+    ) -> None:
+        """Brief: Parse a single record line and merge it into mappings.
+
+        Inputs:
+          - raw_line: Original line text including any comments.
+          - source_label: Human-readable source identifier (file path or
+            inline config label).
+          - lineno: 1-based line number within the source.
+          - mapping: Aggregated (domain, qtype) -> (ttl, [values]) mapping.
+          - name_index: Per-name index mapping domain -> qtype -> (ttl, [values]).
+          - zone_soa: Mapping of zone apex -> (ttl, [soa_values]).
+          - soa_code: Numeric QTYPE code for SOA, or None when unavailable.
+
+        Outputs:
+          - None; updates mapping, name_index, and zone_soa in-place.
+        """
+
+        # Remove inline comments and surrounding whitespace
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            return
+
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) != 4:
+            raise ValueError(
+                f"Source {source_label} malformed line {lineno}: "
+                f"expected <domain>|<qtype>|<ttl>|<value>, got {raw_line!r}"
+            )
+
+        domain_raw, qtype_raw, ttl_raw, value_raw = parts
+        if not domain_raw or not qtype_raw or not ttl_raw or not value_raw:
+            raise ValueError(
+                f"Source {source_label} malformed line {lineno}: "
+                f"empty field in {raw_line!r}"
+            )
+
+        domain = domain_raw.rstrip(".").lower()
+
+        # Parse qtype as number or mnemonic (e.g., "A", "AAAA").
+        qtype_code: Optional[int]
+        if qtype_raw.isdigit():
+            qtype_code = int(qtype_raw)
+        else:
+            name = qtype_raw.upper()
+            # Map mnemonic qtype names to numeric codes in a way that avoids
+            # dnslib raising its own DNSError (for example, "QTYPE: Invalid reverse lookup")
+            # for unknown or class-like tokens such as "IN". We prefer
+            # getattr(QTYPE, name) when it returns an int, and fall back to
+            # QTYPE.get(name, None). Any exception or non-int result is
+            # treated as an unknown qtype and turned into a clean ValueError
+            # below.
+            qtype_code = None
+            try:
+                attr_val = getattr(QTYPE, name)
+            except Exception:
+                attr_val = None
+            if isinstance(attr_val, int):
+                qtype_code = int(attr_val)
+            else:
+                try:
+                    qtype_val = QTYPE.get(name, None)
+                except Exception:
+                    qtype_val = None
+                if isinstance(qtype_val, int):
+                    qtype_code = int(qtype_val)
+
+        if qtype_code is None:
+            raise ValueError(
+                f"Source {source_label} malformed line {lineno}: "
+                f"unknown qtype {qtype_raw!r}"
+            )
+
+        try:
+            ttl = int(ttl_raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"Source {source_label} malformed line {lineno}: "
+                f"invalid ttl {ttl_raw!r}"
+            ) from exc
+        if ttl < 0:
+            raise ValueError(
+                f"Source {source_label} malformed line {lineno}: " f"negative ttl {ttl}"
+            )
+
+        value = value_raw
+
+        key = (domain, int(qtype_code))
+        existing = mapping.get(key)
+
+        if existing is None:
+            # First occurrence for this (domain, qtype): start a new
+            # ordered list of values and remember its TTL.
+            stored_ttl = ttl
+            values: List[str] = []
+        else:
+            # Subsequent occurrences: extend the list, but only with
+            # values we have not seen before. The TTL from the first
+            # occurrence is retained and later duplicates are
+            # dropped entirely.
+            stored_ttl, values = existing
+
+        if value not in values:
+            values.append(value)
+
+        mapping[key] = (stored_ttl, values)
+
+        # Populate per-name index for authoritative semantics.
+        per_name = name_index.setdefault(domain, {})
+        per_name[int(qtype_code)] = (stored_ttl, values)
+
+        # Track SOA records as zone apexes for authoritative zones.
+        if (
+            soa_code is not None
+            and int(qtype_code) == int(soa_code)
+            and domain not in zone_soa
+        ):
+            zone_soa[domain] = (stored_ttl, values)
+
     def _load_records(self) -> None:
         """Brief: Read custom records files and build lookup structures.
 
@@ -799,120 +931,6 @@ class ZoneRecords(BasePlugin):
         ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
             soa_code = None
 
-        def _process_line(raw_line: str, source_label: str, lineno: int) -> None:
-            """Brief: Parse a single record line and merge it into mappings.
-
-            Inputs:
-              - raw_line: Original line text including any comments.
-              - source_label: Human-readable source identifier (file path or
-                inline config label).
-              - lineno: 1-based line number within the source.
-
-            Outputs:
-              - None; updates mapping, name_index, and zone_soa in-place.
-            """
-            # Remove inline comments and surrounding whitespace
-            line = raw_line.split("#", 1)[0].strip()
-            if not line:
-                return
-
-            parts = [p.strip() for p in line.split("|")]
-            if len(parts) != 4:
-                raise ValueError(
-                    f"Source {source_label} malformed line {lineno}: "
-                    f"expected <domain>|<qtype>|<ttl>|<value>, got {raw_line!r}"
-                )
-
-            domain_raw, qtype_raw, ttl_raw, value_raw = parts
-            if not domain_raw or not qtype_raw or not ttl_raw or not value_raw:
-                raise ValueError(
-                    f"Source {source_label} malformed line {lineno}: "
-                    f"empty field in {raw_line!r}"
-                )
-
-            domain = domain_raw.rstrip(".").lower()
-
-            # Parse qtype as number or mnemonic (e.g., "A", "AAAA").
-            qtype_code: Optional[int]
-            if qtype_raw.isdigit():
-                qtype_code = int(qtype_raw)
-            else:
-                name = qtype_raw.upper()
-                # Map mnemonic qtype names to numeric codes in a way that avoids
-                # dnslib raising its own DNSError (for example, "QTYPE: Invalid reverse lookup")
-                # for unknown or class-like tokens such as "IN". We prefer
-                # getattr(QTYPE, name) when it returns an int, and fall back to
-                # QTYPE.get(name, None). Any exception or non-int result is
-                # treated as an unknown qtype and turned into a clean ValueError
-                # below.
-                qtype_code = None
-                try:
-                    attr_val = getattr(QTYPE, name)
-                except Exception:
-                    attr_val = None
-                if isinstance(attr_val, int):
-                    qtype_code = int(attr_val)
-                else:
-                    try:
-                        qtype_val = QTYPE.get(name, None)
-                    except Exception:
-                        qtype_val = None
-                    if isinstance(qtype_val, int):
-                        qtype_code = int(qtype_val)
-
-            if qtype_code is None:
-                raise ValueError(
-                    f"Source {source_label} malformed line {lineno}: "
-                    f"unknown qtype {qtype_raw!r}"
-                )
-
-            try:
-                ttl = int(ttl_raw)
-            except ValueError as exc:
-                raise ValueError(
-                    f"Source {source_label} malformed line {lineno}: "
-                    f"invalid ttl {ttl_raw!r}"
-                ) from exc
-            if ttl < 0:
-                raise ValueError(
-                    f"Source {source_label} malformed line {lineno}: "
-                    f"negative ttl {ttl}"
-                )
-
-            value = value_raw
-
-            key = (domain, int(qtype_code))
-            existing = mapping.get(key)
-
-            if existing is None:
-                # First occurrence for this (domain, qtype): start a new
-                # ordered list of values and remember its TTL.
-                stored_ttl = ttl
-                values: List[str] = []
-            else:
-                # Subsequent occurrences: extend the list, but only with
-                # values we have not seen before. The TTL from the first
-                # occurrence is retained and later duplicates are
-                # dropped entirely.
-                stored_ttl, values = existing
-
-            if value not in values:
-                values.append(value)
-
-            mapping[key] = (stored_ttl, values)
-
-            # Populate per-name index for authoritative semantics.
-            per_name = name_index.setdefault(domain, {})
-            per_name[int(qtype_code)] = (stored_ttl, values)
-
-            # Track SOA records as zone apexes for authoritative zones.
-            if (
-                soa_code is not None
-                and int(qtype_code) == int(soa_code)
-                and domain not in zone_soa
-            ):
-                zone_soa[domain] = (stored_ttl, values)
-
         # First, merge custom pipe-delimited files. Earlier sources keep
         # precedence for TTL; existing values are preserved with new ones
         # appended.
@@ -921,7 +939,15 @@ class ZoneRecords(BasePlugin):
             records_path = pathlib.Path(fp)
             with records_path.open("r", encoding="utf-8") as f:
                 for lineno, raw_line in enumerate(f, start=1):
-                    _process_line(raw_line, str(records_path), lineno)
+                    self._process_record_line(
+                        raw_line,
+                        str(records_path),
+                        lineno,
+                        mapping,
+                        name_index,
+                        zone_soa,
+                        soa_code,
+                    )
 
         # Next, merge any RFC-1035 BIND-style zone files.
         bind_paths = getattr(self, "bind_paths", None) or []
@@ -985,191 +1011,15 @@ class ZoneRecords(BasePlugin):
         # AXFR-backed zones on top. Inline records are merged last so that
         # per-instance overrides still win over transferred data.
         if do_axfr:
-            for zone_cfg in axfr_zones:
-                zone_name = zone_cfg.get("zone")
-                upstreams = zone_cfg.get("upstreams") or []
-                if not zone_name or not isinstance(upstreams, list):
-                    continue
-                zone_text = str(zone_name).rstrip(".").lower()
-                if not zone_text:
-                    continue
-
-                transferred: Optional[List[RR]] = None
-                last_error: Optional[Exception] = None
-
-                for m in upstreams:
-                    if not isinstance(m, dict):
-                        continue
-                    host = m.get("host")
-                    port = m.get("port", 53)
-                    timeout_ms = m.get("timeout_ms", 5000)
-                    transport = str(m.get("transport", "tcp")).lower()
-                    server_name = m.get("server_name")
-                    verify_flag = m.get("verify", True)
-                    ca_file = m.get("ca_file")
-                    if not host:
-                        continue
-                    try:
-                        port_i = int(port)
-                        timeout_i = int(timeout_ms)
-                    except (TypeError, ValueError):
-                        continue
-
-                    try:
-                        logger.info(
-                            "ZoneRecords AXFR: transferring %s from %s:%d via %s",
-                            zone_text,
-                            host,
-                            port_i,
-                            transport,
-                        )
-                        transferred = axfr_transfer(
-                            str(host),
-                            port_i,
-                            zone_text,
-                            transport=transport,
-                            server_name=(
-                                str(server_name) if server_name is not None else None
-                            ),
-                            verify=bool(verify_flag),
-                            ca_file=str(ca_file) if ca_file is not None else None,
-                            connect_timeout_ms=timeout_i,
-                            read_timeout_ms=timeout_i,
-                        )
-                        break
-                    except AXFRError as exc:
-                        last_error = exc
-                        logger.warning(
-                            "ZoneRecords AXFR: failed transfer for %s from %s:%d via %s: %s",
-                            zone_text,
-                            host,
-                            port_i,
-                            transport,
-                            exc,
-                        )
-
-                if not transferred:
-                    if last_error is not None:
-                        logger.warning(
-                            "ZoneRecords AXFR: giving up on %s after error: %s",
-                            zone_text,
-                            last_error,
-                        )
-                    continue
-
-                # Minimal DNSSEC classification for AXFR-backed zones: check
-                # whether apex DNSKEY and/or RRSIG RRsets are present. This does
-                # not perform full cryptographic verification; it only
-                # distinguishes between "no DNSSEC", "partial" (one of
-                # DNSKEY/RRSIG missing), and "present".
-                try:
-                    apex_owner = zone_text.rstrip(".")
-                    has_dnskey = False
-                    has_rrsig = False
-                    try:
-                        dnskey_code = int(QTYPE.DNSKEY)
-                    except Exception:  # pragma: no cover - defensive
-                        dnskey_code = 48
-                    try:
-                        rrsig_code = int(QTYPE.RRSIG)
-                    except Exception:  # pragma: no cover - defensive
-                        rrsig_code = 46
-
-                    for rr in transferred:
-                        try:
-                            owner_norm = str(rr.rname).rstrip(".").lower()
-                        except Exception:  # pragma: no cover - defensive
-                            owner_norm = str(rr.rname).lower()
-                        if owner_norm != apex_owner:
-                            continue
-                        if int(rr.rtype) == int(dnskey_code):
-                            has_dnskey = True
-                        if int(rr.rtype) == int(rrsig_code):
-                            has_rrsig = True
-
-                    if has_dnskey and has_rrsig:
-                        dnssec_state = "present"
-                    elif has_dnskey or has_rrsig:
-                        dnssec_state = "partial"
-                    else:
-                        dnssec_state = "none"
-
-                    allow_no_dnssec = bool(zone_cfg.get("allow_no_dnssec", True))
-                    if dnssec_state in {"none", "partial"}:
-                        # For now we always load the zone but surface a warning
-                        # when DNSSEC data is missing or incomplete. The
-                        # allow_no_dnssec flag can be used by future callers to
-                        # tighten this into a hard reject policy without
-                        # changing config shape.
-                        if not allow_no_dnssec:
-                            logger.warning(
-                                "ZoneRecords AXFR: zone %s has dnssec_state=%s with "
-                                "allow_no_dnssec=False; loading anyway",
-                                zone_text,
-                                dnssec_state,
-                            )
-                        else:
-                            logger.info(
-                                "ZoneRecords AXFR: zone %s has dnssec_state=%s; "
-                                "proceeding (allow_no_dnssec=True)",
-                                zone_text,
-                                dnssec_state,
-                            )
-                    else:
-                        logger.info(
-                            "ZoneRecords AXFR: zone %s has dnssec_state=present",
-                            zone_text,
-                        )
-                    # Remember that we have classified this apex so that the
-                    # later per-zone classification pass does not emit
-                    # duplicate log lines for the same zone.
-                    dnssec_classified_axfr.add(zone_text)
-                except Exception:  # pragma: no cover - defensive logging only
-                    logger.warning(
-                        "ZoneRecords AXFR: failed to classify DNSSEC state for %s",
-                        zone_text,
-                        exc_info=True,
-                    )
-
-                for rr in transferred:
-                    try:
-                        owner = str(rr.rname).rstrip(".").lower()
-                        qtype_code = int(rr.rtype)
-                        ttl = int(rr.ttl)
-                        value = str(rr.rdata)
-                    except Exception as exc:  # pragma: no cover - defensive parsing
-                        logger.warning(
-                            "Skipping RR %r from AXFR zone %s due to parse error: %s",
-                            rr,
-                            zone_text,
-                            exc,
-                        )
-                        continue
-
-                    key = (owner, int(qtype_code))
-                    existing = mapping.get(key)
-
-                    if existing is None:
-                        stored_ttl = ttl
-                        values_ax: List[str] = []
-                    else:
-                        stored_ttl, values_ax = existing
-
-                    if value not in values_ax:
-                        values_ax.append(value)
-
-                    mapping[key] = (stored_ttl, values_ax)
-
-                    per_name_ax = name_index.setdefault(owner, {})
-                    per_name_ax[int(qtype_code)] = (stored_ttl, values_ax)
-
-                    if (
-                        soa_code is not None
-                        and int(qtype_code) == int(soa_code)
-                        and owner not in zone_soa
-                    ):
-                        zone_soa[owner] = (stored_ttl, values_ax)
-
+            _axfr_dnssec.overlay_axfr_zones(
+                mapping,
+                name_index,
+                zone_soa,
+                axfr_zones,
+                soa_code,
+                dnssec_classified_axfr,
+                axfr_fn=axfr_transfer,
+            )
             # Mark that we have attempted AXFR loading so subsequent reloads do
             # not re-transfer zones.
             self._axfr_loaded_once = True
@@ -1189,7 +1039,15 @@ class ZoneRecords(BasePlugin):
                     exc,
                 )
                 continue
-            _process_line(text, "inline-config-records", lineno)
+            self._process_record_line(
+                text,
+                "inline-config-records",
+                lineno,
+                mapping,
+                name_index,
+                zone_soa,
+                soa_code,
+            )
 
         # If no SOA records were explicitly defined but we have at least one
         # RRset, attempt to infer a reasonable zone apex from owner names and
@@ -1280,7 +1138,15 @@ class ZoneRecords(BasePlugin):
                             synthetic_line = (
                                 f"{inferred_apex}|SOA|{default_ttl}|{soa_rdata}"
                             )
-                            _process_line(synthetic_line, "auto-soa", 0)
+                            self._process_record_line(
+                                synthetic_line,
+                                "auto-soa",
+                                0,
+                                mapping,
+                                name_index,
+                                zone_soa,
+                                soa_code,
+                            )
             except Exception:  # pragma: no cover - defensive logging only
                 logger.warning(
                     "ZoneRecords: failed to synthesize SOA for inferred zone apex",
@@ -1355,311 +1221,19 @@ class ZoneRecords(BasePlugin):
 
         # After building mappings from all sources, classify DNSSEC state for
         # each authoritative zone apex derived from local sources (file_paths,
-        # bind_paths, inline records). Zones that were already classified via
-        # the AXFR path above are skipped to avoid duplicate log messages.
-        try:
-            try:
-                dnskey_code_all = int(QTYPE.DNSKEY)
-            except Exception:  # pragma: no cover - defensive
-                dnskey_code_all = 48
-            try:
-                rrsig_code_all = int(QTYPE.RRSIG)
-            except Exception:  # pragma: no cover - defensive
-                rrsig_code_all = 46
-
-            for apex_owner in list(zone_soa.keys()):
-                if apex_owner in dnssec_classified_axfr:
-                    continue
-                owner_rrsets = name_index.get(apex_owner, {}) or {}
-                has_dnskey = int(dnskey_code_all) in owner_rrsets
-                has_rrsig = int(rrsig_code_all) in owner_rrsets
-                if has_dnskey and has_rrsig:
-                    dnssec_state = "present"
-                elif has_dnskey or has_rrsig:
-                    dnssec_state = "partial"
-                else:
-                    dnssec_state = "none"
-                logger.info(
-                    "ZoneRecords zone %s has dnssec_state=%s (file/bind/inline)",
-                    apex_owner,
-                    dnssec_state,
-                )
-        except Exception:  # pragma: no cover - defensive logging only
-            logger.warning(
-                "ZoneRecords: failed to classify DNSSEC state for local zones",
-                exc_info=True,
-            )
-
-        # Optional DNSSEC auto-signing of authoritative zones when configured.
+        # bind_paths, inline records), optionally auto-sign zones, and build the
+        # helper mapping used by query-time DNSSEC handling.
         dnssec_cfg_raw = (
             self.config.get("dnssec_signing") if hasattr(self, "config") else None
         )
-        enabled = False
-        if isinstance(dnssec_cfg_raw, dict):
-            enabled = bool(dnssec_cfg_raw.get("enabled", False))
-        if enabled:
-            try:
-                import datetime as _dt
 
-                import dns.name as _dns_name
-                import dns.rdata as _dns_rdata
-                import dns.rdataclass as _dns_rdataclass
-                import dns.rdatatype as _dns_rdatatype
-                import dns.rrset as _dns_rrset
-                import dns.zone as _dns_zone
-
-                from foghorn.dnssec import zone_signer as _zs
-
-                keys_dir_cfg = dnssec_cfg_raw.get("keys_dir")
-                algorithm = dnssec_cfg_raw.get("algorithm") or "ECDSAP256SHA256"
-                generate_policy = dnssec_cfg_raw.get("generate") or "maybe"
-                validity_days = int(dnssec_cfg_raw.get("validity_days") or 30)
-
-                for apex_owner in list(zone_soa.keys()):
-                    origin_text = apex_owner.rstrip(".").lower() + "."
-                    origin = _dns_name.from_text(origin_text)
-
-                    zone_obj = _dns_zone.Zone(origin)
-
-                    for owner, rrsets in name_index.items():
-                        try:
-                            owner_norm = str(owner).rstrip(".").lower()
-                        except Exception:  # pragma: no cover - defensive
-                            owner_norm = str(owner).lower()
-
-                        if owner_norm != apex_owner and not owner_norm.endswith(
-                            "." + apex_owner
-                        ):
-                            continue
-
-                        owner_name = _dns_name.from_text(owner_norm + ".")
-                        node_obj = zone_obj.find_node(owner_name, create=True)
-
-                        for qtype_code, (ttl_val, vals) in rrsets.items():
-                            if int(qtype_code) == int(rrsig_code_all):
-                                continue
-                            if int(qtype_code) == int(dnskey_code_all):
-                                continue
-
-                            rr_type_name = QTYPE.get(qtype_code, str(qtype_code))
-                            try:
-                                rdtype = _dns_rdatatype.from_text(str(rr_type_name))
-                            except Exception:  # pragma: no cover - defensive
-                                continue
-
-                            rrset_obj = _dns_rrset.RRset(
-                                owner_name,
-                                _dns_rdataclass.IN,
-                                rdtype,
-                            )
-                            for v in list(vals):
-                                try:
-                                    rdata_obj = _dns_rdata.from_text(
-                                        _dns_rdataclass.IN, rdtype, str(v)
-                                    )
-                                except Exception:  # pragma: no cover - defensive
-                                    continue
-                                rrset_obj.add(rdata_obj, int(ttl_val))
-
-                            node_obj.replace_rdataset(rrset_obj)
-
-                    if keys_dir_cfg is not None:
-                        keys_dir_path = pathlib.Path(str(keys_dir_cfg)).expanduser()
-                    else:
-                        keys_dir_path = pathlib.Path(".")
-
-                    try:
-                        (
-                            ksk_private,
-                            zsk_private,
-                            ksk_dnskey,
-                            zsk_dnskey,
-                        ) = _zs.ensure_zone_keys(
-                            origin_text,
-                            keys_dir_path,
-                            algorithm=algorithm,
-                            generate_policy=generate_policy,
-                        )
-                    except Exception as exc:  # pragma: no cover - defensive
-                        logger.warning(
-                            "ZoneRecords DNSSEC auto-sign skipped for %s: %s",
-                            apex_owner,
-                            exc,
-                        )
-                        continue
-
-                    now = _dt.datetime.utcnow()
-                    inception = now - _dt.timedelta(hours=1)
-                    expiration = now + _dt.timedelta(days=validity_days)
-                    alg_enum = _zs.ALGORITHM_MAP[algorithm][0]
-
-                    _zs.sign_zone(
-                        zone_obj,
-                        origin,
-                        ksk_private,
-                        zsk_private,
-                        ksk_dnskey,
-                        zsk_dnskey,
-                        alg_enum,
-                        inception,
-                        expiration,
-                    )
-
-                    for owner_name, node_obj in zone_obj.items():
-                        try:
-                            # Normalise owner names to absolute DNS names before
-                            # deriving the internal key so that apex records are
-                            # stored under the real zone apex (e.g. "zaa")
-                            # rather than BIND-style relative forms such as
-                            # "@". This ensures later lookups using the
-                            # authoritative apex string can find DNSKEY/RRSIG
-                            # RRsets correctly.
-                            if isinstance(owner_name, _dns_name.Name):
-                                owner_abs = owner_name
-                            else:
-                                owner_abs = _dns_name.from_text(str(owner_name))
-                            if not owner_abs.is_absolute():
-                                owner_abs = owner_abs.derelativize(origin)
-                            owner_norm = owner_abs.to_text().rstrip(".").lower()
-                        except Exception:  # pragma: no cover - defensive
-                            owner_norm = str(owner_name).rstrip(".").lower()
-
-                        for rdataset in node_obj:
-                            if rdataset.rdtype not in (
-                                _dns_rdatatype.DNSKEY,
-                                _dns_rdatatype.RRSIG,
-                            ):
-                                continue
-
-                            if rdataset.rdtype == _dns_rdatatype.DNSKEY:
-                                qcode = int(dnskey_code_all)
-                            else:
-                                qcode = int(rrsig_code_all)
-
-                            key = (owner_norm, qcode)
-                            existing = mapping.get(key)
-                            if existing is None:
-                                stored_ttl = int(getattr(rdataset, "ttl", 0) or 0)
-                                vals_list: List[str] = []
-                            else:
-                                stored_ttl, vals_list = existing
-
-                            for rdata_obj in list(rdataset):
-                                try:
-                                    value_text = rdata_obj.to_text()
-                                except Exception:  # pragma: no cover - defensive
-                                    continue
-                                if value_text not in vals_list:
-                                    vals_list.append(value_text)
-
-                            mapping[key] = (stored_ttl, vals_list)
-                            per_name = name_index.setdefault(owner_norm, {})
-                            per_name[qcode] = (stored_ttl, vals_list)
-
-            except Exception:  # pragma: no cover - defensive logging only
-                logger.warning(
-                    "ZoneRecords: DNSSEC auto-signing failed; leaving zones unsigned",
-                    exc_info=True,
-                )
-
-        # Build a helper mapping that groups RRsets by qtype and owner name
-        # and, when RRSIGs exist for a particular RRset, associates the RRSIG
-        # records with the covered qtype. This is used at query time to build
-        # answer sections and attach the corresponding RRSIGs alongside their
-        # covered RRsets without having to re-parse textual representations.
-        try:
-            try:
-                rrsig_code_idx = int(QTYPE.RRSIG)
-            except Exception:  # pragma: no cover - defensive
-                rrsig_code_idx = 46
-
-            # First, index RRSIG rdata by (owner, covered_type). We only track
-            # the presentation text here; the TTL for signatures is derived from
-            # the covered RRset's TTL when we build the per-qtype mapping so
-            # that RRSIG TTLs match their RRset, defaulting to 300 when needed.
-            rrsig_cover: Dict[Tuple[str, int], List[str]] = {}
-            for (owner_name_idx, qcode_idx), (ttl_idx, vals_idx) in mapping.items():
-                if int(qcode_idx) != int(rrsig_code_idx):
-                    continue
-                owner_norm_idx = str(owner_name_idx).rstrip(".").lower()
-                for v_idx in list(vals_idx):
-                    try:
-                        parts = str(v_idx).split()
-                    except Exception:  # pragma: no cover - defensive
-                        continue
-                    if not parts:
-                        continue
-                    covered_name = parts[0].upper()
-                    covered_code: Optional[int] = None
-                    try:
-                        attr_val = getattr(QTYPE, covered_name)
-                    except Exception:
-                        attr_val = None
-                    if isinstance(attr_val, int):
-                        covered_code = int(attr_val)
-                    else:
-                        try:
-                            qval = QTYPE.get(covered_name, None)
-                        except Exception:
-                            qval = None
-                        if isinstance(qval, int):
-                            covered_code = int(qval)
-                    if covered_code is None:
-                        continue
-                    key_idx = (owner_norm_idx, covered_code)
-                    bucket = rrsig_cover.setdefault(key_idx, [])
-                    bucket.append(str(v_idx))
-
-            # Next, pre-build dnslib.RR objects for each (qtype, owner) pair,
-            # appending any matching RRSIGs for the covered type. The resulting
-            # structure is stored on self.mapping as:
-            #   self.mapping[qtype][owner_without_trailing_dot] -> List[RR]
-            mapping_by_qtype: Dict[int, Dict[str, List[RR]]] = {}
-            for (owner_name_idx, qcode_idx), (ttl_idx, vals_idx) in mapping.items():
-                owner_norm_idx = str(owner_name_idx).rstrip(".").lower()
-                qcode_int = int(qcode_idx)
-
-                # Skip bare RRSIG RRsets here; they are attached to the covered
-                # type's bucket using rrsig_cover above.
-                if qcode_int == int(rrsig_code_idx):
-                    continue
-
-                rr_type_name_idx = QTYPE.get(qcode_int, str(qcode_int))
-                rr_list: List[RR] = []
-
-                # Base RRset for this owner/qtype.
-                for v_idx in list(vals_idx):
-                    zone_line_idx = f"{owner_norm_idx}. {int(ttl_idx)} IN {rr_type_name_idx} {v_idx}"
-                    try:
-                        built = RR.fromZone(zone_line_idx)
-                    except Exception:  # pragma: no cover - defensive
-                        continue
-                    rr_list.extend(built)
-
-                # Attach any RRSIGs that cover this RRset, if present. Use the
-                # same TTL as the covered RRset (ttl_idx), falling back to 300
-                # when the stored TTL is zero or missing.
-                sig_entries = rrsig_cover.get((owner_norm_idx, qcode_int), [])
-                for v_sig in sig_entries:
-                    ttl_sig = int(ttl_idx) or 300
-                    zone_line_sig = f"{owner_norm_idx}. {ttl_sig} IN RRSIG {v_sig}"
-                    try:
-                        built_sig = RR.fromZone(zone_line_sig)
-                    except Exception:  # pragma: no cover - defensive
-                        continue
-                    rr_list.extend(built_sig)
-
-                if not rr_list:
-                    continue
-
-                by_name = mapping_by_qtype.setdefault(qcode_int, {})
-                by_name[owner_norm_idx] = rr_list
-        except Exception:  # pragma: no cover - defensive logging only
-            logger.warning(
-                "ZoneRecords: failed to build DNSSEC helper mapping; falling back to per-query construction",
-                exc_info=True,
-            )
-            mapping_by_qtype = {}
+        mapping_by_qtype = _axfr_dnssec.dnssec_postprocess_zones(
+            mapping,
+            name_index,
+            zone_soa,
+            dnssec_classified_axfr,
+            dnssec_cfg_raw if isinstance(dnssec_cfg_raw, dict) else dnssec_cfg_raw,
+        )
 
         lock = getattr(self, "_records_lock", None)
 
@@ -1794,8 +1368,8 @@ class ZoneRecords(BasePlugin):
           - client_ip: Source IP address of the AXFR/IXFR client.
 
         Outputs:
-          - None; updates learned NOTIFY targets and may schedule a delayed
-            NOTIFY when axfr_notify_scheduled is configured.
+          - None; updates learned NOTIFY targets and may schedule a delayed or
+            immediate NOTIFY when axfr_notify_scheduled is configured.
         """
 
         try:
@@ -1834,11 +1408,277 @@ class ZoneRecords(BasePlugin):
             per_zone = self._axfr_notify_learned.setdefault(zone_norm, {})
             per_zone[key] = target
 
-        # Optionally schedule a delayed NOTIFY back to this client to ensure it
-        # can re-validate zone state after a transfer.
+        # Optionally schedule or immediately send a NOTIFY back to this client
+        # so it can re-validate zone state after a transfer. A delay of 0 means
+        # "send immediately"; a positive delay schedules a background send.
         delay = getattr(self, "_axfr_notify_delay", None)
-        if delay is not None and delay > 0:
-            self._schedule_delayed_notify(zone_norm, target, float(delay))
+        if delay is None:
+            return
+
+        try:
+            delay_f = float(delay)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            delay_f = 0.0
+
+        if delay_f <= 0.0:
+            try:
+                self._send_notify_to_target(zone_norm, target)
+            except Exception:  # pragma: no cover - defensive logging only
+                logger.warning(
+                    "ZoneRecords: failed to send immediate NOTIFY to %s for zone %s",
+                    host,
+                    zone_norm,
+                    exc_info=True,
+                )
+        else:
+            self._schedule_delayed_notify(zone_norm, target, delay_f)
+
+    def _snapshot_zone_state(
+        self,
+        zone_apex: str,
+        name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
+    ) -> set[Tuple[str, int, int, Tuple[str, ...]]]:
+        """Brief: Build a hashable snapshot of RRsets for a given zone.
+
+        Inputs:
+          - zone_apex: Zone apex string without trailing dot.
+          - name_index: Mapping of owner -> qtype -> (ttl, values).
+
+        Outputs:
+          - set of (owner, qtype, ttl, values) tuples for owners inside zone.
+        """
+
+        snapshot: set[Tuple[str, int, int, Tuple[str, ...]]] = set()
+        try:
+            apex = str(zone_apex).rstrip(".").lower()
+        except Exception:  # pragma: no cover - defensive
+            apex = str(zone_apex).lower()
+        if not apex:
+            return snapshot
+
+        for owner, rrsets in name_index.items():
+            try:
+                owner_norm = str(owner).rstrip(".").lower()
+            except Exception:  # pragma: no cover - defensive
+                owner_norm = str(owner).lower()
+            if owner_norm != apex and not owner_norm.endswith("." + apex):
+                continue
+            for qcode, (ttl, values) in rrsets.items():
+                try:
+                    ttl_i = int(ttl)
+                except Exception:  # pragma: no cover - defensive
+                    ttl_i = 0
+                snapshot.add(
+                    (
+                        owner_norm,
+                        int(qcode),
+                        ttl_i,
+                        tuple(list(values)),
+                    )
+                )
+        return snapshot
+
+    def _compute_changed_zones(
+        self,
+        old_name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
+        old_zone_soa: Dict[str, Tuple[int, List[str]]],
+        new_name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
+        new_zone_soa: Dict[str, Tuple[int, List[str]]],
+    ) -> List[str]:
+        """Brief: Determine which authoritative zones changed between snapshots.
+
+        Inputs:
+          - old_name_index/new_name_index: Pre- and post-reload name indexes.
+          - old_zone_soa/new_zone_soa: Pre- and post-reload SOA mappings.
+
+        Outputs:
+          - list of zone apex names whose RRsets changed.
+        """
+
+        changed: List[str] = []
+        all_apexes = set(old_zone_soa.keys()) | set(new_zone_soa.keys())
+        for apex in sorted(all_apexes):
+            if apex not in old_zone_soa or apex not in new_zone_soa:
+                changed.append(apex)
+                continue
+            before = self._snapshot_zone_state(apex, old_name_index)
+            after = self._snapshot_zone_state(apex, new_name_index)
+            if before != after:
+                changed.append(apex)
+        return changed
+
+    def _send_notify_for_zones(self, zone_apexes: List[str]) -> None:
+        """Brief: Send DNS NOTIFY for each changed zone to configured targets.
+
+        Inputs:
+          - zone_apexes: List of zone apex names whose data changed.
+
+        Outputs:
+          - None; best-effort fire-and-forget NOTIFY sends.
+        """
+
+        if not zone_apexes:
+            return
+
+        static_targets: List[Dict[str, object]] = list(
+            getattr(self, "_axfr_notify_static_targets", []) or []
+        )
+
+        # Snapshot learned targets under lock so network I/O never holds it.
+        learned_snapshot: Dict[str, Dict[str, Dict[str, object]]] = {}
+        lock = getattr(self, "_axfr_notify_lock", None)
+        if lock is not None:
+            with lock:
+                for zone, targets in self._axfr_notify_learned.items():
+                    learned_snapshot[zone] = dict(targets)
+        else:
+            raw = getattr(self, "_axfr_notify_learned", {}) or {}
+            for zone, targets in raw.items():
+                if isinstance(targets, dict):
+                    learned_snapshot[zone] = dict(targets)
+
+        for apex in zone_apexes:
+            try:
+                zone_norm = str(apex).rstrip(".").lower()
+            except Exception:  # pragma: no cover - defensive
+                zone_norm = str(apex).lower()
+            if not zone_norm:
+                continue
+
+            per_zone_targets: List[Dict[str, object]] = []
+            per_zone_targets.extend(static_targets)
+            for _key, t in learned_snapshot.get(zone_norm, {}).items():
+                per_zone_targets.append(t)
+
+            if not per_zone_targets:
+                continue
+
+            for t in per_zone_targets:
+                try:
+                    self._send_notify_to_target(zone_norm, t)
+                except Exception:  # pragma: no cover - defensive logging only
+                    logger.warning(
+                        "ZoneRecords: failed to send NOTIFY for zone %s to target %r",
+                        zone_norm,
+                        t,
+                        exc_info=True,
+                    )
+
+    def _send_notify_to_target(self, zone_apex: str, target: Dict[str, object]) -> None:
+        """Brief: Send a DNS NOTIFY for *zone_apex* to a single downstream target.
+
+        Inputs:
+          - zone_apex: Zone apex name without trailing dot.
+          - target: Mapping with at least ``host`` and ``port`` keys and
+            optional ``timeout_ms``, ``transport``, ``server_name``, ``verify``,
+            and ``ca_file`` entries.
+
+        Outputs:
+          - None; logs but otherwise ignores transport errors.
+        """
+
+        try:
+            apex = str(zone_apex).rstrip(".").lower()
+        except Exception:  # pragma: no cover - defensive
+            apex = str(zone_apex).lower()
+        if not apex:
+            return
+
+        host = str(target.get("host", ""))
+        if not host:
+            return
+        try:
+            port = int(target.get("port", 53))
+        except Exception:  # pragma: no cover - defensive
+            port = 53
+        try:
+            timeout_ms = int(target.get("timeout_ms", 2000))
+        except Exception:  # pragma: no cover - defensive
+            timeout_ms = 2000
+
+        transport = str(target.get("transport", "tcp") or "tcp").lower()
+        server_name = target.get("server_name")
+        verify_flag = bool(target.get("verify", True))
+        ca_file = target.get("ca_file")
+
+        qname = apex + "."
+        # Build a minimal NOTIFY message for the zone SOA.
+        try:
+            notify = DNSRecord.question(qname, qtype=QTYPE.SOA)
+            notify.header.opcode = OPCODE.NOTIFY
+        except Exception:  # pragma: no cover - defensive
+            return
+
+        wire = notify.pack()
+
+        try:
+            if transport == "dot":
+                dot_query(
+                    host,
+                    port,
+                    wire,
+                    server_name=str(server_name) if server_name is not None else None,
+                    verify=bool(verify_flag),
+                    ca_file=str(ca_file) if ca_file is not None else None,
+                    connect_timeout_ms=timeout_ms,
+                    read_timeout_ms=timeout_ms,
+                )
+            else:
+                tcp_query(
+                    host,
+                    port,
+                    wire,
+                    connect_timeout_ms=timeout_ms,
+                    read_timeout_ms=timeout_ms,
+                )
+        except Exception:  # pragma: no cover - defensive logging only
+            logger.warning(
+                "ZoneRecords: NOTIFY send to %s:%d via %s failed for zone %s",
+                host,
+                port,
+                transport,
+                apex,
+                exc_info=True,
+            )
+
+    def _schedule_delayed_notify(
+        self, zone_apex: str, target: Dict[str, object], delay_s: float
+    ) -> None:
+        """Brief: Schedule a delayed DNS NOTIFY for a learned or static target.
+
+        Inputs:
+          - zone_apex: Zone apex name.
+          - target: Target mapping as accepted by _send_notify_to_target.
+          - delay_s: Delay in seconds before sending NOTIFY.
+
+        Outputs:
+          - None; spawns a background timer when delay is positive.
+        """
+
+        if delay_s <= 0.0:
+            try:
+                self._send_notify_to_target(zone_apex, target)
+            except Exception:  # pragma: no cover - defensive logging only
+                logger.warning(
+                    "ZoneRecords: failed to send immediate scheduled NOTIFY for %s",
+                    zone_apex,
+                    exc_info=True,
+                )
+            return
+
+        def _cb() -> None:
+            try:
+                self._send_notify_to_target(zone_apex, target)
+            except Exception:  # pragma: no cover - defensive logging only
+                logger.warning(
+                    "ZoneRecords: failed to send delayed NOTIFY for %s",
+                    zone_apex,
+                    exc_info=True,
+                )
+
+        timer = threading.Timer(float(delay_s), _cb)
+        timer.daemon = True
+        timer.start()
 
     def _client_wants_dnssec(self, request: object) -> bool:
         """Brief: Detect whether the client wants DNSSEC records via EDNS(0) DO bit.
@@ -1866,6 +1706,194 @@ class ZoneRecords(BasePlugin):
         except Exception:  # pragma: no cover - defensive
             pass
         return False
+
+    def _add_rrset_to_reply(
+        self,
+        reply: DNSRecord,
+        owner_name: str,
+        rr_qtype: int,
+        ttl: int,
+        values: List[str],
+        include_dnssec: bool,
+    ) -> bool:
+        """Brief: Append an RRset (and any attached RRSIGs) to a DNS reply.
+
+        Inputs:
+          - reply: DNSRecord being built.
+          - owner_name: Owner name (with trailing dot preferred but not required).
+          - rr_qtype: Numeric RR type code for the RRset.
+          - ttl: TTL to apply to constructed RRs.
+          - values: List of presentation-format rdata strings.
+          - include_dnssec: When False, suppress RRSIGs unless the caller
+            explicitly handles DNSSEC-only queries.
+
+        Outputs:
+          - bool: True when at least one RR was added to the reply.
+        """
+        owner_key = str(owner_name).rstrip(".").lower()
+        added_any = False
+
+        # Determine the numeric RRSIG type code once so we can reliably
+        # distinguish signature RRs from their covered RRsets when adding
+        # them to the reply sections.
+        try:
+            rrsig_code_local = int(QTYPE.RRSIG)
+        except Exception:  # pragma: no cover - defensive
+            rrsig_code_local = 46
+
+        def _add_rr_to_reply(rr: RR) -> None:
+            """Append RR to the answer section, optionally filtering RRSIGs.
+
+            Inputs:
+              - rr: Fully constructed dnslib.RR instance.
+
+            Outputs:
+              - None; mutates ``reply`` in-place by appending to the answer
+                section. RRSIGs are suppressed entirely when DNSSEC is not
+                requested via the DO bit.
+            """
+
+            try:
+                rr_type_int = int(getattr(rr, "rtype", 0))
+            except Exception:  # pragma: no cover - defensive
+                rr_type_int = 0
+
+            # When the client has not requested DNSSEC (DO=0) and the RR is
+            # an RRSIG, suppress the signature entirely in order to comply
+            # with RFC 4035 section 3.2. We still honour explicit DNSSEC
+            # queries (for example, QTYPE=RRSIG) by passing
+            # include_dnssec=True from the call site in those cases.
+            if rr_type_int == rrsig_code_local and not include_dnssec:
+                return
+
+            reply.add_answer(rr)
+
+        # Prefer the helper mapping constructed at load time when present.
+        try:
+            mapping_by_qtype = getattr(self, "mapping", None)
+        except Exception:  # pragma: no cover - defensive
+            mapping_by_qtype = None
+
+        if isinstance(mapping_by_qtype, dict):
+            by_name = mapping_by_qtype.get(int(rr_qtype), {}) or {}
+            rrs = by_name.get(owner_key)
+            if rrs:
+                for rr in list(rrs):
+                    _add_rr_to_reply(rr)
+                    added_any = True
+
+        if added_any:
+            return True
+
+        # Fallback: construct RRs from textual TTL/value pairs as before.
+        rr_type_name = QTYPE.get(rr_qtype, str(rr_qtype))
+        for value in values:
+            zone_line = f"{owner_name} {ttl} IN {rr_type_name} {value}"
+            try:
+                rrs = RR.fromZone(zone_line)
+            except Exception as exc:  # pragma: no cover - invalid record value
+                logger.warning(
+                    "ZoneRecords invalid value %r for qtype %s: %s",
+                    value,
+                    rr_type_name,
+                    exc,
+                )
+                continue
+            for rr in rrs:
+                _add_rr_to_reply(rr)
+                added_any = True
+        return added_any
+
+    def _is_dnssec_rrtype(self, code: int) -> bool:
+        """Brief: Return True when *code* represents a DNSSEC-related RR type.
+
+        Inputs:
+          - code: Numeric QTYPE code to classify.
+
+        Outputs:
+          - bool: True when *code* is one of the core DNSSEC RR types
+            (DNSKEY, RRSIG, NSEC, NSEC3, NSEC3PARAM, DS).
+        """
+
+        try:
+            c = int(code)
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+        codes: List[int] = []
+        try:
+            codes.append(int(QTYPE.DNSKEY))
+        except Exception:  # pragma: no cover - defensive
+            codes.append(48)
+        try:
+            codes.append(int(QTYPE.RRSIG))
+        except Exception:  # pragma: no cover - defensive
+            codes.append(46)
+        try:
+            codes.append(int(QTYPE.NSEC))
+        except Exception:  # pragma: no cover - defensive
+            codes.append(47)
+        try:
+            codes.append(int(QTYPE.NSEC3))
+        except Exception:  # pragma: no cover - defensive
+            codes.append(50)
+        try:
+            codes.append(int(QTYPE.NSEC3PARAM))
+        except Exception:  # pragma: no cover - defensive
+            codes.append(51)
+        try:
+            codes.append(int(QTYPE.DS))
+        except Exception:  # pragma: no cover - defensive
+            codes.append(43)
+
+        return c in set(codes)
+
+    def _add_dnssec_rrsets(
+        self,
+        reply: DNSRecord,
+        owner_name: str,
+        owner_rrsets: Dict[int, Tuple[int, List[str]]],
+        zone_apex_name: str,
+        name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
+    ) -> None:
+        """Brief: Append DNSSEC RRsets (DNSKEY/RRSIG) when present for an owner.
+
+        Inputs:
+          - reply: DNSRecord being built.
+          - owner_name: Owner name with trailing dot.
+          - owner_rrsets: RRsets dict for this owner.
+          - zone_apex_name: Apex of the authoritative zone (no trailing dot).
+          - name_index: Global name index used to look up apex-level DNSKEY RRsets.
+
+        Outputs:
+          - None; mutates reply by adding DNSKEY (and their RRSIGs) when
+            appropriate. Per-RRset RRSIGs for other types are attached via
+            _add_rrset_to_reply using the pre-built helper mapping.
+        """
+        owner_normalized = owner_name.rstrip(".").lower()
+
+        # DNSKEY code is looked up defensively so tests that monkeypatch QTYPE
+        # continue to behave as expected.
+        try:
+            dnskey_code = int(QTYPE.DNSKEY)
+        except Exception:  # pragma: no cover - defensive
+            dnskey_code = 48
+
+        # At the zone apex, include DNSKEY RRsets when present; their
+        # signatures will be attached by _add_rrset_to_reply using self.mapping
+        # where available.
+        if owner_normalized == zone_apex_name:
+            apex_rrsets = name_index.get(zone_apex_name, {})
+            if dnskey_code in apex_rrsets:
+                ttl_dk, vals_dk = apex_rrsets[dnskey_code]
+                self._add_rrset_to_reply(
+                    reply,
+                    owner_name,
+                    dnskey_code,
+                    ttl_dk,
+                    list(vals_dk),
+                    include_dnssec=True,
+                )
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
@@ -1941,91 +1969,6 @@ class ZoneRecords(BasePlugin):
 
         zone_apex = self._find_zone_for_name(name)
 
-        # Helper to build RRs from a single RRset, preferring the pre-built
-        # self.mapping index when available so that RRSIGs can be attached
-        # alongside their covered RRsets.
-        def _add_rrset(
-            reply: DNSRecord,
-            owner_name: str,
-            rr_qtype: int,
-            ttl: int,
-            values: List[str],
-            include_dnssec: bool,
-        ) -> bool:
-            owner_key = str(owner_name).rstrip(".").lower()
-            added_any = False
-
-            # Determine the numeric RRSIG type code once so we can reliably
-            # distinguish signature RRs from their covered RRsets when adding
-            # them to the reply sections.
-            try:
-                rrsig_code_local = int(QTYPE.RRSIG)
-            except Exception:  # pragma: no cover - defensive
-                rrsig_code_local = 46
-
-            def _add_rr_to_reply(rr: RR) -> None:
-                """Append RR to the answer section, optionally filtering RRSIGs.
-
-                Inputs:
-                  - rr: Fully constructed dnslib.RR instance.
-
-                Outputs:
-                  - None; mutates ``reply`` in-place by appending to the answer
-                  section. RRSIGs are suppressed entirely when DNSSEC is not
-                  requested via the DO bit.
-                """
-
-                try:
-                    rr_type_int = int(getattr(rr, "rtype", 0))
-                except Exception:  # pragma: no cover - defensive
-                    rr_type_int = 0
-
-                # When the client has not requested DNSSEC (DO=0) and the RR is
-                # an RRSIG, suppress the signature entirely in order to comply
-                # with RFC 4035 section 3.2. We still honour explicit DNSSEC
-                # queries (for example, QTYPE=RRSIG) by passing
-                # include_dnssec=True from the call site in those cases.
-                if rr_type_int == rrsig_code_local and not include_dnssec:
-                    return
-
-                reply.add_answer(rr)
-
-            # Prefer the helper mapping constructed at load time when present.
-            try:
-                mapping_by_qtype = getattr(self, "mapping", None)
-            except Exception:  # pragma: no cover - defensive
-                mapping_by_qtype = None
-
-            if isinstance(mapping_by_qtype, dict):
-                by_name = mapping_by_qtype.get(int(rr_qtype), {}) or {}
-                rrs = by_name.get(owner_key)
-                if rrs:
-                    for rr in list(rrs):
-                        _add_rr_to_reply(rr)
-                        added_any = True
-
-            if added_any:
-                return True
-
-            # Fallback: construct RRs from textual TTL/value pairs as before.
-            rr_type_name = QTYPE.get(rr_qtype, str(rr_qtype))
-            for value in values:
-                zone_line = f"{owner_name} {ttl} IN {rr_type_name} {value}"
-                try:
-                    rrs = RR.fromZone(zone_line)
-                except Exception as exc:  # pragma: no cover - invalid record value
-                    logger.warning(
-                        "ZoneRecords invalid value %r for qtype %s: %s",
-                        value,
-                        rr_type_name,
-                        exc,
-                    )
-                    continue
-                for rr in rrs:
-                    _add_rr_to_reply(rr)
-                    added_any = True
-            return added_any
-
         # If this name is not covered by any authoritative zone, preserve the
         # legacy exact-match override behaviour keyed by (name, qtype).
         if zone_apex is None:
@@ -2055,7 +1998,7 @@ class ZoneRecords(BasePlugin):
             )
             owner = str(request.q.qname).rstrip(".") + "."
 
-            added = _add_rrset(
+            added = self._add_rrset_to_reply(
                 reply,
                 owner,
                 qtype_int,
@@ -2213,7 +2156,7 @@ class ZoneRecords(BasePlugin):
                     zone_apex,
                     name,
                 )
-            added = _add_rrset(
+            added = self._add_rrset_to_reply(
                 reply,
                 owner,
                 cname_code,
@@ -2225,7 +2168,7 @@ class ZoneRecords(BasePlugin):
                 return None
             # When client wants DNSSEC, add RRSIG for the CNAME.
             if want_dnssec:
-                _add_dnssec_rrsets(reply, owner, rrsets, zone_apex)
+                self._add_dnssec_rrsets(reply, owner, rrsets, zone_apex, name_index)
             return PluginDecision(action="override", response=reply.pack())
 
         # No CNAME at this owner; distinguish positive, NODATA, and NXDOMAIN.
@@ -2238,9 +2181,9 @@ class ZoneRecords(BasePlugin):
                     # (RRSIG, NSEC, DNSKEY, etc.) to honour RFC 4035. When the
                     # client has explicitly requested DNSSEC via the DO bit we
                     # include them normally.
-                    if not want_dnssec and _is_dnssec_rrtype(rr_qtype):
+                    if not want_dnssec and self._is_dnssec_rrtype(rr_qtype):
                         continue
-                    if _add_rrset(
+                    if self._add_rrset_to_reply(
                         reply,
                         owner,
                         rr_qtype,
@@ -2253,7 +2196,13 @@ class ZoneRecords(BasePlugin):
                     return None
                 # When client wants DNSSEC, add RRSIG/DNSKEY RRsets.
                 if want_dnssec:
-                    _add_dnssec_rrsets(reply, owner, rrsets, zone_apex)
+                    self._add_dnssec_rrsets(
+                        reply,
+                        owner,
+                        rrsets,
+                        zone_apex,
+                        name_index,
+                    )
                 return PluginDecision(action="override", response=reply.pack())
 
             if qtype_int in rrsets:
@@ -2263,8 +2212,8 @@ class ZoneRecords(BasePlugin):
                 # returned regardless of DO so that explicit DNSSEC queries are
                 # satisfied. For all other types, include_dnssec follows the
                 # client's DO bit.
-                include_dnssec = want_dnssec or _is_dnssec_rrtype(qtype_int)
-                if not _add_rrset(
+                include_dnssec = want_dnssec or self._is_dnssec_rrtype(qtype_int)
+                if not self._add_rrset_to_reply(
                     reply,
                     owner,
                     qtype_int,
@@ -2277,7 +2226,13 @@ class ZoneRecords(BasePlugin):
                 # auto-signed and the client has explicitly asked for DNSSEC,
                 # attach DNSKEY/RRSIG RRsets for the owner as appropriate.
                 if want_dnssec:
-                    _add_dnssec_rrsets(reply, owner, rrsets, zone_apex)
+                    self._add_dnssec_rrsets(
+                        reply,
+                        owner,
+                        rrsets,
+                        zone_apex,
+                        name_index,
+                    )
                 return PluginDecision(action="override", response=reply.pack())
 
             # NODATA: name exists in zone but requested type is absent.
@@ -2667,12 +2622,56 @@ class ZoneRecords(BasePlugin):
             self._schedule_debounced_reload(remaining)
             return
 
+        # Snapshot pre-reload state so we can detect which zones changed once
+        # the new records have been loaded.
+        lock = getattr(self, "_records_lock", None)
+        if lock is None:
+            old_name_index = dict(getattr(self, "_name_index", {}) or {})
+            old_zone_soa = dict(getattr(self, "_zone_soa", {}) or {})
+        else:
+            with lock:
+                old_name_index = dict(getattr(self, "_name_index", {}) or {})
+                old_zone_soa = dict(getattr(self, "_zone_soa", {}) or {})
+
         self._last_watchdog_reload_ts = now
         logger.info("Reloading records mapping due to filesystem change")
         try:
             self._load_records()
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.warning("Failed to reload records from watchdog event: %s", exc)
+            return
+
+        # After a successful reload, compute which authoritative zones changed
+        # and send DNS NOTIFY for each updated zone apex.
+        if lock is None:
+            new_name_index = dict(getattr(self, "_name_index", {}) or {})
+            new_zone_soa = dict(getattr(self, "_zone_soa", {}) or {})
+        else:
+            with lock:
+                new_name_index = dict(getattr(self, "_name_index", {}) or {})
+                new_zone_soa = dict(getattr(self, "_zone_soa", {}) or {})
+
+        try:
+            changed_zones = self._compute_changed_zones(
+                old_name_index,
+                old_zone_soa,
+                new_name_index,
+                new_zone_soa,
+            )
+        except Exception:  # pragma: no cover - defensive logging only
+            logger.warning(
+                "ZoneRecords: failed to compute changed zones after reload",
+                exc_info=True,
+            )
+            return
+
+        try:
+            self._send_notify_for_zones(changed_zones)
+        except Exception:  # pragma: no cover - defensive logging only
+            logger.warning(
+                "ZoneRecords: failed to send NOTIFY after records reload",
+                exc_info=True,
+            )
 
     def close(self) -> None:
         """
