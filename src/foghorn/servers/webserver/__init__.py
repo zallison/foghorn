@@ -3,7 +3,7 @@
 Historically, the entire admin FastAPI application and its helpers lived
 directly inside :mod:`foghorn.servers.webserver` (this ``__init__`` module),
 which grew quite large. The full implementation now lives in the
-:mod:`foghorn.servers.webserver._core` module.
+:mod:`foghorn.servers.webserver.core` module.
 
 To preserve backwards compatibility, this package aliases
 ``foghorn.servers.webserver`` to the implementation module so that existing
@@ -22,7 +22,7 @@ import sys as _sys
 
 # Import the implementation module and then alias this package name to it in
 # sys.modules. After this runs, ``foghorn.servers.webserver`` and
-# ``foghorn.servers.webserver._core`` both refer to the same module object.
-from . import _core as _impl
+# ``foghorn.servers.webserver.core`` both refer to the same module object.
+from . import core as _impl
 
 _sys.modules[__name__] = _impl

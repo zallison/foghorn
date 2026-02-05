@@ -3,9 +3,9 @@
 This module hosts the small set of classes and helpers that track listener
 runtime state and implement the logic behind the /ready endpoints.
 
-Historically these lived directly in :mod:`foghorn.servers.webserver._core`.
+Historically these lived directly in :mod:`foghorn.servers.webserver.core`.
 They are split out here to keep the main implementation module smaller while
-preserving the public/semi-public API via re-exports from ``_core``.
+preserving the public/semi-public API via re-exports from ``core``.
 """
 
 from __future__ import annotations
