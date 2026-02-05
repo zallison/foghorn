@@ -1,0 +1,596 @@
+"""Shared business logic for the admin webserver.
+
+This module contains framework-neutral helpers used by both:
+- the FastAPI/uvicorn implementation (routes_*.py), and
+- the threaded stdlib http.server fallback (threaded_handlers.py).
+
+The functions here deliberately avoid importing FastAPI or http.server types.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Optional
+
+from ...plugins.resolve.base import AdminPageSpec
+from ...stats import StatsCollector
+from ..udp_server import DNSUDPHandler
+from .config_helpers import _ts_to_utc_iso
+
+
+@dataclass(frozen=True)
+class AdminLogicHttpError(Exception):
+    """Brief: Error type for mapping logic failures to HTTP responses.
+
+    Inputs:
+      - status_code: HTTP status code that should be returned.
+      - detail: Human-readable error message.
+
+    Outputs:
+      - An exception that can be caught by FastAPI/threaded glue code.
+
+    Example:
+      >>> raise AdminLogicHttpError(status_code=404, detail='not found')
+    """
+
+    status_code: int
+    detail: str
+
+
+def _get_store_from_collector(collector: StatsCollector | None) -> Any | None:
+    """Brief: Return the stats store from a StatsCollector-like object.
+
+    Inputs:
+      - collector: StatsCollector instance (or None).
+
+    Outputs:
+      - The store object (typically StatsSQLiteStore) if present, else None.
+    """
+
+    if collector is None:
+        return None
+    return getattr(collector, "_store", None)
+
+
+def build_query_log_payload(
+    store: Any,
+    *,
+    client_ip: str | None,
+    qtype: str | None,
+    qname: str | None,
+    rcode: str | None,
+    start_ts: float | None,
+    end_ts: float | None,
+    page: int,
+    page_size: int,
+) -> Dict[str, Any]:
+    """Brief: Build the query-log list payload from a store result.
+
+    Inputs:
+      - store: Stats store object that exposes select_query_log(**kwargs).
+      - client_ip/qtype/qname/rcode: Optional filters.
+      - start_ts/end_ts: Optional unix timestamps in seconds (UTC).
+      - page: 1-indexed page number.
+      - page_size: page size (already clamped).
+
+    Outputs:
+      - Dict with keys: total, page, page_size, total_pages, items.
+        Each dict item with a 'ts' key is copied and gets a 'timestamp' field.
+    """
+
+    res = store.select_query_log(
+        client_ip=client_ip,
+        qtype=qtype,
+        qname=qname,
+        rcode=rcode,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        page=page,
+        page_size=page_size,
+    )
+
+    items: list[Any] = []
+    for item in res.get("items", []) or []:
+        if isinstance(item, dict) and "ts" in item:
+            out = dict(item)
+            out["timestamp"] = _ts_to_utc_iso(float(out.get("ts") or 0.0))
+            items.append(out)
+        else:
+            items.append(item)
+
+    return {
+        "total": res.get("total", 0),
+        "page": res.get("page", page),
+        "page_size": res.get("page_size", page_size),
+        "total_pages": res.get("total_pages", 0),
+        "items": items,
+    }
+
+
+def build_query_log_aggregate_payload(
+    store: Any,
+    *,
+    start_dt: datetime,
+    end_dt: datetime,
+    interval_seconds: int,
+    client_ip: str | None,
+    qtype: str | None,
+    qname: str | None,
+    rcode: str | None,
+    group_by: str | None,
+) -> Dict[str, Any]:
+    """Brief: Build query-log aggregate payload from a store result.
+
+    Inputs:
+      - store: Stats store object exposing aggregate_query_log_counts(**kwargs).
+      - start_dt/end_dt: Datetimes representing the aggregate window.
+      - interval_seconds: Bucket size in seconds.
+      - client_ip/qtype/qname/rcode/group_by: Optional aggregation filters.
+
+    Outputs:
+      - Dict with keys: start, end, interval_seconds, items.
+        Each dict item may get bucket_start/bucket_end ISO fields when *_ts keys exist.
+    """
+
+    res = store.aggregate_query_log_counts(
+        start_ts=start_dt.timestamp(),
+        end_ts=end_dt.timestamp(),
+        interval_seconds=interval_seconds,
+        client_ip=client_ip,
+        qtype=qtype,
+        qname=qname,
+        rcode=rcode,
+        group_by=group_by,
+    )
+
+    items: list[dict[str, Any]] = []
+    for item in res.get("items", []) or []:
+        if not isinstance(item, dict):
+            continue
+        out = dict(item)
+        if "bucket_start_ts" in out:
+            out["bucket_start"] = _ts_to_utc_iso(
+                float(out.get("bucket_start_ts") or 0.0)
+            )
+        if "bucket_end_ts" in out:
+            out["bucket_end"] = _ts_to_utc_iso(float(out.get("bucket_end_ts") or 0.0))
+        items.append(out)
+
+    return {
+        "start": start_dt.isoformat().replace("+00:00", "Z"),
+        "end": end_dt.isoformat().replace("+00:00", "Z"),
+        "interval_seconds": int(interval_seconds),
+        "items": items,
+    }
+
+
+def build_upstream_status_payload(
+    config: Dict[str, Any] | None, *, now_ts: float | None = None
+) -> Dict[str, Any]:
+    """Brief: Build upstream status payload using DNSUDPHandler state.
+
+    Inputs:
+      - config: Full configuration mapping, used to read config['upstreams'].
+      - now_ts: Optional unix timestamp (seconds) used for determining up/down.
+
+    Outputs:
+      - Dict with keys: strategy, max_concurrent, items.
+        Items include configured upstreams plus health-only entries.
+    """
+
+    cfg = config or {}
+    upstream_cfg = cfg.get("upstreams") or []
+    if not isinstance(upstream_cfg, list):
+        upstream_cfg = []
+
+    health = getattr(DNSUDPHandler, "upstream_health", {}) or {}
+    strategy = str(getattr(DNSUDPHandler, "upstream_strategy", "failover"))
+    try:
+        max_concurrent = int(getattr(DNSUDPHandler, "upstream_max_concurrent", 1) or 1)
+    except Exception:
+        max_concurrent = 1
+    if max_concurrent < 1:
+        max_concurrent = 1
+
+    import time as _time
+
+    now = float(now_ts) if now_ts is not None else _time.time()
+    items: list[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    for up in upstream_cfg:
+        if not isinstance(up, dict):
+            continue
+        up_id = DNSUDPHandler._upstream_id(up)
+        if not up_id:
+            continue
+        seen_ids.add(up_id)
+        entry = health.get(up_id) or {}
+        try:
+            fail_count = int(entry.get("fail_count", 0))
+        except Exception:
+            fail_count = 0
+        try:
+            down_until = float(entry.get("down_until", 0.0) or 0.0)
+        except Exception:
+            down_until = 0.0
+        state = "down" if entry and down_until > now else "up"
+
+        cfg_view: Dict[str, Any] = {}
+        for key in ("host", "port", "transport", "url"):
+            if key in up:
+                cfg_view[key] = up[key]
+
+        items.append(
+            {
+                "id": up_id,
+                "config": cfg_view,
+                "state": state,
+                "fail_count": fail_count,
+                "down_until": down_until if down_until else None,
+            }
+        )
+
+    for up_id, entry in (health or {}).items():
+        if up_id in seen_ids or not up_id:
+            continue
+        try:
+            fail_count = int(entry.get("fail_count", 0))
+        except Exception:
+            fail_count = 0
+        try:
+            down_until = float(entry.get("down_until", 0.0) or 0.0)
+        except Exception:
+            down_until = 0.0
+        state = "down" if down_until > now else "up"
+        items.append(
+            {
+                "id": up_id,
+                "config": {},
+                "state": state,
+                "fail_count": fail_count,
+                "down_until": down_until if down_until else None,
+            }
+        )
+
+    return {
+        "strategy": strategy,
+        "max_concurrent": max_concurrent,
+        "items": items,
+    }
+
+
+def collect_admin_pages_for_response(plugins: Iterable[object]) -> list[dict[str, Any]]:
+    """Brief: Collect plugin-provided admin pages into a JSON-friendly structure.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+
+    Outputs:
+      - List of dicts with keys: plugin, slug, title, description, layout, kind.
+
+    Notes:
+      - Ignores plugins without a truthy 'name'.
+      - Ignores page specs lacking slug/title.
+    """
+
+    pages: list[dict[str, Any]] = []
+    for plugin in plugins or []:
+        try:
+            plugin_name = getattr(plugin, "name", None)
+        except Exception:
+            plugin_name = None
+        if not plugin_name:
+            continue
+
+        get_pages = getattr(plugin, "get_admin_pages", None)
+        if not callable(get_pages):
+            continue
+
+        try:
+            specs = get_pages()
+        except Exception:
+            continue
+
+        for spec in specs or []:
+            slug = None
+            title = None
+            description = None
+            layout = None
+            kind = None
+            try:
+                if isinstance(spec, AdminPageSpec):
+                    slug = spec.slug
+                    title = spec.title
+                    description = spec.description
+                    layout = spec.layout or "one_column"
+                    kind = spec.kind
+                elif isinstance(spec, dict):
+                    slug = spec.get("slug")
+                    title = spec.get("title")
+                    description = spec.get("description")
+                    layout = spec.get("layout") or "one_column"
+                    kind = spec.get("kind")
+                else:
+                    slug = getattr(spec, "slug", None)
+                    title = getattr(spec, "title", None)
+                    description = getattr(spec, "description", None)
+                    layout = getattr(spec, "layout", "one_column")
+                    kind = getattr(spec, "kind", None)
+            except Exception:
+                continue
+
+            slug_str = str(slug or "").strip()
+            title_str = str(title or "").strip()
+            if not slug_str or not title_str:
+                continue
+
+            layout_str = str(layout or "one_column").strip().lower()
+            if layout_str not in {"one_column", "two_column"}:
+                layout_str = "one_column"
+
+            pages.append(
+                {
+                    "plugin": str(plugin_name),
+                    "slug": slug_str,
+                    "title": title_str,
+                    "description": (
+                        str(description) if description is not None else None
+                    ),
+                    "layout": layout_str,
+                    "kind": str(kind) if kind is not None else None,
+                }
+            )
+
+    return pages
+
+
+def find_admin_page_detail(
+    plugins: Iterable[object], plugin_name: str, page_slug: str
+) -> dict[str, Any] | None:
+    """Brief: Find a specific plugin admin page detail.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+      - plugin_name: Target plugin instance name.
+      - page_slug: Admin page slug.
+
+    Outputs:
+      - Dict for the page, or None if not found.
+
+    Notes:
+      - Mirrors logic used by both FastAPI and threaded implementations.
+    """
+
+    target = None
+    for plugin in plugins or []:
+        try:
+            if getattr(plugin, "name", None) == plugin_name:
+                target = plugin
+                break
+        except Exception:
+            continue
+    if target is None:
+        return None
+
+    get_pages = getattr(target, "get_admin_pages", None)
+    if not callable(get_pages):
+        return None
+
+    try:
+        specs = get_pages()
+    except Exception:
+        return None
+
+    for spec in specs or []:
+        slug = None
+        title = None
+        description = None
+        layout = None
+        kind = None
+        html_left = None
+        html_right = None
+        try:
+            if isinstance(spec, AdminPageSpec):
+                slug = spec.slug
+                title = spec.title
+                description = spec.description
+                layout = spec.layout or "one_column"
+                kind = spec.kind
+                html_left = spec.html_left
+                html_right = spec.html_right
+            elif isinstance(spec, dict):
+                slug = spec.get("slug")
+                title = spec.get("title")
+                description = spec.get("description")
+                layout = spec.get("layout") or "one_column"
+                kind = spec.get("kind")
+                html_left = spec.get("html_left")
+                html_right = spec.get("html_right")
+            else:
+                slug = getattr(spec, "slug", None)
+                title = getattr(spec, "title", None)
+                description = getattr(spec, "description", None)
+                layout = getattr(spec, "layout", "one_column")
+                kind = getattr(spec, "kind", None)
+                html_left = getattr(spec, "html_left", None)
+                html_right = getattr(spec, "html_right", None)
+        except Exception:
+            continue
+
+        slug_str = str(slug or "").strip()
+        if slug_str != str(page_slug or "").strip():
+            continue
+        title_str = str(title or "").strip()
+        if not title_str:
+            continue
+
+        layout_str = str(layout or "one_column").strip().lower()
+        if layout_str not in {"one_column", "two_column"}:
+            layout_str = "one_column"
+
+        return {
+            "plugin": str(plugin_name),
+            "slug": slug_str,
+            "title": title_str,
+            "description": str(description) if description is not None else None,
+            "layout": layout_str,
+            "kind": str(kind) if kind is not None else None,
+            "html_left": str(html_left) if html_left is not None else None,
+            "html_right": str(html_right) if html_right is not None else None,
+        }
+
+    return None
+
+
+def collect_plugin_ui_descriptors(plugins: Iterable[object]) -> list[dict[str, Any]]:
+    """Brief: Collect plugin admin UI descriptors.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+
+    Outputs:
+      - List of normalized descriptor dicts, sorted by (order, title) and with
+        multi-instance title normalization applied.
+
+    Notes:
+      - This does not consult global DNS_CACHE. Callers may append a cache-like
+        object to the plugins list before calling if they want it included.
+    """
+
+    items: list[dict[str, Any]] = []
+
+    def _normalise_descriptor(
+        source: object, desc: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        if not isinstance(desc, dict):
+            return None
+        try:
+            source_name = getattr(source, "name", "")
+        except Exception:
+            source_name = ""
+
+        name = str(desc.get("name") or source_name or "").strip()
+        title_raw = desc.get("title")
+        title = str(title_raw or "").strip()
+        if not name or not title:
+            return None
+
+        kind = desc.get("kind")
+        order_val = desc.get("order")
+        try:
+            order = int(order_val) if order_val is not None else 100
+        except Exception:
+            order = 100
+
+        item = dict(desc)
+        item["name"] = name
+        item["title"] = title
+        item["kind"] = str(kind) if kind is not None else None
+        item["order"] = order
+        return item
+
+    for plugin in plugins or []:
+        get_desc = None
+        try:
+            get_desc = getattr(plugin, "get_admin_ui_descriptor", None)
+        except Exception:
+            get_desc = None
+        if not callable(get_desc):
+            continue
+        try:
+            desc = get_desc()
+        except Exception:
+            continue
+        if isinstance(desc, dict):
+            item = _normalise_descriptor(plugin, desc)
+            if item is not None:
+                items.append(item)
+
+    # Title normalization for multiple instances.
+    title_counts: dict[str, int] = {}
+    for it in items:
+        raw_title = str(it.get("title", ""))
+        name = str(it.get("name", ""))
+        base_title = raw_title
+        if raw_title and name and raw_title.endswith(f" ({name})"):
+            base_title = raw_title[: -len(f" ({name})")]
+        it["_base_title"] = base_title
+        if base_title:
+            title_counts[base_title] = title_counts.get(base_title, 0) + 1
+
+    for it in items:
+        base_title = str(it.get("_base_title", ""))
+        name = str(it.get("name", ""))
+        if not base_title:
+            continue
+        if title_counts.get(base_title, 0) > 1 and name:
+            it["title"] = f"{base_title} ({name})"
+        else:
+            it["title"] = base_title
+        it.pop("_base_title", None)
+
+    items.sort(key=lambda d: (int(d.get("order", 100) or 100), str(d.get("title", ""))))
+    return items
+
+
+def find_plugin_instance_by_name(
+    plugins: Iterable[object], plugin_name: str
+) -> object | None:
+    """Brief: Find a plugin instance by its configured name.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+      - plugin_name: Name to match against plugin.name.
+
+    Outputs:
+      - The plugin instance if found, else None.
+    """
+
+    for p in plugins or []:
+        try:
+            if getattr(p, "name", None) == plugin_name:
+                return p
+        except Exception:
+            continue
+    return None
+
+
+def build_named_plugin_snapshot(
+    plugins: Iterable[object], plugin_name: str, *, label: str
+) -> Dict[str, Any]:
+    """Brief: Build a snapshot payload for a named plugin.
+
+    Inputs:
+      - plugins: Iterable of plugin instances.
+      - plugin_name: Target plugin name.
+      - label: Human label used in error messages (e.g. 'DockerHosts').
+
+    Outputs:
+      - Dict with keys: plugin, data.
+
+    Raises:
+      - AdminLogicHttpError(404) when plugin missing or snapshot method absent.
+      - AdminLogicHttpError(500) when get_http_snapshot() fails.
+    """
+
+    target = find_plugin_instance_by_name(plugins, plugin_name)
+    if target is None or not hasattr(target, "get_http_snapshot"):
+        raise AdminLogicHttpError(
+            status_code=404,
+            detail="plugin not found or does not expose get_http_snapshot",
+        )
+
+    try:
+        snapshot = target.get_http_snapshot()  # type: ignore[call-arg]
+    except Exception as exc:
+        raise AdminLogicHttpError(
+            status_code=500,
+            detail=f"failed to build {label} snapshot: {exc}",
+        ) from exc
+
+    return {
+        "plugin": plugin_name,
+        "data": snapshot,
+    }
