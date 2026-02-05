@@ -6,7 +6,7 @@ performing layout-preserving YAML redaction, and basic time/serialization
 utilities.
 
 The functions here were originally implemented in
-:mod:`foghorn.servers.webserver._core` and are re-exported from there so that
+:mod:`foghorn.servers.webserver.core` and are re-exported from there so that
 existing imports via :mod:`foghorn.servers.webserver` continue to work.
 """
 

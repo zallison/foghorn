@@ -282,7 +282,7 @@ def get_system_info() -> Dict[str, Any]:
     try:  # pragma: no cover - import failure is environment-specific
         import importlib
 
-        web_core = importlib.import_module("foghorn.servers.webserver._core")
+        web_core = importlib.import_module("foghorn.servers.webserver.core")
     except Exception:
         web_core = None
 

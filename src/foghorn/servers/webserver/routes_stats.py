@@ -8,7 +8,6 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
-from ..udp_server import DNSUDPHandler
 from .stats_helpers import (
     _build_stats_payload_from_snapshot,
     _build_traffic_payload_from_snapshot,
@@ -16,7 +15,8 @@ from .stats_helpers import (
     _trim_top_fields,
     _utc_now_iso,
 )
-from . import _core as web_mod
+from . import admin_logic as _admin_logic
+from . import core as web_mod
 
 
 def _register_stats_routes(app: FastAPI, auth_dep: Any, version: str) -> None:
@@ -180,86 +180,9 @@ def _register_stats_routes(app: FastAPI, auth_dep: Any, version: str) -> None:
         """Return upstream strategy, concurrency, and lazy health state."""
 
         cfg = app.state.config or {}
-        upstream_cfg = cfg.get("upstreams") or []
-        if not isinstance(upstream_cfg, list):
-            upstream_cfg = []
-
-        health = getattr(DNSUDPHandler, "upstream_health", {}) or {}
-        strategy = str(getattr(DNSUDPHandler, "upstream_strategy", "failover"))
-        try:
-            max_concurrent = int(
-                getattr(DNSUDPHandler, "upstream_max_concurrent", 1) or 1
-            )
-        except Exception:
-            max_concurrent = 1
-        if max_concurrent < 1:
-            max_concurrent = 1
-
-        now = time.time()
-        items: list[Dict[str, Any]] = []
-        seen_ids: set[str] = set()
-
-        for up in upstream_cfg:
-            if not isinstance(up, dict):
-                continue
-            up_id = DNSUDPHandler._upstream_id(up)
-            if not up_id:
-                continue
-            seen_ids.add(up_id)
-            entry = health.get(up_id) or {}
-            try:
-                fail_count = int(entry.get("fail_count", 0))
-            except Exception:
-                fail_count = 0
-            try:
-                down_until = float(entry.get("down_until", 0.0) or 0.0)
-            except Exception:
-                down_until = 0.0
-            state = "down" if entry and down_until > now else "up"
-
-            cfg_view: Dict[str, Any] = {}
-            for key in ("host", "port", "transport", "url"):
-                if key in up:
-                    cfg_view[key] = up[key]
-
-            items.append(
-                {
-                    "id": up_id,
-                    "config": cfg_view,
-                    "state": state,
-                    "fail_count": fail_count,
-                    "down_until": down_until if down_until else None,
-                }
-            )
-
-        for up_id, entry in health.items():
-            if up_id in seen_ids or not up_id:
-                continue
-            try:
-                fail_count = int(entry.get("fail_count", 0))
-            except Exception:
-                fail_count = 0
-            try:
-                down_until = float(entry.get("down_until", 0.0) or 0.0)
-            except Exception:
-                down_until = 0.0
-            state = "down" if down_until > now else "up"
-            items.append(
-                {
-                    "id": up_id,
-                    "config": {},
-                    "state": state,
-                    "fail_count": fail_count,
-                    "down_until": down_until if down_until else None,
-                }
-            )
-
-        return {
-            "server_time": _utc_now_iso(),
-            "strategy": strategy,
-            "max_concurrent": max_concurrent,
-            "items": items,
-        }
+        payload = _admin_logic.build_upstream_status_payload(cfg)
+        payload["server_time"] = _utc_now_iso()
+        return payload
 
     @app.get("/api/v1/ratelimit", dependencies=[Depends(auth_dep)])
     async def get_rate_limit() -> Dict[str, Any]:
