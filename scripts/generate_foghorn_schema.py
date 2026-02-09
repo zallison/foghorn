@@ -627,9 +627,130 @@ def _build_v2_root_schema(
         "vars", base_props.get("variables", {"type": "object"})
     )
 
+    # ZoneRecords plugin schema: ensure axfr_notify options are documented when
+    # the plugin is present in the base schema.
+    zone_plugin = None
+    if isinstance(base_props.get("plugins"), dict):
+        plugins_schema = base_props["plugins"]
+        if isinstance(plugins_schema.get("items"), dict):
+            plugin_items = plugins_schema["items"]
+            props = (
+                plugin_items.get("properties")
+                if isinstance(plugin_items, dict)
+                else None
+            )
+            if isinstance(props, dict) and isinstance(props.get("config"), dict):
+                cfg_props = props["config"].get("properties")
+                if isinstance(cfg_props, dict):
+                    zone_plugin = cfg_props.get("zone")
+    if isinstance(zone_plugin, dict):
+        zone_cfg_props = zone_plugin.get("properties") or {}
+        if isinstance(zone_cfg_props, dict):
+            # axfr_notify: list of upstream-like objects for NOTIFY recipients.
+            zone_cfg_props.setdefault(
+                "axfr_notify",
+                {
+                    "type": "array",
+                    "description": (
+                        "Optional list of NOTIFY recipients for AXFR-backed zones. "
+                        "Each entry reuses the upstream_host shape (host/port/transport/"
+                        "server_name/verify/ca_file) and is limited to TCP and DoT."
+                    ),
+                    "items": {"$ref": "#/$defs/upstream_host"},
+                },
+            )
+            # axfr_notify_all: learn NOTIFY targets from AXFR/IXFR clients.
+            zone_cfg_props.setdefault(
+                "axfr_notify_all",
+                {
+                    "type": "boolean",
+                    "description": (
+                        "When true, any client that performs AXFR/IXFR from this "
+                        "server is remembered as a NOTIFY target for its zone "
+                        "using its source IP and TCP port 53."
+                    ),
+                    "default": False,
+                },
+            )
+            # axfr_notify_scheduled: delay before sending follow-up NOTIFY.
+            zone_cfg_props.setdefault(
+                "axfr_notify_scheduled",
+                {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Optional delay in seconds after serving AXFR/IXFR to a "
+                        "client before sending a follow-up NOTIFY for that zone. "
+                        "Ignored when null or zero."
+                    ),
+                },
+            )
+
     # Upstreams v2: wrap endpoints + strategy/max_concurrent while reusing
     # upstream_host/upstream_doh defs from $defs.
     defs = base.setdefault("$defs", {})
+
+    # Ensure upstream_host definition exposes an optional notify block used for
+    # NOTIFY handling. This preserves any existing upstream_host shape and only
+    # augments its properties.
+    upstream_host_def = defs.get("upstream_host")
+    if isinstance(upstream_host_def, dict):
+        host_props = upstream_host_def.setdefault("properties", {})
+        if isinstance(host_props, dict):
+            notify_schema = {
+                "type": "object",
+                "additionalProperties": False,
+                "description": (
+                    "Optional NOTIFY policy for this upstream. allow_zones may "
+                    "be 'none', 'all', '*' or a list of zone suffixes (for "
+                    "example ['.lan', '.mycorp']). allow_hosts/block_hosts are "
+                    "optional hostname allow/block lists."
+                ),
+                "properties": {
+                    "allow_zones": {
+                        "oneOf": [
+                            {
+                                "type": "string",
+                                "enum": ["none", "all", "*"],
+                                "description": (
+                                    "String policy for accepted NOTIFY zones: "
+                                    "'none' to refuse all, 'all' or '*' to "
+                                    "accept all zones."
+                                ),
+                            },
+                            {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "Explicit list of zone names or suffixes "
+                                    "from which NOTIFY will be accepted."
+                                ),
+                            },
+                        ],
+                        "default": "all",
+                    },
+                    "allow_hosts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional list of hostnames that are allowed to "
+                            "send NOTIFY for this upstream."
+                        ),
+                    },
+                    "block_hosts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional list of hostnames whose NOTIFY messages "
+                            "should always be refused, even if otherwise "
+                            "allowed."
+                        ),
+                    },
+                },
+            }
+            # Only inject notify when not already present so repeated schema
+            # generation remains idempotent.
+            host_props.setdefault("notify", notify_schema)
 
     # Decorated cache overrides are modelled via a dedicated definition so that
     # both tooling and runtime helpers share the same canonical module+name
@@ -828,6 +949,14 @@ def _build_v2_root_schema(
                     "enable_ede": {
                         "type": "boolean",
                         "description": "Enable generation and pass-through of Extended DNS Errors (RFC 8914) for EDNS clients.",
+                        "default": False,
+                    },
+                    # RFC 6762 specifies that .local is reserved for mDNS. By
+                    # default Foghorn blocks forwarding .local queries to
+                    # upstream resolvers; set this to true to allow forwarding.
+                    "forward_local": {
+                        "type": "boolean",
+                        "description": "Allow forwarding .local queries to upstream resolvers. Default false blocks them per RFC 6762.",
                         "default": False,
                     },
                 },

@@ -1,0 +1,68 @@
+# primary.yaml
+server:
+  listen:
+    dns:
+      udp:
+        enabled: true
+        host: 0.0.0.0
+        port: 53
+      tcp:
+        enabled: true
+        host: 0.0.0.0
+        port: 53
+  dnssec:
+    mode: ignore          # or 'validate' if you’re signing zones
+    validation: upstream_ad
+    udp_payload_size: 1232
+  resolver:
+    timeout_ms: 2000
+    use_asyncio: true
+
+upstreams:
+  strategy: failover
+  max_concurrent: 1
+  endpoints:
+    - host: 1.1.1.1
+      port: 53
+      transport: udp
+
+logging:
+  python:
+    level: info
+
+plugins:
+  - type: zone
+    id: primary-zones
+    config:
+      # Local zone data, from BIND‑style zonefile(s) and/or records files.
+      # You can use any combination of bind_paths / file_paths / records.
+      bind_paths:
+        - ./config/zones/example.com.zone
+        - ./config/zones/secondary.example.net.zone
+      file_paths:
+        - ./config/zones/extra.records
+
+      # Optional: inline custom records merged with the above
+      records:
+        - 'printer.example.com.|A|300|192.0.2.10'
+
+      ttl: 300
+      watchdog_enabled: true
+
+      # AXFR/IXFR serving is automatic when:
+      #  - there is an SOA at the zone apex, and
+      #  - TCP/DoT listener is enabled (we enabled TCP:53 above).
+
+      # NOTIFY: tell secondaries to AXFR when SOA serial changes.
+      notify_zones:
+        - zone: example.com
+          # Where NOTIFYs are sent (one or more secondary servers)
+          remotes:
+            - host: 192.0.2.53       # secondary (client) foghorn
+              port: 53
+              # optional:
+              timeout_ms: 2000
+        - zone: secondary.example.net
+          remotes:
+            - host: 192.0.2.54
+              port: 53

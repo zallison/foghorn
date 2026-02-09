@@ -976,6 +976,11 @@ def main(argv: List[str] | None = None) -> int:
     # upstream EDNS options opaquely.
     enable_ede = bool(server_cfg.get("enable_ede", False))
 
+    # .local forward blocking (RFC 6762). When false (default), queries for
+    # .local names that are not answered by plugins are blocked from being
+    # forwarded to upstream resolvers and return NXDOMAIN instead.
+    forward_local = bool(server_cfg.get("forward_local", False))
+
     # When performing local DNSSEC validation (including local_extended), point
     # the validator's internal resolver at the configured upstream hosts so that
     # chain validation and extended lookups use the same recursive resolvers as
@@ -1026,6 +1031,7 @@ def main(argv: List[str] | None = None) -> int:
             recursive_timeout_ms=recursive_timeout_ms,
             recursive_per_try_timeout_ms=recursive_per_try_timeout_ms,
             enable_ede=enable_ede,
+            forward_local=forward_local,
         )
 
     # Log startup info

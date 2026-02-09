@@ -4,7 +4,7 @@ Foghorn is a versatile DNS server designed for flexibility and performance. Buil
 
 With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard. Newer releases add DNSSEC signing helpers, zone transfers (AXFR/IXFR), RFC 8914 Extended DNS Errors (EDE), and SSH host key utilities so you can treat DNS as a first-class security and operations tool.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-91%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-90%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" width=300px />
 
@@ -1309,7 +1309,8 @@ logging:
   async: true
   backends:
 	- id: pg_primary
-	  backend: postgr   - id: pg_reporting
+	  backend: postgr
+	- id: pg_reporting
 	  backend: postgres
 	  config:
 		  host: pg-reporting.internal
@@ -1330,16 +1331,18 @@ stats:
 plugins:
   - type: acl
 	id: lan-only
+	hooks:
+	  pre_resolve: { priority: 10 }
 	config:
-	  pre_priority: 10
 	  default: deny
 	  allow:
 		- ${LAN}
 
   - type: docker
 	id: lan-docker
+	hooks:
+	  pre_resolve: { priority: 20 }
 	config:
-	  pre_priority: 20
 	  targets: ${LAN}
 	  endpoints:
 		- url: unix:///var/run/docker.sock
@@ -1347,13 +1350,15 @@ plugins:
 
   - type: mdns
 	id: enterprise-mdns
-	config:
-	  pre_priority: 30
+	hooks:
+	  pre_resolve: { priority: 30 }
 	  domain: 'devices.lan'
 	  ttl: 120
 
   - type: zone
 	id: zone-1-office
+	hooks:
+	  pre_resolve: { priority: 40 }
 	config:
 	  pre_priority: 40
 	  targets: ${OFFICE}
@@ -1362,16 +1367,19 @@ plugins:
 
   - type: zone
 	id: zone-2-remote
+	hooks:
+	  pre_resolve:
+		priority: 41
 	config:
-	  pre_priority: 41
 	  targets: ${OFFICE_REMOTE}
 	  file_paths:
 		- ./config/zones.d/zone-2.zone
 
   - type: router
 	id: corp-router
+	hooks:
+	  pre_resolve: { priority: 60 }
 	config:
-	  pre_priority: 60
 	  routes:
 		- suffix: corp.example
 		  upstreams:
@@ -1380,8 +1388,9 @@ plugins:
 
   - type: filter
 	id: global-filter
+	hooks:
+	  pre_resolve: { priority: 80 }
 	config:
-	  pre_priority: 80
 	  default: allow
 	  blocked_domains_files:
 		- ./config/var/lists/global_block.txt
@@ -1389,7 +1398,7 @@ plugins:
 
 From here you can mix and match plugins, caches, and stats backends to shape Foghorn into exactly the DNS service you need.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-91%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-90%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 ## Stargazers over time
 [![Stargazers over time](https://starchart.cc/zallison/foghorn.svg?variant=adaptive)](https://starchart.cc/zallison/foghorn)

@@ -1,3 +1,4 @@
+import ipaddress
 import logging
 import socketserver
 import threading
@@ -7,6 +8,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
     EDNS0,
     EDNSOption,
+    OPCODE,
     QTYPE,
     RCODE,
     RR,
@@ -21,7 +23,7 @@ from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecisi
 from foghorn.servers.recursive_resolver import RecursiveResolver
 from foghorn.servers.transports.dot import DoTError, get_dot_pool
 from foghorn.servers.transports.tcp import TCPError, get_tcp_pool, tcp_query
-from foghorn.utils.register_caches import registered_cached
+from foghorn.utils.register_caches import registered_cached, registered_lru_cached
 from .udp_server import DNSUDPHandler
 
 logger = logging.getLogger("foghorn.server")
@@ -31,6 +33,95 @@ logger = logging.getLogger("foghorn.server")
 # refresh queries. When bypass_cache is True, _resolve_core skips the cache
 # hit path and always treats the query as a miss.
 _CACHE_LOCAL = threading.local()
+
+
+def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
+    """Brief: Best-effort AXFR reload for AXFR-backed plugins on NOTIFY.
+
+    Inputs:
+      - zone_name: QNAME from the NOTIFY question (typically the zone apex).
+      - upstream: Mapping describing the matched upstream host entry that sent
+        the NOTIFY (for example ``{"host": "192.0.2.10", "port": 53}``).
+
+    Outputs:
+      - None; may spawn background threads that refresh AXFR-backed zones based
+        on existing ZoneRecords-style configuration. Errors are logged and do
+        not affect the NOTIFY acknowledgement.
+
+    Notes:
+      - Only plugins that expose an ``_axfr_zones`` attribute and have at least
+        one configured zone matching *zone_name* participate.
+      - Reloads run in background threads so that NOTIFY responses are not
+        delayed by potentially long-running AXFR transfers.
+    """
+
+    try:
+        zone_norm = str(zone_name).rstrip(".").lower()
+    except Exception:
+        zone_norm = str(zone_name).lower()
+    if not zone_norm:
+        return
+
+    plugins = list(getattr(DNSUDPHandler, "plugins", []) or [])
+    if not plugins:
+        return
+
+    for plugin in plugins:
+        cfg = getattr(plugin, "_axfr_zones", None)
+        if not cfg:
+            continue
+
+        try:
+            zones = [
+                str(entry.get("zone", "")).rstrip(".").lower()
+                for entry in cfg
+                if isinstance(entry, dict)
+            ]
+        except Exception:
+            continue
+
+        if zone_norm not in zones:
+            continue
+
+        def _worker(p: BasePlugin = plugin) -> None:
+            """Brief: Background worker that re-runs AXFR-backed loads.
+
+            Inputs:
+              - p: Plugin instance whose AXFR-backed zones should be refreshed.
+
+            Outputs:
+              - None; logs and suppresses any exceptions.
+            """
+
+            try:
+                # Allow AXFR-backed zones to be reloaded by clearing the
+                # one-shot guard before invoking the internal loader.
+                setattr(p, "_axfr_loaded_once", False)
+                loader = getattr(p, "_load_records", None)
+                if callable(loader):
+                    loader()
+            except Exception:  # pragma: no cover - defensive logging only
+                logger.warning(
+                    "Error refreshing AXFR-backed zones for NOTIFY %s via upstream %r",
+                    zone_norm,
+                    upstream,
+                    exc_info=True,
+                )
+
+        try:
+            t = threading.Thread(
+                target=_worker,
+                name="FoghornNotifyAXFR",
+                daemon=True,
+            )
+            t.start()
+        except Exception:  # pragma: no cover - defensive logging only
+            logger.warning(
+                "Failed to start AXFR refresh thread for NOTIFY %s via upstream %r",
+                zone_norm,
+                upstream,
+                exc_info=True,
+            )
 
 
 def _schedule_cache_refresh(data: bytes, client_ip: str) -> None:
@@ -71,6 +162,119 @@ def _schedule_cache_refresh(data: bytes, client_ip: str) -> None:
         Exception
     ):  # pragma: no cover - defensive/metrics path excluded from coverage
         logger.debug("Failed to start cache refresh thread", exc_info=True)
+
+
+@registered_lru_cached(maxsize=1024)
+def _resolve_notify_sender_upstream(sender_ip: str) -> Optional[Dict]:
+    """Brief: Map a NOTIFY sender IP address to a configured upstream.
+
+    Inputs:
+      - sender_ip: String IPv4/IPv6 address of the NOTIFY sender.
+
+    Outputs:
+      - dict | None: Matching upstream configuration mapping when the sender is
+        recognized as one of the configured upstreams, otherwise None.
+
+    Notes:
+      - Fast path compares sender_ip directly against upstream host addresses.
+      - Slow path performs a PTR lookup for sender_ip via configured upstreams
+        and matches the resulting hostnames against upstream host fields.
+    """
+
+    if not sender_ip:
+        return None
+
+    try:
+        ip_text = str(sender_ip).strip()
+    except Exception:
+        ip_text = str(sender_ip)
+    if not ip_text:
+        return None
+
+    upstreams = list(getattr(DNSUDPHandler, "upstream_addrs", []) or [])
+    if not upstreams:
+        return None
+
+    lowered_ip = ip_text.lower()
+
+    # Fast path: direct IP match against upstream host values.
+    for up in upstreams:
+        if not isinstance(up, dict):
+            continue
+        host = up.get("host")
+        if not isinstance(host, str):
+            continue
+        if host.strip().lower() == lowered_ip:
+            return up
+
+    # Slow path: perform a PTR lookup on the sender IP and try to match the
+    # resulting hostnames against upstream host fields.
+    try:
+        addr = ipaddress.ip_address(ip_text)
+        rev_name = addr.reverse_pointer.rstrip(".")
+    except Exception:
+        return None
+
+    try:
+        query = DNSRecord.question(rev_name, qtype=QTYPE.PTR)
+    except Exception:
+        return None
+
+    try:
+        timeout_ms = int(getattr(DNSUDPHandler, "timeout_ms", 2000) or 2000)
+    except Exception:
+        timeout_ms = 2000
+
+    try:
+        resp_wire, _used_up, _reason = send_query_with_failover(
+            query,
+            upstreams,
+            timeout_ms,
+            rev_name,
+            QTYPE.PTR,
+        )
+    except Exception:
+        return None
+
+    if resp_wire is None:
+        return None
+
+    try:
+        resp = DNSRecord.parse(resp_wire)
+    except Exception:
+        return None
+
+    ptr_names: List[str] = []
+    try:
+        for rr in getattr(resp, "rr", []) or []:
+            if getattr(rr, "rtype", None) != QTYPE.PTR:
+                continue
+            try:
+                target = str(getattr(rr, "rdata", "")).rstrip(".").lower()
+            except Exception:
+                target = str(getattr(rr, "rdata", "")).lower()
+            if target:
+                ptr_names.append(target)
+    except Exception:
+        ptr_names = []
+
+    if not ptr_names:
+        return None
+
+    for up in upstreams:
+        if not isinstance(up, dict):
+            continue
+        host = up.get("host")
+        if not isinstance(host, str):
+            continue
+        try:
+            host_norm = host.rstrip(".").lower()
+        except Exception:
+            host_norm = str(host).lower()
+        if host_norm and host_norm in ptr_names:
+            return up
+
+    return None
 
 
 @registered_cached(
@@ -342,11 +546,12 @@ def _set_response_id_bytes(wire: bytes, req_id: int) -> bytes:
         return wire
 
 
-def iter_axfr_messages(req: DNSRecord) -> List[bytes]:
+def iter_axfr_messages(req: DNSRecord, client_ip: str | None = None) -> List[bytes]:
     """Brief: Build AXFR/IXFR response message sequence for an authoritative zone.
 
     Inputs:
       - req: Parsed DNSRecord representing the client's AXFR or IXFR query.
+      - client_ip: Optional source IP address of the AXFR/IXFR client.
 
     Outputs:
       - list[bytes]: Packed DNS response messages to stream over TCP/DoT. When
@@ -355,9 +560,9 @@ def iter_axfr_messages(req: DNSRecord) -> List[bytes]:
 
     Notes:
       - This helper relies on resolve plugins advertising an
-        ``iter_zone_rrs_for_transfer(zone_apex)`` method (for example,
-        ZoneRecords). The first such plugin that claims authority for the
-        requested apex is used.
+        ``iter_zone_rrs_for_transfer(zone_apex, client_ip=None)`` method (for
+        example, ZoneRecords). The first such plugin that claims authority for
+        the requested apex is used.
       - IXFR is currently implemented as a full AXFR-style transfer; the
         question section retains QTYPE=IXFR but the answer stream is a full
         zone dump bounded by matching SOA records.
@@ -401,7 +606,13 @@ def iter_axfr_messages(req: DNSRecord) -> List[bytes]:
         ):  # pragma: no cover - defensive/metrics path excluded from coverage
             continue  # pragma: no cover - defensive/metrics path excluded from coverage
         try:  # pragma: no cover - defensive/metrics path excluded from coverage
-            exported = exporter(zone_apex)
+            # Prefer the newer two-argument form when available so plugins can
+            # learn AXFR clients; fall back to the legacy single-argument call
+            # for older plugins.
+            try:
+                exported = exporter(zone_apex, client_ip)
+            except TypeError:
+                exported = exporter(zone_apex)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
                 "iter_axfr_messages: plugin %r export failure for %s: %s",
@@ -897,6 +1108,104 @@ def _resolve_core(
         qname = str(q.qname).rstrip(".")
         qtype = q.qtype
         cache_key = (qname.lower(), qtype)
+
+        # Special-case DNS NOTIFY opcodes so that upstream change notifications
+        # are handled consistently across listeners.
+        try:
+            opcode = getattr(getattr(req, "header", None), "opcode", 0)
+        except Exception:
+            opcode = 0
+        if opcode == getattr(OPCODE, "NOTIFY", 4):
+            # UDP listeners must refuse NOTIFY; other listeners perform an
+            # upstream membership check before accepting.
+            try:
+                listener_label = (
+                    str(listener or "").lower()
+                    if isinstance(listener, str)
+                    else str(listener or "").lower()
+                )
+            except Exception:
+                listener_label = ""
+
+            if listener_label == "udp":
+                r = req.reply()
+                r.header.rcode = RCODE.REFUSED
+                # Echo client EDNS(0) OPT and attach an EDE describing the
+                # unsupported transport when enabled.
+                _echo_client_edns(req, r)
+                _attach_ede_option(
+                    req,
+                    r,
+                    22,
+                    "NOTIFY not supported over UDP",
+                )  # Not Supported
+                wire = _set_response_id(r.pack(), req.header.id)
+                return _ResolveCoreResult(
+                    wire=wire,
+                    dnssec_status=None,
+                    upstream_id=None,
+                    rcode_name="REFUSED",
+                )
+
+            # Non-UDP: ensure sender is a configured upstream, optionally using
+            # reverse DNS when the raw IP is not configured directly.
+            upstream = _resolve_notify_sender_upstream(client_ip)
+            if upstream is None:
+                r = req.reply()
+                r.header.rcode = RCODE.REFUSED
+                _echo_client_edns(req, r)
+                _attach_ede_option(
+                    req,
+                    r,
+                    15,
+                    "NOTIFY sender not configured as upstream",
+                )  # Blocked
+                wire = _set_response_id(r.pack(), req.header.id)
+                return _ResolveCoreResult(
+                    wire=wire,
+                    dnssec_status=None,
+                    upstream_id=None,
+                    rcode_name="REFUSED",
+                )
+
+            # Authorized NOTIFY sender: log a critical event, schedule any
+            # AXFR refresh work, and acknowledge with a bare NOERROR response.
+            try:
+                upstream_id = DNSUDPHandler._upstream_id(upstream)  # type: ignore[attr-defined]
+            except Exception:
+                upstream_id = None
+
+            logger.critical(
+                "Received DNS NOTIFY from %s (upstream=%s) for %s type %s via %s",
+                client_ip,
+                upstream_id or "unknown",
+                qname,
+                QTYPE.get(qtype, str(qtype)),
+                listener or "unknown",
+            )
+
+            # Best-effort AXFR refresh for any ZoneRecords-style plugins that
+            # are configured for this zone. Failures are logged but must not
+            # impact the NOTIFY acknowledgement.
+            try:
+                _schedule_notify_axfr_refresh(qname, upstream)
+            except Exception:  # pragma: no cover - defensive logging only
+                logger.warning(
+                    "Unexpected error while scheduling AXFR refresh for NOTIFY from %s",
+                    client_ip,
+                    exc_info=True,
+                )
+
+            r = req.reply()
+            r.header.rcode = RCODE.NOERROR
+            _echo_client_edns(req, r)
+            wire = _set_response_id(r.pack(), req.header.id)
+            return _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=upstream_id,
+                rcode_name="NOERROR",
+            )
 
         # Record query stats (mirrors DNSUDPHandler.handle)
         if stats is not None:
@@ -1404,6 +1713,51 @@ def _resolve_core(
                 Exception
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
+
+        # Block forwarding of .local queries unless forward_local is True.
+        # RFC 6762 reserves .local for mDNS; forwarding to upstream resolvers
+        # can cause delays and incorrect answers.
+        forward_local = bool(getattr(DNSUDPHandler, "forward_local", False))
+        qname_lower = qname.lower()
+        if not forward_local and (
+            qname_lower.endswith(".local") or qname_lower == "local"
+        ):
+            r = req.reply()
+            r.header.rcode = RCODE.NXDOMAIN
+            _echo_client_edns(req, r)
+            _attach_ede_option(
+                req, r, 21, ".local not forwarded (RFC 6762)"
+            )  # Not Authoritative
+            wire = _set_response_id(r.pack(), req.header.id)
+            if stats is not None:
+                try:
+                    qtype_name = QTYPE.get(qtype, str(qtype))
+                    stats.record_response_rcode("NXDOMAIN", qname)
+                    stats.record_query_result(
+                        client_ip=client_ip,
+                        qname=qname,
+                        qtype=qtype_name,
+                        rcode="NXDOMAIN",
+                        upstream_id=None,
+                        status="local_blocked",
+                        error=None,
+                        first=None,
+                        result={"source": "local_blocked"},
+                    )
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            if stats is not None and t0 is not None:
+                try:
+                    t1 = _time.perf_counter()
+                    stats.record_latency(t1 - t0)
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            return _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=None,
+                rcode_name="NXDOMAIN",
+            )
 
         reply: Optional[bytes] = None
         used_upstream: Optional[Dict] = None
@@ -2047,6 +2401,7 @@ class DNSServer:
         cache_prefetch_refresh_before_expiry: float = 0.0,
         cache_prefetch_allow_stale_after_expiry: float = 0.0,
         enable_ede: bool = False,
+        forward_local: bool = False,
     ) -> None:
         """Initialize a UDP DNSServer.
 
@@ -2145,6 +2500,12 @@ class DNSServer:
             Exception
         ):  # pragma: nocover - defensive: invalid enable_ede config falls back to False
             DNSUDPHandler.enable_ede = False
+        try:
+            DNSUDPHandler.forward_local = bool(forward_local)
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: invalid forward_local config falls back to False
+            DNSUDPHandler.forward_local = False
         try:
             self.server = socketserver.ThreadingUDPServer(
                 (host, port), DNSUDPHandler

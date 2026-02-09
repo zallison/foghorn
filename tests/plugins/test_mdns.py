@@ -824,3 +824,273 @@ def test_mdns_bridge_uses_default_service_types_when_unconfigured(monkeypatch) -
 
     # Expect at least one overlap between started service browsers and defaults.
     assert default_norm & started_norm
+
+
+def test_mdns_bridge_dns_sd_tcp_aliases_dns_sd_udp_enumeration() -> None:
+    """Brief: `_dns_sd._tcp` queries enumerate the same PTRs as `_services._dns-sd._udp`.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts PTR answers for `_dns_sd._tcp.<suffix>` mirror `_services._dns-sd._udp.<suffix>`.
+    """
+
+    from foghorn.plugins.resolve.mdns import MdnsBridge
+
+    plugin = MdnsBridge(
+        network_enabled=False,
+        ttl=120,
+        domain=".mdns",
+    )
+    plugin.setup()
+
+    suffix = "mdns"
+    service_type1 = f"_http._tcp.{suffix}"
+    service_type2 = f"_ssh._tcp.{suffix}"
+
+    plugin._test_seed_records(
+        ptr={
+            f"_services._dns-sd._udp.{suffix}": [service_type1, service_type2],
+        },
+    )
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    qname = f"_dns_sd._tcp.{suffix}"
+    req = _make_query(qname, int(QTYPE.PTR))
+    decision = plugin.pre_resolve(qname, int(QTYPE.PTR), req, ctx)
+    assert decision is not None
+
+    resp = DNSRecord.parse(decision.response)
+    ptr_values = {str(rr.rdata).rstrip(".") for rr in resp.rr if rr.rtype == QTYPE.PTR}
+    assert {service_type1, service_type2} <= ptr_values
+
+
+def test_mdns_bridge_tcp_aliases_services_helper_namespace() -> None:
+    """Brief: `_tcp` queries enumerate the same PTRs as `_services`.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts PTR answers for `_tcp.<suffix>` mirror `_services.<suffix>`.
+    """
+
+    from foghorn.plugins.resolve.mdns import MdnsBridge
+
+    plugin = MdnsBridge(
+        network_enabled=False,
+        ttl=120,
+        domain=".mdns",
+    )
+    plugin.setup()
+
+    suffix = "mdns"
+    host = f"myhost.{suffix}"
+    service_node1 = f"_http._tcp.{host}"
+    service_node2 = f"_ssh._tcp.{host}"
+
+    plugin._test_seed_records(
+        ptr={
+            f"_services.{suffix}": [service_node1, service_node2],
+        },
+    )
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    qname = f"_tcp.{suffix}"
+    req = _make_query(qname, int(QTYPE.PTR))
+    decision = plugin.pre_resolve(qname, int(QTYPE.PTR), req, ctx)
+    assert decision is not None
+
+    resp = DNSRecord.parse(decision.response)
+    ptr_values = {str(rr.rdata).rstrip(".") for rr in resp.rr if rr.rtype == QTYPE.PTR}
+    assert {service_node1, service_node2} <= ptr_values
+
+
+def test_mdns_bridge_dns_sd_tcp_a_query_returns_ptr_via_alias() -> None:
+    """Brief: A queries for `_dns_sd._tcp` browse name fall back to PTR via alias.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that A queries for `_dns_sd._tcp.<suffix>` return PTR RRs using
+        targets from `_services._dns-sd._udp.<suffix>`.
+    """
+
+    from foghorn.plugins.resolve.mdns import MdnsBridge
+
+    plugin = MdnsBridge(
+        network_enabled=False,
+        ttl=120,
+        domain=".mdns",
+    )
+    plugin.setup()
+
+    suffix = "mdns"
+    service_type = f"_http._tcp.{suffix}"
+
+    plugin._test_seed_records(
+        ptr={
+            f"_services._dns-sd._udp.{suffix}": [service_type],
+        },
+    )
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    qname = f"_dns_sd._tcp.{suffix}"
+    req = _make_query(qname, int(QTYPE.A))
+    decision = plugin.pre_resolve(qname, int(QTYPE.A), req, ctx)
+    assert decision is not None
+
+    resp = DNSRecord.parse(decision.response)
+    ptr_values = {str(rr.rdata).rstrip(".") for rr in resp.rr if rr.rtype == QTYPE.PTR}
+    assert service_type in ptr_values
+
+
+def test_mdns_bridge_dns_sd_tcp_ptr_fallback_enumerates_from_srv_cache() -> None:
+    """Brief: `_dns_sd._tcp` PTR enumerates service types from SRV when no meta PTRs.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that PTR queries for `_dns_sd._tcp.<suffix>` synthesize service
+        types from SRV instance owners when `_services._dns-sd._udp` PTRs are
+        absent.
+    """
+
+    from foghorn.plugins.resolve.mdns import MdnsBridge
+
+    plugin = MdnsBridge(
+        network_enabled=False,
+        ttl=120,
+        domain=".mdns",
+    )
+    plugin.setup()
+
+    suffix = "mdns"
+    instance1 = f"svc1._http._tcp.{suffix}"
+    instance2 = f"svc2._airplay._tcp.{suffix}"
+
+    plugin._test_seed_records(
+        srv={
+            instance1: (0, 0, 8080, f"host1.{suffix}"),
+            instance2: (0, 0, 7000, f"host2.{suffix}"),
+        },
+    )
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    qname = f"_dns_sd._tcp.{suffix}"
+    req = _make_query(qname, int(QTYPE.PTR))
+    decision = plugin.pre_resolve(qname, int(QTYPE.PTR), req, ctx)
+    assert decision is not None
+
+    resp = DNSRecord.parse(decision.response)
+    ptr_values = {str(rr.rdata).rstrip(".") for rr in resp.rr if rr.rtype == QTYPE.PTR}
+    # Expect synthesized `_service._proto` owners.
+    assert f"_http._tcp.{suffix}" in ptr_values
+    assert f"_airplay._tcp.{suffix}" in ptr_values
+
+
+def test_mdns_bridge_tcp_a_query_returns_ptr_via_alias() -> None:
+    """Brief: A queries for `_tcp` browse name fall back to PTR via alias.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that A queries for `_tcp.<suffix>` return PTR RRs using targets
+        from `_services.<suffix>`.
+    """
+
+    from foghorn.plugins.resolve.mdns import MdnsBridge
+
+    plugin = MdnsBridge(
+        network_enabled=False,
+        ttl=120,
+        domain=".mdns",
+    )
+    plugin.setup()
+
+    suffix = "mdns"
+    host = f"myhost.{suffix}"
+    service_node = f"_http._tcp.{host}"
+
+    plugin._test_seed_records(
+        ptr={
+            f"_services.{suffix}": [service_node],
+        },
+    )
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    qname = f"_tcp.{suffix}"
+    req = _make_query(qname, int(QTYPE.A))
+    decision = plugin.pre_resolve(qname, int(QTYPE.A), req, ctx)
+    assert decision is not None
+
+    resp = DNSRecord.parse(decision.response)
+    ptr_values = {str(rr.rdata).rstrip(".") for rr in resp.rr if rr.rtype == QTYPE.PTR}
+    assert service_node in ptr_values
+
+
+def test_mdns_bridge_tcp_udp_ptr_enumerates_service_types_from_srv() -> None:
+    """Brief: PTR queries for `_tcp.<suffix>` / `_udp.<suffix>` enumerate service types.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that PTR queries for `_tcp.<suffix>` return service types using
+        _tcp protocol synthesized from SRV instance owners, and similarly for
+        _udp; each only returns types matching the requested protocol.
+    """
+
+    from foghorn.plugins.resolve.mdns import MdnsBridge
+
+    plugin = MdnsBridge(
+        network_enabled=False,
+        ttl=120,
+        domain=".mdns",
+    )
+    plugin.setup()
+
+    suffix = "mdns"
+    tcp_instance1 = f"svc1._http._tcp.{suffix}"
+    tcp_instance2 = f"svc2._ipp._tcp.{suffix}"
+    udp_instance = f"dns._dns._udp.{suffix}"
+
+    plugin._test_seed_records(
+        srv={
+            tcp_instance1: (0, 0, 8080, f"host1.{suffix}"),
+            tcp_instance2: (0, 0, 631, f"host2.{suffix}"),
+            udp_instance: (0, 0, 5353, f"host3.{suffix}"),
+        },
+    )
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # Query `_tcp.<suffix>` PTR - should return _http._tcp and _ipp._tcp only.
+    qname_tcp = f"_tcp.{suffix}"
+    req_tcp = _make_query(qname_tcp, int(QTYPE.PTR))
+    decision_tcp = plugin.pre_resolve(qname_tcp, int(QTYPE.PTR), req_tcp, ctx)
+    assert decision_tcp is not None
+
+    resp_tcp = DNSRecord.parse(decision_tcp.response)
+    ptr_tcp = {str(rr.rdata).rstrip(".") for rr in resp_tcp.rr if rr.rtype == QTYPE.PTR}
+    assert f"_http._tcp.{suffix}" in ptr_tcp
+    assert f"_ipp._tcp.{suffix}" in ptr_tcp
+    # UDP service types should NOT appear in _tcp query.
+    assert f"_dns._udp.{suffix}" not in ptr_tcp
+
+    # Query `_udp.<suffix>` PTR - should return _dns._udp only.
+    qname_udp = f"_udp.{suffix}"
+    req_udp = _make_query(qname_udp, int(QTYPE.PTR))
+    decision_udp = plugin.pre_resolve(qname_udp, int(QTYPE.PTR), req_udp, ctx)
+    assert decision_udp is not None
+
+    resp_udp = DNSRecord.parse(decision_udp.response)
+    ptr_udp = {str(rr.rdata).rstrip(".") for rr in resp_udp.rr if rr.rtype == QTYPE.PTR}
+    assert f"_dns._udp.{suffix}" in ptr_udp
+    # TCP service types should NOT appear in _udp query.
+    assert f"_http._tcp.{suffix}" not in ptr_udp
+    assert f"_ipp._tcp.{suffix}" not in ptr_udp

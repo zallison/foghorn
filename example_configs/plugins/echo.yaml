@@ -1,0 +1,7 @@
+# Echo Plugin Example Configuration
+plugins:
+  - name: echo
+    type: resolve
+    module: echo
+    # This plugin returns a TXT record containing the query name (qname) and query type (qtype)
+    # Useful for debugging and inspecting DNS queries

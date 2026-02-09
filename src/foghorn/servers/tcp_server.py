@@ -218,7 +218,7 @@ async def _handle_conn(
 
             if is_transfer and req is not None:
                 try:
-                    messages = _server_mod.iter_axfr_messages(req)
+                    messages = _server_mod.iter_axfr_messages(req, client_ip)
                     for wire in messages:
                         if not wire:
                             continue

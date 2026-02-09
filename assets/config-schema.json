@@ -1275,7 +1275,7 @@
               "type": "object"
             }
           },
-          "additionalProperties": false,
+          "additionalProperties": true,
           "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n  - axfr_zones: Optional list of AXFR-backed zones.\n\nExample:\n  Minimal AXFR-only configuration (YAML):\n\n    plugins:\n      - type: zone\n        hooks:\n          pre_resolve: { priority: 60 }\n        config:\n          axfr_zones:\n            - zone: example.com\n              allow_no_dnssec: false\n              upstreams:\n                - host: 192.0.2.10\n                  port: 53\n                  timeout_ms: 5000\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
           "properties": {
             "axfr_zones": {
@@ -2769,6 +2769,52 @@
           "description": "Type: string.",
           "minLength": 1,
           "type": "string"
+        },
+        "notify": {
+          "additionalProperties": false,
+          "description": "Optional NOTIFY policy for this upstream. allow_zones may be 'none', 'all', '*' or a list of zone suffixes (for example ['.lan', '.mycorp']). allow_hosts/block_hosts are optional hostname allow/block lists.",
+          "properties": {
+            "allow_hosts": {
+              "description": "Optional list of hostnames that are allowed to send NOTIFY for this upstream.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "allow_zones": {
+              "default": "all",
+              "description": "Default: \"all\".",
+              "oneOf": [
+                {
+                  "description": "String policy for accepted NOTIFY zones: 'none' to refuse all, 'all' or '*' to accept all zones.",
+                  "enum": [
+                    "none",
+                    "all",
+                    "*"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "description": "Explicit list of zone names or suffixes from which NOTIFY will be accepted.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              ]
+            },
+            "block_hosts": {
+              "description": "Optional list of hostnames whose NOTIFY messages should always be refused, even if otherwise allowed.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
         },
         "pool": {
           "additionalProperties": false,

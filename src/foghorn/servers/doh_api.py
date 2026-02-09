@@ -1,4 +1,3 @@
-import base64
 import http.server
 import logging
 import ssl
@@ -6,29 +5,31 @@ import threading
 import urllib.parse
 from typing import Any, Callable, Optional
 
+from . import doh_logic as _logic
+
 logger = logging.getLogger("foghorn.doh_api")
 
 _DNS_CT = "application/dns-message"
 
 
 def _b64url_decode_nopad(s: str) -> bytes:
-    """
-    Brief: Decode base64url without padding.
+    """Brief: Decode base64url without padding.
 
     Inputs:
-    - s: base64url string without '='
+      - s: base64url string without '='
 
     Outputs:
-    - bytes: decoded binary
+      - bytes: decoded binary
 
     Example:
-        >>> _b64url_decode_nopad('AQI')
-        b'\x01\x02'
+      >>> _b64url_decode_nopad('AQI')
+      b'\x01\x02'
     """
+
+    # Preserve existing error semantics for tests that assert ValueError.
     if not isinstance(s, str):
         raise ValueError("input must be str")
-    pad = "=" * ((4 - len(s) % 4) % 4)
-    return base64.urlsafe_b64decode(s + pad)
+    return _logic.b64url_decode_nopad(s)
 
 
 def create_doh_app(
@@ -74,16 +75,17 @@ def create_doh_app(
         - Response with application/dns-message body on success.
         """
         dns_param = request.query_params.get("dns")
-        if not dns_param:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
         try:
-            qbytes = _b64url_decode_nopad(dns_param)
-        except Exception:
+            qbytes = _logic.parse_doh_get_dns_param(
+                dns_param,
+                decoder=_b64url_decode_nopad,
+            )
+        except _logic.DohLogicError:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
         # Resolve using provided resolver (sync on threadpool would be ideal; keep simple)
         client_ip = request.client.host if request.client else "0.0.0.0"
         try:
-            resp = resolver(qbytes, client_ip)
+            resp = _logic.call_resolver(resolver, query=qbytes, client_ip=client_ip)
         except Exception:
             logger.exception("resolver raised")
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
@@ -109,12 +111,14 @@ def create_doh_app(
         - Response with application/dns-message body on success.
         """
         ctype = request.headers.get("content-type", "")
-        if _DNS_CT not in ctype:
+        try:
+            _logic.validate_doh_post_content_type(ctype, dns_ct=_DNS_CT)
+        except _logic.DohLogicError:
             raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
         body = await request.body()
         client_ip = request.client.host if request.client else "0.0.0.0"
         try:
-            resp = resolver(body, client_ip)
+            resp = _logic.call_resolver(resolver, query=body, client_ip=client_ip)
         except Exception:
             logger.exception("resolver raised")
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
@@ -198,20 +202,19 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
 
         params = urllib.parse.parse_qs(parsed.query)
         dns_param = params.get("dns", [None])[0]
-        if not dns_param:
-            self._send_empty(400)
-            return
-
         try:
-            qbytes = _b64url_decode_nopad(str(dns_param))
-        except Exception:
-            self._send_empty(400)
+            qbytes = _logic.parse_doh_get_dns_param(
+                str(dns_param) if dns_param is not None else None,
+                decoder=_b64url_decode_nopad,
+            )
+        except _logic.DohLogicError as exc:
+            self._send_empty(exc.status_code)
             return
 
         resolver = self.resolver or (lambda q, ip: q)
         client_ip = self._client_ip()
         try:
-            resp = resolver(qbytes, client_ip)
+            resp = _logic.call_resolver(resolver, query=qbytes, client_ip=client_ip)
         except Exception:
             logger.exception("resolver raised in threaded DoH GET")
             self._send_empty(400)
@@ -238,7 +241,9 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         ctype = self.headers.get("Content-Type", "")
-        if _DNS_CT not in ctype:
+        try:
+            _logic.validate_doh_post_content_type(ctype, dns_ct=_DNS_CT)
+        except _logic.DohLogicError:
             self._send_empty(415)
             return
 
@@ -251,7 +256,7 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
         resolver = self.resolver or (lambda q, ip: q)
         client_ip = self._client_ip()
         try:
-            resp = resolver(body, client_ip)
+            resp = _logic.call_resolver(resolver, query=body, client_ip=client_ip)
         except Exception:
             logger.exception("resolver raised in threaded DoH POST")
             self._send_empty(400)
