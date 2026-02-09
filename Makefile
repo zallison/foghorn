@@ -21,7 +21,7 @@ LISTEN ?= 0.0.0.0
 # Label for docker_hosts.py
 FH_PRIORITY ?= 100
 # Default ports
-ADMINPORT ?= 8053
+ADMINPORT ?= 5380
 UDPPORT ?= 53
 TCPPORT ?= 53
 
@@ -300,9 +300,9 @@ docker-run-not-host: docker-build
 	docker rm -f foghorn
 	docker run -d --privileged --name foghorn \
 	    -v ${CONTAINER_DATA}:/foghorn/config/ \
-		-p ${UDPPORT}:5333/udp \
-		-p ${TCPPORT}:5333/tcp \
-		-p ${ADMINPORT}:8053/tcp \
+		-p ${UDPPORT}:5335/udp \
+		-p ${TCPPORT}:5335/tcp \
+		-p ${ADMINPORT}:5380/tcp \
 	 	-v /etc/hosts:/etc/hosts:ro \
 		--restart unless-stopped \
 		${PREFIX}/${CONTAINER_NAME}:${TAG}
@@ -358,7 +358,7 @@ help:
 	@echo "  docker-build     - Build docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
 	@echo "  docker-clean     - Remove docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
 	@echo "  docker-logs      - Follow docker container logs"
-	@echo "  docker-run       - Run docker container (ports 53/udp, 53/tcp, 8053/tcp)"
+	@echo "  docker-run       - Run docker container (ports 53/udp, 53/tcp, 5380/tcp)"
 	@echo "  docker-run-not-host - Run docker container with explicit port mappings instead of --net=host"
 	@echo "  docker           - Docker start to finish: clean → build → run → logs"
 	@echo "OpenSSL CA and signed certs:"
