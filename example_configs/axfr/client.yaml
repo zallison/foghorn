@@ -1,0 +1,48 @@
+# secondary.yaml
+server:
+  listen:
+    dns:
+      udp:
+        enabled: true
+        host: 0.0.0.0
+        port: 53
+      tcp:
+        enabled: true
+        host: 0.0.0.0
+        port: 53
+  dnssec:
+    mode: ignore
+    validation: upstream_ad
+    udp_payload_size: 1232
+  resolver:
+    timeout_ms: 2000
+    use_asyncio: true
+
+upstreams:
+  strategy: failover
+  max_concurrent: 1
+  endpoints:
+    - host: 1.1.1.1
+      port: 53
+      transport: udp
+
+logging:
+  python:
+    level: info
+
+plugins:
+  - type: zone
+    id: axfr-secondary
+    config:
+      # Zones that this instance *learns* via AXFR from the primary.
+      axfr_zones:
+        - zone: example.com
+          upstreams:
+            - host: 203.0.113.10   # primary’s IP / hostname
+              port: 53
+              timeout_ms: 15000
+        # Add more zones or primaries as needed:
+        # - zone: secondary.example.net
+        #   upstreams:
+        #     - host: 203.0.113.11
+        #       port: 53

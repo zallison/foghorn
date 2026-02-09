@@ -1329,6 +1329,56 @@ class MdnsBridge(BasePlugin):
                     if not v6:
                         self._aaaa.pop(host, None)
 
+    def _enumerate_service_types_for_suffix(self, suffix: str) -> Set[str]:
+        """Brief: Derive distinct service-type owners for a given DNS suffix.
+
+        Inputs:
+          - suffix: DNS suffix (e.g. ".zaa", ".mdns") including leading dot.
+
+        Outputs:
+          - set[str]: Owners like ``"_http._tcp.zaa"`` derived from SRV cache
+            instance names under the given suffix.
+        """
+
+        try:
+            suf = str(suffix or "").strip().lower()
+        except Exception:
+            suf = ""
+        if not suf:
+            return set()
+        if not suf.startswith("."):
+            suf = "." + suf
+        suf = suf.rstrip(".")
+
+        out: Set[str] = set()
+        # Instance SRV owners look like ``"instance._service._proto.suffix"``.
+        for owner in list(self._srv.keys()):
+            try:
+                name = str(owner or "").strip().lower()
+            except Exception:
+                continue
+            if not name.endswith(suf):
+                continue
+            base = name[: -len(suf)]
+            if base.endswith("."):
+                base = base[:-1]
+            if not base:
+                continue
+            labels = base.split(".")
+            # Require at least: instance, service, proto.
+            if len(labels) < 3:
+                continue
+            # Protocol label is immediately before the suffix.
+            proto_label = labels[-1]
+            service_label = labels[-2]
+            if proto_label not in {"_tcp", "_udp"}:
+                continue
+            if not service_label.startswith("_"):
+                continue
+            service_type_owner = f"{service_label}.{proto_label}{suf}"
+            out.add(service_type_owner)
+        return out
+
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
     ) -> Optional[
@@ -1463,7 +1513,26 @@ class MdnsBridge(BasePlugin):
             service_node_host = _service_node_host_name(name_norm)
             # PTR
             if qtype_int in {int(QTYPE.PTR), int(QTYPE.ANY)}:
-                ptr_targets = self._ptr.get(name_norm)
+                owner_for_ptr = name_norm
+                # Treat some well-known DNS-SD browsing names as aliases for the
+                # existing helper namespaces so that clients using `_dns_sd._tcp`
+                # and `_tcp` can still enumerate services.
+                labels = name_norm.split(".")
+                alias_suffix: Optional[str] = None
+                allowed_suffixes = getattr(self, "_dns_domains", {self._dns_domain})
+                for suf in allowed_suffixes:
+                    if name_norm.endswith(suf):
+                        alias_suffix = suf
+                        break
+                if alias_suffix and len(labels) >= 2:
+                    if labels[0] == "_dns_sd" and labels[1] == "_tcp":
+                        # `_dns_sd._tcp.<suffix>` -> `_services._dns-sd._udp.<suffix>`
+                        owner_for_ptr = f"_services._dns-sd._udp{alias_suffix}"
+                    elif labels[0] == "_tcp":
+                        # `_tcp.<suffix>` -> `_services.<suffix>`
+                        owner_for_ptr = f"_services{alias_suffix}"
+
+                ptr_targets = self._ptr.get(owner_for_ptr)
                 host_additionals: Set[str] = set()
 
                 # When querying a service type like `_app._proto.tld`, only return
@@ -1471,15 +1540,15 @@ class MdnsBridge(BasePlugin):
                 # owner (so `.zaa` does not return `.local` targets and vice versa).
                 owner_suffix: Optional[str] = None
                 allowed_suffixes = getattr(self, "_dns_domains", {self._dns_domain})
-                if ptr_targets:
-                    for suf in allowed_suffixes:
-                        if name_norm.endswith(suf):
-                            owner_suffix = suf
-                            break
-                    if owner_suffix:
-                        filtered = {t for t in ptr_targets if t.endswith(owner_suffix)}
-                        if filtered:
-                            ptr_targets = filtered
+                for suf in allowed_suffixes:
+                    if name_norm.endswith(suf):
+                        owner_suffix = suf
+                        break
+
+                if ptr_targets and owner_suffix:
+                    filtered = {t for t in ptr_targets if t.endswith(owner_suffix)}
+                    if filtered:
+                        ptr_targets = filtered
 
                 if ptr_targets:
                     for t in sorted(ptr_targets):
@@ -1492,53 +1561,105 @@ class MdnsBridge(BasePlugin):
                                 rdata=PTR(t + "."),
                             ),
                         )
+                # Fallback: when no explicit `_services._dns-sd._udp` PTRs are
+                # available for this suffix, synthesize service-type owners from
+                # the SRV cache so that `_dns_sd._tcp.<suffix>` and
+                # `_services._dns-sd._udp.<suffix>` can still enumerate available
+                # services.
+                if (
+                    (not ptr_targets)
+                    and owner_suffix
+                    and owner_for_ptr
+                    and owner_for_ptr.endswith(f"_services._dns-sd._udp{owner_suffix}")
+                ):
+                    synth_types = self._enumerate_service_types_for_suffix(owner_suffix)
+                    if synth_types:
+                        ptr_targets = synth_types
+                        for t in sorted(ptr_targets):
+                            reply.add_answer(
+                                RR(
+                                    rname=owner_wire,
+                                    rtype=QTYPE.PTR,
+                                    rclass=1,
+                                    ttl=self._ttl,
+                                    rdata=PTR(t + "."),
+                                ),
+                            )
 
-                    # Rule #2: when there are relatively few PTR targets, attempt to
-                    # infer the corresponding host(s) and include their A/AAAA as
-                    # additional records.
-                    if (
-                        0 < len(ptr_targets) <= PTR_ADDITIONAL_HOST_LIMIT
-                        and owner_suffix
-                    ):
-                        for target in ptr_targets:
-                            # If we have TXT for the PTR target (e.g. an instance
-                            # name like `roku_ultra._airplay._tcp.zaa`), include it
-                            # as an additional so a single PTR query can reveal
-                            # both the instance metadata and the host addresses.
-                            txts_for_target = self._txt.get(target)
-                            if txts_for_target:
+                # RFC 6763 style browsing: `_tcp.<suffix>` or `_udp.<suffix>` PTR
+                # queries enumerate service types for that protocol.
+                if (not ptr_targets) and owner_suffix and len(labels) == 2:
+                    proto_label = labels[0]
+                    if proto_label in {"_tcp", "_udp"}:
+                        synth_types = self._enumerate_service_types_for_suffix(
+                            owner_suffix
+                        )
+                        # Filter to only service types using the requested protocol.
+                        proto_filtered = {
+                            t
+                            for t in synth_types
+                            if f".{proto_label}" in t or t.endswith(f".{proto_label}")
+                        }
+                        if proto_filtered:
+                            ptr_targets = proto_filtered
+                            for t in sorted(ptr_targets):
                                 reply.add_answer(
                                     RR(
-                                        rname=target + ".",
-                                        rtype=QTYPE.TXT,
+                                        rname=owner_wire,
+                                        rtype=QTYPE.PTR,
                                         rclass=1,
                                         ttl=self._ttl,
-                                        rdata=TXT(list(txts_for_target)),
+                                        rdata=PTR(t + "."),
                                     ),
                                 )
 
-                            # Patterns we understand for mapping PTR target ->
-                            # host name:
-                            #   - host._service._proto.<suffix>
-                            #   - host.<suffix>
-                            labels = target.split(".")
-                            if not target.endswith(owner_suffix):
-                                continue
-                            # Strip the matched suffix (and any dot before it) to
-                            # get the prefix labels.
-                            base = target[: -len(owner_suffix)]
-                            if base.endswith("."):
-                                base = base[:-1]
-                            if not base:
-                                continue
-                            labels = base.split(".")
-                            if len(labels) >= 2:
-                                # host._service._proto.<suffix> -> host.<suffix>
-                                host_label = labels[0]
-                                host_additionals.add(f"{host_label}{owner_suffix}")
-                            else:
-                                # host.<suffix>
-                                host_additionals.add(target)
+                # Rule #2: when there are relatively few PTR targets, attempt to
+                # infer the corresponding host(s) and include their A/AAAA as
+                # additional records.
+                if (
+                    ptr_targets
+                    and owner_suffix
+                    and 0 < len(ptr_targets) <= PTR_ADDITIONAL_HOST_LIMIT
+                ):
+                    for target in ptr_targets:
+                        # If we have TXT for the PTR target (e.g. an instance
+                        # name like `roku_ultra._airplay._tcp.zaa`), include it
+                        # as an additional so a single PTR query can reveal
+                        # both the instance metadata and the host addresses.
+                        txts_for_target = self._txt.get(target)
+                        if txts_for_target:
+                            reply.add_answer(
+                                RR(
+                                    rname=target + ".",
+                                    rtype=QTYPE.TXT,
+                                    rclass=1,
+                                    ttl=self._ttl,
+                                    rdata=TXT(list(txts_for_target)),
+                                ),
+                            )
+
+                        # Patterns we understand for mapping PTR target ->
+                        # host name:
+                        #   - host._service._proto.<suffix>
+                        #   - host.<suffix>
+                        labels = target.split(".")
+                        if not target.endswith(owner_suffix):
+                            continue
+                        # Strip the matched suffix (and any dot before it) to
+                        # get the prefix labels.
+                        base = target[: -len(owner_suffix)]
+                        if base.endswith("."):
+                            base = base[:-1]
+                        if not base:
+                            continue
+                        labels = base.split(".")
+                        if len(labels) >= 2:
+                            # host._service._proto.<suffix> -> host.<suffix>
+                            host_label = labels[0]
+                            host_additionals.add(f"{host_label}{owner_suffix}")
+                        else:
+                            # host.<suffix>
+                            host_additionals.add(target)
 
                 for host_name in sorted(host_additionals):
                     _append_host_additionals(host_name)
@@ -1599,29 +1720,57 @@ class MdnsBridge(BasePlugin):
                             )
                         )
                 elif qtype_int == int(QTYPE.A):
-                    # Allow service-type A queries (e.g. `_http._tcp.example`) to
-                    # behave like PTR lookups when we have cached PTR data for the
-                    # same owner. This helps clients that mistakenly issue A
-                    # queries for `_service._proto` names discover available
-                    # instances.
+                    # Allow service-type and DNS-SD browse-name A queries (for
+                    # example, `_http._tcp.example`, `_dns_sd._tcp.example`,
+                    # `_tcp.example`) to behave like PTR lookups when we have
+                    # cached PTR data. This helps clients that mistakenly issue A
+                    # queries for `_service._proto` or browse names discover
+                    # available instances.
                     labels = name_norm.split(".")
-                    if (
-                        len(labels) >= 3
-                        and labels[0].startswith("_")
-                        and labels[1] in {"_tcp", "_udp"}
-                    ):
-                        ptr_targets = self._ptr.get(name_norm)
-                        if ptr_targets:
-                            for t in sorted(ptr_targets):
-                                reply.add_answer(
-                                    RR(
-                                        rname=owner_wire,
-                                        rtype=QTYPE.PTR,
-                                        rclass=1,
-                                        ttl=self._ttl,
-                                        rdata=PTR(t + "."),
-                                    ),
-                                )
+                    ptr_owner = name_norm
+                    # Reuse the alias mapping used in the PTR path so that
+                    # `_dns_sd._tcp.<suffix>` and `_tcp.<suffix>` enumerate the
+                    # same targets as `_services._dns-sd._udp.<suffix>` and
+                    # `_services.<suffix>`.
+                    if len(labels) >= 2:
+                        alias_suffix: Optional[str] = None
+                        allowed_suffixes = getattr(
+                            self, "_dns_domains", {self._dns_domain}
+                        )
+                        for suf in allowed_suffixes:
+                            if name_norm.endswith(suf):
+                                alias_suffix = suf
+                                break
+                        if alias_suffix:
+                            if labels[0] == "_dns_sd" and labels[1] == "_tcp":
+                                ptr_owner = f"_services._dns-sd._udp{alias_suffix}"
+                            elif labels[0] == "_tcp":
+                                ptr_owner = f"_services{alias_suffix}"
+                    # Fall back to treating `_service._proto.<suffix>` names as
+                    # service-type owners when no alias mapping applied.
+                    if ptr_owner == name_norm:
+                        if (
+                            len(labels) >= 3
+                            and labels[0].startswith("_")
+                            and labels[1] in {"_tcp", "_udp"}
+                        ):
+                            ptr_targets = self._ptr.get(name_norm)
+                        else:
+                            ptr_targets = None
+                    else:
+                        ptr_targets = self._ptr.get(ptr_owner)
+
+                    if ptr_targets:
+                        for t in sorted(ptr_targets):
+                            reply.add_answer(
+                                RR(
+                                    rname=owner_wire,
+                                    rtype=QTYPE.PTR,
+                                    rclass=1,
+                                    ttl=self._ttl,
+                                    rdata=PTR(t + "."),
+                                ),
+                            )
 
                 if qtype_int == int(QTYPE.A) and service_node_host:
                     # When querying A for a service-node name, also return TXT
@@ -1655,25 +1804,47 @@ class MdnsBridge(BasePlugin):
                             )
                         )
                 elif qtype_int == int(QTYPE.AAAA):
-                    # Same behavior for AAAA queries to service-type names.
+                    # Same behavior for AAAA queries to service-type and
+                    # DNS-SD browse names as for A queries above.
                     labels = name_norm.split(".")
-                    if (
-                        len(labels) >= 3
-                        and labels[0].startswith("_")
-                        and labels[1] in {"_tcp", "_udp"}
-                    ):
-                        ptr_targets = self._ptr.get(name_norm)
-                        if ptr_targets:
-                            for t in sorted(ptr_targets):
-                                reply.add_answer(
-                                    RR(
-                                        rname=owner_wire,
-                                        rtype=QTYPE.PTR,
-                                        rclass=1,
-                                        ttl=self._ttl,
-                                        rdata=PTR(t + "."),
-                                    ),
-                                )
+                    ptr_owner = name_norm
+                    if len(labels) >= 2:
+                        alias_suffix = None  # type: ignore[assignment]
+                        allowed_suffixes = getattr(
+                            self, "_dns_domains", {self._dns_domain}
+                        )
+                        for suf in allowed_suffixes:
+                            if name_norm.endswith(suf):
+                                alias_suffix = suf
+                                break
+                        if alias_suffix:
+                            if labels[0] == "_dns_sd" and labels[1] == "_tcp":
+                                ptr_owner = f"_services._dns-sd._udp{alias_suffix}"
+                            elif labels[0] == "_tcp":
+                                ptr_owner = f"_services{alias_suffix}"
+                    if ptr_owner == name_norm:
+                        if (
+                            len(labels) >= 3
+                            and labels[0].startswith("_")
+                            and labels[1] in {"_tcp", "_udp"}
+                        ):
+                            ptr_targets = self._ptr.get(name_norm)
+                        else:
+                            ptr_targets = None
+                    else:
+                        ptr_targets = self._ptr.get(ptr_owner)
+
+                    if ptr_targets:
+                        for t in sorted(ptr_targets):
+                            reply.add_answer(
+                                RR(
+                                    rname=owner_wire,
+                                    rtype=QTYPE.PTR,
+                                    rclass=1,
+                                    ttl=self._ttl,
+                                    rdata=PTR(t + "."),
+                                ),
+                            )
 
         if not _added_any():
             return None

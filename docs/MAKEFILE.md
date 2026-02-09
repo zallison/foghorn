@@ -147,7 +147,7 @@ These variables control Docker image names and runtime behavior:
   - The Docker image tag.
 - `CONTAINER_DATA` (default: `./.docker`)
   - Directory mounted into the container to hold configuration and data.
-- `UDPPORT`, `TCPPORT`, `ADMINPORT` (defaults: `53`, `53`, `8053`)
+- `UDPPORT`, `TCPPORT`, `ADMINPORT` (defaults: `53`, `53`, `5380`)
   - Control the host ports used by `docker-run-not-host`.
 
 The full image reference used by Docker targets is:
@@ -325,9 +325,9 @@ These targets help you create a simple CA and server certificate for local use.
 - `docker-run-not-host`
   - Depends on: `docker-build`
   - Runs the container without `--net=host`, instead mapping:
-    - `${UDPPORT}:5333/udp`
-    - `${TCPPORT}:5333/tcp`
-    - `${ADMINPORT}:8053/tcp`
+    - `${UDPPORT}:5335/udp`
+    - `${TCPPORT}:5335/tcp`
+    - `${ADMINPORT}:5380/tcp`
 - `docker-logs`
   - Follows the logs of the `foghorn` container.
 - `docker-ship`

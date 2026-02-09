@@ -578,6 +578,251 @@ def test_pre_resolve_returns_none_when_rr_parsing_fails(
     assert decision.action == "override"
 
 
+def test_axfr_notify_static_targets_normalized(tmp_path: pathlib.Path) -> None:
+    """Brief: axfr_notify entries are normalized into upstream-like mappings.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts that axfr_notify is converted into host/port/transport mappings
+        on the ZoneRecords instance.
+    """
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text("example.com|A|300|192.0.2.10\n", encoding="utf-8")
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        axfr_notify=[
+            {"host": "198.51.100.10", "port": 53, "transport": "tcp"},
+            {
+                "host": "198.51.100.20",
+                "port": 853,
+                "transport": "dot",
+                "server_name": "sec2.example",
+                "verify": False,
+                "ca_file": "/tmp/ca.pem",
+            },
+        ],
+    )
+    plugin.setup()
+
+    targets = getattr(plugin, "_axfr_notify_static_targets", None)
+    assert isinstance(targets, list)
+    assert len(targets) == 2
+
+    t1, t2 = targets
+    assert t1["host"] == "198.51.100.10"
+    assert t1["port"] == 53
+    assert t1["transport"] == "tcp"
+
+    assert t2["host"] == "198.51.100.20"
+    assert t2["port"] == 853
+    assert t2["transport"] == "dot"
+    assert t2["server_name"] == "sec2.example"
+    assert t2["verify"] is False
+    assert t2["ca_file"] == "/tmp/ca.pem"
+
+
+def test_axfr_notify_all_learns_axfr_client_and_sends_notify(monkeypatch, tmp_path):
+    """Brief: axfr_notify_all learns AXFR clients and schedules NOTIFY.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that iter_zone_rrs_for_transfer() records the AXFR client as a
+        learned NOTIFY target and triggers a NOTIFY send via the helper.
+    """
+
+    records_file = tmp_path / "records.txt"
+    # Minimal SOA so ZoneRecords is authoritative for the zone.
+    records_file.write_text(
+        "notify.example|SOA|300|ns1.notify.example. hostmaster.notify.example. 1 3600 600 604800 300\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)], axfr_notify_all=True, axfr_notify_scheduled=0
+    )
+    plugin.setup()
+
+    calls = []
+
+    def fake_send_notify(zone_apex, target):  # noqa: D401,ANN001
+        """Record NOTIFY sends instead of performing network I/O."""
+
+        calls.append((zone_apex, dict(target)))
+
+    monkeypatch.setattr(
+        plugin, "_send_notify_to_target", fake_send_notify, raising=True
+    )
+
+    # Pretend an AXFR client pulled the zone.
+    client_ip = "203.0.113.5"
+    rrs = plugin.iter_zone_rrs_for_transfer("notify.example", client_ip=client_ip)
+    assert rrs is not None and rrs, "expected authoritative RRset for notify.example"
+
+    # Learned targets should include the client.
+    learned = getattr(plugin, "_axfr_notify_learned", {})
+    assert "notify.example" in learned or "notify.example" in {
+        k.rstrip(".") for k in learned.keys()
+    }
+
+    # With axfr_notify_scheduled=0 we treat delay as immediate and expect at
+    # least one NOTIFY send for this client.
+    assert calls, "expected at least one NOTIFY send for learned AXFR client"
+    zones = {z for (z, _t) in calls}
+    assert any(z.startswith("notify.example") for z in zones)
+
+
+def test_reload_records_from_watchdog_sends_notify_for_changed_zones(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """Brief: _reload_records_from_watchdog sends NOTIFY for changed zones.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - tmp_path: pytest temporary directory containing a records file.
+
+    Outputs:
+      - Asserts that, after a zone file change and a reload, ZoneRecords calls
+        _send_notify_for_zones() with the apex of the updated zone.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "records.txt"
+    # Initial SOA + A record for example.com.
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. 1 3600 600 604800 300"
+                ),
+                "example.com|A|300|192.0.2.1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin.setup()
+
+    # Mutate the zone file so that the apex RRset changes.
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. 1 3600 600 604800 300"
+                ),
+                # Change the A record value so the zone snapshot differs.
+                "example.com|A|300|192.0.2.2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    notified = {"zones": None}
+
+    def fake_send_for_zones(zones: list[str]) -> None:  # noqa: D401
+        """Capture the list of zone apexes passed to _send_notify_for_zones."""
+
+        notified["zones"] = list(zones)
+
+    plugin._send_notify_for_zones = fake_send_for_zones  # type: ignore[assignment]
+
+    # Force immediate reload path by disabling the minimum interval.
+    plugin._watchdog_min_interval = 0.0  # type: ignore[assignment]
+    plugin._last_watchdog_reload_ts = 0.0  # type: ignore[assignment]
+
+    plugin._reload_records_from_watchdog()
+
+    zones = notified["zones"]
+    assert zones is not None and "example.com" in zones
+
+
+def test_send_notify_for_zones_uses_static_and_learned_targets(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
+    """Brief: _send_notify_for_zones sends NOTIFY to static and learned targets.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that both axfr_notify (static) and learned axfr_notify_all
+        targets are used when sending NOTIFY for a changed zone.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "notify.example|SOA|300|ns1.notify.example. hostmaster.notify.example. 1 3600 600 604800 300\n",
+        encoding="utf-8",
+    )
+
+    # Configure one static axfr_notify target; learned targets will be injected
+    # directly into the plugin's state.
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        axfr_notify=[{"host": "198.51.100.10", "port": 53, "transport": "tcp"}],
+    )
+    plugin.setup()
+
+    # Inject a learned target for the same zone.
+    learned = getattr(plugin, "_axfr_notify_learned", None)
+    assert isinstance(learned, dict)
+    learned["notify.example"] = {
+        "203.0.113.5:53/tcp": {
+            "host": "203.0.113.5",
+            "port": 53,
+            "timeout_ms": 2000,
+            "transport": "tcp",
+            "server_name": None,
+            "verify": True,
+            "ca_file": None,
+        }
+    }
+
+    calls: list[tuple[str, dict]] = []
+
+    def fake_send_notify(zone_apex: str, target: dict) -> None:  # noqa: D401
+        """Record NOTIFY sends instead of performing network I/O."""
+
+        calls.append((zone_apex, dict(target)))
+
+    monkeypatch.setattr(
+        plugin, "_send_notify_to_target", fake_send_notify, raising=True
+    )
+
+    plugin._send_notify_for_zones(["notify.example"])
+
+    # Expect at least one call for the static target and one for the learned one.
+    assert calls, "expected at least one NOTIFY send"
+    zones = {z for (z, _t) in calls}
+    assert any(z.startswith("notify.example") for z in zones)
+    hosts = {t["host"] for (_z, t) in calls}
+    assert "198.51.100.10" in hosts
+    assert "203.0.113.5" in hosts
+
+
 def test_watchdog_handler_should_reload_and_on_any_event(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1797,7 +2042,11 @@ def test_dnssec_rrsig_returned_when_do_bit_set(tmp_path: pathlib.Path) -> None:
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    keys_dir = tmp_path / "keys"
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        dnssec_signing={"enabled": True, "keys_dir": str(keys_dir)},
+    )
     plugin.setup()
 
     ctx = PluginContext(client_ip="127.0.0.1")
@@ -1810,22 +2059,21 @@ def test_dnssec_rrsig_returned_when_do_bit_set(tmp_path: pathlib.Path) -> None:
 
     response = DNSRecord.parse(decision.response)
     answer_types = {rr.rtype for rr in response.rr}
-    additional_types = {rr.rtype for rr in (response.ar or [])}
 
     # A should be in the answer section and the corresponding RRSIG presented
     # as an additional record.
     assert QTYPE.A in answer_types
-    assert QTYPE.RRSIG in additional_types
+    assert QTYPE.RRSIG in answer_types
 
 
 def test_dnssec_rrsig_omitted_when_do_bit_not_set(tmp_path: pathlib.Path) -> None:
-    """Brief: ZoneRecords keeps RRSIGs in additional even when DO=0 or no EDNS.
+    """Brief: ZoneRecords omits RRSIGs when DO=0 or no EDNS.
 
     Inputs:
       - tmp_path: pytest temporary directory.
 
     Outputs:
-      - Asserts that a query without DO=1 returns only A records, not RRSIG.
+      - Asserts that a query without DO=1 returns only A records and no RRSIG.
     """
     records_file = tmp_path / "signed.txt"
     records_file.write_text(
@@ -1866,11 +2114,11 @@ def test_dnssec_rrsig_omitted_when_do_bit_not_set(tmp_path: pathlib.Path) -> Non
     answer_types = {rr.rtype for rr in response.rr}
     additional_types = {rr.rtype for rr in (response.ar or [])}
 
-    # A should be in the answer section and the corresponding RRSIG presented
-    # as an additional record even when the DO bit is not set.
+    # A should be in the answer section and no RRSIG records returned when the
+    # DO bit is not set.
     assert QTYPE.A in answer_types
     assert QTYPE.RRSIG not in answer_types
-    assert QTYPE.RRSIG in additional_types
+    assert QTYPE.RRSIG not in additional_types
 
 
 def test_dnssec_dnskey_returned_at_apex_with_do_bit(tmp_path: pathlib.Path) -> None:
@@ -1926,12 +2174,11 @@ def test_dnssec_dnskey_returned_at_apex_with_do_bit(tmp_path: pathlib.Path) -> N
 
     response = DNSRecord.parse(decision.response)
     answer_types = {rr.rtype for rr in response.rr}
-    additional_types = {rr.rtype for rr in (response.ar or [])}
 
     # DNSKEY should be in the answer section with its covering RRSIG in the
     # additional section.
     assert QTYPE.DNSKEY in answer_types
-    assert QTYPE.RRSIG in additional_types
+    assert QTYPE.RRSIG in answer_types
 
 
 def test_bind_zone_apex_detection_with_dnssec(tmp_path: pathlib.Path) -> None:

@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.4] - 2026-02-05
+
+> Release notes for changes between **v0.6.3** and **v0.6.4**.
+
+### Added
+
+- Added `forward_local` server configuration option to control whether `.local` queries are forwarded to upstream resolvers. When disabled (default), `.local` queries return NXDOMAIN with an RFC 6762 EDE note unless answered by a plugin like MdnsBridge.
+- Extended MdnsBridge plugin to synthesize service-type PTR records from the SRV cache when explicit PTRs are missing, enabling DNS-SD enumeration for discovered services.
+- Added browse-name aliasing in MdnsBridge to map `_dns_sd._tcp.<suffix>` and `_tcp.<suffix>` queries to their RFC 6763 equivalents.
+- Added AXFR NOTIFY configuration options for the `resolve.zone_records` plugin, plus example configuration for AXFR client/server usage.
+- Added `dnssec.zone_helpers` module and an AXFR/DNSSEC overlay for the `resolve.zone_records` plugin so signed zones from AXFR-aware upstreams and tooling can be consumed and served with DNSSEC data.
+- Added shared DNS-over-HTTPS parsing and validation logic for the DoH API.
+- Added a debugging plugin `echo` (config + tests).  It returns a `TXT` record of the qname and qtype.
+- HTTP webserver implementations split into core (asyncio) server, threaded server, runtime, routing, and helper modules.
+
+### Tests
+
+- Added tests for `forward_local` behavior in the query resolution pipeline, covering blocked and allowed `.local` forwarding scenarios.
+- Added comprehensive tests for MdnsBridge DNS-SD aliasing and PTR fallback enumeration from SRV cache.
+- Added unit tests for the `ssh_keyscan` utility module covering key fetch, error handling, and SSHFP record generation.
+- Added tests covering AXFR NOTIFY behavior in ZoneRecords, including ensuring NOTIFY sends the expected AXFR.
+- Extended `tests/plugins/test_zone_records.py` to cover reload-triggered NOTIFY behavior and ensure both static and learned NOTIFY targets are exercised.
+
+### Changed
+
+- Refactored the `resolve.zone_records` plugin to snapshot zone state across reloads, compute changed zones, and send DNS NOTIFY only for zones that changed, including DNSSEC-aware helpers for serving signed RRsets.
+- Migrated the webserver runtime and routes to the new core implementation and removed the legacy `_core` module.
+- Threaded `client_ip` through AXFR iterators.
+
+### Fixed
+
+- DNSSEC is now only applied when requested and enabled.
+- Routed DoH API parsing through shared parsing/validation logic to keep behavior consistent.
+
+### Documentation
+
+- Updated README configuration examples and the test coverage badge.
+
 ## [0.6.3] - 2026-01-19
 
 > Release notes for changes between **v0.6.2** and **v0.6.3**.

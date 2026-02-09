@@ -83,6 +83,10 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     upstream_max_concurrent: int = 1
     _upstream_rr_index: int = 0  # round-robin index shared across handler instances
 
+    # When False (default), queries for .local are never forwarded to upstreams
+    # and instead return NXDOMAIN unless a plugin (like MdnsBridge) answers them.
+    forward_local: bool = False
+
     # Lazy health state for upstreams, keyed by a stable upstream identifier.
     # Each entry contains:
     #   - fail_count: consecutive failure count (for backoff growth).
