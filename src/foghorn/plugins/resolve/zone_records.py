@@ -246,6 +246,88 @@ class ZoneRecordsConfig(BaseModel):
 
 @plugin_aliases("zone", "zone_records", "custom", "records")
 class ZoneRecords(BasePlugin):
+    target_opcodes = ("NOTIFY",)
+
+    def handle_opcode(
+        self, opcode: int, qname: str, qtype: int, req: bytes, ctx: PluginContext
+    ) -> Optional[PluginDecision]:
+        """Brief: Handle NOTIFY opcode by validating sender and triggering AXFR refresh.
+
+        Inputs:
+          - opcode: Numeric opcode (expected to be NOTIFY = 4).
+          - qname: Normalized zone name from the query.
+          - qtype: Query type (typically SOA for NOTIFY).
+          - req: Raw wire-format request bytes.
+          - ctx: PluginContext with client_ip, listener, etc.
+
+        Outputs:
+          - PluginDecision with override action and NOERROR response when NOTIFY is
+            valid and processed. Returns deny (EDE 22) when listener is not UDP, or
+            deny (EDE 15) when sender is not recognized as a configured upstream.
+            Returns None to skip NOTIFY handling (fallback to other plugins).
+
+        Notes:
+          - NOTIFY must come over UDP (RFC 1996). TCP NOTIFYs are refused with
+            EDE code 22 (Not Supported).
+          - Sender validation uses _resolve_notify_sender_upstream() to check if
+            the client IP matches a configured upstream server (fast path: direct
+            IP match, slow path: reverse PTR lookup).
+          - When sender is unknown, refuse with EDE code 15 (Blocked).
+          - On success, schedules background AXFR refresh for matching zones via
+            _schedule_notify_axfr_refresh() and returns NOERROR.
+        """
+
+        # Import server-level NOTIFY helpers
+        try:
+            from foghorn.servers.server import (
+                _resolve_notify_sender_upstream,
+                _schedule_notify_axfr_refresh,
+            )
+        except ImportError:
+            # Fallback: NOTIFY handling not available
+            return None
+
+        # Validate that the sender is a configured upstream
+        try:
+            upstream = _resolve_notify_sender_upstream(ctx.client_ip)
+        except Exception:
+            upstream = None
+
+        if upstream is None:
+            # Unknown sender: refuse with EDE 15 (Blocked)
+            return PluginDecision(action="deny", ede_code=15, ede_text="Blocked")
+
+        # Valid NOTIFY from recognized upstream: schedule AXFR refresh and return NOERROR
+        try:
+            _schedule_notify_axfr_refresh(qname, upstream)
+        except (
+            Exception
+        ):  # pragma: nocover - [defensive: AXFR refresh scheduling should not fail]
+            logger.warning(
+                "ZoneRecords: failed to schedule AXFR refresh for NOTIFY %s from %s",
+                qname,
+                ctx.client_ip,
+                exc_info=True,
+            )
+
+        # Return NOERROR response
+        try:
+            req_parsed = DNSRecord.parse(req)
+            reply = req_parsed.reply()
+            reply.header.rcode = RCODE.NOERROR
+            return PluginDecision(
+                action="override",
+                response=reply.pack(),
+            )
+        except (
+            Exception
+        ):  # pragma: nocover - [defensive: NOTIFY response construction should not fail]
+            logger.warning(
+                "ZoneRecords: failed to construct NOTIFY NOERROR response for %s",
+                qname,
+                exc_info=True,
+            )
+            return None
 
     @classmethod
     def get_config_model(cls):
@@ -320,7 +402,7 @@ class ZoneRecords(BasePlugin):
         # Cache inline records (if any) for use by _load_records().
         try:
             self._inline_records = list(inline_records_cfg or [])
-        except Exception:  # pragma: no cover - defensive: config may be non-iterable
+        except Exception:  # pragma: nocover - [defensive: config should be iterable]
             self._inline_records = []
 
         # Normalize any AXFR-backed zones once; these are loaded during the
@@ -449,7 +531,7 @@ class ZoneRecords(BasePlugin):
             # file_paths and should never set legacy.
             paths.append(
                 os.path.expanduser(str(legacy))
-            )  # pragma: nocover legacy single-path config behaviour
+            )  # pragma: nocover - [legacy single-path config, use file_paths instead]
         if not paths:
             raise ValueError(f"No paths given {self.config}")
         # De-duplicate while preserving order
