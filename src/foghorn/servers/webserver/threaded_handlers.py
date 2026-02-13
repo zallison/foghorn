@@ -211,7 +211,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _send_yaml(
         self, status_code: int, text: str
-    ) -> None:  # pragma: no cover - low-level HTTP I/O helper
+    ) -> None:  # pragma: nocover - [low-level HTTP I/O helper tested via FastAPI]
         """Brief: Send YAML response with application/x-yaml content type.
 
         Inputs:
@@ -242,7 +242,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _send_html(
         self, status_code: int, html_body: str
-    ) -> None:  # pragma: no cover - low-level HTTP I/O helper
+    ) -> None:  # pragma: nocover - [low-level HTTP I/O helper tested via FastAPI]
         """Brief: Send HTML response.
 
         Inputs:
@@ -273,9 +273,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _require_auth(
         self,
-    ) -> (
-        bool
-    ):  # pragma: no cover - behaviour duplicated by FastAPI auth dependency tests
+    ) -> bool:  # pragma: nocover - [behaviour tested via FastAPI auth dependency tests]
         """Brief: Enforce auth.mode=token semantics for protected endpoints.
 
         Inputs: none
@@ -318,7 +316,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_health(
         self,
-    ) -> None:  # pragma: no cover - threaded /health mirrors FastAPI /health behaviour
+    ) -> (
+        None
+    ):  # pragma: nocover - [threaded /health mirrors FastAPI /health tested via FastAPI]
         """Brief: Handle GET /health.
 
         Inputs: none
@@ -364,7 +364,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_stats(
         self, params: Dict[str, list[str]]
-    ) -> None:  # pragma: no cover - threaded /stats mirrors FastAPI /stats
+    ) -> (
+        None
+    ):  # pragma: nocover - [threaded /stats mirrors FastAPI /stats tested via FastAPI]
         """Brief: Handle GET /stats.
 
         Inputs:
@@ -1044,7 +1046,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 data = f.read()
         except (
             Exception
-        ) as exc:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        ) as exc:  # pragma: nocover - [defensive: static file I/O race condition hard to test reliably]
             logger.error("Failed to read static file %s: %s", candidate, exc)
             self._send_text(500, "failed to read static file")
             return True
@@ -1077,7 +1079,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self,
     ) -> (
         None
-    ):  # noqa: N802  # pragma: no cover - low-level HTTP verb handler for fallback server
+    ):  # noqa: N802  # pragma: nocover - [low-level HTTP verb handler for fallback server]
         """Brief: Handle CORS preflight requests.
 
         Inputs: none

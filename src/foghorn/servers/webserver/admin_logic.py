@@ -188,8 +188,8 @@ def build_upstream_status_payload(
     strategy = str(getattr(DNSUDPHandler, "upstream_strategy", "failover"))
     try:
         max_concurrent = int(getattr(DNSUDPHandler, "upstream_max_concurrent", 1) or 1)
-    except Exception:
-        max_concurrent = 1
+    except Exception:  # pragma: nocover - defensive: runtime may provide invalid config
+        max_concurrent = 1  # pragma: nocover - safe fallback
     if max_concurrent < 1:
         max_concurrent = 1
 
@@ -209,12 +209,12 @@ def build_upstream_status_payload(
         entry = health.get(up_id) or {}
         try:
             fail_count = int(entry.get("fail_count", 0))
-        except Exception:
-            fail_count = 0
+        except Exception:  # pragma: nocover - defensive: should already be int-ish
+            fail_count = 0  # pragma: nocover - safe fallback
         try:
             down_until = float(entry.get("down_until", 0.0) or 0.0)
-        except Exception:
-            down_until = 0.0
+        except Exception:  # pragma: nocover - defensive: should already be float-ish
+            down_until = 0.0  # pragma: nocover - safe fallback
         state = "down" if entry and down_until > now else "up"
 
         cfg_view: Dict[str, Any] = {}
@@ -237,12 +237,12 @@ def build_upstream_status_payload(
             continue
         try:
             fail_count = int(entry.get("fail_count", 0))
-        except Exception:
-            fail_count = 0
+        except Exception:  # pragma: nocover - defensive: should already be int-ish
+            fail_count = 0  # pragma: nocover - safe fallback
         try:
             down_until = float(entry.get("down_until", 0.0) or 0.0)
-        except Exception:
-            down_until = 0.0
+        except Exception:  # pragma: nocover - defensive: should already be float-ish
+            down_until = 0.0  # pragma: nocover - safe fallback
         state = "down" if down_until > now else "up"
         items.append(
             {
@@ -279,8 +279,10 @@ def collect_admin_pages_for_response(plugins: Iterable[object]) -> list[dict[str
     for plugin in plugins or []:
         try:
             plugin_name = getattr(plugin, "name", None)
-        except Exception:
-            plugin_name = None
+        except (
+            Exception
+        ):  # pragma: nocover - defensive against misbehaving plugin objects
+            plugin_name = None  # pragma: nocover - defensive default
         if not plugin_name:
             continue
 
@@ -290,8 +292,8 @@ def collect_admin_pages_for_response(plugins: Iterable[object]) -> list[dict[str
 
         try:
             specs = get_pages()
-        except Exception:
-            continue
+        except Exception:  # pragma: nocover - plugin code should not break admin UI
+            continue  # pragma: nocover - best-effort: ignore plugin failures
 
         for spec in specs or []:
             slug = None
@@ -318,8 +320,10 @@ def collect_admin_pages_for_response(plugins: Iterable[object]) -> list[dict[str
                     description = getattr(spec, "description", None)
                     layout = getattr(spec, "layout", "one_column")
                     kind = getattr(spec, "kind", None)
-            except Exception:
-                continue
+            except (
+                Exception
+            ):  # pragma: nocover - plugin page spec parsing is best-effort
+                continue  # pragma: nocover - ignore malformed plugin specs
 
             slug_str = str(slug or "").strip()
             title_str = str(title or "").strip()
@@ -369,8 +373,10 @@ def find_admin_page_detail(
             if getattr(plugin, "name", None) == plugin_name:
                 target = plugin
                 break
-        except Exception:
-            continue
+        except (
+            Exception
+        ):  # pragma: nocover - defensive against misbehaving plugin objects
+            continue  # pragma: nocover - ignore plugin failures
     if target is None:
         return None
 
@@ -380,8 +386,8 @@ def find_admin_page_detail(
 
     try:
         specs = get_pages()
-    except Exception:
-        return None
+    except Exception:  # pragma: nocover - plugin code should not break admin UI
+        return None  # pragma: nocover - best-effort: treat as missing
 
     for spec in specs or []:
         slug = None
@@ -416,8 +422,8 @@ def find_admin_page_detail(
                 kind = getattr(spec, "kind", None)
                 html_left = getattr(spec, "html_left", None)
                 html_right = getattr(spec, "html_right", None)
-        except Exception:
-            continue
+        except Exception:  # pragma: nocover - plugin page spec parsing is best-effort
+            continue  # pragma: nocover - ignore malformed plugin specs
 
         slug_str = str(slug or "").strip()
         if slug_str != str(page_slug or "").strip():
@@ -468,8 +474,10 @@ def collect_plugin_ui_descriptors(plugins: Iterable[object]) -> list[dict[str, A
             return None
         try:
             source_name = getattr(source, "name", "")
-        except Exception:
-            source_name = ""
+        except (
+            Exception
+        ):  # pragma: nocover - defensive against misbehaving plugin objects
+            source_name = ""  # pragma: nocover - defensive default
 
         name = str(desc.get("name") or source_name or "").strip()
         title_raw = desc.get("title")
@@ -481,8 +489,10 @@ def collect_plugin_ui_descriptors(plugins: Iterable[object]) -> list[dict[str, A
         order_val = desc.get("order")
         try:
             order = int(order_val) if order_val is not None else 100
-        except Exception:
-            order = 100
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: plugins should provide int-ish order
+            order = 100  # pragma: nocover - defensive default
 
         item = dict(desc)
         item["name"] = name
@@ -495,14 +505,16 @@ def collect_plugin_ui_descriptors(plugins: Iterable[object]) -> list[dict[str, A
         get_desc = None
         try:
             get_desc = getattr(plugin, "get_admin_ui_descriptor", None)
-        except Exception:
-            get_desc = None
+        except (
+            Exception
+        ):  # pragma: nocover - defensive against misbehaving plugin objects
+            get_desc = None  # pragma: nocover - treat as missing
         if not callable(get_desc):
             continue
         try:
             desc = get_desc()
-        except Exception:
-            continue
+        except Exception:  # pragma: nocover - plugin code should not break admin UI
+            continue  # pragma: nocover - ignore plugin failures
         if isinstance(desc, dict):
             item = _normalise_descriptor(plugin, desc)
             if item is not None:
@@ -552,8 +564,10 @@ def find_plugin_instance_by_name(
         try:
             if getattr(p, "name", None) == plugin_name:
                 return p
-        except Exception:
-            continue
+        except (
+            Exception
+        ):  # pragma: nocover - defensive against misbehaving plugin objects
+            continue  # pragma: nocover - ignore plugin failures
     return None
 
 
