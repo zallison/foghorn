@@ -23,6 +23,7 @@ from dnslib import (  # noqa: F401 - imports are for implementations of this cla
     A,
     DNSHeader,
     DNSRecord,
+    OPCODE,
 )
 
 from foghorn.plugins.cache.base import CachePlugin
@@ -294,6 +295,9 @@ class BasePlugin:
     # restrict which qtypes they apply to. By default, all qtypes are targeted
     # via the "*" wildcard.
     target_qtypes: ClassVar[Sequence[str]] = ("*",)
+    # DNS opcode targeting: plugins may override this at the class level to
+    # restrict which opcodes they handle. Defaults to QUERY (opcode 0) only.
+    target_opcodes: ClassVar[Sequence[Union[str, int]]] = ("QUERY",)
 
     @classmethod
     def get_aliases(cls) -> Sequence[str]:
@@ -454,6 +458,14 @@ class BasePlugin:
                 getattr(self.__class__, "target_qtypes", ("*",)),
             )
         self._target_qtypes = self._normalize_qtype_list(raw_qtypes_cfg)
+
+        # Optional opcode targeting: normalize configured target_opcodes into
+        # uppercase mnemonic values (e.g., ["QUERY", "NOTIFY"]) or integer codes.
+        raw_opcodes_cfg = config.get(
+            "target_opcodes",
+            getattr(self.__class__, "target_opcodes", ("QUERY",)),
+        )
+        self._target_opcodes = self._normalize_opcode_list(raw_opcodes_cfg)
 
     def _init_instance_logger(self, logging_cfg: Dict[str, object]) -> None:
         """Brief: Configure an optional per-plugin logger from a logging config block.
@@ -971,6 +983,95 @@ class BasePlugin:
                 name = str(qtype)
             return str(name).upper()
         return str(qtype).upper()
+
+    @staticmethod
+    def _normalize_opcode_list(raw: object) -> List[Union[str, int]]:
+        """Brief: Normalize a raw target_opcodes config value.
+
+        Inputs:
+          - raw: None, str/int, or sequence of str/int values. Strings may be
+            opcode mnemonics such as "QUERY", "STATUS", "NOTIFY", "UPDATE", or
+            "*" for all opcodes.
+
+        Outputs:
+          - list[Union[str, int]]: Uppercase opcode names and/or integer codes.
+            The wildcard "*" takes precedence and yields ["*"].
+        """
+        if raw is None:
+            return ["QUERY"]
+        if isinstance(raw, (str, int)):
+            entries = [raw]
+        elif isinstance(raw, (list, tuple)):
+            entries = list(raw)
+        else:
+            logger.warning(
+                "BasePlugin: ignoring invalid target_opcodes value %r (expected str/int or list)",
+                raw,
+            )
+            return ["QUERY"]
+
+        normalized: List[Union[str, int]] = []
+        for entry in entries:
+            if isinstance(entry, int):
+                normalized.append(int(entry))
+                continue
+            text = str(entry).strip()
+            if not text:
+                continue
+            if text == "*":
+                return ["*"]
+            normalized.append(text.upper())
+        return normalized or ["QUERY"]
+
+    def targets_opcode(self, opcode: int) -> bool:
+        """Brief: Determine whether this plugin targets the given DNS opcode.
+
+        Inputs:
+          - opcode: Integer opcode from dnslib header (0=QUERY, 2=STATUS, 4=NOTIFY, 5=UPDATE).
+
+        Outputs:
+          - bool: True if this plugin should be considered for handling this opcode.
+        """
+        try:
+            op_list = list(getattr(self, "_target_opcodes", ["QUERY"]))
+        except Exception:
+            op_list = ["QUERY"]
+        if not op_list:
+            return False
+        if "*" in op_list:
+            return True
+        # Accept match by numeric code or by mnemonic string
+        try:
+            name = OPCODE.get(int(opcode), str(opcode))
+        except Exception:
+            name = str(opcode)
+        name_u = str(name).upper()
+        return int(opcode) in {
+            int(x) for x in op_list if isinstance(x, int)
+        } or name_u in {str(x).upper() for x in op_list if not isinstance(x, int)}
+
+    def handle_opcode(
+        self,
+        opcode: int,
+        qname: str,
+        qtype: int,
+        req: bytes,
+        ctx: PluginContext,
+    ) -> Optional[PluginDecision]:
+        """Brief: Optional hook to handle non-QUERY opcodes before resolution.
+
+        Inputs:
+          - opcode: DNS opcode integer (0=QUERY, 2=STATUS, 4=NOTIFY, 5=UPDATE)
+          - qname: The queried domain name (string, no trailing dot)
+          - qtype: The DNS RR type (integer code)
+          - req: Raw DNS request wire bytes
+          - ctx: PluginContext
+
+        Outputs:
+          - PluginDecision to override/deny/drop/allow, or None to fall through
+            to normal pre_resolve/forwarding/post_resolve pipeline.
+        """
+        return None
 
     @staticmethod
     def normalize_qname(
