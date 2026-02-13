@@ -171,7 +171,9 @@ def load_key(key_dir: Path, zone_name: str, key_type: str) -> Optional[object]:
         private_key = serialization.load_pem_private_key(pem_bytes, password=None)
         logger.info("Loaded existing %s key from %s", key_type.upper(), key_path)
         return private_key
-    except Exception as exc:  # pragma: no cover - defensive
+    except (
+        Exception
+    ) as exc:  # pragma: nocover - [defensive: invalid or unsupported PEM key material]
         logger.warning("Failed to load key from %s: %s", key_path, exc)
         return None
 
@@ -274,7 +276,9 @@ def sign_zone(
                 )
                 rrsig_rdataset.add(rrsig)
                 rrsig_rdataset.update_ttl(rdataset.ttl)
-            except Exception as exc:  # pragma: no cover - defensive
+            except (
+                Exception
+            ) as exc:  # pragma: nocover - [defensive: dnspython signing can fail for malformed rdatasets]
                 logger.warning(
                     "Failed to sign %s %s: %s",
                     owner,
@@ -301,7 +305,9 @@ def generate_ds_records(
         try:
             ds = dns.dnssec.make_ds(zone_name, ksk_dnskey, digest_type)
             ds_records.append(ds)
-        except Exception as exc:  # pragma: no cover - defensive
+        except (
+            Exception
+        ) as exc:  # pragma: nocover - [defensive: DS generation can fail for invalid DNSKEY/algorithm]
             logger.warning("Failed to generate DS with digest %s: %s", digest_type, exc)
     return ds_records
 
