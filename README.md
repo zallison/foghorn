@@ -122,7 +122,7 @@ server:
 		host: 0.0.0.0
 		port: 53
   cache:
-	module: memory  # memory | sqlite | redis | memcached | mongodb | none
+	module: memory  # memory | sqlite | redis | memcached | mysql | mariadb | postgres | mongodb | none
 
 upstreams:
   strategy: failover        # failover | round_robin | random
