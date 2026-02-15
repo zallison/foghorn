@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "foghorn"
-version = "0.6.4"
+version = "0.6.5b1"
 description = "Foghorn is a fast, pluggable DNS server that caches, filters, routes, and bends DNS to your will. Up- and down-stream UDP, TCP, DoT, and DoH. DNSEC. Because DNS should do what you want."
 
 authors = [ { name = "Zack Allison", email = "zack@zackallison.com" } ]
@@ -16,19 +16,26 @@ dependencies = [
   "cryptography",
   "dnslib>=0.9.24",
   "dnspython>=2.6.1",
-  "docker>=7.0.0",
   "fastapi>=0.111.0",
   "jsonschema>=4.17.3",
-  "mariadb",
-  "mysql-connector-python",
-  "paho-mqtt",
-  "paramiko",
   "psutil",
   "pyyaml>=6.0.1",
   "requests>=2.31.0",
   "uvicorn>=0.30.0",
+# SSH utility
+  "paramiko",
+# Plugins
+  "docker>=7.0.0",
   "watchdog",
-  "zeroconf"
+  "zeroconf",
+# Databases
+  "mariadb",
+  "mysql-connector-python",
+  "paho-mqtt",
+  "psycopg2-binary",
+  "pymemcache",
+  "pymongo",
+  "redis",
 ]
 
 [project.optional-dependencies]
@@ -63,7 +70,10 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.pytest.ini_options]
-addopts = "--ff --maxfail=1 --disable-warnings"
+addopts = "--ff --maxfail=1 --disable-warnings -m 'not docker'"
+markers = [
+    "docker: mark test as requiring docker (deselect with '-m not docker')",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "*" = ["E402"]
