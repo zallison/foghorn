@@ -764,6 +764,8 @@ plugins:
 
 ### 4.10 Inline and file-based records (`zone`)
 
+The ZoneRecords ("zonerecords") plugin (`type: zone`) is for custom DNS answers. If you only need a handful of local overrides, you **do not** need to create and maintain an entire RFC-1035 zonefile — just use inline `records` or a simple `file_paths` records file.
+
 Define custom records either:
 
 - Inline using the `records` list and the pipe-delimited format
@@ -771,7 +773,9 @@ Define custom records either:
 - From one or more custom records files using `file_paths` (same
   pipe-delimited format as above).
 - From one or more RFC‑1035 style BIND zonefiles using `bind_paths`
-  (parsed via dnslib; supports `$ORIGIN`, `$TTL`, and normal RR syntax).
+  (parsed via dnslib; supports `$ORIGIN`, `$TTL`, and normal RR syntax). Each
+  bind_paths entry can be either a string path, or an object with `path`, plus
+  optional `origin`/`ttl` overrides.
 
 All sources are merged into a single internal view per (name, qtype):
 
@@ -787,6 +791,20 @@ All sources are merged into a single internal view per (name, qtype):
 - IXFR server side currently implemented as a full AXFR-style transfer.
 - IXFR client side is not yet supported.
 
+Optional merge controls:
+
+- `load_mode`:
+  - `merge` (default) preserves any existing in-memory records and overlays new data.
+  - `replace` rebuilds the mapping on each load/reload.
+  - `first` uses the first configured source group in this order:
+    file_paths → bind_paths → axfr_zones → records (inline), and ignores the others.
+- `merge_policy`: `add` (default) appends distinct values into an RRset;
+  `overwrite` replaces an RRset when a later source defines the same
+  `(domain, qtype)`.
+- `nxdomain_zones`: optional list of zone suffixes where, if a name does not
+  exist in ZoneRecords, the plugin returns NXDOMAIN/NODATA instead of falling
+  through to upstream resolution.
+
 ```yaml
 plugins:
   - type: zone
@@ -801,6 +819,9 @@ plugins:
 	  records:
 		- 'printer.lan|A|300|192.168.1.50'
 		- 'files.lan|AAAA|300|2001:db8::50'
+	  # Optional: load/reload behaviour
+	  load_mode: merge     # replace | merge | first
+	  merge_policy: add    # add | overwrite
 	  ttl: 300
 ```
 
