@@ -1256,6 +1256,27 @@ class BasePlugin:
         ctx: PluginContext,
         ipaddr: str,
     ) -> Optional[bytes]:
+        """Brief: Build a minimal DNS response for A/AAAA queries.
+
+        Inputs:
+          - qname: Queried name (currently unused; the parsed request QNAME is
+            used instead).
+          - query_type: QTYPE integer for the query.
+          - raw_req: Raw DNS request wire bytes.
+          - ctx: PluginContext for this request (currently unused).
+          - ipaddr: IP address string used as the A/AAAA rdata.
+
+        Outputs:
+          - Optional[bytes]: Packed DNS response bytes, or None when raw_req
+            cannot be parsed.
+
+        Notes:
+          - For A responses, the TTL is taken from self._ttl (callers must ensure
+            this attribute exists).
+          - For AAAA responses, the TTL is hard-coded to 60 seconds.
+          - For other query types, a response is still packed, but no answers are
+            added.
+        """
         try:
             request = DNSRecord.parse(raw_req)
         except Exception as e:
