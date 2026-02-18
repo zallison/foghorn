@@ -151,6 +151,11 @@ plugins:
 
     ttl: 300
 
+    # Optional: Domains to return NXDOMAIN when there's no match.
+    #           It will not continue to other plugins.
+    nxdomain_zones:
+     - .zaa
+
     # Optional: AXFR-backed zones fetched at startup
     axfr_zones:
       - zone: example.com
