@@ -197,6 +197,13 @@
         },
         "module": "foghorn.plugins.resolve.docker_hosts.DockerHosts"
       },
+      "echo": {
+        "aliases": [
+          "echo"
+        ],
+        "config_schema": null,
+        "module": "foghorn.plugins.resolve.echo.EchoPlugin"
+      },
       "etc_hosts": {
         "aliases": [
           "/etc/hosts",
@@ -1211,6 +1218,53 @@
               "title": "AxfrZoneConfig",
               "type": "object"
             },
+            "BindZoneFileConfig": {
+              "additionalProperties": false,
+              "description": "Brief: Configuration for a single BIND zone file entry.\n\nInputs:\n  - path: Filesystem path to an RFC-1035 style zonefile.\n  - origin: Optional override for the zonefile base domain ($ORIGIN).\n  - ttl: Optional override for the zonefile default TTL ($TTL).\n\nOutputs:\n  - BindZoneFileConfig instance.",
+              "properties": {
+                "origin": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional override for the zonefile base domain ($ORIGIN). When set, ZoneRecords ignores any $ORIGIN lines found in the file and uses this value.",
+                  "title": "Origin"
+                },
+                "path": {
+                  "description": "Path to an RFC-1035 style zonefile.",
+                  "title": "Path",
+                  "type": "string"
+                },
+                "ttl": {
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional override for the zonefile default TTL ($TTL). When set, ZoneRecords ignores any $TTL lines found in the file and uses this value as the default TTL for records which omit TTL.",
+                  "title": "Ttl"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "title": "BindZoneFileConfig",
+              "type": "object"
+            },
             "ZoneDnssecSigningConfig": {
               "additionalProperties": false,
               "description": "Brief: DNSSEC auto-signing configuration for ZoneRecords.\n\nInputs:\n  - enabled: Enable automatic DNSSEC signing for authoritative zones.\n  - keys_dir: Optional base directory for per-zone key files.\n  - algorithm: DNSSEC algorithm name (e.g. \"ECDSAP256SHA256\").\n  - generate: Key generation policy (\"yes\", \"no\", or \"maybe\").\n  - validity_days: Signature validity window in days.\n  - use_tld: Optional single-label TLD (e.g. \"zaa\", \"corp\") to treat as\n    an inferred apex for SSHFP-only zones when synthesizing SOA records.\n\nOutputs:\n  - Parsed ZoneDnssecSigningConfig instance used by the config schema.",
@@ -1276,8 +1330,48 @@
             }
           },
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n  - axfr_zones: Optional list of AXFR-backed zones.\n\nExample:\n  Minimal AXFR-only configuration (YAML):\n\n    plugins:\n      - type: zone\n        hooks:\n          pre_resolve: { priority: 60 }\n        config:\n          axfr_zones:\n            - zone: example.com\n              allow_no_dnssec: false\n              upstreams:\n                - host: 192.0.2.10\n                  port: 53\n                  timeout_ms: 5000\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"merge\" (default): preserve existing records and overlay newly loaded ones.\n    - \"replace\": rebuild records from configured sources on each load.\n    - \"first\": use the first configured source group in this order:\n      file_paths \u2192 bind_paths \u2192 axfr_zones \u2192 records (inline), and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - axfr_zones: Optional list of AXFR-backed zones.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
           "properties": {
+            "axfr_notify": {
+              "anyOf": [
+                {
+                  "description": "Type: array.",
+                  "items": {
+                    "$ref": "#/$defs/AxfrUpstreamConfig"
+                  },
+                  "type": "array"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional list of NOTIFY recipients for AXFR-backed zones. Each entry uses the same host/port/transport/server_name/verify/ca_file shape as axfr_zones[].upstreams. Only 'tcp' and 'dot' transports are supported for outbound NOTIFY.",
+              "title": "Axfr Notify"
+            },
+            "axfr_notify_all": {
+              "default": false,
+              "description": "When true, automatically learn NOTIFY targets from AXFR/IXFR clients by recording their source IPs as downstream secondaries. Default: false.",
+              "title": "Axfr Notify All",
+              "type": "boolean"
+            },
+            "axfr_notify_scheduled": {
+              "anyOf": [
+                {
+                  "description": "Type: integer.",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional delay in seconds after serving AXFR/IXFR to a client before sending a follow-up NOTIFY for the transferred zone. Ignored when null or zero.",
+              "title": "Axfr Notify Scheduled"
+            },
             "axfr_zones": {
               "anyOf": [
                 {
@@ -1300,8 +1394,15 @@
                 {
                   "description": "Type: array.",
                   "items": {
-                    "description": "Type: string.",
-                    "type": "string"
+                    "anyOf": [
+                      {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      {
+                        "$ref": "#/$defs/BindZoneFileConfig"
+                      }
+                    ]
                   },
                   "type": "array"
                 },
@@ -1342,6 +1443,37 @@
               ],
               "default": null,
               "title": "File Paths"
+            },
+            "load_mode": {
+              "default": "merge",
+              "description": "Controls record loading strategy: 'merge' preserves existing records and overlays new data; 'replace' rebuilds the in-memory mapping each time; 'first' uses the first configured source group and ignores the rest. Default: \"merge\".",
+              "title": "Load Mode",
+              "type": "string"
+            },
+            "merge_policy": {
+              "default": "add",
+              "description": "Controls conflict behaviour when the same (name,qtype) appears more than once: 'add' appends unique values (keeping the earlier TTL); 'overwrite' replaces the RRset using the later source. Default: \"add\".",
+              "title": "Merge Policy",
+              "type": "string"
+            },
+            "nxdomain_zones": {
+              "anyOf": [
+                {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional list of zone suffixes for which ZoneRecords should return NXDOMAIN/NODATA for names under that suffix which are not present in the internal mapping, instead of falling through to upstream resolution.",
+              "title": "Nxdomain Zones"
             },
             "records": {
               "anyOf": [
@@ -2998,6 +3130,11 @@
         "enable_ede": {
           "default": false,
           "description": "Enable generation and pass-through of Extended DNS Errors (RFC 8914) for EDNS clients.",
+          "type": "boolean"
+        },
+        "forward_local": {
+          "default": false,
+          "description": "Allow forwarding .local queries to upstream resolvers. Default false blocks them per RFC 6762.",
           "type": "boolean"
         },
         "http": {
