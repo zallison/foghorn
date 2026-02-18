@@ -98,6 +98,10 @@ make schema
 
 Plugins can participate in schema generation in two ways:
 
+Note: when plugin configuration fields change (for example, `zone` / ZoneRecords
+adding `load_mode` and `merge_policy`), you should regenerate
+`assets/config-schema.json` and ensure example configs remain schema-valid.
+
 1. **Typed config model**
    - Implement a `get_config_model()` `@classmethod` that returns a Pydantic `BaseModel` subclass.
    - The generator calls `model_json_schema()` (Pydantic v2) or `schema()` (v1) and embeds the result.

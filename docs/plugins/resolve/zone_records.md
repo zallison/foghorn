@@ -166,12 +166,28 @@ Clients without DO=1 receive only the base RRsets without signatures.
 - `file_path: str | null`
   - Legacy single records file path; merged into `file_paths` when both are set.
   - Prefer `file_paths` for new configurations.
-- `bind_paths: list[str] | null`
-  - Paths to standard BIND zone files (RFC 1035). These are parsed into the same
-  internal mapping.
+- `bind_paths: list[str | object] | null`
+  - Paths (or per-file objects) for standard BIND zone files (RFC 1035). Each
+    entry may be either:
+    - `./path/to/zonefile.zone`, or
+    - `{ path: ./path/to/zonefile.zone, origin: example.com., ttl: 300 }`
+  - When `origin` is set, any `$ORIGIN` line found in the file is ignored (with a warning).
+  - When `ttl` is set, any `$TTL` line found in the file is ignored (with a warning).
 - `records: list[str] | null`
   - Inline pipe-delimited records with the same syntax as `file_paths` entries.
   - Processed after file-backed records so they can override entries from files.
+- `load_mode: str`
+  - `merge` (default) preserves any existing in-memory records and overlays newly
+    loaded records on top (no deletions).
+  - `replace` rebuilds the in-memory mapping on each load/reload.
+  - `first` uses the first configured source group in this order:
+    file_paths → bind_paths → axfr_zones → records (inline), and ignores the others.
+- `merge_policy: str`
+  - `add` (default) appends unique values into an existing RRset.
+  - `overwrite` replaces an existing RRset when a later source defines the same
+    `(domain, qtype)`.
+  - When `overwrite` overwrites any owners, ZoneRecords logs a single warning
+    summarizing how many owners were overwritten per source.
 - `axfr_zones: list[object] | null`
   - Optional list of zones fetched via AXFR at startup. Each entry should include:
     - `zone: str` – zone apex (e.g. `"example.com"`, `"0.0.10.in-addr.arpa"`).
@@ -195,6 +211,10 @@ Clients without DO=1 receive only the base RRsets without signatures.
 	changes (useful where filesystem events are unreliable).
 - `ttl: int`
   - Default TTL in seconds. Used when an individual record omits its own TTL.
+- `nxdomain_zones: list[str] | null`
+  - Optional list of zone suffixes where ZoneRecords should return NXDOMAIN/NODATA
+    for names under that suffix which are not present in its internal mapping,
+    instead of falling through to upstream resolution.
 
 ### Behaviour
 
