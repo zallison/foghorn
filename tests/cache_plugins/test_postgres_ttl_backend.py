@@ -153,10 +153,10 @@ def test_init_builds_kwargs_and_creates_schema(monkeypatch) -> None:
 
 
 def test_get_with_meta_miss(monkeypatch) -> None:
-    """Test get_with_meta() returns None on miss."""
+    """Test get_with_meta() returns (None, None, None) on miss."""
     cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
     result = cache.get_with_meta(b"m1")
-    assert result is None
+    assert result == (None, None, None)
 
 
 def test_set_and_purge(monkeypatch) -> None:
@@ -164,7 +164,7 @@ def test_set_and_purge(monkeypatch) -> None:
     cache, conn, _ = _init_cache_with_fake_conn(monkeypatch)
 
     # Test set
-    cache.set(b"key", b"value", 300)
+    cache.set(b"key", 300, b"value")
     assert any(
         "INSERT INTO" in sql and "ON CONFLICT" in sql
         for (sql, _p) in conn.last_cursor.executes
