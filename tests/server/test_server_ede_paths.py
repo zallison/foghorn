@@ -494,6 +494,7 @@ def test_notify_known_sender_triggers_axfr_refresh(monkeypatch, tmp_path) -> Non
     # Prepare a ZoneRecords plugin with a single AXFR-backed zone whose masters
     # include the NOTIFY sender IP.
     import foghorn.plugins.resolve.zone_records as mod
+    import foghorn.plugins.resolve.zone_records.loader as loader_mod
 
     ZoneRecords = mod.ZoneRecords
 
@@ -507,7 +508,7 @@ def test_notify_known_sender_triggers_axfr_refresh(monkeypatch, tmp_path) -> Non
         calls["axfr"] += 1
         return [_RR("host.%s." % zone, QTYPE.A, rdata=_A("203.0.113.5"), ttl=123)]
 
-    monkeypatch.setattr(mod, "axfr_transfer", fake_axfr_transfer)
+    monkeypatch.setattr(loader_mod, "axfr_transfer", fake_axfr_transfer)
 
     sender_ip = "198.51.100.5"
     plugin = ZoneRecords(
@@ -578,6 +579,7 @@ def test_notify_sends_axfr_to_correct_upstream(monkeypatch, tmp_path) -> None:
     records_file.write_text("seed.test|A|300|192.0.2.10\n", encoding="utf-8")
 
     import foghorn.plugins.resolve.zone_records as mod
+    import foghorn.plugins.resolve.zone_records.loader as loader_mod
 
     ZoneRecords = mod.ZoneRecords
 
@@ -592,7 +594,7 @@ def test_notify_sends_axfr_to_correct_upstream(monkeypatch, tmp_path) -> None:
         axfr_calls.append({"host": host, "port": port, "zone": zone, "kwargs": kwargs})
         return [_RR("host.%s." % zone, QTYPE.A, rdata=_A("203.0.113.5"), ttl=123)]
 
-    monkeypatch.setattr(mod, "axfr_transfer", fake_axfr_transfer)
+    monkeypatch.setattr(loader_mod, "axfr_transfer", fake_axfr_transfer)
 
     # Configure with a specific upstream host and port for AXFR.
     axfr_host = "192.0.2.53"
