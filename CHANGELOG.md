@@ -17,15 +17,26 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - Refactored ZoneRecords implementation into `foghorn.plugins.resolve.zone_records` package modules for clearer separation of loader/resolver/watchdog/AXFR helpers.
+- Refactored `cache.postgres_cache` to delegate to the `PostgresTTLCache` backend, with a more explicit key/TTL/value API and stable key hashing for non-bytes keys.
+- Packaging now includes the built-in admin web UI assets in installed distributions.
+
+### Fixed
+
+- The admin `/config` endpoint now supports `server.http.redact_keys` as a compatibility fallback when `webserver.redact_keys` is not set.
+- Redacted YAML output now quotes the placeholder (`'***'`) to ensure redacted config output remains parseable.
 
 ### Tests
 
 - Extended ZoneRecords test coverage for merge/overwrite behavior, first-mode semantics, BIND override warnings, and `nxdomain_zones`.
-- Updated NOTIFY/EDE tests to patch AXFR transfer through the ZoneRecords loader module.
+- Added focused unit tests for ZoneRecords AXFR polling, NOTIFY helpers, and transfer snapshot helpers.
+- Added cache backend tests covering stable key hashing, bytes vs pickle storage, and the updated `PostgresCache` API.
+- Updated webserver tests for redact-key compatibility (`server.http.redact_keys`) and quoted YAML redaction placeholders.
+- Added additional branch-coverage tests for DNSSEC validation helpers and resolve plugin targeting/echo behavior.
 
 ### Documentation
 
 - Updated ZoneRecords plugin docs and README examples to document the new options.
+- Updated the README test/coverage badges.
 - Added developer documentation note about regenerating `assets/config-schema.json` when plugin config models change.
 
 ## [0.6.4] - 2026-02-05
