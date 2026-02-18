@@ -1,0 +1,501 @@
+"""Brief: Query resolution and reply building for zone records.
+
+Inputs/Outputs:
+  - DNS query handling with authoritative zone semantics and DNSSEC support.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Dict, List, Optional, Tuple
+
+from dnslib import OPCODE, QTYPE, RCODE, DNSHeader, DNSRecord
+
+from foghorn.plugins.resolve.base import PluginContext, PluginDecision
+
+from . import dnssec, helpers, notify
+
+logger = logging.getLogger(__name__)
+
+
+def handle_opcode(
+    plugin: object,
+    opcode: int,
+    qname: str,
+    qtype: int,
+    req: bytes,
+    ctx: PluginContext,
+) -> Optional[PluginDecision]:
+    """Brief: Handle NOTIFY opcode by validating sender and triggering AXFR refresh.
+
+    Inputs:
+      - plugin: ZoneRecords plugin instance.
+      - opcode: Numeric opcode (expected to be NOTIFY = 4).
+      - qname: Normalized zone name from the query.
+      - qtype: Query type (typically SOA for NOTIFY).
+      - req: Raw wire-format request bytes.
+      - ctx: PluginContext with client_ip, listener, etc.
+
+    Outputs:
+      - PluginDecision with override action and NOERROR response when NOTIFY is
+        valid and processed. Returns deny (EDE 22) when listener is not UDP, or
+        deny (EDE 15) when sender is not recognized as a configured upstream.
+        Returns None to skip NOTIFY handling (fallback to other plugins).
+
+    Notes:
+      - NOTIFY must come over UDP (RFC 1996). TCP NOTIFYs are refused with
+        EDE code 22 (Not Supported).
+      - Sender validation uses _resolve_notify_sender_upstream() to check if
+        the client IP matches a configured upstream server.
+    """
+    # Import server-level NOTIFY helpers
+    try:
+        from foghorn.servers.server import (
+            _resolve_notify_sender_upstream,
+            _schedule_notify_axfr_refresh,
+        )
+    except ImportError:
+        # Fallback: NOTIFY handling not available
+        return None
+
+    # Validate that the sender is a configured upstream
+    try:
+        upstream = _resolve_notify_sender_upstream(ctx.client_ip)
+    except Exception:
+        upstream = None
+
+    if upstream is None:
+        # Unknown sender: refuse with EDE 15 (Blocked)
+        return PluginDecision(action="deny", ede_code=15, ede_text="Blocked")
+
+    # Valid NOTIFY from recognized upstream: schedule AXFR refresh and return NOERROR
+    try:
+        _schedule_notify_axfr_refresh(qname, upstream)
+    except (
+        Exception
+    ):  # pragma: nocover - [defensive: AXFR refresh scheduling should not fail]
+        logger.warning(
+            "ZoneRecords: failed to schedule AXFR refresh for NOTIFY %s from %s",
+            qname,
+            ctx.client_ip,
+            exc_info=True,
+        )
+
+    # Return NOERROR response
+    try:
+        req_parsed = DNSRecord.parse(req)
+        reply = req_parsed.reply()
+        reply.header.rcode = RCODE.NOERROR
+        return PluginDecision(
+            action="override",
+            response=reply.pack(),
+        )
+    except (
+        Exception
+    ):  # pragma: nocover - [defensive: NOTIFY response construction should not fail]
+        logger.warning(
+            "ZoneRecords: failed to construct NOTIFY NOERROR response for %s",
+            qname,
+            exc_info=True,
+        )
+        return None
+
+
+def pre_resolve(
+    plugin: object,
+    qname: str,
+    qtype: int,
+    req: bytes,
+    ctx: PluginContext,
+) -> Optional[PluginDecision]:
+    """Brief: Decide whether to override resolution for a query.
+
+    Inputs:
+      - plugin: ZoneRecords plugin instance.
+      - qname: Queried domain name.
+      - qtype: DNS record type (numeric code).
+      - req: Raw DNS request bytes.
+      - ctx: Plugin context.
+
+    Outputs:
+      - PluginDecision("override") with an authoritative DNS response when
+        this plugin should answer the query, or None to allow normal cache
+        and upstream processing.
+
+    Behaviour:
+      - For names inside an authoritative zone (identified by SOA records
+        in the records files), act as an authoritative server: apply
+        correct CNAME and QTYPE.ANY semantics and synthesize NODATA and
+        NXDOMAIN responses with SOA in the authority section.
+      - For names outside any authoritative zone, preserve the historical
+        behaviour and only answer when there is an exact (name, qtype)
+        entry, falling through to upstreams otherwise.
+      - When the client advertises EDNS(0) with DO=1, include RRSIG and
+        DNSKEY RRsets from the zone data in positive answers.
+    """
+    # Normalize domain to a consistent lookup key.
+    try:
+        name = str(qname).rstrip(".").lower()
+    except Exception:  # pragma: no cover - defensive
+        name = str(qname).lower()
+
+    qtype_int = int(qtype)
+    type_name = QTYPE.get(qtype_int, str(qtype_int))
+
+    # Attach qname to the context so BasePlugin can enforce domain-level
+    # targeting (targets_domains/targets_domains_mode) via self.targets.
+    try:
+        if ctx is not None:
+            setattr(ctx, "qname", qname)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    # Honour BasePlugin client/listener/domain targeting.
+    try:
+        if ctx is not None and not plugin.targets(ctx):
+            return None
+    except Exception:  # pragma: no cover - defensive
+        logger.warning(
+            "ZoneRecords: targets() evaluation failed; applying globally",
+            exc_info=True,
+        )
+    logger.debug("pre-resolve zone-records %s %s", name, type_name)
+
+    # Safe concurrent read from mappings when a watcher may be reloading.
+    lock = getattr(plugin, "_records_lock", None)
+    if lock is None:
+        records = getattr(plugin, "records", {})
+        name_index = getattr(plugin, "_name_index", {})
+        zone_soa = getattr(plugin, "_zone_soa", {})
+        mapping_by_qtype = getattr(plugin, "mapping", None)
+    else:
+        with lock:
+            records = dict(getattr(plugin, "records", {}))
+            name_index = dict(getattr(plugin, "_name_index", {}))
+            zone_soa = dict(getattr(plugin, "_zone_soa", {}))
+            mapping_by_qtype = dict(getattr(plugin, "mapping", {}) or {})
+
+    zone_apex = helpers.find_zone_for_name(name, zone_soa)
+
+    # If this name is not covered by any authoritative zone, preserve the
+    # legacy exact-match override behaviour keyed by (name, qtype), *unless*
+    # nxdomain_zones is configured to force NXDOMAIN/NODATA under specific
+    # suffixes.
+    if zone_apex is None:
+        key = (name, qtype_int)
+        entry = records.get(key)
+        if not entry:
+            # Optional: treat selected suffixes as authoritative NXDOMAIN/NODATA
+            # zones even without an SOA.
+            try:
+                nxdomain_zones = list(getattr(plugin, "_nxdomain_zones", []) or [])
+            except Exception:  # pragma: no cover - defensive
+                nxdomain_zones = []
+
+            matched_zone: Optional[str] = None
+            if nxdomain_zones:
+                for z in nxdomain_zones:
+                    try:
+                        zone_norm = str(z).rstrip(".").lower()
+                    except Exception:
+                        continue
+                    if not zone_norm:
+                        continue
+                    if name == zone_norm or name.endswith("." + zone_norm):
+                        matched_zone = zone_norm
+                        break
+
+            if matched_zone is None:
+                return None
+
+            try:
+                request = DNSRecord.parse(req)
+            except Exception as e:  # pragma: no cover - defensive parsing
+                logger.warning("ZoneRecords parse failure (nxdomain_zones): %s", e)
+                return None
+
+            want_dnssec_nx = bool(dnssec.client_wants_dnssec(request))
+            reply = DNSRecord(
+                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=1), q=request.q
+            )
+            owner = str(request.q.qname).rstrip(".") + "."
+
+            rrsets = name_index.get(name, {})
+            cname_code = int(QTYPE.CNAME)
+
+            # CNAME at owner name: always answer with CNAME regardless of qtype.
+            if cname_code in rrsets:
+                ttl_cname, cname_values = rrsets[cname_code]
+                added = dnssec.add_rrset_to_reply(
+                    reply,
+                    owner,
+                    cname_code,
+                    ttl_cname,
+                    list(cname_values),
+                    include_dnssec=want_dnssec_nx,
+                    mapping_by_qtype=mapping_by_qtype,
+                )
+                if not added:
+                    return None
+                if want_dnssec_nx:
+                    dnssec.add_dnssec_rrsets(
+                        reply,
+                        owner,
+                        rrsets,
+                        matched_zone,
+                        name_index,
+                        mapping_by_qtype=mapping_by_qtype,
+                    )
+                return PluginDecision(action="override", response=reply.pack())
+
+            if rrsets:
+                # ANY query returns all RRsets at the owner.
+                if qtype_int == int(QTYPE.ANY):
+                    added_any = False
+                    for rr_qtype, (ttl_rr, values_rr) in rrsets.items():
+                        if not want_dnssec_nx and dnssec.is_dnssec_rrtype(rr_qtype):
+                            continue
+                        if dnssec.add_rrset_to_reply(
+                            reply,
+                            owner,
+                            rr_qtype,
+                            ttl_rr,
+                            list(values_rr),
+                            include_dnssec=want_dnssec_nx,
+                            mapping_by_qtype=mapping_by_qtype,
+                        ):
+                            added_any = True
+                    if not added_any:
+                        return None
+                    if want_dnssec_nx:
+                        dnssec.add_dnssec_rrsets(
+                            reply,
+                            owner,
+                            rrsets,
+                            matched_zone,
+                            name_index,
+                            mapping_by_qtype=mapping_by_qtype,
+                        )
+                    return PluginDecision(action="override", response=reply.pack())
+
+                # Exact qtype match.
+                if qtype_int in rrsets:
+                    ttl_rr, values_rr = rrsets[qtype_int]
+                    include_dnssec = want_dnssec_nx or dnssec.is_dnssec_rrtype(
+                        qtype_int
+                    )
+                    if not dnssec.add_rrset_to_reply(
+                        reply,
+                        owner,
+                        qtype_int,
+                        ttl_rr,
+                        list(values_rr),
+                        include_dnssec=include_dnssec,
+                        mapping_by_qtype=mapping_by_qtype,
+                    ):
+                        return None
+                    if want_dnssec_nx:
+                        dnssec.add_dnssec_rrsets(
+                            reply,
+                            owner,
+                            rrsets,
+                            matched_zone,
+                            name_index,
+                            mapping_by_qtype=mapping_by_qtype,
+                        )
+                    return PluginDecision(action="override", response=reply.pack())
+
+                # Name exists under the configured suffix, but requested type is absent.
+                reply.header.rcode = RCODE.NOERROR
+                return PluginDecision(action="override", response=reply.pack())
+
+            # Name does not exist under the configured suffix.
+            reply.header.rcode = RCODE.NXDOMAIN
+            return PluginDecision(action="override", response=reply.pack())
+
+        ttl, values = entry
+        logger.debug("ZoneRecords got entry for %s %s -> %s", name, type_name, values)
+
+        try:
+            request = DNSRecord.parse(req)
+        except Exception as e:  # pragma: no cover - defensive parsing
+            logger.warning("ZoneRecords parse failure: %s", e)
+            return None
+
+        want_dnssec_legacy = dnssec.client_wants_dnssec(request)
+
+        reply = DNSRecord(
+            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=1), q=request.q
+        )
+        owner = str(request.q.qname).rstrip(".") + "."
+
+        added = dnssec.add_rrset_to_reply(
+            reply,
+            owner,
+            qtype_int,
+            ttl,
+            list(values),
+            include_dnssec=want_dnssec_legacy or False,
+            mapping_by_qtype=mapping_by_qtype,
+        )
+        if not added:
+            return None
+
+        return PluginDecision(action="override", response=reply.pack())
+
+    # Authoritative path: name is inside a zone managed by this plugin.
+    try:
+        request = DNSRecord.parse(req)
+    except Exception as e:  # pragma: no cover - defensive parsing
+        logger.warning("ZoneRecords parse failure (authoritative path): %s", e)
+        return None
+
+    # Detect whether the client wants DNSSEC records via EDNS(0) DO bit.
+    want_dnssec = bool(dnssec.client_wants_dnssec(request))
+
+    owner = str(request.q.qname).rstrip(".") + "."
+    reply = DNSRecord(
+        DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=1), q=request.q
+    )
+
+    rrsets = name_index.get(name, {})
+    cname_code = int(QTYPE.CNAME)
+
+    # CNAME at owner name: always answer with CNAME regardless of qtype.
+    if cname_code in rrsets:
+        ttl_cname, cname_values = rrsets[cname_code]
+        if len(rrsets) > 1:
+            logger.warning(
+                "CustomRecords zone %s has CNAME and other RRsets at %s; "
+                "answering with CNAME only",
+                zone_apex,
+                name,
+            )
+        added = dnssec.add_rrset_to_reply(
+            reply,
+            owner,
+            cname_code,
+            ttl_cname,
+            list(cname_values),
+            include_dnssec=want_dnssec,
+            mapping_by_qtype=mapping_by_qtype,
+        )
+        if not added:
+            return None
+        if want_dnssec:
+            dnssec.add_dnssec_rrsets(
+                reply,
+                owner,
+                rrsets,
+                zone_apex,
+                name_index,
+                mapping_by_qtype=mapping_by_qtype,
+            )
+        return PluginDecision(action="override", response=reply.pack())
+
+    # No CNAME at this owner; distinguish positive, NODATA, and NXDOMAIN.
+    if rrsets:
+        # Positive answers for specific qtypes.
+        if qtype_int == int(QTYPE.ANY):
+            added_any = False
+            for rr_qtype, (ttl_rr, values_rr) in rrsets.items():
+                # For QTYPE=ANY with DO=0, suppress DNSSEC-only RR types
+                if not want_dnssec and dnssec.is_dnssec_rrtype(rr_qtype):
+                    continue
+                if dnssec.add_rrset_to_reply(
+                    reply,
+                    owner,
+                    rr_qtype,
+                    ttl_rr,
+                    list(values_rr),
+                    include_dnssec=want_dnssec,
+                    mapping_by_qtype=mapping_by_qtype,
+                ):
+                    added_any = True
+            if not added_any:
+                return None
+            if want_dnssec:
+                dnssec.add_dnssec_rrsets(
+                    reply,
+                    owner,
+                    rrsets,
+                    zone_apex,
+                    name_index,
+                    mapping_by_qtype=mapping_by_qtype,
+                )
+            return PluginDecision(action="override", response=reply.pack())
+
+        if qtype_int in rrsets:
+            ttl_rr, values_rr = rrsets[qtype_int]
+            # For DNSSEC RR types queried directly, always allow signatures.
+            include_dnssec = want_dnssec or dnssec.is_dnssec_rrtype(qtype_int)
+            if not dnssec.add_rrset_to_reply(
+                reply,
+                owner,
+                qtype_int,
+                ttl_rr,
+                list(values_rr),
+                include_dnssec=include_dnssec,
+                mapping_by_qtype=mapping_by_qtype,
+            ):
+                return None
+            if want_dnssec:
+                dnssec.add_dnssec_rrsets(
+                    reply,
+                    owner,
+                    rrsets,
+                    zone_apex,
+                    name_index,
+                    mapping_by_qtype=mapping_by_qtype,
+                )
+            return PluginDecision(action="override", response=reply.pack())
+
+        # NODATA: name exists in zone but requested type is absent.
+        reply.header.rcode = RCODE.NOERROR
+        soa_entry = zone_soa.get(zone_apex)
+        if soa_entry is not None:
+            soa_ttl, soa_values = soa_entry
+            soa_owner = zone_apex.rstrip(".") + "."
+            for value in list(soa_values):
+                zone_line = f"{soa_owner} {soa_ttl} IN SOA {value}"
+                try:
+                    from dnslib import RR
+
+                    rrs = RR.fromZone(zone_line)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "ZoneRecords invalid SOA value %r for zone %s: %s",
+                        value,
+                        zone_apex,
+                        exc,
+                    )
+                    continue
+                for rr in rrs:
+                    reply.add_auth(rr)
+
+        return PluginDecision(action="override", response=reply.pack())
+
+    # NXDOMAIN: no RRsets at this owner name within the authoritative zone.
+    reply.header.rcode = RCODE.NXDOMAIN
+    soa_entry = zone_soa.get(zone_apex)
+    if soa_entry is not None:
+        soa_ttl, soa_values = soa_entry
+        soa_owner = zone_apex.rstrip(".") + "."
+        for value in list(soa_values):
+            zone_line = f"{soa_owner} {soa_ttl} IN SOA {value}"
+            try:
+                from dnslib import RR
+
+                rrs = RR.fromZone(zone_line)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "ZoneRecords invalid SOA value %r for zone %s: %s",
+                    value,
+                    zone_apex,
+                    exc,
+                )
+                continue
+            for rr in rrs:
+                reply.add_auth(rr)
+
+    return PluginDecision(action="override", response=reply.pack())

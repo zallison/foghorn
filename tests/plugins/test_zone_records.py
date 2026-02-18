@@ -18,7 +18,7 @@ def _make_query(name: str, qtype: int) -> bytes:
       qtype: Numeric DNS record type code.
 
     Outputs:
-      Raw DNS query bytes suitable for passing to CustomRecords.pre_resolve.
+      Raw DNS query bytes suitable for passing to ZoneRecords.pre_resolve.
     """
     # dnslib expects the qtype either as a mnemonic string (e.g. "A") or as a
     # QTYPE instance; when we receive the numeric code, map it back to its
@@ -31,7 +31,7 @@ def _make_query(name: str, qtype: int) -> bytes:
 def test_load_records_uniques_and_preserves_order_single_file(
     tmp_path: pathlib.Path,
 ) -> None:
-    """CustomRecords._load_records keeps first TTL and value order from a single file.
+    """ZoneRecords record loader keeps first TTL and value order from a single file.
 
     Inputs:
       tmp_path: pytest-provided temporary directory.
@@ -117,6 +117,244 @@ def test_load_records_across_multiple_files_order_and_dedup(
 
     # TTL comes from the first occurrence, and values follow their first
     # appearance order across files.
+    assert ttl == 100
+    assert values == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
+
+
+def test_load_records_merge_mode_preserves_existing_records(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: load_mode=merge preserves existing in-memory records on reload.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts that, after an initial load, a subsequent reload with
+        load_mode=merge keeps existing records while overlaying newly loaded
+        records.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    f1 = tmp_path / "records1.txt"
+    f1.write_text("keep.example|A|300|192.0.2.10\n", encoding="utf-8")
+
+    plugin = ZoneRecords(file_paths=[str(f1)])
+    plugin.setup()
+
+    # Second load uses a different file, but merge should preserve prior state.
+    f2 = tmp_path / "records2.txt"
+    f2.write_text("new.example|A|300|192.0.2.20\n", encoding="utf-8")
+
+    plugin.file_paths = [str(f2)]
+    plugin.config["load_mode"] = "merge"
+    plugin.config["merge_policy"] = "add"
+
+    plugin._load_records()
+
+    assert ("keep.example", int(QTYPE.A)) in plugin.records
+    assert ("new.example", int(QTYPE.A)) in plugin.records
+
+
+def test_load_records_merge_mode_add_policy_appends_values(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: load_mode=merge + merge_policy=add appends values without overwriting.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts that an RRset defined in a later source is merged by appending
+        new values (and keeping the original TTL) when merge_policy is 'add'.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    base = tmp_path / "base.txt"
+    base.write_text("example.com|A|300|1.1.1.1\n", encoding="utf-8")
+
+    plugin = ZoneRecords(file_paths=[str(base)])
+    plugin.setup()
+
+    overlay = tmp_path / "overlay.txt"
+    overlay.write_text("example.com|A|600|2.2.2.2\n", encoding="utf-8")
+
+    plugin.file_paths = [str(overlay)]
+    plugin.config["load_mode"] = "merge"
+    plugin.config["merge_policy"] = "add"
+
+    plugin._load_records()
+
+    ttl, values = plugin.records[("example.com", int(QTYPE.A))]
+    assert ttl == 300
+    assert values == ["1.1.1.1", "2.2.2.2"]
+
+
+def test_load_records_merge_mode_overwrite_policy_replaces_rrset_and_warns(
+    tmp_path: pathlib.Path, caplog
+) -> None:
+    """Brief: merge_policy=overwrite replaces existing RRsets and logs one summary.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+      - caplog: pytest logging capture fixture.
+
+    Outputs:
+      - Asserts that, when a later source defines an existing (name,qtype), the
+        RRset is replaced (TTL and values), and that a single warning summarises
+        overwritten owners per source.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    base = tmp_path / "base.txt"
+    base.write_text("example.com|A|300|1.1.1.1\n", encoding="utf-8")
+
+    plugin = ZoneRecords(file_paths=[str(base)])
+    plugin.setup()
+
+    overlay = tmp_path / "overlay.txt"
+    overlay.write_text(
+        "\n".join(
+            [
+                "example.com|A|600|2.2.2.2",
+                "example.com|A|600|3.3.3.3",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plugin.file_paths = [str(overlay)]
+    plugin.config["load_mode"] = "merge"
+    plugin.config["merge_policy"] = "overwrite"
+
+    with caplog.at_level(logging.WARNING):
+        plugin._load_records()
+
+    ttl, values = plugin.records[("example.com", int(QTYPE.A))]
+    assert ttl == 600
+    assert values == ["2.2.2.2", "3.3.3.3"]
+
+    msgs = [
+        r.getMessage()
+        for r in caplog.records
+        if "overwritten RRsets during load" in r.getMessage()
+    ]
+    assert len(msgs) == 1
+    assert str(overlay) in msgs[0]
+    assert "=1" in msgs[0]
+
+
+def test_load_records_first_mode_uses_file_paths_group_and_ignores_inline(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: load_mode=first uses the first configured source group.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts that when file_paths are configured, inline records are ignored
+        in load_mode=first.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    f1 = tmp_path / "records1.txt"
+    f1.write_text("example.com|A|300|1.1.1.1\n", encoding="utf-8")
+
+    plugin = ZoneRecords(
+        file_paths=[str(f1)],
+        records=[
+            # This would normally overlay after files, but must be ignored.
+            "example.com|A|300|9.9.9.9",
+            "inline-only.example|A|300|8.8.8.8",
+        ],
+        load_mode="first",
+    )
+    plugin.setup()
+
+    ttl, values = plugin.records[("example.com", int(QTYPE.A))]
+    assert ttl == 300
+    assert values == ["1.1.1.1"]
+
+    assert ("inline-only.example", int(QTYPE.A)) not in plugin.records
+
+
+def test_load_records_first_mode_uses_inline_when_no_files_or_bind(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: load_mode=first falls back to inline when no file/bind sources exist.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts that inline records are loaded when they are the first available
+        source group.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(
+        records=[
+            "inline.example|A|300|203.0.113.10",
+        ],
+        load_mode="first",
+    )
+    plugin.setup()
+
+    ttl, values = plugin.records[("inline.example", int(QTYPE.A))]
+    assert ttl == 300
+    assert values == ["203.0.113.10"]
+
+
+def test_load_records_first_mode_includes_all_file_paths_in_group(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: load_mode=first loads all configured entries within the selected group.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts that, when file_paths is the selected group, *all* file_paths are
+        processed (not just the first one).
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    f1 = tmp_path / "records1.txt"
+    f1.write_text(
+        "\n".join(
+            [
+                "example.com|A|100|1.1.1.1",
+                "example.com|A|100|2.2.2.2",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    f2 = tmp_path / "records2.txt"
+    f2.write_text(
+        "\n".join(
+            [
+                # New value should be appended.
+                "example.com|A|200|3.3.3.3",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    plugin = ZoneRecords(file_paths=[str(f1), str(f2)], load_mode="first")
+    plugin.setup()
+
+    ttl, values = plugin.records[("example.com", int(QTYPE.A))]
     assert ttl == 100
     assert values == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
 
@@ -390,6 +628,7 @@ def test_load_records_qtype_fallback_to_get_int(
     records_file.write_text("example.com|FOO|300|1.2.3.4\n", encoding="utf-8")
 
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    loader_mod = importlib.import_module("foghorn.plugins.resolve.zone_records.loader")
 
     class DummyQType:
         def __getattr__(self, name: str) -> int:
@@ -398,7 +637,7 @@ def test_load_records_qtype_fallback_to_get_int(
         def get(self, name, default=None):  # type: ignore[override]
             return 42
 
-    monkeypatch.setattr(mod, "QTYPE", DummyQType())
+    monkeypatch.setattr(loader_mod, "QTYPE", DummyQType())
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])
@@ -422,6 +661,7 @@ def test_load_records_qtype_unknown_raises(monkeypatch, tmp_path: pathlib.Path) 
     records_file.write_text("example.com|BAR|300|1.2.3.4\n", encoding="utf-8")
 
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    loader_mod = importlib.import_module("foghorn.plugins.resolve.zone_records.loader")
 
     class DummyQType:
         def __getattr__(self, name: str) -> int:
@@ -430,7 +670,7 @@ def test_load_records_qtype_unknown_raises(monkeypatch, tmp_path: pathlib.Path) 
         def get(self, name, default=None):  # type: ignore[override]
             return "NOT_INT"
 
-    monkeypatch.setattr(mod, "QTYPE", DummyQType())
+    monkeypatch.setattr(loader_mod, "QTYPE", DummyQType())
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])
@@ -534,7 +774,7 @@ def test_pre_resolve_no_entry_and_no_lock(tmp_path: pathlib.Path) -> None:
 def test_pre_resolve_returns_none_when_rr_parsing_fails(
     monkeypatch, tmp_path: pathlib.Path
 ) -> None:
-    """Brief: pre_resolve tolerates RR.fromZone failures when answers are pre-built.
+    """Brief: pre_resolve returns None when RR.fromZone fails to parse answers.
 
     Inputs:
       - monkeypatch: pytest fixture for runtime patching.
@@ -547,14 +787,19 @@ def test_pre_resolve_returns_none_when_rr_parsing_fails(
     records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
 
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    dnssec_mod = importlib.import_module("foghorn.plugins.resolve.zone_records.dnssec")
     ZoneRecords = mod.ZoneRecords
 
     plugin = ZoneRecords(file_paths=[str(records_file)])
     plugin.setup()
 
+    # Force ZoneRecords onto the RR.fromZone fallback path by clearing the
+    # pre-built RR mapping produced at load time.
+    plugin.mapping = {}  # type: ignore[assignment]
+
     # Force RR.fromZone to fail so that no answers are added.
     monkeypatch.setattr(
-        mod,
+        dnssec_mod,
         "RR",
         type(
             "_RR",
@@ -571,11 +816,7 @@ def test_pre_resolve_returns_none_when_rr_parsing_fails(
     req_bytes = _make_query("example.com", int(QTYPE.A))
 
     decision = plugin.pre_resolve("example.com", int(QTYPE.A), req_bytes, ctx)
-    # With pre-built RR objects in the helper mapping, pre_resolve can still
-    # return an override decision even when RR.fromZone is patched to fail at
-    # query time.
-    assert decision is not None
-    assert decision.action == "override"
+    assert decision is None
 
 
 def test_axfr_notify_static_targets_normalized(tmp_path: pathlib.Path) -> None:
@@ -662,8 +903,9 @@ def test_axfr_notify_all_learns_axfr_client_and_sends_notify(monkeypatch, tmp_pa
 
         calls.append((zone_apex, dict(target)))
 
+    notify_mod = importlib.import_module("foghorn.plugins.resolve.zone_records.notify")
     monkeypatch.setattr(
-        plugin, "_send_notify_to_target", fake_send_notify, raising=True
+        notify_mod, "send_notify_to_target", fake_send_notify, raising=True
     )
 
     # Pretend an AXFR client pulled the zone.
@@ -694,8 +936,8 @@ def test_reload_records_from_watchdog_sends_notify_for_changed_zones(
       - tmp_path: pytest temporary directory containing a records file.
 
     Outputs:
-      - Asserts that, after a zone file change and a reload, ZoneRecords calls
-        _send_notify_for_zones() with the apex of the updated zone.
+      - Asserts that, after a zone file change and a reload, ZoneRecords triggers
+        notify.send_notify_for_zones() with the apex of the updated zone.
     """
 
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
@@ -738,12 +980,16 @@ def test_reload_records_from_watchdog_sends_notify_for_changed_zones(
 
     notified = {"zones": None}
 
-    def fake_send_for_zones(zones: list[str]) -> None:  # noqa: D401
-        """Capture the list of zone apexes passed to _send_notify_for_zones."""
+    def fake_send_for_zones(plugin_obj: object, zones: list[str]) -> None:  # noqa: D401
+        """Capture the list of zone apexes passed to send_notify_for_zones()."""
 
+        _ = plugin_obj
         notified["zones"] = list(zones)
 
-    plugin._send_notify_for_zones = fake_send_for_zones  # type: ignore[assignment]
+    notify_mod = importlib.import_module("foghorn.plugins.resolve.zone_records.notify")
+    monkeypatch.setattr(
+        notify_mod, "send_notify_for_zones", fake_send_for_zones, raising=True
+    )
 
     # Force immediate reload path by disabling the minimum interval.
     plugin._watchdog_min_interval = 0.0  # type: ignore[assignment]
@@ -758,7 +1004,7 @@ def test_reload_records_from_watchdog_sends_notify_for_changed_zones(
 def test_send_notify_for_zones_uses_static_and_learned_targets(
     monkeypatch, tmp_path: pathlib.Path
 ) -> None:
-    """Brief: _send_notify_for_zones sends NOTIFY to static and learned targets.
+    """Brief: send_notify_for_zones sends NOTIFY to static and learned targets.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
@@ -808,11 +1054,12 @@ def test_send_notify_for_zones_uses_static_and_learned_targets(
 
         calls.append((zone_apex, dict(target)))
 
+    notify_mod = importlib.import_module("foghorn.plugins.resolve.zone_records.notify")
     monkeypatch.setattr(
-        plugin, "_send_notify_to_target", fake_send_notify, raising=True
+        notify_mod, "send_notify_to_target", fake_send_notify, raising=True
     )
 
-    plugin._send_notify_for_zones(["notify.example"])
+    notify_mod.send_notify_for_zones(plugin, ["notify.example"])
 
     # Expect at least one call for the static target and one for the learned one.
     assert calls, "expected at least one NOTIFY send"
@@ -826,7 +1073,7 @@ def test_send_notify_for_zones_uses_static_and_learned_targets(
 def test_watchdog_handler_should_reload_and_on_any_event(
     tmp_path: pathlib.Path,
 ) -> None:
-    """Brief: _WatchdogHandler only reloads for matching file events.
+    """Brief: WatchdogHandler only reloads for matching file events.
 
     Inputs:
       - tmp_path: pytest temporary directory.
@@ -834,9 +1081,6 @@ def test_watchdog_handler_should_reload_and_on_any_event(
     Outputs:
       - Asserts _should_reload and on_any_event behaviour for various event shapes.
     """
-    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
-    ZoneRecords = mod.ZoneRecords
-
     records_file = tmp_path / "records.txt"
     records_file.write_text("example.com|A|300|1.2.3.4\n", encoding="utf-8")
     watched = [records_file]
@@ -849,7 +1093,10 @@ def test_watchdog_handler_should_reload_and_on_any_event(
             self.reloaded += 1
 
     plugin = DummyPlugin()
-    handler = ZoneRecords._WatchdogHandler(plugin, watched)
+    watchdog_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.watchdog"
+    )
+    handler = watchdog_mod.WatchdogHandler(plugin, watched)
 
     # No paths -> False
     assert handler._should_reload(None, None) is False
@@ -893,16 +1140,19 @@ def test_watchdog_handler_should_reload_and_on_any_event(
 
 
 def test_start_watchdog_observer_none(monkeypatch, tmp_path: pathlib.Path) -> None:
-    """Brief: _start_watchdog logs and disables observer when Observer is None.
+    """Brief: start_watchdog leaves _observer unset when Observer is None.
 
     Inputs:
       - monkeypatch: pytest fixture for runtime patching.
       - tmp_path: pytest temporary directory.
 
     Outputs:
-      - Asserts that _observer is left as None when Observer is unavailable.
+      - Asserts that _observer is left as None when watchdog Observer is unavailable.
     """
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    watchdog_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.watchdog"
+    )
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -912,14 +1162,14 @@ def test_start_watchdog_observer_none(monkeypatch, tmp_path: pathlib.Path) -> No
     plugin.setup()
 
     # Force Observer to be treated as unavailable.
-    monkeypatch.setattr(mod, "Observer", None)
+    monkeypatch.setattr(watchdog_mod, "Observer", None)
 
-    plugin._start_watchdog()
+    watchdog_mod.start_watchdog(plugin)
     assert getattr(plugin, "_observer", None) is None
 
 
 def test_start_watchdog_with_no_directories(monkeypatch) -> None:
-    """Brief: _start_watchdog returns early when there are no directories to watch.
+    """Brief: start_watchdog returns early when there are no directories to watch.
 
     Inputs:
       - monkeypatch: pytest fixture for runtime patching.
@@ -928,6 +1178,9 @@ def test_start_watchdog_with_no_directories(monkeypatch) -> None:
       - Asserts that _observer is set to None when file_paths is empty.
     """
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    watchdog_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.watchdog"
+    )
     ZoneRecords = mod.ZoneRecords
 
     # Construct a bare instance without going through __init__ to allow empty file_paths.
@@ -935,23 +1188,21 @@ def test_start_watchdog_with_no_directories(monkeypatch) -> None:
     plugin.file_paths = []  # type: ignore[assignment]
     plugin._observer = None  # type: ignore[assignment]
 
-    # Force Observer to be a dummy sentinel so we can see if it would be used.
     class DummyObserver:
         def __init__(self) -> None:
-            self.started = False
+            raise AssertionError(
+                "Observer should not be instantiated when no directories exist"
+            )
 
-        def start(self) -> None:
-            self.started = True
+    monkeypatch.setattr(watchdog_mod, "Observer", DummyObserver)
 
-    monkeypatch.setattr(mod, "Observer", DummyObserver)
-
-    plugin._start_watchdog()
+    watchdog_mod.start_watchdog(plugin)
     # When there are no concrete directories to watch, _observer remains None.
     assert plugin._observer is None
 
 
 def test_start_polling_configuration(monkeypatch, tmp_path: pathlib.Path) -> None:
-    """Brief: _start_polling only starts a thread when interval and stop_event are set.
+    """Brief: start_polling only starts a thread when interval and stop_event are set.
 
     Inputs:
       - monkeypatch: pytest fixture for runtime patching.
@@ -961,6 +1212,9 @@ def test_start_polling_configuration(monkeypatch, tmp_path: pathlib.Path) -> Non
       - Asserts that polling thread is only started when both interval and stop_event are set.
     """
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    watchdog_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.watchdog"
+    )
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -971,7 +1225,7 @@ def test_start_polling_configuration(monkeypatch, tmp_path: pathlib.Path) -> Non
     plugin.setup()
     plugin._poll_interval = 0.0  # type: ignore[assignment]
     plugin._poll_stop = threading.Event()
-    plugin._start_polling()
+    watchdog_mod.start_polling(plugin)
     assert getattr(plugin, "_poll_thread", None) is None
 
     # Interval set but no stop_event configured -> no thread
@@ -979,28 +1233,35 @@ def test_start_polling_configuration(monkeypatch, tmp_path: pathlib.Path) -> Non
     plugin2.setup()
     plugin2._poll_interval = 0.1  # type: ignore[assignment]
     plugin2._poll_stop = None  # type: ignore[assignment]
-    plugin2._start_polling()
+    watchdog_mod.start_polling(plugin2)
     assert getattr(plugin2, "_poll_thread", None) is None
 
     # Proper configuration starts a polling thread.
-    plugin3 = ZoneRecords(
-        file_paths=[str(records_file)], watchdog_poll_interval_seconds=0.01
-    )
+    plugin3 = ZoneRecords(file_paths=[str(records_file)])
     plugin3.setup()
+    plugin3._poll_interval = 0.01  # type: ignore[assignment]
+    plugin3._poll_stop = threading.Event()
+    watchdog_mod.start_polling(plugin3)
     assert getattr(plugin3, "_poll_thread", None) is not None
     plugin3.close()
 
 
-def test_poll_loop_early_return_and_iteration(tmp_path: pathlib.Path) -> None:
+def test_poll_loop_early_return_and_iteration(
+    monkeypatch, tmp_path: pathlib.Path
+) -> None:
     """Brief: _poll_loop returns early when misconfigured and loops once when configured.
 
     Inputs:
+      - monkeypatch: pytest fixture for runtime patching.
       - tmp_path: pytest temporary directory.
 
     Outputs:
       - Asserts both the early-return and single-iteration behaviours.
     """
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    watchdog_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.watchdog"
+    )
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -1012,25 +1273,29 @@ def test_poll_loop_early_return_and_iteration(tmp_path: pathlib.Path) -> None:
     # Early return when stop_event is None.
     plugin._poll_stop = None  # type: ignore[assignment]
     plugin._poll_interval = 0.1  # type: ignore[assignment]
-    plugin._poll_loop()
+    watchdog_mod._poll_loop(plugin)
 
     # Single iteration when configured; have_files_changed clears the stop event.
     stop = threading.Event()
     plugin._poll_stop = stop  # type: ignore[assignment]
     plugin._poll_interval = 0.01  # type: ignore[assignment]
 
-    def fake_have_files_changed() -> bool:
+    def fake_have_files_changed(plugin_obj: object) -> bool:
+        _ = plugin_obj
         stop.set()
         return False
 
-    plugin._have_files_changed = fake_have_files_changed  # type: ignore[assignment]
-    plugin._poll_loop()
+    monkeypatch.setattr(
+        watchdog_mod, "have_files_changed", fake_have_files_changed, raising=True
+    )
+    watchdog_mod._poll_loop(plugin)
+    assert stop.is_set() is True
 
 
 def test_have_files_changed_tracks_snapshot(
     monkeypatch, tmp_path: pathlib.Path
 ) -> None:
-    """Brief: _have_files_changed builds snapshots and detects changes.
+    """Brief: have_files_changed builds snapshots and detects changes.
 
     Inputs:
       - monkeypatch: pytest fixture for runtime patching.
@@ -1040,6 +1305,9 @@ def test_have_files_changed_tracks_snapshot(
       - Asserts that the first call returns True and subsequent identical stats return False.
     """
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    watchdog_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.watchdog"
+    )
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -1064,18 +1332,18 @@ def test_have_files_changed_tracks_snapshot(
 
     plugin.file_paths = [str(records_file), str(missing), str(extra)]  # type: ignore[assignment]
 
-    monkeypatch.setattr(mod.os, "stat", fake_stat)
+    monkeypatch.setattr(watchdog_mod.os, "stat", fake_stat)
 
     # First call establishes snapshot.
-    assert plugin._have_files_changed() is True
+    assert watchdog_mod.have_files_changed(plugin) is True
     # Second call with same stats returns False.
-    assert plugin._have_files_changed() is False
+    assert watchdog_mod.have_files_changed(plugin) is False
 
 
 def test_schedule_debounced_reload_variants(
     monkeypatch, tmp_path: pathlib.Path
 ) -> None:
-    """Brief: _schedule_debounced_reload covers immediate, lock-less, and timer cases.
+    """Brief: schedule_debounced_reload covers immediate, lock-less, and timer cases.
 
     Inputs:
       - monkeypatch: pytest fixture for runtime patching.
@@ -1085,6 +1353,9 @@ def test_schedule_debounced_reload_variants(
       - Asserts that reload is called immediately for zero delay and scheduled via Timer otherwise.
     """
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    watchdog_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.watchdog"
+    )
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -1101,7 +1372,7 @@ def test_schedule_debounced_reload_variants(
     plugin._reload_records_from_watchdog = fake_reload  # type: ignore[assignment]
 
     # Immediate path when delay <= 0.
-    plugin._schedule_debounced_reload(0.0)
+    watchdog_mod.schedule_debounced_reload(plugin, 0.0)
     assert called["count"] == 1
 
     # No lock configured -> no scheduling.
@@ -1109,7 +1380,7 @@ def test_schedule_debounced_reload_variants(
     plugin2.setup()
     plugin2._reload_records_from_watchdog = fake_reload  # type: ignore[assignment]
     plugin2._reload_timer_lock = None  # type: ignore[assignment]
-    plugin2._schedule_debounced_reload(1.0)
+    watchdog_mod.schedule_debounced_reload(plugin2, 1.0)
     assert called["count"] == 1
 
     # Existing live timer prevents new scheduling.
@@ -1122,7 +1393,7 @@ def test_schedule_debounced_reload_variants(
     plugin3._reload_records_from_watchdog = fake_reload  # type: ignore[assignment]
     plugin3._reload_timer_lock = threading.Lock()  # type: ignore[assignment]
     plugin3._reload_debounce_timer = DummyTimer()  # type: ignore[assignment]
-    plugin3._schedule_debounced_reload(1.0)
+    watchdog_mod.schedule_debounced_reload(plugin3, 1.0)
     assert called["count"] == 1
 
     # Normal scheduling path with Timer replacement that calls callback immediately.
@@ -1130,10 +1401,6 @@ def test_schedule_debounced_reload_variants(
 
     def make_timer(delay, cb):  # type: ignore[override]
         class ImmediateTimer:
-            def __init__(self) -> None:
-                self.delay = delay
-                self._cb = cb
-
             def is_alive(self) -> bool:  # pragma: no cover - not used in this branch.
                 return False
 
@@ -1151,13 +1418,13 @@ def test_schedule_debounced_reload_variants(
         calls["timer_cb"] += 1
         return ImmediateTimer()
 
-    monkeypatch.setattr(mod.threading, "Timer", make_timer)
+    monkeypatch.setattr(watchdog_mod.threading, "Timer", make_timer)
 
     plugin4 = ZoneRecords(file_paths=[str(records_file)])
     plugin4.setup()
     plugin4._reload_records_from_watchdog = fake_reload  # type: ignore[assignment]
     plugin4._reload_timer_lock = threading.Lock()  # type: ignore[assignment]
-    plugin4._schedule_debounced_reload(0.01)
+    watchdog_mod.schedule_debounced_reload(plugin4, 0.01)
 
     assert called["count"] >= 2
     assert calls["timer_cb"] == 1
@@ -1176,6 +1443,9 @@ def test_reload_records_from_watchdog_deferred_and_immediate(
       - Asserts that short intervals schedule a deferred reload and long ones call _load_records.
     """
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    watchdog_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.watchdog"
+    )
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -1185,21 +1455,24 @@ def test_reload_records_from_watchdog_deferred_and_immediate(
     plugin.setup()
 
     # Deferred path: elapsed < min_interval. Use a fixed time source for determinism.
-    monkeypatch.setattr(mod.time, "time", lambda: 105.0)
+    monkeypatch.setattr(watchdog_mod.time, "time", lambda: 105.0)
     plugin._last_watchdog_reload_ts = 100.0  # type: ignore[assignment]
     plugin._watchdog_min_interval = 10.0  # type: ignore[assignment]
 
     scheduled = {"delay": None}
 
-    def fake_schedule(delay: float) -> None:
+    def fake_schedule(plugin_obj: object, delay: float) -> None:
+        _ = plugin_obj
         scheduled["delay"] = delay
 
-    plugin._schedule_debounced_reload = fake_schedule  # type: ignore[assignment]
+    monkeypatch.setattr(
+        watchdog_mod, "schedule_debounced_reload", fake_schedule, raising=True
+    )
     plugin._reload_records_from_watchdog()
     assert scheduled["delay"] is not None
 
     # Immediate path: elapsed >= min_interval causes an in-place reload.
-    monkeypatch.setattr(mod.time, "time", lambda: 200.0)
+    monkeypatch.setattr(watchdog_mod.time, "time", lambda: 200.0)
     plugin._last_watchdog_reload_ts = 0.0  # type: ignore[assignment]
     called = {"load": 0}
 
@@ -1288,9 +1561,12 @@ def test_setup_watchdog_enabled_flag_controls_start(
       - tmp_path: pytest temporary directory.
 
     Outputs:
-      - Asserts that _start_watchdog is only called when watchdog_enabled is truthy.
+      - Asserts that start_watchdog is only called when watchdog_enabled is truthy.
     """
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    watchdog_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.watchdog"
+    )
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
@@ -1298,10 +1574,13 @@ def test_setup_watchdog_enabled_flag_controls_start(
 
     calls = {"start": 0}
 
-    def fake_start(self) -> None:  # type: ignore[override]
+    def fake_start(plugin_obj: object) -> None:  # noqa: D401
+        """Count calls to watchdog.start_watchdog without starting a real observer."""
+
+        _ = plugin_obj
         calls["start"] += 1
 
-    monkeypatch.setattr(ZoneRecords, "_start_watchdog", fake_start, raising=False)
+    monkeypatch.setattr(watchdog_mod, "start_watchdog", fake_start, raising=True)
 
     # Explicitly disabled -> no call.
     plugin_disabled = ZoneRecords(
@@ -1309,15 +1588,109 @@ def test_setup_watchdog_enabled_flag_controls_start(
     )
     plugin_disabled.setup()
 
-    # Truthy non-bool value -> treated as True and calls _start_watchdog.
+    # Truthy non-bool value -> treated as True and calls start_watchdog.
     plugin_enabled = ZoneRecords(file_paths=[str(records_file)], watchdog_enabled="yes")
     plugin_enabled.setup()
 
     assert calls["start"] == 1
 
 
+def test_nxdomain_zones_returns_nxdomain_for_missing_name_under_suffix(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: nxdomain_zones makes ZoneRecords return NXDOMAIN under a suffix.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture (unused, but kept for API
+        consistency with surrounding tests).
+
+    Outputs:
+      - Asserts that queries under the configured suffix are overridden with
+        NXDOMAIN when the name does not exist in ZoneRecords.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(
+        records=["host.private.test|A|300|192.0.2.10"],
+        nxdomain_zones=["private.test"],
+    )
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req_bytes = _make_query("missing.private.test", int(QTYPE.A))
+
+    decision = plugin.pre_resolve("missing.private.test", int(QTYPE.A), req_bytes, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+
+    response = DNSRecord.parse(decision.response)
+    assert response.header.rcode == RCODE.NXDOMAIN
+
+
+def test_nxdomain_zones_returns_nodata_when_name_exists_but_type_missing(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: nxdomain_zones returns NOERROR/NODATA when name exists.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture (unused).
+
+    Outputs:
+      - Asserts that, when an owner exists under the suffix but does not have
+        the requested type, ZoneRecords returns NOERROR with an empty answer
+        section (NODATA).
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(
+        records=["host.private.test|A|300|192.0.2.10"],
+        nxdomain_zones=["private.test"],
+    )
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req_bytes = _make_query("host.private.test", int(QTYPE.AAAA))
+
+    decision = plugin.pre_resolve("host.private.test", int(QTYPE.AAAA), req_bytes, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+
+    response = DNSRecord.parse(decision.response)
+    assert response.header.rcode == RCODE.NOERROR
+    assert not response.rr
+
+
+def test_nxdomain_zones_does_not_apply_outside_configured_suffix(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: nxdomain_zones only triggers for matching suffixes.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture (unused).
+
+    Outputs:
+      - Asserts that names outside the configured suffix fall through.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(
+        records=["host.private.test|A|300|192.0.2.10"],
+        nxdomain_zones=["private.test"],
+    )
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req_bytes = _make_query("missing.other.test", int(QTYPE.A))
+
+    decision = plugin.pre_resolve("missing.other.test", int(QTYPE.A), req_bytes, ctx)
+    assert decision is None
+
+
 def test_authoritative_zone_nxdomain_and_nodata(tmp_path: pathlib.Path) -> None:
-    """CustomRecords behaves authoritatively inside a zone with SOA.
+    """ZoneRecords behaves authoritatively inside a zone with SOA.
 
     Inputs:
       - tmp_path: pytest temporary directory.
@@ -1488,6 +1861,52 @@ def test_bind_paths_loads_rfc1035_zone_and_answers(tmp_path: pathlib.Path) -> No
     resp_nx = DNSRecord.parse(decision_nx.response)
     assert resp_nx.header.rcode == RCODE.NXDOMAIN
     assert any(rr.rtype == QTYPE.SOA for rr in (resp_nx.auth or []))
+
+
+def test_bind_paths_entry_override_origin_and_ttl_warns_and_uses_config(
+    tmp_path: pathlib.Path, caplog
+) -> None:
+    """Brief: bind_paths entries can override $ORIGIN/$TTL and emit a warning.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+      - caplog: pytest logging capture fixture.
+
+    Outputs:
+      - Asserts that when a bind_paths entry supplies origin/ttl, ZoneRecords
+        ignores in-file $ORIGIN/$TTL directives (with warnings) and uses the
+        config values instead.
+    """
+    zone_file = tmp_path / "example.zone"
+    zone_file.write_text(
+        """$ORIGIN example.com.\n$TTL 300\n@   IN  SOA ns1.example.com. hostmaster.example.com. ( 1 3600 600 604800 300 )\n@   IN  NS  ns1.example.com.\nwww IN  A   192.0.2.20\n""",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    with caplog.at_level(logging.WARNING):
+        plugin = ZoneRecords(
+            bind_paths=[
+                {
+                    "path": str(zone_file),
+                    "origin": "override.test.",
+                    "ttl": 600,
+                }
+            ]
+        )
+        plugin.setup()
+
+    ttl, values = plugin.records[("www.override.test", int(QTYPE.A))]
+    assert ttl == 600
+    assert values == ["192.0.2.20"]
+
+    msgs = [
+        r.getMessage() for r in caplog.records if "BIND zone file" in r.getMessage()
+    ]
+    assert any("contains $ORIGIN" in m and str(zone_file) in m for m in msgs)
+    assert any("contains $TTL" in m and str(zone_file) in m for m in msgs)
 
 
 def test_bind_paths_merges_with_file_paths_and_preserves_ttl_and_order(
@@ -1695,7 +2114,7 @@ def test_auto_soa_generated_for_sshfp_only_zone(tmp_path: pathlib.Path) -> None:
 
 
 def test_normalize_axfr_config_valid_and_invalid_entries() -> None:
-    """Brief: _normalize_axfr_config returns only well-formed zones and upstreams.
+    """Brief: normalize_axfr_config returns only well-formed zones and upstreams.
 
     Inputs:
       - None.
@@ -1703,11 +2122,9 @@ def test_normalize_axfr_config_valid_and_invalid_entries() -> None:
     Outputs:
       - Asserts that valid entries are normalized and invalid ones dropped.
     """
-    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
-    ZoneRecords = mod.ZoneRecords
-
-    # Construct a bare instance so we can call the helper directly.
-    plugin = ZoneRecords.__new__(ZoneRecords)
+    helpers_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.helpers"
+    )
 
     raw = [
         {
@@ -1728,7 +2145,7 @@ def test_normalize_axfr_config_valid_and_invalid_entries() -> None:
         },
     ]
 
-    zones = plugin._normalize_axfr_config(raw)
+    zones = helpers_mod.normalize_axfr_config(raw)
     assert len(zones) == 1
     z = zones[0]
     assert z["zone"] == "example.com"
@@ -1745,7 +2162,7 @@ def test_normalize_axfr_config_valid_and_invalid_entries() -> None:
 
 
 def test_normalize_axfr_config_supports_dot_and_tls_fields() -> None:
-    """Brief: _normalize_axfr_config preserves transport and TLS-related fields.
+    """Brief: normalize_axfr_config preserves transport and TLS-related fields.
 
     Inputs:
       - None.
@@ -1753,10 +2170,9 @@ def test_normalize_axfr_config_supports_dot_and_tls_fields() -> None:
     Outputs:
       - Asserts that DoT masters keep transport/server_name/verify/ca_file.
     """
-    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
-    ZoneRecords = mod.ZoneRecords
-
-    plugin = ZoneRecords.__new__(ZoneRecords)
+    helpers_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.helpers"
+    )
 
     raw = [
         {
@@ -1781,7 +2197,7 @@ def test_normalize_axfr_config_supports_dot_and_tls_fields() -> None:
         }
     ]
 
-    zones = plugin._normalize_axfr_config(raw)
+    zones = helpers_mod.normalize_axfr_config(raw)
     assert len(zones) == 1
     z = zones[0]
     assert z["zone"] == "tls.example"
@@ -1811,6 +2227,7 @@ def test_load_records_axfr_overlays_and_only_runs_once(
         and that transferred RRs are visible in records after setup.
     """
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    loader_mod = importlib.import_module("foghorn.plugins.resolve.zone_records.loader")
     ZoneRecords = mod.ZoneRecords
 
     # Seed a simple file-backed record so setup() does not fail.
@@ -1834,7 +2251,7 @@ def test_load_records_axfr_overlays_and_only_runs_once(
         calls["n"] += 1
         return axfr_rrs
 
-    monkeypatch.setattr(mod, "axfr_transfer", fake_axfr_transfer)
+    monkeypatch.setattr(loader_mod, "axfr_transfer", fake_axfr_transfer)
 
     plugin = ZoneRecords(
         file_paths=[str(records_file)],
@@ -1879,15 +2296,17 @@ def test_load_records_axfr_errors_do_not_abort(
         and file-backed records are present, while AXFR zones are skipped.
     """
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    loader_mod = importlib.import_module("foghorn.plugins.resolve.zone_records.loader")
+    axfr_mod = importlib.import_module("foghorn.servers.transports.axfr")
     ZoneRecords = mod.ZoneRecords
 
     records_file = tmp_path / "records.txt"
     records_file.write_text("seed-only.test|A|300|192.0.2.10\n", encoding="utf-8")
 
     def failing_axfr(*a, **k):  # noqa: ARG001
-        raise mod.AXFRError("boom")
+        raise axfr_mod.AXFRError("boom")
 
-    monkeypatch.setattr(mod, "axfr_transfer", failing_axfr)
+    monkeypatch.setattr(loader_mod, "axfr_transfer", failing_axfr)
 
     plugin = ZoneRecords(
         file_paths=[str(records_file)],
@@ -1925,33 +2344,26 @@ def _make_query_with_do_bit(name: str, qtype: int) -> bytes:
 
 
 def test_client_wants_dnssec_detection(tmp_path: pathlib.Path) -> None:
-    """Brief: _client_wants_dnssec correctly detects DO bit in EDNS(0) OPT RR.
+    """Brief: client_wants_dnssec correctly detects DO bit in EDNS(0) OPT RR.
 
     Inputs:
-      - tmp_path: pytest temporary directory.
+      - tmp_path: pytest temporary directory (unused; kept for test API stability).
 
     Outputs:
       - Asserts True when DO=1, False when no EDNS or DO=0.
     """
-    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
-    ZoneRecords = mod.ZoneRecords
-
-    records_file = tmp_path / "records.txt"
-    records_file.write_text("example.com|A|300|192.0.2.1\n", encoding="utf-8")
-
-    plugin = ZoneRecords(file_paths=[str(records_file)])
-    plugin.setup()
+    dnssec_mod = importlib.import_module("foghorn.plugins.resolve.zone_records.dnssec")
 
     # Query with DO=1 should return True.
     do_query = _make_query_with_do_bit("example.com", int(QTYPE.A))
-    assert plugin._client_wants_dnssec(do_query) is True
+    assert dnssec_mod.client_wants_dnssec(do_query) is True
 
     # Query without EDNS should return False.
     plain_query = _make_query("example.com", int(QTYPE.A))
-    assert plugin._client_wants_dnssec(plain_query) is False
+    assert dnssec_mod.client_wants_dnssec(plain_query) is False
 
     # Malformed bytes should return False gracefully.
-    assert plugin._client_wants_dnssec(b"not-valid-dns") is False
+    assert dnssec_mod.client_wants_dnssec(b"not-valid-dns") is False
 
 
 def test_dnssec_helper_mapping_contains_base_and_rrsig(tmp_path: pathlib.Path) -> None:
@@ -2190,7 +2602,7 @@ def test_bind_zone_apex_detection_with_dnssec(tmp_path: pathlib.Path) -> None:
     Outputs:
       - Asserts that a BIND-style zone with SOA at the apex registers the apex
         in _zone_soa and that names under the zone map back to that apex via
-        _find_zone_for_name().
+        helpers.find_zone_for_name().
     """
     from foghorn.plugins.resolve.zone_records import ZoneRecords
 
@@ -2224,7 +2636,12 @@ def test_bind_zone_apex_detection_with_dnssec(tmp_path: pathlib.Path) -> None:
 
     # Names under the apex should resolve back to that apex for authoritative
     # handling.
-    assert plugin._find_zone_for_name("host.example.test") == "example.test"
+    helpers_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.helpers"
+    )
+    assert (
+        helpers_mod.find_zone_for_name("host.example.test", zone_soa) == "example.test"
+    )
 
 
 def test_bind_zone_dnssec_autosign_a_includes_rrsig(tmp_path: pathlib.Path) -> None:
@@ -2287,7 +2704,7 @@ def test_bind_zone_dnssec_autosign_a_includes_rrsig(tmp_path: pathlib.Path) -> N
 
 
 def test_normalize_axfr_config_allow_no_dnssec_field() -> None:
-    """Brief: _normalize_axfr_config parses allow_no_dnssec correctly.
+    """Brief: normalize_axfr_config parses allow_no_dnssec correctly.
 
     Inputs:
       - None.
@@ -2295,10 +2712,9 @@ def test_normalize_axfr_config_allow_no_dnssec_field() -> None:
     Outputs:
       - Asserts that allow_no_dnssec defaults to True and can be set to False.
     """
-    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
-    ZoneRecords = mod.ZoneRecords
-
-    plugin = ZoneRecords.__new__(ZoneRecords)
+    helpers_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.helpers"
+    )
 
     raw = [
         {
@@ -2318,7 +2734,7 @@ def test_normalize_axfr_config_allow_no_dnssec_field() -> None:
         },
     ]
 
-    zones = plugin._normalize_axfr_config(raw)
+    zones = helpers_mod.normalize_axfr_config(raw)
     assert len(zones) == 3
 
     # Default case.

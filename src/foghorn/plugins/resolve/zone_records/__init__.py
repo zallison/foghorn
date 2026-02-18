@@ -1,0 +1,552 @@
+"""ZoneRecords plugin: Zone-based DNS record management with AXFR and DNSSEC support.
+
+Main entry point that orchestrates record loading, query resolution, and file watching.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from typing import Dict, List, Optional, Tuple
+
+from pydantic import BaseModel, Field
+
+from foghorn.plugins.resolve.base import (
+    BasePlugin,
+    PluginContext,
+    PluginDecision,
+    plugin_aliases,
+)
+
+from . import (
+    axfr_polling,
+    dnssec,
+    helpers,
+    loader,
+    notify,
+    resolver,
+    transfer,
+    watchdog,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class AxfrUpstreamConfig(BaseModel):
+    """Brief: Configuration for a single AXFR upstream server.
+
+    Inputs:
+      - host: Upstream authoritative server hostname or IP.
+      - port: TCP port (default 53).
+      - timeout_ms: Transfer timeout in milliseconds (default 5000).
+      - transport: "tcp" (default) or "dot" for DNS-over-TLS.
+      - server_name: Optional TLS SNI name for DoT.
+      - verify: TLS certificate verification for DoT (default True).
+      - ca_file: Optional CA bundle path for DoT.
+
+    Outputs:
+      - AxfrUpstreamConfig instance.
+    """
+
+    host: str = Field(..., description="Upstream authoritative server hostname or IP.")
+    port: int = Field(default=53, ge=1, le=65535, description="TCP port.")
+    timeout_ms: int = Field(
+        default=5000, ge=0, description="Transfer timeout in milliseconds."
+    )
+    transport: str = Field(default="tcp", description="Transport: 'tcp' or 'dot'.")
+    server_name: Optional[str] = Field(
+        default=None, description="TLS SNI name for DoT."
+    )
+    verify: bool = Field(
+        default=True, description="TLS certificate verification for DoT."
+    )
+    ca_file: Optional[str] = Field(default=None, description="CA bundle path for DoT.")
+
+    class Config:
+        extra = "forbid"
+
+
+class AxfrZoneConfig(BaseModel):
+    """Brief: Configuration for a single AXFR-backed zone.
+
+    Inputs:
+      - zone: Zone apex (e.g. "example.com").
+      - upstreams: List of upstream servers to transfer from.
+      - masters: Legacy alias for upstreams (deprecated).
+      - allow_no_dnssec: Accept transfer even if DNSSEC is missing or invalid
+        (default True). When False, zones without valid DNSSEC will be rejected
+        once DNSSEC validation for AXFR is implemented.
+
+    Outputs:
+      - AxfrZoneConfig instance.
+    """
+
+    zone: str = Field(..., description="Zone apex (e.g. 'example.com').")
+    upstreams: Optional[List[AxfrUpstreamConfig]] = Field(
+        default=None, description="List of upstream servers to transfer from."
+    )
+    masters: Optional[List[AxfrUpstreamConfig]] = Field(
+        default=None, description="Legacy alias for upstreams (deprecated)."
+    )
+    allow_no_dnssec: bool = Field(
+        default=True,
+        description=(
+            "Accept transfer even if DNSSEC is missing or invalid. When False, "
+            "zones without valid DNSSEC will be rejected once DNSSEC validation "
+            "for AXFR is implemented."
+        ),
+    )
+
+    class Config:
+        extra = "forbid"
+
+
+class ZoneDnssecSigningConfig(BaseModel):
+    """Brief: DNSSEC auto-signing configuration for ZoneRecords.
+
+    Inputs:
+      - enabled: Enable automatic DNSSEC signing for authoritative zones.
+      - keys_dir: Optional base directory for per-zone key files.
+      - algorithm: DNSSEC algorithm name (e.g. "ECDSAP256SHA256").
+      - generate: Key generation policy ("yes", "no", or "maybe").
+      - validity_days: Signature validity window in days.
+      - use_tld: Optional single-label TLD (e.g. "zaa", "corp") to treat as
+        an inferred apex for SSHFP-only zones when synthesizing SOA records.
+
+    Outputs:
+      - Parsed ZoneDnssecSigningConfig instance used by the config schema.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable automatic DNSSEC signing for authoritative zones.",
+    )
+    keys_dir: Optional[str] = Field(
+        default=None,
+        description="Directory to read/write DNSSEC keys; defaults to the working directory when omitted.",
+    )
+    algorithm: str = Field(
+        default="ECDSAP256SHA256",
+        description="DNSSEC algorithm name (e.g. 'ECDSAP256SHA256', 'RSASHA256').",
+    )
+    generate: str = Field(
+        default="maybe",
+        description="Key generation policy: 'yes' (always new), 'no' (never), 'maybe' (generate when missing).",
+    )
+    validity_days: int = Field(
+        default=30,
+        ge=1,
+        description="Signature validity window in days.",
+    )
+    use_tld: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional single-label TLD (e.g. 'zaa', 'corp') that ZoneRecords "
+            "may treat as an inferred zone apex when synthesizing SOA records "
+            "for SSHFP-only data."
+        ),
+    )
+
+    class Config:
+        extra = "forbid"
+
+
+class BindZoneFileConfig(BaseModel):
+    """Brief: Configuration for a single BIND zone file entry.
+
+    Inputs:
+      - path: Filesystem path to an RFC-1035 style zonefile.
+      - origin: Optional override for the zonefile base domain ($ORIGIN).
+      - ttl: Optional override for the zonefile default TTL ($TTL).
+
+    Outputs:
+      - BindZoneFileConfig instance.
+    """
+
+    path: str = Field(..., description="Path to an RFC-1035 style zonefile.")
+    origin: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional override for the zonefile base domain ($ORIGIN). When set, "
+            "ZoneRecords ignores any $ORIGIN lines found in the file and uses this value."
+        ),
+    )
+    ttl: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Optional override for the zonefile default TTL ($TTL). When set, "
+            "ZoneRecords ignores any $TTL lines found in the file and uses this value "
+            "as the default TTL for records which omit TTL."
+        ),
+    )
+
+    class Config:
+        extra = "forbid"
+
+
+class ZoneRecordsConfig(BaseModel):
+    """Brief: Typed configuration model for ZoneRecords.
+
+    Inputs:
+      - file_paths: Preferred list of records file paths.
+      - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may
+        be plain strings (paths) or objects with per-file origin/ttl overrides.
+      - records: Optional list of inline records using
+        ``<domain>|<qtype>|<ttl>|<value>`` format.
+      - load_mode: Controls load/reload behaviour:
+        - "merge" (default): preserve existing records and overlay newly loaded ones.
+        - "replace": rebuild records from configured sources on each load.
+        - "first": use the first configured source group in this order:
+          file_paths → bind_paths → axfr_zones → records (inline), and ignore the others.
+      - merge_policy: "add" (default) to append unique values into existing
+        RRsets, or "overwrite" to replace RRsets when the same (name,qtype)
+        appears in a later source.
+      - watchdog_enabled: Enable watchdog-based reloads.
+      - watchdog_min_interval_seconds: Minimum seconds between reloads.
+      - watchdog_poll_interval_seconds: Optional polling interval.
+      - ttl: Default TTL in seconds.
+      - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords
+        should return NXDOMAIN/NODATA instead of falling through to upstream.
+      - axfr_zones: Optional list of AXFR-backed zones.
+
+    Outputs:
+      - ZoneRecordsConfig instance with normalized field types.
+    """
+
+    file_paths: Optional[List[str]] = None
+    bind_paths: Optional[List[str | BindZoneFileConfig]] = None
+    records: Optional[List[str]] = None
+    load_mode: str = Field(
+        default="merge",
+        description=(
+            "Controls record loading strategy: 'merge' preserves existing records "
+            "and overlays new data; 'replace' rebuilds the in-memory mapping each "
+            "time; 'first' uses the first configured source group and ignores the rest."
+        ),
+    )
+    merge_policy: str = Field(
+        default="add",
+        description=(
+            "Controls conflict behaviour when the same (name,qtype) appears more "
+            "than once: 'add' appends unique values (keeping the earlier TTL); "
+            "'overwrite' replaces the RRset using the later source."
+        ),
+    )
+    watchdog_enabled: Optional[bool] = None
+    watchdog_min_interval_seconds: float = Field(default=1.0, ge=0)
+    watchdog_poll_interval_seconds: float = Field(default=0.0, ge=0)
+    ttl: int = Field(default=300, ge=0)
+    nxdomain_zones: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional list of zone suffixes for which ZoneRecords should return "
+            "NXDOMAIN/NODATA for names under that suffix which are not present in "
+            "the internal mapping, instead of falling through to upstream resolution."
+        ),
+    )
+    axfr_zones: Optional[List[AxfrZoneConfig]] = None
+    axfr_notify: Optional[List[AxfrUpstreamConfig]] = Field(
+        default=None,
+        description=(
+            "Optional list of NOTIFY recipients for AXFR-backed zones. Each "
+            "entry uses the same host/port/transport/server_name/verify/ca_file "
+            "shape as axfr_zones[].upstreams. Only 'tcp' and 'dot' transports "
+            "are supported for outbound NOTIFY."
+        ),
+    )
+    axfr_notify_all: bool = Field(
+        default=False,
+        description=(
+            "When true, automatically learn NOTIFY targets from AXFR/IXFR "
+            "clients by recording their source IPs as downstream secondaries."
+        ),
+    )
+    axfr_notify_scheduled: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Optional delay in seconds after serving AXFR/IXFR to a client "
+            "before sending a follow-up NOTIFY for the transferred zone. "
+            "Ignored when null or zero."
+        ),
+    )
+    dnssec_signing: Optional[ZoneDnssecSigningConfig] = None
+
+    class Config:
+        extra = "allow"
+
+
+@plugin_aliases("zone", "zone_records", "custom", "records")
+class ZoneRecords(BasePlugin):
+    """DNS zone records plugin with AXFR, DNSSEC, and file watching support."""
+
+    target_opcodes = ("NOTIFY",)
+
+    def handle_opcode(
+        self, opcode: int, qname: str, qtype: int, req: bytes, ctx: PluginContext
+    ) -> Optional[PluginDecision]:
+        """Brief: Handle NOTIFY opcode by validating sender and triggering AXFR refresh.
+
+        Inputs:
+          - opcode: Numeric opcode (expected to be NOTIFY = 4).
+          - qname: Normalized zone name from the query.
+          - qtype: Query type (typically SOA for NOTIFY).
+          - req: Raw wire-format request bytes.
+          - ctx: PluginContext with client_ip, listener, etc.
+
+        Outputs:
+          - PluginDecision with override action and NOERROR response when NOTIFY is
+            valid and processed. Returns None to skip NOTIFY handling.
+        """
+        return resolver.handle_opcode(self, opcode, qname, qtype, req, ctx)
+
+    @classmethod
+    def get_config_model(cls):
+        """Brief: Return the Pydantic model used to validate plugin configuration.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - ZoneRecordsConfig class for use by the core config loader.
+        """
+        return ZoneRecordsConfig
+
+    def setup(self) -> None:
+        """Brief: Initialize the plugin, load record mappings, and configure watchers.
+
+        Inputs:
+          - None (uses self.config for configuration).
+
+        Outputs:
+          - None
+        """
+        # Normalize and validate paths
+        provided_paths = self.config.get("file_paths")
+        legacy_path = self.config.get("file_path")
+        bind_paths_cfg = self.config.get("bind_paths")
+        inline_records_cfg = self.config.get("records")
+        axfr_cfg = self.config.get("axfr_zones")
+
+        self.file_paths = []
+        self.bind_paths: List[object] = []
+
+        if provided_paths is not None or legacy_path is not None:
+            self.file_paths = helpers.normalize_paths(provided_paths, legacy_path)
+
+        if bind_paths_cfg is not None:
+            self.bind_paths = helpers.normalize_bind_paths(bind_paths_cfg)
+
+        if not self.file_paths and not self.bind_paths:
+            if inline_records_cfg or axfr_cfg:
+                self.file_paths = []
+                self.bind_paths = []
+            else:
+                self.file_paths = helpers.normalize_paths(None, None)
+
+        # Cache inline records
+        try:
+            self._inline_records = list(inline_records_cfg or [])
+        except Exception:  # pragma: no cover - defensive
+            self._inline_records = []
+
+        # Normalize zone suffix list for NXDOMAIN behaviour.
+        self._nxdomain_zones = helpers.normalize_zone_suffixes(
+            self.config.get("nxdomain_zones")
+        )
+
+        # Normalize AXFR and NOTIFY configuration
+        self._axfr_zones = helpers.normalize_axfr_config(axfr_cfg)
+        self._axfr_loaded_once = False
+
+        self._axfr_notify_static_targets = helpers.normalize_axfr_notify_targets(
+            self.config.get("axfr_notify")
+        )
+        self._axfr_notify_all = bool(self.config.get("axfr_notify_all", False))
+        notify_delay_raw = self.config.get("axfr_notify_scheduled")
+        try:
+            notify_delay = (
+                int(notify_delay_raw) if notify_delay_raw is not None else None
+            )
+        except (TypeError, ValueError):
+            notify_delay = None
+        if notify_delay is not None and notify_delay < 0:
+            notify_delay = None
+        self._axfr_notify_delay = notify_delay
+        self._axfr_notify_learned: Dict[str, Dict[str, Dict[str, object]]] = {}
+        self._axfr_notify_health: Dict[str, Dict[str, object]] = {}
+        self._axfr_notify_lock = threading.RLock()
+
+        # Initialize state and locks
+        self._records_lock = threading.RLock()
+        self.records: Dict[Tuple[str, int], Tuple[int, List[str]]] = {}
+        self._observer = None
+        self._axfr_poll_stop = None
+        self._axfr_poll_thread = None
+        self._axfr_poll_interval = 0.0
+
+        # Watchdog configuration
+        self._watchdog_min_interval = float(
+            self.config.get("watchdog_min_interval_seconds", 1.0)
+        )
+        self._last_watchdog_reload_ts = 0.0
+        self._reload_debounce_timer = None
+        self._reload_timer_lock = threading.Lock()
+
+        # Polling configuration
+        self._poll_interval = float(
+            self.config.get("watchdog_poll_interval_seconds", 0.0)
+        )
+        self._last_stat_snapshot = None
+        self._poll_stop = None
+        self._poll_thread = None
+
+        # Initial load
+        loader.load_records(self)
+        self._ttl = self.config.get("ttl", 300)
+
+        # Start watchdog if enabled
+        watchdog_cfg = self.config.get("watchdog_enabled")
+        if watchdog_cfg is not None:
+            watchdog_enabled = bool(watchdog_cfg)
+        else:
+            watchdog_enabled = True
+
+        if watchdog_enabled:
+            watchdog.start_watchdog(self)
+
+        # Optional polling fallback
+        if self._poll_interval > 0.0:
+            logger.warning(
+                "ZoneRecords Watchdog falling back to polling every %s",
+                self._poll_interval,
+            )
+            self._poll_stop = threading.Event()
+            watchdog.start_polling(self)
+
+        # Optional AXFR polling
+        axfr_polling.start_axfr_polling(self)
+
+    def pre_resolve(
+        self, qname: str, qtype: int, req: bytes, ctx: PluginContext
+    ) -> Optional[PluginDecision]:
+        """Brief: Decide whether to override resolution for a query.
+
+        Inputs:
+          - qname: Queried domain name.
+          - qtype: DNS record type (numeric code).
+          - req: Raw DNS request bytes.
+          - ctx: Plugin context.
+
+        Outputs:
+          - PluginDecision("override") with an authoritative DNS response when
+            this plugin should answer the query, or None to allow normal processing.
+        """
+        return resolver.pre_resolve(self, qname, qtype, req, ctx)
+
+    def iter_zone_rrs_for_transfer(
+        self, zone_apex: str, client_ip: Optional[str] = None
+    ) -> Optional[list]:
+        """Brief: Export authoritative RRsets for a zone for AXFR/IXFR.
+
+        Inputs:
+          - zone_apex: Zone apex name (with or without trailing dot), case-insensitive.
+          - client_ip: Optional IP address of the AXFR/IXFR client.
+
+        Outputs:
+          - list[RR]: All RRs in the zone suitable for AXFR/IXFR transfer, or
+            None when this plugin is not authoritative for the requested apex.
+        """
+        return transfer.iter_zone_rrs_for_transfer(self, zone_apex, client_ip)
+
+    def _load_records(self) -> None:
+        """Brief: Internal wrapper for record loading (called by watchdog/polling).
+
+        Inputs:
+          - None
+
+        Outputs:
+          - None
+        """
+        loader.load_records(self)
+
+    def _reload_records_from_watchdog(self) -> None:
+        """Brief: Internal wrapper for watchdog reload (called by watchdog handlers).
+
+        Inputs:
+          - None
+
+        Outputs:
+          - None
+        """
+        watchdog.reload_records_from_watchdog(self)
+
+    def close(self) -> None:
+        """Brief: Stop any background watchers and release resources.
+
+        Inputs:
+          - None
+
+        Outputs:
+          - None
+        """
+        observer = getattr(self, "_observer", None)
+        if observer is not None:
+            try:
+                observer.stop()
+                observer.join(timeout=2.0)
+            except Exception:  # pragma: no cover - defensive
+                pass
+            self._observer = None
+
+        # Stop polling loop
+        stop_event = getattr(self, "_poll_stop", None)
+        if stop_event is not None:
+            try:
+                stop_event.set()
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        poll_thread = getattr(self, "_poll_thread", None)
+        if poll_thread is not None:
+            try:
+                poll_thread.join(timeout=2.0)
+            except Exception:  # pragma: no cover - defensive
+                pass
+            self._poll_thread = None
+
+        # Stop AXFR polling loop
+        axfr_stop = getattr(self, "_axfr_poll_stop", None)
+        if axfr_stop is not None:
+            try:
+                axfr_stop.set()
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        axfr_thread = getattr(self, "_axfr_poll_thread", None)
+        if axfr_thread is not None:
+            try:
+                axfr_thread.join(timeout=2.0)
+            except Exception:  # pragma: no cover - defensive
+                pass
+            self._axfr_poll_thread = None
+
+        # Cancel deferred reload timer
+        timer = getattr(self, "_reload_debounce_timer", None)
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:  # pragma: no cover - defensive
+                pass
+            self._reload_debounce_timer = None
+
+
+# Re-export config models for public API
+__all__ = [
+    "ZoneRecords",
+    "ZoneRecordsConfig",
+    "AxfrUpstreamConfig",
+    "AxfrZoneConfig",
+    "ZoneDnssecSigningConfig",
+]
