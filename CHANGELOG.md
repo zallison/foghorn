@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.5] - 2026-02-18
+
+> Release notes for changes between **v0.6.4** and **v0.6.5**.
+
+### Added
+
+- ZoneRecords (`zone`) now supports configurable reload semantics via `load_mode` and conflict handling via `merge_policy`.
+- ZoneRecords can now be configured with `load_mode=first` to select the first configured source group (files, BIND zonefiles, AXFR, or inline) and ignore the others.
+- BIND zonefile entries under `bind_paths` can now override `$ORIGIN` and `$TTL` via per-entry `origin`/`ttl` settings; in-file `$ORIGIN`/`$TTL` directives are ignored with a warning when overridden.
+- Added `nxdomain_zones` to force NXDOMAIN/NODATA under selected suffixes when a name is not present in ZoneRecords, instead of falling through to upstream.
+- Added `example_configs/plugin_zone.yaml` and expanded `example_configs/kitchen_sink.yaml` to demonstrate ZoneRecords options.
+
+### Changed
+
+- Refactored ZoneRecords implementation into `foghorn.plugins.resolve.zone_records` package modules for clearer separation of loader/resolver/watchdog/AXFR helpers.
+
+### Tests
+
+- Extended ZoneRecords test coverage for merge/overwrite behavior, first-mode semantics, BIND override warnings, and `nxdomain_zones`.
+- Updated NOTIFY/EDE tests to patch AXFR transfer through the ZoneRecords loader module.
+
+### Documentation
+
+- Updated ZoneRecords plugin docs and README examples to document the new options.
+- Added developer documentation note about regenerating `assets/config-schema.json` when plugin config models change.
+
 ## [0.6.4] - 2026-02-05
 
 > Release notes for changes between **v0.6.3** and **v0.6.4**.
