@@ -124,6 +124,57 @@ plugins:
 - type: router
   config:
     routes: []
+
+# Inline and file-based records (ZoneRecords / `zone` plugin)
+- type: zone
+  id: kitchen-sink-zone
+  config:
+    # Optional: pipe-delimited records files
+    file_paths:
+      - ./config/var/internal.records
+    # Optional: native BIND zonefiles
+    bind_paths:
+      - ./config/var/example.com.zone
+    # Optional: inline records
+    records:
+      - 'example.com|SOA|300|ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300'
+      - 'www.example.com|A|300|192.0.2.10'
+
+    # Optional: load/reload behaviour
+    load_mode: merge     # replace | merge | first
+    merge_policy: add    # add | overwrite
+
+    # Automatic reload control
+    watchdog_enabled: true
+    watchdog_min_interval_seconds: 1.0
+    watchdog_poll_interval_seconds: 0.0
+
+    ttl: 300
+
+    # Optional: AXFR-backed zones fetched at startup
+    axfr_zones:
+      - zone: example.com
+        allow_no_dnssec: true
+        upstreams:
+          - host: 192.0.2.53
+            port: 53
+            timeout_ms: 5000
+
+    # Optional: NOTIFY targets
+    axfr_notify:
+      - host: 192.0.2.54
+        port: 53
+        transport: tcp
+    axfr_notify_all: false
+    axfr_notify_scheduled: 0
+
+    # Optional: DNSSEC auto-signing
+    dnssec_signing:
+      enabled: false
+      keys_dir: ./config/var/keys
+      algorithm: ECDSAP256SHA256
+      generate: maybe
+      validity_days: 30
 server:
   listen:
     udp:
