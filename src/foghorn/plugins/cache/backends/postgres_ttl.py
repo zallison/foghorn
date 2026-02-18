@@ -58,6 +58,49 @@ def _import_postgres_driver():
             ) from exc
 
 
+def _stable_digest_for_key(key: Any) -> bytes:
+    """Brief: Create a stable SHA-256 digest for a cache key.
+
+    Inputs:
+      - key: Any Python object used as a cache key.
+
+    Outputs:
+      - bytes: 32-byte SHA-256 digest.
+
+    Notes:
+      - Bytes-like keys are hashed directly.
+      - Other keys are pickled (highest protocol) then hashed.
+    """
+
+    if isinstance(key, (bytes, bytearray, memoryview)):
+        payload = bytes(key)
+    else:
+        payload = pickle.dumps(key, protocol=pickle.HIGHEST_PROTOCOL)
+
+    return hashlib.sha256(payload).digest()
+
+
+def _encode_key_blob(key: Any) -> bytes:
+    """Brief: Encode a key for storage in the key_blob column.
+
+    Inputs:
+      - key: Any Python object used as a cache key.
+
+    Outputs:
+      - bytes: Bytes to store in key_blob.
+
+    Notes:
+      - This is used only for diagnostic/introspection purposes (key lookups are
+        driven by key_digest).
+      - We store bytes-like keys directly; other keys are pickled.
+    """
+
+    if isinstance(key, (bytes, bytearray, memoryview)):
+        return bytes(key)
+
+    return pickle.dumps(key, protocol=pickle.HIGHEST_PROTOCOL)
+
+
 class PostgresTTLCache:
     """PostgreSQL-backed TTL cache with lazy driver import and key digest storage.
 
@@ -161,55 +204,47 @@ class PostgresTTLCache:
             Tuple of (encoded bytes, is_pickle flag: 0 for bytes, 1 for pickled).
         """
 
-        if isinstance(value, bytes):
-            return value, 0
-        return pickle.dumps(value), 1
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return bytes(value), 0
+        return pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL), 1
 
     @staticmethod
-    def _decode(payload: bytes, is_pickle: int) -> Any:
+    def _decode(payload: Any, is_pickle: int) -> Any:
         """Decode bytes back to original value.
 
         Inputs:
-            payload: Encoded bytes.
+            payload: Encoded bytes-like object.
             is_pickle: Flag indicating whether payload is pickled (1) or raw (0).
 
         Outputs:
             Decoded value.
         """
 
-        if is_pickle == 0:
-            return payload
-        return pickle.loads(payload)
+        if int(is_pickle) == 0:
+            # psycopg2 returns BYTEA as memoryview.
+            return bytes(payload)
+        return pickle.loads(bytes(payload))
 
-    def _get_key_digest(self, key: bytes) -> bytes:
-        """Compute stable SHA-256 digest for a key.
-
-        Inputs:
-            key: Raw key bytes.
-
-        Outputs:
-            SHA-256 hash digest as bytes.
-        """
-
-        return hashlib.sha256(key).digest()
-
-    def set(self, key: bytes, value: Any, ttl: int) -> None:
+    def set(self, key: Any, ttl: int, value: Any) -> None:
         """Cache a value with TTL.
 
         Inputs:
-            key: Cache key (bytes).
-            value: Value to cache (bytes or arbitrary object).
+            key: Cache key (any Python object).
             ttl: Time-to-live in seconds.
+            value: Value to cache (bytes or arbitrary object).
 
         Outputs:
             None.
         """
 
+        ttl_int = max(0, int(ttl))
+
         with self._lock:
             payload, is_pickle = self._encode(value)
-            digest = self._get_key_digest(key)
+            digest = _stable_digest_for_key(key)
+            key_blob = _encode_key_blob(key)
             now = time.time()
-            expiry = now + ttl
+            expiry = now + float(ttl_int)
 
             table_name = f"{self.namespace}_ttl"
             cur = self._conn.cursor()
@@ -219,28 +254,37 @@ class PostgresTTLCache:
                 (key_digest, key_blob, value_blob, is_pickle, ttl_secs, expiry_ts, created_ts)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (key_digest) DO UPDATE SET
+                    key_blob = EXCLUDED.key_blob,
                     value_blob = EXCLUDED.value_blob,
                     is_pickle = EXCLUDED.is_pickle,
                     ttl_secs = EXCLUDED.ttl_secs,
                     expiry_ts = EXCLUDED.expiry_ts,
                     created_ts = EXCLUDED.created_ts
                 """,
-                (digest, key, payload, is_pickle, ttl, expiry, now),
+                (
+                    digest,
+                    key_blob,
+                    payload,
+                    int(is_pickle),
+                    int(ttl_int),
+                    float(expiry),
+                    float(now),
+                ),
             )
             self._conn.commit()
 
-    def get(self, key: bytes) -> Optional[Any]:
+    def get(self, key: Any) -> Optional[Any]:
         """Retrieve a cached value if not expired.
 
         Inputs:
-            key: Cache key (bytes).
+            key: Cache key (any Python object).
 
         Outputs:
             Cached value or None if expired/missing.
         """
 
         with self._lock:
-            digest = self._get_key_digest(key)
+            digest = _stable_digest_for_key(key)
             table_name = f"{self.namespace}_ttl"
             cur = self._conn.cursor()
 
@@ -257,7 +301,12 @@ class PostgresTTLCache:
 
             value_blob, is_pickle, expiry_ts = row
             now = time.time()
-            if now >= expiry_ts:
+            try:
+                expiry_f = float(expiry_ts)
+            except Exception:
+                expiry_f = 0.0
+
+            if now >= expiry_f:
                 # Expired; clean up and return None
                 cur.execute(
                     f"DELETE FROM {table_name} WHERE key_digest = %s",
@@ -266,26 +315,28 @@ class PostgresTTLCache:
                 self._conn.commit()
                 return None
 
-            return self._decode(value_blob, is_pickle)
+            return self._decode(value_blob, int(is_pickle))
 
-    def get_with_meta(self, key: bytes) -> Optional[Dict[str, Any]]:
+    def get_with_meta(
+        self, key: Any
+    ) -> Tuple[Any | None, Optional[float], Optional[int]]:
         """Retrieve a cached value with metadata if not expired.
 
         Inputs:
-            key: Cache key (bytes).
+            key: Cache key (any Python object).
 
         Outputs:
-            Dict with "value", "ttl", "expiry_ts", or None if expired/missing.
+            (value_or_None, seconds_remaining_or_None, original_ttl_or_None)
         """
 
         with self._lock:
-            digest = self._get_key_digest(key)
+            digest = _stable_digest_for_key(key)
             table_name = f"{self.namespace}_ttl"
             cur = self._conn.cursor()
 
             cur.execute(
                 f"""
-                SELECT value_blob, is_pickle, ttl_secs, expiry_ts, created_ts
+                SELECT value_blob, is_pickle, ttl_secs, expiry_ts
                 FROM {table_name}
                 WHERE key_digest = %s
                 """,
@@ -293,25 +344,32 @@ class PostgresTTLCache:
             )
             row = cur.fetchone()
             if row is None:
-                return None
+                return None, None, None
 
-            value_blob, is_pickle, ttl_secs, expiry_ts, created_ts = row
+            value_blob, is_pickle, ttl_secs, expiry_ts = row
             now = time.time()
-            if now >= expiry_ts:
-                # Expired; clean up and return None
+
+            try:
+                ttl_i = int(ttl_secs)
+            except Exception:
+                ttl_i = 0
+
+            try:
+                expiry_f = float(expiry_ts)
+            except Exception:
+                expiry_f = 0.0
+
+            remaining = float(expiry_f - now)
+            if remaining <= 0:
+                # Expired; clean up and return miss.
                 cur.execute(
                     f"DELETE FROM {table_name} WHERE key_digest = %s",
                     (digest,),
                 )
                 self._conn.commit()
-                return None
+                return None, None, None
 
-            return {
-                "value": self._decode(value_blob, is_pickle),
-                "ttl": ttl_secs,
-                "expiry_ts": expiry_ts,
-                "created_ts": created_ts,
-            }
+            return self._decode(value_blob, int(is_pickle)), remaining, ttl_i
 
     def purge(self) -> int:
         """Remove all expired entries from the cache.
