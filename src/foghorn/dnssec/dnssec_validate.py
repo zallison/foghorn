@@ -7,7 +7,9 @@ try:  # Ensure required crypto backend is present before enabling DNSSEC logic.
     import importlib.util as _importlib_util
 
     if _importlib_util.find_spec("cryptography") is None:
-        raise ImportError("No module named 'cryptography'")
+        raise ImportError(
+            "No module named 'cryptography'"
+        )  # pragma: no cover - depends on runtime environment
 except (
     ImportError
 ) as exc:  # pragma: no cover - exercised only when dependency is missing at runtime
@@ -77,10 +79,12 @@ def configure_dnssec_resolver(nameservers: Optional[list[str]]) -> None:
     """Configure nameservers for DNSSEC validation lookups.
 
     Inputs:
-      - nameservers: Optional list of IP address strings. When None or empty,
-        validation uses the system resolver configuration. When provided,
-        validation lookups bypass the system config and talk directly to these
-        servers.
+      - nameservers: Optional list of IP address strings.
+        - None: validation uses the system resolver configuration.
+        - [] (empty list): validation performs all lookups via Foghorn's own
+          RecursiveResolver (no system resolver, no external stub resolvers).
+        - Non-empty list: validation lookups bypass the system config and talk
+          directly to these servers.
 
     Outputs:
       - None; updates module-level configuration used by _resolver().
@@ -788,7 +792,7 @@ def _collect_positive_rrsets(
             # current = <prefix>.dname_owner; replace the owner suffix with
             # target_suffix.
             if not current.is_subdomain(dname_owner):
-                return None
+                return None  # pragma: no cover - defensive: dname_owner is derived from current and its parents
             prefix_labels = current.labels[: -len(dname_owner.labels)]
             new_labels = prefix_labels + target_suffix.labels
             current = dns.name.Name(new_labels)
