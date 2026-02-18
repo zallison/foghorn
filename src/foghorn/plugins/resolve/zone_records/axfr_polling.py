@@ -23,6 +23,11 @@ def start_axfr_polling(plugin: object) -> None:
       - None; when at least one axfr_zones entry has poll_interval_seconds
         > 0, spawns a daemon thread that re-runs AXFR at the minimum
         configured interval.
+
+    Notes:
+      - The polling thread waits a full interval before its first reload.
+      - Each polling tick clears plugin._axfr_loaded_once and calls
+        plugin._load_records(), allowing AXFR-backed zones to transfer again.
     """
     zones = getattr(plugin, "_axfr_zones", None) or []
     min_interval: Optional[int] = None
