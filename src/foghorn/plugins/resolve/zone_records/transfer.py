@@ -35,11 +35,12 @@ def iter_zone_rrs_for_transfer(
         None when this plugin is not authoritative for the requested apex.
 
     Notes:
-      - The returned list is a snapshot built under the records lock so
-        mid-transfer reloads do not change the view.
-      - DNSSEC-related RR types (for example, DNSKEY, RRSIG) are included
-        when present in the zone data; AXFR-specific DNSSEC policy is
-        intentionally out of scope for this helper.
+      - The returned list is built from a snapshot of the plugin's name index.
+        When plugin._records_lock is available, the snapshot is taken under that
+        lock so mid-transfer reloads do not change the view.
+      - DNSSEC-related RR types (for example, DNSKEY, RRSIG) are included when
+        present in the zone data; AXFR-specific DNSSEC policy is intentionally
+        out of scope for this helper.
     """
     # Normalize apex and check whether this plugin is authoritative.
     apex = str(zone_apex).rstrip(".").lower() if zone_apex is not None else ""

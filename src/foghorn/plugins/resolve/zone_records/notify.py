@@ -33,18 +33,20 @@ def record_axfr_client(
     Outputs:
       - None; updates learned NOTIFY targets and may schedule a delayed or
         immediate NOTIFY when axfr_notify_scheduled is configured.
+      - When the plugin does not expose an _axfr_notify_lock (unexpected), this
+        function is a no-op.
     """
     try:
         zone_norm = str(zone_apex).rstrip(".").lower()
     except Exception:
-        zone_norm = str(zone_apex).lower()
+        zone_norm = str(zone_apex).rstrip(".").lower()
     if not zone_norm:
         return
 
     try:
         host = str(client_ip).strip()
     except Exception:
-        host = str(client_ip)
+        host = str(client_ip).strip()
     if not host:
         return
 
@@ -104,6 +106,10 @@ def send_notify_to_target(zone_apex: str, target: Dict[str, object]) -> None:
 
     Outputs:
       - None; logs but otherwise ignores transport errors.
+
+    Notes:
+      - Only "tcp" and "dot" transports are supported. Any transport other than
+        "dot" is treated as plain TCP.
     """
     try:
         apex = str(zone_apex).rstrip(".").lower()
@@ -132,7 +138,9 @@ def send_notify_to_target(zone_apex: str, target: Dict[str, object]) -> None:
     qname = apex + "."
     # Build a minimal NOTIFY message for the zone SOA.
     try:
-        notify = DNSRecord.question(qname, qtype=QTYPE.SOA)
+        # dnslib's DNSRecord.question expects a qtype mnemonic string (e.g. "SOA"),
+        # not a numeric code.
+        notify = DNSRecord.question(qname, qtype="SOA")
         notify.header.opcode = OPCODE.NOTIFY
     except Exception:  # pragma: no cover - defensive
         return
@@ -182,6 +190,10 @@ def send_notify_for_zones(
 
     Outputs:
       - None; best-effort fire-and-forget NOTIFY sends.
+
+    Notes:
+      - Uses both statically configured targets (plugin._axfr_notify_static_targets)
+        and learned targets from recent AXFR/IXFR clients (plugin._axfr_notify_learned).
     """
     if not zone_apexes:
         return
