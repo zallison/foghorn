@@ -66,6 +66,11 @@ foghorn = "foghorn.main:main"
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+[tool.setuptools.package-data]
+# Include the built-in admin web UI assets in wheels/installs so the webserver
+# can serve / and /index.html when running from an installed package.
+"foghorn" = ["html/*", "html/**/*"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
