@@ -701,6 +701,48 @@ def test_config_endpoint_returns_sanitized_config() -> None:
     assert upstream_out["token"] == "***"
 
 
+def test_config_endpoint_honors_server_http_redact_keys(tmp_path) -> None:
+    """Brief: /config should honor server.http.redact_keys when webserver.redact_keys is absent.
+
+    Inputs:
+      - YAML config file on disk.
+      - In-memory config dict containing server.http.redact_keys.
+
+    Outputs:
+      - /config YAML has the configured keys redacted (replaced with '***').
+    """
+
+    cfg_text = (
+        "server:\n"
+        "  http:\n"
+        "    redact_keys: [token, password]\n"
+        "webserver:\n"
+        "  enabled: true\n"
+        "auth:\n"
+        "  token: secret-token\n"
+        "nested:\n"
+        "  password: pw\n"
+    )
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(cfg_text, encoding="utf-8")
+
+    cfg = yaml.safe_load(cfg_text) or {}
+    app = create_app(
+        stats=None,
+        config=cfg,
+        log_buffer=RingBuffer(),
+        config_path=str(cfg_file),
+    )
+    client = TestClient(app)
+
+    resp = client.get("/config")
+    assert resp.status_code == 200
+    config_out = yaml.safe_load(resp.text) or {}
+
+    assert config_out["auth"]["token"] == "***"
+    assert config_out["nested"]["password"] == "***"
+
+
 def test_config_yaml_cache_reuses_body_within_ttl(monkeypatch) -> None:
     """Brief: _get_sanitized_config_yaml_cached should reuse YAML text within TTL.
 
@@ -1433,8 +1475,8 @@ def test_config_endpoint_preserves_comments_and_redacts_values_and_subkeys(
 
     # auth subtree is redacted, including its subkeys
     assert "auth:" in body
-    assert "token: ***" in body
-    assert "password: ***" in body
+    assert "token: '***'" in body
+    assert "password: '***'" in body
     assert "secret-token" not in body
     assert "secret-password" not in body
 
@@ -2613,13 +2655,13 @@ def test_redact_yaml_preserving_layout_covers_lists_and_blank_lines() -> None:
 
     # Top-level auth subtree redacted, including nested keys.
     assert "auth:" in body
-    assert "token: ***" in body
-    assert "password: ***" in body
+    assert "token: '***'" in body
+    assert "password: '***'" in body
     assert "secret-token" not in body
     assert "secret-password" not in body
 
     # List-of-mapping entry with sensitive key is redacted.
-    assert "- token: ***" in body
+    assert "- token: '***'" in body
     assert "list-secret" not in body
 
     # Simple list items in a separate non-redacted block remain unchanged.
@@ -2673,7 +2715,7 @@ def test_get_sanitized_config_yaml_cached_uses_config_path(tmp_path) -> None:
     )
 
     assert "secret-token" not in body
-    assert "token: ***" in body
+    assert "token: '***'" in body
 
 
 def test_find_rate_limit_db_paths_from_config_extracts_db_paths() -> None:

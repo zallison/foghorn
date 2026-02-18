@@ -60,12 +60,24 @@ def _get_redact_keys(config: Dict[str, Any] | None) -> List[str]:
       - List of key names that should have their values redacted.
 
     Notes:
-      - Uses ``webserver.redact_keys`` when set; otherwise falls back to a small
-        default list of sensitive names ("token", "password", "secret").
+      - Preferred: ``webserver.redact_keys``.
+      - Compatibility: also accepts ``server.http.redact_keys`` (v2-style config).
+      - If neither is configured, falls back to a small default list of sensitive
+        names ("token", "password", "secret").
     """
 
     web_cfg = _get_web_cfg(config)
-    keys = web_cfg.get("redact_keys") or ["token", "password", "secret"]
+    keys = web_cfg.get("redact_keys")
+
+    if keys is None and isinstance(config, dict):
+        server_cfg = config.get("server") or {}
+        http_cfg = server_cfg.get("http") or {}
+        if isinstance(http_cfg, dict):
+            keys = http_cfg.get("redact_keys")
+
+    if not keys:
+        keys = ["token", "password", "secret"]
+
     if isinstance(keys, (list, tuple)):
         return [str(k) for k in keys]
     return [str(keys)]
@@ -291,8 +303,10 @@ def _redact_yaml_text_preserving_layout(
                     out_lines.append(line)
                     continue
 
-                # Scalar inline value -> redact.
-                new_line = f"{indent}{key_clean}: ***{comment_part}"
+                # Scalar inline value -> redact. Quote the placeholder so the
+                # resulting YAML remains parseable (unquoted "***" is treated
+                # as an alias token by YAML parsers).
+                new_line = f"{indent}{key_clean}: '***'{comment_part}"
                 out_lines.append(new_line)
                 continue
 
@@ -302,7 +316,7 @@ def _redact_yaml_text_preserving_layout(
                 value_trim = value_part.strip()
                 # Only redact scalars; when no inline value or container, keep as-is.
                 if value_trim and not _is_container_like(value_trim):
-                    new_line = f"{indent}{key_clean}: ***{comment_part}"
+                    new_line = f"{indent}{key_clean}: '***'{comment_part}"
                     out_lines.append(new_line)
                     continue
                 # Keep original line if not a scalar inline value.
@@ -335,7 +349,7 @@ def _redact_yaml_text_preserving_layout(
                     continue
 
                 # Scalar inline value -> redact.
-                new_line = f"{indent}- {key_clean}: ***{comment_part}"
+                new_line = f"{indent}- {key_clean}: '***'{comment_part}"
                 out_lines.append(new_line)
                 continue
 
@@ -351,7 +365,7 @@ def _redact_yaml_text_preserving_layout(
                 value_trim = value_part.strip()
                 # Only redact scalars; keep container or empty-as-header lines.
                 if value_trim and not _is_container_like(value_trim):
-                    new_line = f"{indent}- ***{comment_part}"
+                    new_line = f"{indent}- '***'{comment_part}"
                     out_lines.append(new_line)
                     continue
                 out_lines.append(line)

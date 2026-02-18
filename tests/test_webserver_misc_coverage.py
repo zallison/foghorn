@@ -255,8 +255,8 @@ def test_redact_yaml_preserving_layout_redacts_nested_block_keys() -> None:
     )
 
     out = web_mod._redact_yaml_text_preserving_layout(raw_yaml, ["auth"])
-    assert "token: ***" in out
-    assert "password: ***" in out
+    assert "token: '***'" in out
+    assert "password: '***'" in out
     assert "secret-token" not in out
     assert "secret-password" not in out
     assert "note: keep" in out
