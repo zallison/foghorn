@@ -20,15 +20,17 @@ class EchoPlugin(BasePlugin):
         """Brief: Synthesize a TXT response containing the query name and type.
 
         Inputs:
-          - qname: Queried domain name (string or dnslib-compatible object).
+          - qname: Queried domain name (string-like). The echoed value is
+            normalized by stripping a trailing dot while preserving case.
           - qtype: DNS RR type as an integer code.
           - req: Raw DNS request wire bytes.
           - ctx: PluginContext describing the client and listener.
 
         Outputs:
-          - PluginDecision("override", response=wire) when this plugin targets the
-            request and a response can be built; otherwise None to fall back to
-            normal resolution.
+          - PluginDecision(action="override", response=wire) with a packed DNS
+            response containing a single TXT answer when the plugin targets the
+            request and the request bytes can be parsed.
+          - None when ctx is not targeted, or when req cannot be parsed.
         """
         if not self.targets(ctx):
             return None
