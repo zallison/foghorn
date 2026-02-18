@@ -1,0 +1,113 @@
+# ZoneRecords / `zone` plugin (full-ish config example)
+#
+# This is an example configuration intended to demonstrate the available
+# ZoneRecords options and common BasePlugin targeting/logging knobs.
+
+upstreams:
+  endpoints:
+    - host: 1.1.1.1
+      port: 53
+      transport: udp
+  strategy: failover
+  max_concurrent: 1
+
+logging:
+  python:
+    level: info
+
+plugins:
+  - type: zone
+    id: zone-full-example
+    hooks:
+      pre_resolve: { priority: 60 }
+    config:
+      # BasePlugin targeting + logging
+      targets: [ 0.0.0.0/0 ]
+      targets_ignore: []
+      targets_listener: any
+      targets_domains: []
+      targets_domains_mode: any
+      target_qtypes: [ '*' ]
+      logging:
+        level: info
+        stderr: true
+
+      # Pipe-delimited records files (Foghorn format)
+      file_paths:
+        - ./config/var/records.txt
+        - ./config/var/extra-records.txt
+
+      # Standard BIND-style zone files
+      # Entries can be strings or objects with origin/ttl overrides.
+      bind_paths:
+        - path: ./config/var/example.com.zone
+          origin: example.com.
+          ttl: 300
+        - ./config/var/0.0.10.in-addr.arpa.zone
+
+      # Inline records (processed after files)
+      records:
+        - 'example.com|SOA|300|ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300'
+        - 'www.example.com|A|300|192.0.2.10'
+
+      # Optional: load/reload behaviour
+      load_mode: merge     # replace | merge | first
+      merge_policy: add    # add | overwrite
+
+      # Automatic reload control
+      watchdog_enabled: true
+      watchdog_min_interval_seconds: 1.0
+      watchdog_poll_interval_seconds: 0.0
+
+      ttl: 300
+
+      # Optional: treat these suffixes as authoritative NXDOMAIN/NODATA zones
+      # even without an explicit SOA.
+      nxdomain_zones: [ 'internal.test' ]
+
+      # Optional AXFR-backed zones fetched at startup
+      axfr_zones:
+        - zone: example.com
+          allow_no_dnssec: true
+          upstreams:
+            - host: 192.0.2.10
+              port: 53
+              timeout_ms: 5000
+              transport: tcp
+
+      # Optional NOTIFY targets
+      axfr_notify:
+        - host: 192.0.2.53
+          port: 53
+          timeout_ms: 2000
+          transport: tcp
+      axfr_notify_all: false
+      axfr_notify_scheduled: 0
+
+      # Optional DNSSEC auto-signing
+      dnssec_signing:
+        enabled: false
+        keys_dir: ./config/var/keys
+        algorithm: ECDSAP256SHA256
+        generate: maybe   # yes | no | maybe
+        validity_days: 30
+        use_tld: null
+
+server:
+  listen:
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5353
+    tcp:
+      enabled: false
+      host: 127.0.0.1
+      port: 5353
+    dot:
+      enabled: false
+      host: 127.0.0.1
+      port: 8853
+    doh:
+      enabled: false
+      host: 127.0.0.1
+      port: 5380
