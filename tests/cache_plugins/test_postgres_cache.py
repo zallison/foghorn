@@ -153,10 +153,9 @@ def test_postgres_cache_plugin_initialization_with_defaults() -> None:
         mock_backend = MagicMock()
         mock_backend_class.return_value = mock_backend
 
-        # Test with None config
-        cache = PostgresCache(config=None)
+        cache = PostgresCache()
         assert cache.min_cache_ttl == 0
-        assert cache.backend is mock_backend
+        assert cache._cache is mock_backend
 
         # Verify backend was called with defaults
         call_kwargs = mock_backend_class.call_args[1]
@@ -195,7 +194,7 @@ def test_postgres_cache_plugin_initialization_with_config() -> None:
             "min_cache_ttl": 120,
             "connect_kwargs": {"sslmode": "require"},
         }
-        cache = PostgresCache(config=config)
+        cache = PostgresCache(**config)
         assert cache.min_cache_ttl == 120
 
         call_kwargs = mock_backend_class.call_args[1]
@@ -227,16 +226,15 @@ def test_postgres_cache_plugin_set_enforces_min_ttl() -> None:
         mock_backend = MagicMock()
         mock_backend_class.return_value = mock_backend
 
-        config = {"min_cache_ttl": 100}
-        cache = PostgresCache(config=config)
+        cache = PostgresCache(min_cache_ttl=100)
 
         # TTL below min_cache_ttl should use min_cache_ttl
-        cache.set(b"key1", b"value1", 50)
-        mock_backend.set.assert_called_with(b"key1", b"value1", 100)
+        cache.set(("key1", 1), 50, b"value1")
+        mock_backend.set.assert_called_with(("key1", 1), 100, b"value1")
 
         # TTL above min_cache_ttl should use provided TTL
-        cache.set(b"key2", b"value2", 200)
-        mock_backend.set.assert_called_with(b"key2", b"value2", 200)
+        cache.set(("key2", 1), 200, b"value2")
+        mock_backend.set.assert_called_with(("key2", 1), 200, b"value2")
 
 
 def test_postgres_cache_plugin_get_returns_bytes() -> None:
@@ -258,22 +256,22 @@ def test_postgres_cache_plugin_get_returns_bytes() -> None:
         mock_backend = MagicMock()
         mock_backend_class.return_value = mock_backend
 
-        cache = PostgresCache(config={})
+        cache = PostgresCache()
 
         # Backend returns bytes
         mock_backend.get.return_value = b"cached_value"
-        result = cache.get(b"key1")
+        result = cache.get(("key1", 1))
         assert result == b"cached_value"
 
         # Backend returns None
         mock_backend.get.return_value = None
-        result = cache.get(b"key2")
+        result = cache.get(("key2", 1))
         assert result is None
 
-        # Backend returns non-bytes (should be filtered)
+        # Backend returns non-bytes
         mock_backend.get.return_value = "string_not_bytes"
-        result = cache.get(b"key3")
-        assert result is None
+        result = cache.get(("key3", 1))
+        assert result == "string_not_bytes"
 
 
 def test_postgres_cache_plugin_close() -> None:
@@ -295,7 +293,7 @@ def test_postgres_cache_plugin_close() -> None:
         mock_backend = MagicMock()
         mock_backend_class.return_value = mock_backend
 
-        cache = PostgresCache(config={})
+        cache = PostgresCache()
         cache.close()
         mock_backend.close.assert_called_once()
 
@@ -319,4 +317,4 @@ def test_postgres_cache_plugin_backend_initialization_error() -> None:
         mock_backend_class.side_effect = RuntimeError("No driver available")
 
         with pytest.raises(RuntimeError, match="Failed to initialize PostgreSQL"):
-            PostgresCache(config={})
+            PostgresCache()

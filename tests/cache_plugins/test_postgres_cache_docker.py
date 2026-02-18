@@ -180,20 +180,18 @@ def test_postgres_cache_roundtrip_with_real_db(postgres_container: str) -> None:
 
     try:
         cache = PostgresCache(
-            config={
-                "host": "127.0.0.1",
-                "port": 5433,
-                "user": "postgres",
-                "password": "test",
-                "database": "foghorn_cache",
-                "namespace": "test_cache",
-            }
+            host="127.0.0.1",
+            port=5433,
+            user="postgres",
+            password="test",
+            database="foghorn_cache",
+            namespace="test_cache",
         )
 
         # Test set and get
-        key = (("example.com", 1),)
+        key = ("example.com", 1)
         value = b"test_response_data"
-        cache.set(key, value, 60)
+        cache.set(key, 60, value)
 
         result = cache.get(key)
         assert result == value
@@ -218,20 +216,18 @@ def test_postgres_cache_expiry_with_real_db(postgres_container: str) -> None:
 
     try:
         cache = PostgresCache(
-            config={
-                "host": "127.0.0.1",
-                "port": 5433,
-                "user": "postgres",
-                "password": "test",
-                "database": "foghorn_cache",
-                "namespace": "test_cache_ttl",
-            }
+            host="127.0.0.1",
+            port=5433,
+            user="postgres",
+            password="test",
+            database="foghorn_cache",
+            namespace="test_cache_ttl",
         )
 
         # Test set with short TTL
-        key = (("short.com", 1),)
+        key = ("short.com", 1)
         value = b"expiring_data"
-        cache.set(key, value, 1)  # 1 second TTL
+        cache.set(key, 1, value)  # 1 second TTL
 
         # Should exist immediately
         assert cache.get(key) == value
@@ -263,25 +259,23 @@ def test_postgres_cache_multiple_entries_with_real_db(
 
     try:
         cache = PostgresCache(
-            config={
-                "host": "127.0.0.1",
-                "port": 5433,
-                "user": "postgres",
-                "password": "test",
-                "database": "foghorn_cache",
-                "namespace": "test_cache_multi",
-            }
+            host="127.0.0.1",
+            port=5433,
+            user="postgres",
+            password="test",
+            database="foghorn_cache",
+            namespace="test_cache_multi",
         )
 
         # Test multiple entries
         entries = [
-            ((("a.com", 1),), b"response_a"),
-            ((("b.com", 1),), b"response_b"),
-            ((("c.com", 28),), b"response_c"),
+            (("a.com", 1), b"response_a"),
+            (("b.com", 1), b"response_b"),
+            (("c.com", 28), b"response_c"),
         ]
 
         for key, value in entries:
-            cache.set(key, value, 300)
+            cache.set(key, 300, value)
 
         # Verify all entries exist
         for key, expected_value in entries:
