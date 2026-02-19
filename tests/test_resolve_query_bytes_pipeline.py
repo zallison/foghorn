@@ -336,6 +336,68 @@ def test_resolve_query_bytes_recursive_mode_uses_recursive_resolver(
     DNSUDPHandler.resolver_mode = "forward"
 
 
+def test_resolve_query_bytes_master_mode_refuses_without_forwarding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: master resolver mode returns REFUSED without contacting upstreams.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts REFUSED and that forwarding helpers are not invoked.
+    """
+
+    def _boom_send(*_a, **_k):  # noqa: ANN001
+        raise AssertionError("send_query_with_failover should not be called")
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _boom_send)
+
+    DNSUDPHandler.plugins = []
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    DNSUDPHandler.resolver_mode = "master"
+    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+
+    q = DNSRecord.question("no-forward.example.", "A")
+    resp = resolve_query_bytes(q.pack(), "127.0.0.1")
+    out = DNSRecord.parse(resp)
+    assert out.header.rcode == RCODE.REFUSED
+
+    # Restore default.
+    DNSUDPHandler.resolver_mode = "forward"
+
+
+def test_resolve_query_bytes_none_alias_behaves_like_master(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: resolver mode alias 'none' behaves like master.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts REFUSED and no upstream calls.
+    """
+
+    def _boom_send(*_a, **_k):  # noqa: ANN001
+        raise AssertionError("send_query_with_failover should not be called")
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _boom_send)
+
+    DNSUDPHandler.plugins = []
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    DNSUDPHandler.resolver_mode = "none"
+    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+
+    q = DNSRecord.question("no-forward-alias.example.", "A")
+    resp = resolve_query_bytes(q.pack(), "127.0.0.1")
+    out = DNSRecord.parse(resp)
+    assert out.header.rcode == RCODE.REFUSED
+
+    # Restore default.
+    DNSUDPHandler.resolver_mode = "forward"
+
+
 def test_forward_local_false_blocks_local_queries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
