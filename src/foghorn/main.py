@@ -14,15 +14,98 @@ from .config.config_parser import (
     normalize_upstream_config,
     parse_config_file,
 )
-from foghorn.dnssec.dnssec_validate import configure_dnssec_resolver
 from foghorn.utils.register_caches import apply_decorated_cache_overrides
+
 from .config.logging_config import init_logging
-from .plugins.resolve.base import BasePlugin
-from .servers.doh_api import start_doh_server
-from .servers.server import DNSServer
-from .servers.webserver import RingBuffer, RuntimeState, start_webserver
-from .stats import StatsCollector, StatsReporter
 from .plugins.querylog import BaseStatsStore, load_stats_store_backend
+from .plugins.resolve.base import BasePlugin
+from .servers.runtime_state import RingBuffer, RuntimeState
+from .servers.server import DNSServer
+from .stats import StatsCollector, StatsReporter
+
+
+def start_doh_server(
+    host: str,
+    port: int,
+    resolve_bytes,
+    *,
+    cert_file: str | None = None,
+    key_file: str | None = None,
+    use_asyncio: bool = True,
+) -> object | None:
+    """Brief: Start the optional DoH (DNS-over-HTTPS) server.
+
+    This wrapper exists so tests can monkeypatch foghorn.main.start_doh_server
+    without importing FastAPI/uvicorn at foghorn.main import time.
+
+    Inputs:
+      - host: Bind host.
+      - port: Bind port.
+      - resolve_bytes: Callable that takes (query_bytes, client_ip) and returns response bytes.
+      - cert_file: Optional TLS certificate path.
+      - key_file: Optional TLS private key path.
+      - use_asyncio: When true, prefer asyncio; otherwise use threaded fallback when supported.
+
+    Outputs:
+      - object | None: A server handle/thread-like object, or None on failure.
+
+    Example use:
+      In tests, monkeypatch the wrapper symbol without importing FastAPI at import time:
+        monkeypatch.setattr(foghorn.main, 'start_doh_server', fake_start)
+    """
+
+    from .servers.doh_api import start_doh_server as _start_doh_server
+
+    return _start_doh_server(
+        host,
+        port,
+        resolve_bytes,
+        cert_file=cert_file,
+        key_file=key_file,
+        use_asyncio=use_asyncio,
+    )
+
+
+def start_webserver(
+    stats_collector,
+    cfg,
+    *,
+    log_buffer=None,
+    config_path: str | None = None,
+    runtime_state: RuntimeState | None = None,
+    plugins: list[BasePlugin] | None = None,
+) -> object | None:
+    """Brief: Start the optional admin HTTP webserver.
+
+    This wrapper exists so tests can monkeypatch foghorn.main.start_webserver
+    without importing FastAPI/uvicorn at foghorn.main import time.
+
+    Inputs:
+      - stats_collector: StatsCollector instance or None.
+      - cfg: Parsed config mapping.
+      - log_buffer: Optional RingBuffer for recent logs.
+      - config_path: Path to the loaded config file.
+      - runtime_state: Optional RuntimeState for readiness endpoints.
+      - plugins: Optional list of active plugins.
+
+    Outputs:
+      - object | None: A webserver handle/thread-like object, or None on failure.
+
+    Example use:
+      In tests, monkeypatch the wrapper symbol without importing FastAPI at import time:
+        monkeypatch.setattr(foghorn.main, 'start_webserver', fake_start)
+    """
+
+    from .servers.webserver import start_webserver as _start_webserver
+
+    return _start_webserver(
+        stats_collector,
+        cfg,
+        log_buffer=log_buffer,
+        config_path=config_path,
+        runtime_state=runtime_state,
+        plugins=plugins,
+    )
 
 
 def _clear_lru_caches(wrappers: Optional[List[object]]):
@@ -990,19 +1073,39 @@ def main(argv: List[str] | None = None) -> int:
     # that case, route all DNSSEC helper lookups through Foghorn's own
     # RecursiveResolver rather than the system resolver.
     if dnssec_mode == "validate" and dnssec_validation in {"local", "local_extended"}:
+        try:
+            from foghorn.dnssec.dnssec_validate import (
+                configure_dnssec_resolver as _configure_dnssec_resolver,
+            )
+        except Exception as exc:
+            logger.error(
+                "DNSSEC validation is enabled (dnssec.mode=validate, dnssec.validation=%s) "
+                "but required dependencies are missing (%s). Install dnspython+cryptography or disable DNSSEC validation.",
+                dnssec_validation,
+                exc,
+            )
+            return 1
+
         if resolver_mode == "forward":
             upstream_hosts = [
                 str(u["host"]) for u in upstreams if isinstance(u, dict) and "host" in u
             ]
-            configure_dnssec_resolver(upstream_hosts or None)
+            _configure_dnssec_resolver(upstream_hosts or None)
         else:
-            # Empty list is a sentinel tellingfoghorn.dnssec.dnssec_validate to use
+            # Empty list is a sentinel telling foghorn.dnssec.dnssec_validate to use
             # RecursiveResolver for all validation lookups.
-            configure_dnssec_resolver([])
+            _configure_dnssec_resolver([])
     else:
-        # For non-validating modes or upstream_ad, fall back to system resolver
-        # configuration inside the DNSSEC validator.
-        configure_dnssec_resolver(None)
+        # DNSSEC validation is not using local lookups. Avoid importing dnspython
+        # at startup so minimal/headless builds can omit it.
+        try:
+            from foghorn.dnssec.dnssec_validate import (
+                configure_dnssec_resolver as _configure_dnssec_resolver,
+            )
+
+            _configure_dnssec_resolver(None)
+        except Exception:
+            pass
 
     server = None
     udp_thread: threading.Thread | None = None
@@ -1245,8 +1348,9 @@ def main(argv: List[str] | None = None) -> int:
         cert_file = doh_cfg.get("cert_file")
         key_file = doh_cfg.get("key_file")
         logger.info("Starting DoH listener on %s:%d", h, p)
+
         try:
-            # start uvicorn-based DoH FastAPI server in background thread
+            # Start uvicorn-based DoH FastAPI server in background thread.
             doh_handle = start_doh_server(
                 h,
                 p,
@@ -1255,9 +1359,16 @@ def main(argv: List[str] | None = None) -> int:
                 key_file=key_file,
                 use_asyncio=use_asyncio,
             )
-        except Exception as e:
-            runtime_state.set_listener_error("doh", e)
-            logger.error("Failed to start DoH server: %s", e)
+        except Exception as exc:
+            runtime_state.set_listener_error("doh", exc)
+            if isinstance(exc, (ImportError, ModuleNotFoundError)):
+                logger.error(
+                    "listen.doh.enabled=true but DoH dependencies are missing (%s). "
+                    "Install fastapi+uvicorn or disable listen.doh.",
+                    exc,
+                )
+            else:
+                logger.error("Failed to start DoH server: %s", exc)
             return 1
         if doh_handle is None:
             runtime_state.set_listener_error("doh", "start_doh_server returned None")
@@ -1268,24 +1379,29 @@ def main(argv: List[str] | None = None) -> int:
 
         runtime_state.set_listener("doh", enabled=True, thread=doh_handle)
 
-    # Start admin HTTP webserver (FastAPI) and treat None handle as fatal when
-    # webserver.enabled is true. Tests and production code both rely on a
-    # single call to start_webserver() so it can be cleanly monkeypatched and
-    # stopped from the finally: block below.
-    try:
-        web_handle = start_webserver(
-            stats_collector,
-            cfg,
-            log_buffer=web_log_buffer,
-            config_path=cfg_path,
-            runtime_state=runtime_state,
-            plugins=plugins,
-        )
-    except (
-        Exception
-    ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        logger.error("Failed to start webserver: %s", e)
-        return 1
+    # Start admin HTTP webserver (FastAPI). When disabled, avoid importing the
+    # FastAPI implementation so minimal/headless builds can omit it.
+    if web_enabled:
+        try:
+            web_handle = start_webserver(
+                stats_collector,
+                cfg,
+                log_buffer=web_log_buffer,
+                config_path=cfg_path,
+                runtime_state=runtime_state,
+                plugins=plugins,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            runtime_state.set_listener_error("webserver", exc)
+            if isinstance(exc, (ImportError, ModuleNotFoundError)):
+                logger.error(
+                    "server.http.enabled=true (or legacy http/webserver config present) but "
+                    "admin webserver dependencies are missing (%s). Install fastapi+uvicorn or disable server.http.",
+                    exc,
+                )
+            else:
+                logger.error("Failed to start webserver: %s", exc)
+            return 1
 
     if web_enabled and web_handle is None:
         runtime_state.set_listener_error("webserver", "start_webserver returned None")
