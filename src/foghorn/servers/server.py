@@ -1763,8 +1763,11 @@ def _resolve_core(
         used_upstream: Optional[Dict] = None
         reason: Optional[str] = None
 
-        # Decide between forwarding and recursive resolution based on resolver_mode.
+        # Decide between forwarding, recursion, and authoritative-only (no
+        # forwarding) based on resolver_mode.
         resolver_mode = str(getattr(DNSUDPHandler, "resolver_mode", "forward")).lower()
+        if resolver_mode == "none":
+            resolver_mode = "master"
 
         if resolver_mode == "recursive":
             # In recursive mode we bypass configured upstreams and instead walk
@@ -1814,6 +1817,20 @@ def _resolve_core(
             # and an optional upstream identifier for stats.
             reply, upstream_id = resolver.resolve(req)
             reason = "ok" if reply is not None else "all_failed"
+        elif resolver_mode == "master":
+            # Authoritative-only mode: do not forward or recurse. Plugins still
+            # run (pre/post), but any cache miss falls through to REFUSED.
+            upstream_id = None
+            r = req.reply()
+            r.header.rcode = RCODE.REFUSED
+            # Echo client EDNS(0) OPT and attach an EDE explaining the policy
+            # when enabled.
+            _echo_client_edns(req, r)
+            ede_code_for_logs = 15
+            ede_text_for_logs = "forwarding disabled (resolver.mode=master)"
+            _attach_ede_option(req, r, ede_code_for_logs, ede_text_for_logs)  # Blocked
+            reply = r.pack()
+            reason = "no_forwarding"
         else:
             # Classic forwarding: EDNS/DNSSEC adjustments (mirror
             # DNSUDPHandler behaviour) followed by send_query_with_failover.
