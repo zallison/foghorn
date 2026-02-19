@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.6.5] - 2026-02-18
+## [Unreleased]
 
 > Release notes for changes between **v0.6.4** and **v0.6.5**.
 
@@ -12,6 +12,12 @@ All notable changes to this project will be documented in this file.
 - Added generic resolve-plugin admin UI snapshots via `BasePlugin.get_http_snapshot()`.
 - Added ZoneRecords admin snapshot payload (`ZoneRecords.get_http_snapshot()`) including per-record source labels.
 - Added `scripts/generate_config_mermaid.py` to generate a Mermaid diagram of plugin ordering and short-circuit behavior from a config file.
+- `scripts/generate_config_mermaid.py`: added diagram rendering knobs (`--direction`, `--font-size`, `--node-spacing`, `--rank-spacing`, `--no-init`) and config-derived listener/upstream summaries.
+- Admin web UI: added a config diagram PNG generated on startup (when possible) and served at `/api/v1/config/diagram.png`.
+- Admin web UI: updated the "JSON & Config" tab to show the config diagram (left) and config YAML (right).
+- Admin web UI: added server-side paginated table data for stats via `/api/v1/stats/table/{table_id}` (supports paging, sorting, and search).
+- Config Mermaid diagram generation now splits listeners and upstream endpoints into individual nodes, and highlights secure transports (DoT/DoH) vs insecure (UDP/TCP).
+- Filter plugin: added `deny_response: drop` to allow silently dropping denied queries (no reply).
 - ZoneRecords (`zone`) now supports configurable reload semantics via `load_mode` and conflict handling via `merge_policy`.
 - ZoneRecords can now be configured with `load_mode=first` to select the first configured source group (files, BIND zonefiles, AXFR, or inline) and ignore the others.
 - BIND zonefile entries under `bind_paths` can now override `$ORIGIN` and `$TTL` via per-entry `origin`/`ttl` settings; in-file `$ORIGIN`/`$TTL` directives are ignored with a warning when overridden.
@@ -23,10 +29,13 @@ All notable changes to this project will be documented in this file.
 - `server.resolver.mode: none` is now treated as an alias for authoritative-only operation (master mode): queries do not recurse/forward.
 - Filter plugin now normalizes domain keys (case/trailing-dot) for consistent allow/deny and record handling.
 - Resolve Echo plugin class renamed from `EchoPlugin` to `Echo`.
+- Refactored `scripts/generate_config_mermaid.py` to use shared library code under `foghorn.utils.config_mermaid`.
 - Regenerated `assets/config-schema.json` (via `scripts/generate_foghorn_schema.py`) to reflect updated resolver options and plugin config models.
 - Refactored ZoneRecords implementation into `foghorn.plugins.resolve.zone_records` package modules for clearer separation of loader/resolver/watchdog/AXFR helpers.
 - Refactored `cache.postgres_cache` to delegate to the `PostgresTTLCache` backend, with a more explicit key/TTL/value API and stable key hashing for non-bytes keys.
 - Packaging now includes the built-in admin web UI assets in installed distributions.
+- Foghorn can now start in minimal/headless environments without importing FastAPI or dnspython at module import time. DNSSEC local validation, DoH, and the admin web UI are imported only when enabled in configuration.
+- Resolve plugin discovery skips plugins with missing optional dependencies by default (with improved error messages). Set `abort_on_failure: true` in a plugin's config to make missing dependencies fatal, or set `FOGHORN_STRICT_PLUGIN_DISCOVERY=1` for strict discovery.
 
 ### Fixed
 
@@ -34,6 +43,7 @@ All notable changes to this project will be documented in this file.
 - Authoritative-only resolver behavior now returns REFUSED with an EDE explanation instead of attempting upstream resolution.
 - The admin `/config` endpoint now supports `server.http.redact_keys` as a compatibility fallback when `webserver.redact_keys` is not set.
 - Redacted YAML output now quotes the placeholder (`'***'`) to ensure redacted config output remains parseable.
+- Fixed Mermaid config diagram rendering when resolver mode is `master` (authoritative-only / no forwarding).
 
 ### Tests
 
@@ -48,6 +58,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
+- Updated Filter plugin docs to include `deny_response: drop`.
 - Updated ZoneRecords plugin docs and README examples to document the new options.
 - Updated the README test/coverage badges.
 - Added developer documentation note about regenerating `assets/config-schema.json` when plugin config models change.
