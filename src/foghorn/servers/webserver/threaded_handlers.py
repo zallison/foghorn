@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional
 import yaml
 
 from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
+from ...utils.config_mermaid import diagram_png_path_for_config
 from ..udp_server import DNSUDPHandler
 from . import admin_logic as _admin_logic
 from . import config_persistence as _config_persistence
@@ -208,6 +209,87 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 getattr(self, "path", ""),
             )
             return
+
+    def _get_query_param(
+        self,
+        params: Dict[str, list[str]],
+        key: str,
+        default: str | None = None,
+    ) -> str | None:
+        """Brief: Fetch a single string query parameter from parse_qs output.
+
+        Inputs:
+          - params: Dict from urllib.parse.parse_qs.
+          - key: Query parameter key.
+          - default: Value to return when the key is missing.
+
+        Outputs:
+          - Parameter string value or default.
+        """
+
+        values = params.get(key)
+        if not values:
+            return default
+        if not isinstance(values, list):
+            return default
+        if not values:
+            return default
+        val = values[0]
+        if val is None:
+            return default
+        return str(val)
+
+    def _get_int_param(
+        self,
+        params: Dict[str, list[str]],
+        key: str,
+        default: int,
+    ) -> int:
+        """Brief: Fetch an int query parameter from parse_qs output.
+
+        Inputs:
+          - params: Dict from urllib.parse.parse_qs.
+          - key: Query parameter key.
+          - default: Default int when missing or invalid.
+
+        Outputs:
+          - Parsed int value.
+        """
+
+        raw = self._get_query_param(params, key)
+        if raw is None:
+            return int(default)
+        try:
+            return int(raw)
+        except Exception:
+            return int(default)
+
+    def _get_bool_param(
+        self,
+        params: Dict[str, list[str]],
+        key: str,
+        default: bool = False,
+    ) -> bool:
+        """Brief: Fetch a bool query parameter from parse_qs output.
+
+        Inputs:
+          - params: Dict from urllib.parse.parse_qs.
+          - key: Query parameter key.
+          - default: Default bool when missing or invalid.
+
+        Outputs:
+          - Parsed bool value.
+        """
+
+        raw = self._get_query_param(params, key)
+        if raw is None:
+            return bool(default)
+        raw = str(raw).strip().lower()
+        if raw in {"1", "true", "t", "yes", "y", "on"}:
+            return True
+        if raw in {"0", "false", "f", "no", "n", "off"}:
+            return False
+        return bool(default)
 
     def _send_yaml(
         self, status_code: int, text: str
@@ -435,6 +517,112 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             ],
         )
 
+        self._send_json(200, payload)
+
+    def _handle_stats_table(self, path: str, params: Dict[str, list[str]]) -> None:
+        """Brief: Handle GET /api/v1/stats/table/{table_id}.
+
+        Inputs:
+          - path: Request path including the table_id segment.
+          - params: Query parameters mapping.
+
+        Outputs:
+          - None (sends JSON response with a paged table payload).
+        """
+
+        if not self._require_auth():
+            return
+
+        collector: Optional[StatsCollector] = getattr(self._server(), "stats", None)
+        if collector is None:
+            self._send_json(
+                404,
+                {"detail": "stats collector disabled", "server_time": _utc_now_iso()},
+            )
+            return
+
+        prefix = "/api/v1/stats/table/"
+        table_id_raw = path[len(prefix) :].strip("/")
+        table_id = urllib.parse.unquote(table_id_raw)
+        if not table_id:
+            self._send_json(
+                404,
+                {"detail": "unknown stats table", "server_time": _utc_now_iso()},
+            )
+            return
+
+        snap: StatsSnapshot = _get_stats_snapshot_cached(collector, reset=False)
+
+        def _pairs_to_rows(pairs: object) -> list[dict[str, object]]:
+            out: list[dict[str, object]] = []
+            if not isinstance(pairs, list):
+                return out
+            for item in pairs:
+                if not isinstance(item, (list, tuple)) or len(item) < 2:
+                    continue
+                name, count = item[0], item[1]
+                try:
+                    count_i = int(count)
+                except Exception:
+                    continue
+                out.append({"name": str(name), "count": count_i})
+            return out
+
+        group_key = self._get_query_param(params, "group_key")
+        tid = str(table_id).strip()
+
+        rows: list[dict[str, object]]
+        if tid in {
+            "top_clients",
+            "top_domains",
+            "top_subdomains",
+            "cache_hit_domains",
+            "cache_miss_domains",
+            "cache_hit_subdomains",
+            "cache_miss_subdomains",
+        }:
+            pairs = getattr(snap, tid, None)
+            rows = _pairs_to_rows(pairs)
+        elif tid in {"qtype_qnames", "rcode_domains", "rcode_subdomains"}:
+            if not group_key:
+                self._send_json(
+                    400,
+                    {
+                        "detail": "group_key is required for grouped stats tables",
+                        "server_time": _utc_now_iso(),
+                    },
+                )
+                return
+            mapping = getattr(snap, tid, None)
+            if not isinstance(mapping, dict):
+                rows = []
+            else:
+                rows = _pairs_to_rows(mapping.get(str(group_key)))
+        else:
+            self._send_json(
+                404,
+                {"detail": "unknown stats table", "server_time": _utc_now_iso()},
+            )
+            return
+
+        payload = _admin_logic.build_table_page_payload(
+            rows,
+            page=self._get_int_param(params, "page", 1),
+            page_size=self._get_int_param(params, "page_size", 50),
+            sort_key=self._get_query_param(params, "sort_key"),
+            sort_dir=self._get_query_param(params, "sort_dir"),
+            search=self._get_query_param(params, "search"),
+            hide_zero_calls=False,
+            hide_zero_hits=False,
+            show_down_services=True,
+            hide_hash_like=False,
+            default_sort_key="count",
+            default_sort_dir="desc",
+        )
+        payload["server_time"] = _utc_now_iso()
+        payload["table_id"] = tid
+        if group_key is not None:
+            payload["group_key"] = str(group_key)
         self._send_json(200, payload)
 
     def _handle_stats_reset(
@@ -1335,6 +1523,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_ready()
         elif path in {"/stats", "/api/v1/stats"}:
             self._handle_stats(params)
+        elif path.startswith("/api/v1/stats/table/"):
+            self._handle_stats_table(path, params)
         elif path in {"/traffic", "/api/v1/traffic"}:
             self._handle_traffic(params)
         elif path in {"/config", "/api/v1/config"}:

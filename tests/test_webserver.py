@@ -537,6 +537,127 @@ def test_stats_fastapi_and_threaded_payloads_match(monkeypatch) -> None:
     assert "rcode_subdomains" in fastapi_data
 
 
+def test_stats_table_endpoint_fastapi_and_threaded_match() -> None:
+    """Brief: /api/v1/stats/table must work in both FastAPI and threaded servers.
+
+    Inputs:
+      - StatsCollector seeded with cache miss and qtype top-list activity.
+
+    Outputs:
+      - FastAPI and threaded payloads match for successful table responses.
+      - Grouped tables require group_key and return 400 otherwise.
+      - Unknown table_id returns 404.
+    """
+
+    import http.client
+
+    import foghorn.servers.webserver as web_mod
+
+    collector = StatsCollector(
+        track_uniques=True,
+        include_qtype_breakdown=True,
+        include_top_clients=True,
+        include_top_domains=True,
+        top_n=50,
+    )
+
+    # Populate cache miss domain counters.
+    collector.record_cache_miss("b.com")
+    collector.record_cache_miss("b.com")
+    collector.record_cache_miss("a.com")
+
+    # Populate qtype_qnames grouped counters.
+    collector.record_query("192.0.2.1", "b.com", "A")
+    collector.record_query("192.0.2.2", "a.com", "A")
+    collector.record_query("192.0.2.3", "c.com", "AAAA")
+
+    cfg = {"webserver": {"enabled": True, "auth": {"mode": "none"}}}
+
+    # ---- FastAPI ----
+    app = create_app(stats=collector, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    fastapi_resp = client.get("/api/v1/stats/table/cache_miss_domains")
+    assert fastapi_resp.status_code == 200
+    fastapi_data = fastapi_resp.json()
+    assert fastapi_data["sort_key"] == "count"
+    assert fastapi_data["sort_dir"] == "desc"
+    assert fastapi_data["items"][0]["name"] == "b.com"
+    assert fastapi_data["items"][0]["count"] == 2
+
+    # Grouped table.
+    fastapi_grouped = client.get(
+        "/api/v1/stats/table/qtype_qnames", params={"group_key": "A"}
+    )
+    assert fastapi_grouped.status_code == 200
+    assert fastapi_grouped.json()["group_key"] == "A"
+
+    # Missing group_key => 400.
+    missing_group = client.get("/api/v1/stats/table/qtype_qnames")
+    assert missing_group.status_code == 400
+
+    # Unknown table => 404.
+    unknown = client.get("/api/v1/stats/table/nope")
+    assert unknown.status_code == 404
+
+    # ---- Threaded ----
+    def _threaded_get(path: str) -> tuple[int, dict[str, object]]:
+        httpd = web_mod._AdminHTTPServer(
+            ("127.0.0.1", 0),
+            web_mod._ThreadedAdminRequestHandler,
+            stats=collector,
+            config=cfg,
+            log_buffer=RingBuffer(),
+            config_path=None,
+        )
+        host, port = httpd.server_address
+
+        def _serve_once() -> None:
+            try:
+                httpd.handle_request()
+            finally:
+                httpd.server_close()
+
+        t = threading.Thread(target=_serve_once, daemon=True)
+        t.start()
+
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            status = int(resp.status)
+            body = resp.read().decode("utf-8")
+        finally:
+            conn.close()
+            t.join(timeout=1.0)
+
+        data = json.loads(body or "{}")
+        assert isinstance(data, dict)
+        return status, data
+
+    status, threaded_data = _threaded_get("/api/v1/stats/table/cache_miss_domains")
+    assert status == 200
+
+    def _normalize(payload: dict) -> dict:
+        cleaned = dict(payload)
+        cleaned.pop("server_time", None)
+        return cleaned
+
+    assert _normalize(threaded_data) == _normalize(fastapi_data)
+
+    status2, grouped2 = _threaded_get("/api/v1/stats/table/qtype_qnames?group_key=A")
+    assert status2 == 200
+    assert grouped2.get("group_key") == "A"
+
+    status3, missing3 = _threaded_get("/api/v1/stats/table/qtype_qnames")
+    assert status3 == 400
+    assert "detail" in missing3
+
+    status4, unknown4 = _threaded_get("/api/v1/stats/table/nope")
+    assert status4 == 404
+    assert "detail" in unknown4
+
+
 def test_stats_debug_timings_emit_log_when_enabled(caplog) -> None:
     """Brief: /stats should log timing breakdown when debug_timings is enabled.
 
