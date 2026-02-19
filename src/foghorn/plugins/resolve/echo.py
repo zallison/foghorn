@@ -7,7 +7,7 @@ from dnslib import DNSHeader, DNSRecord, QTYPE, RR, TXT
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
 
 
-class EchoPlugin(BasePlugin):
+class Echo(BasePlugin):
     """Brief: Simple resolve plugin that echoes qname/qtype in a TXT answer."""
 
     def pre_resolve(
