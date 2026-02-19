@@ -188,6 +188,21 @@ a:visited {
     width: 100%;
 }
 
+/* Config page: collapse to a single column when Mermaid diagram is unavailable */
+.fh-main-config-single {
+    flex-direction: column;
+}
+
+/* Hide the diagram pane entirely when no diagram can be loaded. */
+.fh-main-config-single .fh-pane-left {
+    display: none;
+}
+
+.fh-main-config-single .fh-pane {
+    flex: 0 0 100%;
+    width: 100%;
+}
+
 .fh-docker-controls {
     margin: 0 0 0.5rem 0;
 }
@@ -385,6 +400,27 @@ table {
     height: 100%;
     background: var(--accent);
     transform-origin: left center;
+}
+
+/* Config diagram */
+
+.fh-diagram-container {
+    background: var(--bg-card-inner);
+    border-radius: 0.375rem;
+    padding: 0.75rem 0.9rem;
+    overflow: auto;
+}
+
+.fh-diagram-img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.fh-diagram-fallback {
+    margin-top: 0.5rem;
+    font-size: 0.85rem;
+    color: var(--fg-muted);
 }
 
 /* Config view/edit */

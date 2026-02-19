@@ -6,7 +6,7 @@ WORKDIR /foghorn
 
 # Install python3-pip
 RUN DEBIAN_FRONTEND=noninteractive apt update && \
-	DEBIAN_FRONTEND=noninteractive apt install -y python3-pip libmariadb-dev && \
+	DEBIAN_FRONTEND=noninteractive apt install -y python3-pip libmariadb-dev npm && \
 	DEBIAN_FRONTEND=noninteractive apt clean && \
 	rm -rf /var/lib/apt/lists/*
 
@@ -23,7 +23,8 @@ RUN pip3 install --root-user-action=ignore black build coverage isort pytest pyt
 COPY . /foghorn
 
 # Ensure dependencies
-RUN pip install --root-user-action=ignore --no-build-isolation "."
+RUN pip install --root-user-action=ignore --no-build-isolation "." && \
+	cd /foghorn && npm install -g @mermaid-js/mermaid-cli
 
 ## Port expose and suggusted mappings
 # Normal Port # Comment

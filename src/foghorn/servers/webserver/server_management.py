@@ -215,6 +215,20 @@ def start_webserver(
     if not enabled:
         return None
 
+    # Best-effort: generate a config diagram PNG for the active config when
+    # possible. This is intentionally non-fatal (e.g., mmdc missing).
+    if config_path:
+        try:
+            from ...utils.config_mermaid import ensure_config_diagram_png
+
+            ok, detail, png_path = ensure_config_diagram_png(config_path=config_path)
+            if ok:
+                logger.info("Config diagram: %s (%s)", png_path, detail)
+            else:
+                logger.warning("Config diagram not generated: %s", detail)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Config diagram generation failed")
+
     foghorn_cfg = (config.get("foghorn") or {}) if isinstance(config, dict) else {}
     use_asyncio = bool(foghorn_cfg.get("use_asyncio", True))
 
