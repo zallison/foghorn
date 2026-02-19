@@ -420,6 +420,82 @@
 				return hms;
 			}
 
+			function _ensureStatsPaneRefs() {
+				if (!page2) {
+					return;
+				}
+				if (!statsPaneLeftEl) {
+					statsPaneLeftEl = page2.querySelector('.fh-pane-left');
+				}
+				if (!statsPaneRightEl) {
+					statsPaneRightEl = page2.querySelector('.fh-pane-right');
+				}
+			}
+
+			function hideStatsDetails() {
+				_ensureStatsPaneRefs();
+				if (statsDetailsPane) {
+					statsDetailsPane.hidden = true;
+				}
+				if (statsDetailsRootEl) {
+					statsDetailsRootEl.textContent = '';
+				}
+				if (statsPaneLeftEl) {
+					statsPaneLeftEl.hidden = false;
+				}
+				if (statsPaneRightEl) {
+					statsPaneRightEl.hidden = false;
+				}
+			}
+
+			function showStatsDetails(details) {
+				if (!details || !details.table_id) {
+					return;
+				}
+				_ensureStatsPaneRefs();
+				if (statsPaneLeftEl) {
+					statsPaneLeftEl.hidden = true;
+				}
+				if (statsPaneRightEl) {
+					statsPaneRightEl.hidden = true;
+				}
+				if (statsDetailsPane) {
+					statsDetailsPane.hidden = false;
+				}
+
+				var title = details.title || 'Details';
+				if (statsDetailsTitleEl) {
+					statsDetailsTitleEl.textContent = title;
+				}
+				if (statsDetailsHelpEl) {
+					statsDetailsHelpEl.textContent = details.help || '';
+				}
+				if (!statsDetailsRootEl) {
+					return;
+				}
+
+				var desc = { endpoints: { snapshot: '/api/v1/stats' } };
+				var section = {
+					id: details.table_id,
+					title: title,
+					columns: [
+						{ key: 'name', label: 'Name' },
+						{ key: 'count', label: 'Count', align: 'right', nowrap: true },
+					],
+				};
+				var extra = null;
+				if (details.group_key != null && details.group_key !== '') {
+					extra = { group_key: details.group_key };
+				}
+				renderTableSectionPaged(statsDetailsRootEl, section, desc, null, extra);
+			}
+
+			if (btnStatsDetailsBack) {
+				btnStatsDetailsBack.addEventListener('click', function () {
+					hideStatsDetails();
+				});
+			}
+
 			function clearStatsGroups() {
 				while (statsGroupsEl.firstChild) {
 					statsGroupsEl.removeChild(statsGroupsEl.firstChild);
@@ -564,6 +640,65 @@
 				statsGroupsEl.appendChild(group);
 			}
 
+			function getStatsDetailsForTopListTitle(title) {
+				if (!title) {
+					return null;
+				}
+				title = String(title);
+				var info = { title: title, table_id: null, group_key: null, help: '' };
+
+				// Fixed-name tables (direct stats snapshot fields).
+				var fixed = {
+					'Top Client': 'top_clients',
+					'Top Domains': 'top_domains',
+					'Top Sub Domains': 'top_subdomains',
+					'Top Cache Hit Domains': 'cache_hit_domains',
+					'Top Cache Miss Domains': 'cache_miss_domains',
+					'Top Cache Hit Subdomains': 'cache_hit_subdomains',
+					'Top Cache Miss Subdomains': 'cache_miss_subdomains',
+				};
+				if (Object.prototype.hasOwnProperty.call(fixed, title)) {
+					info.table_id = fixed[title];
+					info.help = 'From /api/v1/stats/table/' + encodeURIComponent(String(info.table_id)) + '.';
+					return info;
+				}
+
+				// Per-qtype lists: "Top A Requests" => qtype_qnames?group_key=A
+				if (title.indexOf('Top ') === 0 && title.lastIndexOf(' Requests') === title.length - ' Requests'.length) {
+					var qt = title.slice('Top '.length, title.length - ' Requests'.length);
+					if (qt) {
+						info.table_id = 'qtype_qnames';
+						info.group_key = qt;
+						info.help = 'Query type ' + qt + ' from /api/v1/stats/table/qtype_qnames.';
+						return info;
+					}
+				}
+
+				// Per-rcode domain lists: "Top NXDOMAIN Domains" => rcode_domains?group_key=NXDOMAIN
+				if (title.indexOf('Top ') === 0 && title.lastIndexOf(' Domains') === title.length - ' Domains'.length) {
+					var rc = title.slice('Top '.length, title.length - ' Domains'.length);
+					if (rc && rc.indexOf('Cache ') !== 0) {
+						info.table_id = 'rcode_domains';
+						info.group_key = rc;
+						info.help = 'Response code ' + rc + ' from /api/v1/stats/table/rcode_domains.';
+						return info;
+					}
+				}
+
+				// Per-rcode subdomain lists: "Top NXDOMAIN Subdomains" => rcode_subdomains?group_key=NXDOMAIN
+				if (title.indexOf('Top ') === 0 && title.lastIndexOf(' Subdomains') === title.length - ' Subdomains'.length) {
+					var rc2 = title.slice('Top '.length, title.length - ' Subdomains'.length);
+					if (rc2 && rc2.indexOf('Cache ') !== 0) {
+						info.table_id = 'rcode_subdomains';
+						info.group_key = rc2;
+						info.help = 'Response code ' + rc2 + ' from /api/v1/stats/table/rcode_subdomains.';
+						return info;
+					}
+				}
+
+				return null;
+			}
+
 			function appendTopListGroup(title, entries, container) {
 				if (!entries || !Array.isArray(entries) || !entries.length) {
 					return;
@@ -575,6 +710,13 @@
 				var heading = document.createElement('h3');
 				heading.className = 'fh-stats-group-title';
 				heading.textContent = title;
+				var details = getStatsDetailsForTopListTitle(title);
+				if (details && details.table_id) {
+					heading.classList.add('fh-stats-group-title-link');
+					heading.addEventListener('click', function () {
+						showStatsDetails(details);
+					});
+				}
 				// Provide a helpful tooltip for any "*Subdomain*" style list so it
 				// is clear that the entries are full subdomain qnames.
 				if (
@@ -582,6 +724,10 @@
 					(title.indexOf('Subdomain') !== -1 || title.indexOf('Sub Domains') !== -1)
 				) {
 					heading.title = 'Entries are subdomain names (full qnames, for example "www.example.com").';
+				}
+				if (details && details.table_id) {
+					var extra = details.group_key ? ' group_key=' + String(details.group_key) : '';
+					heading.title = (heading.title ? heading.title + ' ' : '') + 'Click for details (' + details.table_id + extra + ').';
 				}
 				group.appendChild(heading);
 
@@ -1924,6 +2070,8 @@
 			}
 
 			function renderTableSection(root, rows, section) {
+				// Legacy client-side renderer (kept for backwards compatibility and
+				// for any future non-paginated uses).
 				if (!root) {
 					return;
 				}
@@ -1962,59 +2110,58 @@
 				heading.textContent = title;
 				group.appendChild(heading);
 
-					// Optional filters (e.g. hide_zero_calls/hide_zero_hits for decorated
-					// caches or show_down_services for mDNS). Multiple filters for a
-					// section share a single controls container.
-					var filterIds = Array.isArray(section && section.filters)
-						? section.filters.map(function (f) { return f && f.id; })
-						: [];
-					var controlsDiv = null;
-					function ensureControlsDiv() {
-						if (!controlsDiv) {
-							controlsDiv = document.createElement('div');
-							controlsDiv.className = 'fh-pane-controls';
-							group.appendChild(controlsDiv);
-						}
-						return controlsDiv;
+				// Optional filters (legacy client-side)
+				var filterIds = Array.isArray(section && section.filters)
+					? section.filters.map(function (f) { return f && f.id; })
+					: [];
+				var controlsDiv = null;
+				function ensureControlsDiv() {
+					if (!controlsDiv) {
+						controlsDiv = document.createElement('div');
+						controlsDiv.className = 'fh-pane-controls';
+						group.appendChild(controlsDiv);
 					}
-					if (filterIds.indexOf('hide_zero_calls') !== -1) {
-						var controlsZeroCalls = ensureControlsDiv();
-						var labelZeroCalls = document.createElement('label');
-						labelZeroCalls.style.fontSize = '0.9em';
-						var cbZeroCalls = document.createElement('input');
-						cbZeroCalls.type = 'checkbox';
-						cbZeroCalls.checked = true;
-						cbZeroCalls.setAttribute('data-filter-id', 'hide_zero_calls');
-						labelZeroCalls.appendChild(cbZeroCalls);
-						labelZeroCalls.appendChild(document.createTextNode(' Hide zero-call caches'));
-						controlsZeroCalls.appendChild(labelZeroCalls);
-					}
-					if (filterIds.indexOf('hide_zero_hits') !== -1) {
-						var controlsZeroHits = ensureControlsDiv();
-						var labelZeroHits = document.createElement('label');
-						labelZeroHits.style.fontSize = '0.9em';
-						labelZeroHits.style.marginLeft = '1.5em';
-						var cbZeroHits = document.createElement('input');
-						cbZeroHits.type = 'checkbox';
-						cbZeroHits.checked = true;
-						cbZeroHits.setAttribute('data-filter-id', 'hide_zero_hits');
-						labelZeroHits.appendChild(cbZeroHits);
-						labelZeroHits.appendChild(document.createTextNode(' Hide zero-hit caches'));
-						controlsZeroHits.appendChild(labelZeroHits);
-					}
-					if (filterIds.indexOf('show_down_services') !== -1) {
-						var controlsStatus = ensureControlsDiv();
-						var labelStatus = document.createElement('label');
-						labelStatus.style.fontSize = '0.9em';
-						labelStatus.style.marginLeft = '1.5em';
-						var cbStatus = document.createElement('input');
-						cbStatus.type = 'checkbox';
-						cbStatus.checked = false; // default: show only up services
-						cbStatus.setAttribute('data-filter-id', 'show_down_services');
-						labelStatus.appendChild(cbStatus);
-						labelStatus.appendChild(document.createTextNode(' Show down services'));
-						controlsStatus.appendChild(labelStatus);
-					}
+					return controlsDiv;
+				}
+				if (filterIds.indexOf('hide_zero_calls') !== -1) {
+					var controlsZeroCalls = ensureControlsDiv();
+					var labelZeroCalls = document.createElement('label');
+					labelZeroCalls.style.fontSize = '0.9em';
+					var cbZeroCalls = document.createElement('input');
+					cbZeroCalls.type = 'checkbox';
+					cbZeroCalls.checked = true;
+					cbZeroCalls.setAttribute('data-filter-id', 'hide_zero_calls');
+					labelZeroCalls.appendChild(cbZeroCalls);
+					labelZeroCalls.appendChild(document.createTextNode(' Hide zero-call caches'));
+					controlsZeroCalls.appendChild(labelZeroCalls);
+				}
+				if (filterIds.indexOf('hide_zero_hits') !== -1) {
+					var controlsZeroHits = ensureControlsDiv();
+					var labelZeroHits = document.createElement('label');
+					labelZeroHits.style.fontSize = '0.9em';
+					labelZeroHits.style.marginLeft = '1.5em';
+					var cbZeroHits = document.createElement('input');
+					cbZeroHits.type = 'checkbox';
+					cbZeroHits.checked = true;
+					cbZeroHits.setAttribute('data-filter-id', 'hide_zero_hits');
+					labelZeroHits.appendChild(cbZeroHits);
+					labelZeroHits.appendChild(document.createTextNode(' Hide zero-hit caches'));
+					controlsZeroHits.appendChild(labelZeroHits);
+				}
+				if (filterIds.indexOf('show_down_services') !== -1) {
+					var controlsStatus = ensureControlsDiv();
+					var labelStatus = document.createElement('label');
+					labelStatus.style.fontSize = '0.9em';
+					labelStatus.style.marginLeft = '1.5em';
+					var cbStatus = document.createElement('input');
+					cbStatus.type = 'checkbox';
+					cbStatus.checked = false; // default: show only up services
+					cbStatus.setAttribute('data-filter-id', 'show_down_services');
+					labelStatus.appendChild(cbStatus);
+					labelStatus.appendChild(document.createTextNode(' Show down services'));
+					controlsStatus.appendChild(labelStatus);
+				}
+
 				if (!rows.length) {
 					var p = document.createElement('p');
 					p.className = 'fh-pane-help';
@@ -2025,18 +2172,15 @@
 				}
 				var table = document.createElement('table');
 				table.className = 'fh-table fh-table-upstreams';
-				// Attach a data attribute so filter handlers can locate this table.
 				table.setAttribute('data-section-id', section && section.id ? String(section.id) : '');
 				var thead = document.createElement('thead');
 				var hrow = document.createElement('tr');
 				columns.forEach(function (col) {
 					var th = document.createElement('th');
 					th.textContent = col.label || String(col.key || '');
-					// Optional alignment hint for numeric-heavy columns such as TTL
-					// and Max size in cache tables.
-						if (col.align === 'right') {
-							th.style.textAlign = 'right';
-						}
+					if (col.align === 'right') {
+						th.style.textAlign = 'right';
+					}
 					hrow.appendChild(th);
 				});
 				thead.appendChild(hrow);
@@ -2047,18 +2191,12 @@
 						return;
 					}
 					var tr = document.createElement('tr');
-					// Tag each row with calls_total when available so filters can
-					// hide zero-call entries for decorated caches.
 					if (rowData && typeof rowData.calls_total === 'number') {
 						tr.setAttribute('data-calls-total', String(rowData.calls_total));
 					}
-					// Tag each row with cache_hits when available so filters can
-					// hide zero-hit entries for decorated caches.
 					if (rowData && typeof rowData.cache_hits === 'number') {
 						tr.setAttribute('data-cache-hits', String(rowData.cache_hits));
 					}
-					// Tag each row with status when present so mDNS-style tables can
-					// hide/show down services via a checkbox filter.
 					if (rowData && typeof rowData.status === 'string') {
 						tr.setAttribute('data-status', String(rowData.status).toLowerCase());
 					}
@@ -2067,108 +2205,391 @@
 						var joiner = col.join || null;
 						var raw = key ? resolvePath(rowData, key) : null;
 						var td = document.createElement('td');
-					if (col.align === 'right') {
-						td.style.textAlign = 'right';
-					}
-					if (col.nowrap) {
-						td.style.whiteSpace = 'nowrap';
-					}
-					var text = '';
-					// Special-case: last_seen should be rendered in the user's timezone
-					// as "YYYY-MM-DD HH:MM:SS" and expose the full ISO timestamp via
-					// a tooltip on hover.
-					if (key === 'last_seen') {
-						var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
-						var fmt = formatTimestamp(iso || raw);
-						text = fmt != null ? String(fmt) : '';
-						if (iso) {
-							td.title = iso;
+						if (col.align === 'right') {
+							td.style.textAlign = 'right';
 						}
-					} else if (raw == null) {
-						text = '';
-					} else if (Array.isArray(raw) && joiner) {
-						text = raw.join(String(joiner));
-					} else if (typeof raw === 'boolean') {
-						text = raw ? 'yes' : '';
-					} else if (typeof raw === 'number') {
-						text = formatNumber(raw);
-					} else {
-						text = String(raw);
-					}
+						if (col.nowrap) {
+							td.style.whiteSpace = 'nowrap';
+						}
+						var text = '';
+						if (key === 'last_seen') {
+							var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
+							var fmt = formatTimestamp(iso || raw);
+							text = fmt != null ? String(fmt) : '';
+							if (iso) {
+								td.title = iso;
+							}
+						} else if (raw == null) {
+							text = '';
+						} else if (Array.isArray(raw) && joiner) {
+							text = raw.join(String(joiner));
+						} else if (typeof raw === 'boolean') {
+							text = raw ? 'yes' : '';
+						} else if (typeof raw === 'number') {
+							text = formatNumber(raw);
+						} else {
+							text = String(raw);
+						}
 						if (col.html) {
 							td.innerHTML = text;
 						} else {
 							td.textContent = text;
 						}
-					// For Docker TXT/Info cells, expose the full raw TXT payload as a tooltip.
-					if (col.key === 'txt' && rowData && rowData._txtTooltip) {
-						td.title = String(rowData._txtTooltip);
-					}
+						if (col.key === 'txt' && rowData && rowData._txtTooltip) {
+							td.title = String(rowData._txtTooltip);
+						}
 						tr.appendChild(td);
 					});
 					tbody.appendChild(tr);
 				});
 				table.appendChild(tbody);
 				group.appendChild(table);
-
-					// Wire up hide_zero_calls, hide_zero_hits and show_down_services
-					// filters, when present.
-					if (controlsDiv) {
-						var cbHideCalls = controlsDiv.querySelector('input[data-filter-id="hide_zero_calls"]');
-						var cbHideHits = controlsDiv.querySelector('input[data-filter-id="hide_zero_hits"]');
-						var cbShowDown = controlsDiv.querySelector('input[data-filter-id="show_down_services"]');
-						if (cbHideCalls || cbHideHits || cbShowDown) {
-							var applyFilters = function () {
-								var hideZeroCalls = cbHideCalls ? cbHideCalls.checked : false;
-								var hideZeroHits = cbHideHits ? cbHideHits.checked : false;
-								var showDown = cbShowDown ? cbShowDown.checked : false;
-								var rowsEls = tbody.querySelectorAll('tr');
-								rowsEls.forEach(function (trEl) {
-									var display = '';
-									// Zero-call cache rows (decorated caches view).
-									if (cbHideCalls) {
-										var callsAttr = trEl.getAttribute('data-calls-total');
-										var calls = callsAttr ? parseInt(callsAttr, 10) : NaN;
-										if (hideZeroCalls && callsAttr !== null && !isNaN(calls) && calls === 0) {
-											display = 'none';
-										}
-									}
-									// Zero-hit cache rows (decorated caches view).
-									if (cbHideHits) {
-										var hitsAttr = trEl.getAttribute('data-cache-hits');
-										var hits = hitsAttr ? parseInt(hitsAttr, 10) : NaN;
-										if (hideZeroHits && hitsAttr !== null && !isNaN(hits) && hits === 0) {
-											display = 'none';
-										}
-									}
-									// mDNS services: show only status=up by default unless
-									// the user explicitly enables down services.
-									if (cbShowDown) {
-										var statusAttr = (trEl.getAttribute('data-status') || '').toLowerCase();
-										if (!showDown && statusAttr === 'down') {
-											display = 'none';
-										}
-									}
-									trEl.style.display = display;
-								});
-							};
-							if (cbHideCalls) {
-								cbHideCalls.addEventListener('change', applyFilters);
-							}
-							if (cbHideHits) {
-								cbHideHits.addEventListener('change', applyFilters);
-							}
-							if (cbShowDown) {
-								cbShowDown.addEventListener('change', applyFilters);
-							}
-							// Apply initial state so filters take effect immediately.
-							applyFilters();
-						}
-					}
-
 				root.appendChild(group);
 			}
 
+			function _getTableSectionUrl(desc, pluginName, sectionId) {
+				var endpoint = desc && desc.endpoints && desc.endpoints.snapshot ? String(desc.endpoints.snapshot) : '';
+				var sid = encodeURIComponent(String(sectionId || ''));
+				if (!sid) {
+					return '';
+				}
+				if (endpoint.indexOf('/api/v1/cache') === 0) {
+					return '/api/v1/cache/table/' + sid;
+				}
+				if (endpoint.indexOf('/api/v1/stats') === 0) {
+					return '/api/v1/stats/table/' + sid;
+				}
+				if (!pluginName) {
+					return '';
+				}
+				return '/api/v1/plugins/' + encodeURIComponent(String(pluginName)) + '/table/' + sid;
+			}
+
+			function _buildQuery(params) {
+				var parts = [];
+				Object.keys(params || {}).forEach(function (k) {
+					var v = params[k];
+					if (v === undefined || v === null || v === '') {
+						return;
+					}
+					parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v)));
+				});
+				return parts.length ? '?' + parts.join('&') : '';
+			}
+
+			function renderTableSectionPaged(root, section, desc, pluginName, extraQuery) {
+				if (!root) {
+					return;
+				}
+				root.textContent = '';
+				if (!section || typeof section !== 'object') {
+					return;
+				}
+				var sectionId = section.id || '';
+				var tableUrl = _getTableSectionUrl(desc, pluginName, sectionId);
+				var columns = Array.isArray(section.columns) ? section.columns : [];
+				var title = section.title ? section.title : 'Items';
+				if (!columns.length || !tableUrl) {
+					return;
+				}
+
+				var state = {
+					page: 1,
+					pageSize: 50,
+					sortKey: '',
+					// Keep empty until we have a sort key so we do not override
+					// server-side defaults (for stats tables this is count/desc).
+					sortDir: '',
+					search: '',
+					filters: {
+						hide_zero_calls: true,
+						hide_zero_hits: true,
+						show_down_services: false,
+						hide_hash_like: true,
+					},
+				};
+				var requestToken = 0;
+
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = title;
+				group.appendChild(heading);
+
+				var controlsDiv = document.createElement('div');
+				controlsDiv.className = 'fh-table-controls';
+				group.appendChild(controlsDiv);
+
+				var searchWrap = document.createElement('div');
+				searchWrap.className = 'fh-table-controls-row';
+				var searchInput = document.createElement('input');
+				searchInput.type = 'search';
+				searchInput.className = 'fh-table-search';
+				searchInput.placeholder = 'Search...';
+				searchWrap.appendChild(searchInput);
+				controlsDiv.appendChild(searchWrap);
+
+				// Optional per-section filters.
+				var filterIds = Array.isArray(section.filters) ? section.filters.map(function (f) { return f && f.id; }) : [];
+				var enabledFilters = Object.create(null);
+				filterIds.forEach(function (fid) {
+					if (fid) {
+						enabledFilters[String(fid)] = true;
+					}
+				});
+				if (filterIds.length) {
+					var filterRow = document.createElement('div');
+					filterRow.className = 'fh-table-controls-row';
+					section.filters.forEach(function (f) {
+						if (!f || !f.id) {
+							return;
+						}
+						var fid = String(f.id);
+						if (!Object.prototype.hasOwnProperty.call(state.filters, fid)) {
+							// Unknown filter id; skip.
+							return;
+						}
+						var label = document.createElement('label');
+						label.className = 'fh-table-filter';
+						var cb = document.createElement('input');
+						cb.type = 'checkbox';
+						cb.checked = !!state.filters[fid];
+						cb.setAttribute('data-filter-id', fid);
+						label.appendChild(cb);
+						label.appendChild(document.createTextNode(' ' + String(f.label || fid)));
+						cb.addEventListener('change', function () {
+							state.filters[fid] = cb.checked;
+							state.page = 1;
+							loadPage();
+						});
+						filterRow.appendChild(label);
+					});
+					controlsDiv.appendChild(filterRow);
+				}
+
+				var pagerRow = document.createElement('div');
+				pagerRow.className = 'fh-table-controls-row fh-table-pager';
+				var btnPrev = document.createElement('button');
+				btnPrev.type = 'button';
+				btnPrev.className = 'fh-btn fh-btn-secondary fh-table-page-btn';
+				btnPrev.textContent = 'Prev';
+				var btnNext = document.createElement('button');
+				btnNext.type = 'button';
+				btnNext.className = 'fh-btn fh-btn-secondary fh-table-page-btn';
+				btnNext.textContent = 'Next';
+				var pageInfo = document.createElement('span');
+				pageInfo.className = 'fh-table-page-info';
+				pageInfo.textContent = '';
+				var sizeSelect = document.createElement('select');
+				sizeSelect.className = 'fh-table-page-size';
+				[25, 50, 100, 200].forEach(function (n) {
+					var opt = document.createElement('option');
+					opt.value = String(n);
+					opt.textContent = String(n) + ' / page';
+					if (n === state.pageSize) {
+						opt.selected = true;
+					}
+					sizeSelect.appendChild(opt);
+				});
+				sizeSelect.addEventListener('change', function () {
+					var n = parseInt(sizeSelect.value, 10);
+					if (!isNaN(n) && n > 0) {
+						state.pageSize = n;
+						state.page = 1;
+						loadPage();
+					}
+				});
+
+				btnPrev.addEventListener('click', function () {
+					if (state.page > 1) {
+						state.page -= 1;
+						loadPage();
+					}
+				});
+				btnNext.addEventListener('click', function () {
+					state.page += 1;
+					loadPage();
+				});
+
+				pagerRow.appendChild(btnPrev);
+				pagerRow.appendChild(btnNext);
+				pagerRow.appendChild(pageInfo);
+				pagerRow.appendChild(sizeSelect);
+				controlsDiv.appendChild(pagerRow);
+
+				var table = document.createElement('table');
+				table.className = 'fh-table fh-table-upstreams';
+				group.appendChild(table);
+
+				function renderHeader() {
+					var thead = document.createElement('thead');
+					var hrow = document.createElement('tr');
+					columns.forEach(function (col) {
+						var th = document.createElement('th');
+						var label = col.label || String(col.key || '');
+						var key = String(col.key || '');
+						var suffix = '';
+						if (key && state.sortKey && key === state.sortKey) {
+							suffix = state.sortDir === 'desc' ? ' ▼' : ' ▲';
+						}
+						th.textContent = label + suffix;
+						th.style.cursor = key ? 'pointer' : '';
+						if (col.align === 'right') {
+							th.style.textAlign = 'right';
+						}
+						th.addEventListener('click', function () {
+							if (!key) {
+								return;
+							}
+							if (state.sortKey === key) {
+								state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+							} else {
+								state.sortKey = key;
+								state.sortDir = 'asc';
+							}
+							state.page = 1;
+							loadPage();
+						});
+						hrow.appendChild(th);
+					});
+					thead.appendChild(hrow);
+					return thead;
+				}
+
+				function renderBody(items) {
+					var tbody = document.createElement('tbody');
+					items = Array.isArray(items) ? items : [];
+					if (section && section.style === 'docker_group_by_txt') {
+						// Best-effort: keep the grouping UI, but only within the current page.
+						items = buildDockerGroupsByTxt(items, section);
+					}
+					items.forEach(function (rowData) {
+						if (!rowData || typeof rowData !== 'object') {
+							return;
+						}
+						var tr = document.createElement('tr');
+						columns.forEach(function (col) {
+							var key = col.key;
+							var joiner = col.join || null;
+							var raw = key ? resolvePath(rowData, key) : null;
+							var td = document.createElement('td');
+							if (col.align === 'right') {
+								td.style.textAlign = 'right';
+							}
+							if (col.nowrap) {
+								td.style.whiteSpace = 'nowrap';
+							}
+							var text = '';
+							if (key === 'last_seen') {
+								var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
+								var fmt = formatTimestamp(iso || raw);
+								text = fmt != null ? String(fmt) : '';
+								if (iso) {
+									td.title = iso;
+								}
+							} else if (raw == null) {
+								text = '';
+							} else if (Array.isArray(raw) && joiner) {
+								text = raw.join(String(joiner));
+							} else if (typeof raw === 'boolean') {
+								text = raw ? 'yes' : '';
+							} else if (typeof raw === 'number') {
+								text = formatNumber(raw);
+							} else {
+								text = String(raw);
+							}
+							if (col.html) {
+								td.innerHTML = text;
+							} else {
+								td.textContent = text;
+							}
+							if (col.key === 'txt' && rowData && rowData._txtTooltip) {
+								td.title = String(rowData._txtTooltip);
+							}
+							tr.appendChild(td);
+						});
+						tbody.appendChild(tr);
+					});
+					return tbody;
+				}
+
+				function updatePager(meta) {
+					var total = meta && meta.total != null ? meta.total : 0;
+					var page = meta && meta.page != null ? meta.page : state.page;
+					var totalPages = meta && meta.total_pages != null ? meta.total_pages : 0;
+					pageInfo.textContent = ' Page ' + page + (totalPages ? ' / ' + totalPages : '') + ' (' + total + ' rows)';
+					btnPrev.disabled = page <= 1;
+					btnNext.disabled = totalPages ? page >= totalPages : (total === 0);
+				}
+
+				var searchTimer = null;
+				searchInput.addEventListener('input', function () {
+					if (searchTimer) {
+						clearTimeout(searchTimer);
+					}
+					searchTimer = setTimeout(function () {
+						state.search = String(searchInput.value || '').trim();
+						state.page = 1;
+						loadPage();
+					}, 200);
+				});
+
+				function loadPage() {
+					requestToken += 1;
+					var token = requestToken;
+					var query = {
+						page: state.page,
+						page_size: state.pageSize,
+						sort_key: state.sortKey,
+						sort_dir: state.sortDir,
+						search: state.search,
+					};
+					if (extraQuery && typeof extraQuery === 'object') {
+						Object.keys(extraQuery).forEach(function (k) {
+							query[k] = extraQuery[k];
+						});
+					}
+					Object.keys(state.filters || {}).forEach(function (k) {
+						if (!enabledFilters || !enabledFilters[k]) {
+							return;
+						}
+						query[k] = state.filters[k] ? 1 : 0;
+					});
+					var url = tableUrl + _buildQuery(query);
+					pageInfo.textContent = ' Loading...';
+					return fetchJson(url)
+						.then(function (payload) {
+							if (token !== requestToken) {
+								return;
+							}
+							// Update state from server (defaults may have been applied).
+							state.page = payload && payload.page ? payload.page : state.page;
+							state.pageSize = payload && payload.page_size ? payload.page_size : state.pageSize;
+							state.sortKey = payload && payload.sort_key ? payload.sort_key : state.sortKey;
+							state.sortDir = payload && payload.sort_dir ? payload.sort_dir : state.sortDir;
+
+							table.textContent = '';
+							table.appendChild(renderHeader());
+							table.appendChild(renderBody(payload && payload.items ? payload.items : []));
+							updatePager(payload);
+						})
+						.catch(function (err) {
+							if (token !== requestToken) {
+								return;
+							}
+							table.textContent = '';
+							var pre = document.createElement('pre');
+							pre.className = 'fh-pre fh-pre-compact';
+							pre.textContent = 'Failed to load table: ' + err.message;
+							group.appendChild(pre);
+							pageInfo.textContent = ' Error';
+						});
+				}
+
+				root.appendChild(group);
+				loadPage();
+			}
 			function initSnapshotPageV1(pageEl, desc) {
 				if (!pageEl) {
 					return;
@@ -2227,7 +2648,15 @@
 					return;
 				}
 				body.textContent = '';
-				fetchJson(endpoint)
+				// Request table-free snapshots (when supported) so large tables are
+				// fetched via dedicated paginated endpoints.
+				var snapshotUrl = endpoint;
+				if (snapshotUrl.indexOf('?') === -1) {
+					snapshotUrl += '?exclude_tables=1';
+				} else {
+					snapshotUrl += '&exclude_tables=1';
+				}
+				fetchJson(snapshotUrl)
 					.then(function (payload) {
 						var data = payload && payload.data ? payload.data : {};
 						var layout = desc && desc.layout ? desc.layout : {};
@@ -2260,7 +2689,7 @@
 							body.appendChild(sectionRoot);
 							var value = path ? resolvePath(data, path) : data;
 							if (type === 'table') {
-								renderTableSection(sectionRoot, value, section);
+								renderTableSectionPaged(sectionRoot, section, desc, pluginName);
 						} else {
 							// Default to key/value rendering using section.rows
 							// against the resolved value mapping.
@@ -2560,6 +2989,9 @@
 					}
 				} catch (e) {}
 				var isStats = tab === 'stats';
+				if (!isStats) {
+					hideStatsDetails();
+				}
 				var isEdit = tab === 'edit';
 				var pluginName = null;
 				if (tab && tab.indexOf('plugin:') === 0) {
