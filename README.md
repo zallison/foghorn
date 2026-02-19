@@ -4,7 +4,7 @@ Foghorn is a versatile DNS server designed for flexibility and performance. Buil
 
 With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard. Newer releases add DNSSEC signing helpers, zone transfers (AXFR/IXFR), RFC 8914 Extended DNS Errors (EDE), and SSH host key utilities so you can treat DNS as a first-class security and operations tool.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-91%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-84%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" width=300px />
 
@@ -271,7 +271,10 @@ Without `trust-ad`, glibc clears the AD flag before handing answers to applicati
 - `server.enable_ede`
   - Optional toggle for RFC 8914 Extended DNS Errors; when true and the client advertises EDNS(0), Foghorn can attach EDE options to certain policy or upstream-failure responses and surface per-code stats in the admin UI.
 - `server.resolver`
-  - Timeouts, recursion depth, and whether Foghorn runs as a forwarder or recursive resolver.
+  - Timeouts, recursion depth, and resolver mode:
+    - `forward` (default): forward to configured `upstreams`.
+    - `recursive`: walk from root servers.
+    - `master` / `none`: authoritative-only (no forwarding; cache miss -> REFUSED).
 - `server.http`
   - Admin web UI listener configuration.
 
@@ -433,8 +436,8 @@ Targeting:
 	  * `"any"`, `"*"`, or `null`   → no listener restriction.
 - **Domain targeting**:
   - `config.targets_domains`: list (or single string) of domain names to match.
-  - `config.targets_domains_mode`: `"exact"` (qname must equal one of `targets_domains`), `"suffix"` (qname is that domain or ends with
-	`"." + domain`), or `"any"` (no domain restriction).
+  - `config.targets_domains_mode`: `"exact"` (qname must equal one of `targets_domains`) or `"suffix"` (qname is that domain or ends with
+	`"." + domain`). Omit `targets_domains` (or set it to an empty list) for no domain restriction.
 - **qtype targeting**:
   - `config.target_qtypes`: list of qtype names or `'*'` for all types, e.g.
 	`['A', 'AAAA']`, `['MX']` or `['*']`.
@@ -471,7 +474,7 @@ plugins:
 	   # Domain targeting: only *.corp.example
 	   targets_domains:
 		 - corp.example
-	   targets_domains_mode: suffix  # any | exact | suffix
+	   targets_domains_mode: suffix  # exact | suffix
 
 	   # qtype targeting: A/AAAA only
 		 target_qtypes: ['A', 'AAAA']  # '*' | ['A'] | ['A', 'AAAA']
@@ -1419,7 +1422,7 @@ plugins:
 
 From here you can mix and match plugins, caches, and stats backends to shape Foghorn into exactly the DNS service you need.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-91%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-84%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 ## Stargazers over time
 [![Stargazers over time](https://starchart.cc/zallison/foghorn.svg?variant=adaptive)](https://starchart.cc/zallison/foghorn)
