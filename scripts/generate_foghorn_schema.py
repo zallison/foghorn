@@ -496,6 +496,51 @@ def _build_v2_root_schema(
         if isinstance(server_props, dict) and "resolver" in server_props
         else base_props.get("resolver", {"type": "object"})
     )
+
+    # Ensure server.resolver exposes the runtime configuration surface. Some
+    # older base schemas model this as a generic object; augment it here so
+    # editor tooling can validate supported modes.
+    resolver_schema = {
+        "type": "object",
+        "additionalProperties": True,
+        "description": (
+            "Resolver configuration. mode selects how unanswered queries are "
+            "handled: forward (default), recursive (walk from root), or "
+            "master (authoritative-only; no forwarding). 'none' is an alias "
+            "for 'master'."
+        ),
+        "properties": {
+            "mode": {
+                "type": "string",
+                "enum": ["forward", "recursive", "master", "none"],
+                "default": "forward",
+                "description": "Resolver mode: forward | recursive | master (none).",
+            },
+            "timeout_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 2000,
+                "description": "Upstream/recursive timeout budget per query (milliseconds).",
+            },
+            "max_depth": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 16,
+                "description": "Maximum delegation hops for recursive mode.",
+            },
+            "per_try_timeout_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 2000,
+                "description": "Per-authority timeout for recursive mode (milliseconds).",
+            },
+            "use_asyncio": {
+                "type": "boolean",
+                "default": True,
+                "description": "Enable asyncio-based listeners when available.",
+            },
+        },
+    }
     cache_schema = (
         server_props.get("cache")  # type: ignore[union-attr]
         if isinstance(server_props, dict) and "cache" in server_props
@@ -971,7 +1016,32 @@ def _build_v2_root_schema(
                 "items": {"$ref": "#/$defs/PluginInstance"},
             },
         },
-        "required": ["server", "upstreams"],
+        "required": ["server"],
+        # Conditionally require upstreams only when running in forward mode.
+        "allOf": [
+            {
+                "if": {
+                    "required": ["server"],
+                    "properties": {
+                        "server": {
+                            "required": ["resolver"],
+                            "properties": {
+                                "resolver": {
+                                    "required": ["mode"],
+                                    "properties": {
+                                        "mode": {
+                                            "enum": ["recursive", "master", "none"],
+                                        }
+                                    },
+                                }
+                            },
+                        }
+                    },
+                },
+                "then": {},
+                "else": {"required": ["upstreams"]},
+            }
+        ],
         "$defs": defs,
     }
 
