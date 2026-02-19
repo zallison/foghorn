@@ -2,12 +2,24 @@ from __future__ import annotations
 
 import inspect
 import ipaddress
+import json
 import logging
 import logging.handlers
 import os
 import sys
 from dataclasses import dataclass
-from typing import ClassVar, Dict, List, Optional, Sequence, Tuple, Union, Set, final
+from typing import (
+    Any,
+    ClassVar,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    Set,
+    final,
+)
 
 from cachetools import LRUCache
 from dnslib import (  # noqa: F401 - imports are for implementations of this class
@@ -1152,6 +1164,100 @@ class BasePlugin:
         """
 
         return None
+
+    def get_http_snapshot(self) -> Dict[str, object]:
+        """Brief: Build a generic JSON-serializable snapshot for the admin web UI.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - dict with keys:
+              * summary: High-level plugin metadata (name, type, priorities,
+                targets).
+              * config_items: List of key/value pairs derived from self.config,
+                coerced into JSON-safe values.
+
+        Example:
+          >>> BasePlugin(name='example').get_http_snapshot()['summary']['name']
+          'example'
+        """
+
+        def _to_json_safe(value: object) -> Any:
+            if value is None or isinstance(value, (str, int, float, bool)):
+                return value
+            if isinstance(value, (list, tuple, set)):
+                return [_to_json_safe(v) for v in value]
+            if isinstance(value, dict):
+                return {str(k): _to_json_safe(v) for k, v in value.items()}
+            try:
+                return str(value)
+            except Exception:
+                return repr(value)
+
+        def _targets_to_strings(values: object) -> list[str]:
+            out: list[str] = []
+            try:
+                for v in list(values or []):
+                    out.append(str(v))
+            except Exception:
+                return []
+            return out
+
+        config_items: list[dict[str, object]] = []
+        try:
+            cfg = dict(self.config or {})
+        except Exception:
+            cfg = {}
+
+        for key in sorted(cfg.keys()):
+            value = cfg.get(key)
+            config_items.append(
+                {
+                    "key": str(key),
+                    "value": _to_json_safe(value),
+                }
+            )
+
+        summary: dict[str, object] = {
+            "name": str(getattr(self, "name", self.__class__.__name__)),
+            "module": str(getattr(self.__class__, "__module__", "")),
+            "class": str(getattr(self.__class__, "__name__", "")),
+            "aliases": [str(a) for a in self.__class__.get_aliases()],
+            "pre_priority": int(getattr(self, "pre_priority", 100) or 100),
+            "post_priority": int(getattr(self, "post_priority", 100) or 100),
+            "setup_priority": int(getattr(self, "setup_priority", 100) or 100),
+            "targets": {
+                "clients": _targets_to_strings(getattr(self, "_target_networks", [])),
+                "ignore_clients": _targets_to_strings(
+                    getattr(self, "_ignore_networks", [])
+                ),
+                "listeners": sorted(
+                    list(getattr(self, "_targets_listeners", set()) or [])
+                ),
+                "domains": list(getattr(self, "_targets_domains", []) or []),
+                "domains_mode": str(
+                    getattr(self, "_targets_domains_mode", "any") or "any"
+                ),
+                "qtypes": list(getattr(self, "_target_qtypes", ["*"]) or ["*"]),
+                "opcodes": list(
+                    getattr(self, "_target_opcodes", ["QUERY"]) or ["QUERY"]
+                ),
+            },
+        }
+
+        # Defensive: ensure the payload is JSON-serializable even if a plugin
+        # stuffed non-serializable values into config.
+        payload: dict[str, object] = {"summary": summary, "config_items": config_items}
+        try:
+            json.dumps(payload)
+        except Exception:
+            # Fall back to stringified config when needed.
+            payload["config_items"] = [
+                {"key": it.get("key"), "value": str(it.get("value"))}
+                for it in (config_items or [])
+            ]
+        return payload
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
