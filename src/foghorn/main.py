@@ -363,6 +363,8 @@ def main(argv: List[str] | None = None) -> int:
     )
 
     resolver_mode = str(resolver_cfg.get("mode", "forward")).lower()
+    if resolver_mode == "none":
+        resolver_mode = "master"
     try:
         recursive_max_depth = int(resolver_cfg.get("max_depth", 16))
     except (TypeError, ValueError):
