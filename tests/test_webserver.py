@@ -19,7 +19,15 @@ import logging
 import threading
 
 import yaml
-from fastapi.testclient import TestClient
+import pytest
+
+try:  # FastAPI is an optional dependency
+    from fastapi.testclient import TestClient
+except ModuleNotFoundError:  # pragma: no cover - environment dependent
+    pytest.skip(
+        "fastapi not installed; skipping webserver tests",
+        allow_module_level=True,
+    )
 
 from foghorn.stats import StatsCollector, StatsSQLiteStore
 from foghorn.servers.webserver import (
