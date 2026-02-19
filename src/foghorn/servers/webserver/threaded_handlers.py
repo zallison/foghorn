@@ -185,7 +185,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         """Brief: Send plain-text response.
 
         Inputs:
-          - status_code: HTTP status code
+          - status_code: HTTP status code.
           - text: Response body
         Outputs:
           - None
@@ -653,8 +653,11 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
     ) -> None:  # pragma: no cover - threaded /traffic mirrors FastAPI endpoint
         """Brief: Handle GET /traffic.
 
-        Inputs: none
-        Outputs: None
+        Inputs:
+          - params: Query string parameters mapping
+
+        Outputs:
+          - None (sends JSON response).
         """
 
         if not self._require_auth():
@@ -796,6 +799,55 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 "raw_yaml": raw["raw_yaml"],
             },
         )
+
+    def _handle_config_diagram_png(self) -> None:
+        """Brief: Handle GET /api/v1/config/diagram.png.
+
+        Inputs:
+          - None (uses self.server.config_path to locate the diagram PNG).
+
+        Outputs:
+          - None (sends image/png body when present).
+        """
+
+        if not self._require_auth():
+            return
+
+        cfg_path = getattr(self._server(), "config_path", None)
+        if not cfg_path:
+            self._send_json(
+                500,
+                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
+            )
+            return
+
+        png_path = diagram_png_path_for_config(cfg_path)
+        if not os.path.isfile(png_path):
+            self._send_text(404, "config diagram not found")
+            return
+
+        try:
+            with open(png_path, "rb") as f:
+                data = f.read()
+        except Exception as exc:  # pragma: no cover - environment specific
+            self._send_text(500, f"failed to read diagram: {exc}")
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(len(data)))
+        self._apply_cors_headers()
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except BrokenPipeError:  # pragma: no cover - client disconnect
+            logger.warning(
+                "Client disconnected while sending diagram for %s %s",
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return
 
     def _handle_query_log(self, params: Dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/query_log for the threaded fallback server.
@@ -1545,6 +1597,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             "/api/v1/config_raw.json",
         }:
             self._handle_config_raw_json()
+        elif path in {"/api/v1/config/diagram.png", "/config/diagram.png"}:
+            self._handle_config_diagram_png()
         elif path in {"/logs", "/api/v1/logs"}:
             self._handle_logs(params)
         elif path in {"/query_log", "/api/v1/query_log"}:
@@ -1625,11 +1679,16 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
     def log_message(
         self, format: str, *args: Any
     ) -> None:  # noqa: A003  # pragma: no cover - logging-only fallback path
-        """Brief: Route handler logs through the module logger instead of stderr.
+        """Brief: Suppress BaseHTTPRequestHandler's default request logging.
+
+        Note: This implementation is intentionally quiet (no-op) during normal
+        request handling. If string formatting fails, it logs the raw message at
+        DEBUG level as a best-effort fallback.
 
         Inputs:
           - format: format string
           - args: format arguments
+
         Outputs:
           - None
         """

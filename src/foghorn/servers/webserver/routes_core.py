@@ -8,8 +8,10 @@ from . import admin_logic as _admin_logic
 from . import config_persistence as _config_persistence
 
 from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi import status
+
+from ...utils.config_mermaid import diagram_png_path_for_config
 
 import sys as _sys
 
@@ -137,6 +139,25 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         redact_keys = _get_redact_keys(cfg)
         clean = sanitize_config(cfg, redact_keys=redact_keys)
         return {"server_time": _utc_now_iso(), "config": clean}
+
+    @app.get("/api/v1/config/diagram.png", dependencies=[Depends(auth_dep)])
+    @app.get("/config/diagram.png", dependencies=[Depends(auth_dep)])
+    async def get_config_diagram_png() -> FileResponse:
+        cfg_path = getattr(app.state, "config_path", None)
+        if not cfg_path:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="config_path not configured",
+            )
+
+        png_path = diagram_png_path_for_config(cfg_path)
+        if not os.path.isfile(png_path):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="config diagram not found",
+            )
+
+        return FileResponse(png_path, media_type="image/png")
 
     @app.get("/api/v1/config/raw.json", dependencies=[Depends(auth_dep)])
     @app.get("/config/raw.json", dependencies=[Depends(auth_dep)])

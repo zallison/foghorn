@@ -80,15 +80,15 @@
 
 		<section class="fh-pane fh-pane-left">
 			<div class="fh-pane-header">
-				<h2 class="fh-pane-title">Raw JSON Stats</h2>
-				<p class="fh-pane-help"></p>
+				<h2 class="fh-pane-title">Config diagram</h2>
+				<p class="fh-pane-help" id="config-diagram-status">Loading diagram...</p>
 			</div>
-			<div id="stats-groups" class="fh-stats-groups">
-				<!-- Filled by JavaScript -->
-			</div>
-			<div class="fh-stats-group">
-				<h3 class="fh-stats-group-title">Raw stats JSON</h3>
-				<pre id="stats-raw" class="fh-pre fh-pre-compact">Loading statistics...</pre>
+			<div class="fh-diagram-container">
+				<img id="config-diagram-img" class="fh-diagram-img" alt="Config diagram" />
+				<div id="config-diagram-fallback" class="fh-diagram-fallback" hidden>
+					Diagram unavailable. Ensure the server can run <code>mmdc</code> (Mermaid CLI)
+					and restart so the PNG can be generated.
+				</div>
 			</div>
 		</section>
 
@@ -1519,8 +1519,54 @@
 							});
 					})
 					.catch(function (err) {
-						statsRawEl.textContent = 'Failed to load statistics: ' + err.message;
+						if (statsRawEl) {
+							statsRawEl.textContent = 'Failed to load statistics: ' + err.message;
+						}
 					});
+			}
+
+			function loadConfigDiagram() {
+				if (!configDiagramImgEl) {
+					return;
+				}
+				if (configDiagramStatusEl) {
+					configDiagramStatusEl.textContent = 'Loading diagram...';
+				}
+				if (configDiagramFallbackEl) {
+					configDiagramFallbackEl.hidden = true;
+				}
+
+				configDiagramImgEl.onload = function () {
+					if (configDiagramStatusEl) {
+						configDiagramStatusEl.textContent = '';
+					}
+					// Diagram present: use the standard two-pane layout.
+					if (page1 && page1.classList) {
+						page1.classList.remove('fh-main-config-single');
+					}
+					configDiagramImgEl.style.display = 'block';
+					if (configDiagramFallbackEl) {
+						configDiagramFallbackEl.hidden = true;
+					}
+				};
+				configDiagramImgEl.onerror = function () {
+					if (configDiagramStatusEl) {
+						configDiagramStatusEl.textContent = 'Diagram unavailable.';
+					}
+					// Diagram missing (usually mmdc not available on the server): collapse
+					// the config page to a single column so the editor can use full width.
+					if (page1 && page1.classList) {
+						page1.classList.add('fh-main-config-single');
+					}
+					configDiagramImgEl.style.display = 'none';
+					if (configDiagramFallbackEl) {
+						// When the diagram pane is hidden, keep the fallback message hidden
+						// as well so the config editor is the only content.
+						configDiagramFallbackEl.hidden = true;
+					}
+				};
+
+				configDiagramImgEl.src = '/api/v1/config/diagram.png?ts=' + Date.now();
 			}
 
 			// Generic helpers for plugin admin pages driven by JSON snapshots.
@@ -3009,6 +3055,9 @@
 				if (page1) {
 					// When Stats is selected, page1 shows Advanced/Config; hide when Stats or a plugin tab is selected.
 					page1.style.display = isEdit ? '' : 'none';
+					if (isEdit) {
+						loadConfigDiagram();
+					}
 				}
 				if (page2) {
 					page2.style.display = isStats ? '' : 'none';
