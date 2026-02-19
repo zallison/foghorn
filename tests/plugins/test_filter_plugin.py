@@ -136,6 +136,32 @@ def test_pre_resolve_deny_response_ip_override(tmp_path):
         assert str(reply.rr[0].rdata) == "192.0.2.55"
 
 
+def test_pre_resolve_deny_response_drop(tmp_path):
+    """Brief: deny_response='drop' returns PluginDecision(action='drop').
+
+    Inputs:
+      - blocked_domains: ['blocked.com']
+      - deny_response: 'drop'
+
+    Outputs:
+      - None: Asserts drop decision.
+    """
+    db = tmp_path / "bl_drop.db"
+    p = Filter(
+        db_path=str(db),
+        blocked_domains=["blocked.com"],
+        default="allow",
+        deny_response="drop",
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+
+    with closing(p.conn):
+        dec = p.pre_resolve("blocked.com", QTYPE.A, b"", ctx)
+        assert isinstance(dec, PluginDecision)
+        assert dec.action == "drop"
+
+
 def test_pre_resolve_qtype_allowlist_denies_unlisted_qtypes(tmp_path):
     """Brief: allow_qtypes denies qtypes not explicitly allowed.
 
@@ -1040,6 +1066,32 @@ def test_post_resolve_deny_response_refused_and_noerror_empty(tmp_path):
         rep2 = DNSRecord.parse(dec2.response)
         assert rep2.header.rcode == RCODE.NOERROR
         assert not rep2.rr
+
+
+def test_post_resolve_deny_response_drop(tmp_path):
+    """Brief: deny_response='drop' returns PluginDecision(action='drop') post-resolve.
+
+    Inputs:
+      - blocked_ips: [{'ip': '1.2.3.4', 'action': 'deny'}]
+      - deny_response: 'drop'
+
+    Outputs:
+      - None: Asserts drop decision.
+    """
+    db = tmp_path / "bl_post_drop.db"
+    p = Filter(
+        db_path=str(db),
+        blocked_ips=[{"ip": "1.2.3.4", "action": "deny"}],
+        deny_response="drop",
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+    resp = _mk_response_with_ips("ex.com", [("A", "1.2.3.4", 60)])
+
+    with closing(p.conn):
+        dec = p.post_resolve("ex.com", QTYPE.A, resp, ctx)
+        assert isinstance(dec, PluginDecision)
+        assert dec.action == "drop"
 
 
 def test_build_deny_decision_post_unknown_mode_defaults_to_deny(tmp_path):

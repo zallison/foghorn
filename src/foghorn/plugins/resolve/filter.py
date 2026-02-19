@@ -35,7 +35,8 @@ class FilterConfig(BaseModel):
         Filter instances do not share state by default.
       - default: Default policy ("allow" or "deny").
       - ttl: TTL for synthesized responses.
-      - deny_response: Policy for deny responses.
+      - deny_response: Policy for deny responses ('nxdomain', 'refused', 'servfail',
+        'noerror_empty'/'nodata', 'ip', or 'drop').
       - deny_response_ip4 / deny_response_ip6: Optional IPs for IP-mode denies.
       - allow_qtypes / deny_qtypes: Optional lists of DNS qtype names to allow or deny.
       - *_domains_files: List paths for loading allow/block lists from files.
@@ -181,6 +182,7 @@ class Filter(BasePlugin):
         #   - "servfail": override with SERVFAIL
         #   - "noerror_empty"/"nodata": NOERROR with no answer records
         #   - "ip": synthesize an A/AAAA answer using deny_response_ip4/deny_response_ip6
+        #   - "drop": send no response (client observes a timeout)
         self.deny_response: str = str(
             self.config.get("deny_response", "nxdomain")
         ).lower()
@@ -241,6 +243,7 @@ class Filter(BasePlugin):
             "noerror_empty",
             "nodata",
             "ip",
+            "drop",
         }
         if self.deny_response not in valid_deny_responses:
             logger.warning(
@@ -684,6 +687,8 @@ class Filter(BasePlugin):
         mode = (getattr(self, "deny_response", "nxdomain") or "nxdomain").lower()
         if mode == "nxdomain":
             return PluginDecision(action="deny")
+        if mode == "drop":
+            return PluginDecision(action="drop")
 
         if mode in {"refused", "servfail", "noerror_empty", "nodata"}:
             try:
@@ -777,6 +782,9 @@ class Filter(BasePlugin):
             already-parsed response as the response template.
         """
         mode = (getattr(self, "deny_response", "nxdomain") or "nxdomain").lower()
+
+        if mode == "drop":
+            return PluginDecision(action="drop")
 
         # For NXDOMAIN and IP modes in the post-resolve path, preserve the
         # historical behaviour by signalling a generic deny and letting the

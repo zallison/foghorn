@@ -64,7 +64,7 @@ plugins:
       ttl: 300                        # TTL for synthetic IP answers
 
       # What to send when a query is denied in pre/post phases
-      deny_response: nxdomain         # nxdomain|refused|servfail|noerror_empty|ip
+      deny_response: nxdomain         # nxdomain|refused|servfail|noerror_empty|ip|drop
       deny_response_ip4: 0.0.0.0      # used when deny_response == 'ip'
       deny_response_ip6: ::1
 
@@ -138,6 +138,7 @@ plugins:
     - `"refused"` / `"servfail"`.
     - `"noerror_empty"` / `"nodata"`: NOERROR with empty answer.
     - `"ip"`: synthesize A/AAAA answers using `deny_response_ip4`/`deny_response_ip6`.
+    - `"drop"`: send no response (client observes a timeout).
 - `deny_response_ip4: str | null`, `deny_response_ip6: str | null`
   - Replacement IPs used when `deny_response == 'ip'`.
 - `clear: int`
