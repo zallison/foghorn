@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import math
+from functools import cmp_to_key
 from typing import Any, Dict, Iterable, List, Optional
 
 from ...plugins.resolve.base import AdminPageSpec
@@ -162,6 +164,175 @@ def build_query_log_aggregate_payload(
         "end": end_dt.isoformat().replace("+00:00", "Z"),
         "interval_seconds": int(interval_seconds),
         "items": items,
+    }
+
+
+def _resolve_path(obj: Any, path: str) -> Any:
+    """Brief: Resolve a dotted path into a nested mapping/object.
+
+    Inputs:
+      - obj: Source object (typically a dict).
+      - path: Dotted key path, e.g. "config.host".
+
+    Outputs:
+      - Resolved value or None.
+    """
+
+    if obj is None:
+        return None
+    if not path:
+        return obj
+
+    cur: Any = obj
+    for part in str(path).split("."):
+        if cur is None:
+            return None
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+        else:
+            cur = getattr(cur, part, None)
+    return cur
+
+
+def build_table_page_payload(
+    rows: Iterable[dict[str, Any]] | None,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    sort_key: str | None = None,
+    sort_dir: str | None = None,
+    search: str | None = None,
+    hide_zero_calls: bool = False,  # noqa: ARG001
+    hide_zero_hits: bool = False,  # noqa: ARG001
+    show_down_services: bool = True,  # noqa: ARG001
+    hide_hash_like: bool = False,  # noqa: ARG001
+    default_sort_key: str | None = None,
+    default_sort_dir: str = "asc",
+) -> Dict[str, Any]:
+    """Brief: Server-side pagination/sorting/search for list-of-dict tables.
+
+    Inputs:
+      - rows: Iterable of dict rows.
+      - page: 1-indexed page.
+      - page_size: Page size.
+      - sort_key/sort_dir: Optional sort configuration.
+      - search: Optional substring filter applied across stringified row values.
+      - default_sort_key/default_sort_dir: Used when sort_key/dir are missing.
+      - hide_* / show_* flags: Reserved for future table-specific filters.
+
+    Outputs:
+      - Dict with keys: total, page, page_size, total_pages, sort_key, sort_dir,
+        search, items.
+    """
+
+    items: list[dict[str, Any]] = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            items.append(row)
+
+    # Normalize paging.
+    try:
+        page_i = int(page)
+    except Exception:
+        page_i = 1
+    if page_i < 1:
+        page_i = 1
+
+    try:
+        page_size_i = int(page_size)
+    except Exception:
+        page_size_i = 50
+    if page_size_i < 1:
+        page_size_i = 1
+    if page_size_i > 500:
+        page_size_i = 500
+
+    # Search filtering.
+    q = (str(search).strip().lower() if search else "").strip()
+    if q:
+        filtered: list[dict[str, Any]] = []
+        for row in items:
+            try:
+                values = row.values()
+            except Exception:
+                values = []
+            matched = False
+            for v in values:
+                if v is None:
+                    continue
+                try:
+                    if q in str(v).lower():
+                        matched = True
+                        break
+                except Exception:
+                    continue
+            if matched:
+                filtered.append(row)
+        items = filtered
+
+    # Sorting.
+    key = (sort_key or default_sort_key or "").strip()
+    direction = (sort_dir or default_sort_dir or "asc").strip().lower()
+    if direction not in {"asc", "desc"}:
+        direction = "asc"
+
+    indexed: list[tuple[int, dict[str, Any]]] = list(enumerate(items))
+
+    def _norm(v: Any) -> tuple[int, Any]:
+        # 0: numeric/bool, 1: string/other, 2: None (always last)
+        if v is None:
+            return (2, 0)
+        if isinstance(v, bool):
+            return (0, int(v))
+        if isinstance(v, (int, float)):
+            return (0, float(v))
+        if isinstance(v, str):
+            try:
+                return (0, float(v))
+            except Exception:
+                return (1, v.lower())
+        return (1, str(v).lower())
+
+    def _cmp(a: tuple[int, dict[str, Any]], b: tuple[int, dict[str, Any]]) -> int:
+        ia, ra = a
+        ib, rb = b
+        if not key:
+            return -1 if ia < ib else (1 if ia > ib else 0)
+        va = _resolve_path(ra, key)
+        vb = _resolve_path(rb, key)
+        na = _norm(va)
+        nb = _norm(vb)
+        if na < nb:
+            res = -1
+        elif na > nb:
+            res = 1
+        else:
+            res = 0
+        if res == 0:
+            res = -1 if ia < ib else (1 if ia > ib else 0)
+        if direction == "desc":
+            res = -res
+        return res
+
+    indexed.sort(key=cmp_to_key(_cmp))
+    items = [row for _, row in indexed]
+
+    total = len(items)
+    total_pages = int(math.ceil(total / page_size_i)) if total else 0
+
+    start = (page_i - 1) * page_size_i
+    end = start + page_size_i
+    page_items = items[start:end] if start < total else []
+
+    return {
+        "total": total,
+        "page": page_i,
+        "page_size": page_size_i,
+        "total_pages": total_pages,
+        "sort_key": key,
+        "sort_dir": direction,
+        "search": str(search) if search is not None else "",
+        "items": page_items,
     }
 
 
