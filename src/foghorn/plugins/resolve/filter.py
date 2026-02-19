@@ -13,7 +13,7 @@ import time
 from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
 
 from dnslib import AAAA as RDATA_AAAA
-from dnslib import QTYPE, RCODE
+from dnslib import DNSHeader, QTYPE, RCODE, RR
 from dnslib import A as RDATA_A
 from dnslib import DNSRecord
 from pydantic import BaseModel, Field
@@ -95,7 +95,7 @@ class Filter(BasePlugin):
     Example use:
         In config.yaml:
         plugins:
-          - module: foghorn.plugins.filter.Filter
+          - module: foghorn.plugins.resolve.filter.Filter
             config:
               # Pre-resolve (domain) filterings (exact match)
               allowed_domains:
@@ -386,6 +386,23 @@ class Filter(BasePlugin):
         ):
             self._load_blocked_ips_from_file(ipfile)
 
+    @staticmethod
+    def _normalize_domain(domain: object) -> str:
+        """Brief: Canonicalize a domain name for DB lookups and cache keys.
+
+        Inputs:
+          - domain: Domain-like object (str, dnslib label, etc.).
+
+        Outputs:
+          - str: Lowercased domain with any trailing dot removed.
+
+        Notes:
+          - DNS names are case-insensitive.
+          - Many sources include a trailing '.' for absolute names; the plugin
+            stores and queries domains without the trailing dot.
+        """
+        return str(domain).strip().rstrip(".").lower()
+
     def add_to_cache(self, key: any, allowed: bool):
         """Brief: Add a pre-resolve decision to the TTL cache.
 
@@ -400,9 +417,14 @@ class Filter(BasePlugin):
             # Normalize to (domain, qtype) cache key. qtype=0 is a legacy default
             # for callers that only pass a domain.
             if not isinstance(key, tuple):
-                norm_key = (str(key).rstrip(".").lower(), 0)
+                norm_key = (self._normalize_domain(key), 0)
             else:
-                norm_key = key
+                # Support callers that pass (domain, qtype) tuples.
+                if len(key) >= 2:
+                    norm_key = (self._normalize_domain(key[0]), int(key[1]))
+                else:  # pragma: no cover - defensive
+                    norm_key = (self._normalize_domain(key[0]) if key else "", 0)
+
             self._domain_cache.set(
                 norm_key, int(self.cache_ttl_seconds), b"1" if allowed else b"0"
             )
@@ -432,12 +454,12 @@ class Filter(BasePlugin):
         if not self.targets(ctx):
             return None
 
-        domain = qname.lower()
+        domain = self._normalize_domain(qname)
         # Cache keys:
         #  - (domain, 0): legacy "domain-wide" decision (applies to all qtypes)
         #  - (domain, qtype): qtype-specific decision (used for allow_qtypes/deny_qtypes)
-        domain_key = (str(domain).rstrip(".").lower(), 0)
-        qtype_key = (str(domain).rstrip(".").lower(), int(qtype))
+        domain_key = (domain, 0)
+        qtype_key = (domain, int(qtype))
 
         # Enforce query-type allow/deny before any domain-based checks.
         if self._allow_qtypes and int(qtype) not in self._allow_qtypes:
@@ -461,8 +483,8 @@ class Filter(BasePlugin):
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
-        if not self.is_allowed(str(domain).rstrip(".")):
-            logger.debug("Domain '%s' blocked (exact match)", qname)
+        if not self.is_allowed(domain):
+            logger.debug("Domain '%s' blocked by allow/deny list", qname)
             self.add_to_cache(domain_key, False)
             return self._build_deny_decision_pre(qname, qtype, req, ctx)
 
@@ -496,7 +518,7 @@ class Filter(BasePlugin):
 
         Inputs:
             qname: Queried domain name.
-            qtype: Query type (only A and AAAA are supported).
+            qtype: Query type.
             response_wire: DNS response bytes from the upstream server.
             ctx: PluginContext with request metadata.
 
@@ -505,19 +527,18 @@ class Filter(BasePlugin):
             Deny decisions are mapped to NXDOMAIN, REFUSED, SERVFAIL, or other
             policy responses depending on configuration, or a PluginDecision
             with action "skip" when no changes are required.
+            Returns None for qtypes other than A/AAAA.
 
         Example:
-            >>> # Only A/AAAA queries are supported; others raise TypeError
+            >>> # Only A/AAAA queries are handled; other qtypes return None
             >>> # plugin.post_resolve("ex.com", QTYPE.MX, b"", ctx)  # doctest: +SKIP
         """
         if not self.targets(ctx):
             return None
 
-        # Only process A and AAAA records; other qtypes are considered a
-        # programming error for this plugin and raise TypeError so callers can
-        # handle them explicitly.
+        # Only process A and AAAA records.
         if qtype not in (QTYPE.A, QTYPE.AAAA):
-            return
+            return None
 
         if not self.blocked_ips and not self.blocked_networks:
             return PluginDecision(action="skip")
@@ -789,6 +810,69 @@ class Filter(BasePlugin):
                 e,
             )
             return PluginDecision(action="deny")
+
+    def _make_a_response(
+        self,
+        qname: str,
+        query_type: int,
+        raw_req: bytes,
+        ctx: PluginContext,
+        ipaddr: str,
+    ) -> Optional[bytes]:
+        """Brief: Build a minimal DNS response for A/AAAA queries.
+
+        Inputs:
+          - qname: Queried name (currently unused; the parsed request QNAME is
+            used instead).
+          - query_type: QTYPE integer for the query.
+          - raw_req: Raw DNS request wire bytes.
+          - ctx: PluginContext for this request (currently unused).
+          - ipaddr: IP address string used as the A/AAAA rdata.
+
+        Outputs:
+          - Optional[bytes]: Packed DNS response bytes, or None when raw_req
+            cannot be parsed.
+
+        Notes:
+          - Unlike BasePlugin._make_a_response, this implementation honors
+            self._ttl for both A and AAAA answers.
+          - For other query types, a response is still packed, but no answers are
+            added.
+        """
+        try:
+            request = DNSRecord.parse(raw_req)
+        except Exception as e:
+            logger.warning(
+                "Filter: parse failure while building A/AAAA response: %s", e
+            )
+            return None
+
+        reply = DNSRecord(
+            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
+        )
+
+        if query_type == QTYPE.A:
+            reply.add_answer(
+                RR(
+                    rname=request.q.qname,
+                    rtype=QTYPE.A,
+                    rclass=1,
+                    ttl=self._ttl,
+                    rdata=RDATA_A(ipaddr),
+                )
+            )
+        elif query_type == QTYPE.AAAA:
+            reply.add_answer(
+                RR(
+                    rname=request.q.qname,
+                    rtype=QTYPE.AAAA,
+                    rclass=1,
+                    ttl=self._ttl,
+                    rdata=RDATA_AAAA(ipaddr),
+                )
+            )
+
+        return reply.pack()
 
     def _get_ip_action(
         self, ip_addr: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
@@ -1125,11 +1209,12 @@ class Filter(BasePlugin):
         Outputs:
             None
         """
+        normalized_domain = self._normalize_domain(domain)
         added_at = int(time.time())
         self.conn.execute(
             "INSERT OR REPLACE INTO blocked_domains (domain, filename, mode, added_at) "
             "VALUES (?, ?, ?, ?)",
-            (domain, filename, mode, added_at),
+            (normalized_domain, filename, mode, added_at),
         )
 
     def load_list_from_file(self, filename: str, mode: str = "deny") -> None:
@@ -1222,7 +1307,9 @@ class Filter(BasePlugin):
                     if not domain_val:
                         logger.error("Missing domain entry in %s", filename)
                         continue
-                    self._db_insert_domain(domain_val, filename, eff_mode)
+                    self._db_insert_domain(
+                        self._normalize_domain(domain_val), filename, eff_mode
+                    )
 
     def is_allowed(self, domain: str) -> bool:
         """
@@ -1243,7 +1330,7 @@ class Filter(BasePlugin):
         """
         # Normalize to a plain string to avoid sqlite InterfaceError when callers
         # pass dnslib labels or other non-str objects.
-        normalized = str(domain).rstrip(".")
+        normalized = self._normalize_domain(domain)
 
         # Prepare candidate suffixes from most specific to least specific.
         labels = normalized.split(".") if normalized else []
