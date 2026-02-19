@@ -19,6 +19,7 @@ Outputs:
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -593,7 +594,26 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         # Resolve plugin class eagerly so we can derive a stable, human-friendly
         # instance name when the config omits "name". The effective instance
         # name is used for logging, statistics, and HTTP routing.
-        plugin_cls = get_plugin_class(module_path, alias_registry)
+        #
+        # In minimal/headless builds, optional plugin dependencies may be absent.
+        # When this happens, skip the plugin by default unless the plugin config
+        # explicitly sets abort_on_failure=true.
+        import_abort_on_failure = bool(raw_config.get("abort_on_failure", False))
+        try:
+            plugin_cls = get_plugin_class(module_path, alias_registry)
+        except Exception as exc:
+            log = logging.getLogger("foghorn.config.plugins")
+            if import_abort_on_failure:
+                raise RuntimeError(
+                    f"Failed to load plugin {module_path!r} with abort_on_failure=true: {exc}"
+                ) from exc
+            log.warning(
+                "Skipping plugin %s because it could not be imported (%s). "
+                "Set abort_on_failure=true to make this fatal.",
+                module_path,
+                exc,
+            )
+            continue
 
         effective_name = _derive_plugin_instance_name(
             plugin_cls=plugin_cls,
