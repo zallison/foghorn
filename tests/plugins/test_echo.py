@@ -11,20 +11,20 @@ Outputs:
 from dnslib import DNSRecord, QTYPE
 
 from foghorn.plugins.resolve.base import PluginContext
-from foghorn.plugins.resolve.echo import EchoPlugin
+from foghorn.plugins.resolve.echo import Echo
 
 
 def test_echo_pre_resolve_not_targeted_returns_none():
-    """Brief: When ctx does not match plugin targets, EchoPlugin should not run.
+    """Brief: When ctx does not match plugin targets, Echo should not run.
 
     Inputs:
-      - plugin: EchoPlugin configured with explicit targets
+      - plugin: Echo configured with explicit targets
       - ctx: PluginContext with a client_ip outside the targeted networks
 
     Outputs:
       - None: Asserts pre_resolve returns None
     """
-    plugin = EchoPlugin(targets=["192.0.2.0/24"])
+    plugin = Echo(targets=["192.0.2.0/24"])
     plugin.setup()
 
     ctx = PluginContext(client_ip="198.51.100.1")
@@ -43,7 +43,7 @@ def test_echo_pre_resolve_parse_failure_returns_none():
     Outputs:
       - None: Asserts pre_resolve returns None
     """
-    plugin = EchoPlugin()
+    plugin = Echo()
     plugin.setup()
 
     ctx = PluginContext(client_ip="1.2.3.4")
@@ -52,7 +52,7 @@ def test_echo_pre_resolve_parse_failure_returns_none():
 
 
 def test_echo_pre_resolve_builds_txt_override_response():
-    """Brief: EchoPlugin should synthesize a TXT override response on match.
+    """Brief: Echo should synthesize a TXT override response on match.
 
     Inputs:
       - qname: name to echo (trailing dot allowed)
@@ -62,7 +62,7 @@ def test_echo_pre_resolve_builds_txt_override_response():
     Outputs:
       - None: Asserts returned PluginDecision contains a TXT RR with the echoed text
     """
-    plugin = EchoPlugin()
+    plugin = Echo()
     plugin.setup()
 
     ctx = PluginContext(client_ip="1.2.3.4")
@@ -80,7 +80,7 @@ def test_echo_pre_resolve_builds_txt_override_response():
 
     rr = response.rr[0]
     assert rr.rtype == QTYPE.TXT
-    assert rr.ttl == EchoPlugin.ttl
+    assert rr.ttl == Echo.ttl
 
     # dnslib TXT stores one or more byte-string chunks.
     txt = b"".join(getattr(rr.rdata, "data", [])).decode("utf-8")
@@ -88,7 +88,7 @@ def test_echo_pre_resolve_builds_txt_override_response():
 
 
 def test_echo_pre_resolve_uses_class_ttl_override():
-    """Brief: EchoPlugin should use the plugin class's ttl attribute for the answer.
+    """Brief: Echo should use the plugin class's ttl attribute for the answer.
 
     Inputs:
       - ttl: custom class attribute override
@@ -97,7 +97,7 @@ def test_echo_pre_resolve_uses_class_ttl_override():
       - None: Asserts the TXT RR ttl matches the overridden class attribute
     """
 
-    class EchoTTL(EchoPlugin):
+    class EchoTTL(Echo):
         ttl = 42
 
     plugin = EchoTTL()
