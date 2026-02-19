@@ -1,19 +1,15 @@
 """Logging and in-memory log buffer helpers for the admin webserver.
 
-This module contains uvicorn access-log suppression logic and a simple
-thread-safe RingBuffer used for exposing recent log entries via the
-FastAPI admin API.
+This module contains uvicorn access-log suppression logic and re-exports a
+thread-safe RingBuffer (implemented in :mod:`foghorn.servers.runtime_state`) for
+exposing recent log entries via the FastAPI admin API.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
-from typing import Any, List, Optional
 
-from cachetools import TTLCache
-
-from foghorn.utils.register_caches import registered_cached
+from foghorn.servers.runtime_state import RingBuffer
 
 
 class _Suppress2xxAccessFilter(logging.Filter):
@@ -67,57 +63,3 @@ def install_uvicorn_2xx_suppression() -> None:
         if isinstance(f, _Suppress2xxAccessFilter):
             return
     access_logger.addFilter(_Suppress2xxAccessFilter())
-
-
-class RingBuffer:
-    """Thread-safe fixed-size ring buffer of arbitrary items.
-
-    Inputs (constructor):
-      - capacity: Maximum number of items to retain (int, >= 1)
-
-    Outputs:
-      - RingBuffer instance with push() and snapshot() helpers.
-    """
-
-    def __init__(self, capacity: int = 500) -> None:
-        if capacity <= 0:
-            capacity = 1
-
-        self._capacity = int(capacity)
-        self._items: List[Any] = []
-        self._lock = threading.Lock()
-
-    def push(self, item: Any) -> None:
-        """Append an item, evicting the oldest when capacity is exceeded.
-
-        Inputs:
-          - item: Any JSON-serializable value.
-
-        Outputs:
-          - None.
-        """
-
-        with self._lock:
-            self._items.append(item)
-            if len(self._items) > self._capacity:
-                # Drop oldest
-                overflow = len(self._items) - self._capacity
-                if overflow > 0:
-                    self._items = self._items[overflow:]
-
-    @registered_cached(cache=TTLCache(maxsize=1, ttl=10))
-    def snapshot(self, limit: Optional[int] = None) -> List[Any]:
-        """Return a copy of buffered items, optionally truncated to newest N.
-
-        Inputs:
-          - limit: Optional int maximum number of items to return (newest first).
-
-        Outputs:
-          - List of items (shallow copy) suitable for JSON serialization.
-        """
-
-        with self._lock:
-            data = list(self._items)
-        if limit is not None and limit >= 0:
-            data = data[-limit:]
-        return data

@@ -10,175 +10,21 @@ preserving the public/semi-public API via re-exports from ``core``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import threading
 from typing import Any, Dict, Optional, Tuple, List
 
-from cachetools import TTLCache
-
 from foghorn.stats import StatsCollector
-from foghorn.utils.register_caches import registered_cached
 
 from .config_helpers import _get_web_cfg
 
-
-@dataclass
-class _ListenerRuntime:
-    """Track the runtime state of a single listener for readiness checks.
-
-    Inputs (fields):
-      - name: Logical listener name (e.g. "udp", "tcp", "dot", "doh", "webserver").
-      - enabled: Whether this listener is expected to be running.
-      - thread: Optional thread-like object that may implement ``is_alive()`` or
-        ``is_running()``.
-      - error: Optional string describing a startup/runtime error.
-
-    Outputs:
-      - ``_ListenerRuntime`` instance used inside :class:`RuntimeState`.
-    """
-
-    name: str
-    enabled: bool
-    thread: Any | None = None
-    error: str | None = None
-
-
-class RuntimeState:
-    """Shared, thread-safe runtime state used by /ready endpoints.
-
-    Inputs (constructor):
-      - startup_complete: Optional bool indicating whether main startup has
-        completed.
-
-    Outputs:
-      - :class:`RuntimeState` instance whose :meth:`snapshot` method returns a
-        JSON-safe mapping describing listener readiness.
-
-    Example::
-
-      state = RuntimeState()
-      state.set_listener("udp", enabled=True, thread=None)
-      state.mark_startup_complete()
-    """
-
-    def __init__(self, startup_complete: bool = False) -> None:
-        self._lock = threading.Lock()
-        self._startup_complete = bool(startup_complete)
-        self._listeners: Dict[str, _ListenerRuntime] = {}
-
-    def mark_startup_complete(self) -> None:
-        """Mark the process as having completed startup.
-
-        Inputs: none
-        Outputs: none
-        """
-
-        with self._lock:
-            self._startup_complete = True
-
-    def set_listener(self, name: str, *, enabled: bool, thread: Any | None) -> None:
-        """Register or update a listener entry.
-
-        Inputs:
-          - name: Listener name string.
-          - enabled: Whether the listener is expected to be running.
-          - thread: Optional thread/handle object.
-
-        Outputs:
-          - None.
-        """
-
-        if not name:
-            return
-        with self._lock:
-            current = self._listeners.get(name)
-            error = current.error if current is not None else None
-            self._listeners[name] = _ListenerRuntime(
-                name=str(name),
-                enabled=bool(enabled),
-                thread=thread,
-                error=error,
-            )
-
-    def set_listener_error(self, name: str, exc: Exception | str) -> None:
-        """Attach an error message to a listener entry.
-
-        Inputs:
-          - name: Listener name string.
-          - exc: Exception instance or error string.
-
-        Outputs:
-          - None.
-        """
-
-        if not name:
-            return
-        msg = str(exc)
-        with self._lock:
-            current = self._listeners.get(name)
-            enabled = current.enabled if current is not None else True
-            thread = current.thread if current is not None else None
-            self._listeners[name] = _ListenerRuntime(
-                name=str(name),
-                enabled=bool(enabled),
-                thread=thread,
-                error=msg,
-            )
-
-    @registered_cached(cache=TTLCache(maxsize=1, ttl=10))
-    def snapshot(self) -> Dict[str, Any]:
-        """Return a JSON-safe snapshot of current runtime state.
-
-        Inputs: none
-
-        Outputs:
-          - dict with keys:
-              * startup_complete: bool
-              * listeners: mapping of listener name -> {enabled, running, error}
-        """
-
-        with self._lock:
-            listeners = {
-                name: {
-                    "enabled": entry.enabled,
-                    "running": _thread_is_alive(entry.thread),
-                    "error": entry.error,
-                }
-                for name, entry in self._listeners.items()
-            }
-            return {
-                "startup_complete": bool(self._startup_complete),
-                "listeners": listeners,
-            }
-
-
-def _thread_is_alive(obj: Any | None) -> bool:
-    """Best-effort check whether a thread/handle is alive.
-
-    Inputs:
-      - obj: Thread-like object (may implement ``is_alive()`` or
-        ``is_running()``) or None.
-
-    Outputs:
-      - bool: True when ``obj`` appears to be running; False otherwise.
-    """
-
-    if obj is None:
-        return False
-    try:
-        fn = getattr(obj, "is_alive", None)
-        if callable(fn):
-            return bool(fn())
-    except Exception:
-        return False
-    # Some handles expose is_running instead of is_alive.
-    try:
-        fn = getattr(obj, "is_running", None)
-        if callable(fn):
-            return bool(fn())
-    except Exception:
-        return False
-    return False
+# Re-export shared types from the FastAPI-free servers.runtime_state module so
+# minimal/headless builds can import foghorn.main without pulling in the web UI.
+from foghorn.servers.runtime_state import (  # noqa: F401
+    RuntimeState,
+    RingBuffer,  # kept for backwards compatibility; some callers import it from webserver
+    _ListenerRuntime,
+    _thread_is_alive,
+)
 
 
 def _expected_listeners_from_config(config: Dict[str, Any] | None) -> Dict[str, bool]:
