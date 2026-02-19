@@ -214,8 +214,22 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for EtcHosts.\n\nInputs:\n  - file_paths: Preferred list of hosts file paths.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Response TTL in seconds.\n\nOutputs:\n  - EtcHostsConfig instance with normalized field types.\n\nNotes:\n  - The legacy single-path key \"file_path\" has been removed; use \"file_paths\".",
+          "description": "Brief: Typed configuration model for EtcHosts.\n\nInputs:\n  - file_path: Legacy single hosts file path.\n  - file_paths: Preferred list of hosts file paths.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Response TTL in seconds.\n\nOutputs:\n  - EtcHostsConfig instance with normalized field types.",
           "properties": {
+            "file_path": {
+              "anyOf": [
+                {
+                  "description": "Type: string.",
+                  "type": "string"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "File Path"
+            },
             "file_paths": {
               "anyOf": [
                 {
@@ -282,7 +296,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for FileDownloader.\n\nInputs:\n  - download_path: Directory where list files are written.\n  - urls: Explicit list of HTTP(S) URLs to download. Each entry may be either\n    a bare URL string or an object with keys:\n      - url (str): The URL to download.\n      - hash_filenames (bool | None): When True, use hashed filenames;\n        when False, derive filenames directly from the URL; when None in a\n        per-URL object, fall back to the plugin-level default.\n      - add_comment (bool | None): When True, prepend a timestamped comment\n        line to the downloaded file; when False or None, no comment is\n        written for that URL.\n  - url_files: Paths to files containing one URL per line.\n  - interval_days: Optional number of days between refreshes (>= 0).\n  - interval_seconds: Optional legacy seconds-based interval (>= 0).\n  - add_comment: Plugin-level default for whether to add a comment header\n    line to downloaded files (default: False).\n  - hash_filenames: Plugin-level default for whether filenames should\n    include a URL hash (default: False).\n  - min_valid_domains: Minimum number of valid domain lines required for a\n    downloaded list to be considered valid (default: 5).\n\nOutputs:\n  - FileDownloaderConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for FileDownloader.\n\nInputs:\n  - download_path: Directory where list files are written.\n  - urls: Explicit list of HTTP(S) URLs to download. Each entry may be either\n    a bare URL string or an object with keys:\n      - url (str): The URL to download.\n      - hash_filenames (bool | None): When True, use hashed filenames;\n        when False, derive filenames directly from the URL; when None in a\n        per-URL object, fall back to the plugin-level default.\n      - add_comment (bool | None): When True, prepend a timestamped comment\n        line to the downloaded file; when False or None, no comment is\n        written for that URL.\n  - url_files: Paths to files containing one URL per line.\n  - interval_days: Optional number of days between refreshes (>= 0).\n  - interval_seconds: Optional legacy seconds-based interval (>= 0).\n  - add_comment: Plugin-level default for whether to add a comment header\n    line to downloaded files (default: False).\n  - hash_filenames: Plugin-level default for whether filenames should\n    include a URL hash (default: False).\n\nOutputs:\n  - FileDownloaderConfig instance with normalized field types.",
           "properties": {
             "add_comment": {
               "anyOf": [
@@ -341,13 +355,6 @@
               "default": null,
               "title": "Interval Seconds"
             },
-            "min_valid_domains": {
-              "default": 5,
-              "description": "Type: integer. Default: 5.",
-              "minimum": 1,
-              "title": "Min Valid Domains",
-              "type": "integer"
-            },
             "url_files": {
               "description": "Type: array.",
               "items": {
@@ -377,7 +384,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for Filter.\n\nInputs:\n  - cache_ttl_seconds: TTL for domain cache.\n  - db_path: Optional path to blocklist SQLite DB. When omitted or empty,\n    the plugin uses a per-instance in-memory database so that multiple\n    Filter instances do not share state by default.\n  - default: Default policy (\"allow\" or \"deny\").\n  - ttl: TTL for synthesized responses.\n  - deny_response: Policy for deny responses.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs for IP-mode denies.\n  - allow_qtypes / deny_qtypes: Optional lists of DNS qtype names to allow or deny.\n  - *_domains_files: List paths for loading allow/block lists from files.\n  - blocked_domains / allowed_domains: Inline domain lists.\n  - blocked_patterns / blocked_patterns_files: Regexes.\n  - blocked_keywords / blocked_keywords_files: Keywords.\n  - blocked_ips / blocked_ips_files: IP rules.\n\nOutputs:\n  - FilterConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for Filter.\n\nInputs:\n  - cache_ttl_seconds: TTL for domain cache.\n  - db_path: Optional path to blocklist SQLite DB. When omitted or empty,\n    the plugin uses a per-instance in-memory database so that multiple\n    Filter instances do not share state by default.\n  - default: Default policy (\"allow\" or \"deny\").\n  - ttl: TTL for synthesized responses.\n  - deny_response: Policy for deny responses ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop').\n  - deny_response_ip4 / deny_response_ip6: Optional IPs for IP-mode denies.\n  - allow_qtypes / deny_qtypes: Optional lists of DNS qtype names to allow or deny.\n  - *_domains_files: List paths for loading allow/block lists from files.\n  - blocked_domains / allowed_domains: Inline domain lists.\n  - blocked_patterns / blocked_patterns_files: Regexes.\n  - blocked_keywords / blocked_keywords_files: Keywords.\n  - blocked_ips / blocked_ips_files: IP rules.\n\nOutputs:\n  - FilterConfig instance with normalized field types.",
           "properties": {
             "allowed_domains": {
               "description": "Type: array.",
