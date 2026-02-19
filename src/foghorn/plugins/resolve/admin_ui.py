@@ -79,6 +79,8 @@ def _make_deepcopy_safe(value: Any) -> Any:
         can safely copy/redact it.
 
     Notes:
+      - Tuples/sets are converted into lists.
+      - Unknown object types are converted to a stable string (usually the class name).
       - This primarily exists because config_parser injects a live cache instance into
         every plugin config under the key "cache". Some cache implementations contain
         non-pickleable locks (e.g. RLock), which breaks copy.deepcopy().
@@ -115,7 +117,7 @@ def _truncate(text: str, max_len: int = 200) -> str:
 
     Inputs:
       - text: Original string.
-      - max_len: Maximum allowed length.
+      - max_len: Maximum allowed length. When <= 0, truncation is disabled.
 
     Outputs:
       - Possibly truncated string.
@@ -136,6 +138,10 @@ def _stringify_value(value: Any, *, max_len: int = 200) -> str:
 
     Outputs:
       - str: A display-friendly representation.
+
+    Notes:
+      - Sequences show at most the first 50 items.
+      - Dicts attempt json.dumps(...); when that fails, they fall back to str(value).
     """
 
     if value is None:
@@ -180,6 +186,8 @@ def config_to_items(
       - list[dict]: Rows with keys: key, value.
 
     Notes:
+      - The output is one row per *top-level* key in cfg (the mapping is not
+        flattened).
       - Values are stringified so the frontend table renderer displays them
         predictably.
     """
