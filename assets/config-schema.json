@@ -202,7 +202,7 @@
           "echo"
         ],
         "config_schema": null,
-        "module": "foghorn.plugins.resolve.echo.EchoPlugin"
+        "module": "foghorn.plugins.resolve.echo.Echo"
       },
       "etc_hosts": {
         "aliases": [
@@ -214,22 +214,8 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for EtcHosts.\n\nInputs:\n  - file_path: Legacy single hosts file path.\n  - file_paths: Preferred list of hosts file paths.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Response TTL in seconds.\n\nOutputs:\n  - EtcHostsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for EtcHosts.\n\nInputs:\n  - file_paths: Preferred list of hosts file paths.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Response TTL in seconds.\n\nOutputs:\n  - EtcHostsConfig instance with normalized field types.\n\nNotes:\n  - The legacy single-path key \"file_path\" has been removed; use \"file_paths\".",
           "properties": {
-            "file_path": {
-              "anyOf": [
-                {
-                  "description": "Type: string.",
-                  "type": "string"
-                },
-                {
-                  "description": "Type: null.",
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "File Path"
-            },
             "file_paths": {
               "anyOf": [
                 {
@@ -296,7 +282,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for FileDownloader.\n\nInputs:\n  - download_path: Directory where list files are written.\n  - urls: Explicit list of HTTP(S) URLs to download. Each entry may be either\n    a bare URL string or an object with keys:\n      - url (str): The URL to download.\n      - hash_filenames (bool | None): When True, use hashed filenames;\n        when False, derive filenames directly from the URL; when None in a\n        per-URL object, fall back to the plugin-level default.\n      - add_comment (bool | None): When True, prepend a timestamped comment\n        line to the downloaded file; when False or None, no comment is\n        written for that URL.\n  - url_files: Paths to files containing one URL per line.\n  - interval_days: Optional number of days between refreshes (>= 0).\n  - interval_seconds: Optional legacy seconds-based interval (>= 0).\n  - add_comment: Plugin-level default for whether to add a comment header\n    line to downloaded files (default: False).\n  - hash_filenames: Plugin-level default for whether filenames should\n    include a URL hash (default: False).\n\nOutputs:\n  - FileDownloaderConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for FileDownloader.\n\nInputs:\n  - download_path: Directory where list files are written.\n  - urls: Explicit list of HTTP(S) URLs to download. Each entry may be either\n    a bare URL string or an object with keys:\n      - url (str): The URL to download.\n      - hash_filenames (bool | None): When True, use hashed filenames;\n        when False, derive filenames directly from the URL; when None in a\n        per-URL object, fall back to the plugin-level default.\n      - add_comment (bool | None): When True, prepend a timestamped comment\n        line to the downloaded file; when False or None, no comment is\n        written for that URL.\n  - url_files: Paths to files containing one URL per line.\n  - interval_days: Optional number of days between refreshes (>= 0).\n  - interval_seconds: Optional legacy seconds-based interval (>= 0).\n  - add_comment: Plugin-level default for whether to add a comment header\n    line to downloaded files (default: False).\n  - hash_filenames: Plugin-level default for whether filenames should\n    include a URL hash (default: False).\n  - min_valid_domains: Minimum number of valid domain lines required for a\n    downloaded list to be considered valid (default: 5).\n\nOutputs:\n  - FileDownloaderConfig instance with normalized field types.",
           "properties": {
             "add_comment": {
               "anyOf": [
@@ -354,6 +340,13 @@
               ],
               "default": null,
               "title": "Interval Seconds"
+            },
+            "min_valid_domains": {
+              "default": 5,
+              "description": "Type: integer. Default: 5.",
+              "minimum": 1,
+              "title": "Min Valid Domains",
+              "type": "integer"
             },
             "url_files": {
               "description": "Type: array.",
@@ -3010,6 +3003,44 @@
   "$id": "https://example.com/foghorn/config.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "allOf": [
+    {
+      "else": {
+        "required": [
+          "upstreams"
+        ]
+      },
+      "if": {
+        "properties": {
+          "server": {
+            "properties": {
+              "resolver": {
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "recursive",
+                      "master",
+                      "none"
+                    ]
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              }
+            },
+            "required": [
+              "resolver"
+            ]
+          }
+        },
+        "required": [
+          "server"
+        ]
+      },
+      "then": {}
+    }
+  ],
   "properties": {
     "$schema": {
       "description": "Optional URI or identifier for the JSON Schema associated with this configuration file.",
@@ -3146,7 +3177,44 @@
           "type": "object"
         },
         "resolver": {
-          "description": "Type: object.",
+          "additionalProperties": true,
+          "description": "Resolver configuration. mode selects how unanswered queries are handled: forward (default), recursive (walk from root), or master (authoritative-only; no forwarding). 'none' is an alias for 'master'.",
+          "properties": {
+            "max_depth": {
+              "default": 16,
+              "description": "Maximum delegation hops for recursive mode.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "mode": {
+              "default": "forward",
+              "description": "Resolver mode: forward | recursive | master (none).",
+              "enum": [
+                "forward",
+                "recursive",
+                "master",
+                "none"
+              ],
+              "type": "string"
+            },
+            "per_try_timeout_ms": {
+              "default": 2000,
+              "description": "Per-authority timeout for recursive mode (milliseconds).",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "timeout_ms": {
+              "default": 2000,
+              "description": "Upstream/recursive timeout budget per query (milliseconds).",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "use_asyncio": {
+              "default": true,
+              "description": "Enable asyncio-based listeners when available.",
+              "type": "boolean"
+            }
+          },
           "type": "object"
         }
       },
@@ -3204,8 +3272,7 @@
     }
   },
   "required": [
-    "server",
-    "upstreams"
+    "server"
   ],
   "title": "Foghorn Config (v0.6.0)",
   "type": "object"
