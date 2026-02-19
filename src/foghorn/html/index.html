@@ -58,6 +58,16 @@
 		<span id="plugin-tabs-root"></span>
 	</div>
 	<main class="fh-main" id="page2">
+		<section class="fh-pane fh-pane-full" id="stats-details-pane" hidden>
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title" id="stats-details-title">Details</h2>
+				<div class="fh-config-actions">
+					<button id="btn-stats-details-back" class="fh-btn fh-btn-secondary" type="button">Back</button>
+				</div>
+			</div>
+			<p class="fh-pane-help" id="stats-details-help"></p>
+			<div id="stats-details-root" class="fh-stats-groups"></div>
+		</section>
 		<section class="fh-pane fh-pane-left">
 			<div class="fh-pane-header">
 				<h2 class="fh-pane-title">Statistics</h2>
@@ -136,7 +146,17 @@
 			var statsRawEl = document.getElementById('stats-raw');
 			var statsGroupsEl = document.getElementById('stats-groups');
 			var statsGroupsRightEl = document.getElementById('stats-groups-right');
+			var statsDetailsPane = document.getElementById('stats-details-pane');
+			var statsDetailsTitleEl = document.getElementById('stats-details-title');
+			var statsDetailsHelpEl = document.getElementById('stats-details-help');
+			var statsDetailsRootEl = document.getElementById('stats-details-root');
+			var btnStatsDetailsBack = document.getElementById('btn-stats-details-back');
+			var statsPaneLeftEl = null;
+			var statsPaneRightEl = null;
 			var configOutputEl = document.getElementById('config-output');
+			var configDiagramImgEl = document.getElementById('config-diagram-img');
+			var configDiagramStatusEl = document.getElementById('config-diagram-status');
+			var configDiagramFallbackEl = document.getElementById('config-diagram-fallback');
 			var configEditorEl = document.getElementById('config-editor');
 			var configViewContainer = document.getElementById('config-view-container');
 			var configEditContainer = document.getElementById('config-edit-container');
@@ -1346,7 +1366,9 @@
 				clearStatsGroups();
 
 				if (!data || typeof data !== 'object') {
-					statsRawEl.textContent = 'No statistics payload returned from /stats';
+					if (statsRawEl) {
+						statsRawEl.textContent = 'No statistics payload returned from /stats';
+					}
 					return;
 				}
 
@@ -1362,7 +1384,9 @@
 					p.textContent = 'Statistics are disabled for this server instance.';
 					disabledGroup.appendChild(p);
 					statsGroupsEl.appendChild(disabledGroup);
-					statsRawEl.textContent = pretty(data);
+					if (statsRawEl) {
+						statsRawEl.textContent = pretty(data);
+					}
 					return;
 				}
 
@@ -1503,7 +1527,9 @@
 					appendSystemGroup(data.system);
 				}
 
-				statsRawEl.textContent = pretty(data);
+				if (statsRawEl) {
+					statsRawEl.textContent = pretty(data);
+				}
 			}
 
 			function loadStats() {

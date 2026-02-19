@@ -228,6 +228,11 @@ a:visited {
     box-shadow: 0 4px 12px rgba(15, 23, 42, 0.6);
 }
 
+.fh-pane-full {
+    flex: 0 0 100%;
+    width: 100%;
+}
+
 .fh-pane-title {
     margin: 0 0 0.5rem 0;
     color: var(--accent);
@@ -266,6 +271,14 @@ a:visited {
 .fh-stats-group-title {
     margin: 0 0 0.5rem 0;
     font-size: 1rem;
+}
+
+.fh-stats-group-title-link {
+    cursor: pointer;
+}
+
+.fh-stats-group-title-link:hover {
+    text-decoration: underline;
 }
 
 .fh-kv-list {
