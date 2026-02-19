@@ -9,6 +9,8 @@ import logging
 import threading
 from typing import Dict, List, Optional, Tuple
 
+from dnslib import QTYPE
+
 from pydantic import BaseModel, Field
 
 from foghorn.plugins.resolve.base import (
@@ -444,6 +446,160 @@ class ZoneRecords(BasePlugin):
             this plugin should answer the query, or None to allow normal processing.
         """
         return resolver.pre_resolve(self, qname, qtype, req, ctx)
+
+    def get_http_snapshot(self) -> Dict[str, object]:
+        """Brief: Summarize current ZoneRecords state for the admin web UI.
+
+        Inputs:
+          - None (uses in-memory zone mappings populated by setup()/reload).
+
+        Outputs:
+          - dict with keys:
+              * summary: High-level counts.
+              * zones: list of zone descriptors.
+              * records: flattened list of record rows including per-value sources.
+
+        Notes:
+          - Sources are best-effort and currently derived from configured file_paths,
+            bind_paths, and inline-config records.
+        """
+
+        def _parse_qtype_code(raw: object) -> Optional[int]:
+            if raw is None:
+                return None
+            text = str(raw).strip()
+            if not text:
+                return None
+            if text.isdigit():
+                try:
+                    return int(text)
+                except Exception:
+                    return None
+            name = text.upper()
+            try:
+                attr_val = getattr(QTYPE, name)
+            except Exception:
+                attr_val = None
+            if isinstance(attr_val, int):
+                return int(attr_val)
+            try:
+                qtype_val = QTYPE.get(name, None)
+            except Exception:
+                qtype_val = None
+            return int(qtype_val) if isinstance(qtype_val, int) else None
+
+        def _iter_pipe_records(
+            source_label: str, lines: List[str]
+        ) -> List[tuple[str, int, str]]:
+            out: List[tuple[str, int, str]] = []
+            for raw_line in lines or []:
+                try:
+                    line = str(raw_line)
+                except Exception:
+                    continue
+                # Strip inline comments and whitespace.
+                line = line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) != 4:
+                    continue
+                owner_raw, qtype_raw, _ttl_raw, value_raw = parts
+                if not owner_raw or not qtype_raw or not value_raw:
+                    continue
+                owner = owner_raw.rstrip(".").lower()
+                qcode = _parse_qtype_code(qtype_raw)
+                if qcode is None:
+                    continue
+                out.append((owner, int(qcode), str(value_raw)))
+            return out
+
+        # Snapshot configured sources into (owner,qtype,value)->set(source_labels).
+        sources_map: Dict[tuple[str, int, str], set[str]] = {}
+
+        # File-based records.
+        file_paths = list(getattr(self, "file_paths", []) or [])
+        for fp in file_paths:
+            try:
+                with open(str(fp), "r", encoding="utf-8") as f:
+                    lines = [ln.rstrip("\n") for ln in f.readlines()]
+            except Exception:
+                continue
+            for owner, qcode, value in _iter_pipe_records(str(fp), lines):
+                sources_map.setdefault((owner, qcode, value), set()).add(str(fp))
+
+        # Inline records.
+        inline = list(getattr(self, "_inline_records", []) or [])
+        for owner, qcode, value in _iter_pipe_records(
+            "inline-config-records", [str(x) for x in inline]
+        ):
+            sources_map.setdefault((owner, qcode, value), set()).add(
+                "inline-config-records"
+            )
+
+        # Safe concurrent read from mappings when a watcher may be reloading.
+        lock = getattr(self, "_records_lock", None)
+        if lock is None:
+            records_map = dict(getattr(self, "records", {}) or {})
+            name_index = dict(getattr(self, "_name_index", {}) or {})
+            zone_soa = dict(getattr(self, "_zone_soa", {}) or {})
+        else:
+            with lock:
+                records_map = dict(getattr(self, "records", {}) or {})
+                name_index = dict(getattr(self, "_name_index", {}) or {})
+                zone_soa = dict(getattr(self, "_zone_soa", {}) or {})
+
+        zones: List[Dict[str, object]] = []
+        for apex, (ttl, values) in sorted(zone_soa.items(), key=lambda kv: str(kv[0])):
+            zones.append(
+                {
+                    "zone": str(apex),
+                    "soa_ttl": int(ttl),
+                    "soa_values": list(values or []),
+                }
+            )
+
+        rows: List[Dict[str, object]] = []
+        for (owner, qcode), (ttl, values) in sorted(
+            records_map.items(), key=lambda kv: (str(kv[0][0]), int(kv[0][1]))
+        ):
+            owner_norm = str(owner).rstrip(".").lower()
+            zone = helpers.find_zone_for_name(owner_norm, zone_soa)
+            try:
+                qtype_name = QTYPE.get(int(qcode), str(qcode))
+            except Exception:
+                qtype_name = str(qcode)
+
+            for v in list(values or []):
+                value_text = str(v)
+                sources = sorted(
+                    list(sources_map.get((owner_norm, int(qcode), value_text), set()))
+                )
+                rows.append(
+                    {
+                        "zone": str(zone) if zone is not None else None,
+                        "owner": owner_norm,
+                        "qtype": str(qtype_name),
+                        "ttl": int(ttl),
+                        "value": value_text,
+                        "sources": sources,
+                    }
+                )
+
+        summary: Dict[str, object] = {
+            "zones": int(len(zones)),
+            "rrsets": int(len(records_map)),
+            "records": int(
+                sum(len(vs or []) for _k, (_ttl, vs) in records_map.items())
+            ),
+            "owners": int(len(name_index)),
+        }
+
+        return {
+            "summary": summary,
+            "zones": zones,
+            "records": rows,
+        }
 
     def iter_zone_rrs_for_transfer(
         self, zone_apex: str, client_ip: Optional[str] = None
