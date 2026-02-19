@@ -350,15 +350,17 @@ def test_get_plugin_class_with_hyphens():
 
 
 def test_discover_plugins_import_exception_propagates(monkeypatch):
-    """
-    Brief: discover_plugins re-raises exceptions when a module import fails.
+    """Brief: discover_plugins re-raises ImportError when strict discovery is enabled.
 
     Inputs:
       - monkeypatch: patch _iter_plugin_modules and importlib.import_module to raise
 
     Outputs:
-      - None: asserts ImportError is raised
+      - None: asserts ImportError is raised when FOGHORN_STRICT_PLUGIN_DISCOVERY is truthy
     """
+
+    monkeypatch.setenv("FOGHORN_STRICT_PLUGIN_DISCOVERY", "1")
+
     # Patch the iterator to return a single fake module name
     import foghorn.plugins.resolve.registry as reg
 
