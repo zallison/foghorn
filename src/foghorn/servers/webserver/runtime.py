@@ -274,6 +274,8 @@ def evaluate_readiness(
     if not isinstance(resolver_cfg, dict):
         resolver_cfg = {}
     mode = str(resolver_cfg.get("mode", "forward")).lower()
+    if mode == "none":
+        mode = "master"
 
     if mode == "forward":
         upstreams = cfg.get("upstreams") or []
