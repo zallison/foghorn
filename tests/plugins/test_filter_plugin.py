@@ -47,25 +47,25 @@ def _mk_response_with_ips(name, records):
 
 def test_pre_resolve_block_exact_and_cache(tmp_path):
     """
-    Brief: Exact blocked domain denies and subsequent cached lookup denies fast.
+    Brief: Blocked domain denies and subsequent cached lookup denies fast.
 
     Inputs:
-      - blocked_domains: ['blocked.com']
+      - blocked_domains: ['Blocked.COM.']
 
     Outputs:
-      - None: Asserts deny and cached deny
+      - None: Asserts deny and cached deny across mixed-case and trailing-dot variants.
     """
     db = tmp_path / "bl.db"
-    p = Filter(db_path=str(db), blocked_domains=["blocked.com"], default="allow")
+    p = Filter(db_path=str(db), blocked_domains=["Blocked.COM."], default="allow")
     p.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
 
     with closing(p.conn):
         # First call denies and populates cache
-        dec1 = p.pre_resolve("blocked.com", QTYPE.A, b"", ctx)
+        dec1 = p.pre_resolve("Blocked.Com.", QTYPE.A, b"", ctx)
         assert isinstance(dec1, PluginDecision) and dec1.action == "deny"
 
-        # Second call hits cache
+        # Second call hits cache (normalized key)
         dec2 = p.pre_resolve("blocked.com", QTYPE.A, b"", ctx)
         assert isinstance(dec2, PluginDecision) and dec2.action == "deny"
 
@@ -380,13 +380,13 @@ def test_post_resolve_replace_version_mismatch_and_invalid_runtime(tmp_path):
 
 def test_post_resolve_non_a_aaaa_and_parse_error(tmp_path):
     """
-    Brief: Non-A/AAAA qtype raises TypeError; parse error returns default action.
+    Brief: Non-A/AAAA qtype returns None; parse error returns default action.
 
     Inputs:
-      - qtype: MX for TypeError; bad wire to force parse error
+      - qtype: MX for None; bad wire to force parse error
 
     Outputs:
-      - None: Asserts TypeError and default decision
+      - None: Asserts None and default decision
     """
     db = tmp_path / "bl.db"
     p = Filter(db_path=str(db), blocked_ips=["1.2.3.4"], default="allow")
@@ -944,13 +944,14 @@ def test_pre_resolve_ip_mode_for_aaaa_and_other_qtypes(tmp_path):
       - tmp_path fixture.
 
     Outputs:
-      - None: Asserts AAAA and non-A/AAAA paths build override responses.
+      - None: Asserts AAAA and non-A/AAAA paths build override responses and honor TTL.
     """
     db = tmp_path / "bl_ipmode.db"
     p = Filter(
         db_path=str(db),
         blocked_domains=["blocked.com"],
         default="allow",
+        ttl=123,
         deny_response="ip",
         deny_response_ip4="192.0.2.55",
         deny_response_ip6="2001:db8::55",
@@ -966,10 +967,10 @@ def test_pre_resolve_ip_mode_for_aaaa_and_other_qtypes(tmp_path):
         assert isinstance(dec6, PluginDecision)
         assert dec6.action == "override"
         rep6 = DNSRecord.parse(dec6.response)
-        assert any(rr.rtype == QTYPE.AAAA for rr in rep6.rr)
-        assert any(
-            str(rr.rdata) == "2001:db8::55" for rr in rep6.rr if rr.rtype == QTYPE.AAAA
-        )
+        aaaa_rrs = [rr for rr in rep6.rr if rr.rtype == QTYPE.AAAA]
+        assert aaaa_rrs
+        assert aaaa_rrs[0].ttl == 123
+        assert str(aaaa_rrs[0].rdata) == "2001:db8::55"
 
         dec_txt = p.pre_resolve("blocked.com", QTYPE.TXT, wiretxt, ctx)
         assert isinstance(dec_txt, PluginDecision)

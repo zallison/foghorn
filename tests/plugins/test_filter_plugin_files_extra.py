@@ -53,8 +53,8 @@ def test_domains_files_allow_and_block(tmp_path):
     """
     allowf = tmp_path / "allows.txt"
     blockf = tmp_path / "blocks.txt"
-    allowf.write_text("ok.com\n")
-    blockf.write_text("bad.com\n")
+    allowf.write_text("OK.COM.\n")
+    blockf.write_text("BAD.COM.\n")
 
     p = Filter(
         db_path=str(tmp_path / "bl.db"),
