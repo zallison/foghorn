@@ -142,7 +142,16 @@ Key pieces:
 - `resolve/registry.py`:
   - Walks the `foghorn.plugins` package using `pkgutil.walk_packages`.
   - Registers each `BasePlugin` subclass under a default alias derived from its class name plus any explicit `aliases` attribute.
+  - By default, **skips** plugin modules that raise `ImportError` during discovery
+    (missing optional dependencies) and records the errors for better diagnostics.
+  - Set `FOGHORN_STRICT_PLUGIN_DISCOVERY=1` to make discovery strict (re-raise ImportError).
   - `get_plugin_class()` resolves identifiers either as aliases or dotted import paths.
+
+- `config/config_parser.py:load_plugins()`:
+  - When a plugin referenced in config cannot be imported (due to missing optional deps
+    or skipped discovery), the plugin is **skipped by default**.
+  - To make an import failure fatal for a specific plugin, set `abort_on_failure: true`
+    in that plugin's `config` block.
 
 Built‑in resolve plugins include (by alias only):
 
