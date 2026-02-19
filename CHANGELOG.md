@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Added `foghorn.stats` package providing a thread-safe `StatsCollector`, a SQLite-backed `StatsSQLiteStore`, and a background `StatsReporter`.
+- Added generic resolve-plugin admin UI snapshots via `BasePlugin.get_http_snapshot()`.
+- Added ZoneRecords admin snapshot payload (`ZoneRecords.get_http_snapshot()`) including per-record source labels.
+- Added `scripts/generate_config_mermaid.py` to generate a Mermaid diagram of plugin ordering and short-circuit behavior from a config file.
 - ZoneRecords (`zone`) now supports configurable reload semantics via `load_mode` and conflict handling via `merge_policy`.
 - ZoneRecords can now be configured with `load_mode=first` to select the first configured source group (files, BIND zonefiles, AXFR, or inline) and ignore the others.
 - BIND zonefile entries under `bind_paths` can now override `$ORIGIN` and `$TTL` via per-entry `origin`/`ttl` settings; in-file `$ORIGIN`/`$TTL` directives are ignored with a warning when overridden.
@@ -16,17 +20,26 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- `server.resolver.mode: none` is now treated as an alias for authoritative-only operation (master mode): queries do not recurse/forward.
+- Filter plugin now normalizes domain keys (case/trailing-dot) for consistent allow/deny and record handling.
+- Resolve Echo plugin class renamed from `EchoPlugin` to `Echo`.
+- Regenerated `assets/config-schema.json` (via `scripts/generate_foghorn_schema.py`) to reflect updated resolver options and plugin config models.
 - Refactored ZoneRecords implementation into `foghorn.plugins.resolve.zone_records` package modules for clearer separation of loader/resolver/watchdog/AXFR helpers.
 - Refactored `cache.postgres_cache` to delegate to the `PostgresTTLCache` backend, with a more explicit key/TTL/value API and stable key hashing for non-bytes keys.
 - Packaging now includes the built-in admin web UI assets in installed distributions.
 
 ### Fixed
 
+- Filter allow/deny behavior is now consistent across mixed-case names and trailing-dot variants.
+- Authoritative-only resolver behavior now returns REFUSED with an EDE explanation instead of attempting upstream resolution.
 - The admin `/config` endpoint now supports `server.http.redact_keys` as a compatibility fallback when `webserver.redact_keys` is not set.
 - Redacted YAML output now quotes the placeholder (`'***'`) to ensure redacted config output remains parseable.
 
 ### Tests
 
+- Updated echo/filter tests to match the rename and domain normalization.
+- Added tests asserting plugin/ZoneRecords admin snapshots are JSON-safe.
+- Added pipeline tests for master/none authoritative-only behavior.
 - Extended ZoneRecords test coverage for merge/overwrite behavior, first-mode semantics, BIND override warnings, and `nxdomain_zones`.
 - Added focused unit tests for ZoneRecords AXFR polling, NOTIFY helpers, and transfer snapshot helpers.
 - Added cache backend tests covering stable key hashing, bytes vs pickle storage, and the updated `PostgresCache` API.
