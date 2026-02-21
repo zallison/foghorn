@@ -1,10 +1,11 @@
 from __future__ import annotations
+
 import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import BaseStatsStore
-from .sqlite import _normalize_domain, _is_subdomain
+from .sqlite import _is_subdomain, _normalize_domain
 
 """MySQL/MariaDB-backed implementation of the BaseStatsStore interface.
 
@@ -21,42 +22,187 @@ Outputs:
 Notes:
   - This backend intentionally mirrors the logical schema and behaviour of the
     SqliteStatsStore so callers remain backend-agnostic.
-  - The underlying DB driver (mysql-connector-python or MariaDB) is imported
+  - The underlying DB driver (mariadb or mysql-connector-python) is imported
     lazily so that Foghorn does not require it unless this backend is used.
+  - Config may specify:
+      - driver: auto|mariadb|mysql-connector-python (or mysql)
+      - driver_fallback: auto|none|<driver>|[<driver>, ...]
 """
 
 logger = logging.getLogger(__name__)
 
 
-def _import_mysql_driver():
+def _normalize_mysql_driver_name(raw: object) -> str | None:
+    """Brief: Normalize a MySQL driver name from config.
+
+    Inputs:
+        raw: Candidate value (string-like) from config.
+
+    Outputs:
+        str | None: Canonical driver key:
+          - 'mariadb'
+          - 'mysql-connector-python'
+        Returns None when raw is missing/empty/auto.
+    """
+
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        return None
+
+    value = raw.strip().lower().replace("_", "-").replace(" ", "")
+    if not value or value in {"auto", "default"}:
+        return None
+
+    # Accept a few common synonyms.
+    if value in {"mariadb", "maria-db"}:
+        return "mariadb"
+    if value in {
+        "mysql",
+        "mysql-connector-python",
+        "mysql.connector",
+        "mysql-connector",
+        "mysqlconnector",
+        "mysql-connector/py",
+        "connector",
+    }:
+        return "mysql-connector-python"
+
+    raise ValueError(
+        "mysql driver must be one of 'auto', 'mariadb', 'mysql', or 'mysql-connector-python'"
+    )
+
+
+def _normalize_driver_fallbacks(raw: object) -> list[str] | None:
+    """Brief: Normalize driver fallback configuration.
+
+    Inputs:
+        raw: Candidate fallback config from YAML (string or list of strings).
+
+    Outputs:
+        list[str] | None:
+          - None for default behavior (auto fallback)
+          - [] for explicit no-fallback (none)
+          - list of canonical driver keys
+    """
+
+    if raw is None:
+        return None
+
+    if isinstance(raw, str):
+        v = raw.strip().lower().replace("_", "-").replace(" ", "")
+        if not v or v in {"auto", "default"}:
+            return None
+        if v in {"none", "no", "false", "off"}:
+            return []
+        return [_normalize_mysql_driver_name(raw)]  # type: ignore[list-item]
+
+    if isinstance(raw, list):
+        out: list[str] = []
+        for item in raw:
+            if item is None:
+                continue
+            name = _normalize_mysql_driver_name(item)
+            if name is None:
+                continue
+            out.append(name)
+        return out
+
+    return None
+
+
+def _driver_order_from_config(
+    *,
+    driver: object = None,
+    driver_fallback: object = None,
+) -> list[str]:
+    """Brief: Compute the driver import order based on config.
+
+    Inputs:
+        driver: Preferred driver name ('auto'|'mariadb'|'mysql-connector-python').
+        driver_fallback: Fallback policy ('auto'|'none'|<driver>|[<driver>,...]).
+
+    Outputs:
+        list[str]: Ordered list of canonical driver keys to try.
+    """
+
+    preferred = _normalize_mysql_driver_name(driver)
+    fallbacks = _normalize_driver_fallbacks(driver_fallback)
+
+    # Default order: prefer mariadb, then mysql-connector-python.
+    default_order = ["mariadb", "mysql-connector-python"]
+
+    if preferred is None:
+        # auto/default
+        if fallbacks == []:
+            return [default_order[0]]
+        return default_order
+
+    # Explicit preferred.
+    if fallbacks is None:
+        # Default fallback for an explicit preference is "the other driver".
+        fallbacks = [d for d in default_order if d != preferred]
+
+    # fallbacks may be [] to disable.
+    order = [preferred] + list(fallbacks or [])
+
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in order:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _import_mysql_driver(
+    *,
+    driver: object = None,
+    driver_fallback: object = None,
+) -> tuple[object, str]:
     """Import and return a DB-API compatible MySQL/MariaDB driver module.
 
     Inputs:
-        None.
+        driver: Preferred driver name.
+        driver_fallback: Fallback policy.
 
     Outputs:
-        DB-API like module exposing a ``connect`` callable.
+        (driver_module, placeholder):
+          - driver_module: DB-API like module exposing a ``connect`` callable.
+          - placeholder: Parameter placeholder string ('%s' or '?').
 
     Raises:
         RuntimeError: When no supported MySQL/MariaDB driver is available.
+        ValueError: When driver/driver_fallback values are invalid.
     """
 
-    try:  # Prefer mysql-connector-python when available.
-        # pragma: disable E402
-        import mysql.connector as driver  # type: ignore[import]
+    order = _driver_order_from_config(driver=driver, driver_fallback=driver_fallback)
 
-        return driver
-    except Exception:  # pragma: no cover - import-path dependent
+    last_exc: Exception | None = None
+    for choice in order:
         try:
-            import mariadb as driver  # type: ignore[import]
+            if choice == "mariadb":
+                # pragma: disable E402
+                import mariadb as driver_mod  # type: ignore[import]
 
-            return driver
-        except Exception as exc:  # pragma: no cover - environment specific
-            raise RuntimeError(
-                "No supported MySQL/MariaDB driver found; install either "
-                "'mysql-connector-python' or 'mariadb' "
-                "to use the MySqlStatsStore"
-            ) from exc
+                return driver_mod, "?"  # DB-API qmark style
+
+            if choice == "mysql-connector-python":
+                # pragma: disable E402
+                import mysql.connector as driver_mod  # type: ignore[import]
+
+                return driver_mod, "%s"  # DB-API format style
+
+        except ImportError as exc:  # pragma: no cover - import-path dependent
+            last_exc = exc
+            continue
+
+    raise RuntimeError(
+        "No supported MySQL/MariaDB driver found; install either 'mariadb' or "
+        "'mysql-connector-python' to use the MySqlStatsStore"
+    ) from last_exc
 
 
 class MySqlStatsStore(BaseStatsStore):
@@ -77,6 +223,11 @@ class MySqlStatsStore(BaseStatsStore):
         connect_kwargs: Optional mapping of additional keyword arguments passed
             through to the underlying driver's ``connect`` function
             (for example, ssl, unix_socket).
+        driver: Preferred DB driver (auto|mariadb|mysql-connector-python or mysql).
+        driver_fallback: Fallback policy for driver import:
+            - auto (default): try the other driver as a fallback.
+            - none: do not fall back.
+            - <driver> or [<driver>, ...]: explicit fallback list.
 
     Outputs:
         Initialized MySqlStatsStore instance with ensured schema.
@@ -91,9 +242,13 @@ class MySqlStatsStore(BaseStatsStore):
         database: str = "foghorn_stats",
         connect_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = False,
+        driver: Optional[str] = None,
+        driver_fallback: object = None,
         **_: Any,
     ) -> None:
-        driver = _import_mysql_driver()
+        driver_mod, placeholder = _import_mysql_driver(
+            driver=driver, driver_fallback=driver_fallback
+        )
 
         kwargs: Dict[str, Any] = {
             "host": host,
@@ -107,8 +262,9 @@ class MySqlStatsStore(BaseStatsStore):
         if connect_kwargs:
             kwargs.update(dict(connect_kwargs))
 
-        self._driver = driver
-        self._conn = driver.connect(**kwargs)
+        self._driver = driver_mod
+        self._placeholder = str(placeholder)
+        self._conn = driver_mod.connect(**kwargs)
 
         # Use synchronous logging by default for SQL stats backends.
         self._async_logging = bool(async_logging)
@@ -240,8 +396,9 @@ class MySqlStatsStore(BaseStatsStore):
             None.
         """
 
+        ph = self._placeholder
         sql = (
-            "INSERT INTO counts(scope, key, value) VALUES(%s, %s, %s) "
+            f"INSERT INTO counts(scope, key, value) VALUES({ph}, {ph}, {ph}) "
             "ON DUPLICATE KEY UPDATE value = value + VALUES(value)"
         )
         cur = self._conn.cursor()
@@ -260,8 +417,9 @@ class MySqlStatsStore(BaseStatsStore):
             None.
         """
 
+        ph = self._placeholder
         sql = (
-            "INSERT INTO counts(scope, key, value) VALUES(%s, %s, %s) "
+            f"INSERT INTO counts(scope, key, value) VALUES({ph}, {ph}, {ph}) "
             "ON DUPLICATE KEY UPDATE value = VALUES(value)"
         )
         cur = self._conn.cursor()
@@ -396,10 +554,11 @@ class MySqlStatsStore(BaseStatsStore):
             None.
         """
 
+        ph = self._placeholder
         sql = (
             "INSERT INTO query_log (ts, client_ip, name, qtype, upstream_id, rcode, "
             "status, error, first, result_json) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})"
         )
         cur = self._conn.cursor()
         cur.execute(
@@ -466,22 +625,22 @@ class MySqlStatsStore(BaseStatsStore):
         params: List[Any] = []
 
         if client_ip:
-            where.append("client_ip = %s")
+            where.append(f"client_ip = {self._placeholder}")
             params.append(client_ip.strip())
         if qtype:
-            where.append("qtype = %s")
+            where.append(f"qtype = {self._placeholder}")
             params.append(qtype.strip().upper())
         if qname:
-            where.append("name = %s")
+            where.append(f"name = {self._placeholder}")
             params.append(qname.strip().rstrip(".").lower())
         if rcode:
-            where.append("rcode = %s")
+            where.append(f"rcode = {self._placeholder}")
             params.append(rcode.strip().upper())
         if isinstance(start_ts, (int, float)):
-            where.append("ts >= %s")
+            where.append(f"ts >= {self._placeholder}")
             params.append(float(start_ts))
         if isinstance(end_ts, (int, float)):
-            where.append("ts < %s")
+            where.append(f"ts < {self._placeholder}")
             params.append(float(end_ts))
 
         where_sql = " WHERE " + " AND ".join(where) if where else ""
@@ -492,11 +651,12 @@ class MySqlStatsStore(BaseStatsStore):
         total = int(row[0]) if row else 0
 
         offset = (page_i - 1) * page_size_i
+        ph = self._placeholder
         sql = (
             "SELECT id, ts, client_ip, name, qtype, upstream_id, rcode, status, "
             "error, first, result_json "
             f"FROM query_log{where_sql} "
-            "ORDER BY ts DESC, id DESC LIMIT %s OFFSET %s"
+            f"ORDER BY ts DESC, id DESC LIMIT {ph} OFFSET {ph}"
         )
         cur2 = self._conn.cursor()
         cur2.execute(sql, tuple(params + [page_size_i, offset]))
@@ -587,20 +747,23 @@ class MySqlStatsStore(BaseStatsStore):
                 "items": [],
             }
 
-        where: List[str] = ["ts >= %s", "ts < %s"]
+        where: List[str] = [
+            f"ts >= {self._placeholder}",
+            f"ts < {self._placeholder}",
+        ]
         params: List[Any] = [start_f, end_f]
 
         if client_ip:
-            where.append("client_ip = %s")
+            where.append(f"client_ip = {self._placeholder}")
             params.append(client_ip.strip())
         if qtype:
-            where.append("qtype = %s")
+            where.append(f"qtype = {self._placeholder}")
             params.append(qtype.strip().upper())
         if qname:
-            where.append("name = %s")
+            where.append(f"name = {self._placeholder}")
             params.append(qname.strip().rstrip(".").lower())
         if rcode:
-            where.append("rcode = %s")
+            where.append(f"rcode = {self._placeholder}")
             params.append(rcode.strip().upper())
 
         where_sql = " WHERE " + " AND ".join(where)
@@ -622,8 +785,9 @@ class MySqlStatsStore(BaseStatsStore):
         cur = self._conn.cursor()
         rows: List[Tuple[int, Optional[str], int]] = []
         if group_col:
+            ph = self._placeholder
             sql = (
-                "SELECT FLOOR((ts - %s) / %s) AS bucket, "
+                f"SELECT FLOOR((ts - {ph}) / {ph}) AS bucket, "
                 f"{group_col} AS group_value, COUNT(1) AS c "
                 f"FROM query_log{where_sql} "
                 "GROUP BY bucket, group_value ORDER BY bucket ASC"
@@ -639,8 +803,9 @@ class MySqlStatsStore(BaseStatsStore):
                     (b_i, str(group_value) if group_value is not None else None, c_i)
                 )
         else:
+            ph = self._placeholder
             sql = (
-                "SELECT FLOOR((ts - %s) / %s) AS bucket, COUNT(1) AS c "
+                f"SELECT FLOOR((ts - {ph}) / {ph}) AS bucket, COUNT(1) AS c "
                 f"FROM query_log{where_sql} "
                 "GROUP BY bucket ORDER BY bucket ASC"
             )
