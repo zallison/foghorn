@@ -103,6 +103,34 @@ class AxfrZoneConfig(BaseModel):
         extra = "forbid"
 
 
+class ZoneDnssecNsec3Config(BaseModel):
+    """Brief: NSEC3 parameters for DNSSEC negative proofs in ZoneRecords.
+
+    Inputs:
+      - salt: Salt in zonefile presentation format ("-" for empty, otherwise hex).
+      - iterations: NSEC3 iterations parameter (RFC 5155).
+
+    Outputs:
+      - ZoneDnssecNsec3Config instance.
+    """
+
+    salt: str = Field(
+        default="-",
+        description=(
+            "NSEC3 salt in zonefile presentation form: '-' for empty salt, "
+            "otherwise a hex string (e.g. 'A1B2C3')."
+        ),
+    )
+    iterations: int = Field(
+        default=10,
+        ge=0,
+        description="NSEC3 iterations value (RFC 5155).",
+    )
+
+    class Config:
+        extra = "forbid"
+
+
 class ZoneDnssecSigningConfig(BaseModel):
     """Brief: DNSSEC auto-signing configuration for ZoneRecords.
 
@@ -112,6 +140,8 @@ class ZoneDnssecSigningConfig(BaseModel):
       - algorithm: DNSSEC algorithm name (e.g. "ECDSAP256SHA256").
       - generate: Key generation policy ("yes", "no", or "maybe").
       - validity_days: Signature validity window in days.
+      - nsec3: Optional NSEC3 parameters (salt/iterations) used for signed
+        NXDOMAIN/NODATA proofs.
       - use_tld: Optional single-label TLD (e.g. "zaa", "corp") to treat as
         an inferred apex for SSHFP-only zones when synthesizing SOA records.
 
@@ -139,6 +169,10 @@ class ZoneDnssecSigningConfig(BaseModel):
         default=30,
         ge=1,
         description="Signature validity window in days.",
+    )
+    nsec3: Optional[ZoneDnssecNsec3Config] = Field(
+        default=None,
+        description="Optional NSEC3 parameters used for negative-answer proofs.",
     )
     use_tld: Optional[str] = Field(
         default=None,
@@ -237,7 +271,7 @@ class ZoneRecordsConfig(BaseModel):
     )
     watchdog_enabled: Optional[bool] = None
     watchdog_min_interval_seconds: float = Field(default=1.0, ge=0)
-    watchdog_poll_interval_seconds: float = Field(default=0.0, ge=0)
+    watchdog_poll_interval_seconds: float = Field(default=60.0, ge=0)
     ttl: int = Field(default=300, ge=0)
     nxdomain_zones: Optional[List[str]] = Field(
         default=None,
@@ -398,7 +432,7 @@ class ZoneRecords(BasePlugin):
 
         # Polling configuration
         self._poll_interval = float(
-            self.config.get("watchdog_poll_interval_seconds", 0.0)
+            self.config.get("watchdog_poll_interval_seconds", 60.0)
         )
         self._last_stat_snapshot = None
         self._poll_stop = None
@@ -420,8 +454,8 @@ class ZoneRecords(BasePlugin):
 
         # Optional polling fallback
         if self._poll_interval > 0.0:
-            logger.warning(
-                "ZoneRecords Watchdog falling back to polling every %s",
+            logger.info(
+                "ZoneRecords polling enabled (interval_seconds=%s)",
                 self._poll_interval,
             )
             self._poll_stop = threading.Event()
