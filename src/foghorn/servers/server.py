@@ -29,6 +29,95 @@ from .udp_server import DNSUDPHandler
 logger = logging.getLogger("foghorn.server")
 
 
+# Track whether we've already emitted a warning for a given upstream being
+# skipped. This prevents log spam when an upstream is repeatedly failing.
+# The "warned" state is cleared the next time the upstream succeeds.
+_UPSTREAM_SKIP_WARNED: Dict[str, bool] = {}
+_UPSTREAM_SKIP_LOCK = threading.Lock()
+
+
+def _upstream_key_for_skip_warning(
+    upstream: Dict, host: str, port: int, transport: str
+) -> str:
+    """Brief: Compute a stable identifier for upstream skip warning de-duplication.
+
+    Inputs:
+      - upstream: Upstream configuration mapping.
+      - host: Upstream host string (may be empty for DoH).
+      - port: Upstream port integer (0 when unspecified).
+      - transport: Transport label (e.g. "udp", "tcp", "dot", "doh").
+
+    Outputs:
+      - str: A stable-ish key used to de-duplicate skip warnings.
+
+    Notes:
+      - For DoH, prefer the URL/endpoint when present so distinct endpoints do
+        not collide.
+      - For DoT, include tls.server_name when configured so SNI-specific
+        failures are distinguishable.
+    """
+    try:
+        url = str(upstream.get("url") or upstream.get("endpoint") or "").strip()
+    except Exception:
+        url = ""
+    if url:
+        return f"{transport}:{url}"
+
+    server_name = ""
+    try:
+        tls_cfg = (
+            upstream.get("tls", {}) if isinstance(upstream.get("tls"), dict) else {}
+        )
+        server_name = str(tls_cfg.get("server_name") or "").strip()
+    except Exception:
+        server_name = ""
+
+    if server_name:
+        return f"{transport}:{host}:{port}:{server_name}"
+    return f"{transport}:{host}:{port}"
+
+
+def _warn_upstream_skip_once(upstream_key: str, fmt: str, *args) -> None:
+    """Brief: Log a skip warning only once per upstream until it succeeds again.
+
+    Inputs:
+      - upstream_key: Identifier returned by _upstream_key_for_skip_warning.
+      - fmt: Logger format string.
+      - *args: Logger formatting arguments.
+
+    Outputs:
+      - None. Emits a single warning for this upstream_key if not previously
+        emitted since the last reset.
+    """
+    try:
+        with _UPSTREAM_SKIP_LOCK:
+            if _UPSTREAM_SKIP_WARNED.get(upstream_key):
+                return
+            _UPSTREAM_SKIP_WARNED[upstream_key] = True
+    except Exception:  # pragma: no cover - defensive
+        # If the de-dupe bookkeeping fails, fall back to logging.
+        logger.warning(fmt, *args)
+        return
+
+    logger.warning(fmt, *args)
+
+
+def _reset_upstream_skip_warning(upstream_key: str) -> None:
+    """Brief: Clear the de-dupe state for an upstream after a successful query.
+
+    Inputs:
+      - upstream_key: Identifier returned by _upstream_key_for_skip_warning.
+
+    Outputs:
+      - None. Removes any prior warning state so the next failure is logged.
+    """
+    try:
+        with _UPSTREAM_SKIP_LOCK:
+            _UPSTREAM_SKIP_WARNED.pop(upstream_key, None)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
 # Thread-local flag used to bypass cache lookups when performing background
 # refresh queries. When bypass_cache is True, _resolve_core skips the cache
 # hit path and always treats the query as a miss.
@@ -804,6 +893,19 @@ def send_query_with_failover(
         except Exception:  # pragma: no cover - defensive: bad port value
             port = 0
         transport = str(upstream.get("transport", "udp")).lower()
+        upstream_key = _upstream_key_for_skip_warning(upstream, host, port, transport)
+
+        # Capture any tls.ca_file path early so failures that lose their filename
+        # (for example, exceptions wrapped/re-raised by libraries) still provide
+        # actionable context.
+        tls_ca_file_hint = None
+        try:
+            tls_cfg = (
+                upstream.get("tls", {}) if isinstance(upstream.get("tls"), dict) else {}
+            )
+            tls_ca_file_hint = tls_cfg.get("ca_file")
+        except Exception:  # pragma: no cover - defensive
+            tls_ca_file_hint = None
 
         try:
             logger.debug(
@@ -948,24 +1050,44 @@ def send_query_with_failover(
                         )
                         parsed_response = DNSRecord.parse(response_wire)
                     except Exception as e2:  # pragma: no cover - defensive
+                        _warn_upstream_skip_once(
+                            upstream_key,
+                            "Skipping upstream %s:%d via %s for %s (EDNS fallback failed): %s",
+                            host,
+                            port,
+                            transport,
+                            qname,
+                            e2,
+                        )
                         last_exception = e2
                         return None, None, "all_failed"
 
                     # After fallback, treat SERVFAIL as failure as usual.
                     if parsed_response.header.rcode == RCODE.SERVFAIL:
+                        _warn_upstream_skip_once(
+                            upstream_key,
+                            "Skipping upstream %s:%d via %s for %s (SERVFAIL after EDNS fallback)",
+                            host,
+                            port,
+                            transport,
+                            qname,
+                        )
                         last_exception = Exception(
                             f"FORMERR/SERVFAIL from {host}:{port} without EDNS"
                         )
                         return None, None, "all_failed"
 
                     # Successful non-SERVFAIL response after EDNS fallback.
+                    _reset_upstream_skip_warning(upstream_key)
                     return response_wire, upstream, "ok"
 
                 if parsed_response.header.rcode == RCODE.SERVFAIL:
-                    logger.warning(
-                        "Upstream %s:%d returned SERVFAIL for %s, trying next",
+                    _warn_upstream_skip_once(
+                        upstream_key,
+                        "Skipping upstream %s:%d via %s for %s (returned SERVFAIL)",
                         host,
                         port,
+                        transport,
                         qname,
                     )
                     last_exception = Exception(f"SERVFAIL from {host}:{port}")
@@ -984,20 +1106,32 @@ def send_query_with_failover(
                             connect_timeout_ms=timeout_ms,
                             read_timeout_ms=timeout_ms,
                         )
+                        _reset_upstream_skip_warning(upstream_key)
                         return (
                             response_wire,
                             {**upstream, "transport": "tcp"},
                             "ok",
                         )
                     except Exception as e2:  # pragma: no cover - defensive
+                        _warn_upstream_skip_once(
+                            upstream_key,
+                            "Skipping upstream %s:%d via %s for %s (TCP retry after truncation failed): %s",
+                            host,
+                            port,
+                            transport,
+                            qname,
+                            e2,
+                        )
                         last_exception = e2
                         return None, None, "all_failed"
             except Exception as e:  # pragma: no cover - defensive
                 # If parsing fails, treat as a server failure
-                logger.warning(
-                    "Failed to parse response from %s:%d for %s: %s",
+                _warn_upstream_skip_once(
+                    upstream_key,
+                    "Skipping upstream %s:%d via %s for %s (failed to parse response): %s",
                     host,
                     port,
+                    transport,
                     qname,
                     e,
                 )
@@ -1005,6 +1139,7 @@ def send_query_with_failover(
                 return None, None, "all_failed"
 
             # Success (NOERROR, NXDOMAIN, etc.)
+            _reset_upstream_skip_warning(upstream_key)
             return response_wire, upstream, "ok"
 
         except (
@@ -1012,13 +1147,38 @@ def send_query_with_failover(
             TCPError,
             Exception,
         ) as e:  # pragma: no cover - defensive: network/transport failure
-            logger.debug(
-                "Upstream %s:%d via %s failed for %s: %s",
+            # Some exceptions (notably FileNotFoundError/OSError) carry an
+            # associated filename that is not always present in str(e).
+            filename = getattr(e, "filename", None)
+            filename2 = getattr(e, "filename2", None)
+            if filename and filename2:
+                file_info = f" (files: {filename!r}, {filename2!r})"
+            elif filename:
+                file_info = f" (file: {filename!r})"
+            elif filename2:
+                file_info = f" (file: {filename2!r})"
+            else:
+                file_info = ""
+
+            # Fallback: if we didn't get a filename from the exception itself,
+            # try to include the configured tls.ca_file for DoT/DoH upstreams.
+            if not file_info and tls_ca_file_hint and isinstance(e, OSError):
+                try:
+                    if getattr(e, "errno", None) == 2:
+                        file_info = f" (file: {str(tls_ca_file_hint)!r})"
+                except Exception:  # pragma: no cover - defensive
+                    pass
+
+            _warn_upstream_skip_once(
+                upstream_key,
+                "Skipping upstream %s:%d via %s for %s: %s: %s%s",
                 host,
                 port,
                 transport,
                 qname,
+                type(e).__name__,
                 str(e),
+                file_info,
             )
             last_exception = e
             return None, None, "all_failed"
