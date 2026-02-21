@@ -601,7 +601,7 @@ def test_render_mermaid_includes_expected_branches() -> None:
     assert "Drop" in out
     assert "PreMerge" in out
     assert "PostMerge" in out
-    assert "SetupPlugins" in out
+    assert "SetupPlugins" not in out
     assert "PrePlugins" in out
     assert "PostPlugins" in out
     assert "routes upstream" in out
@@ -609,9 +609,98 @@ def test_render_mermaid_includes_expected_branches() -> None:
     # Listener and upstream details are now split into individual nodes.
     assert "Listener_udp" in out
     assert "class Listener_udp insecure" in out
-    assert 'Upstreams["Upstreams<br/>strategy=failover, max_concurrent=1"]' in out
-    assert "UpstreamEp_0_udp" in out
-    assert "class UpstreamEp_0_udp insecure" in out
+    assert "subgraph UpstreamCfg[Upstreams]" in out
+    assert "strategy=failover, max_concurrent=1" in out
+    assert "udp: 1.1.1.1:53" in out
+    assert "class Upstreams insecure" in out
+
+
+def test_render_mermaid_renders_routed_upstreams_block_like_endpoints() -> None:
+    """Brief: Routed upstreams are rendered as upstream endpoints in a dedicated block.
+
+    Inputs:
+      - A pre plugin that routes upstreams.
+      - routed_upstream_lines representing upstream_router routes.
+
+    Outputs:
+      - None; asserts block name and endpoint-like lines are emitted.
+    """
+
+    p = cm.PluginInfo(
+        idx=0,
+        name="router",
+        type_key="upstream_router",
+        cls_path="foghorn.plugins.resolve.upstream_router.UpstreamRouter",
+        pre_priority=100,
+        routed_upstream_lines=[
+            "route: domain=internal.example",
+            "udp: 10.0.0.2:53",
+            "udp: 10.0.0.3:53",
+        ],
+        sets_upstreams=True,
+    )
+
+    out = cm.render_mermaid(
+        [p],
+        config_path="cfg.yaml",
+        resolver_mode="forward",
+        listener_lines=[],
+        upstream_lines=["strategy=failover, max_concurrent=1", "udp: 1.1.1.1:53"],
+        include_init=False,
+    )
+
+    assert "subgraph RoutedUpstreams[Upstream router upstreams]" in out
+    assert "Upstreams<br/>route: domain=internal.example" in out
+    assert "udp: 10.0.0.2:53" in out
+    assert "class RoutedUpstreams_0_router insecure" in out
+
+
+def test_render_mermaid_renders_two_upstream_boxes_when_transports_mixed() -> None:
+    """Brief: Mixed secure/insecure upstreams are rendered as two separate boxes.
+
+    Inputs:
+      - forward resolver mode.
+      - multiple upstream endpoint lines with mixed transports.
+
+    Outputs:
+      - None; asserts a secure and insecure upstream node are emitted.
+    """
+
+    out = cm.render_mermaid(
+        [],
+        config_path="cfg.yaml",
+        resolver_mode="forward",
+        listener_lines=[],
+        upstream_lines=[
+            "strategy=failover, max_concurrent=1",
+            "udp: 1.1.1.1:53",
+            "tcp: 9.9.9.9:53",
+            "doh: https://dns.example/dns-query",
+        ],
+        include_init=False,
+    )
+
+    assert "subgraph UpstreamCfg[Upstreams]" in out
+    assert "Upstream --> UpstreamsInsecure" in out
+    assert "Upstream --> UpstreamsSecure" in out
+    assert "class UpstreamsInsecure insecure" in out
+    assert "class UpstreamsSecure secure" in out
+
+    # Endpoints should still be present in the diagram output.
+    assert "udp: 1.1.1.1:53" in out
+    assert "tcp: 9.9.9.9:53" in out
+    assert "doh: https://dns.example/dns-query" in out
+
+    insecure_line = next(
+        (ln for ln in out.splitlines() if 'UpstreamsInsecure["' in ln), ""
+    )
+    secure_line = next((ln for ln in out.splitlines() if 'UpstreamsSecure["' in ln), "")
+
+    assert "udp: 1.1.1.1:53" in insecure_line
+    assert "tcp: 9.9.9.9:53" in insecure_line
+    assert "doh: https://dns.example/dns-query" not in insecure_line
+
+    assert "doh: https://dns.example/dns-query" in secure_line
 
 
 def test_load_config_returns_empty_for_non_mapping_root(
@@ -664,6 +753,72 @@ def test_is_stale_handles_missing_and_mtime_comparison(tmp_path: Path) -> None:
     os.utime(out, (t, t))
     os.utime(inp, (t + 10, t + 10))
     assert cm._is_stale(str(inp), str(out)) is True
+
+
+def test_diagram_candidate_paths_prefer_config_dir_over_sibling(tmp_path: Path) -> None:
+    """Brief: diagram_*_candidate_paths prefer config/diagram.* over <cfg>.mermaid.*.
+
+    Inputs:
+      - tmp_path with cfg.yaml and multiple diagram candidates.
+
+    Outputs:
+      - None; asserts lookup order and helper selection.
+    """
+
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text("plugins: []\n", encoding="utf-8")
+
+    cfg_dir_png = tmp_path / "diagram.png"
+    cfg_dir_png.write_bytes(b"PNG")
+    sibling_png = tmp_path / "cfg.yaml.mermaid.png"
+    sibling_png.write_bytes(b"PNG2")
+
+    png_candidates = cm.diagram_png_candidate_paths_for_config(str(cfg))
+    assert png_candidates[0] == cfg_dir_png
+    assert png_candidates[1] == sibling_png
+    assert cm.find_first_existing_path(png_candidates) == cfg_dir_png
+
+    cfg_dir_mmd = tmp_path / "diagram.mmd"
+    cfg_dir_mmd.write_text("flowchart TB\n", encoding="utf-8")
+    sibling_mmd = tmp_path / "cfg.yaml.mermaid.mmd"
+    sibling_mmd.write_text("flowchart LR\n", encoding="utf-8")
+
+    mmd_candidates = cm.diagram_mmd_candidate_paths_for_config(str(cfg))
+    assert mmd_candidates[0] == cfg_dir_mmd
+    assert mmd_candidates[1] == sibling_mmd
+    assert cm.find_first_existing_path(mmd_candidates) == cfg_dir_mmd
+
+
+def test_stale_diagram_warning_when_config_newer(tmp_path: Path) -> None:
+    """Brief: stale_diagram_warning is set when config mtime is newer than diagram.
+
+    Inputs:
+      - tmp_path config and diagram files with controlled mtimes.
+
+    Outputs:
+      - None; asserts warning returned when stale.
+    """
+
+    cfg = tmp_path / "cfg.yaml"
+    dia = tmp_path / "diagram.png"
+    cfg.write_text("x: 1\n", encoding="utf-8")
+    dia.write_bytes(b"PNG")
+
+    import os
+    import time
+
+    t = time.time()
+    os.utime(dia, (t, t))
+    os.utime(cfg, (t + 10, t + 10))
+
+    warn = cm.stale_diagram_warning(config_path=str(cfg), diagram_path=str(dia))
+    assert warn is not None
+    assert "stale" in warn.lower()
+
+    # If the diagram is newer (or equal), no warning.
+    os.utime(dia, (t + 20, t + 20))
+    warn2 = cm.stale_diagram_warning(config_path=str(cfg), diagram_path=str(dia))
+    assert warn2 is None
 
 
 def test_render_png_with_mmdc_failure_messages(
