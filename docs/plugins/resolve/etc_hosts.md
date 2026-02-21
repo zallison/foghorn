@@ -71,7 +71,7 @@ plugins:
       watchdog_enabled: true
       watchdog_min_interval_seconds: 1.0
       # Optional stat-based polling fallback when filesystem events are unreliable
-      watchdog_poll_interval_seconds: 0.0
+      watchdog_poll_interval_seconds: 60.0   # set to 0 to disable
 
       # TTL applied to synthesized answers (A/AAAA/PTR)
       ttl: 300
@@ -97,7 +97,7 @@ plugins:
   - When `> 0`, start a background polling thread that periodically stats the files
     and reloads them when metadata changes (useful on filesystems that do not
     generate change events).
-  - Default: `0.0` (disabled).
+  - Default: `60.0` (set to `0.0` to disable).
 - `ttl: int`
   - TTL in seconds used for synthesized A, AAAA and PTR answers.
   - Default: `300`.

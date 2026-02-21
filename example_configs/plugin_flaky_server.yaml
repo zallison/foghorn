@@ -1,22 +1,67 @@
 upstreams:
   endpoints:
-  - host: 1.1.1.1
-    port: 53
-  - host: 8.8.8.8
-    port: 53
+    - host: 1.1.1.1
+      port: 53
+    - host: 8.8.8.8
+      port: 53
+
 logging:
-  level: info
+  python:
+    level: info
+
 plugins:
-- type: flaky
-  config:
-    targets:
-    - 192.0.2.0/24
-    - 2001:db8::/32
-    servfail_percent: 25.0
-    nxdomain_percent: 10.0
-    apply_to_qtypes:
-    - A
-    - AAAA
+  - type: flaky
+    id: flaky_server_example
+    enabled: true
+    comment: 'FlakyServer example (simulate upstream failures and response corruption).'
+    config:
+      # BasePlugin options
+      abort_on_failure: false
+      enabled: true
+      comment: 'Config-level comment (ignored).'
+      priority: 15
+      pre_priority: 15
+      post_priority: 15
+      setup_priority: 15
+      targets:
+        - 192.0.2.0/24
+        - 2001:db8::/32
+      targets_ignore: []
+      targets_cache_ttl_seconds: 300
+      targets_listener: any
+      targets_domains: []
+      targets_domains_mode: any
+      target_qtypes:
+        - '*'
+      target_opcodes:
+        - QUERY
+      logging:
+        level: info
+        stderr: true
+      cache:
+        module: in_memory_ttl
+        config:
+          min_cache_ttl: 0
+
+      # FlakyServer-specific options
+      servfail_percent: 25.0
+      nxdomain_percent: 10.0
+      timeout_percent: 2.0
+      truncate_percent: 1.0
+      formerr_percent: 0.5
+      noerror_empty_percent: 0.5
+      apply_to_qtypes:
+        - A
+        - AAAA
+      fuzz_percent: 5.0
+      min_fuzz_bytes: 1
+      max_fuzz_bytes: 4
+      wrong_qtype_percent: 2.0
+      fuzz_actions:
+        - bit_flip
+        - swap_bytes
+      seed: 12345
+
 server:
   listen:
     udp:
