@@ -456,6 +456,73 @@ def pre_resolve(
         if soa_entry is not None:
             soa_ttl, soa_values = soa_entry
             soa_owner = zone_apex.rstrip(".") + "."
+
+            if want_dnssec:
+                dnssec.add_rrset_to_reply(
+                    reply,
+                    soa_owner,
+                    int(QTYPE.SOA),
+                    int(soa_ttl),
+                    list(soa_values),
+                    include_dnssec=True,
+                    mapping_by_qtype=mapping_by_qtype,
+                    section="auth",
+                )
+                dnssec.add_nsec3_denial_of_existence(
+                    reply,
+                    name,
+                    zone_apex,
+                    records,
+                    name_index,
+                    mapping_by_qtype=mapping_by_qtype,
+                )
+            else:
+                for value in list(soa_values):
+                    zone_line = f"{soa_owner} {soa_ttl} IN SOA {value}"
+                    try:
+                        from dnslib import RR
+
+                        rrs = RR.fromZone(zone_line)
+                    except Exception as exc:  # pragma: no cover - defensive
+                        logger.warning(
+                            "ZoneRecords invalid SOA value %r for zone %s: %s",
+                            value,
+                            zone_apex,
+                            exc,
+                        )
+                        continue
+                    for rr in rrs:
+                        reply.add_auth(rr)
+
+        return PluginDecision(action="override", response=reply.pack())
+
+    # NXDOMAIN: no RRsets at this owner name within the authoritative zone.
+    reply.header.rcode = RCODE.NXDOMAIN
+    soa_entry = zone_soa.get(zone_apex)
+    if soa_entry is not None:
+        soa_ttl, soa_values = soa_entry
+        soa_owner = zone_apex.rstrip(".") + "."
+
+        if want_dnssec:
+            dnssec.add_rrset_to_reply(
+                reply,
+                soa_owner,
+                int(QTYPE.SOA),
+                int(soa_ttl),
+                list(soa_values),
+                include_dnssec=True,
+                mapping_by_qtype=mapping_by_qtype,
+                section="auth",
+            )
+            dnssec.add_nsec3_denial_of_existence(
+                reply,
+                name,
+                zone_apex,
+                records,
+                name_index,
+                mapping_by_qtype=mapping_by_qtype,
+            )
+        else:
             for value in list(soa_values):
                 zone_line = f"{soa_owner} {soa_ttl} IN SOA {value}"
                 try:
@@ -472,30 +539,5 @@ def pre_resolve(
                     continue
                 for rr in rrs:
                     reply.add_auth(rr)
-
-        return PluginDecision(action="override", response=reply.pack())
-
-    # NXDOMAIN: no RRsets at this owner name within the authoritative zone.
-    reply.header.rcode = RCODE.NXDOMAIN
-    soa_entry = zone_soa.get(zone_apex)
-    if soa_entry is not None:
-        soa_ttl, soa_values = soa_entry
-        soa_owner = zone_apex.rstrip(".") + "."
-        for value in list(soa_values):
-            zone_line = f"{soa_owner} {soa_ttl} IN SOA {value}"
-            try:
-                from dnslib import RR
-
-                rrs = RR.fromZone(zone_line)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning(
-                    "ZoneRecords invalid SOA value %r for zone %s: %s",
-                    value,
-                    zone_apex,
-                    exc,
-                )
-                continue
-            for rr in rrs:
-                reply.add_auth(rr)
 
     return PluginDecision(action="override", response=reply.pack())

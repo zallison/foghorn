@@ -50,6 +50,8 @@ def add_rrset_to_reply(
     values: List[str],
     include_dnssec: bool,
     mapping_by_qtype: Optional[Dict[int, Dict[str, List[RR]]]] = None,
+    *,
+    section: str = "answer",
 ) -> bool:
     """Brief: Append an RRset (and any attached RRSIGs) to a DNS reply.
 
@@ -79,15 +81,15 @@ def add_rrset_to_reply(
         rrsig_code_local = 46
 
     def _add_rr_to_reply(rr: RR) -> None:
-        """Append RR to the answer section, optionally filtering RRSIGs.
+        """Append RR to the selected reply section, optionally filtering RRSIGs.
 
         Inputs:
           - rr: Fully constructed dnslib.RR instance.
 
         Outputs:
-          - None; mutates ``reply`` in-place by appending to the answer
-            section. RRSIGs are suppressed entirely when DNSSEC is not
-            requested via the DO bit.
+          - None; mutates ``reply`` in-place by appending to the selected
+            section (answer/authority/additional). RRSIGs are suppressed
+            entirely when DNSSEC is not requested via the DO bit.
         """
         try:
             rr_type_int = int(getattr(rr, "rtype", 0))
@@ -102,7 +104,14 @@ def add_rrset_to_reply(
         if rr_type_int == rrsig_code_local and not include_dnssec:
             return
 
-        reply.add_answer(rr)
+        if section == "answer":
+            reply.add_answer(rr)
+        elif section in {"auth", "authority"}:
+            reply.add_auth(rr)
+        elif section in {"ar", "additional"}:
+            reply.add_ar(rr)
+        else:  # pragma: no cover - defensive
+            reply.add_answer(rr)
 
     # Prefer the helper mapping constructed at load time when present.
     if isinstance(mapping_by_qtype, dict):
@@ -134,6 +143,221 @@ def add_rrset_to_reply(
             _add_rr_to_reply(rr)
             added_any = True
     return added_any
+
+
+def _find_closest_encloser(
+    qname: str,
+    zone_apex: str,
+    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
+) -> str:
+    """Brief: Find the closest existing ancestor name inside a zone.
+
+    Inputs:
+      - qname: Normalized queried name (no trailing dot, lowercased).
+      - zone_apex: Normalized zone apex (no trailing dot, lowercased).
+      - name_index: Mapping of existing owner names -> RRsets.
+
+    Outputs:
+      - Closest encloser name inside the zone (at minimum the zone apex).
+    """
+
+    candidate = str(qname).rstrip(".").lower()
+    apex = str(zone_apex).rstrip(".").lower()
+
+    while candidate and candidate != apex:
+        if candidate in name_index:
+            return candidate
+        if "." not in candidate:
+            break
+        candidate = candidate.split(".", 1)[1]
+
+    return apex
+
+
+def add_nsec3_denial_of_existence(
+    reply: DNSRecord,
+    qname: str,
+    zone_apex: str,
+    records: Dict[Tuple[str, int], Tuple[int, List[str]]],
+    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
+    mapping_by_qtype: Optional[Dict[int, Dict[str, List[RR]]]] = None,
+) -> None:
+    """Brief: Add NSEC3 proof material to an authoritative negative response.
+
+    Inputs:
+      - reply: DNS reply to mutate (adds records to the authority section).
+      - qname: Normalized queried name (no trailing dot, lowercased).
+      - zone_apex: Normalized zone apex (no trailing dot, lowercased).
+      - records: (owner,qtype)->(ttl,[values]) mapping used by ZoneRecords.
+      - name_index: owner->qtype->(ttl,[values]) index used by ZoneRecords.
+      - mapping_by_qtype: Optional helper mapping with pre-built dnslib RR
+        instances (base RRsets + covering RRSIGs).
+
+    Outputs:
+      - None; appends NSEC3 (and their RRSIGs) into ``reply.auth``.
+
+    Notes:
+      - This function is only meaningful when the zone has NSEC3PARAM and NSEC3
+        RRsets (e.g. from DNSSEC auto-signing).
+      - We include a minimal RFC 5155 proof set: closest encloser match, and
+        covering NSEC3 for the next-closer name and for the wildcard under the
+        closest encloser.
+    """
+
+    if not isinstance(mapping_by_qtype, dict):
+        return
+
+    try:
+        nsec3_code = int(QTYPE.NSEC3)
+    except Exception:  # pragma: no cover - defensive
+        nsec3_code = 50
+    try:
+        nsec3param_code = int(QTYPE.NSEC3PARAM)
+    except Exception:  # pragma: no cover - defensive
+        nsec3param_code = 51
+
+    nsec3_by_name = mapping_by_qtype.get(int(nsec3_code), {}) or {}
+    if not nsec3_by_name:
+        return
+
+    # Extract hashing parameters from apex-level NSEC3PARAM.
+    param_entry = records.get((str(zone_apex), int(nsec3param_code)))
+    if not param_entry:
+        return
+
+    _ttl_param, param_vals = param_entry
+    if not param_vals:
+        return
+
+    try:
+        p = str(param_vals[0]).split()
+        alg = int(p[0])
+        _flags = int(p[1])
+        iterations = int(p[2])
+        salt_text = str(p[3])
+        if salt_text in {"", "-"}:
+            salt_hash = ""
+        else:
+            # NSEC3PARAM salt is hex in presentation form.
+            try:
+                salt_hash = bytes.fromhex(salt_text)
+            except Exception:
+                salt_hash = str(salt_text)
+    except Exception:
+        return
+
+    # Compute closest encloser and derived names.
+    qn = str(qname).rstrip(".").lower()
+    apex = str(zone_apex).rstrip(".").lower()
+
+    is_nodata = qn in name_index
+
+    if is_nodata:
+        closest = qn
+        next_closer = None
+        wildcard = None
+    else:
+        closest = _find_closest_encloser(qn, apex, name_index)
+
+        labels_q = qn.split(".") if qn else []
+        labels_c = closest.split(".") if closest else []
+        if len(labels_q) <= len(labels_c):
+            return
+
+        diff = len(labels_q) - len(labels_c)
+        next_label = labels_q[diff - 1]
+        next_closer = f"{next_label}.{closest}"
+        wildcard = f"*.{closest}"
+
+    try:
+        import dns.dnssec as _dns_dnssec
+
+        h_closest = _dns_dnssec.nsec3_hash(f"{closest}.", salt_hash, iterations, alg)
+        h_next = (
+            _dns_dnssec.nsec3_hash(f"{next_closer}.", salt_hash, iterations, alg)
+            if next_closer
+            else None
+        )
+        h_wc = (
+            _dns_dnssec.nsec3_hash(f"{wildcard}.", salt_hash, iterations, alg)
+            if wildcard
+            else None
+        )
+    except Exception:
+        return
+
+    # Build sorted list of available hashes in this zone from the NSEC3 owner
+    # names (first label is the hash).
+    hash_to_owner: Dict[str, str] = {}
+    for owner in nsec3_by_name.keys():
+        try:
+            owner_norm = str(owner).rstrip(".").lower()
+        except Exception:
+            continue
+        if not owner_norm.endswith("." + apex):
+            continue
+        first = owner_norm.split(".", 1)[0]
+        if first:
+            hash_to_owner[first.upper()] = owner_norm
+
+    if not hash_to_owner:
+        return
+
+    hashes_sorted = sorted(hash_to_owner.keys())
+
+    def _covering_owner(target_hash: str) -> str:
+        """Return the NSEC3 owner name whose interval covers target_hash.
+
+        Inputs:
+          - target_hash: Uppercase base32hex digest.
+
+        Outputs:
+          - Owner name (normalized, no trailing dot) of the covering NSEC3 RRset.
+        """
+
+        # Find the greatest hash <= target_hash; wrap to last on underflow.
+        idx = 0
+        for i, h in enumerate(hashes_sorted):
+            if h <= target_hash:
+                idx = i
+            else:
+                break
+        return hash_to_owner[hashes_sorted[idx]]
+
+    owners_to_add: List[str] = []
+
+    exact_closest_owner = f"{str(h_closest).lower()}.{apex}"
+    if exact_closest_owner in nsec3_by_name:
+        owners_to_add.append(exact_closest_owner)
+    else:
+        owners_to_add.append(_covering_owner(str(h_closest).upper()))
+
+    if h_next is not None:
+        owners_to_add.append(_covering_owner(str(h_next).upper()))
+    if h_wc is not None:
+        owners_to_add.append(_covering_owner(str(h_wc).upper()))
+
+    # De-dup while preserving order.
+    seen: set[str] = set()
+    for nsec3_owner in owners_to_add:
+        if nsec3_owner in seen:
+            continue
+        seen.add(nsec3_owner)
+
+        entry = records.get((nsec3_owner, int(nsec3_code)))
+        if not entry:
+            continue
+        ttl, vals = entry
+        add_rrset_to_reply(
+            reply,
+            nsec3_owner + ".",
+            int(nsec3_code),
+            int(ttl),
+            list(vals),
+            include_dnssec=True,
+            mapping_by_qtype=mapping_by_qtype,
+            section="auth",
+        )
 
 
 def is_dnssec_rrtype(code: int) -> bool:

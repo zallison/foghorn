@@ -1,7 +1,7 @@
 """Brief: Watchdog and polling infrastructure for file changes.
 
 Inputs/Outputs:
-  - File change detection, debounced reload scheduling, polling fallback.
+  - File change detection, debounced reload scheduling, periodic stat-based polling.
 """
 
 from __future__ import annotations
@@ -12,6 +12,59 @@ import pathlib
 import threading
 import time
 from typing import Optional
+
+
+def _iter_watched_record_files(plugin: object) -> list[str]:
+    """Brief: Collect all record source files that should trigger reload.
+
+    Inputs:
+      - plugin: ZoneRecords instance.
+
+    Outputs:
+      - list[str]: Concrete filesystem paths from both:
+          - plugin.file_paths (Foghorn pipe-delimited records files)
+          - plugin.bind_paths (BIND/RFC-1035 zone files)
+
+    Notes:
+      - bind_paths entries may be strings, dicts with a 'path' key, or typed
+        objects with a .path attribute.
+      - Returned paths are de-duplicated while preserving order.
+    """
+
+    paths: list[str] = []
+
+    # Pipe-delimited records files.
+    for fp in list(getattr(plugin, "file_paths", []) or []):
+        try:
+            text = str(fp)
+        except Exception:
+            continue
+        if text:
+            paths.append(text)
+
+    # BIND-style zone files.
+    for entry in list(getattr(plugin, "bind_paths", []) or []):
+        path_val = None
+        if isinstance(entry, dict):
+            path_val = entry.get("path")
+        elif hasattr(entry, "path"):
+            path_val = getattr(entry, "path", None)
+        else:
+            path_val = entry
+
+        if path_val is None:
+            continue
+
+        try:
+            text = str(path_val)
+        except Exception:
+            continue
+        if text:
+            paths.append(text)
+
+    # De-duplicate while preserving order.
+    return list(dict.fromkeys(paths))
+
 
 try:  # watchdog is used for cross-platform file watching
     from watchdog.events import FileSystemEventHandler
@@ -98,7 +151,7 @@ def start_watchdog(plugin: object) -> None:
         plugin._observer = None
         return
 
-    file_paths = getattr(plugin, "file_paths", [])
+    file_paths = _iter_watched_record_files(plugin)
     record_paths = [pathlib.Path(p).expanduser() for p in file_paths]
     watched_files = [p.resolve() for p in record_paths]
     directories = {p.parent.resolve() for p in record_paths}
@@ -125,7 +178,7 @@ def start_polling(plugin: object) -> None:
     """Brief: Start a stat-based polling loop to detect records file changes.
 
     Inputs:
-      - plugin: ZoneRecords instance with file_paths and _poll_interval.
+      - plugin: ZoneRecords instance with file_paths/bind_paths and _poll_interval.
 
     Outputs:
       - None
@@ -142,6 +195,13 @@ def start_polling(plugin: object) -> None:
         # If no stop event is configured, do not start polling to avoid
         # leaking an unmanaged thread.
         return
+
+    # Establish a baseline snapshot before the polling thread starts so the
+    # first tick does not immediately trigger a redundant reload.
+    try:
+        _ = have_files_changed(plugin)
+    except Exception:  # pragma: no cover - defensive logging only
+        logger.debug("ZoneRecords: failed to establish polling baseline", exc_info=True)
 
     thread = threading.Thread(
         target=_poll_loop, args=(plugin,), name="CustomRecordsPoller"
@@ -180,17 +240,16 @@ def have_files_changed(plugin: object) -> bool:
     """Brief: Detect whether any configured records files have changed on disk.
 
     Inputs:
-      - plugin: ZoneRecords instance with file_paths and _last_stat_snapshot.
+      - plugin: ZoneRecords instance with file_paths/bind_paths and _last_stat_snapshot.
 
     Outputs:
       - bool: True if the current stat snapshot differs from the last one.
 
     Example:
-      First invocation after setup() returns True and records baseline
-      snapshot; subsequent calls only return True when a file's inode,
-      size, or mtime changes.
+      First invocation records a baseline snapshot; subsequent calls only return
+      True when a file's inode, size, or mtime changes.
     """
-    file_paths = getattr(plugin, "file_paths", [])
+    file_paths = _iter_watched_record_files(plugin)
     snapshot = []
     for fp in file_paths:
         try:
