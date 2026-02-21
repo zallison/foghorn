@@ -14,8 +14,12 @@ All notable changes to this project will be documented in this file.
 - Added `scripts/generate_config_mermaid.py` to generate a Mermaid diagram of plugin ordering and short-circuit behavior from a config file.
 - `scripts/generate_config_mermaid.py`: added diagram rendering knobs (`--direction`, `--font-size`, `--node-spacing`, `--rank-spacing`, `--no-init`) and config-derived listener/upstream summaries.
 - Admin web UI: added a config diagram PNG generated on startup (when possible) and served at `/api/v1/config/diagram.png`.
+- Admin web UI: added a Mermaid source endpoint for the config diagram at `/api/v1/config/diagram.mmd`.
+- Admin web UI: added a config diagram upload endpoint at `POST /api/v1/config/diagram.png`.
 - Admin web UI: updated the "JSON & Config" tab to show the config diagram (left) and config YAML (right).
 - Admin web UI: added server-side paginated table data for stats via `/api/v1/stats/table/{table_id}` (supports paging, sorting, and search).
+- Admin web UI: added server-side paginated table data for cache via `/api/v1/cache/table/{table_id}`.
+- Admin web UI: added server-side paginated table data for plugin admin tables via `/api/v1/plugins/{plugin_name}/table/{table_id}`.
 - Config Mermaid diagram generation now splits listeners and upstream endpoints into individual nodes, and highlights secure transports (DoT/DoH) vs insecure (UDP/TCP).
 - Filter plugin: added `deny_response: drop` to allow silently dropping denied queries (no reply).
 - ZoneRecords (`zone`) now supports configurable reload semantics via `load_mode` and conflict handling via `merge_policy`.
@@ -30,6 +34,8 @@ All notable changes to this project will be documented in this file.
 - Filter plugin now normalizes domain keys (case/trailing-dot) for consistent allow/deny and record handling.
 - Resolve Echo plugin class renamed from `EchoPlugin` to `Echo`.
 - Refactored `scripts/generate_config_mermaid.py` to use shared library code under `foghorn.utils.config_mermaid`.
+- MySQL/MariaDB cache and stats backends now support explicit driver selection and fallback policy (`driver`, `driver_fallback`).
+- `EtcHosts.watchdog_poll_interval_seconds` now defaults to `60.0` to enable a stat-based reload fallback when filesystem events are unreliable.
 - Regenerated `assets/config-schema.json` (via `scripts/generate_foghorn_schema.py`) to reflect updated resolver options and plugin config models.
 - Refactored ZoneRecords implementation into `foghorn.plugins.resolve.zone_records` package modules for clearer separation of loader/resolver/watchdog/AXFR helpers.
 - Refactored `cache.postgres_cache` to delegate to the `PostgresTTLCache` backend, with a more explicit key/TTL/value API and stable key hashing for non-bytes keys.
@@ -41,6 +47,7 @@ All notable changes to this project will be documented in this file.
 
 - Filter allow/deny behavior is now consistent across mixed-case names and trailing-dot variants.
 - Authoritative-only resolver behavior now returns REFUSED with an EDE explanation instead of attempting upstream resolution.
+- Reduced log spam in upstream failover by emitting upstream skip warnings once per upstream target.
 - The admin `/config` endpoint now supports `server.http.redact_keys` as a compatibility fallback when `webserver.redact_keys` is not set.
 - Redacted YAML output now quotes the placeholder (`'***'`) to ensure redacted config output remains parseable.
 - Fixed Mermaid config diagram rendering when resolver mode is `master` (authoritative-only / no forwarding).
