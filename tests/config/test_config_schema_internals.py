@@ -12,14 +12,15 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List
-import json
 
 import pytest
 
 from foghorn.config import config_schema as config_schema_mod
 
 
-def test_normalize_cache_config_treats_null_module_as_none_alias_and_strips_null_config() -> None:
+def test_normalize_cache_config_treats_null_module_as_none_alias_and_strips_null_config() -> (
+    None
+):
     """Brief: _normalize_cache_config_for_validation handles null module/config.
 
     Inputs:
@@ -152,7 +153,7 @@ def test_normalize_variables_embeds_non_scalar_as_json_in_string() -> None:
     config_schema_mod._normalize_variables_for_validation(cfg)
 
     text = cfg["text"]
-    assert "\"a\": 1" in text
+    assert '"a": 1' in text
 
 
 def test_normalize_dnssec_config_lowercases_validation_fields() -> None:
@@ -176,7 +177,9 @@ def test_normalize_dnssec_config_lowercases_validation_fields() -> None:
     assert cfg["foghorn"]["dnssec"]["validation"] == "local"
 
 
-def test_normalize_plugin_entries_strips_disabled_and_applies_priority_and_comment() -> None:
+def test_normalize_plugin_entries_strips_disabled_and_applies_priority_and_comment() -> (
+    None
+):
     """Brief: _normalize_plugin_entries_for_validation normalizes plugin meta fields.
 
     Inputs:
@@ -200,7 +203,11 @@ def test_normalize_plugin_entries_strips_disabled_and_applies_priority_and_comme
 
     plugins = cfg["plugins"]
     assert len(plugins) == 3
-    assert "a" not in {getattr(p, "get", lambda *_: None)("module") for p in plugins if isinstance(p, dict)}
+    assert "a" not in {
+        getattr(p, "get", lambda *_: None)("module")
+        for p in plugins
+        if isinstance(p, dict)
+    }
     # Entry "c" should have its priority expanded and comment stripped.
     entry_c = next(p for p in plugins if isinstance(p, dict) and p.get("module") == "c")
     assert "priority" not in entry_c
@@ -282,7 +289,9 @@ def test_format_errors_includes_paths_and_schema_paths() -> None:
     """
 
     errors: List[Any] = [
-        SimpleNamespace(path=["foo"], schema_path=["properties", "foo"], message="is bad"),
+        SimpleNamespace(
+            path=["foo"], schema_path=["properties", "foo"], message="is bad"
+        ),
         SimpleNamespace(path=[], schema_path=["root"], message="root error"),
     ]
 
@@ -342,7 +351,9 @@ def test_validate_config_skips_when_schema_file_missing(tmp_path: Path) -> None:
     config_schema_mod.validate_config(cfg, schema_path=missing)
 
 
-def test_validate_config_skips_when_schema_load_fails(tmp_path: Path, monkeypatch) -> None:
+def test_validate_config_skips_when_schema_load_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
     """Brief: validate_config logs and returns when _load_schema raises.
 
     Inputs:
@@ -365,7 +376,9 @@ def test_validate_config_skips_when_schema_load_fails(tmp_path: Path, monkeypatc
     config_schema_mod.validate_config(cfg, schema_path=path)
 
 
-def test_validate_config_skips_when_jsonschema_not_installed(tmp_path: Path, monkeypatch) -> None:
+def test_validate_config_skips_when_jsonschema_not_installed(
+    tmp_path: Path, monkeypatch
+) -> None:
     """Brief: validate_config returns when Draft202012Validator is None.
 
     Inputs:
@@ -385,7 +398,9 @@ def test_validate_config_skips_when_jsonschema_not_installed(tmp_path: Path, mon
     config_schema_mod.validate_config(cfg, schema_path=path)
 
 
-def test_validate_config_handles_non_extra_and_extra_errors(monkeypatch, tmp_path: Path) -> None:
+def test_validate_config_handles_non_extra_and_extra_errors(
+    monkeypatch, tmp_path: Path
+) -> None:
     """Brief: validate_config treats non-extra errors as fatal regardless of unknown_keys.
 
     Inputs:
@@ -428,7 +443,9 @@ def test_validate_config_handles_non_extra_and_extra_errors(monkeypatch, tmp_pat
     assert "foo" in msg and "bar" in msg
 
 
-def test_validate_config_extra_property_policy_variants(monkeypatch, tmp_path: Path) -> None:
+def test_validate_config_extra_property_policy_variants(
+    monkeypatch, tmp_path: Path
+) -> None:
     """Brief: validate_config honors ignore/warn/error for extra-property errors.
 
     Inputs:
