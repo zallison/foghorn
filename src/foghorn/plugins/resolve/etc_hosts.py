@@ -47,7 +47,7 @@ class EtcHostsConfig(BaseModel):
     file_paths: Optional[List[str]] = None
     watchdog_enabled: Optional[bool] = None
     watchdog_min_interval_seconds: float = Field(default=1.0, ge=0)
-    watchdog_poll_interval_seconds: float = Field(default=0.0, ge=0)
+    watchdog_poll_interval_seconds: float = Field(default=60.0, ge=0)
     ttl: int = Field(default=300, ge=0)
 
     class Config:
@@ -128,7 +128,7 @@ class EtcHosts(BasePlugin):
         # events are not delivered, such as in certain container or bind-mount
         # environments).
         self._poll_interval = float(
-            self.config.get("watchdog_poll_interval_seconds", 0.0)
+            self.config.get("watchdog_poll_interval_seconds", 60.0)
         )
         self._last_stat_snapshot = None
         self._poll_stop = None
@@ -155,8 +155,9 @@ class EtcHosts(BasePlugin):
         # is further rate-limited by the reload debouncing in
         # _reload_hosts_from_watchdog.
         if self._poll_interval > 0.0:
-            logger.warning(
-                "Watchdog falling back to polling every {self._poll_interval}"
+            logger.info(
+                "EtcHosts polling enabled (interval_seconds=%s)",
+                self._poll_interval,
             )
             self._poll_stop = threading.Event()
             self._start_polling()
@@ -646,6 +647,15 @@ class EtcHosts(BasePlugin):
             # If no stop event is configured, do not start polling to avoid
             # leaking an unmanaged thread.
             return
+
+        # Establish a baseline snapshot before the polling thread starts so the
+        # first tick does not immediately trigger a redundant reload.
+        try:
+            _ = self._have_files_changed()
+        except Exception:  # pragma: no cover - defensive logging only
+            logger.debug(
+                "EtcHosts: failed to establish polling baseline", exc_info=True
+            )
 
         thread = threading.Thread(target=self._poll_loop, name="EtcHostsPoller")
         thread.daemon = True
