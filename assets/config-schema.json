@@ -277,8 +277,8 @@
               "type": "number"
             },
             "watchdog_poll_interval_seconds": {
-              "default": 0.0,
-              "description": "Type: number. Default: 0.0.",
+              "default": 60.0,
+              "description": "Type: number. Default: 60.0.",
               "minimum": 0,
               "title": "Watchdog Poll Interval Seconds",
               "type": "number"
@@ -927,64 +927,6 @@
         },
         "module": "foghorn.plugins.resolve.rate_limit.RateLimit"
       },
-      "ssh_keys": {
-        "aliases": [
-          "ssh_keys"
-        ],
-        "config_schema": {
-          "additionalProperties": true,
-          "description": "Brief: Typed configuration model for SshKeys.\n\nInputs:\n  - targets: List of IPs, CIDR ranges, and/or hostnames to scan.\n  - scan_threads: Maximum number of concurrent SSH probes.\n  - ttl: DNS TTL to apply to synthesized SSHFP answers.\n  - db_path: Filesystem path to the sqlite database storing SSH keys.\n  - port: SSH TCP port used when probing hosts.\n  - timeout_seconds: Socket/handshake timeout when fetching keys.\n\nOutputs:\n  - SshKeysConfig instance with normalized field types.",
-          "properties": {
-            "db_path": {
-              "default": "./config/var/ssh_keys.db",
-              "description": "Type: string. Default: \"./config/var/ssh_keys.db\".",
-              "title": "Db Path",
-              "type": "string"
-            },
-            "port": {
-              "default": 22,
-              "description": "Type: integer. Default: 22.",
-              "maximum": 65535,
-              "minimum": 1,
-              "title": "Port",
-              "type": "integer"
-            },
-            "scan_threads": {
-              "default": 4,
-              "description": "Type: integer. Default: 4.",
-              "minimum": 1,
-              "title": "Scan Threads",
-              "type": "integer"
-            },
-            "targets": {
-              "description": "Type: array.",
-              "items": {
-                "description": "Type: string.",
-                "type": "string"
-              },
-              "title": "Targets",
-              "type": "array"
-            },
-            "timeout_seconds": {
-              "default": 5.0,
-              "description": "Type: number. Default: 5.0.",
-              "minimum": 0.1,
-              "title": "Timeout Seconds",
-              "type": "number"
-            },
-            "ttl": {
-              "default": 300,
-              "description": "Type: integer. Default: 300.",
-              "minimum": 0,
-              "title": "Ttl",
-              "type": "integer"
-            }
-          },
-          "title": "SshKeysConfig",
-          "type": "object"
-        },
-        "module": "foghorn.plugins.resolve.ssh_keys.SshKeys"
-      },
       "upstream_router": {
         "aliases": [
           "router",
@@ -1265,9 +1207,30 @@
               "title": "BindZoneFileConfig",
               "type": "object"
             },
+            "ZoneDnssecNsec3Config": {
+              "additionalProperties": false,
+              "description": "Brief: NSEC3 parameters for DNSSEC negative proofs in ZoneRecords.\n\nInputs:\n  - salt: Salt in zonefile presentation format (\"-\" for empty, otherwise hex).\n  - iterations: NSEC3 iterations parameter (RFC 5155).\n\nOutputs:\n  - ZoneDnssecNsec3Config instance.",
+              "properties": {
+                "iterations": {
+                  "default": 10,
+                  "description": "NSEC3 iterations value (RFC 5155). Default: 10.",
+                  "minimum": 0,
+                  "title": "Iterations",
+                  "type": "integer"
+                },
+                "salt": {
+                  "default": "-",
+                  "description": "NSEC3 salt in zonefile presentation form: '-' for empty salt, otherwise a hex string (e.g. 'A1B2C3'). Default: \"-\".",
+                  "title": "Salt",
+                  "type": "string"
+                }
+              },
+              "title": "ZoneDnssecNsec3Config",
+              "type": "object"
+            },
             "ZoneDnssecSigningConfig": {
               "additionalProperties": false,
-              "description": "Brief: DNSSEC auto-signing configuration for ZoneRecords.\n\nInputs:\n  - enabled: Enable automatic DNSSEC signing for authoritative zones.\n  - keys_dir: Optional base directory for per-zone key files.\n  - algorithm: DNSSEC algorithm name (e.g. \"ECDSAP256SHA256\").\n  - generate: Key generation policy (\"yes\", \"no\", or \"maybe\").\n  - validity_days: Signature validity window in days.\n  - use_tld: Optional single-label TLD (e.g. \"zaa\", \"corp\") to treat as\n    an inferred apex for SSHFP-only zones when synthesizing SOA records.\n\nOutputs:\n  - Parsed ZoneDnssecSigningConfig instance used by the config schema.",
+              "description": "Brief: DNSSEC auto-signing configuration for ZoneRecords.\n\nInputs:\n  - enabled: Enable automatic DNSSEC signing for authoritative zones.\n  - keys_dir: Optional base directory for per-zone key files.\n  - algorithm: DNSSEC algorithm name (e.g. \"ECDSAP256SHA256\").\n  - generate: Key generation policy (\"yes\", \"no\", or \"maybe\").\n  - validity_days: Signature validity window in days.\n  - nsec3: Optional NSEC3 parameters (salt/iterations) used for signed\n    NXDOMAIN/NODATA proofs.\n  - use_tld: Optional single-label TLD (e.g. \"zaa\", \"corp\") to treat as\n    an inferred apex for SSHFP-only zones when synthesizing SOA records.\n\nOutputs:\n  - Parsed ZoneDnssecSigningConfig instance used by the config schema.",
               "properties": {
                 "algorithm": {
                   "default": "ECDSAP256SHA256",
@@ -1301,6 +1264,19 @@
                   "default": null,
                   "description": "Directory to read/write DNSSEC keys; defaults to the working directory when omitted.",
                   "title": "Keys Dir"
+                },
+                "nsec3": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ZoneDnssecNsec3Config"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional NSEC3 parameters used for negative-answer proofs."
                 },
                 "use_tld": {
                   "anyOf": [
@@ -1522,8 +1498,8 @@
               "type": "number"
             },
             "watchdog_poll_interval_seconds": {
-              "default": 0.0,
-              "description": "Type: number. Default: 0.0.",
+              "default": 60.0,
+              "description": "Type: number. Default: 60.0.",
               "minimum": 0,
               "title": "Watchdog Poll Interval Seconds",
               "type": "number"
