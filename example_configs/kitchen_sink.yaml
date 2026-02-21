@@ -9,12 +9,18 @@ upstreams:
     pool:
       max_connections: 32
       idle_timeout_ms: 15000
-  - host: 1.1.1.1
+  # DoT upstream (example using a self-signed / internal CA)
+  # Generate lab certs (./keys by default):
+  #   make ssl-ca-pem KEYS=./keys
+  #   make ssl-cert KEYS=./keys CNAME=dot.example
+  #   Use the foghorn_ca.pem to verify.
+  - host: 192.0.2.53
     port: 853
     transport: dot
     tls:
-      server_name: cloudflare-dns.com
+      server_name: dot.example
       verify: true
+      ca_file: ./keys/foghorn_ca.pem
     pool:
       max_connections: 64
       idle_timeout_ms: 30000
@@ -44,83 +50,123 @@ plugins:
 - type: docker-hosts
   config:
     endpoints:
-    - unix:///var/run/docker.sock
-    docker_binary: docker
+      - url: unix:///var/run/docker.sock
+        reload_interval_second: 60.0
+        use_ipv4: null
+        use_ipv6: null
+        ttl: null
     ttl: 300
-    reload_interval_seconds: 60
-- type: hosts
+    health:
+      - healthy
+      - running
+    discovery: false
+- type: flaky_server
   config:
-    allow:
-    - 192.0.2.0/24
-    - 2001:db8::/32
+    targets:
+      - 192.0.2.0/24
+      - 2001:db8::/32
     servfail_percent: 5.0
     nxdomain_percent: 2.0
+    timeout_percent: 0.0
+    truncate_percent: 0.0
+    formerr_percent: 0.0
+    noerror_empty_percent: 0.0
     apply_to_qtypes:
-    - A
-    - AAAA
+      - A
+      - AAAA
+    fuzz_percent: 0.0
+    min_fuzz_bytes: 1
+    max_fuzz_bytes: 4
+    wrong_qtype_percent: 0.0
+    fuzz_actions:
+      - bit_flip
+      - swap_bytes
+    seed: null
 - type: file_downloader
   config:
     setup_priority: 15
     download_path: ./config/var/lists
-    interval_days: 1
     urls:
-    - https://v.firebog.net/hosts/AdguardDNS.txt
-    - https://v.firebog.net/hosts/Easylist.txt
-    - https://v.firebog.net/hosts/Prigent-Ads.txt
-    - https://v.firebog.net/hosts/Prigent-Malware.txt
+      - https://v.firebog.net/hosts/AdguardDNS.txt
+      - https://v.firebog.net/hosts/Easylist.txt
+      - https://v.firebog.net/hosts/Prigent-Ads.txt
+      - https://v.firebog.net/hosts/Prigent-Malware.txt
+    url_files: []
+    interval_days: 1
+    interval_seconds: null
+    add_comment: false
+    hash_filenames: false
 - type: filter
   config:
     setup_priority: 20
     default: deny
     db_path: ./config/var/blocklist.db
     cache_ttl_seconds: 600
+    ttl: 300
+    deny_response: nxdomain
+    deny_response_ip4: null
+    deny_response_ip6: null
     blocked_domains:
-    - tracker.example
+      - tracker.example
     allowed_domains:
-    - intranet.example
+      - intranet.example
     blocked_patterns:
-    - .*\.ads\..*
+      - .*\\.ads\\..*
+    blocked_patterns_files: []
     blocked_keywords:
-    - gambling
+      - gambling
+    blocked_keywords_files: []
     blocked_ips:
-    - ip: 198.51.100.0/24
-      action: remove
-    - ip: 203.0.113.5
-      action: replace
-      replace_with: 127.0.0.1
+      - ip: 198.51.100.0/24
+        action: remove
+      - ip: 203.0.113.5
+        action: replace
+        replace_with: 127.0.0.1
+    blocked_ips_files: []
     blocked_domains_files:
-    - ./config/var/lists/AdguardDNS-*.txt
-    - ./config/var/lists/Easylist-*.txt
-    - ./config/var/lists/Prigent-Ads-*.txt
-    - ./config/var/lists/Prigent-Malware-*.txt
-    - ./config/block.txt
+      - ./config/var/lists/AdguardDNS-*.txt
+      - ./config/var/lists/Easylist-*.txt
+      - ./config/var/lists/Prigent-Ads-*.txt
+      - ./config/var/lists/Prigent-Malware-*.txt
+      - ./config/block.txt
     allowed_domains_files:
-    - ./config/allow.txt
+      - ./config/allow.txt
+    clear: 1
 - type: upstream
   config:
     routes:
-    - domain: internal.example
-      upstreams:
-      - host: 10.0.0.2
-        port: 53
-      - host: 10.0.0.3
-        port: 53
-    - suffix: corp
-      upstreams:
-      - host: 10.0.1.1
-        port: 53
-- type: greylist
+      - domain: internal.example
+        upstreams:
+          - host: 10.0.0.2
+            port: 53
+          - host: 10.0.0.3
+            port: 53
+      - domain: corp
+        upstreams:
+          - host: 10.0.1.1
+            port: 53
+- type: greylist_example
   config:
     duration_seconds: 3600
+    duration_hours: 24
     db_path: ./config/var/greylist.db
+    cache_ttl_seconds: 300
+    cache_max_entries: 100000
 - type: new_domain
   config:
     threshold_days: 14
     whois_db_path: ./config/var/whois_cache.db
+    whois_cache_ttl_seconds: 3600
+    whois_refresh_seconds: 86400
 - type: etc-hosts
   config:
+    file_path: null
     file_paths:
-    - /etc/hosts
+      - /etc/hosts
+    watchdog_enabled: null
+    watchdog_min_interval_seconds: 1.0
+    watchdog_poll_interval_seconds: 60.0   # set to 0 to disable
+    ttl: 300
 - type: router
   config:
     routes: []
@@ -130,11 +176,14 @@ plugins:
   id: kitchen-sink-zone
   config:
     # Optional: pipe-delimited records files
+    file_path: null
     file_paths:
       - ./config/var/internal.records
     # Optional: native BIND zonefiles
     bind_paths:
-      - ./config/var/example.com.zone
+      - path: ./config/var/example.com.zone
+        origin: null
+        ttl: null
     # Optional: inline records
     records:
       - 'example.com|SOA|300|ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300'
@@ -147,29 +196,38 @@ plugins:
     # Automatic reload control
     watchdog_enabled: true
     watchdog_min_interval_seconds: 1.0
-    watchdog_poll_interval_seconds: 0.0
+    watchdog_poll_interval_seconds: 60.0   # set to 0 to disable
 
     ttl: 300
 
     # Optional: Domains to return NXDOMAIN when there's no match.
     #           It will not continue to other plugins.
     nxdomain_zones:
-     - .zaa
+      - .zaa
 
     # Optional: AXFR-backed zones fetched at startup
     axfr_zones:
       - zone: example.com
-        allow_no_dnssec: true
         upstreams:
           - host: 192.0.2.53
             port: 53
             timeout_ms: 5000
+            transport: tcp
+            server_name: null
+            verify: true
+            ca_file: null
+        masters: null
+        allow_no_dnssec: true
 
     # Optional: NOTIFY targets
     axfr_notify:
       - host: 192.0.2.54
         port: 53
+        timeout_ms: 5000
         transport: tcp
+        server_name: null
+        verify: true
+        ca_file: null
     axfr_notify_all: false
     axfr_notify_scheduled: 0
 
@@ -180,6 +238,7 @@ plugins:
       algorithm: ECDSAP256SHA256
       generate: maybe
       validity_days: 30
+      nsec3: true
 server:
   listen:
     udp:
@@ -191,9 +250,16 @@ server:
       host: 127.0.0.1
       port: 5335
     dot:
-      enabled: false
+      # DNS-over-TLS (DoT) listener (example using self-signed / internal CA certs).
+      # Generate lab certs (./keys by default):
+      #   make ssl-ca-pem
+      #   make ssl-cert CNAME=localhost
+      # Configure DoT clients to trust ./keys/foghorn_ca.pem.
+      enabled: false  # set true to listen for DoT clients
       host: 127.0.0.1
       port: 8853
+      cert_file: ./keys/foghorn_localhost.crt
+      key_file: ./keys/foghorn_localhost.key
     doh:
       enabled: false
       host: 127.0.0.1

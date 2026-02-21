@@ -22,17 +22,31 @@ plugins:
       pre_resolve: { priority: 60 }
     config:
       # BasePlugin targeting + logging
+      abort_on_failure: false
+      enabled: true
+      comment: 'Config-level comment (ignored).'
+      priority: 60
+      pre_priority: 60
+      post_priority: 60
+      setup_priority: 60
       targets: [ 0.0.0.0/0 ]
       targets_ignore: []
+      targets_cache_ttl_seconds: 300
       targets_listener: any
       targets_domains: []
       targets_domains_mode: any
       target_qtypes: [ '*' ]
+      target_opcodes: [ 'QUERY', 'NOTIFY' ]
       logging:
         level: info
         stderr: true
+      cache:
+        module: in_memory_ttl
+        config:
+          min_cache_ttl: 0
 
       # Pipe-delimited records files (Foghorn format)
+      file_path: ./config/var/records.txt
       file_paths:
         - ./config/var/records.txt
         - ./config/var/extra-records.txt
@@ -57,7 +71,7 @@ plugins:
       # Automatic reload control
       watchdog_enabled: true
       watchdog_min_interval_seconds: 1.0
-      watchdog_poll_interval_seconds: 0.0
+      watchdog_poll_interval_seconds: 60.0   # set to 0 to disable
 
       ttl: 300
 
@@ -71,18 +85,24 @@ plugins:
           allow_no_dnssec: true
           upstreams:
             - host: 192.0.2.10
-              port: 53
+              port: 853
               timeout_ms: 5000
-              transport: tcp
+              transport: dot
+              server_name: ns1.example.com
+              verify: true
+              ca_file: ./keys/foghorn_ca.pem
 
       # Optional NOTIFY targets
       axfr_notify:
         - host: 192.0.2.53
-          port: 53
+          port: 853
           timeout_ms: 2000
-          transport: tcp
+          transport: dot
+          server_name: notify.example.com
+          verify: true
+          ca_file: ./keys/foghorn_ca.pem
       axfr_notify_all: false
-      axfr_notify_scheduled: 0
+      axfr_notify_scheduled: 5
 
       # Optional DNSSEC auto-signing
       dnssec_signing:
@@ -91,7 +111,10 @@ plugins:
         algorithm: ECDSAP256SHA256
         generate: maybe   # yes | no | maybe
         validity_days: 30
-        use_tld: null
+        nsec3:
+          salt: A1B2C3
+          iterations: 10
+        use_tld: corp
 
 server:
   listen:

@@ -1,16 +1,55 @@
 upstreams:
   endpoints:
-  - host: 1.1.1.1
-    port: 53
-  - host: 8.8.8.8
-    port: 53
+    - host: 1.1.1.1
+      port: 53
+    - host: 8.8.8.8
+      port: 53
+
 logging:
-  level: info
+  python:
+    level: info
+
 plugins:
-- type: greylist
-  config:
-    duration_seconds: 3600
-    db_path: ./config/var/greylist.db
+  - type: greylist_example
+    id: greylist_example
+    enabled: true
+    comment: 'Example greylist plugin (first-seen deny, allow after window).'
+    config:
+      # BasePlugin options (apply to all plugins)
+      abort_on_failure: false
+      enabled: true
+      comment: 'Config-level comment (ignored).'
+      priority: 70
+      pre_priority: 70
+      post_priority: 70
+      setup_priority: 70
+      targets:
+        - 0.0.0.0/0
+      targets_ignore: []
+      targets_cache_ttl_seconds: 300
+      targets_listener: any
+      targets_domains:
+        - example.com
+      targets_domains_mode: suffix
+      target_qtypes:
+        - '*'
+      target_opcodes:
+        - QUERY
+      logging:
+        level: info
+        stderr: true
+      cache:
+        module: in_memory_ttl
+        config:
+          min_cache_ttl: 0
+
+      # GreylistExample-specific options
+      duration_seconds: 3600
+      duration_hours: 24
+      db_path: ./config/var/greylist.db
+      cache_ttl_seconds: 300
+      cache_max_entries: 100000
+
 server:
   listen:
     udp:

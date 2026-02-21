@@ -73,7 +73,7 @@ plugins:
 	  # Automatic reload control
 	  watchdog_enabled: true
 	  watchdog_min_interval_seconds: 1.0
-	  watchdog_poll_interval_seconds: 0.0
+	  watchdog_poll_interval_seconds: 60.0  # set to 0 to disable
 
 	  # Default TTL when a record omits TTL
 	  ttl: 300
@@ -128,6 +128,10 @@ plugins:
         algorithm: ECDSAP256SHA256
         generate: maybe   # yes | no | maybe
         validity_days: 30
+        nsec3:
+          # NSEC3 salt in zonefile presentation form: '-' for empty salt, else hex.
+          salt: '-'
+          iterations: 10
 ```
 
 Keys are stored per-zone under `keys_dir` using the same naming convention as
@@ -152,7 +156,10 @@ Clients without DO=1 receive only the base RRsets without signatures.
 
 ### Scope and Limitations
 
-- NSEC/NSEC3 negative proofs are **not** generated automatically.
+- When `dnssec_signing.enabled` is true, ZoneRecords generates **NSEC3PARAM** and
+  **NSEC3** records for authoritative zones so that NXDOMAIN/NODATA responses can
+  include authenticated denial of existence when clients set DO=1.
+- NSEC (non-hashed) negative proofs are not generated.
 - Foghorn does not validate its own ZoneRecords responses.
 - DNSSEC is static – re-run the signing script when zone data changes.
 
@@ -209,6 +216,7 @@ Clients without DO=1 receive only the base RRsets without signatures.
 - `watchdog_poll_interval_seconds: float`
   - When `> 0`, start a stat-based polling loop that periodically checks for
 	changes (useful where filesystem events are unreliable).
+  - Default: `60.0` (set to `0.0` to disable).
 - `ttl: int`
   - Default TTL in seconds. Used when an individual record omits its own TTL.
 - `nxdomain_zones: list[str] | null`

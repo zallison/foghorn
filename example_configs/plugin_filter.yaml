@@ -1,61 +1,117 @@
 upstreams:
   endpoints:
-  - host: 1.1.1.1
-    port: 53
-  - host: 8.8.8.8
-    port: 53
+    - host: 1.1.1.1
+      port: 53
+    - host: 8.8.8.8
+      port: 53
+
 logging:
-  level: info
+  python:
+    level: info
+
 plugins:
-- type: filter
-  config:
-    # Demonstrates all BasePlugin targeting options in a single filter plugin.
-    # 1) Client IP targeting
-    targets:
-    - 10.0.0.0/8
-    - 192.168.0.0/16
-    targets_ignore:
-    - 10.0.10.0/24
-    - 192.168.100.50/32
-    targets_cache_ttl_seconds: 300
+  - type: filter
+    id: filter_targeting_example
+    enabled: true
+    comment: 'Filter plugin showing BasePlugin targeting + full Filter options.'
+    config:
+      abort_on_failure: false
+      enabled: true
+      comment: 'Config-level comment (ignored).'
+      priority: 50
+      pre_priority: 50
+      post_priority: 50
+      setup_priority: 50
 
-    # 2) Listener / security targeting (only secure listeners: DoT/DoH)
-    #    Accepts concrete listeners ["udp", "tcp", "dot", "doh"] or aliases
-    #    such as "secure" (dot+doh) / "unsecure" (udp+tcp).
-    targets_listener:
-    - dot
-    - doh
+      # Demonstrates BasePlugin targeting options in a single plugin.
+      # 1) Client IP targeting
+      targets:
+        - 10.0.0.0/8
+        - 192.168.0.0/16
+      targets_ignore:
+        - 10.0.10.0/24
+        - 192.168.100.50/32
+      targets_cache_ttl_seconds: 300
 
-    # 3) Domain targeting (only *.corp.example and *.internal.corp)
-    targets_domains:
-    - corp.example
-    - internal.corp
-    targets_domains_mode: suffix
+      # 2) Listener targeting (only secure listeners: DoT/DoH)
+      #    Accepts ["udp", "tcp", "dot", "doh"] or aliases like "secure".
+      targets_listener:
+        - dot
+        - doh
 
-    # 4) Qtype targeting (only A/AAAA/PTR)
-    target_qtypes:
-    - A
-    - AAAA
-    - PTR
+      # 3) Domain targeting (only *.corp.example and *.internal.corp)
+      targets_domains:
+        - corp.example
+        - internal.corp
+      targets_domains_mode: suffix
 
-    # Filter-specific configuration
-    default: deny
-    db_path: ./config/var/blocklist.db
-    cache_ttl_seconds: 600
-    blocked_domains:
-    - tracker.example
-    allowed_domains:
-    - intranet.example
-    blocked_patterns:
-    - .*\.ads\..*
-    blocked_keywords:
-    - gambling
-    blocked_ips:
-    - ip: 198.51.100.0/24
-      action: remove
-    - ip: 203.0.113.5
-      action: replace
-      replace_with: 127.0.0.1
+      # 4) Qtype targeting (only A/AAAA/PTR)
+      target_qtypes:
+        - A
+        - AAAA
+        - PTR
+
+      # 5) Opcode targeting
+      target_opcodes:
+        - QUERY
+
+      # Per-plugin logging and cache examples
+      logging:
+        level: info
+        stderr: true
+      cache:
+        module: in_memory_ttl
+        config:
+          min_cache_ttl: 0
+
+      # Filter-specific options
+      default: deny
+      db_path: ./config/var/blacklist.db
+      cache_ttl_seconds: 600
+      ttl: 300
+
+      deny_response: ip
+      deny_response_ip4: 0.0.0.0
+      deny_response_ip6: '::'
+
+      # Extra (supported) options: per-qtype allow/deny
+      allow_qtypes:
+        - A
+        - AAAA
+      deny_qtypes:
+        - TXT
+
+      blocked_domains_files:
+        - ./config/deny/domains.txt
+      allowed_domains_files:
+        - ./config/allow/domains.txt
+
+      blocked_domains:
+        - tracker.example
+      allowed_domains:
+        - intranet.example
+
+      blocked_patterns:
+        - '.*\\.ads\\..*'
+      blocked_patterns_files:
+        - ./config/deny/patterns.txt
+
+      blocked_keywords:
+        - gambling
+      blocked_keywords_files:
+        - ./config/deny/keywords.txt
+
+      blocked_ips:
+        - ip: 198.51.100.0/24
+          action: remove
+        - ip: 203.0.113.5
+          action: replace
+          replace_with: 127.0.0.1
+      blocked_ips_files:
+        - ./config/deny/ips.txt
+
+      clear: 1
+
 server:
   listen:
     udp:

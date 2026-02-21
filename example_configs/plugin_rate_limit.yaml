@@ -1,21 +1,60 @@
 upstreams:
   endpoints:
-  - host: 1.1.1.1
-    port: 53
+    - host: 1.1.1.1
+      port: 53
+
+logging:
+  python:
+    level: info
+
 plugins:
-- type: rate_limit
-  config:
-    mode: per_domain
-    db_path: ./config/var/ratelimit-solo.db
-    window_seconds: 10
-    warmup_windows: 3
-    alpha: 0.4
-    alpha_down: 0.1
-    burst_factor: 5.0
-    min_enforce_rps: 4.0
-    global_max_rps: 50.0
-    deny_response: refused
-  id: localhost_ratelimit
+  - type: rate_limit
+    id: localhost_ratelimit
+    enabled: true
+    comment: 'RateLimit example (learning EWMA, then enforce bursts).'
+    config:
+      # BasePlugin options
+      abort_on_failure: false
+      enabled: true
+      comment: 'Config-level comment (ignored).'
+      priority: 30
+      pre_priority: 30
+      post_priority: 30
+      setup_priority: 30
+      targets:
+        - 0.0.0.0/0
+      targets_ignore: []
+      targets_cache_ttl_seconds: 300
+      targets_listener: any
+      targets_domains: []
+      targets_domains_mode: any
+      target_qtypes:
+        - '*'
+      target_opcodes:
+        - QUERY
+      logging:
+        level: info
+        stderr: true
+      cache:
+        module: in_memory_ttl
+        config:
+          min_cache_ttl: 0
+
+      # RateLimit-specific options
+      mode: per_domain
+      window_seconds: 10
+      warmup_windows: 3
+      alpha: 0.4
+      alpha_down: 0.1
+      burst_factor: 5.0
+      min_enforce_rps: 4.0
+      global_max_rps: 50.0
+      db_path: ./config/var/rate_limit.db
+      deny_response: ip
+      deny_response_ip4: 0.0.0.0
+      deny_response_ip6: '::'
+      ttl: 60
+
 server:
   listen:
     udp:

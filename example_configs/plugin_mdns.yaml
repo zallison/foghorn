@@ -1,17 +1,64 @@
 upstreams:
   endpoints:
-  - host: 1.1.1.1
-    port: 53
+    - host: 1.1.1.1
+      port: 53
+
 logging:
-  level: info
+  python:
+    level: info
+
 plugins:
-- type: mdns
-  config:
-    ttl: 60
-    network_enabled: true
-    include_ipv4: true
-    include_ipv6: true
-    info_timeout_ms: 1500
+  - type: mdns
+    id: mdns_bridge_example
+    enabled: true
+    comment: 'Bridge mDNS/DNS-SD (zeroconf) records into DNS.'
+    config:
+      # BasePlugin options (apply to all plugins)
+      abort_on_failure: false
+      enabled: true
+      comment: 'Config-level comment (ignored).'
+      priority: 60
+      pre_priority: 60
+      post_priority: 60
+      setup_priority: 60
+      targets:
+        - 0.0.0.0/0
+      targets_ignore: []
+      targets_cache_ttl_seconds: 300
+      targets_listener: any
+      targets_domains:
+        - home.arpa
+      targets_domains_mode: suffix
+      target_qtypes:
+        - '*'
+      target_opcodes:
+        - QUERY
+      logging:
+        level: info
+        stderr: true
+      cache:
+        module: in_memory_ttl
+        config:
+          min_cache_ttl: 0
+
+      # MdnsBridge-specific options
+      domain: home.arpa
+      ttl: 60
+      network_enabled: true
+      include_ipv4: true
+      include_ipv6: true
+      info_timeout_ms: 1500
+      zeroconf_interfaces: all
+      zeroconf_ip_version: all
+      zeroconf_unicast: false
+      service_types:
+        - _http._tcp.local.
+        - _ssh._tcp.local.
+
+      # Extra (accepted) option: also serve mDNS data under additional domains
+      domains:
+        - lan
+
 server:
   listen:
     udp:
