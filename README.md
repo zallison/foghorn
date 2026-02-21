@@ -4,12 +4,81 @@ Foghorn is a versatile DNS server designed for flexibility and performance. Buil
 
 With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard. Newer releases add DNSSEC signing helpers, zone transfers (AXFR/IXFR), RFC 8914 Extended DNS Errors (EDE), and SSH host key utilities so you can treat DNS as a first-class security and operations tool.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-91%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-89%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" width=300px />
 
+## Foghorn DNS Server
 
-The configuration file is validated against a JSON Schema, but you rarely need to read the schema directly. This guide walks through the main sections (`vars`, `server`, `upstreams`, `logging`, `stats`, and `plugins`), then shows concrete examples for every built‑in plugin.
+### Overview
+- **Foghorn** is a DNS server that lets you do almost anything.
+- Nearly *everything* is configurable, tunable, and observable via the admin Web UI, even down to Python function cache settings.
+- Plugins and the resolver do most of the heavy lifting.
+- Out of the box, with no plugins enabled, it behaves like a standard DNS server with:
+  - UDP / TCP
+  - DoT (DNS over TLS)
+  - DoH (DNS over HTTPS)
+  - DNSSEC support for secure DNS
+  - DNS
+- Enabling TLS is straightforward. The `Makefile` includes targets to generate a CA and sign keys.
+
+---
+
+### Query Pipeline
+- Queries flow through a pipeline of plugins. A plugin can appear multiple times with different configurations.
+- Plugins execute in priority order. The first plugin that produces a final answer immediately short-circuits the pipeline.
+- If no pre-resolve plugin responds, the configured resolver, either forwarder or recursive, runs.
+- The result then flows through a post-resolve pipeline, if configured, sent to the client, then added to the logging queue.
+
+---
+
+### Plugins
+Key plugins include:
+
+- **ACL**: Access control
+- **EtcHosts**: Serve a hosts-file-style set of A/AAAA records via DNS. Ideal for small, simple setups.
+- **FileDownloader + Filter**: Download blocklists and filter queries, similar to Pi-hole. Can return:
+  - An IP
+  - `REFUSED`
+  - `SERVFAIL`
+  - Or silently drop the connection
+- **ZoneRecords**: Load BIND9 zone files and/or define arbitrary records without creating a full zone. Supports combining multiple files and enabling DNSSEC.
+- **UpstreamRouter**: Route queries to different upstreams based on name, for example forwarding `.corp` to a VPN resolver.
+- Additional plugins for:
+  - Rate limiting - Static or Dynamic
+  - Docker host discovery - Add containers to DNS
+  - Zeroconf / mDNS / Bonjour - Forward mDNS over DNS, alo the admin ui offers oberservability.
+  - Simulating unreliable upstreams for development, including on-the-wire fuzzing. Seedable for testing purposes.
+
+"Targets" let you limit the scope of the plugin to given client IPs, domain names, query types, listener type, and more.
+
+Creating new plugins is simple. You can implement custom DNS logic without writing an entire DNS server. For example, the “finger-over-dns” example plugin can be built in under an hour.
+
+---
+
+### Highly Customizable
+- Fine-grained controls let you tune behavior precisely.
+- Resize and configure the Python function cache to match your workload.
+- Variables allow multiple servers to share the same configuration with small differences, such as listen address.
+- Environment variables make it easy to adjust behavior in CI/CD environments.
+
+---
+
+### Fits Into Your Infrastructure
+- Flexible caching backends:
+  - In-memory
+  - SQL databases
+  - Valkey or Redis
+  - MongoDB
+- Logging integrates with your existing systems, can log to multiple targets.:
+  - File-based logging
+  - SQL databases
+  - InfluxDB
+  - MQTT
+
+---
+
+# Full Documentation
 
 ## Table of Contents
 - [0. Thanks](#0-thanks)
@@ -107,8 +176,8 @@ Example (require `ssh_keys` plugin deps at startup):
 ```yaml
 plugins:
   - type: ssh_keys
-    config:
-      abort_on_failure: true
+	config:
+	  abort_on_failure: true
 ```
 
 Developer strict mode: to make *plugin discovery* itself strict (raise on ImportError
@@ -303,9 +372,9 @@ Without `trust-ad`, glibc clears the AD flag before handing answers to applicati
   - Optional toggle for RFC 8914 Extended DNS Errors; when true and the client advertises EDNS(0), Foghorn can attach EDE options to certain policy or upstream-failure responses and surface per-code stats in the admin UI.
 - `server.resolver`
   - Timeouts, recursion depth, and resolver mode:
-    - `forward` (default): forward to configured `upstreams`.
-    - `recursive`: walk from root servers.
-    - `master` / `none`: authoritative-only (no forwarding; cache miss -> REFUSED).
+	- `forward` (default): forward to configured `upstreams`.
+	- `recursive`: walk from root servers.
+	- `master` / `none`: authoritative-only (no forwarding; cache miss -> REFUSED).
 - `server.http`
   - Admin web UI listener configuration.
 
@@ -831,7 +900,7 @@ Optional merge controls:
   - `merge` (default) preserves any existing in-memory records and overlays new data.
   - `replace` rebuilds the mapping on each load/reload.
   - `first` uses the first configured source group in this order:
-    file_paths → bind_paths → axfr_zones → records (inline), and ignores the others.
+	file_paths → bind_paths → axfr_zones → records (inline), and ignores the others.
 - `merge_policy`: `add` (default) appends distinct values into an RRset;
   `overwrite` replaces an RRset when a later source defines the same
   `(domain, qtype)`.
@@ -1238,6 +1307,9 @@ logging:
 		port: 3306
 		user: foghorn
 		database: foghorn_stats
+		# Optional: control which Python DB driver is used.
+		driver: auto                 # auto | mariadb | mysql-connector-python | mysql
+		driver_fallback: auto        # auto | none | <driver> | [<driver>, ...]
 
 stats:
   enabled: true
@@ -1453,7 +1525,7 @@ plugins:
 
 From here you can mix and match plugins, caches, and stats backends to shape Foghorn into exactly the DNS service you need.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-91%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-89%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 ## Stargazers over time
 [![Stargazers over time](https://starchart.cc/zallison/foghorn.svg?variant=adaptive)](https://starchart.cc/zallison/foghorn)
