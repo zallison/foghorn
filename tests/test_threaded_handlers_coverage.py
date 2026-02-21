@@ -262,6 +262,62 @@ def test_threaded_config_diagram_png_endpoints(tmp_path: Path) -> None:
     assert body3 == png_bytes
 
 
+def test_threaded_config_diagram_mmd_endpoint(tmp_path: Path) -> None:
+    """Brief: Threaded /api/v1/config/diagram.mmd returns Mermaid source text.
+
+    Inputs:
+      - No config_path configured.
+      - Minimal config file on disk.
+
+    Outputs:
+      - 500 when config_path missing.
+      - 200 text/plain containing Mermaid flowchart when config_path present.
+    """
+
+    cfg = {"webserver": {"auth": {"mode": "none"}}}
+
+    status, _hdrs, body = _one_shot_http_request(
+        method="GET",
+        path="/api/v1/config/diagram.mmd",
+        config=cfg,
+        config_path=None,
+    )
+    assert status == 500
+    assert "config_path" in body.decode("utf-8")
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        (
+            "server:\n"
+            "  resolver:\n"
+            "    mode: forward\n"
+            "  http:\n"
+            "    enabled: false\n"
+            "listen:\n"
+            "  udp:\n"
+            "    enabled: false\n"
+            "upstreams:\n"
+            "  endpoints:\n"
+            "    - transport: udp\n"
+            "      host: 1.1.1.1\n"
+            "      port: 53\n"
+            "plugins: []\n"
+        ),
+        encoding="utf-8",
+    )
+
+    status2, hdrs2, body2 = _one_shot_http_request(
+        method="GET",
+        path="/api/v1/config/diagram.mmd",
+        config=cfg,
+        config_path=str(cfg_path),
+    )
+    assert status2 == 200
+    assert hdrs2.get("content-type", "").startswith("text/plain")
+    text = body2.decode("utf-8")
+    assert "flowchart" in text
+
+
 def test_threaded_plugin_admin_endpoints() -> None:
     """Brief: Threaded plugin pages/UI/snapshot endpoints return expected shapes.
 
