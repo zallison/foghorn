@@ -20,7 +20,13 @@ from typing import Any, Dict, Optional
 import yaml
 
 from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
-from ...utils.config_mermaid import diagram_png_path_for_config
+from ...utils.config_mermaid import (
+    diagram_png_candidate_paths_for_config,
+    diagram_mmd_candidate_paths_for_config,
+    find_first_existing_path,
+    stale_diagram_warning,
+    generate_mermaid_text_from_config_path,
+)
 from ..udp_server import DNSUDPHandler
 from . import admin_logic as _admin_logic
 from . import config_persistence as _config_persistence
@@ -180,13 +186,18 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
     def _send_text(
-        self, status_code: int, text: str
+        self,
+        status_code: int,
+        text: str,
+        headers: Dict[str, str] | None = None,
     ) -> None:  # pragma: no cover - low-level HTTP I/O helper
         """Brief: Send plain-text response.
 
         Inputs:
           - status_code: HTTP status code.
           - text: Response body
+          - headers: Optional mapping of extra HTTP headers to include.
+
         Outputs:
           - None
         """
@@ -196,6 +207,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
+        if headers:
+            for k, v in headers.items():
+                self.send_header(str(k), str(v))
         self._apply_cors_headers()
         self.end_headers()
         try:
@@ -800,14 +814,17 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
-    def _handle_config_diagram_png(self) -> None:
+    def _handle_config_diagram_png(self, params: Dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/config/diagram.png.
 
         Inputs:
-          - None (uses self.server.config_path to locate the diagram PNG).
+          - params: Query parameters mapping.
 
         Outputs:
           - None (sends image/png body when present).
+          - When meta=1 is provided, sends an empty 200 with:
+              - X-Foghorn-Exists: '1' or '0'
+              - X-Foghorn-Warning (optional)
         """
 
         if not self._require_auth():
@@ -821,13 +838,40 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
-        png_path = diagram_png_path_for_config(cfg_path)
-        if not os.path.isfile(png_path):
+        png_file = find_first_existing_path(
+            diagram_png_candidate_paths_for_config(cfg_path)
+        )
+
+        headers: dict[str, str] = {
+            "X-Foghorn-Exists": "1" if png_file is not None else "0",
+        }
+
+        if png_file is not None:
+            warn = stale_diagram_warning(
+                config_path=str(cfg_path), diagram_path=str(png_file)
+            )
+            if warn:
+                headers["X-Foghorn-Warning"] = warn
+
+        meta_only = False
+        try:
+            meta_only = bool(
+                params.get("meta")
+                and str(params.get("meta")[0]) not in {"", "0", "false"}
+            )
+        except Exception:
+            meta_only = False
+
+        if meta_only:
+            self._send_text(200, "", headers=headers)
+            return
+
+        if png_file is None:
             self._send_text(404, "config diagram not found")
             return
 
         try:
-            with open(png_path, "rb") as f:
+            with open(str(png_file), "rb") as f:
                 data = f.read()
         except Exception as exc:  # pragma: no cover - environment specific
             self._send_text(500, f"failed to read diagram: {exc}")
@@ -837,6 +881,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "image/png")
         self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(data)))
+        for k, v in headers.items():
+            self.send_header(str(k), str(v))
         self._apply_cors_headers()
         self.end_headers()
         try:
@@ -848,6 +894,81 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 getattr(self, "path", ""),
             )
             return
+
+    def _handle_config_diagram_mmd(self, params: Dict[str, list[str]]) -> None:
+        """Brief: Handle GET /api/v1/config/diagram.mmd.
+
+        Inputs:
+          - params: Query parameters mapping.
+
+        Outputs:
+          - None (sends Mermaid text).
+        """
+
+        if not self._require_auth():
+            return
+
+        cfg_path = getattr(self._server(), "config_path", None)
+        if not cfg_path:
+            self._send_json(
+                500,
+                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
+            )
+            return
+
+        headers: dict[str, str] = {}
+
+        png_file = find_first_existing_path(
+            diagram_png_candidate_paths_for_config(cfg_path)
+        )
+        if png_file is not None:
+            warn_png = stale_diagram_warning(
+                config_path=str(cfg_path), diagram_path=str(png_file)
+            )
+            if warn_png:
+                headers["X-Foghorn-Warning"] = warn_png
+
+        mmd_file = find_first_existing_path(
+            diagram_mmd_candidate_paths_for_config(cfg_path)
+        )
+        if mmd_file is not None:
+            warn_mmd = stale_diagram_warning(
+                config_path=str(cfg_path), diagram_path=str(mmd_file)
+            )
+            if warn_mmd and "X-Foghorn-Warning" not in headers:
+                headers["X-Foghorn-Warning"] = warn_mmd
+
+        meta_only = False
+        try:
+            meta_only = bool(
+                params.get("meta")
+                and str(params.get("meta")[0]) not in {"", "0", "false"}
+            )
+        except Exception:
+            meta_only = False
+
+        if meta_only:
+            self._send_text(200, "", headers=headers)
+            return
+
+        if mmd_file is not None:
+            try:
+                text = mmd_file.read_text(encoding="utf-8")
+            except Exception as exc:  # pragma: no cover - environment dependent
+                self._send_text(
+                    500, f"failed to read config diagram from {mmd_file}: {exc}"
+                )
+                return
+            self._send_text(200, text, headers=headers)
+            return
+
+        try:
+            text = generate_mermaid_text_from_config_path(str(cfg_path))
+        except Exception as exc:  # pragma: no cover - environment dependent
+            self._send_text(500, f"failed to generate config diagram: {exc}")
+            return
+
+        self._send_text(200, text, headers=headers)
 
     def _handle_query_log(self, params: Dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/query_log for the threaded fallback server.
@@ -1390,6 +1511,340 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
+    def _table_path_from_descriptor(
+        self, desc: object, table_id: str
+    ) -> tuple[str, str | None, str]:
+        """Brief: Resolve a table section path and default sort from an admin descriptor.
+
+        Inputs:
+          - desc: Plugin/cache admin UI descriptor (dict-like).
+          - table_id: Section id from the frontend.
+
+        Outputs:
+          - (path, default_sort_key, default_sort_dir)
+        """
+
+        table_id_norm = str(table_id or "").strip()
+        default_sort_key: str | None = None
+        default_sort_dir = "asc"
+
+        if not isinstance(desc, dict):
+            return table_id_norm, default_sort_key, default_sort_dir
+
+        layout = desc.get("layout")
+        if not isinstance(layout, dict):
+            return table_id_norm, default_sort_key, default_sort_dir
+
+        sections = layout.get("sections")
+        if not isinstance(sections, list):
+            return table_id_norm, default_sort_key, default_sort_dir
+
+        for sec in sections:
+            if not isinstance(sec, dict):
+                continue
+            if str(sec.get("id") or "") != table_id_norm:
+                continue
+            if str(sec.get("type") or "") != "table":
+                continue
+
+            path = str(sec.get("path") or "").strip()
+
+            sort_hint = sec.get("sort")
+            if sort_hint == "by_calls":
+                default_sort_key = "calls_total"
+                default_sort_dir = "desc"
+
+            return path, default_sort_key, default_sort_dir
+
+        return "", default_sort_key, default_sort_dir
+
+    def _is_hex_hash_like(self, name: object) -> bool:
+        """Brief: Return True for hash-like labels (12–64 hex characters).
+
+        Inputs:
+          - name: Hostname-like value; only the left-most label is inspected.
+
+        Outputs:
+          - bool: True when the first label looks like a short/long hex hash.
+        """
+
+        token = str(name or "").split(".", 1)[0].lower().strip()
+        if len(token) < 12 or len(token) > 64:
+            return False
+        return all(ch in "0123456789abcdef" for ch in token)
+
+    def _handle_cache_snapshot(self) -> None:
+        """Brief: Handle GET /api/v1/cache.
+
+        Inputs:
+          - None (uses the global DNS cache instance).
+
+        Outputs:
+          - None (sends JSON response with cache snapshot or 404).
+        """
+
+        if not self._require_auth():
+            return
+
+        try:
+            from ...plugins.resolve import base as plugin_base
+
+            cache = getattr(plugin_base, "DNS_CACHE", None)
+        except Exception:
+            cache = None
+
+        if cache is None or not hasattr(cache, "get_http_snapshot"):
+            self._send_json(
+                404,
+                {
+                    "detail": "cache plugin not found or does not expose get_http_snapshot",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        try:
+            snapshot = cache.get_http_snapshot()  # type: ignore[call-arg]
+        except Exception as exc:
+            self._send_json(
+                500,
+                {
+                    "detail": f"failed to build cache snapshot: {exc}",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        cache_name = getattr(cache, "name", None) or cache.__class__.__name__
+        self._send_json(
+            200,
+            {
+                "server_time": _utc_now_iso(),
+                "cache": str(cache_name),
+                "data": _json_safe(snapshot),
+            },
+        )
+
+    def _handle_cache_table(self, path: str, params: Dict[str, list[str]]) -> None:
+        """Brief: Handle GET /api/v1/cache/table/{table_id}.
+
+        Inputs:
+          - path: Request path including the table_id segment.
+          - params: Query parameters mapping.
+
+        Outputs:
+          - None (sends JSON response with a paged table payload).
+        """
+
+        if not self._require_auth():
+            return
+
+        try:
+            from ...plugins.resolve import base as plugin_base
+
+            cache = getattr(plugin_base, "DNS_CACHE", None)
+        except Exception:
+            cache = None
+
+        if cache is None or not hasattr(cache, "get_http_snapshot"):
+            self._send_json(
+                404,
+                {
+                    "detail": "cache plugin not found or does not expose get_http_snapshot",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        prefix = "/api/v1/cache/table/"
+        table_id_raw = path[len(prefix) :].strip("/")
+        table_id = urllib.parse.unquote(table_id_raw)
+        if not table_id:
+            self._send_json(
+                404,
+                {"detail": "cache table not found", "server_time": _utc_now_iso()},
+            )
+            return
+
+        try:
+            snapshot = cache.get_http_snapshot()  # type: ignore[call-arg]
+        except Exception as exc:
+            self._send_json(
+                500,
+                {
+                    "detail": f"failed to build cache snapshot: {exc}",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        desc = None
+        get_desc = getattr(cache, "get_admin_ui_descriptor", None)
+        if callable(get_desc):
+            try:
+                desc = get_desc()
+            except Exception:
+                desc = None
+
+        table_path, default_sort_key, default_sort_dir = (
+            self._table_path_from_descriptor(desc, table_id)
+        )
+        if not table_path:
+            self._send_json(
+                404,
+                {"detail": "cache table not found", "server_time": _utc_now_iso()},
+            )
+            return
+
+        raw_rows = _admin_logic._resolve_path(snapshot, table_path)
+        rows: list[dict[str, Any]] = (
+            [r for r in (raw_rows or []) if isinstance(r, dict)]
+            if isinstance(raw_rows, list)
+            else []
+        )
+
+        if self._get_bool_param(params, "hide_zero_calls", False):
+            rows = [
+                r
+                for r in rows
+                if not (
+                    isinstance(r.get("calls_total"), int)
+                    and int(r.get("calls_total") or 0) == 0
+                )
+            ]
+        if self._get_bool_param(params, "hide_zero_hits", False):
+            rows = [
+                r
+                for r in rows
+                if not (
+                    isinstance(r.get("cache_hits"), int)
+                    and int(r.get("cache_hits") or 0) == 0
+                )
+            ]
+
+        payload = _admin_logic.build_table_page_payload(
+            rows,
+            page=self._get_int_param(params, "page", 1),
+            page_size=self._get_int_param(params, "page_size", 50),
+            sort_key=self._get_query_param(params, "sort_key"),
+            sort_dir=self._get_query_param(params, "sort_dir"),
+            search=self._get_query_param(params, "search"),
+            hide_zero_calls=self._get_bool_param(params, "hide_zero_calls", False),
+            hide_zero_hits=self._get_bool_param(params, "hide_zero_hits", False),
+            show_down_services=True,
+            hide_hash_like=False,
+            default_sort_key=default_sort_key,
+            default_sort_dir=default_sort_dir,
+        )
+        payload["server_time"] = _utc_now_iso()
+        payload["table_id"] = str(table_id)
+        self._send_json(200, payload)
+
+    def _handle_plugin_table(self, path: str, params: Dict[str, list[str]]) -> None:
+        """Brief: Handle GET /api/v1/plugins/{plugin_name}/table/{table_id}.
+
+        Inputs:
+          - path: Request path containing plugin_name and table_id.
+          - params: Query parameters mapping.
+
+        Outputs:
+          - None (sends JSON response with a paged table payload).
+        """
+
+        if not self._require_auth():
+            return
+
+        prefix = "/api/v1/plugins/"
+        suffix = "/table/"
+        rest = path[len(prefix) :]
+        if suffix not in rest:
+            self._send_json(
+                404,
+                {"detail": "plugin table not found", "server_time": _utc_now_iso()},
+            )
+            return
+
+        plugin_part, table_part = rest.split(suffix, 1)
+        plugin_name = urllib.parse.unquote(plugin_part.strip("/"))
+        table_id = urllib.parse.unquote(table_part.strip("/"))
+        if not plugin_name or not table_id:
+            self._send_json(
+                404,
+                {"detail": "plugin table not found", "server_time": _utc_now_iso()},
+            )
+            return
+
+        plugins_list = getattr(self._server(), "plugins", []) or []
+        target = _admin_logic.find_plugin_instance_by_name(plugins_list, plugin_name)
+        if target is None or not hasattr(target, "get_http_snapshot"):
+            self._send_json(
+                404,
+                {
+                    "detail": "plugin not found or does not expose get_http_snapshot",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        desc = None
+        get_desc = getattr(target, "get_admin_ui_descriptor", None)
+        if callable(get_desc):
+            try:
+                desc = get_desc()
+            except Exception:
+                desc = None
+
+        table_path, default_sort_key, default_sort_dir = (
+            self._table_path_from_descriptor(desc, table_id)
+        )
+        if not table_path:
+            self._send_json(
+                404,
+                {"detail": "plugin table not found", "server_time": _utc_now_iso()},
+            )
+            return
+
+        try:
+            snapshot = target.get_http_snapshot()  # type: ignore[call-arg]
+        except Exception as exc:
+            self._send_json(
+                500,
+                {
+                    "detail": f"failed to build plugin snapshot: {exc}",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        raw_rows = _admin_logic._resolve_path(snapshot, table_path)
+        rows: list[dict[str, Any]] = (
+            [r for r in (raw_rows or []) if isinstance(r, dict)]
+            if isinstance(raw_rows, list)
+            else []
+        )
+
+        if self._get_bool_param(params, "hide_hash_like", False):
+            rows = [r for r in rows if not self._is_hex_hash_like(r.get("name"))]
+
+        payload = _admin_logic.build_table_page_payload(
+            rows,
+            page=self._get_int_param(params, "page", 1),
+            page_size=self._get_int_param(params, "page_size", 50),
+            sort_key=self._get_query_param(params, "sort_key"),
+            sort_dir=self._get_query_param(params, "sort_dir"),
+            search=self._get_query_param(params, "search"),
+            hide_zero_calls=False,
+            hide_zero_hits=False,
+            show_down_services=True,
+            hide_hash_like=self._get_bool_param(params, "hide_hash_like", False),
+            default_sort_key=default_sort_key,
+            default_sort_dir=default_sort_dir,
+        )
+        payload["server_time"] = _utc_now_iso()
+        payload["plugin"] = str(plugin_name)
+        payload["table_id"] = str(table_id)
+        self._send_json(200, payload)
+
     def _handle_plugin_page_detail_route(self, path: str) -> None:
         """Brief: Handle GET /api/v1/plugin_pages/{plugin_name}/{page_slug}.
 
@@ -1577,6 +2032,12 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_stats(params)
         elif path.startswith("/api/v1/stats/table/"):
             self._handle_stats_table(path, params)
+        elif path == "/api/v1/cache":
+            self._handle_cache_snapshot()
+        elif path.startswith("/api/v1/cache/table/"):
+            self._handle_cache_table(path, params)
+        elif path.startswith("/api/v1/plugins/") and "/table/" in path:
+            self._handle_plugin_table(path, params)
         elif path in {"/traffic", "/api/v1/traffic"}:
             self._handle_traffic(params)
         elif path in {"/config", "/api/v1/config"}:
@@ -1598,7 +2059,9 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         }:
             self._handle_config_raw_json()
         elif path in {"/api/v1/config/diagram.png", "/config/diagram.png"}:
-            self._handle_config_diagram_png()
+            self._handle_config_diagram_png(params)
+        elif path in {"/api/v1/config/diagram.mmd", "/config/diagram.mmd"}:
+            self._handle_config_diagram_mmd(params)
         elif path in {"/logs", "/api/v1/logs"}:
             self._handle_logs(params)
         elif path in {"/query_log", "/api/v1/query_log"}:

@@ -195,3 +195,103 @@ def test_config_diagram_endpoint_returns_404_when_missing(tmp_path: Path) -> Non
     client = TestClient(app)
     resp = client.get("/api/v1/config/diagram.png")
     assert resp.status_code == 404
+
+
+def test_config_diagram_png_upload_saves_diagram_png_in_config_dir(
+    tmp_path: Path,
+) -> None:
+    """Brief: POST /api/v1/config/diagram.png writes config/diagram.png.
+
+    Inputs:
+      - tmp_path: pytest tmp_path fixture.
+
+    Outputs:
+      - Upload returns 200 and GET serves the uploaded PNG.
+    """
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    cfg_path = cfg_dir / "config.yaml"
+    cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=None,
+        config_path=str(cfg_path),
+        runtime_state=None,
+        plugins=[],
+    )
+
+    client = TestClient(app)
+
+    payload = b"\x89PNG\r\n\x1a\nFAKEPAYLOAD"
+    resp = client.post(
+        "/api/v1/config/diagram.png",
+        files={"file": ("diagram.png", payload, "image/png")},
+    )
+    assert resp.status_code == 200
+
+    saved = cfg_dir / "diagram.png"
+    assert saved.is_file()
+    assert saved.read_bytes() == payload
+
+    resp2 = client.get("/api/v1/config/diagram.png")
+    assert resp2.status_code == 200
+    assert resp2.content == payload
+
+
+def test_config_diagram_png_upload_rejects_non_png_extension(tmp_path: Path) -> None:
+    """Brief: POST /api/v1/config/diagram.png rejects non-.png filenames."""
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    cfg_path = cfg_dir / "config.yaml"
+    cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=None,
+        config_path=str(cfg_path),
+        runtime_state=None,
+        plugins=[],
+    )
+
+    client = TestClient(app)
+    payload = b"\x89PNG\r\n\x1a\nFAKEPAYLOAD"
+    resp = client.post(
+        "/api/v1/config/diagram.png",
+        files={"file": ("diagram.jpg", payload, "image/png")},
+    )
+    assert resp.status_code == 400
+
+
+def test_config_diagram_png_upload_rejects_too_large(tmp_path: Path) -> None:
+    """Brief: POST /api/v1/config/diagram.png enforces a 1,000,000 byte limit."""
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir()
+    cfg_path = cfg_dir / "config.yaml"
+    cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=None,
+        config_path=str(cfg_path),
+        runtime_state=None,
+        plugins=[],
+    )
+
+    client = TestClient(app)
+
+    max_bytes = 1_000_000
+    payload = b"\x89PNG\r\n\x1a\n" + (b"A" * (max_bytes + 1 - 8))
+    assert len(payload) == max_bytes + 1
+
+    resp = client.post(
+        "/api/v1/config/diagram.png",
+        files={"file": ("diagram.png", payload, "image/png")},
+    )
+    assert resp.status_code == 413

@@ -53,7 +53,7 @@
 			Stats
 		</button>
 		<button id="btn-tab-edit" class="fh-theme-btn" type="button" role="tab" aria-selected="false">
-			JSON & Config
+			Config
 		</button>
 		<span id="plugin-tabs-root"></span>
 	</div>
@@ -90,21 +90,27 @@
 
 		<section class="fh-pane fh-pane-left">
 			<div class="fh-pane-header">
-				<h2 class="fh-pane-title">Config diagram</h2>
+				<h2 class="fh-pane-title">Config Diagram</h2>
 				<p class="fh-pane-help" id="config-diagram-status">Loading diagram...</p>
 			</div>
 			<div class="fh-diagram-container">
-				<img id="config-diagram-img" class="fh-diagram-img" alt="Config diagram" />
-				<div id="config-diagram-fallback" class="fh-diagram-fallback" hidden>
-					Diagram unavailable. Ensure the server can run <code>mmdc</code> (Mermaid CLI)
-					and restart so the PNG can be generated.
-				</div>
+					<img id="config-diagram-img" class="fh-diagram-img" alt="Config diagram" />
+					<div id="config-diagram-fallback" class="fh-diagram-fallback" hidden>
+						PNG diagram unavailable. Showing Mermaid output (same as
+						<code>scripts/generate_config_mermaid.py</code>):
+						<pre id="config-diagram-mmd" class="fh-pre fh-pre-compact"></pre>
+						<div class="fh-config-actions" style="margin-top: 10px; gap: 10px; flex-wrap: wrap;">
+							<input id="config-diagram-upload" type="file" accept="image/png" />
+							<button id="btn-config-diagram-upload" class="fh-btn fh-btn-secondary" type="button">Upload PNG (max 1MB)</button>
+						</div>
+						<p class="fh-pane-help" id="config-diagram-upload-status"></p>
+					</div>
 			</div>
 		</section>
 
 		<section class="fh-pane fh-pane-right">
 			<div class="fh-pane-header">
-				<h2 class="fh-pane-title">Configuration</h2>
+				<h2 class="fh-pane-title">Config</h2>
 				<div class="fh-config-actions" id="config-actions-view">
 					<button id="btn-edit" class="fh-btn" type="button">Edit Config</button>
 				</div>
@@ -157,6 +163,10 @@
 			var configDiagramImgEl = document.getElementById('config-diagram-img');
 			var configDiagramStatusEl = document.getElementById('config-diagram-status');
 			var configDiagramFallbackEl = document.getElementById('config-diagram-fallback');
+			var configDiagramMmdEl = document.getElementById('config-diagram-mmd');
+			var configDiagramUploadEl = document.getElementById('config-diagram-upload');
+			var btnConfigDiagramUploadEl = document.getElementById('btn-config-diagram-upload');
+			var configDiagramUploadStatusEl = document.getElementById('config-diagram-upload-status');
 			var configEditorEl = document.getElementById('config-editor');
 			var configViewContainer = document.getElementById('config-view-container');
 			var configEditContainer = document.getElementById('config-edit-container');
@@ -1561,6 +1571,9 @@
 				if (configDiagramFallbackEl) {
 					configDiagramFallbackEl.hidden = true;
 				}
+				if (configDiagramUploadStatusEl) {
+					configDiagramUploadStatusEl.textContent = '';
+				}
 
 				configDiagramImgEl.onload = function () {
 					if (configDiagramStatusEl) {
@@ -1574,25 +1587,150 @@
 					if (configDiagramFallbackEl) {
 						configDiagramFallbackEl.hidden = true;
 					}
+					if (configDiagramMmdEl) {
+						configDiagramMmdEl.textContent = '';
+					}
+
+					// Best-effort: fetch only headers from /diagram.mmd so we can surface
+					// staleness warnings even when the PNG loads successfully.
+					fetch('/api/v1/config/diagram.mmd?meta=1&ts=' + Date.now(), { cache: 'no-store' })
+						.then(function (resp) {
+							var warn = resp.headers.get('x-foghorn-warning');
+							if (warn && configDiagramStatusEl) {
+								configDiagramStatusEl.textContent = warn;
+							}
+						})
+						.catch(function () {
+							// Ignore warning fetch failures.
+						});
 				};
 				configDiagramImgEl.onerror = function () {
 					if (configDiagramStatusEl) {
-						configDiagramStatusEl.textContent = 'Diagram unavailable.';
+						configDiagramStatusEl.textContent = 'PNG unavailable; showing Mermaid source.';
 					}
 					// Diagram missing (usually mmdc not available on the server): collapse
-					// the config page to a single column so the editor can use full width.
+					// the config page to a single column so the editor can use full width,
+					// and show the Mermaid output as a text fallback.
 					if (page1 && page1.classList) {
 						page1.classList.add('fh-main-config-single');
 					}
 					configDiagramImgEl.style.display = 'none';
 					if (configDiagramFallbackEl) {
-						// When the diagram pane is hidden, keep the fallback message hidden
-						// as well so the config editor is the only content.
-						configDiagramFallbackEl.hidden = true;
+						configDiagramFallbackEl.hidden = false;
+					}
+					if (configDiagramMmdEl) {
+						configDiagramMmdEl.textContent = 'Loading Mermaid source...';
+						fetch('/api/v1/config/diagram.mmd?ts=' + Date.now(), { cache: 'no-store' })
+							.then(function (resp) {
+								var warn = resp.headers.get('x-foghorn-warning');
+								if (warn && configDiagramStatusEl) {
+									configDiagramStatusEl.textContent = warn;
+								}
+								if (!resp.ok) {
+									throw new Error('HTTP ' + resp.status);
+								}
+								return resp.text();
+							})
+							.then(function (text) {
+								configDiagramMmdEl.textContent = text || '';
+							})
+							.catch(function (err) {
+								configDiagramMmdEl.textContent = 'Failed to load Mermaid source: ' + (err && err.message ? err.message : String(err));
+							});
 					}
 				};
 
-				configDiagramImgEl.src = '/api/v1/config/diagram.png?ts=' + Date.now();
+				var ts = Date.now();
+				// Ask the server if a PNG exists without downloading it. When mmdc is
+				// not available, the PNG is typically missing; in that case we show the
+				// Mermaid output (same as scripts/generate_config_mermaid.py) instead
+				// of leaving the diagram area blank.
+				fetch('/api/v1/config/diagram.png?meta=1&ts=' + ts, { cache: 'no-store' })
+					.then(function (resp) {
+						if (!resp.ok) {
+							throw new Error('HTTP ' + resp.status);
+						}
+						var warn = resp.headers.get('x-foghorn-warning');
+						if (warn && configDiagramStatusEl) {
+							configDiagramStatusEl.textContent = warn;
+						}
+						var exists = resp.headers.get('x-foghorn-exists');
+						if (exists === '0') {
+							if (typeof configDiagramImgEl.onerror === 'function') {
+								configDiagramImgEl.onerror();
+							}
+							return;
+						}
+						configDiagramImgEl.src = '/api/v1/config/diagram.png?ts=' + ts;
+					})
+					.catch(function () {
+						// Older servers may not support the meta probe; fall back to
+						// the img load/onerror path.
+						configDiagramImgEl.src = '/api/v1/config/diagram.png?ts=' + ts;
+					});
+			}
+
+			function setDiagramUploadStatus(text) {
+				if (!configDiagramUploadStatusEl) {
+					return;
+				}
+				configDiagramUploadStatusEl.textContent = text || '';
+			}
+
+			function uploadConfigDiagramPng() {
+				setDiagramUploadStatus('');
+				if (!configDiagramUploadEl || !configDiagramUploadEl.files || !configDiagramUploadEl.files.length) {
+					setDiagramUploadStatus('Select a PNG file to upload.');
+					return;
+				}
+				if (configDiagramUploadEl.files.length > 1) {
+					setDiagramUploadStatus('Please choose a single PNG file.');
+					return;
+				}
+				var file = configDiagramUploadEl.files[0];
+				if (!file) {
+					setDiagramUploadStatus('Select a PNG file to upload.');
+					return;
+				}
+				var name = (file.name || '').toLowerCase();
+				if (name && name.lastIndexOf('.png') !== name.length - 4) {
+					setDiagramUploadStatus('File must have a .png extension.');
+					return;
+				}
+				if (file.size > 1000000) {
+					setDiagramUploadStatus('File too large (max 1MB).');
+					return;
+				}
+				if (file.type && file.type !== 'image/png') {
+					setDiagramUploadStatus('File must be an image/png.');
+					return;
+				}
+
+				setDiagramUploadStatus('Uploading...');
+				var form = new FormData();
+				form.append('file', file, file.name || 'diagram.png');
+				fetch('/api/v1/config/diagram.png', {
+					method: 'POST',
+					body: form,
+				})
+					.then(function (resp) {
+						if (!resp.ok) {
+							return resp.text().then(function (text) {
+								throw new Error('HTTP ' + resp.status + ': ' + text);
+							});
+						}
+						return resp.json().catch(function () { return {}; });
+					})
+					.then(function (data) {
+						setDiagramUploadStatus('Uploaded diagram.png. Reloading...');
+						try {
+							configDiagramUploadEl.value = '';
+						} catch (e) {}
+						loadConfigDiagram();
+					})
+					.catch(function (err) {
+						setDiagramUploadStatus('Upload failed: ' + (err && err.message ? err.message : String(err)));
+					});
 			}
 
 			// Generic helpers for plugin admin pages driven by JSON snapshots.
@@ -3147,6 +3285,13 @@
 			btnSave.addEventListener('click', function () {
 				saveConfig();
 			});
+
+			// Upload config diagram PNG (only shown when Mermaid fallback is visible)
+			if (btnConfigDiagramUploadEl) {
+				btnConfigDiagramUploadEl.addEventListener('click', function () {
+					uploadConfigDiagramPng();
+				});
+			}
 
 			// Theme control
 			btnThemeDark.addEventListener('click', function () {

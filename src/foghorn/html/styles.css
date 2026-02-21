@@ -193,14 +193,14 @@ a:visited {
     flex-direction: column;
 }
 
-/* Hide the diagram pane entirely when no diagram can be loaded. */
-.fh-main-config-single .fh-pane-left {
-    display: none;
-}
-
 .fh-main-config-single .fh-pane {
     flex: 0 0 100%;
     width: 100%;
+}
+
+.fh-diagram-fallback .fh-pre {
+    margin-top: 0.75rem;
+    white-space: pre;
 }
 
 .fh-docker-controls {
@@ -346,6 +346,20 @@ table {
     background: #e5e7eb;
     color: #111827;
     border-color: #9ca3af;
+}
+
+/* Dark theme: increase contrast for search/pagination controls (borders were
+   previously indistinguishable from the panel background). */
+:root:not([data-theme='light']) .fh-table-search,
+:root:not([data-theme='light']) .fh-table-page-size,
+:root:not([data-theme='light']) .fh-table-page-btn {
+    border-color: rgba(229, 231, 235, 0.35);
+}
+
+:root:not([data-theme='light']) .fh-table-pager {
+    border: 1px solid rgba(229, 231, 235, 0.25);
+    border-radius: 0.5rem;
+    padding: 0.35rem;
 }
 
 .fh-table-filter {
