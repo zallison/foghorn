@@ -65,6 +65,7 @@ class PluginInfo:
       - post_priority: post_resolve order (lower runs first) when enabled.
       - pre_actions/post_actions: Pipeline actions the plugin may emit.
       - sets_upstreams: Whether plugin may set ctx.upstream_candidates/override.
+      - routed_upstream_lines: Human-friendly route upstream lines (for upstream_router).
 
     Outputs:
       - PluginInfo instance.
@@ -83,6 +84,7 @@ class PluginInfo:
     post_actions: set[str] = field(default_factory=set)
 
     sets_upstreams: bool = False
+    routed_upstream_lines: list[str] = field(default_factory=list)
 
 
 def _safe_int(value: object) -> Optional[int]:
@@ -144,6 +146,7 @@ class PluginSource:
       - class_name: Class name implementing the plugin.
       - file_path: Filesystem path to the Python file.
       - has_setup: Whether the class appears to define a setup() method.
+      - has_pre_resolve/has_post_resolve: Whether the class defines those hook methods.
       - pre_actions/post_actions: Pipeline actions referenced in pre_resolve/post_resolve.
       - sets_upstreams: Whether pre/post code references ctx.upstream_candidates/override.
 
@@ -157,6 +160,9 @@ class PluginSource:
     file_path: Path
 
     has_setup: bool = False
+    has_pre_resolve: bool = False
+    has_post_resolve: bool = False
+
     pre_actions: set[str] = field(default_factory=set)
     post_actions: set[str] = field(default_factory=set)
     sets_upstreams: bool = False
@@ -375,6 +381,8 @@ def _build_plugin_source_from_module(
         class_name=class_name,
         file_path=file_path,
         has_setup=has_setup,
+        has_pre_resolve=has_pre,
+        has_post_resolve=has_post,
         pre_actions=pre_actions,
         post_actions=post_actions,
         sets_upstreams=sets_upstreams,
@@ -579,6 +587,125 @@ def _has_nonempty_list(value: object) -> bool:
     return isinstance(value, list) and bool(value)
 
 
+def _extract_upstream_router_route_lines(entry_config: dict[str, Any]) -> list[str]:
+    """Brief: Build route/upstream lines for upstream_router config.
+
+    Inputs:
+      - entry_config: Plugin config mapping (entry["config"]).
+
+    Outputs:
+      - list[str]: Human-friendly lines describing each route and its upstreams.
+
+    Notes:
+      - This is diagram-only metadata; it does not attempt full validation.
+      - The output is designed to look similar to `extract_upstream_lines()`:
+        `transport: host[:port]` and `transport: url`.
+      - Some configs in the wild define a shared `upstreams:` list next to `routes:`
+        (instead of `routes[].upstreams`). The runtime plugin currently only uses
+        `routes[].upstreams`, but for diagram purposes we try to render shared
+        upstreams as a fallback so users can spot the intended wiring.
+    """
+
+    routes = entry_config.get("routes")
+    if not isinstance(routes, list):
+        return []
+
+    shared_upstreams = entry_config.get("upstreams")
+    if not isinstance(shared_upstreams, list):
+        shared_upstreams = []
+
+    def _infer_transport_from_url(url: str) -> str:
+        """Brief: Infer transport label from a URL-like string.
+
+        Inputs:
+          - url: Upstream URL.
+
+        Outputs:
+          - str: Transport label ('doh', 'dot', 'tcp', 'udp').
+        """
+
+        u = (url or "").strip().lower()
+        if u.startswith("https://") or u.startswith("http://"):
+            return "doh"
+        if u.startswith("tls://"):
+            return "dot"
+        if u.startswith("tcp://"):
+            return "tcp"
+        return "udp"
+
+    out: list[str] = []
+
+    for r in routes:
+        if not isinstance(r, dict):
+            continue
+
+        domain = r.get("domain")
+        suffix = r.get("suffix")
+
+        match_bits: list[str] = []
+        if isinstance(domain, str) and domain.strip():
+            match_bits.append(f"domain={domain.strip()}")
+        if isinstance(suffix, str) and suffix.strip():
+            match_bits.append(f"suffix={suffix.strip()}")
+        if not match_bits:
+            continue
+
+        # Prefer per-route upstreams. If missing, fall back to a shared list.
+        # Also tolerate a legacy singular 'upstream' mapping.
+        shared = False
+        ups = r.get("upstreams")
+        if not isinstance(ups, list) or not ups:
+            legacy_up = r.get("upstream")
+            if isinstance(legacy_up, dict):
+                ups = [legacy_up]
+            elif shared_upstreams:
+                ups = list(shared_upstreams)
+                shared = True
+            else:
+                ups = []
+
+        route_label = "route: " + ", ".join(match_bits)
+        if shared:
+            route_label += " (shared upstreams)"
+        out.append(route_label)
+
+        if not ups:
+            out.append("upstreams: (none)")
+            continue
+
+        for u in ups:
+            if not isinstance(u, dict):
+                continue
+
+            transport = str(u.get("transport", "") or "").strip().lower()
+            url = u.get("url")
+            if isinstance(url, str) and url.strip():
+                t = transport or _infer_transport_from_url(url)
+                out.append(f"{t}: {url.strip()}")
+                continue
+
+            host = u.get("host")
+            port = u.get("port")
+            if not isinstance(host, str) or not host.strip():
+                continue
+
+            t = transport or "udp"
+            if port is None:
+                out.append(f"{t}: {host.strip()}")
+                continue
+
+            try:
+                p = int(port)
+            except Exception:
+                # Best-effort: show host even if port is invalid.
+                out.append(f"{t}: {host.strip()}")
+                continue
+
+            out.append(f"{t}: {host.strip()}:{p}")
+
+    return out
+
+
 def _constrain_plugin_info_for_config(
     info: PluginInfo, *, entry_config: dict[str, Any]
 ) -> PluginInfo:
@@ -632,6 +759,14 @@ def normalize_plugins(cfg: dict[str, Any]) -> list[PluginInfo]:
 
         setup_prio, pre_prio, post_prio = _extract_priorities(entry)
 
+        # If the config doesn't specify priorities, the runtime defaults still
+        # apply (BasePlugin pre/post_priority default to 100). Only enable phases
+        # that exist on the plugin class.
+        if src and src.has_pre_resolve and pre_prio is None:
+            pre_prio = 100
+        if src and src.has_post_resolve and post_prio is None:
+            post_prio = 100
+
         is_setup_plugin = bool(src and src.has_setup)
         if is_setup_plugin and setup_prio is None:
             setup_prio = pre_prio if pre_prio is not None else 100
@@ -658,6 +793,14 @@ def normalize_plugins(cfg: dict[str, Any]) -> list[PluginInfo]:
         entry_cfg = entry.get("config")
         if not isinstance(entry_cfg, dict):
             entry_cfg = {}
+
+        # Plugin-specific diagram metadata.
+        if info.cls_path == "foghorn.plugins.resolve.upstream_router.UpstreamRouter":
+            info = replace(
+                info,
+                routed_upstream_lines=_extract_upstream_router_route_lines(entry_cfg),
+            )
+
         info = _constrain_plugin_info_for_config(info, entry_config=entry_cfg)
 
         out.append(info)
@@ -900,30 +1043,6 @@ def render_mermaid(
             elif proto in {"udp", "tcp"}:
                 lines.append(f"  class {nid} insecure")
 
-    # Upstream endpoint nodes (split by transport) when in forward mode.
-    if upstream_lines and mode == "forward":
-        meta_bits = [str(x).strip() for x in upstream_lines if x and ":" not in str(x)]
-        meta_txt = "<br/>".join(_escape_mermaid_label(x) for x in meta_bits)
-        if meta_txt:
-            lines.append(f'  Upstreams["Upstreams<br/>{meta_txt}"]')
-        else:
-            lines.append('  Upstreams["Upstreams"]')
-
-        for i, raw in enumerate([x for x in upstream_lines if x and ":" in str(x)]):
-            raw_s = str(raw).strip()
-            proto = raw_s.split(":", 1)[0].strip().lower()
-            safe_proto = re.sub(r"[^a-zA-Z0-9_]", "_", proto) or "unknown"
-            nid = f"UpstreamEp_{i}_{safe_proto}"
-            label = _escape_mermaid_label(raw_s)
-            lines.append(f'  {nid}["{label}"]')
-            # Detail edge (selection depends on strategy); show endpoints as children.
-            lines.append(f"  Upstreams --> {nid}")
-
-            if proto in {"dot", "doh"}:
-                lines.append(f"  class {nid} secure")
-            elif proto in {"udp", "tcp"}:
-                lines.append(f"  class {nid} insecure")
-
     lines.append("  Resp([Response])")
     if has_drop:
         lines.append('  Drop(["Drop (no reply)"])')
@@ -947,18 +1066,9 @@ def render_mermaid(
         lines.append('    PostMerge(["Post short-circuit"])')
         lines.append("    PostMerge --> Resp")
 
-    if setup_chain:
-        lines.append("    subgraph SetupPlugins[Setup plugins]")
-        lines.append("      direction TB")
-        prev = None
-        for p in setup_chain:
-            nid = _node_id("setup", p.name, p.idx)
-            label = f"{p.name}<br/>{p.type_key}<br/>setup={p.setup_priority}"
-            lines.append(f'      {nid}["{label}"]')
-            if prev is not None:
-                lines.append(f"      {prev} --> {nid}")
-            prev = nid
-        lines.append("    end")
+    # Setup plugins are intentionally not shown in this diagram.
+
+    pre_node_ids: dict[int, str] = {}
 
     if pre_chain:
         lines.append("    subgraph PrePlugins[Pre plugins]")
@@ -968,6 +1078,7 @@ def render_mermaid(
         prev = None
         for p in pre_chain:
             nid = _node_id("pre", p.name, p.idx)
+            pre_node_ids[p.idx] = nid
             label = f"{p.name}<br/>{p.type_key}<br/>pre={p.pre_priority}"
             if p.sets_upstreams:
                 label += "<br/>routes upstream"
@@ -1004,10 +1115,125 @@ def render_mermaid(
     lines.append("    Cache -->|miss| Resolver")
     lines.append("    Resolver --> Upstream")
 
-    upstream_tail = "Upstream"
+    # Routed upstreams (e.g., via upstream_router) are shown as a separate
+    # upstream block inside the query path, near the forwarding section.
+    routed_plugins = [p for p in pre_chain if p.routed_upstream_lines]
+    if routed_plugins:
+        lines.append("    subgraph RoutedUpstreams[Upstream router upstreams]")
+        lines.append("      direction TB")
+        for p in routed_plugins:
+            safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", p.name).strip("_") or "plugin"
+            rid = f"RoutedUpstreams_{p.idx}_{safe_name}"
+
+            raw_lines = list(p.routed_upstream_lines or [])
+            payload = "<br/>".join(_escape_mermaid_label(x) for x in raw_lines)
+            lines.append(f'      {rid}["Upstreams<br/>{payload}"]')
+
+            transports: set[str] = set()
+            for ln in raw_lines:
+                head = str(ln).split(":", 1)[0].strip().lower()
+                if head in {"udp", "tcp", "dot", "doh"}:
+                    transports.add(head)
+
+            if transports & {"udp", "tcp"}:
+                lines.append(f"      class {rid} insecure")
+            elif transports & {"dot", "doh"}:
+                lines.append(f"      class {rid} secure")
+
+            # Link from the plugin node (if we can find it) to its routed-upstreams.
+            pre_nid = pre_node_ids.get(p.idx)
+            if pre_nid:
+                lines.append(f"      {pre_nid} -.-> {rid}")
+
+        lines.append("    end")
+
+    upstream_tails: list[str] = ["Upstream"]
     if upstream_lines and mode == "forward":
-        lines.append("    Upstream --> Upstreams")
-        upstream_tail = "Upstreams"
+        meta_bits = [str(x).strip() for x in upstream_lines if x and ":" not in str(x)]
+
+        lines.append("    subgraph UpstreamCfg[Upstreams]")
+        lines.append("      direction TB")
+
+        endpoint_lines = [str(x).strip() for x in upstream_lines if x and ":" in str(x)]
+
+        # Preserve order while de-duping exact entries.
+        seen: set[str] = set()
+        items_insecure: list[str] = []
+        items_secure: list[str] = []
+        protos: set[str] = set()
+
+        for raw_s in endpoint_lines:
+            raw_s = raw_s.strip()
+            if not raw_s or raw_s in seen:
+                continue
+            seen.add(raw_s)
+
+            proto, _, rest = raw_s.partition(":")
+            proto = proto.strip().lower()
+            rest = rest.strip()
+            if not proto or not rest:
+                continue
+
+            protos.add(proto)
+            item = f"{proto}: {rest}"
+            if proto in {"udp", "tcp"}:
+                items_insecure.append(item)
+            elif proto in {"dot", "doh"}:
+                items_secure.append(item)
+            else:
+                # Unknown transports are treated as insecure.
+                items_insecure.append(item)
+
+        has_insecure = bool(protos & {"udp", "tcp"}) or bool(items_insecure)
+        has_secure = bool(protos & {"dot", "doh"}) or bool(items_secure)
+
+        def _emit_upstreams_node(
+            *, node_id: str, items: list[str], class_name: str
+        ) -> None:
+            """Brief: Emit a single upstreams node into the diagram.
+
+            Inputs:
+              - node_id: Mermaid node identifier.
+              - items: Endpoint lines to include.
+              - class_name: Mermaid class to apply (secure/insecure).
+
+            Outputs:
+              - None; appends Mermaid lines to the output list.
+            """
+
+            label_bits: list[str] = ["Upstreams"]
+            label_bits.extend(meta_bits)
+            label_bits.extend(items)
+
+            label = "<br/>".join(_escape_mermaid_label(x) for x in label_bits if x)
+            lines.append(f'      {node_id}["{label}"]')
+            lines.append(f"      class {node_id} {class_name}")
+
+        if has_insecure and has_secure:
+            _emit_upstreams_node(
+                node_id="UpstreamsInsecure", items=items_insecure, class_name="insecure"
+            )
+            _emit_upstreams_node(
+                node_id="UpstreamsSecure", items=items_secure, class_name="secure"
+            )
+            upstream_tails = ["UpstreamsInsecure", "UpstreamsSecure"]
+
+            lines.append("    end")
+
+            lines.append("    Upstream --> UpstreamsInsecure")
+            lines.append("    Upstream --> UpstreamsSecure")
+        else:
+            # Single transport group (or none): preserve the legacy single-node view.
+            items = items_insecure if has_insecure else items_secure
+            class_name = "insecure" if has_insecure else "secure"
+            _emit_upstreams_node(
+                node_id="Upstreams", items=items, class_name=class_name
+            )
+            upstream_tails = ["Upstreams"]
+
+            lines.append("    end")
+
+            lines.append("    Upstream --> Upstreams")
 
     if post_chain:
         lines.append("    subgraph PostPlugins[Post plugins]")
@@ -1042,10 +1268,12 @@ def render_mermaid(
 
         assert first_post is not None
         assert prev_post is not None
-        lines.append(f"    {upstream_tail} --> {first_post}")
+        for tail in upstream_tails:
+            lines.append(f"    {tail} --> {first_post}")
         lines.append(f"    {prev_post} --> Resp")
     else:
-        lines.append(f"    {upstream_tail} --> Resp")
+        for tail in upstream_tails:
+            lines.append(f"    {tail} --> Resp")
 
     lines.append("  end")
 
@@ -1147,6 +1375,92 @@ def diagram_mmd_path_for_config(config_path: str) -> str:
     """
 
     return f"{config_path}.mermaid.mmd"
+
+
+def diagram_png_candidate_paths_for_config(config_path: str) -> list[Path]:
+    """Brief: Candidate locations to find a pre-generated config diagram PNG.
+
+    Inputs:
+      - config_path: YAML config path.
+
+    Outputs:
+      - list[Path]: Candidate PNG paths, in priority order.
+
+    Notes:
+      - Prefer a canonical file in the config directory (diagram.png).
+      - Fall back to the auto-generated sibling of the config file
+        (<config>.mermaid.png).
+    """
+
+    cfg = Path(str(config_path))
+    cfg_dir = cfg.parent
+    return [cfg_dir / "diagram.png", Path(diagram_png_path_for_config(str(cfg)))]
+
+
+def diagram_mmd_candidate_paths_for_config(config_path: str) -> list[Path]:
+    """Brief: Candidate locations to find a pre-generated config diagram Mermaid source.
+
+    Inputs:
+      - config_path: YAML config path.
+
+    Outputs:
+      - list[Path]: Candidate Mermaid source paths, in priority order.
+
+    Notes:
+      - Prefer a canonical file in the config directory (diagram.mmd).
+      - Fall back to the auto-generated sibling of the config file
+        (<config>.mermaid.mmd).
+    """
+
+    cfg = Path(str(config_path))
+    cfg_dir = cfg.parent
+    return [cfg_dir / "diagram.mmd", Path(diagram_mmd_path_for_config(str(cfg)))]
+
+
+def find_first_existing_path(paths: list[Path]) -> Path | None:
+    """Brief: Return the first existing file path from a candidate list.
+
+    Inputs:
+      - paths: Candidate filesystem paths.
+
+    Outputs:
+      - Path | None: The first candidate that exists as a regular file.
+    """
+
+    for p in paths:
+        try:
+            if p.is_file():
+                return p
+        except Exception:
+            continue
+    return None
+
+
+def stale_diagram_warning(*, config_path: str, diagram_path: str) -> str | None:
+    """Brief: Build a warning when a diagram file is older than its config file.
+
+    Inputs:
+      - config_path: YAML config path.
+      - diagram_path: Diagram artifact path (PNG or .mmd).
+
+    Outputs:
+      - str | None: Warning text when stale, otherwise None.
+
+    Example:
+      - stale_diagram_warning(config_path='config.yaml', diagram_path='diagram.png')
+    """
+
+    try:
+        cfg_mtime = float(os.stat(str(config_path)).st_mtime)
+        dia_mtime = float(os.stat(str(diagram_path)).st_mtime)
+    except Exception:
+        return None
+
+    if cfg_mtime <= dia_mtime:
+        return None
+
+    # Keep this short; it is commonly displayed directly in the web UI.
+    return "Warning: diagram is older than config; it may be stale."
 
 
 def _is_stale(input_path: str, output_path: str) -> bool:
@@ -1313,6 +1627,11 @@ def ensure_config_diagram_png(
     config_path: str,
     output_png_path: str | None = None,
     output_mmd_path: str | None = None,
+    direction: str = _DEFAULT_DIRECTION,
+    font_size_px: int = _DEFAULT_FONT_SIZE_PX,
+    node_spacing: int = _DEFAULT_NODE_SPACING,
+    rank_spacing: int = _DEFAULT_RANK_SPACING,
+    include_init: bool = True,
 ) -> tuple[bool, str, str | None]:
     """Brief: Ensure a PNG config diagram exists and is up-to-date.
 
@@ -1320,6 +1639,11 @@ def ensure_config_diagram_png(
       - config_path: YAML config path.
       - output_png_path: Optional explicit output path for PNG.
       - output_mmd_path: Optional explicit output path for Mermaid source.
+      - direction: Mermaid flow direction (TB or LR).
+      - font_size_px: Mermaid theme font size in pixels.
+      - node_spacing: Mermaid flowchart node spacing.
+      - rank_spacing: Mermaid flowchart rank spacing.
+      - include_init: When True, include Mermaid init directive.
 
     Outputs:
       - (ok, detail, png_path)
@@ -1333,19 +1657,47 @@ def ensure_config_diagram_png(
     if not cfg_path:
         return False, "config_path is empty", None
 
+    cfg_dir = Path(cfg_path).resolve().parent
+
     if output_png_path is None:
-        output_png_path = diagram_png_path_for_config(cfg_path)
+        output_png_path = str(cfg_dir / "diagram.png")
     if output_mmd_path is None:
-        output_mmd_path = diagram_mmd_path_for_config(cfg_path)
+        output_mmd_path = str(cfg_dir / "diagram.mmd")
 
     if not os.path.isfile(cfg_path):
         return False, f"config not found: {cfg_path}", None
 
-    if not _is_stale(cfg_path, output_png_path):
+    # Consider the diagram stale not just when the config changes, but also
+    # when the generator implementation or schema changes. This avoids serving
+    # a stale PNG after upgrading foghorn without touching the config file.
+    stale_inputs: list[str] = [cfg_path]
+
+    try:
+        impl_path = str(Path(__file__).resolve())
+        if os.path.isfile(impl_path):
+            stale_inputs.append(impl_path)
+    except Exception:
+        pass
+
+    try:
+        schema_path = str(get_default_schema_path())
+        if os.path.isfile(schema_path):
+            stale_inputs.append(schema_path)
+    except Exception:
+        pass
+
+    if not any(_is_stale(p, output_png_path) for p in stale_inputs):
         return True, "up-to-date", output_png_path
 
     try:
-        mmd_text = generate_mermaid_text_from_config_path(cfg_path)
+        mmd_text = generate_mermaid_text_from_config_path(
+            cfg_path,
+            direction=direction,
+            font_size_px=font_size_px,
+            node_spacing=node_spacing,
+            rank_spacing=rank_spacing,
+            include_init=include_init,
+        )
     except Exception as exc:
         return False, f"failed to generate mermaid text: {exc}", None
 

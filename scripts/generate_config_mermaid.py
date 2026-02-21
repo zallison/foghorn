@@ -5,6 +5,8 @@ Inputs:
   - --config (str): Path to a Foghorn YAML config file. Default: ./config/config.yaml
   - --output (str, optional): Write the Mermaid text to this path. When omitted,
     output is written to stdout.
+  - --png (flag): Also render the diagram to PNG (requires `mmdc` or python_mermaid).
+  - --png-output (str, optional): Output path for the PNG. Default: <config_dir>/diagram.png
   - --direction (TB|LR): Mermaid flow direction. Default: TB (top-to-bottom).
   - --font-size (int): Diagram font size (px) applied via Mermaid init directive.
   - --node-spacing (int): Mermaid flowchart node spacing (init directive).
@@ -20,6 +22,7 @@ Outputs:
       - resolver mode (forward/recursive/master)
       - post_resolve execution order (post_priority)
       - potential short-circuits (deny/override/drop) and upstream routing
+  - When --png is set, writes a PNG to diagram.png by default.
 
 Notes:
   - This script reads the config file but does not modify it.
@@ -35,6 +38,7 @@ Notes:
 
 Example:
   PYTHONPATH=src python3 scripts/generate_config_mermaid.py --config ./config/config.yaml > plugins.mmd
+  PYTHONPATH=src python3 scripts/generate_config_mermaid.py --config ./config/config.yaml --png --output ./config/diagram.mmd
 """
 
 from __future__ import annotations
@@ -80,6 +84,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Write Mermaid text output to this file (default: stdout)",
     )
     parser.add_argument(
+        "--png",
+        action="store_true",
+        help="Also render the diagram to PNG (requires mmdc or python_mermaid)",
+    )
+    parser.add_argument(
+        "--png-output",
+        default=None,
+        help="Write PNG output to this path (default: <config_dir>/diagram.png)",
+    )
+    parser.add_argument(
         "--direction",
         choices=["TB", "LR"],
         default="TB",
@@ -111,8 +125,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     args = parser.parse_args(argv)
 
+    config_path = str(args.config)
+
     text = cm.generate_mermaid_text_from_config_path(
-        str(args.config),
+        config_path,
         direction=str(args.direction),
         font_size_px=int(args.font_size),
         node_spacing=int(args.node_spacing),
@@ -124,6 +140,29 @@ def main(argv: Optional[list[str]] = None) -> int:
         Path(str(args.output)).write_text(text, encoding="utf-8")
     else:
         sys.stdout.write(text)
+
+    if args.png:
+        cfg_dir = Path(config_path).resolve().parent
+        png_path = (
+            Path(str(args.png_output)) if args.png_output else (cfg_dir / "diagram.png")
+        )
+        # For UI/debugging, prefer writing Mermaid next to the PNG when the user
+        # didn't explicitly choose a --output path.
+        mmd_path = Path(str(args.output)) if args.output else (cfg_dir / "diagram.mmd")
+
+        ok, detail, _png_path = cm.ensure_config_diagram_png(
+            config_path=config_path,
+            output_png_path=str(png_path),
+            output_mmd_path=str(mmd_path),
+            direction=str(args.direction),
+            font_size_px=int(args.font_size),
+            node_spacing=int(args.node_spacing),
+            rank_spacing=int(args.rank_spacing),
+            include_init=not bool(args.no_init),
+        )
+        if not ok:
+            sys.stderr.write(f"Failed to render PNG: {detail}\n")
+            return 2
 
     return 0
 
