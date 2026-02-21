@@ -9,8 +9,8 @@ Outputs:
 
 from __future__ import annotations
 
-import types
 import time
+import types
 from typing import Any, List, Optional, Tuple
 
 import pytest
@@ -74,38 +74,76 @@ class FakeDriver:
         return self.conn
 
 
-def test_import_driver_prefers_mysql_connector(monkeypatch) -> None:
-    # Provide a fake mysql.connector module and ensure it is returned
+def test_import_driver_prefers_mariadb_by_default(monkeypatch) -> None:
+    # Provide fake mariadb and mysql.connector modules and ensure mariadb wins by default
+    sys = __import__("sys")
+
+    mariadb_mod = types.ModuleType("mariadb")
+    monkeypatch.setitem(sys.modules, "mariadb", mariadb_mod)
+
     mysql_pkg = types.ModuleType("mysql")
     mysql_connector = types.ModuleType("mysql.connector")
     mysql_pkg.connector = mysql_connector
-    monkeypatch.setitem(__import__("sys").modules, "mysql", mysql_pkg)
-    monkeypatch.setitem(__import__("sys").modules, "mysql.connector", mysql_connector)
+    monkeypatch.setitem(sys.modules, "mysql", mysql_pkg)
+    monkeypatch.setitem(sys.modules, "mysql.connector", mysql_connector)
+
+    driver, param_style = mysql_mod._import_mysql_driver()
+    assert driver is mariadb_mod
+    assert param_style == "qmark"
+
+
+def test_import_driver_falls_back_to_mysql_connector(monkeypatch) -> None:
+    # Provide only mysql.connector; default path should fall back to it
+    sys = __import__("sys")
+    sys.modules.pop("mariadb", None)
+
+    mysql_pkg = types.ModuleType("mysql")
+    mysql_connector = types.ModuleType("mysql.connector")
+    mysql_pkg.connector = mysql_connector
+    monkeypatch.setitem(sys.modules, "mysql", mysql_pkg)
+    monkeypatch.setitem(sys.modules, "mysql.connector", mysql_connector)
 
     driver, param_style = mysql_mod._import_mysql_driver()
     assert driver is mysql_connector
     assert param_style == "format"
 
 
-def test_import_driver_falls_back_to_mariadb(monkeypatch) -> None:
-    # Mock _import_mysql_driver directly since driver may already be cached
-    import builtins
+def test_import_driver_explicit_mysql_connector_wins_over_mariadb(monkeypatch) -> None:
+    # When driver is explicitly set, respect it even if mariadb is available.
+    sys = __import__("sys")
 
-    real_import = builtins.__import__
     mariadb_mod = types.ModuleType("mariadb")
+    monkeypatch.setitem(sys.modules, "mariadb", mariadb_mod)
 
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]
-        if name in ("mysql", "mysql.connector"):
-            raise ModuleNotFoundError(name)
-        if name == "mariadb":
-            return mariadb_mod
-        return real_import(name, globals, locals, fromlist, level)
+    mysql_pkg = types.ModuleType("mysql")
+    mysql_connector = types.ModuleType("mysql.connector")
+    mysql_pkg.connector = mysql_connector
+    monkeypatch.setitem(sys.modules, "mysql", mysql_pkg)
+    monkeypatch.setitem(sys.modules, "mysql.connector", mysql_connector)
 
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-    # Force reimport to test fallback
-    driver, param_style = mysql_mod._import_mysql_driver()
-    assert driver is mariadb_mod
-    assert param_style == "qmark"
+    driver, param_style = mysql_mod._import_mysql_driver(
+        driver="mysql-connector-python"
+    )
+    assert driver is mysql_connector
+    assert param_style == "format"
+
+
+def test_import_driver_explicit_mysql_alias_wins_over_mariadb(monkeypatch) -> None:
+    # 'mysql' should be accepted as an alias for mysql-connector-python.
+    sys = __import__("sys")
+
+    mariadb_mod = types.ModuleType("mariadb")
+    monkeypatch.setitem(sys.modules, "mariadb", mariadb_mod)
+
+    mysql_pkg = types.ModuleType("mysql")
+    mysql_connector = types.ModuleType("mysql.connector")
+    mysql_pkg.connector = mysql_connector
+    monkeypatch.setitem(sys.modules, "mysql", mysql_pkg)
+    monkeypatch.setitem(sys.modules, "mysql.connector", mysql_connector)
+
+    driver, param_style = mysql_mod._import_mysql_driver(driver="mysql")
+    assert driver is mysql_connector
+    assert param_style == "format"
 
 
 def test_import_driver_raises_when_missing(monkeypatch) -> None:
@@ -142,7 +180,9 @@ def _init_cache_with_fake_conn(
 ):
     conn = FakeConn()
     driver = FakeDriver(conn)
-    monkeypatch.setattr(mysql_mod, "_import_mysql_driver", lambda: (driver, "format"))
+    monkeypatch.setattr(
+        mysql_mod, "_import_mysql_driver", lambda **_: (driver, "format")
+    )
     cache = mysql_mod.MySQLTTLCache(
         host="h",
         port=3306,

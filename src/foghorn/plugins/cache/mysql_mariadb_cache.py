@@ -27,6 +27,8 @@ class MySqlCache(CachePlugin):
           - namespace (str): Namespace/table name (default "dns_cache").
           - table (str): Backward-compatible alias for namespace.
           - connect_kwargs (dict): Additional connection kwargs.
+          - driver (str): Preferred DB driver: auto|mariadb|mysql-connector-python (or mysql).
+          - driver_fallback (str|list[str]): Fallback policy: auto|none|<driver>|[<driver>,...].
           - min_cache_ttl (int): Optional cache TTL floor.
 
     Outputs:
@@ -39,6 +41,7 @@ class MySqlCache(CachePlugin):
           host: 127.0.0.1
           port: 3306
           user: foghorn
+          driver: mariadb # or mysql / mysql-connector-python
           password: secret
           database: foghorn_cache
           min_cache_ttl: 60
@@ -79,6 +82,9 @@ class MySqlCache(CachePlugin):
         if not isinstance(connect_kwargs, dict):
             connect_kwargs = None
 
+        driver = config.get("driver")
+        driver_fallback = config.get("driver_fallback")
+
         self._cache = MySQLTTLCache(
             host=host,
             port=port,
@@ -87,6 +93,8 @@ class MySqlCache(CachePlugin):
             database=str(database),
             namespace=str(namespace),
             connect_kwargs=connect_kwargs,
+            driver=str(driver) if isinstance(driver, str) else None,
+            driver_fallback=driver_fallback,
         )
 
     def get(self, key: Tuple[str, int]) -> Any | None:
