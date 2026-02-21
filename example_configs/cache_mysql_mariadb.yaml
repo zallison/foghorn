@@ -23,6 +23,9 @@ server:
       password: secret
       database: foghorn_cache
       namespace: dns_cache
+      # Optional: control which Python DB driver is used.
+      driver: auto                 # auto | mariadb | mysql-connector-python | mysql
+      driver_fallback: auto        # auto | none | <driver> | [<driver>, ...]
       min_cache_ttl: 60
   dnssec:
     mode: passthrough
