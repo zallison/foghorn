@@ -12,15 +12,21 @@ license = { file = "LICENSE.txt" }
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "cachetools",
+# Core
+  "cachetools",         # function caches. "technically" optional
+  "dnslib>=0.9.24",     # On-wire DNS primitives <-> python objects
+  "jsonschema>=4.17.3", # Validate config
+  "pydantic",           # Type checking
+  "pyyaml>=6.0.1",      # Read config
+  "requests>=2.31.0",   # Various, including DoH and health for the Dockerfile
+# DNSSEC
   "cryptography",
-  "dnslib>=0.9.24",
   "dnspython>=2.6.1",
+# Admin UI and DoH server
   "fastapi>=0.111.0",
-  "jsonschema>=4.17.3",
+  "mmdc",
   "psutil",
-  "pyyaml>=6.0.1",
-  "requests>=2.31.0",
+  "python-multipart",
   "uvicorn>=0.30.0",
 # SSH utility
   "paramiko",
@@ -32,7 +38,7 @@ dependencies = [
   "mariadb",
   "mysql-connector-python",
   "paho-mqtt",
-  "psycopg2-binary",
+  "psycopg2",
   "pymemcache",
   "pymongo",
   "redis",
@@ -77,7 +83,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 addopts = "--ff --maxfail=1 --disable-warnings -m 'not docker'"
 markers = [
-    "docker: mark test as requiring docker (deselect with '-m not docker')",
+	"docker: mark test as requiring docker (deselect with '-m not docker')",
 ]
 
 [tool.ruff.lint.per-file-ignores]
