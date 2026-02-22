@@ -140,12 +140,21 @@ def test_send_query_with_failover_parse_error_then_success(monkeypatch, caplog):
         {"host": "1.0.0.1", "port": 53, "transport": "udp"},
     ]
 
+    # send_query_with_failover de-dupes upstream skip warnings across the process,
+    # so ensure this test is deterministic regardless of test order.
+    upstream_key = srv._upstream_key_for_skip_warning(
+        upstreams[0], "1.1.1.1", 53, "udp"
+    )
+    srv._reset_upstream_skip_warning(upstream_key)
+
     with caplog.at_level("WARNING"):
         resp, used, reason = srv.send_query_with_failover(
             q, upstreams, 300, "example.com", QTYPE.A
         )
     assert reason == "ok" and used["host"] == "1.0.0.1"
-    assert any("Failed to parse response" in rec.message for rec in caplog.records)
+    assert any(
+        "failed to parse response" in rec.message.lower() for rec in caplog.records
+    )
 
 
 def test_send_query_with_failover_udp_legacy_send_path(monkeypatch):
