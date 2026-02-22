@@ -97,6 +97,18 @@ def test_import_driver_falls_back_to_mysql_connector(monkeypatch) -> None:
     sys = __import__("sys")
     sys.modules.pop("mariadb", None)
 
+    # Ensure a real mariadb package in the environment can't be imported.
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]
+        if name == "mariadb":
+            raise ModuleNotFoundError(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
     mysql_pkg = types.ModuleType("mysql")
     mysql_connector = types.ModuleType("mysql.connector")
     mysql_pkg.connector = mysql_connector
