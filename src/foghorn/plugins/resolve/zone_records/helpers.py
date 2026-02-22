@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
+import re
 from typing import Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -487,6 +488,258 @@ def find_zone_for_name(
             if best is None or len(apex) > len(best):
                 best = apex
     return best
+
+
+_DNS_LABEL_RE = re.compile(r"^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$")
+
+
+def _split_dns_labels(text: str) -> List[str]:
+    """Brief: Split a domain into normalized DNS labels.
+
+    Inputs:
+      - text: Domain-like string (may include trailing dot).
+
+    Outputs:
+      - list[str]: Lowercased labels.
+
+    Notes:
+      - Returns an empty list when the input appears invalid (empty labels like
+        "..", leading dot, or labels with unexpected characters).
+      - This is primarily to avoid surprising wildcard matches on malformed
+        inputs.
+    """
+    try:
+        norm = str(text).strip().rstrip(".").lower()
+    except Exception:  # pragma: no cover - defensive
+        norm = str(text).rstrip(".").lower()
+
+    if not norm:
+        return []
+
+    # Reject empty-label constructs such as ".." or a leading dot.
+    if norm.startswith(".") or ".." in norm:
+        return []
+
+    labels = norm.split(".")
+
+    for lbl in labels:
+        # Wildcard label is only valid when the entire label is exactly "*".
+        if lbl == "*":
+            continue
+        if not _DNS_LABEL_RE.match(lbl):
+            return []
+
+    return labels
+
+
+def is_wildcard_domain_pattern(pattern: str) -> bool:
+    """Brief: Return True when *pattern* contains one or more wildcard labels.
+
+    Inputs:
+      - pattern: Owner/pattern string such as "*.example.com".
+
+    Outputs:
+      - bool: True when any label is exactly "*".
+
+    Notes:
+      - A label containing "*" plus other characters (e.g. "foo*") is treated as
+        a literal label and is not considered a wildcard.
+    """
+    labels = _split_dns_labels(pattern)
+    return any(lbl == "*" for lbl in labels)
+
+
+def match_wildcard_domain(name: str, pattern: str) -> bool:
+    """Brief: Match a domain name against a ZoneRecords wildcard pattern.
+
+    Inputs:
+      - name: Queried name (no trailing dot preferred).
+      - pattern: Owner/pattern string. Wildcards are expressed as "*" labels.
+
+    Outputs:
+      - bool: True when *name* matches *pattern*.
+
+    Wildcard rules:
+      - A "*" label matches exactly one label.
+      - If the pattern's first label is "*", that "*" matches **one or more**
+        leading labels (i.e. any depth) so the remainder of the pattern still
+        matches the name suffix.
+
+    Examples:
+      - foo.my.domain.org matches "*.domain.org" (leading "*" matches "foo.my")
+      - foo.my.domain.org matches "foo.my.*.org" ("*" matches "domain")
+      - foo.my.domain.org does not match "foo.my.*" (last "*" only matches one label)
+    """
+    name_labels = _split_dns_labels(name)
+    pat_labels = _split_dns_labels(pattern)
+
+    if not name_labels or not pat_labels:
+        return False
+
+    # Special case: "*" alone.
+    if pat_labels == ["*"]:
+        return True
+
+    # Special case: leading "*" matches any number of labels (>=1).
+    if pat_labels and pat_labels[0] == "*":
+        remainder = pat_labels[1:]
+        if not remainder:
+            return True
+
+        # Must have at least one label consumed by the leading wildcard.
+        if len(name_labels) < (len(remainder) + 1):
+            return False
+
+        suffix = name_labels[-len(remainder) :]
+        for want, got in zip(remainder, suffix):
+            if want == "*":
+                continue
+            if want != got:
+                return False
+        return True
+
+    # Non-leading patterns require label-for-label matches.
+    if len(name_labels) != len(pat_labels):
+        return False
+
+    for want, got in zip(pat_labels, name_labels):
+        if want == "*":
+            continue
+        if want != got:
+            return False
+    return True
+
+
+def wildcard_matched_character_count(name: str, pattern: str) -> Optional[int]:
+    """Brief: Count how many characters were consumed by a leading wildcard match.
+
+    Inputs:
+      - name: Queried domain name (no trailing dot preferred).
+      - pattern: Wildcard owner/pattern string using "*" labels.
+
+    Outputs:
+      - int: Number of characters consumed by the *leading* "*" label.
+        Returns 0 for patterns that do not start with "*".
+      - None: When either value is invalid or *pattern* does not match *name*.
+
+    Notes:
+      - ZoneRecords treats a leading "*" as matching one-or-more leading labels
+        (any depth). When multiple wildcard owners match, the best match is the
+        one whose leading "*" consumed the fewest characters.
+      - "Empty" names never match (because _split_dns_labels() returns []).
+    """
+    name_labels = _split_dns_labels(name)
+    pat_labels = _split_dns_labels(pattern)
+
+    if not name_labels or not pat_labels:
+        return None
+
+    if not match_wildcard_domain(name, pattern):
+        return None
+
+    # Patterns without a leading wildcard are treated as a 0-cost match.
+    if not pat_labels or pat_labels[0] != "*":
+        return 0
+
+    # Pattern "*" alone: it matches the whole name.
+    if pat_labels == ["*"]:
+        return len(".".join(name_labels))
+
+    remainder = pat_labels[1:]
+    if not remainder:
+        return len(".".join(name_labels))
+
+    # By match_wildcard_domain() contract this is >= 1.
+    leading_len = len(name_labels) - len(remainder)
+    if leading_len <= 0:
+        return None
+
+    return len(".".join(name_labels[:leading_len]))
+
+
+def sort_wildcard_patterns(patterns: Iterable[str]) -> List[str]:
+    """Brief: Sort wildcard patterns from most-specific to least-specific.
+
+    Inputs:
+      - patterns: Iterable of owner/pattern strings.
+
+    Outputs:
+      - list[str]: Sorted patterns.
+
+    Notes:
+      - Specificity is defined as (literal_labels, total_labels, -wildcard_labels).
+      - The sort is stable and deterministic across reloads.
+    """
+
+    def _score(p: str) -> tuple[int, int, int, str]:
+        labels = _split_dns_labels(p)
+        literal = sum(1 for lbl in labels if lbl != "*")
+        wildcard = sum(1 for lbl in labels if lbl == "*")
+        return (literal, len(labels), -wildcard, str(p))
+
+    # Sort descending by score.
+    return sorted([str(p) for p in patterns or []], key=_score, reverse=True)
+
+
+def find_best_rrsets_for_name(
+    name: str,
+    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
+    wildcard_patterns: Optional[List[str]] = None,
+) -> tuple[Optional[str], Dict[int, Tuple[int, List[str]]]]:
+    """Brief: Find the best matching RRsets for *name* using wildcard owners.
+
+    Inputs:
+      - name: Query name (no trailing dot preferred).
+      - name_index: Mapping of owner -> qtype -> (ttl, [values]).
+      - wildcard_patterns: Optional pre-sorted list of wildcard owners to check.
+
+    Outputs:
+      - (matched_owner, rrsets)
+        * matched_owner: exact owner or wildcard owner key from name_index.
+        * rrsets: RRsets dict, or {} when no match.
+
+    Notes:
+      - Exact owner matches always win.
+      - When multiple wildcard patterns match, the "best" match is chosen as:
+          1) the match whose *leading* wildcard consumed the fewest characters
+          2) on ties, the most-specific pattern (per sort_wildcard_patterns())
+    """
+    try:
+        norm = str(name).rstrip(".").lower()
+    except Exception:  # pragma: no cover - defensive
+        norm = str(name).lower()
+
+    if norm in name_index:
+        return norm, name_index.get(norm, {}) or {}
+
+    # If the caller didn't provide a pre-sorted wildcard list, derive it.
+    patterns = wildcard_patterns
+    if patterns is None:
+        patterns = sort_wildcard_patterns(
+            [owner for owner in name_index.keys() if is_wildcard_domain_pattern(owner)]
+        )
+
+    best_pat: Optional[str] = None
+    best_cost: Optional[int] = None
+
+    # We scan all candidates because the "fewest leading-wildcard characters"
+    # metric is query-dependent.
+    for pat in patterns or []:
+        if pat not in name_index:
+            continue
+
+        cost = wildcard_matched_character_count(norm, pat)
+        if cost is None:
+            continue
+
+        if best_cost is None or cost < best_cost:
+            best_pat = pat
+            best_cost = cost
+
+    if best_pat is not None:
+        return best_pat, name_index.get(best_pat, {}) or {}
+
+    return None, {}
 
 
 def snapshot_zone_state(

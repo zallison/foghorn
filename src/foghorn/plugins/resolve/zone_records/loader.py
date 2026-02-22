@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from dnslib import QTYPE, RR
 
 from . import axfr_dnssec as _axfr_dnssec
+from . import helpers
 from foghorn.servers.transports.axfr import axfr_transfer
 
 logger = logging.getLogger(__name__)
@@ -796,6 +797,15 @@ def load_records(plugin: object) -> None:
         dnssec_cfg_raw if isinstance(dnssec_cfg_raw, dict) else dnssec_cfg_raw,
     )
 
+    # Pre-compute wildcard owner patterns for query-time matching.
+    wildcard_owners = helpers.sort_wildcard_patterns(
+        [
+            owner
+            for owner in (name_index or {}).keys()
+            if helpers.is_wildcard_domain_pattern(str(owner))
+        ]
+    )
+
     if overwritten_by_source:
         parts: List[str] = []
         for src in sorted(overwritten_by_source.keys()):
@@ -813,6 +823,7 @@ def load_records(plugin: object) -> None:
         plugin._name_index = name_index
         plugin._zone_soa = zone_soa
         plugin.mapping = mapping_by_qtype
+        plugin._wildcard_owners = wildcard_owners
         plugin._dnssec_classified_axfr = set(dnssec_classified_axfr)
     else:
         with lock:
@@ -820,4 +831,5 @@ def load_records(plugin: object) -> None:
             plugin._name_index = name_index
             plugin._zone_soa = zone_soa
             plugin.mapping = mapping_by_qtype
+            plugin._wildcard_owners = wildcard_owners
             plugin._dnssec_classified_axfr = set(dnssec_classified_axfr)
