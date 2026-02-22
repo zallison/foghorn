@@ -188,14 +188,14 @@ a:visited {
     width: 100%;
 }
 
-/* Config page: collapse to a single column when Mermaid diagram is unavailable */
+/* Config page: keep two-pane layout even when Mermaid diagram is unavailable */
 .fh-main-config-single {
-    flex-direction: column;
+    flex-direction: row;
 }
 
 .fh-main-config-single .fh-pane {
-    flex: 0 0 100%;
-    width: 100%;
+    flex: 1 1 0;
+    width: auto;
 }
 
 .fh-diagram-fallback .fh-pre {

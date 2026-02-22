@@ -97,7 +97,10 @@
 					<img id="config-diagram-img" class="fh-diagram-img" alt="Config diagram" />
 					<div id="config-diagram-fallback" class="fh-diagram-fallback" hidden>
 						PNG diagram unavailable. Showing Mermaid output (same as
-						<code>scripts/generate_config_mermaid.py</code>):
+						<code>scripts/generate_config_mermaid.py</code>).
+						<br />
+						To render a PNG via Docker (Mermaid CLI):
+						<pre class="fh-pre fh-pre-compact">docker run -v ${DATA}:/data minlag/mermaid-cli:11.12.1-beta.5 -i /data/diagram.mmd -o /data/diagram.png</pre>
 						<pre id="config-diagram-mmd" class="fh-pre fh-pre-compact"></pre>
 						<div class="fh-config-actions" style="margin-top: 10px; gap: 10px; flex-wrap: wrap;">
 							<input id="config-diagram-upload" type="file" accept="image/png" />
@@ -1608,12 +1611,9 @@
 					if (configDiagramStatusEl) {
 						configDiagramStatusEl.textContent = 'PNG unavailable; showing Mermaid source.';
 					}
-					// Diagram missing (usually mmdc not available on the server): collapse
-					// the config page to a single column so the editor can use full width,
-					// and show the Mermaid output as a text fallback.
-					if (page1 && page1.classList) {
-						page1.classList.add('fh-main-config-single');
-					}
+					// Diagram missing (usually mmdc not available on the server): keep the
+					// standard two-pane layout and show the Mermaid output in the diagram
+					// area instead of collapsing to a single column.
 					configDiagramImgEl.style.display = 'none';
 					if (configDiagramFallbackEl) {
 						configDiagramFallbackEl.hidden = false;
