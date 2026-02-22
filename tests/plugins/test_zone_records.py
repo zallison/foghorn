@@ -401,6 +401,260 @@ def test_pre_resolve_uses_value_order_from_config(tmp_path: pathlib.Path) -> Non
     assert ips == ["2.2.2.2", "1.1.1.1"]
 
 
+def test_pre_resolve_wildcard_domain_patterns(tmp_path: pathlib.Path) -> None:
+    """Brief: ZoneRecords supports wildcard owner patterns in the records mapping.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts that "*" labels match per ZoneRecords rules:
+          * leading "*" matches one-or-more labels (any depth)
+          * non-leading "*" matches exactly one label
+        and that the most-specific matching pattern wins.
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                "*.domain.org|A|300|1.1.1.1",
+                "foo.my.*.org|A|300|2.2.2.2",
+                "*.my.*.org|A|300|3.3.3.3",
+                # Should not match foo.my.domain.org.
+                "*.my.*|A|300|4.4.4.4",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(records_file)], watchdog_enabled=False)
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    # Most-specific match wins: foo.my.*.org
+    req1 = _make_query("foo.my.domain.org", int(QTYPE.A))
+    decision1 = plugin.pre_resolve("foo.my.domain.org", int(QTYPE.A), req1, ctx)
+    assert decision1 is not None
+    resp1 = DNSRecord.parse(decision1.response)
+    ips1 = [str(a.rdata) for a in resp1.rr if a.rtype == QTYPE.A]
+    assert ips1 == ["2.2.2.2"]
+
+    # Next-most-specific match wins: *.my.*.org
+    req2 = _make_query("bar.my.domain.org", int(QTYPE.A))
+    decision2 = plugin.pre_resolve("bar.my.domain.org", int(QTYPE.A), req2, ctx)
+    assert decision2 is not None
+    resp2 = DNSRecord.parse(decision2.response)
+    ips2 = [str(a.rdata) for a in resp2.rr if a.rtype == QTYPE.A]
+    assert ips2 == ["3.3.3.3"]
+
+    # Leading wildcard matches multiple labels: *.domain.org
+    req3 = _make_query("x.y.domain.org", int(QTYPE.A))
+    decision3 = plugin.pre_resolve("x.y.domain.org", int(QTYPE.A), req3, ctx)
+    assert decision3 is not None
+    resp3 = DNSRecord.parse(decision3.response)
+    ips3 = [str(a.rdata) for a in resp3.rr if a.rtype == QTYPE.A]
+    assert ips3 == ["1.1.1.1"]
+
+    # Leading wildcard requires at least one label: domain.org should not match *.domain.org.
+    req4 = _make_query("domain.org", int(QTYPE.A))
+    decision4 = plugin.pre_resolve("domain.org", int(QTYPE.A), req4, ctx)
+    assert decision4 is None
+
+
+def test_wildcard_non_leading_matches_one_label_only(tmp_path: pathlib.Path) -> None:
+    """Brief: Non-leading "*" matches exactly one label.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts that foo.*.org matches foo.bar.org but does not match
+        foo.bar.baz.org (extra label).
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "foo.*.org|A|300|192.0.2.10\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(records_file)], watchdog_enabled=False)
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+
+    req_ok = _make_query("foo.bar.org", int(QTYPE.A))
+    decision_ok = plugin.pre_resolve("foo.bar.org", int(QTYPE.A), req_ok, ctx)
+    assert decision_ok is not None
+
+    req_bad = _make_query("foo.bar.baz.org", int(QTYPE.A))
+    decision_bad = plugin.pre_resolve("foo.bar.baz.org", int(QTYPE.A), req_bad, ctx)
+    assert decision_bad is None
+
+
+def test_wildcard_does_not_match_embedded_star_in_label(tmp_path: pathlib.Path) -> None:
+    """Brief: Only "*" as an entire label is a wildcard.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts that "foo*.example" is treated as a literal owner and does not
+        match other names.
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "foo*.domain.org|A|300|192.0.2.11\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(records_file)], watchdog_enabled=False)
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req = _make_query("foox.domain.org", int(QTYPE.A))
+
+    decision = plugin.pre_resolve("foox.domain.org", int(QTYPE.A), req, ctx)
+    assert decision is None
+
+
+def test_wildcard_rejects_invalid_chars_in_name(tmp_path: pathlib.Path) -> None:
+    """Brief: Wildcard matching rejects invalid characters in the query name.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts that malformed names do not match wildcard owners.
+
+    Notes:
+      - Some malformed names cannot be encoded into DNS wire format by dnslib,
+        so we exercise the helper matcher directly instead of pre_resolve().
+    """
+    helpers_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.helpers"
+    )
+
+    # '$' is not expected in DNS labels for this matcher.
+    assert helpers_mod.match_wildcard_domain("foo$.domain.org", "*.domain.org") is False
+
+    # Empty label (double-dot) should be rejected.
+    assert helpers_mod.match_wildcard_domain("foo..domain.org", "*.domain.org") is False
+
+    # Blank/empty names are not matches, even for "*".
+    assert helpers_mod.match_wildcard_domain("", "*") is False
+    assert helpers_mod.match_wildcard_domain("   ", "*") is False
+
+    # Also ensure find_best_rrsets_for_name cannot resolve invalid names.
+    name_index = {"*.domain.org": {int(QTYPE.A): (300, ["192.0.2.12"])}}
+    matched, rrsets = helpers_mod.find_best_rrsets_for_name(
+        "foo$.domain.org", name_index
+    )
+    assert matched is None
+    assert rrsets == {}
+
+    # And ensure blank/empty names never resolve via wildcard owners.
+    matched_empty, rrsets_empty = helpers_mod.find_best_rrsets_for_name("", name_index)
+    assert matched_empty is None
+    assert rrsets_empty == {}
+
+    matched_blank, rrsets_blank = helpers_mod.find_best_rrsets_for_name(
+        "   ", name_index
+    )
+    assert matched_blank is None
+    assert rrsets_blank == {}
+
+
+def test_wildcard_specificity_prefers_more_specific_pattern(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: When multiple wildcard patterns match, the most specific wins.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts that "*.my.domain.org" is preferred over "*.domain.org".
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                "*.domain.org|A|300|192.0.2.13",
+                "*.my.domain.org|A|300|192.0.2.14",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(records_file)], watchdog_enabled=False)
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req = _make_query("x.my.domain.org", int(QTYPE.A))
+
+    decision = plugin.pre_resolve("x.my.domain.org", int(QTYPE.A), req, ctx)
+    assert decision is not None
+    resp = DNSRecord.parse(decision.response)
+    ips = [str(a.rdata) for a in resp.rr if a.rtype == QTYPE.A]
+    assert ips == ["192.0.2.14"]
+
+
+def test_authoritative_zone_wildcard_owner_prevents_nxdomain(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: In an authoritative zone, wildcard owners answer instead of NXDOMAIN.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts that a name under an SOA-defined zone apex is answered by a
+        wildcard record rather than returning NXDOMAIN.
+    """
+    records_file = tmp_path / "records.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                "domain.org|SOA|300|ns1.domain.org. hostmaster.domain.org. 1 3600 600 604800 300",
+                "*.domain.org|A|300|192.0.2.55",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(file_paths=[str(records_file)], watchdog_enabled=False)
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req = _make_query("a.b.domain.org", int(QTYPE.A))
+
+    decision = plugin.pre_resolve("a.b.domain.org", int(QTYPE.A), req, ctx)
+    assert decision is not None
+    resp = DNSRecord.parse(decision.response)
+    assert resp.header.rcode == RCODE.NOERROR
+    ips = [str(a.rdata) for a in resp.rr if a.rtype == QTYPE.A]
+    assert ips == ["192.0.2.55"]
+
+
 def test_inline_records_config_only() -> None:
     """Brief: ZoneRecords can load and answer from inline records in config.
 
