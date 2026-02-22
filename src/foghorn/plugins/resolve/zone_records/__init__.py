@@ -78,6 +78,9 @@ class AxfrZoneConfig(BaseModel):
       - allow_no_dnssec: Accept transfer even if DNSSEC is missing or invalid
         (default True). When False, zones without valid DNSSEC will be rejected
         once DNSSEC validation for AXFR is implemented.
+      - minimum_reload_time: Minimum seconds between AXFR reloads. Reloads will
+        only occur after this time has elapsed since the original load or since
+        the last NOTIFY was received for the zone.
 
     Outputs:
       - AxfrZoneConfig instance.
@@ -96,6 +99,15 @@ class AxfrZoneConfig(BaseModel):
             "Accept transfer even if DNSSEC is missing or invalid. When False, "
             "zones without valid DNSSEC will be rejected once DNSSEC validation "
             "for AXFR is implemented."
+        ),
+    )
+    minimum_reload_time: float = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Minimum seconds between AXFR reloads. Reloads only occur after "
+            "this time has elapsed since the original load or since the last "
+            "NOTIFY was received for the zone. A value of 0 reloads on every load."
         ),
     )
 
@@ -234,7 +246,7 @@ class ZoneRecordsConfig(BaseModel):
         - "merge" (default): preserve existing records and overlay newly loaded ones.
         - "replace": rebuild records from configured sources on each load.
         - "first": use the first configured source group in this order:
-          file_paths → bind_paths → axfr_zones → records (inline), and ignore the others.
+          records (inline) → axfr_zones → file_paths → bind_paths, and ignore the others.
       - merge_policy: "add" (default) to append unique values into existing
         RRsets, or "overwrite" to replace RRsets when the same (name,qtype)
         appears in a later source.
@@ -395,6 +407,8 @@ class ZoneRecords(BasePlugin):
         # Normalize AXFR and NOTIFY configuration
         self._axfr_zones = helpers.normalize_axfr_config(axfr_cfg)
         self._axfr_loaded_once = False
+        # Track AXFR zone metadata for reload timing
+        self._axfr_zone_metadata: Dict[str, Dict[str, object]] = {}
 
         self._axfr_notify_static_targets = helpers.normalize_axfr_notify_targets(
             self.config.get("axfr_notify")

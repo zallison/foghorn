@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from dnslib import QTYPE, RR
 
@@ -177,20 +177,20 @@ def _add_nsec3_chain_to_zone(
 
 
 def auto_sign_zones(
-    mapping: Dict[Tuple[str, int], Tuple[int, List[str]]],
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
-    zone_soa: Dict[str, Tuple[int, List[str]]],
+    mapping: Dict[Tuple[str, int], Tuple[int, List[str], Set[str]]],
+    name_index: Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]],
+    zone_soa: Dict[str, Tuple[int, List[str], Set[str]]],
     dnssec_cfg_raw: dict,
     log: Optional[logging.Logger] = None,
 ) -> None:
     """Brief: Perform DNSSEC auto-signing for authoritative zones.
 
     Inputs:
-      - mapping: (owner, qtype) -> (ttl, [values]) mapping to receive DNSKEY/
+      - mapping: (owner, qtype) -> (ttl, [values], {sources}) mapping to receive DNSKEY/
         RRSIG material.
-      - name_index: owner -> qtype -> (ttl, [values]) index updated with
+      - name_index: owner -> qtype -> (ttl, [values], {sources}) index updated with
         auto-signed RRsets.
-      - zone_soa: zone apex -> (ttl, [soa_values]) mapping.
+      - zone_soa: zone apex -> (ttl, [soa_values], {sources}) mapping.
       - dnssec_cfg_raw: dnssec_signing configuration dict.
       - log: Optional logger; when omitted, uses this module's logger.
 
@@ -255,7 +255,7 @@ def auto_sign_zones(
                 owner_name = _dns_name.from_text(owner_norm + ".")
                 node_obj = zone_obj.find_node(owner_name, create=True)
 
-                for qtype_code, (ttl_val, vals) in rrsets.items():
+                for qtype_code, (ttl_val, vals, _sources) in rrsets.items():
                     if int(qtype_code) == int(rrsig_code_all):
                         continue
                     if int(qtype_code) == int(dnskey_code_all):
@@ -287,7 +287,7 @@ def auto_sign_zones(
             # can be DNSSEC-validatable when DO=1.
             try:
                 soa_ttl_entry = zone_soa.get(apex_owner)
-                nsec3_ttl = int(soa_ttl_entry[0]) if soa_ttl_entry is not None else 300
+                nsec3_ttl = int(soa_ttl_entry[0]) if soa_ttl_entry else 300
             except Exception:  # pragma: no cover - defensive
                 nsec3_ttl = 300
 
@@ -400,7 +400,11 @@ def auto_sign_zones(
                         stored_ttl = int(getattr(rdataset, "ttl", 0) or 0)
                         vals_list: List[str] = []
                     else:
-                        stored_ttl, vals_list = existing
+                        try:
+                            stored_ttl, vals_list, _sources = existing
+                        except (ValueError, TypeError):
+                            # Legacy 2-tuple or other format
+                            stored_ttl, vals_list = existing
 
                     for rdata_obj in list(rdataset):
                         try:
@@ -410,9 +414,17 @@ def auto_sign_zones(
                         if value_text not in vals_list:
                             vals_list.append(value_text)
 
-                    mapping[key] = (stored_ttl, vals_list)
-                    per_name = name_index.setdefault(owner_norm, {})
-                    per_name[qcode] = (stored_ttl, vals_list)
+                    # Preserve existing sources if any
+                    try:
+                        _stored_ttl, _vals_list, existing_sources = mapping[key]
+                        mapping[key] = (stored_ttl, vals_list, existing_sources)
+                        per_name = name_index.setdefault(owner_norm, {})
+                        per_name[qcode] = (stored_ttl, vals_list, existing_sources)
+                    except (ValueError, TypeError, KeyError):
+                        # Legacy 2-tuple format or key missing
+                        mapping[key] = (stored_ttl, vals_list, set())
+                        per_name = name_index.setdefault(owner_norm, {})
+                        per_name[qcode] = (stored_ttl, vals_list, set())
 
     except Exception:  # pragma: no cover - defensive logging only
         log.warning(
@@ -422,13 +434,13 @@ def auto_sign_zones(
 
 
 def build_dnssec_helper_mapping(
-    mapping: Dict[Tuple[str, int], Tuple[int, List[str]]],
+    mapping: Dict[Tuple[str, int], Tuple[int, List[str], Set[str]]],
     log: Optional[logging.Logger] = None,
 ) -> Dict[int, Dict[str, List[RR]]]:
     """Brief: Build qtype->owner->RR helper mapping including RRSIGs.
 
     Inputs:
-      - mapping: (owner, qtype) -> (ttl, [values]) mapping.
+      - mapping: (owner, qtype) -> (ttl, [values], {sources}) mapping.
       - log: Optional logger; when omitted, uses this module's logger.
 
     Outputs:
@@ -445,7 +457,11 @@ def build_dnssec_helper_mapping(
             rrsig_code_idx = 46
 
         rrsig_cover: Dict[Tuple[str, int], List[str]] = {}
-        for (owner_name_idx, qcode_idx), (ttl_idx, vals_idx) in mapping.items():
+        for (owner_name_idx, qcode_idx), (
+            ttl_idx,
+            vals_idx,
+            _sources,
+        ) in mapping.items():
             if int(qcode_idx) != int(rrsig_code_idx):
                 continue
             owner_norm_idx = str(owner_name_idx).rstrip(".").lower()
@@ -487,7 +503,11 @@ def build_dnssec_helper_mapping(
             nsec3param_code_idx = 51
 
         mapping_by_qtype: Dict[int, Dict[str, List[RR]]] = {}
-        for (owner_name_idx, qcode_idx), (ttl_idx, vals_idx) in mapping.items():
+        for (owner_name_idx, qcode_idx), (
+            ttl_idx,
+            vals_idx,
+            _sources,
+        ) in mapping.items():
             owner_norm_idx = str(owner_name_idx).rstrip(".").lower()
             qcode_int = int(qcode_idx)
 

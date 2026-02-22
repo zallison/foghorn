@@ -770,7 +770,7 @@ def snapshot_zone_state(
             owner_norm = str(owner).lower()
         if owner_norm != apex and not owner_norm.endswith("." + apex):
             continue
-        for qcode, (ttl, values) in rrsets.items():
+        for qcode, (ttl, values, _) in rrsets.items():
             try:
                 ttl_i = int(ttl)
             except Exception:  # pragma: no cover - defensive

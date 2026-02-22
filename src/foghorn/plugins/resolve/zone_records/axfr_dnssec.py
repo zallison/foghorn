@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import time
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import ipaddress  # reused by DNSSEC auto-sign helper when building PTRs, kept for future use
@@ -13,27 +14,93 @@ from foghorn.servers.transports.axfr import AXFRError, axfr_transfer
 logger = logging.getLogger(__name__)
 
 
+def should_reload_axfr_zone(
+    zone_name: str,
+    zone_cfg: Dict[str, object],
+    zone_metadata: Dict[str, Dict[str, object]],
+    force_reload: bool = False,
+) -> bool:
+    """Brief: Determine if an AXFR zone should be reloaded based on timing rules.
+
+    Inputs:
+      - zone_name: Normalized zone apex name.
+      - zone_cfg: Zone configuration dict from axfr_zones.
+      - zone_metadata: Plugin's AXFR zone metadata tracking dict.
+      - force_reload: If True, ignore timing checks and force reload.
+
+    Outputs:
+      - True if the zone should be loaded/reloaded, False otherwise.
+    """
+    if force_reload:
+        return True
+
+    minimum_reload_time = float(zone_cfg.get("minimum_reload_time", 0))
+    if minimum_reload_time == 0:
+        # Zero means reload on every load
+        return True
+
+    metadata = zone_metadata.get(zone_name, {})
+    last_loaded = metadata.get("last_loaded", 0)
+    last_notify = metadata.get("last_notify", 0)
+
+    current_time = time.time()
+    last_event = max(last_loaded, last_notify)
+
+    time_elapsed = current_time - last_event
+    return time_elapsed >= minimum_reload_time
+
+
+def update_axfr_metadata(
+    zone_name: str,
+    zone_metadata: Dict[str, Dict[str, object]],
+    loaded: bool = False,
+    notified: bool = False,
+) -> None:
+    """Brief: Update AXFR zone metadata with load/notify timestamps.
+
+    Inputs:
+      - zone_name: Normalized zone apex name.
+      - zone_metadata: Plugin's AXFR zone metadata tracking dict.
+      - loaded: If True, update last_loaded timestamp.
+      - notified: If True, update last_notify timestamp.
+
+    Outputs:
+      - None; updates zone_metadata in-place.
+    """
+    if zone_name not in zone_metadata:
+        zone_metadata[zone_name] = {}
+
+    if loaded:
+        zone_metadata[zone_name]["last_loaded"] = time.time()
+    if notified:
+        zone_metadata[zone_name]["last_notify"] = time.time()
+
+
 def overlay_axfr_zones(
-    mapping: Dict[Tuple[str, int], Tuple[int, List[str]]],
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
-    zone_soa: Dict[str, Tuple[int, List[str]]],
+    mapping: Dict[Tuple[str, int], Tuple[int, List[str], Set[str]]],
+    name_index: Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]],
+    zone_soa: Dict[str, Tuple[int, List[str], Set[str]]],
     axfr_zones: List[Dict[str, object]],
     soa_code: Optional[int],
     dnssec_classified_axfr: Set[str],
     axfr_fn: Optional[Callable[..., List[RR]]] = None,
+    zone_metadata: Optional[Dict[str, Dict[str, object]]] = None,
+    force_reload: bool = False,
 ) -> None:
     """Brief: Overlay AXFR-backed zones onto existing mappings.
 
     Inputs:
-      - mapping: Current (owner, qtype) -> (ttl, [values]) mapping.
-      - name_index: Per-owner index owner -> qtype -> (ttl, [values]).
-      - zone_soa: Mapping of apex -> (ttl, [soa_values]).
+      - mapping: Current (owner, qtype) -> (ttl, [values], {sources}) mapping.
+      - name_index: Per-owner index owner -> qtype -> (ttl, [values], {sources}).
+      - zone_soa: Mapping of apex -> (ttl, [soa_values], {sources}).
       - axfr_zones: Normalized axfr_zones configuration list from ZoneRecords.
       - soa_code: Numeric QTYPE code for SOA, or None when unavailable.
       - dnssec_classified_axfr: Set of apex names already DNSSEC-classified.
       - axfr_fn: Optional callable used to perform the AXFR transfer. When
         omitted, the module-level axfr_transfer import is used. ZoneRecords
         passes its own axfr_transfer attribute so tests can monkeypatch it.
+      - zone_metadata: Optional dict tracking zone metadata (load_times, notify_times).
+      - force_reload: If True, reload all zones ignoring minimum_reload_time.
 
     Outputs:
       - None; mapping, name_index, zone_soa and dnssec_classified_axfr
@@ -43,6 +110,9 @@ def overlay_axfr_zones(
     if not axfr_zones:
         return
 
+    if zone_metadata is None:
+        zone_metadata = {}
+
     for zone_cfg in axfr_zones:
         zone_name = zone_cfg.get("zone")  # type: ignore[assignment]
         upstreams = zone_cfg.get("upstreams") or []  # type: ignore[assignment]
@@ -51,6 +121,16 @@ def overlay_axfr_zones(
 
         zone_text = str(zone_name).rstrip(".").lower()
         if not zone_text:
+            continue
+
+        # Check if this zone should be reloaded based on minimum_reload_time
+        if not should_reload_axfr_zone(
+            zone_text, zone_cfg, zone_metadata, force_reload
+        ):
+            logger.debug(
+                "ZoneRecords AXFR: skipping %s (minimum_reload_time not met)",
+                zone_text,
+            )
             continue
 
         transferred, last_error = _axfr_transfer_for_zone(zone_text, upstreams, axfr_fn)
@@ -74,6 +154,9 @@ def overlay_axfr_zones(
             zone_text,
             transferred,
         )
+
+        # Update metadata after successful load
+        update_axfr_metadata(zone_text, zone_metadata, loaded=True)
 
 
 def _axfr_transfer_for_zone(
@@ -233,9 +316,9 @@ def _classify_axfr_zone_dnssec(
 
 
 def _merge_transferred_rrs_into_mappings(
-    mapping: Dict[Tuple[str, int], Tuple[int, List[str]]],
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
-    zone_soa: Dict[str, Tuple[int, List[str]]],
+    mapping: Dict[Tuple[str, int], Tuple[int, List[str], Set[str]]],
+    name_index: Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]],
+    zone_soa: Dict[str, Tuple[int, List[str], Set[str]]],
     soa_code: Optional[int],
     zone_text: str,
     transferred: List[RR],
@@ -243,9 +326,9 @@ def _merge_transferred_rrs_into_mappings(
     """Brief: Merge transferred AXFR RRs into mapping, name_index, and zone_soa.
 
     Inputs:
-      - mapping: (owner, qtype) -> (ttl, [values]) mapping to update.
-      - name_index: owner -> qtype -> (ttl, [values]) index.
-      - zone_soa: zone apex -> (ttl, [soa_values]) mapping.
+      - mapping: (owner, qtype) -> (ttl, [values], {sources}) mapping to update.
+      - name_index: owner -> qtype -> (ttl, [values], {sources}) index.
+      - zone_soa: zone apex -> (ttl, [soa_values], {sources}) mapping.
       - soa_code: Numeric QTYPE code for SOA, or None.
       - zone_text: Human-readable zone label used for logging.
       - transferred: List of RRs from AXFR.
@@ -253,6 +336,8 @@ def _merge_transferred_rrs_into_mappings(
     Outputs:
       - None; updates all three mappings in place.
     """
+
+    source_label = f"axfr-{zone_text}"
 
     for rr in transferred:
         try:
@@ -275,35 +360,42 @@ def _merge_transferred_rrs_into_mappings(
         if existing is None:
             stored_ttl = ttl
             values_ax: List[str] = []
+            sources_ax: Set[str] = {source_label}
         else:
-            stored_ttl, values_ax = existing
+            try:
+                stored_ttl, values_ax, sources_ax = existing
+            except (ValueError, TypeError):
+                # Legacy 2-tuple format
+                stored_ttl, values_ax = existing
+                sources_ax = {source_label}
 
         if value not in values_ax:
             values_ax.append(value)
+        sources_ax.add(source_label)
 
-        mapping[key] = (stored_ttl, values_ax)
+        mapping[key] = (stored_ttl, values_ax, sources_ax)
 
         per_name_ax = name_index.setdefault(owner, {})
-        per_name_ax[int(qtype_code)] = (stored_ttl, values_ax)
+        per_name_ax[int(qtype_code)] = (stored_ttl, values_ax, sources_ax)
 
         if (
             soa_code is not None
             and int(qtype_code) == int(soa_code)
             and owner not in zone_soa
         ):
-            zone_soa[owner] = (stored_ttl, values_ax)
+            zone_soa[owner] = (stored_ttl, values_ax, sources_ax)
 
 
 def _classify_local_zones_dnssec(
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
-    zone_soa: Dict[str, Tuple[int, List[str]]],
+    name_index: Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]],
+    zone_soa: Dict[str, Tuple[int, List[str], Set[str]]],
     dnssec_classified_axfr: Set[str],
 ) -> None:
     """Brief: Classify DNSSEC state for zones built from local sources.
 
     Inputs:
-      - name_index: owner -> qtype -> (ttl, [values]) index.
-      - zone_soa: zone apex -> (ttl, [soa_values]) mapping.
+      - name_index: owner -> qtype -> (ttl, [values], {sources}) index.
+      - zone_soa: zone apex -> (ttl, [soa_values], {sources}) mapping.
       - dnssec_classified_axfr: Set of apexes already classified via AXFR.
 
     Outputs:
@@ -346,18 +438,18 @@ def _classify_local_zones_dnssec(
 
 
 def dnssec_postprocess_zones(
-    mapping: Dict[Tuple[str, int], Tuple[int, List[str]]],
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
-    zone_soa: Dict[str, Tuple[int, List[str]]],
+    mapping: Dict[Tuple[str, int], Tuple[int, List[str], Set[str]]],
+    name_index: Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]],
+    zone_soa: Dict[str, Tuple[int, List[str], Set[str]]],
     dnssec_classified_axfr: Set[str],
     dnssec_cfg_raw: Optional[dict],
 ) -> Dict[int, Dict[str, List[RR]]]:
     # Brief: Classify and optionally auto-sign zones, then build DNSSEC helpers.
     #
     # Inputs:
-    #   - mapping: (owner, qtype) -> (ttl, [values]) mapping.
-    #   - name_index: owner -> qtype -> (ttl, [values]) index.
-    #   - zone_soa: zone apex -> (ttl, [soa_values]) mapping.
+    #   - mapping: (owner, qtype) -> (ttl, [values], {sources}) mapping.
+    #   - name_index: owner -> qtype -> (ttl, [values], {sources}) index.
+    #   - zone_soa: zone apex -> (ttl, [soa_values], {sources}) mapping.
     #   - dnssec_classified_axfr: Set of apexes already classified via AXFR.
     #   - dnssec_cfg_raw: Raw dnssec_signing config dict (or None).
     #

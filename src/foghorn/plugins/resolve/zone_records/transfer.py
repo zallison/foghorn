@@ -86,7 +86,7 @@ def iter_zone_rrs_for_transfer(
         if owner_norm != apex and not owner_norm.endswith("." + apex):
             continue
 
-        for qtype_code, (ttl, values) in rrsets.items():
+        for qtype_code, (ttl, values, _) in rrsets.items():
             rr_type_name = QTYPE.get(qtype_code, str(qtype_code))
             for value in values:
                 zone_line = f"{owner_norm}. {ttl} IN {rr_type_name} {value}"
