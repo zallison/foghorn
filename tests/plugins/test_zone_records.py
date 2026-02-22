@@ -61,7 +61,7 @@ def test_load_records_uniques_and_preserves_order_single_file(
     plugin.setup()
 
     key = ("example.com", int(QTYPE.A))
-    ttl, values = plugin.records[key]
+    ttl, values, _ = plugin.records[key]
 
     assert ttl == 300
     assert values == ["1.1.1.1", "2.2.2.2"]
@@ -113,7 +113,7 @@ def test_load_records_across_multiple_files_order_and_dedup(
     plugin.setup()
 
     key = ("example.com", int(QTYPE.A))
-    ttl, values = plugin.records[key]
+    ttl, values, _ = plugin.records[key]
 
     # TTL comes from the first occurrence, and values follow their first
     # appearance order across files.
@@ -187,7 +187,7 @@ def test_load_records_merge_mode_add_policy_appends_values(
 
     plugin._load_records()
 
-    ttl, values = plugin.records[("example.com", int(QTYPE.A))]
+    ttl, values, _ = plugin.records[("example.com", int(QTYPE.A))]
     assert ttl == 300
     assert values == ["1.1.1.1", "2.2.2.2"]
 
@@ -234,7 +234,7 @@ def test_load_records_merge_mode_overwrite_policy_replaces_rrset_and_warns(
     with caplog.at_level(logging.WARNING):
         plugin._load_records()
 
-    ttl, values = plugin.records[("example.com", int(QTYPE.A))]
+    ttl, values, _ = plugin.records[("example.com", int(QTYPE.A))]
     assert ttl == 600
     assert values == ["2.2.2.2", "3.3.3.3"]
 
@@ -248,7 +248,7 @@ def test_load_records_merge_mode_overwrite_policy_replaces_rrset_and_warns(
     assert "=1" in msgs[0]
 
 
-def test_load_records_first_mode_uses_file_paths_group_and_ignores_inline(
+def test_load_records_first_mode_uses_inline_group_and_ignores_files(
     tmp_path: pathlib.Path,
 ) -> None:
     """Brief: load_mode=first uses the first configured source group.
@@ -257,8 +257,8 @@ def test_load_records_first_mode_uses_file_paths_group_and_ignores_inline(
       - tmp_path: pytest temporary directory fixture.
 
     Outputs:
-      - Asserts that when file_paths are configured, inline records are ignored
-        in load_mode=first.
+      - Asserts that when inline records are configured (highest precedence),
+            file_paths are ignored in load_mode=first.
     """
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
@@ -267,21 +267,18 @@ def test_load_records_first_mode_uses_file_paths_group_and_ignores_inline(
     f1.write_text("example.com|A|300|1.1.1.1\n", encoding="utf-8")
 
     plugin = ZoneRecords(
-        file_paths=[str(f1)],
         records=[
-            # This would normally overlay after files, but must be ignored.
+            # This wins due to higher precedence.
             "example.com|A|300|9.9.9.9",
-            "inline-only.example|A|300|8.8.8.8",
         ],
+        file_paths=[str(f1)],  # Ignored because inline comes first
         load_mode="first",
     )
     plugin.setup()
 
-    ttl, values = plugin.records[("example.com", int(QTYPE.A))]
+    ttl, values, _ = plugin.records[("example.com", int(QTYPE.A))]
     assert ttl == 300
-    assert values == ["1.1.1.1"]
-
-    assert ("inline-only.example", int(QTYPE.A)) not in plugin.records
+    assert values == ["9.9.9.9"]
 
 
 def test_load_records_first_mode_uses_inline_when_no_files_or_bind(
@@ -307,7 +304,7 @@ def test_load_records_first_mode_uses_inline_when_no_files_or_bind(
     )
     plugin.setup()
 
-    ttl, values = plugin.records[("inline.example", int(QTYPE.A))]
+    ttl, values, _ = plugin.records[("inline.example", int(QTYPE.A))]
     assert ttl == 300
     assert values == ["203.0.113.10"]
 
@@ -354,7 +351,7 @@ def test_load_records_first_mode_includes_all_file_paths_in_group(
     plugin = ZoneRecords(file_paths=[str(f1), str(f2)], load_mode="first")
     plugin.setup()
 
-    ttl, values = plugin.records[("example.com", int(QTYPE.A))]
+    ttl, values, _ = plugin.records[("example.com", int(QTYPE.A))]
     assert ttl == 100
     assert values == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
 
@@ -672,7 +669,7 @@ def test_inline_records_config_only() -> None:
     plugin.setup()
 
     key = ("inline.example", int(QTYPE.A))
-    ttl, values = plugin.records[key]
+    ttl, values, _ = plugin.records[key]
 
     assert ttl == 300
     assert values == ["203.0.113.10"]
@@ -694,12 +691,12 @@ def test_inline_records_merge_after_files(tmp_path: pathlib.Path) -> None:
     """Brief: Inline records are merged after file-backed ones with deduplication.
 
     Inputs:
-      - tmp_path: pytest-provided temporary directory.
+      - tmp_path: tmp_path-provided temporary directory.
 
     Outputs:
-      - Asserts that TTL comes from the first occurrence and that values from
-        inline records are appended in first-seen order with duplicates
-        ignored.
+      - Asserts that TTL comes from inline records (highest precedence) and that
+            values from file records are appended in first-seen order with duplicates
+            ignored.
     """
     records_file = tmp_path / "records.txt"
     records_file.write_text(
@@ -720,17 +717,20 @@ def test_inline_records_merge_after_files(tmp_path: pathlib.Path) -> None:
         file_paths=[str(records_file)],
         records=[
             "example.com|A|400|3.3.3.3",
-            # Duplicate value with a different TTL; should be ignored.
+            # Duplicate value with a different TTL from file; should be ignored.
             "example.com|A|500|2.2.2.2",
         ],
     )
     plugin.setup()
 
     key = ("example.com", int(QTYPE.A))
-    ttl, values = plugin.records[key]
+    ttl, values, _ = plugin.records[key]
 
-    assert ttl == 100
-    assert values == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
+    # Inline has highest precedence now, so TTL is 400 (from inline)
+    assert ttl == 400
+    # Values: inline first (but 3.3.3.3 was already in files), then files in order
+    # Merge preserves file order: 2.2.2.2 then 1.1.1.1
+    assert values == ["3.3.3.3", "2.2.2.2", "1.1.1.1"]
 
 
 def test_normalize_paths_raises_when_no_paths(tmp_path: pathlib.Path) -> None:
@@ -779,7 +779,7 @@ def test_load_records_skips_blank_and_comment_lines(tmp_path: pathlib.Path) -> N
     plugin.setup()
 
     key = ("example.com", int(QTYPE.A))
-    ttl, values = plugin.records[key]
+    ttl, values, _ = plugin.records[key]
 
     assert ttl == 300
     assert values == ["1.1.1.1"]
@@ -986,13 +986,13 @@ def test_auto_ptr_generated_from_a_and_aaaa(tmp_path: pathlib.Path) -> None:
 
     # IPv4 PTR
     key_v4_ptr = (v4_rev, ptr_code)
-    ttl_v4, vals_v4 = plugin.records[key_v4_ptr]
+    ttl_v4, vals_v4, _ = plugin.records[key_v4_ptr]
     assert ttl_v4 == 300
     assert "v4.example." in vals_v4
 
     # IPv6 PTR
     key_v6_ptr = (v6_rev, ptr_code)
-    ttl_v6, vals_v6 = plugin.records[key_v6_ptr]
+    ttl_v6, vals_v6, _ = plugin.records[key_v6_ptr]
     assert ttl_v6 == 400
     assert "v6.example." in vals_v6
 
@@ -2171,7 +2171,7 @@ def test_bind_paths_entry_override_origin_and_ttl_warns_and_uses_config(
         )
         plugin.setup()
 
-    ttl, values = plugin.records[("www.override.test", int(QTYPE.A))]
+    ttl, values, _ = plugin.records[("www.override.test", int(QTYPE.A))]
     assert ttl == 600
     assert values == ["192.0.2.20"]
 
@@ -2222,7 +2222,7 @@ def test_bind_paths_merges_with_file_paths_and_preserves_ttl_and_order(
     plugin.setup()
 
     key = ("merge.test", int(QTYPE.A))
-    ttl, values = plugin.records[key]
+    ttl, values, _ = plugin.records[key]
 
     # TTL comes from the first occurrence for this (name, qtype) key across
     # all sources, and values follow first-seen order with duplicates dropped.
@@ -2306,14 +2306,14 @@ def test_custom_sshfp_and_openpgpkey_records(
     # SSHFP record must be present in the internal mapping with the expected
     # TTL and value string (note that we store the original hex casing here).
     sshfp_key = ("sshfp.example", int(QTYPE.SSHFP))
-    ssh_ttl, ssh_values = plugin.records[sshfp_key]
+    ssh_ttl, ssh_values, _ = plugin.records[sshfp_key]
     assert ssh_ttl == 600
     assert ssh_values == ["1 1 1234567890abcdef1234567890abcdef12345678"]
 
     # OPENPGPKEY record must also be present with its hex RDATA in the
     # internal mapping (generic "#" form is only used when answering).
     openpgp_key = ("openpgp.example", int(QTYPE.OPENPGPKEY))
-    open_ttl, open_values = plugin.records[openpgp_key]
+    open_ttl, open_values, _ = plugin.records[openpgp_key]
     assert open_ttl == 300
     assert open_values == ["0A0B0C"]
 
@@ -2380,7 +2380,7 @@ def test_auto_soa_generated_for_sshfp_only_zone(tmp_path: pathlib.Path) -> None:
     apex = "sshfp.test"
     soa_key = (apex, int(QTYPE.SOA))
     assert soa_key in plugin.records
-    soa_ttl, soa_vals = plugin.records[soa_key]
+    soa_ttl, soa_vals, _ = plugin.records[soa_key]
     assert soa_ttl == plugin.config.get("ttl", 300)
     # Sanity check that the synthesized SOA value references the inferred apex.
     assert any(f"ns1.{apex}." in v and f"hostmaster.{apex}." in v for v in soa_vals)
@@ -2546,7 +2546,7 @@ def test_load_records_axfr_overlays_and_only_runs_once(
     # Transferred A record should be present in the records mapping.
     key = ("host.axfr.test", int(QTYPE.A))
     assert key in plugin.records
-    ttl, values = plugin.records[key]
+    ttl, values, _ = plugin.records[key]
     assert ttl == 123
     assert values == ["203.0.113.5"]
 
@@ -2911,7 +2911,7 @@ def test_dnssec_nsec3_params_configurable_via_dnssec_signing(
     nsec3param_key = ("example.com", int(QTYPE.NSEC3PARAM))
     assert nsec3param_key in plugin.records
 
-    _ttl, vals = plugin.records[nsec3param_key]
+    _ttl, vals, _ = plugin.records[nsec3param_key]
     assert vals
 
     parts = str(vals[0]).split()

@@ -21,68 +21,114 @@ logger = logging.getLogger(__name__)
 
 
 def _clone_records_mapping(
-    records: Dict[Tuple[str, int], Tuple[int, List[str]]],
-) -> Dict[Tuple[str, int], Tuple[int, List[str]]]:
-    """Brief: Deep-clone the (name,qtype)->(ttl,values) mapping.
+    records: Dict[Tuple[str, int], Tuple[int, List[str]]],  # noqa: ARG001
+) -> Dict[Tuple[str, int], Tuple[int, List[str], Set[str]]]:
+    """Brief: Deep-clone the (name,qtype)->(ttl,values,sources) mapping.
 
     Inputs:
-      - records: Mapping of (owner, qtype) -> (ttl, [values]).
+      - records: Mapping of (owner, qtype) -> (ttl, [values], {sources}).
 
     Outputs:
-      - New mapping with copied tuples and value lists.
+      - New mapping with copied tuples and value lists, preserving sources.
     """
-    cloned: Dict[Tuple[str, int], Tuple[int, List[str]]] = {}
-    for key, (ttl, values) in (records or {}).items():
+    cloned: Dict[Tuple[str, int], Tuple[int, List[str], Set[str]]] = {}
+    for key, entry in (records or {}).items():
+        try:
+            # Try 3-tuple format first
+            ttl, values, sources = entry
+        except (ValueError, TypeError):
+            try:
+                # Fall back to 2-tuple format for backward compatibility
+                ttl, values = entry
+                sources = set()
+            except (ValueError, TypeError):
+                ttl = 0
+                values = []
+                sources = set()
+
         try:
             ttl_i = int(ttl)
         except Exception:
             ttl_i = 0
-        cloned[(str(key[0]), int(key[1]))] = (ttl_i, list(values or []))
+
+        cloned[(str(key[0]), int(key[1]))] = (
+            ttl_i,
+            list(values or []),
+            set(sources or set()),
+        )
     return cloned
 
 
 def _clone_name_index(
     name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
-) -> Dict[str, Dict[int, Tuple[int, List[str]]]]:
+) -> Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]]:
     """Brief: Deep-clone the per-owner name index.
 
     Inputs:
-      - name_index: owner -> qtype -> (ttl, [values]).
+      - name_index: owner -> qtype -> (ttl, [values], {sources}).
 
     Outputs:
-      - New nested dict with copied tuples and value lists.
+      - New nested dict with copied tuples and value lists, preserving sources.
     """
-    cloned: Dict[str, Dict[int, Tuple[int, List[str]]]] = {}
+    cloned: Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]] = {}
     for owner, rrsets in (name_index or {}).items():
-        inner: Dict[int, Tuple[int, List[str]]] = {}
-        for qcode, (ttl, values) in (rrsets or {}).items():
+        inner: Dict[int, Tuple[int, List[str], Set[str]]] = {}
+        for qcode, entry in (rrsets or {}).items():
+            try:
+                # Try 3-tuple format first
+                ttl, values, sources = entry
+            except (ValueError, TypeError):
+                try:
+                    # Fall back to 2-tuple format for backward compatibility
+                    ttl, values = entry
+                    sources = set()
+                except (ValueError, TypeError):
+                    ttl = 0
+                    values = []
+                    sources = set()
+
             try:
                 ttl_i = int(ttl)
             except Exception:
                 ttl_i = 0
-            inner[int(qcode)] = (ttl_i, list(values or []))
+
+            inner[int(qcode)] = (ttl_i, list(values or []), set(sources or set()))
         cloned[str(owner)] = inner
     return cloned
 
 
 def _clone_zone_soa(
     zone_soa: Dict[str, Tuple[int, List[str]]],
-) -> Dict[str, Tuple[int, List[str]]]:
+) -> Dict[str, Tuple[int, List[str], Set[str]]]:
     """Brief: Deep-clone the zone apex SOA mapping.
 
     Inputs:
-      - zone_soa: apex -> (ttl, [soa_values]).
+      - zone_soa: apex -> (ttl, [soa_values], {sources}).
 
     Outputs:
-      - New mapping with copied tuples and value lists.
+      - New mapping with copied tuples and value lists, preserving sources.
     """
-    cloned: Dict[str, Tuple[int, List[str]]] = {}
-    for apex, (ttl, values) in (zone_soa or {}).items():
+    cloned: Dict[str, Tuple[int, List[str], Set[str]]] = {}
+    for apex, entry in (zone_soa or {}).items():
+        try:
+            # Try 3-tuple format first
+            ttl, values, sources = entry
+        except (ValueError, TypeError):
+            try:
+                # Fall back to 2-tuple format for backward compatibility
+                ttl, values = entry
+                sources = set()
+            except (ValueError, TypeError):
+                ttl = 0
+                values = []
+                sources = set()
+
         try:
             ttl_i = int(ttl)
         except Exception:
             ttl_i = 0
-        cloned[str(apex)] = (ttl_i, list(values or []))
+
+        cloned[str(apex)] = (ttl_i, list(values or []), set(sources or set()))
     return cloned
 
 
@@ -93,9 +139,9 @@ def _merge_rr_value(
     ttl: int,
     value: str,
     source_label: str,
-    mapping: Dict[Tuple[str, int], Tuple[int, List[str]]],
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
-    zone_soa: Dict[str, Tuple[int, List[str]]],
+    mapping: Dict[Tuple[str, int], Tuple[int, List[str], Set[str]]],
+    name_index: Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]],
+    zone_soa: Dict[str, Tuple[int, List[str], Set[str]]],
     soa_code: Optional[int],
     load_mode: str,
     merge_policy: str,
@@ -110,9 +156,9 @@ def _merge_rr_value(
       - ttl: TTL for the RR.
       - value: Presentation-format rdata value.
       - source_label: Human-readable source identifier.
-      - mapping: Aggregated (owner, qtype) -> (ttl, [values]) mapping.
-      - name_index: Per-owner index mapping owner -> qtype -> (ttl, [values]).
-      - zone_soa: Mapping of zone apex -> (ttl, [soa_values]).
+      - mapping: Aggregated (owner, qtype) -> (ttl, [values], {sources}) mapping.
+      - name_index: Per-owner index mapping owner -> qtype -> (ttl, [values], {sources}).
+      - zone_soa: Mapping of zone apex -> (ttl, [soa_values], {sources}).
       - soa_code: Numeric SOA qtype code or None.
       - load_mode: One of 'replace', 'merge', or 'first'.
       - merge_policy: Either 'add' (default) or 'overwrite'.
@@ -132,38 +178,47 @@ def _merge_rr_value(
         if existing is not None and key not in seen_rrsets:
             # First time this source touches this RRset: replace it.
             values_list: List[str] = []
-            mapping[key] = (int(ttl), values_list)
+            sources_set: Set[str] = {source_label}
+            mapping[key] = (int(ttl), values_list, sources_set)
             per_name = name_index.setdefault(owner_norm, {})
-            per_name[int(qtype_code)] = (int(ttl), values_list)
+            per_name[int(qtype_code)] = (int(ttl), values_list, sources_set)
             overwritten_by_source.setdefault(source_label, set()).add(owner_norm)
             seen_rrsets.add(key)
             existing = mapping.get(key)
         elif existing is None:
             values_list = []
-            mapping[key] = (int(ttl), values_list)
+            sources_set = {source_label}
+            mapping[key] = (int(ttl), values_list, sources_set)
             per_name = name_index.setdefault(owner_norm, {})
-            per_name[int(qtype_code)] = (int(ttl), values_list)
+            per_name[int(qtype_code)] = (int(ttl), values_list, sources_set)
             seen_rrsets.add(key)
             existing = mapping.get(key)
 
     if existing is None:
         stored_ttl = int(ttl)
         values: List[str] = []
+        sources_set: Set[str] = {source_label}
     else:
-        stored_ttl, values = existing
+        try:
+            stored_ttl, values, sources_set = existing
+        except (ValueError, TypeError):
+            # Legacy 2-tuple format; upgrade to 3-tuple
+            stored_ttl, values = existing
+            sources_set = {source_label}
 
     if value not in values:
         values.append(value)
+    sources_set.add(source_label)
 
-    mapping[key] = (stored_ttl, values)
+    mapping[key] = (stored_ttl, values, sources_set)
     per_name = name_index.setdefault(owner_norm, {})
-    per_name[int(qtype_code)] = (stored_ttl, values)
+    per_name[int(qtype_code)] = (stored_ttl, values, sources_set)
 
     # Track SOA records as zone apexes for authoritative zones.
     if soa_code is not None and int(qtype_code) == int(soa_code):
         # With overwrite policy, allow later sources to replace the apex SOA.
         if merge_policy == "overwrite" or owner_norm not in zone_soa:
-            zone_soa[owner_norm] = (stored_ttl, values)
+            zone_soa[owner_norm] = (stored_ttl, values, sources_set)
 
 
 def process_record_line(
@@ -171,9 +226,9 @@ def process_record_line(
     raw_line: str,
     source_label: str,
     lineno: int,
-    mapping: Dict[Tuple[str, int], Tuple[int, List[str]]],
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
-    zone_soa: Dict[str, Tuple[int, List[str]]],
+    mapping: Dict[Tuple[str, int], Tuple[int, List[str], Set[str]]],
+    name_index: Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]],
+    zone_soa: Dict[str, Tuple[int, List[str], Set[str]]],
     soa_code: Optional[int],
     load_mode: str,
     merge_policy: str,
@@ -187,9 +242,9 @@ def process_record_line(
       - raw_line: Original line text including any comments.
       - source_label: Human-readable source identifier (file path or inline config label).
       - lineno: 1-based line number within the source.
-      - mapping: Aggregated (domain, qtype) -> (ttl, [values]) mapping.
-      - name_index: Per-name index mapping domain -> qtype -> (ttl, [values]).
-      - zone_soa: Mapping of zone apex -> (ttl, [soa_values]).
+      - mapping: Aggregated (domain, qtype) -> (ttl, [values], {sources}) mapping.
+      - name_index: Per-name index mapping domain -> qtype -> (ttl, [values], {sources}).
+      - zone_soa: Mapping of zone apex -> (ttl, [soa_values], {sources}).
       - soa_code: Numeric QTYPE code for SOA, or None when unavailable.
       - load_mode: One of 'replace', 'merge', or 'first'.
       - merge_policy: Either 'add' or 'overwrite'.
@@ -472,7 +527,9 @@ def load_records(plugin: object) -> None:
 
     axfr_zones = getattr(plugin, "_axfr_zones", None) or []
     do_axfr = bool(axfr_zones) and not getattr(plugin, "_axfr_loaded_once", False)
+    zone_metadata = getattr(plugin, "_axfr_zone_metadata", None) or {}
 
+    # Get SOA type code once at start
     try:
         raw = getattr(QTYPE, "SOA", None)
     except Exception:
@@ -489,23 +546,69 @@ def load_records(plugin: object) -> None:
 
     # load_mode='first': Use the first configured source group and ignore
     # the others (no cross-group overlays).
+    # This uses the documented precedence order: inline > axfr > file_paths > bind_paths
+    inline_records = getattr(plugin, "_inline_records", None) or []
+    axfr_zones = getattr(plugin, "_axfr_zones", None) or []
     file_paths = getattr(plugin, "file_paths", [])
     bind_paths = getattr(plugin, "bind_paths", None) or []
-    inline_records = getattr(plugin, "_inline_records", None) or []
 
     if load_mode == "first":
-        if file_paths:
+        if inline_records:
+            selected = "inline"
+        elif do_axfr:
+            selected = "axfr"
+        elif file_paths:
             selected = "files"
         elif bind_paths:
             selected = "bind"
-        elif do_axfr:
-            selected = "axfr"
-        elif inline_records:
-            selected = "inline"
         else:
             selected = "none"
     else:
         selected = "all"
+
+    # Merge inline records (highest priority)
+    if selected in {"all", "inline"}:
+        seen_rrsets = set()
+        for lineno, raw_line in enumerate(inline_records, start=1):
+            try:
+                text = str(raw_line)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "Skipping non-string inline record at index %d: %r (%s)",
+                    lineno,
+                    raw_line,
+                    exc,
+                )
+                continue
+            process_record_line(
+                plugin,
+                text,
+                "inline-config-records",
+                lineno,
+                mapping,
+                name_index,
+                zone_soa,
+                soa_code,
+                load_mode,
+                merge_policy,
+                seen_rrsets,
+                overwritten_by_source,
+            )
+
+    # Overlay AXFR-backed zones
+    if selected in {"all", "axfr"} and do_axfr:
+        _axfr_dnssec.overlay_axfr_zones(
+            mapping,
+            name_index,
+            zone_soa,
+            axfr_zones,
+            soa_code,
+            dnssec_classified_axfr,
+            axfr_fn=axfr_transfer,
+            zone_metadata=zone_metadata,
+            force_reload=not getattr(plugin, "_axfr_loaded_once", False),
+        )
+        plugin._axfr_loaded_once = True
 
     # Load custom pipe-delimited files
     if selected in {"all", "files"}:
@@ -606,53 +709,11 @@ def load_records(plugin: object) -> None:
                     overwritten_by_source=overwritten_by_source,
                 )
 
-    # Overlay AXFR-backed zones
-    if selected in {"all", "axfr"} and do_axfr:
-        _axfr_dnssec.overlay_axfr_zones(
-            mapping,
-            name_index,
-            zone_soa,
-            axfr_zones,
-            soa_code,
-            dnssec_classified_axfr,
-            axfr_fn=axfr_transfer,
-        )
-        plugin._axfr_loaded_once = True
-
-    # Merge inline records
-    if selected in {"all", "inline"}:
-        seen_rrsets = set()
-        for lineno, raw_line in enumerate(inline_records, start=1):
-            try:
-                text = str(raw_line)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning(
-                    "Skipping non-string inline record at index %d: %r (%s)",
-                    lineno,
-                    raw_line,
-                    exc,
-                )
-                continue
-            process_record_line(
-                plugin,
-                text,
-                "inline-config-records",
-                lineno,
-                mapping,
-                name_index,
-                zone_soa,
-                soa_code,
-                load_mode,
-                merge_policy,
-                seen_rrsets,
-                overwritten_by_source,
-            )
-
     # Synthesize SOA if needed
     if not zone_soa:
         try:
             candidate_names: List[str] = []
-            for (owner_name, qcode), (_ttl_val, _vals) in mapping.items():
+            for (owner_name, qcode), (_ttl_val, _vals, _sources) in mapping.items():
                 if soa_code is not None and int(qcode) == int(soa_code):
                     continue
                 candidate_names.append(str(owner_name))
@@ -750,7 +811,11 @@ def load_records(plugin: object) -> None:
             for rr_qtype in (a_code, aaaa_code):
                 if rr_qtype not in rrsets:
                     continue
-                ttl_val, vals = rrsets[rr_qtype]
+                try:
+                    ttl_val, vals, _sources = rrsets[rr_qtype]
+                except (ValueError, TypeError):
+                    # Legacy 2-tuple format
+                    ttl_val, vals = rrsets[rr_qtype]
                 for v in list(vals):
                     try:
                         ip_obj = ipaddress.ip_address(str(v))
@@ -769,15 +834,22 @@ def load_records(plugin: object) -> None:
                     if existing_ptr is None:
                         stored_ttl = int(ttl_val)
                         ptr_vals: List[str] = []
+                        ptr_sources: Set[str] = set(["ptr-auto-" + owner_norm])
                     else:
-                        stored_ttl, ptr_vals = existing_ptr
+                        try:
+                            stored_ttl, ptr_vals, ptr_sources = existing_ptr
+                        except (ValueError, TypeError):
+                            # Legacy 2-tuple format
+                            stored_ttl, ptr_vals = existing_ptr
+                            ptr_sources = set(["ptr-auto-" + owner_norm])
 
                     if ptr_target not in ptr_vals:
                         ptr_vals.append(ptr_target)
+                    ptr_sources.add("ptr-auto-" + owner_norm)
 
-                    mapping[key_ptr] = (stored_ttl, ptr_vals)
+                    mapping[key_ptr] = (stored_ttl, ptr_vals, ptr_sources)
                     per_name_ptr = name_index.setdefault(reverse_owner, {})
-                    per_name_ptr[int(ptr_code)] = (stored_ttl, ptr_vals)
+                    per_name_ptr[int(ptr_code)] = (stored_ttl, ptr_vals, ptr_sources)
     except Exception:  # pragma: no cover - defensive logging only
         logger.warning(
             "ZoneRecords: failed to auto-generate PTR records from A/AAAA",

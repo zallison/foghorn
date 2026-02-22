@@ -249,12 +249,12 @@ Clients without DO=1 receive only the base RRsets without signatures.
 #### Precedence
 
 When multiple sources define the same owner/qtype, ZoneRecords applies this
-policy order:
+policy order from highest to lowest precedence:
 
 1. `records` – inline records define local policy and TTLs.
 2. `axfr_zones` – AXFR-backed records extend the inline view.
 3. `file_paths` – custom pipe-delimited files further extend the view.
-4. `bind_paths` – BIND-style zone files are merged last.
+4.  `bind_paths` – BIND-style zone files are merged last.
 
 Within this merge:
 
@@ -263,6 +263,27 @@ Within this merge:
   ignored.
 - The first SOA for a given owner defines that zone apex; later SOAs for the
   same owner are ignored.
+
+#### AXFR Reload Timing
+
+AXFR-backed zones can be reloaded on subsequent plugin loads based on the
+`minimum_reload_time` configuration field in `axfr_zones` entries:
+
+- `minimum_reload_time: float` – Minimum seconds between AXFR reloads. Reloads only
+  after this time has elapsed since the initial load or since the last NOTIFY was
+  received for the zone. A value of 0 (default) reloads on every load.
+
+This allows balancing between keeping zones up-to-date and avoiding excessive transfer
+load on upstream servers.
+
+The `load_mode=replace` mode always forces a reload when the plugin starts up.
+
+#### Dynamic DNS (Future Support)
+
+Future updates will add Dynamic DNS (RFC 2136) update support, allowing
+in-place modifications to records from authorized clients. When enabled, records
+modified via Dynamic DNS will be tracked by source, allowing stale entries to be
+removed cleanly when their source is removed or reconfigured.
 
 ### Common BasePlugin options
 

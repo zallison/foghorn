@@ -70,7 +70,15 @@ def handle_opcode(
 
     # Valid NOTIFY from recognized upstream: schedule AXFR refresh and return NOERROR
     try:
+        import time
+
         _schedule_notify_axfr_refresh(qname, upstream)
+        # Update NOTIFY timestamp for AXFR reload timing logic
+        zone_metadata = getattr(plugin, "_axfr_zone_metadata", None) or {}
+        zone_norm = str(qname).rstrip(".").lower()
+        if zone_norm not in zone_metadata:
+            zone_metadata[zone_norm] = {}
+        zone_metadata[zone_norm]["last_notify"] = time.time()
     except (
         Exception
     ):  # pragma: nocover - [defensive: AXFR refresh scheduling should not fail]
@@ -238,7 +246,7 @@ def pre_resolve(
 
             # CNAME at owner name: always answer with CNAME regardless of qtype.
             if cname_code in rrsets:
-                ttl_cname, cname_values = rrsets[cname_code]
+                ttl_cname, cname_values, _ = rrsets[cname_code]
                 added = dnssec.add_rrset_to_reply(
                     reply,
                     owner,
@@ -265,7 +273,7 @@ def pre_resolve(
                 # ANY query returns all RRsets at the owner.
                 if qtype_int == int(QTYPE.ANY):
                     added_any = False
-                    for rr_qtype, (ttl_rr, values_rr) in rrsets.items():
+                    for rr_qtype, (ttl_rr, values_rr, _) in rrsets.items():
                         if not want_dnssec_nx and dnssec.is_dnssec_rrtype(rr_qtype):
                             continue
                         if dnssec.add_rrset_to_reply(
@@ -293,7 +301,7 @@ def pre_resolve(
 
                 # Exact qtype match.
                 if qtype_int in rrsets:
-                    ttl_rr, values_rr = rrsets[qtype_int]
+                    ttl_rr, values_rr, _ = rrsets[qtype_int]
                     include_dnssec = want_dnssec_nx or dnssec.is_dnssec_rrtype(
                         qtype_int
                     )
@@ -340,7 +348,7 @@ def pre_resolve(
             reply.header.rcode = RCODE.NXDOMAIN
             return PluginDecision(action="override", response=reply.pack())
 
-        ttl, values = entry
+        ttl, values, _ = entry
         logger.debug("ZoneRecords got entry for %s %s -> %s", name, type_name, values)
 
         try:
@@ -392,7 +400,7 @@ def pre_resolve(
 
     # CNAME at owner name: always answer with CNAME regardless of qtype.
     if cname_code in rrsets:
-        ttl_cname, cname_values = rrsets[cname_code]
+        ttl_cname, cname_values, _ = rrsets[cname_code]
         if len(rrsets) > 1:
             logger.warning(
                 "CustomRecords zone %s has CNAME and other RRsets at %s; "
@@ -427,7 +435,7 @@ def pre_resolve(
         # Positive answers for specific qtypes.
         if qtype_int == int(QTYPE.ANY):
             added_any = False
-            for rr_qtype, (ttl_rr, values_rr) in rrsets.items():
+            for rr_qtype, (ttl_rr, values_rr, _) in rrsets.items():
                 # For QTYPE=ANY with DO=0, suppress DNSSEC-only RR types
                 if not want_dnssec and dnssec.is_dnssec_rrtype(rr_qtype):
                     continue
@@ -455,7 +463,7 @@ def pre_resolve(
             return PluginDecision(action="override", response=reply.pack())
 
         if qtype_int in rrsets:
-            ttl_rr, values_rr = rrsets[qtype_int]
+            ttl_rr, values_rr, _ = rrsets[qtype_int]
             # For DNSSEC RR types queried directly, always allow signatures.
             include_dnssec = want_dnssec or dnssec.is_dnssec_rrtype(qtype_int)
             if not dnssec.add_rrset_to_reply(
@@ -483,7 +491,7 @@ def pre_resolve(
         reply.header.rcode = RCODE.NOERROR
         soa_entry = zone_soa.get(zone_apex)
         if soa_entry is not None:
-            soa_ttl, soa_values = soa_entry
+            soa_ttl, soa_values, _ = soa_entry
             soa_owner = zone_apex.rstrip(".") + "."
 
             if want_dnssec:
@@ -532,7 +540,7 @@ def pre_resolve(
     reply.header.rcode = RCODE.NXDOMAIN
     soa_entry = zone_soa.get(zone_apex)
     if soa_entry is not None:
-        soa_ttl, soa_values = soa_entry
+        soa_ttl, soa_values, _ = soa_entry
         soa_owner = zone_apex.rstrip(".") + "."
 
         if want_dnssec:
