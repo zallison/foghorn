@@ -7,7 +7,7 @@ Inputs/Outputs:
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from dnslib import QTYPE, RR, DNSRecord
 
@@ -148,7 +148,7 @@ def add_rrset_to_reply(
 def _find_closest_encloser(
     qname: str,
     zone_apex: str,
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
+    name_index: Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]],
 ) -> str:
     """Brief: Find the closest existing ancestor name inside a zone.
 
@@ -178,8 +178,8 @@ def add_nsec3_denial_of_existence(
     reply: DNSRecord,
     qname: str,
     zone_apex: str,
-    records: Dict[Tuple[str, int], Tuple[int, List[str]]],
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
+    records: Dict[Tuple[str, int], Tuple[int, List[str], Set[str]]],
+    name_index: Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]],
     mapping_by_qtype: Optional[Dict[int, Dict[str, List[RR]]]] = None,
 ) -> None:
     """Brief: Add NSEC3 proof material to an authoritative negative response.
@@ -225,7 +225,11 @@ def add_nsec3_denial_of_existence(
     if not param_entry:
         return
 
-    _ttl_param, param_vals = param_entry
+    try:
+        _ttl_param, param_vals, _sources = param_entry
+    except (ValueError, TypeError):
+        # Legacy 2-tuple format
+        _ttl_param, param_vals = param_entry
     if not param_vals:
         return
 
@@ -347,7 +351,11 @@ def add_nsec3_denial_of_existence(
         entry = records.get((nsec3_owner, int(nsec3_code)))
         if not entry:
             continue
-        ttl, vals = entry
+        try:
+            ttl, vals, _sources = entry
+        except (ValueError, TypeError):
+            # Legacy 2-tuple format
+            ttl, vals = entry
         add_rrset_to_reply(
             reply,
             nsec3_owner + ".",
@@ -407,9 +415,9 @@ def is_dnssec_rrtype(code: int) -> bool:
 def add_dnssec_rrsets(
     reply: DNSRecord,
     owner_name: str,
-    owner_rrsets: Dict[int, Tuple[int, List[str]]],
+    owner_rrsets: Dict[int, Tuple[int, List[str], Set[str]]],
     zone_apex_name: str,
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
+    name_index: Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]],
     mapping_by_qtype: Optional[Dict[int, Dict[str, List[RR]]]] = None,
 ) -> None:
     """Brief: Append DNSSEC RRsets (DNSKEY/RRSIG) when present for an owner.
@@ -443,7 +451,10 @@ def add_dnssec_rrsets(
     if owner_normalized == zone_apex_name:
         apex_rrsets = name_index.get(zone_apex_name, {})
         if dnskey_code in apex_rrsets:
-            ttl_dk, vals_dk = apex_rrsets[dnskey_code]
+            try:
+                ttl_dk, vals_dk, _sources = apex_rrsets[dnskey_code]
+            except (ValueError, TypeError):
+                ttl_dk, vals_dk = apex_rrsets[dnskey_code]
             add_rrset_to_reply(
                 reply,
                 owner_name,
