@@ -168,12 +168,14 @@ def pre_resolve(
         name_index = getattr(plugin, "_name_index", {})
         zone_soa = getattr(plugin, "_zone_soa", {})
         mapping_by_qtype = getattr(plugin, "mapping", None)
+        wildcard_owners = getattr(plugin, "_wildcard_owners", None)
     else:
         with lock:
             records = dict(getattr(plugin, "records", {}))
             name_index = dict(getattr(plugin, "_name_index", {}))
             zone_soa = dict(getattr(plugin, "_zone_soa", {}))
             mapping_by_qtype = dict(getattr(plugin, "mapping", {}) or {})
+            wildcard_owners = list(getattr(plugin, "_wildcard_owners", []) or [])
 
     zone_apex = helpers.find_zone_for_name(name, zone_soa)
 
@@ -184,6 +186,15 @@ def pre_resolve(
     if zone_apex is None:
         key = (name, qtype_int)
         entry = records.get(key)
+
+        # If there's no exact match, try wildcard owners.
+        if not entry:
+            matched_owner, rrsets = helpers.find_best_rrsets_for_name(
+                name, name_index, wildcard_patterns=wildcard_owners
+            )
+            if matched_owner is not None and qtype_int in (rrsets or {}):
+                entry = rrsets[qtype_int]
+
         if not entry:
             # Optional: treat selected suffixes as authoritative NXDOMAIN/NODATA
             # zones even without an SOA.
@@ -220,7 +231,9 @@ def pre_resolve(
             )
             owner = str(request.q.qname).rstrip(".") + "."
 
-            rrsets = name_index.get(name, {})
+            matched_owner_nx, rrsets = helpers.find_best_rrsets_for_name(
+                name, name_index, wildcard_patterns=wildcard_owners
+            )
             cname_code = int(QTYPE.CNAME)
 
             # CNAME at owner name: always answer with CNAME regardless of qtype.
@@ -307,6 +320,20 @@ def pre_resolve(
 
                 # Name exists under the configured suffix, but requested type is absent.
                 reply.header.rcode = RCODE.NOERROR
+
+                # DNSSEC denial-of-existence for wildcard-expanded answers is tricky,
+                # and the NSEC3 proof logic assumes concrete owner names. Avoid
+                # attaching NSEC3 when the rrsets came from a wildcard owner.
+                if want_dnssec_nx and matched_owner_nx == name:
+                    dnssec.add_nsec3_denial_of_existence(
+                        reply,
+                        name,
+                        matched_zone,
+                        records,
+                        name_index,
+                        mapping_by_qtype=mapping_by_qtype,
+                    )
+
                 return PluginDecision(action="override", response=reply.pack())
 
             # Name does not exist under the configured suffix.
@@ -358,7 +385,9 @@ def pre_resolve(
         DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=1), q=request.q
     )
 
-    rrsets = name_index.get(name, {})
+    matched_owner, rrsets = helpers.find_best_rrsets_for_name(
+        name, name_index, wildcard_patterns=wildcard_owners
+    )
     cname_code = int(QTYPE.CNAME)
 
     # CNAME at owner name: always answer with CNAME regardless of qtype.
@@ -468,14 +497,17 @@ def pre_resolve(
                     mapping_by_qtype=mapping_by_qtype,
                     section="auth",
                 )
-                dnssec.add_nsec3_denial_of_existence(
-                    reply,
-                    name,
-                    zone_apex,
-                    records,
-                    name_index,
-                    mapping_by_qtype=mapping_by_qtype,
-                )
+
+                # Avoid NSEC3 proofs for wildcard-expanded names (see note above).
+                if matched_owner == name:
+                    dnssec.add_nsec3_denial_of_existence(
+                        reply,
+                        name,
+                        zone_apex,
+                        records,
+                        name_index,
+                        mapping_by_qtype=mapping_by_qtype,
+                    )
             else:
                 for value in list(soa_values):
                     zone_line = f"{soa_owner} {soa_ttl} IN SOA {value}"
