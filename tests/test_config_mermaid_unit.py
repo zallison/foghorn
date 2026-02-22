@@ -954,7 +954,9 @@ def test_ensure_config_diagram_png_edge_cases_and_python_mermaid_fallback(
     cfg_path.write_text("plugins: []\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        cm, "generate_mermaid_text_from_config_path", lambda _p: "flowchart TB\n"
+        cm,
+        "generate_mermaid_text_from_config_path",
+        lambda _p, **_k: "flowchart TB\n",
     )
     monkeypatch.setattr(cm.shutil, "which", lambda _n: None)
 
