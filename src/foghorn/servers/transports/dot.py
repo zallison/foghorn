@@ -4,6 +4,8 @@ import threading
 import time
 from typing import Optional
 
+from foghorn.utils.register_caches import registered_lru_cached
+
 
 class DoTError(Exception):
     """
@@ -20,6 +22,7 @@ class DoTError(Exception):
     pass
 
 
+@registered_lru_cached(maxsize=64)
 def _build_ssl_context(
     server_hostname: Optional[str],
     verify: bool = True,

@@ -7,12 +7,33 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Set
 
 from foghorn.plugins.querylog import BaseStatsStore
+from foghorn.utils.register_caches import registered_lru_cached
 
 from ..domain import _normalize_domain
 from ..histogram import LatencyHistogram
 from ..topk import TOPK_CAPACITY_FACTOR, TOPK_MIN_CAPACITY, TopK
 
 logger = logging.getLogger("foghorn.stats")
+
+
+@registered_lru_cached(maxsize=4096)
+def _parse_client_ip_for_ignore(
+    client_ip: str,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Brief: Parse and cache client IP strings for ignore-filter evaluation.
+
+    Inputs:
+      - client_ip: Client IP string.
+
+    Outputs:
+      - ipaddress.IPv4Address | ipaddress.IPv6Address: Parsed address object.
+
+    Notes:
+      - This is used on the query-recording hot path when ignore_top_clients is
+        configured, so caching avoids repeated ipaddress parsing for common
+        client IPs.
+    """
+    return ipaddress.ip_address(str(client_ip).strip())
 
 
 class _StatsCollectorInitMixin:
@@ -193,7 +214,7 @@ class _StatsCollectorInitMixin:
         if not client_ip or not self._ignore_top_client_networks:
             return False
         try:
-            addr = ipaddress.ip_address(str(client_ip))
+            addr = _parse_client_ip_for_ignore(str(client_ip))
         except Exception:
             return False
         return any(addr in net for net in self._ignore_top_client_networks)
