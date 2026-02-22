@@ -10,6 +10,7 @@ import logging
 import os
 import pathlib
 import re
+from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -493,17 +494,18 @@ def find_zone_for_name(
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$")
 
 
-def _split_dns_labels(text: str) -> List[str]:
+@lru_cache(maxsize=4096)
+def _split_dns_labels(text: str) -> tuple[str, ...]:
     """Brief: Split a domain into normalized DNS labels.
 
     Inputs:
       - text: Domain-like string (may include trailing dot).
 
     Outputs:
-      - list[str]: Lowercased labels.
+      - tuple[str, ...]: Lowercased labels.
 
     Notes:
-      - Returns an empty list when the input appears invalid (empty labels like
+      - Returns an empty tuple when the input appears invalid (empty labels like
         "..", leading dot, or labels with unexpected characters).
       - This is primarily to avoid surprising wildcard matches on malformed
         inputs.
@@ -514,11 +516,11 @@ def _split_dns_labels(text: str) -> List[str]:
         norm = str(text).rstrip(".").lower()
 
     if not norm:
-        return []
+        return ()
 
     # Reject empty-label constructs such as ".." or a leading dot.
     if norm.startswith(".") or ".." in norm:
-        return []
+        return ()
 
     labels = norm.split(".")
 
@@ -527,11 +529,12 @@ def _split_dns_labels(text: str) -> List[str]:
         if lbl == "*":
             continue
         if not _DNS_LABEL_RE.match(lbl):
-            return []
+            return ()
 
-    return labels
+    return tuple(labels)
 
 
+@lru_cache(maxsize=8192)
 def is_wildcard_domain_pattern(pattern: str) -> bool:
     """Brief: Return True when *pattern* contains one or more wildcard labels.
 
@@ -549,6 +552,7 @@ def is_wildcard_domain_pattern(pattern: str) -> bool:
     return any(lbl == "*" for lbl in labels)
 
 
+@lru_cache(maxsize=8192)
 def match_wildcard_domain(name: str, pattern: str) -> bool:
     """Brief: Match a domain name against a ZoneRecords wildcard pattern.
 
@@ -577,7 +581,7 @@ def match_wildcard_domain(name: str, pattern: str) -> bool:
         return False
 
     # Special case: "*" alone.
-    if pat_labels == ["*"]:
+    if pat_labels == ("*",):
         return True
 
     # Special case: leading "*" matches any number of labels (>=1).
@@ -610,6 +614,7 @@ def match_wildcard_domain(name: str, pattern: str) -> bool:
     return True
 
 
+@lru_cache(maxsize=8192)
 def wildcard_matched_character_count(name: str, pattern: str) -> Optional[int]:
     """Brief: Count how many characters were consumed by a leading wildcard match.
 
@@ -642,7 +647,7 @@ def wildcard_matched_character_count(name: str, pattern: str) -> Optional[int]:
         return 0
 
     # Pattern "*" alone: it matches the whole name.
-    if pat_labels == ["*"]:
+    if pat_labels == ("*",):
         return len(".".join(name_labels))
 
     remainder = pat_labels[1:]

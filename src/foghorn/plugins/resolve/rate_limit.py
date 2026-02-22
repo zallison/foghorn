@@ -5,6 +5,7 @@ import os
 import sqlite3
 import threading
 import time
+from functools import lru_cache
 from typing import Optional, Tuple
 
 from dnslib import QTYPE, RCODE, DNSRecord
@@ -65,6 +66,7 @@ class RateLimitConfig(BaseModel):
         extra = "allow"
 
 
+@lru_cache(maxsize=16384)
 def _to_base_domain(qname: str, base_labels: int = 2) -> str:
     """Brief: Extract base domain using the last N labels from qname.
 
