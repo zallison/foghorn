@@ -206,6 +206,24 @@ def fake_mysql_driver(monkeypatch: pytest.MonkeyPatch):
       - types.ModuleType for mysql.connector; installed into sys.modules.
     """
 
+    # The backend defaults to preferring mariadb when available. Many test
+    # environments have a real mariadb package installed, so ensure we don't
+    # accidentally connect to a real DB unless the test explicitly installs a
+    # fake mariadb module.
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]
+        if name == "mariadb":
+            mod = sys.modules.get("mariadb")
+            if mod is not None and getattr(mod, "__file__", None) is None:
+                return real_import(name, globals, locals, fromlist, level)
+            raise ModuleNotFoundError(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
     driver_mod = types.ModuleType("mysql.connector")
 
     def _connect(**kwargs: Any) -> _FakeConn:
