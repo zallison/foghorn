@@ -23,6 +23,7 @@ All notable changes to this project will be documented in this file.
 - Config Mermaid diagram generation now splits listeners and upstream endpoints into individual nodes, and highlights secure transports (DoT/DoH) vs insecure (UDP/TCP).
 - Filter plugin: added `deny_response: drop` to allow silently dropping denied queries (no reply).
 - ZoneRecords (`zone`) now supports configurable reload semantics via `load_mode` and conflict handling via `merge_policy`.
+- ZoneRecords now supports wildcard owner patterns (`*` labels) in record sources, selecting a single best match based on leading-wildcard depth.
 - ZoneRecords can now be configured with `load_mode=first` to select the first configured source group (files, BIND zonefiles, AXFR, or inline) and ignore the others.
 - BIND zonefile entries under `bind_paths` can now override `$ORIGIN` and `$TTL` via per-entry `origin`/`ttl` settings; in-file `$ORIGIN`/`$TTL` directives are ignored with a warning when overridden.
 - Added `nxdomain_zones` to force NXDOMAIN/NODATA under selected suffixes when a name is not present in ZoneRecords, instead of falling through to upstream.
@@ -48,6 +49,8 @@ All notable changes to this project will be documented in this file.
 - Filter allow/deny behavior is now consistent across mixed-case names and trailing-dot variants.
 - Authoritative-only resolver behavior now returns REFUSED with an EDE explanation instead of attempting upstream resolution.
 - Reduced log spam in upstream failover by emitting upstream skip warnings once per upstream target.
+- The admin config diagram endpoint now attempts on-demand generation/refresh (when `mmdc` is available) if the PNG is missing or stale.
+- Mermaid config diagram PNG generation now uses an atomic replace to avoid leaving partially-written files on render failure.
 - The admin `/config` endpoint now supports `server.http.redact_keys` as a compatibility fallback when `webserver.redact_keys` is not set.
 - Redacted YAML output now quotes the placeholder (`'***'`) to ensure redacted config output remains parseable.
 - Fixed Mermaid config diagram rendering when resolver mode is `master` (authoritative-only / no forwarding).
@@ -58,9 +61,11 @@ All notable changes to this project will be documented in this file.
 - Added tests asserting plugin/ZoneRecords admin snapshots are JSON-safe.
 - Added pipeline tests for master/none authoritative-only behavior.
 - Extended ZoneRecords test coverage for merge/overwrite behavior, first-mode semantics, BIND override warnings, and `nxdomain_zones`.
+- Added ZoneRecords wildcard matching tests, including ensuring blank names do not match `*`.
 - Added focused unit tests for ZoneRecords AXFR polling, NOTIFY helpers, and transfer snapshot helpers.
 - Added cache backend tests covering stable key hashing, bytes vs pickle storage, and the updated `PostgresCache` API.
-- Updated webserver tests for redact-key compatibility (`server.http.redact_keys`) and quoted YAML redaction placeholders.
+- Hardened MySQL/MariaDB backend tests against environments where the `mariadb` driver is installed.
+- Updated webserver tests for config diagram generation/refresh and redact-key compatibility (`server.http.redact_keys`).
 - Added additional branch-coverage tests for DNSSEC validation helpers and resolve plugin targeting/echo behavior.
 
 ### Documentation
