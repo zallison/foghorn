@@ -24,7 +24,7 @@ dependencies = [
   "dnspython>=2.6.1",
 # Admin UI and DoH server
   "fastapi>=0.111.0",
-  "mmdc",
+#  "mmdc",
   "psutil",
   "python-multipart",
   "uvicorn>=0.30.0",
