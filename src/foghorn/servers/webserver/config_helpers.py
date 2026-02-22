@@ -21,6 +21,8 @@ from typing import Any, Dict, List, Tuple
 
 import yaml
 
+from foghorn.utils.register_caches import registered_lru_cached
+
 # Short-lived cache for sanitized YAML configuration text returned by /config.
 # The underlying on-disk config rarely changes, so a small TTL avoids repeated
 # disk I/O and redaction work under frequent polling.
@@ -428,23 +430,21 @@ def _ts_to_utc_iso(ts: float) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-def _parse_utc_datetime(value: str) -> datetime:
-    """Parse a datetime string into an aware UTC :class:`datetime`.
-
-    Brief:
-      Accepts either ISO-8601-like strings (including a trailing ``"Z"``) or
-      a simple space-separated format ``"YYYY-MM-DD HH:MM:SS"`` (optionally with
-      fractional seconds).
+@registered_lru_cached(maxsize=1024)
+def _parse_utc_datetime_cached(value: str, datetime_token: int) -> datetime:
+    """Brief: Cached helper for _parse_utc_datetime.
 
     Inputs:
       - value: Datetime string.
+      - datetime_token: Integer token included in the cache key so that tests
+        which monkeypatch the module-level ``datetime`` do not accidentally hit
+        a stale cached parse.
 
     Outputs:
       - timezone-aware :class:`datetime` in UTC.
-
-    Raises:
-      - ValueError when parsing fails.
     """
+    # datetime_token is intentionally unused except as part of the cache key.
+    _ = int(datetime_token)
 
     raw = str(value or "").strip()
     if not raw:
@@ -474,3 +474,26 @@ def _parse_utc_datetime(value: str) -> datetime:
     else:
         dt = dt.astimezone(timezone.utc)
     return dt
+
+
+def _parse_utc_datetime(value: str) -> datetime:
+    """Parse a datetime string into an aware UTC :class:`datetime`.
+
+    Brief:
+      Accepts either ISO-8601-like strings (including a trailing ``"Z"``) or
+      a simple space-separated format ``"YYYY-MM-DD HH:MM:SS"`` (optionally with
+      fractional seconds).
+
+    Inputs:
+      - value: Datetime string.
+
+    Outputs:
+      - timezone-aware :class:`datetime` in UTC.
+
+    Raises:
+      - ValueError when parsing fails.
+    """
+
+    # Include the identity of the module-level datetime binding in the cache key
+    # so that tests which monkeypatch `datetime` do not observe stale cache hits.
+    return _parse_utc_datetime_cached(value, id(datetime))
