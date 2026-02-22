@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- ZoneRecords plugin source precedence order has been **revised** to match documentation: inline records (highest) → AXFR zones → file_paths → bind_paths (lowest). Previously the order was the reverse of this.
+  - This changes which source wins when the same `(domain, qtype)` is defined by multiple sources.
+  - `load_mode=first` order has been updated to reflect the new precedence: inline → axfr → file_paths → bind_paths.
+- AXFR zones now enforce `minimum_reload_time` timing on reload, preventing excessive upstream load. Previously, AXFR was only loaded once at startup.
+- The `minimum_reload_time` field in `axfr_zones` entries now triggers reloads only after the configured seconds have elapsed since initial load or last NOTIFY receipt (default 0 = reload on every load).
+
+### Added
+
+- ZoneRecords plugin: Added `minimum_reload_time` field to `axfr_zones` entries to control when AXFR zones can be reloaded, allowing load balancing between staying current and avoiding excessive upstream transfer load while still honoring NOTIFY events.
+
+### Changed
+
+- AXFR-backed zones now respect `minimum_reload_time` and reload only when enough time has elapsed since initial load or last NOTIFY reception, or when `load_mode=replace` forces a full reload.
+- Performance: added LRU caches to hot-path helpers used during resolution and admin polling (ZoneRecords wildcard parsing, RateLimit base-domain extraction, AccessControl IP parsing, DoH/DoT SSL context creation, stats ignore-filter IP parsing, and webserver UTC datetime parsing).
+- Admin UI: when the config diagram PNG is unavailable, the UI now preserves the normal two-pane layout and shows Mermaid source in the diagram pane.
+- Logging: upstream skip de-duplication messages are now logged at INFO (was WARNING).
+- Packaging: `mmdc` is now treated as optional (no longer a default dependency); docs/UI include Docker-based rendering instructions.
+- Docker image: added `libfontconfig` to support diagram text rendering.
+
+### Documentation
+
+- Updated ZoneRecords docs to clarify source precedence order and AXFR reload timing behavior.
+- Added Docker-based Mermaid CLI (mmdc) rendering instructions.
+
+----
+
 > Release notes for changes between **v0.6.4** and **v0.6.5**.
 
 ### Added
