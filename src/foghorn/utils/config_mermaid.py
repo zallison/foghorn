@@ -1586,6 +1586,46 @@ def _render_png_with_mmdc(*, mmd_text: str, output_png_path: str) -> tuple[bool,
     return True, "ok"
 
 
+def _render_png_with_mmdc_atomic(
+    *, mmd_text: str, output_png_path: str
+) -> tuple[bool, str]:
+    """Brief: Render via mmdc and atomically replace the destination file.
+
+    Inputs:
+      - mmd_text: Mermaid flowchart text.
+      - output_png_path: Final destination PNG path.
+
+    Outputs:
+      - (ok, detail)
+
+    Notes:
+      - This avoids leaving a partially-written PNG behind when mmdc fails.
+    """
+
+    tmp_path = f"{output_png_path}.new"
+
+    ok, detail = _render_png_with_mmdc(mmd_text=mmd_text, output_png_path=tmp_path)
+    if not ok:
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except Exception:
+            pass
+        return False, detail
+
+    try:
+        os.replace(tmp_path, output_png_path)
+    except Exception as exc:
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except Exception:
+            pass
+        return False, f"failed to replace png: {exc}"
+
+    return True, "ok"
+
+
 def _render_png_with_python_mermaid(
     *, mmd_text: str, output_png_path: str
 ) -> tuple[bool, str]:
@@ -1707,7 +1747,7 @@ def ensure_config_diagram_png(
     except Exception:
         pass
 
-    ok, detail = _render_png_with_mmdc(
+    ok, detail = _render_png_with_mmdc_atomic(
         mmd_text=mmd_text, output_png_path=output_png_path
     )
     if not ok:
