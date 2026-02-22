@@ -107,7 +107,7 @@ def test_ensure_config_diagram_png_renders_when_mmdc_available(
 
     ok, detail, png_path = ensure_config_diagram_png(config_path=str(cfg_path))
     assert ok is True
-    assert png_path == diagram_png_path_for_config(str(cfg_path))
+    assert png_path == str(cfg_path.parent / "diagram.png")
     assert Path(png_path).is_file()
     assert "rendered" in detail
 
@@ -118,7 +118,7 @@ def test_ensure_config_diagram_png_skips_when_up_to_date(
     """Brief: ensure_config_diagram_png should not re-render when PNG newer than config.
 
     Inputs:
-      - config file and PNG file where PNG mtime >= config mtime.
+      - config file and diagram.png where PNG mtime >= config mtime.
 
     Outputs:
       - ok True with detail up-to-date.
@@ -127,22 +127,191 @@ def test_ensure_config_diagram_png_skips_when_up_to_date(
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
 
-    png_path = Path(diagram_png_path_for_config(str(cfg_path)))
+    png_path = tmp_path / "diagram.png"
     png_path.write_bytes(b"\x89PNG\r\n\x1a\nEXISTING")
 
     # Force PNG to be newer than config.
-    png_path.touch()
     png_path.touch()
 
     import foghorn.utils.config_mermaid as cm
 
     # If the function attempted to call mmdc, fail the test.
-    monkeypatch.setattr(cm.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("called")))  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        cm.subprocess,
+        "run",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("called")),
+    )  # type: ignore[arg-type]
 
     ok, detail, out = ensure_config_diagram_png(config_path=str(cfg_path))
     assert ok is True
     assert out == str(png_path)
     assert detail == "up-to-date"
+
+
+def test_config_diagram_endpoint_regenerates_when_stale_and_mmdc_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Brief: GET /api/v1/config/diagram.png refreshes stale diagram when mmdc exists.
+
+    Inputs:
+      - config newer than an existing diagram.png.
+      - mmdc available (shutil.which returns a path).
+      - subprocess.run stubbed to write a new PNG.
+
+    Outputs:
+      - Endpoint returns the refreshed PNG and clears the staleness warning.
+    """
+
+    png_path = tmp_path / "diagram.png"
+    png_path.write_bytes(b"\x89PNG\r\n\x1a\nOLD")
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
+
+    import foghorn.utils.config_mermaid as cm
+
+    # Ensure the generator doesn't depend on full config parsing in this test.
+    monkeypatch.setattr(
+        cm,
+        "generate_mermaid_text_from_config_path",
+        lambda _p, **_k: "flowchart TB\n",
+    )
+
+    monkeypatch.setattr(
+        cm.shutil,
+        "which",
+        lambda n: "/usr/bin/mmdc" if n == "mmdc" else None,
+    )
+
+    def fake_run(cmd, check=False, stdout=None, stderr=None, text=None):  # type: ignore[no-untyped-def]
+        assert "-o" in cmd
+        out_path = Path(cmd[cmd.index("-o") + 1])
+        out_path.write_bytes(b"\x89PNG\r\n\x1a\nNEW")
+        return types.SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(cm.subprocess, "run", fake_run)
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=None,
+        config_path=str(cfg_path),
+        runtime_state=None,
+        plugins=[],
+    )
+
+    client = TestClient(app)
+    resp = client.get("/api/v1/config/diagram.png")
+    assert resp.status_code == 200
+    assert resp.content.endswith(b"NEW")
+    assert "X-Foghorn-Warning" not in resp.headers
+
+    # And the file on disk should have been replaced.
+    assert png_path.read_bytes().endswith(b"NEW")
+
+
+def test_config_diagram_endpoint_builds_on_demand_when_missing_and_mmdc_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Brief: GET /api/v1/config/diagram.png builds diagram.png on-demand when missing.
+
+    Inputs:
+      - diagram.png missing.
+      - mmdc available.
+
+    Outputs:
+      - Endpoint returns 200 and creates diagram.png.
+    """
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
+
+    import foghorn.utils.config_mermaid as cm
+
+    monkeypatch.setattr(
+        cm,
+        "generate_mermaid_text_from_config_path",
+        lambda _p, **_k: "flowchart TB\n",
+    )
+    monkeypatch.setattr(
+        cm.shutil, "which", lambda n: "/usr/bin/mmdc" if n == "mmdc" else None
+    )
+
+    def fake_run(cmd, check=False, stdout=None, stderr=None, text=None):  # type: ignore[no-untyped-def]
+        out_path = Path(cmd[cmd.index("-o") + 1])
+        out_path.write_bytes(b"\x89PNG\r\n\x1a\nOND")
+        return types.SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(cm.subprocess, "run", fake_run)
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=None,
+        config_path=str(cfg_path),
+        runtime_state=None,
+        plugins=[],
+    )
+
+    client = TestClient(app)
+    resp = client.get("/api/v1/config/diagram.png")
+    assert resp.status_code == 200
+    assert resp.content.endswith(b"OND")
+    assert (tmp_path / "diagram.png").is_file()
+
+
+def test_config_diagram_endpoint_builds_on_demand_only_once_when_generation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Brief: On-demand build is attempted only once per config signature.
+
+    Inputs:
+      - diagram.png missing.
+      - mmdc available.
+      - subprocess.run returns non-zero.
+
+    Outputs:
+      - Both requests return 404.
+      - mmdc subprocess is invoked only once.
+    """
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
+
+    import foghorn.utils.config_mermaid as cm
+
+    monkeypatch.setattr(
+        cm,
+        "generate_mermaid_text_from_config_path",
+        lambda _p, **_k: "flowchart TB\n",
+    )
+    monkeypatch.setattr(
+        cm.shutil, "which", lambda n: "/usr/bin/mmdc" if n == "mmdc" else None
+    )
+
+    calls = {"n": 0}
+
+    def fake_run(cmd, check=False, stdout=None, stderr=None, text=None):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        return types.SimpleNamespace(returncode=1, stderr="nope", stdout="")
+
+    monkeypatch.setattr(cm.subprocess, "run", fake_run)
+
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=None,
+        config_path=str(cfg_path),
+        runtime_state=None,
+        plugins=[],
+    )
+
+    client = TestClient(app)
+    resp1 = client.get("/api/v1/config/diagram.png")
+    assert resp1.status_code == 404
+    resp2 = client.get("/api/v1/config/diagram.png")
+    assert resp2.status_code == 404
+    assert calls["n"] == 1
 
 
 def test_config_diagram_endpoint_serves_png_when_present(tmp_path: Path) -> None:
@@ -177,11 +346,23 @@ def test_config_diagram_endpoint_serves_png_when_present(tmp_path: Path) -> None
     assert resp.headers.get("content-type", "").startswith("image/png")
 
 
-def test_config_diagram_endpoint_returns_404_when_missing(tmp_path: Path) -> None:
-    """Brief: /api/v1/config/diagram.png returns 404 when file is absent."""
+def test_config_diagram_endpoint_returns_404_when_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Brief: /api/v1/config/diagram.png returns 404 when file is absent.
+
+    Notes:
+      - This test forces mmdc to be unavailable so the endpoint doesn't try an
+        on-demand build.
+    """
 
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
+
+    import foghorn.utils.config_mermaid as cm
+
+    monkeypatch.setattr(cm.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(cm, "_mmdc_fallback_paths", lambda: [])
 
     app = create_app(
         stats=None,
