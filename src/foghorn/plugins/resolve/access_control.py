@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+from functools import lru_cache
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
@@ -9,6 +10,23 @@ from pydantic import BaseModel, Field
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=2048)
+def _parse_client_ip(client_ip: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Brief: Parse and cache client IPs for AccessControl hot-path lookups.
+
+    Inputs:
+      - client_ip: Client IP string (IPv4 or IPv6).
+
+    Outputs:
+      - ipaddress.IPv4Address | ipaddress.IPv6Address: Parsed address object.
+
+    Notes:
+      - This keeps per-query overhead low when many requests repeat the same
+        client IPs.
+    """
+    return ipaddress.ip_address(str(client_ip))
 
 
 class AccessControlConfig(BaseModel):
@@ -108,7 +126,7 @@ class AccessControl(BasePlugin):
         if not self.targets(ctx):
             return None
 
-        ip = ipaddress.ip_address(ctx.client_ip)
+        ip = _parse_client_ip(str(ctx.client_ip))
         # Deny takes precedence
         for n in self.deny_nets:
             if ip in n:
