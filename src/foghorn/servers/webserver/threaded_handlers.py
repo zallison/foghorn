@@ -838,20 +838,83 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
+        # Allow a best-effort on-demand build attempt, but only once per config
+        # signature for this process.
+        try:
+            st = os.stat(str(cfg_path))
+            cfg_sig = f"{cfg_path}:{int(st.st_mtime_ns)}:{int(st.st_size)}"
+        except Exception:
+            cfg_sig = str(cfg_path)
+
+        attempted_sig = getattr(
+            self._server(), "_config_diagram_build_attempt_sig", None
+        )
+
         png_file = find_first_existing_path(
             diagram_png_candidate_paths_for_config(cfg_path)
         )
+
+        # If missing and mmdc exists, attempt an on-demand build once.
+        if png_file is None and attempted_sig != cfg_sig:
+            try:
+                from ...utils.config_mermaid import (
+                    _find_mmdc_cmd,
+                    ensure_config_diagram_png,
+                )
+
+                if _find_mmdc_cmd() is not None:
+                    setattr(
+                        self._server(), "_config_diagram_build_attempt_sig", cfg_sig
+                    )
+                    ensure_config_diagram_png(config_path=str(cfg_path))
+                    png_file = find_first_existing_path(
+                        diagram_png_candidate_paths_for_config(cfg_path)
+                    )
+            except Exception:
+                pass
+
+        warn: str | None = None
+        if png_file is not None:
+            warn = stale_diagram_warning(
+                config_path=str(cfg_path), diagram_path=str(png_file)
+            )
+
+            # If stale and mmdc exists, try to refresh the PNG in-place once.
+            if (
+                warn
+                and getattr(self._server(), "_config_diagram_build_attempt_sig", None)
+                != cfg_sig
+            ):
+                try:
+                    from ...utils.config_mermaid import (
+                        _find_mmdc_cmd,
+                        ensure_config_diagram_png,
+                    )
+
+                    if _find_mmdc_cmd() is not None:
+                        setattr(
+                            self._server(), "_config_diagram_build_attempt_sig", cfg_sig
+                        )
+                        ok, _detail, refreshed = ensure_config_diagram_png(
+                            config_path=str(cfg_path)
+                        )
+                        if ok and refreshed:
+                            from pathlib import Path
+
+                            png_file = Path(str(refreshed))
+                            warn = stale_diagram_warning(
+                                config_path=str(cfg_path), diagram_path=str(png_file)
+                            )
+                except Exception:
+                    # Non-fatal: prefer serving the existing file.
+                    pass
 
         headers: dict[str, str] = {
             "X-Foghorn-Exists": "1" if png_file is not None else "0",
         }
 
-        if png_file is not None:
-            warn = stale_diagram_warning(
-                config_path=str(cfg_path), diagram_path=str(png_file)
-            )
-            if warn:
-                headers["X-Foghorn-Warning"] = warn
+        if warn:
+            headers["X-Foghorn-Warning"] = warn
 
         meta_only = False
         try:
