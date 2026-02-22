@@ -9,16 +9,25 @@ WORKDIR /foghorn
 # Copy the current directory contents into the container
 COPY . /foghorn
 
-# Ensure dependencies
+# Ensure dependencies for databases and diagram rendering in the webui
 RUN DEBIAN_FRONTEND=noninteractive apt update && \
-	DEBIAN_FRONTEND=noninteractive apt install -y libmariadb-dev postgresql-server-dev-all build-essential gcc && \
+	DEBIAN_FRONTEND=noninteractive apt install -y \
+	  build-essential \
+	  gcc \
+	  libfontconfig \
+	  libmariadb-dev \
+	  postgresql-server-dev-all && \
 	DEBIAN_FRONTEND=noninteractive apt clean && \
 	rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade pip && pip install --root-user-action=ignore "."
+# build-essential, gcc, and libmariadb for maraidb support
+# postgresql-server-dev-all for postgres
+# libfontconfig for rendering text in diagrams.
+
+RUN pip install --root-user-action=ignore --upgrade pip && pip install --root-user-action=ignore "."
 
 ## Suggested expose and mappings
-
+# Listens on ports > 1024 by default.
 # 53→53353 # Standard UDP/TCP
 EXPOSE 5335/tcp
 EXPOSE 5335/udp
