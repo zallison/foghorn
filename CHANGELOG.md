@@ -25,6 +25,10 @@ All notable changes to this project will be documented in this file.
 - Packaging: `mmdc` is now treated as optional (no longer a default dependency); docs/UI include Docker-based rendering instructions.
 - Docker image: added `libfontconfig` to support diagram text rendering.
 
+### Fixed
+
+- ZoneRecords DNSSEC negative-response helpers now handle source-aware RRset entries `(ttl, values, sources)` to avoid tuple-unpacking errors.
+
 ### Documentation
 
 - Updated ZoneRecords docs to clarify source precedence order and AXFR reload timing behavior.
