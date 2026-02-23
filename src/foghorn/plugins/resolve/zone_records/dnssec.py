@@ -148,7 +148,7 @@ def add_rrset_to_reply(
 def _find_closest_encloser(
     qname: str,
     zone_apex: str,
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
+    name_index: Dict[str, Dict[int, Tuple[int, List[str], object]]],
 ) -> str:
     """Brief: Find the closest existing ancestor name inside a zone.
 
@@ -177,9 +177,10 @@ def _find_closest_encloser(
 def add_nsec3_denial_of_existence(
     reply: DNSRecord,
     qname: str,
+    qtype: int,
     zone_apex: str,
-    records: Dict[Tuple[str, int], Tuple[int, List[str]]],
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
+    records: Dict[Tuple[str, int], Tuple[int, List[str], object]],
+    name_index: Dict[str, Dict[int, Tuple[int, List[str], object]]],
     mapping_by_qtype: Optional[Dict[int, Dict[str, List[RR]]]] = None,
 ) -> None:
     """Brief: Add NSEC3 proof material to an authoritative negative response.
@@ -187,6 +188,7 @@ def add_nsec3_denial_of_existence(
     Inputs:
       - reply: DNS reply to mutate (adds records to the authority section).
       - qname: Normalized queried name (no trailing dot, lowercased).
+      - qtype: Numeric RR type code from the original query.
       - zone_apex: Normalized zone apex (no trailing dot, lowercased).
       - records: (owner,qtype)->(ttl,[values]) mapping used by ZoneRecords.
       - name_index: owner->qtype->(ttl,[values]) index used by ZoneRecords.
@@ -197,15 +199,51 @@ def add_nsec3_denial_of_existence(
       - None; appends NSEC3 (and their RRSIGs) into ``reply.auth``.
 
     Notes:
-      - This function is only meaningful when the zone has NSEC3PARAM and NSEC3
-        RRsets (e.g. from DNSSEC auto-signing).
-      - We include a minimal RFC 5155 proof set: closest encloser match, and
-        covering NSEC3 for the next-closer name and for the wildcard under the
-        closest encloser.
+      - For NXDOMAIN we include a minimal RFC 5155 proof set: closest encloser
+        match, and covering NSEC3 for the next-closer name and for the wildcard
+        under the closest encloser.
+      - For NOERROR/NODATA we only include the *exact* NSEC3 for the queried
+        name's hash (when present), and only when its type bitmap does not
+        contain the queried RR type.
     """
 
     if not isinstance(mapping_by_qtype, dict):
         return
+
+    def _nsec3_value_denies_qtype(value: str) -> bool:
+        """Brief: Return True if an NSEC3 presentation value denies *qtype*.
+
+        Inputs:
+          - value: NSEC3 RDATA in presentation format.
+
+        Outputs:
+          - bool: True when we can parse the type bitmap and it does not contain
+            the queried qtype; False when qtype appears in the bitmap or when
+            parsing is inconclusive.
+        """
+
+        try:
+            qtype_name = str(QTYPE.get(int(qtype), str(qtype))).upper()
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+        # If we cannot represent the queried type as a mnemonic, we cannot
+        # reliably compare against the bitmap.
+        if not qtype_name or qtype_name.isdigit():
+            return False
+
+        try:
+            parts = str(value).split()
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+        # NSEC3 presentation format:
+        #   alg flags iter salt next-hash type...
+        if len(parts) < 6:
+            return False
+
+        bitmap_types = {p.upper() for p in parts[5:]}
+        return qtype_name not in bitmap_types
 
     try:
         nsec3_code = int(QTYPE.NSEC3)
@@ -225,7 +263,7 @@ def add_nsec3_denial_of_existence(
     if not param_entry:
         return
 
-    _ttl_param, param_vals = param_entry
+    param_vals = param_entry[1]
     if not param_vals:
         return
 
@@ -324,18 +362,35 @@ def add_nsec3_denial_of_existence(
                 break
         return hash_to_owner[hashes_sorted[idx]]
 
-    owners_to_add: List[str] = []
+    # For NOERROR/NODATA, only the *exact* NSEC3 RRset at the hashed owner name
+    # can prove that a specific RRtype does not exist at an existing name.
+    if is_nodata:
+        exact_owner = f"{str(h_closest).lower()}.{apex}"
+        if exact_owner not in nsec3_by_name:
+            return
 
-    exact_closest_owner = f"{str(h_closest).lower()}.{apex}"
-    if exact_closest_owner in nsec3_by_name:
-        owners_to_add.append(exact_closest_owner)
+        entry_exact = records.get((exact_owner, int(nsec3_code)))
+        if not entry_exact:
+            return
+
+        vals_exact = entry_exact[1] or []
+        if not any(_nsec3_value_denies_qtype(v) for v in list(vals_exact)):
+            return
+
+        owners_to_add: List[str] = [exact_owner]
     else:
-        owners_to_add.append(_covering_owner(str(h_closest).upper()))
+        owners_to_add = []
 
-    if h_next is not None:
-        owners_to_add.append(_covering_owner(str(h_next).upper()))
-    if h_wc is not None:
-        owners_to_add.append(_covering_owner(str(h_wc).upper()))
+        exact_closest_owner = f"{str(h_closest).lower()}.{apex}"
+        if exact_closest_owner in nsec3_by_name:
+            owners_to_add.append(exact_closest_owner)
+        else:
+            owners_to_add.append(_covering_owner(str(h_closest).upper()))
+
+        if h_next is not None:
+            owners_to_add.append(_covering_owner(str(h_next).upper()))
+        if h_wc is not None:
+            owners_to_add.append(_covering_owner(str(h_wc).upper()))
 
     # De-dup while preserving order.
     seen: set[str] = set()
@@ -347,7 +402,8 @@ def add_nsec3_denial_of_existence(
         entry = records.get((nsec3_owner, int(nsec3_code)))
         if not entry:
             continue
-        ttl, vals = entry
+        ttl = int(entry[0])
+        vals = entry[1]
         add_rrset_to_reply(
             reply,
             nsec3_owner + ".",
@@ -407,9 +463,9 @@ def is_dnssec_rrtype(code: int) -> bool:
 def add_dnssec_rrsets(
     reply: DNSRecord,
     owner_name: str,
-    owner_rrsets: Dict[int, Tuple[int, List[str]]],
+    owner_rrsets: Dict[int, Tuple[int, List[str], object]],
     zone_apex_name: str,
-    name_index: Dict[str, Dict[int, Tuple[int, List[str]]]],
+    name_index: Dict[str, Dict[int, Tuple[int, List[str], object]]],
     mapping_by_qtype: Optional[Dict[int, Dict[str, List[RR]]]] = None,
 ) -> None:
     """Brief: Append DNSSEC RRsets (DNSKEY/RRSIG) when present for an owner.
@@ -443,7 +499,9 @@ def add_dnssec_rrsets(
     if owner_normalized == zone_apex_name:
         apex_rrsets = name_index.get(zone_apex_name, {})
         if dnskey_code in apex_rrsets:
-            ttl_dk, vals_dk = apex_rrsets[dnskey_code]
+            entry = apex_rrsets[dnskey_code]
+            ttl_dk = int(entry[0])
+            vals_dk = entry[1]
             add_rrset_to_reply(
                 reply,
                 owner_name,
