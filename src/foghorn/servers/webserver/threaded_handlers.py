@@ -20,12 +20,12 @@ from typing import Any, Dict, Optional
 import yaml
 
 from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
-from ...utils.config_mermaid import (
+from ...utils.config_diagram import (
     diagram_png_candidate_paths_for_config,
-    diagram_mmd_candidate_paths_for_config,
+    diagram_dot_candidate_paths_for_config,
     find_first_existing_path,
     stale_diagram_warning,
-    generate_mermaid_text_from_config_path,
+    generate_dot_text_from_config_path,
 )
 from ..udp_server import DNSUDPHandler
 from . import admin_logic as _admin_logic
@@ -854,15 +854,15 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             diagram_png_candidate_paths_for_config(cfg_path)
         )
 
-        # If missing and mmdc exists, attempt an on-demand build once.
+        # If missing and dot exists, attempt an on-demand build once.
         if png_file is None and attempted_sig != cfg_sig:
             try:
-                from ...utils.config_mermaid import (
-                    _find_mmdc_cmd,
+                from ...utils.config_diagram import (
+                    _find_dot_cmd,
                     ensure_config_diagram_png,
                 )
 
-                if _find_mmdc_cmd() is not None:
+                if _find_dot_cmd() is not None:
                     setattr(
                         self._server(), "_config_diagram_build_attempt_sig", cfg_sig
                     )
@@ -879,19 +879,19 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 config_path=str(cfg_path), diagram_path=str(png_file)
             )
 
-            # If stale and mmdc exists, try to refresh the PNG in-place once.
+            # If stale and dot exists, try to refresh the PNG in-place once.
             if (
                 warn
                 and getattr(self._server(), "_config_diagram_build_attempt_sig", None)
                 != cfg_sig
             ):
                 try:
-                    from ...utils.config_mermaid import (
-                        _find_mmdc_cmd,
+                    from ...utils.config_diagram import (
+                        _find_dot_cmd,
                         ensure_config_diagram_png,
                     )
 
-                    if _find_mmdc_cmd() is not None:
+                    if _find_dot_cmd() is not None:
                         setattr(
                             self._server(), "_config_diagram_build_attempt_sig", cfg_sig
                         )
@@ -958,14 +958,14 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
-    def _handle_config_diagram_mmd(self, params: Dict[str, list[str]]) -> None:
-        """Brief: Handle GET /api/v1/config/diagram.mmd.
+    def _handle_config_diagram_dot(self, params: Dict[str, list[str]]) -> None:
+        """Brief: Handle GET /api/v1/config/diagram.dot.
 
         Inputs:
           - params: Query parameters mapping.
 
         Outputs:
-          - None (sends Mermaid text).
+          - None (sends dot text).
         """
 
         if not self._require_auth():
@@ -991,15 +991,15 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             if warn_png:
                 headers["X-Foghorn-Warning"] = warn_png
 
-        mmd_file = find_first_existing_path(
-            diagram_mmd_candidate_paths_for_config(cfg_path)
+        dot_file = find_first_existing_path(
+            diagram_dot_candidate_paths_for_config(cfg_path)
         )
-        if mmd_file is not None:
-            warn_mmd = stale_diagram_warning(
-                config_path=str(cfg_path), diagram_path=str(mmd_file)
+        if dot_file is not None:
+            warn_dot = stale_diagram_warning(
+                config_path=str(cfg_path), diagram_path=str(dot_file)
             )
-            if warn_mmd and "X-Foghorn-Warning" not in headers:
-                headers["X-Foghorn-Warning"] = warn_mmd
+            if warn_dot and "X-Foghorn-Warning" not in headers:
+                headers["X-Foghorn-Warning"] = warn_dot
 
         meta_only = False
         try:
@@ -1014,19 +1014,19 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_text(200, "", headers=headers)
             return
 
-        if mmd_file is not None:
+        if dot_file is not None:
             try:
-                text = mmd_file.read_text(encoding="utf-8")
+                text = dot_file.read_text(encoding="utf-8")
             except Exception as exc:  # pragma: no cover - environment dependent
                 self._send_text(
-                    500, f"failed to read config diagram from {mmd_file}: {exc}"
+                    500, f"failed to read config diagram from {dot_file}: {exc}"
                 )
                 return
             self._send_text(200, text, headers=headers)
             return
 
         try:
-            text = generate_mermaid_text_from_config_path(str(cfg_path))
+            text = generate_dot_text_from_config_path(str(cfg_path))
         except Exception as exc:  # pragma: no cover - environment dependent
             self._send_text(500, f"failed to generate config diagram: {exc}")
             return
@@ -2123,8 +2123,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_config_raw_json()
         elif path in {"/api/v1/config/diagram.png", "/config/diagram.png"}:
             self._handle_config_diagram_png(params)
-        elif path in {"/api/v1/config/diagram.mmd", "/config/diagram.mmd"}:
-            self._handle_config_diagram_mmd(params)
+        elif path in {"/api/v1/config/diagram.dot", "/config/diagram.dot"}:
+            self._handle_config_diagram_dot(params)
         elif path in {"/logs", "/api/v1/logs"}:
             self._handle_logs(params)
         elif path in {"/query_log", "/api/v1/query_log"}:
