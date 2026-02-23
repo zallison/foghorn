@@ -188,7 +188,7 @@ a:visited {
     width: 100%;
 }
 
-/* Config page: keep two-pane layout even when Mermaid diagram is unavailable */
+/* Config page: keep two-pane layout even when the config diagram is unavailable */
 .fh-main-config-single {
     flex-direction: row;
 }
@@ -531,6 +531,11 @@ table {
 
 .fh-messages-success {
     color: #bbf7d0;
+}
+
+:root[data-theme='light'] .fh-messages-success {
+    /* Darken success text for readability on the light theme background. */
+    color: #166534;
 }
 
 .fh-messages-info {
