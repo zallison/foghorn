@@ -12,12 +12,13 @@ from fastapi import File, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi import status
 
-from ...utils.config_mermaid import (
+from ...utils.config_diagram import (
     diagram_png_candidate_paths_for_config,
-    diagram_mmd_candidate_paths_for_config,
+    diagram_dark_png_candidate_paths_for_config,
+    diagram_dot_candidate_paths_for_config,
     find_first_existing_path,
     stale_diagram_warning,
-    generate_mermaid_text_from_config_path,
+    generate_dot_text_from_config_path,
 )
 
 import sys as _sys
@@ -184,14 +185,14 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
             diagram_png_candidate_paths_for_config(cfg_path)
         )
 
-        # If missing and mmdc exists, attempt an on-demand build once.
+        # If missing and dot exists, attempt an on-demand build once.
         if png_file is None and attempted_sig != cfg_sig:
-            from ...utils.config_mermaid import (
-                _find_mmdc_cmd,
+            from ...utils.config_diagram import (
+                _find_dot_cmd,
                 ensure_config_diagram_png,
             )
 
-            if _find_mmdc_cmd() is not None:
+            if _find_dot_cmd() is not None:
                 setattr(app.state, "_config_diagram_build_attempt_sig", cfg_sig)
                 ensure_config_diagram_png(config_path=str(cfg_path))
                 png_file = find_first_existing_path(
@@ -204,18 +205,18 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
                 config_path=str(cfg_path), diagram_path=str(png_file)
             )
 
-            # If stale and mmdc exists, try to refresh it in-place once.
+            # If stale and dot exists, try to refresh it in-place once.
             if (
                 warn
                 and getattr(app.state, "_config_diagram_build_attempt_sig", None)
                 != cfg_sig
             ):
-                from ...utils.config_mermaid import (
-                    _find_mmdc_cmd,
+                from ...utils.config_diagram import (
+                    _find_dot_cmd,
                     ensure_config_diagram_png,
                 )
 
-                if _find_mmdc_cmd() is not None:
+                if _find_dot_cmd() is not None:
                     setattr(app.state, "_config_diagram_build_attempt_sig", cfg_sig)
                     ok, _detail, refreshed = ensure_config_diagram_png(
                         config_path=str(cfg_path)
@@ -227,6 +228,79 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
                         warn = stale_diagram_warning(
                             config_path=str(cfg_path), diagram_path=str(png_file)
                         )
+
+        headers: dict[str, str] = {
+            "X-Foghorn-Exists": "1" if png_file is not None else "0",
+        }
+
+        if warn:
+            headers["X-Foghorn-Warning"] = warn
+
+        if meta:
+            return PlainTextResponse("", media_type="text/plain", headers=headers)
+
+        if png_file is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="config diagram not found",
+            )
+
+        return FileResponse(str(png_file), media_type="image/png", headers=headers)
+
+    @app.get("/api/v1/config/diagram-dark.png", dependencies=[Depends(auth_dep)])
+    @app.get("/config/diagram-dark.png", dependencies=[Depends(auth_dep)])
+    async def get_config_diagram_png_dark(meta: int | None = None):
+        """Serve the config diagram dark-theme PNG (when available).
+
+        Inputs:
+          - meta: When truthy, do not return the PNG body; instead return an empty
+            200 response with metadata headers.
+
+        Outputs:
+          - FileResponse (image/png) when the PNG exists and meta is not set.
+          - PlainTextResponse (empty) when meta is set, with:
+              - X-Foghorn-Exists: '1' or '0'
+              - X-Foghorn-Warning (optional): staleness warning.
+        """
+
+        cfg_path = getattr(app.state, "config_path", None)
+        if not cfg_path:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="config_path not configured",
+            )
+
+        try:
+            st = os.stat(str(cfg_path))
+            cfg_sig = f"{cfg_path}:{int(st.st_mtime_ns)}:{int(st.st_size)}"
+        except Exception:
+            cfg_sig = str(cfg_path)
+
+        attempted_sig = getattr(app.state, "_config_diagram_build_attempt_sig", None)
+
+        png_file = find_first_existing_path(
+            diagram_dark_png_candidate_paths_for_config(cfg_path)
+        )
+
+        # If missing and dot exists, attempt an on-demand build once.
+        if png_file is None and attempted_sig != cfg_sig:
+            from ...utils.config_diagram import (
+                _find_dot_cmd,
+                ensure_config_diagram_png,
+            )
+
+            if _find_dot_cmd() is not None:
+                setattr(app.state, "_config_diagram_build_attempt_sig", cfg_sig)
+                ensure_config_diagram_png(config_path=str(cfg_path))
+                png_file = find_first_existing_path(
+                    diagram_dark_png_candidate_paths_for_config(cfg_path)
+                )
+
+        warn: str | None = None
+        if png_file is not None:
+            warn = stale_diagram_warning(
+                config_path=str(cfg_path), diagram_path=str(png_file)
+            )
 
         headers: dict[str, str] = {
             "X-Foghorn-Exists": "1" if png_file is not None else "0",
@@ -338,9 +412,9 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
             "size_bytes": len(payload),
         }
 
-    @app.get("/api/v1/config/diagram.mmd", dependencies=[Depends(auth_dep)])
-    @app.get("/config/diagram.mmd", dependencies=[Depends(auth_dep)])
-    async def get_config_diagram_mmd(meta: int | None = None) -> PlainTextResponse:
+    @app.get("/api/v1/config/diagram.dot", dependencies=[Depends(auth_dep)])
+    @app.get("/config/diagram.dot", dependencies=[Depends(auth_dep)])
+    async def get_config_diagram_dot(meta: int | None = None) -> PlainTextResponse:
         cfg_path = getattr(app.state, "config_path", None)
         if not cfg_path:
             raise HTTPException(
@@ -361,31 +435,31 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
             if warn_png:
                 headers["X-Foghorn-Warning"] = warn_png
 
-        mmd_file = find_first_existing_path(
-            diagram_mmd_candidate_paths_for_config(cfg_path)
+        dot_file = find_first_existing_path(
+            diagram_dot_candidate_paths_for_config(cfg_path)
         )
-        if mmd_file is not None:
-            warn_mmd = stale_diagram_warning(
-                config_path=str(cfg_path), diagram_path=str(mmd_file)
+        if dot_file is not None:
+            warn_dot = stale_diagram_warning(
+                config_path=str(cfg_path), diagram_path=str(dot_file)
             )
-            if warn_mmd and "X-Foghorn-Warning" not in headers:
-                headers["X-Foghorn-Warning"] = warn_mmd
+            if warn_dot and "X-Foghorn-Warning" not in headers:
+                headers["X-Foghorn-Warning"] = warn_dot
 
         if meta:
             return PlainTextResponse("", media_type="text/plain", headers=headers)
 
-        if mmd_file is not None:
+        if dot_file is not None:
             try:
-                text = mmd_file.read_text(encoding="utf-8")
+                text = dot_file.read_text(encoding="utf-8")
             except Exception as exc:  # pragma: no cover - environment dependent
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"failed to read config diagram from {mmd_file}: {exc}",
+                    detail=f"failed to read config diagram from {dot_file}: {exc}",
                 ) from exc
             return PlainTextResponse(text, media_type="text/plain", headers=headers)
 
         try:
-            text = generate_mermaid_text_from_config_path(str(cfg_path))
+            text = generate_dot_text_from_config_path(str(cfg_path))
         except Exception as exc:  # pragma: no cover - environment dependent
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
