@@ -1,4 +1,4 @@
-"""Brief: Unit tests for foghorn.utils.config_mermaid helpers.
+"""Brief: Unit tests for foghorn.utils.config_diagram helpers.
 
 Inputs:
   - tmp_path: pytest tmp_path fixture.
@@ -11,12 +11,11 @@ Outputs:
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 import types
 
 import pytest
 
-import foghorn.utils.config_mermaid as cm
+import foghorn.utils.config_diagram as cm
 
 
 def test_safe_int_handles_none_valid_and_invalid() -> None:
@@ -467,7 +466,7 @@ def test_normalize_plugins_uses_source_metadata_and_setup_default(
 
 
 def test_node_id_sanitizes_and_falls_back_to_plugin() -> None:
-    """Brief: _node_id produces safe Mermaid node identifiers.
+    """Brief: _node_id produces safe node identifiers.
 
     Inputs:
       - Names containing invalid characters.
@@ -543,17 +542,19 @@ def test_extract_upstream_lines_forward_only_and_endpoint_formats() -> None:
     assert cm.extract_upstream_lines(cfg, resolver_mode="recursive") == []
 
 
-def test_render_mermaid_includes_expected_branches() -> None:
-    """Brief: render_mermaid includes merge/drop/setup/pre/post branches.
+def test_render_dot_includes_expected_branches() -> None:
+    """Brief: render_dot includes merge/drop/pre/post branches.
 
     Inputs:
-      - Plugins with deny/override/drop and setup phases.
+      - Plugins with deny/override/drop phases.
       - forward resolver mode with listeners/upstreams.
 
     Outputs:
       - None; asserts key nodes and edges exist.
     """
 
+    # Setup plugins are intentionally not shown in this diagram, but they should
+    # also not break rendering.
     setup = cm.PluginInfo(
         idx=0,
         name="Setupper",
@@ -587,7 +588,7 @@ def test_render_mermaid_includes_expected_branches() -> None:
         post_actions={"deny"},
     )
 
-    out = cm.render_mermaid(
+    out = cm.render_dot(
         [setup, pre, post],
         config_path="cfg.yaml",
         resolver_mode="forward",
@@ -597,25 +598,24 @@ def test_render_mermaid_includes_expected_branches() -> None:
         include_init=False,
     )
 
-    assert "flowchart TB" in out
-    assert "Drop" in out
+    assert "digraph config_diagram" in out
+    assert "rankdir=TB" in out
+    assert "Drop (no reply)" in out
     assert "PreMerge" in out
     assert "PostMerge" in out
-    assert "SetupPlugins" not in out
-    assert "PrePlugins" in out
-    assert "PostPlugins" in out
+    assert "cluster_pre" in out
+    assert "cluster_post" in out
     assert "routes upstream" in out
 
-    # Listener and upstream details are now split into individual nodes.
+    # Listener and upstream details should show up as separate nodes.
     assert "Listener_udp" in out
-    assert "class Listener_udp insecure" in out
-    assert "subgraph UpstreamCfg[Upstreams]" in out
-    assert "strategy=failover, max_concurrent=1" in out
+    assert "Listener_udp -> Q" in out
+    assert "cluster_upstreams" in out
+    assert "strategy=failover\\nmax_concurrent=1" in out
     assert "udp: 1.1.1.1:53" in out
-    assert "class Upstreams insecure" in out
 
 
-def test_render_mermaid_renders_routed_upstreams_block_like_endpoints() -> None:
+def test_render_dot_renders_routed_upstreams_block_like_endpoints() -> None:
     """Brief: Routed upstreams are rendered as upstream endpoints in a dedicated block.
 
     Inputs:
@@ -640,7 +640,7 @@ def test_render_mermaid_renders_routed_upstreams_block_like_endpoints() -> None:
         sets_upstreams=True,
     )
 
-    out = cm.render_mermaid(
+    out = cm.render_dot(
         [p],
         config_path="cfg.yaml",
         resolver_mode="forward",
@@ -649,13 +649,16 @@ def test_render_mermaid_renders_routed_upstreams_block_like_endpoints() -> None:
         include_init=False,
     )
 
-    assert "subgraph RoutedUpstreams[Upstream router upstreams]" in out
-    assert "Upstreams<br/>route: domain=internal.example" in out
+    assert "cluster_routed_upstreams" in out
+    assert 'label="Upstream router upstreams"' in out
+    assert "RoutedUpstreams_0_router" in out
+    assert "route: domain=internal.example" in out
     assert "udp: 10.0.0.2:53" in out
-    assert "class RoutedUpstreams_0_router insecure" in out
+    assert "pre_0_router -> RoutedUpstreams_0_router" in out
+    assert "style=dashed" in out
 
 
-def test_render_mermaid_renders_two_upstream_boxes_when_transports_mixed() -> None:
+def test_render_dot_renders_two_upstream_boxes_when_transports_mixed() -> None:
     """Brief: Mixed secure/insecure upstreams are rendered as two separate boxes.
 
     Inputs:
@@ -666,7 +669,7 @@ def test_render_mermaid_renders_two_upstream_boxes_when_transports_mixed() -> No
       - None; asserts a secure and insecure upstream node are emitted.
     """
 
-    out = cm.render_mermaid(
+    out = cm.render_dot(
         [],
         config_path="cfg.yaml",
         resolver_mode="forward",
@@ -680,27 +683,16 @@ def test_render_mermaid_renders_two_upstream_boxes_when_transports_mixed() -> No
         include_init=False,
     )
 
-    assert "subgraph UpstreamCfg[Upstreams]" in out
-    assert "Upstream --> UpstreamsInsecure" in out
-    assert "Upstream --> UpstreamsSecure" in out
-    assert "class UpstreamsInsecure insecure" in out
-    assert "class UpstreamsSecure secure" in out
+    assert "cluster_upstreams" in out
+    assert "UpstreamsInsecure" in out
+    assert "UpstreamsSecure" in out
+    assert "Upstream -> UpstreamsInsecure" in out
+    assert "Upstream -> UpstreamsSecure" in out
 
     # Endpoints should still be present in the diagram output.
     assert "udp: 1.1.1.1:53" in out
     assert "tcp: 9.9.9.9:53" in out
     assert "doh: https://dns.example/dns-query" in out
-
-    insecure_line = next(
-        (ln for ln in out.splitlines() if 'UpstreamsInsecure["' in ln), ""
-    )
-    secure_line = next((ln for ln in out.splitlines() if 'UpstreamsSecure["' in ln), "")
-
-    assert "udp: 1.1.1.1:53" in insecure_line
-    assert "tcp: 9.9.9.9:53" in insecure_line
-    assert "doh: https://dns.example/dns-query" not in insecure_line
-
-    assert "doh: https://dns.example/dns-query" in secure_line
 
 
 def test_load_config_returns_empty_for_non_mapping_root(
@@ -756,7 +748,7 @@ def test_is_stale_handles_missing_and_mtime_comparison(tmp_path: Path) -> None:
 
 
 def test_diagram_candidate_paths_prefer_config_dir_over_sibling(tmp_path: Path) -> None:
-    """Brief: diagram_*_candidate_paths prefer config/diagram.* over <cfg>.mermaid.*.
+    """Brief: diagram_*_candidate_paths prefer config/diagram.* over <cfg>.dot.*.
 
     Inputs:
       - tmp_path with cfg.yaml and multiple diagram candidates.
@@ -770,7 +762,7 @@ def test_diagram_candidate_paths_prefer_config_dir_over_sibling(tmp_path: Path) 
 
     cfg_dir_png = tmp_path / "diagram.png"
     cfg_dir_png.write_bytes(b"PNG")
-    sibling_png = tmp_path / "cfg.yaml.mermaid.png"
+    sibling_png = tmp_path / "cfg.yaml.dot.png"
     sibling_png.write_bytes(b"PNG2")
 
     png_candidates = cm.diagram_png_candidate_paths_for_config(str(cfg))
@@ -778,15 +770,15 @@ def test_diagram_candidate_paths_prefer_config_dir_over_sibling(tmp_path: Path) 
     assert png_candidates[1] == sibling_png
     assert cm.find_first_existing_path(png_candidates) == cfg_dir_png
 
-    cfg_dir_mmd = tmp_path / "diagram.mmd"
-    cfg_dir_mmd.write_text("flowchart TB\n", encoding="utf-8")
-    sibling_mmd = tmp_path / "cfg.yaml.mermaid.mmd"
-    sibling_mmd.write_text("flowchart LR\n", encoding="utf-8")
+    cfg_dir_dot = tmp_path / "diagram.dot"
+    cfg_dir_dot.write_text("digraph config_diagram {}\n", encoding="utf-8")
+    sibling_dot = tmp_path / "cfg.yaml.dot"
+    sibling_dot.write_text("digraph other {}\n", encoding="utf-8")
 
-    mmd_candidates = cm.diagram_mmd_candidate_paths_for_config(str(cfg))
-    assert mmd_candidates[0] == cfg_dir_mmd
-    assert mmd_candidates[1] == sibling_mmd
-    assert cm.find_first_existing_path(mmd_candidates) == cfg_dir_mmd
+    dot_candidates = cm.diagram_dot_candidate_paths_for_config(str(cfg))
+    assert dot_candidates[0] == cfg_dir_dot
+    assert dot_candidates[1] == sibling_dot
+    assert cm.find_first_existing_path(dot_candidates) == cfg_dir_dot
 
 
 def test_stale_diagram_warning_when_config_newer(tmp_path: Path) -> None:
@@ -821,118 +813,51 @@ def test_stale_diagram_warning_when_config_newer(tmp_path: Path) -> None:
     assert warn2 is None
 
 
-def test_render_png_with_mmdc_failure_messages(
+def test_render_png_with_dot_failure_messages(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Brief: _render_png_with_mmdc returns helpful detail on failures.
+    """Brief: _render_png_with_dot returns helpful detail on failures.
 
     Inputs:
-      - mmdc present.
+      - dot present.
       - subprocess.run returns non-zero and then raises.
 
     Outputs:
       - None; asserts error detail formatting.
     """
 
-    monkeypatch.setattr(cm.shutil, "which", lambda _n: "/usr/bin/mmdc")
+    monkeypatch.setattr(cm.shutil, "which", lambda _n: "/usr/bin/dot")
 
     def fake_run_bad(*_a, **_k):  # type: ignore[no-untyped-def]
         return types.SimpleNamespace(returncode=1, stderr="bad", stdout="")
 
     monkeypatch.setattr(cm.subprocess, "run", fake_run_bad)
-    ok, detail = cm._render_png_with_mmdc(
-        mmd_text="flowchart TB\n", output_png_path=str(tmp_path / "o.png")
+    ok, detail = cm._render_png_with_dot(
+        dot_text="digraph config_diagram {}\n", output_png_path=str(tmp_path / "o.png")
     )
     assert ok is False
-    assert "mmdc failed" in detail
+    assert "dot failed" in detail
 
     def fake_run_raises(*_a, **_k):  # type: ignore[no-untyped-def]
         raise OSError("boom")
 
     monkeypatch.setattr(cm.subprocess, "run", fake_run_raises)
-    ok2, detail2 = cm._render_png_with_mmdc(
-        mmd_text="flowchart TB\n", output_png_path=str(tmp_path / "o2.png")
+    ok2, detail2 = cm._render_png_with_dot(
+        dot_text="digraph config_diagram {}\n", output_png_path=str(tmp_path / "o2.png")
     )
     assert ok2 is False
-    assert "failed to run mmdc" in detail2
+    assert "failed to run dot" in detail2
 
 
-def test_render_png_with_mmdc_falls_back_to_container_node_modules(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Brief: _render_png_with_mmdc uses /foghorn/node_modules/mmdc when PATH is missing.
-
-    Inputs:
-      - PATH lookup (shutil.which) returns None.
-      - Fallback path list includes an executable temp file.
-
-    Outputs:
-      - None; asserts the fallback path is used to build the subprocess cmd.
-    """
-
-    fake_mmdc = tmp_path / "mmdc"
-    fake_mmdc.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    fake_mmdc.chmod(0o755)
-
-    monkeypatch.setattr(cm.shutil, "which", lambda _n: None)
-    monkeypatch.setattr(cm, "_mmdc_fallback_paths", lambda: [fake_mmdc])
-
-    def fake_run(cmd, check=False, stdout=None, stderr=None, text=None):  # type: ignore[no-untyped-def]
-        assert cmd[0] == str(fake_mmdc)
-        return types.SimpleNamespace(returncode=0, stderr="", stdout="")
-
-    monkeypatch.setattr(cm.subprocess, "run", fake_run)
-
-    ok, detail = cm._render_png_with_mmdc(
-        mmd_text="flowchart TB\n",
-        output_png_path=str(tmp_path / "out.png"),
-    )
-    assert ok is True
-    assert detail == "ok"
-
-
-def test_render_png_with_python_mermaid_success_and_fallbacks(
+def test_ensure_config_diagram_png_edge_cases_when_dot_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Brief: _render_png_with_python_mermaid supports a render() API returning bytes.
-
-    Inputs:
-      - Injected python_mermaid module with a render() function.
-
-    Outputs:
-      - None; asserts PNG written.
-    """
-
-    fake = types.SimpleNamespace(render=lambda _t, output_format=None: b"PNGDATA")
-    monkeypatch.setitem(sys.modules, "python_mermaid", fake)
-
-    out_path = tmp_path / "x.png"
-    ok, detail = cm._render_png_with_python_mermaid(
-        mmd_text="flowchart TB\n", output_png_path=str(out_path)
-    )
-    assert ok is True
-    assert detail == "ok"
-    assert out_path.read_bytes() == b"PNGDATA"
-
-    # Non-bytes return is treated as unsupported.
-    fake2 = types.SimpleNamespace(render=lambda _t, output_format=None: "not-bytes")
-    monkeypatch.setitem(sys.modules, "python_mermaid", fake2)
-    ok2, detail2 = cm._render_png_with_python_mermaid(
-        mmd_text="x", output_png_path=str(tmp_path / "y.png")
-    )
-    assert ok2 is False
-    assert "supported" in detail2
-
-
-def test_ensure_config_diagram_png_edge_cases_and_python_mermaid_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Brief: ensure_config_diagram_png handles empty/missing configs and python_mermaid fallback.
+    """Brief: ensure_config_diagram_png handles empty/missing configs and missing dot.
 
     Inputs:
       - Empty config_path.
       - Missing config file.
-      - Config file with mmdc missing but python_mermaid available.
+      - Config file with dot missing.
 
     Outputs:
       - None; asserts expected (ok, detail, path).
@@ -955,36 +880,32 @@ def test_ensure_config_diagram_png_edge_cases_and_python_mermaid_fallback(
 
     monkeypatch.setattr(
         cm,
-        "generate_mermaid_text_from_config_path",
-        lambda _p, **_k: "flowchart TB\n",
+        "generate_dot_text_from_config_path",
+        lambda _p, **_k: "digraph config_diagram {}\n",
     )
     monkeypatch.setattr(cm.shutil, "which", lambda _n: None)
 
-    # Force .mmd write failure (best-effort) by making output path a directory.
-    mmd_dir = tmp_path / "as_dir"
-    mmd_dir.mkdir()
-
-    fake = types.SimpleNamespace(render=lambda _t, output_format=None: b"PNGDATA")
-    monkeypatch.setitem(sys.modules, "python_mermaid", fake)
+    # Force .dot write failure (best-effort) by making output path a directory.
+    dot_dir = tmp_path / "as_dir"
+    dot_dir.mkdir()
 
     ok2, detail2, path2 = cm.ensure_config_diagram_png(
         config_path=str(cfg_path),
-        output_mmd_path=str(mmd_dir),
+        output_dot_path=str(dot_dir),
     )
-    assert ok2 is True
-    assert path2 is not None
-    assert "python_mermaid" in detail2
-    assert Path(path2).is_file()
+    assert ok2 is False
+    assert path2 is None
+    assert "dot" in detail2.lower()
 
 
 def test_ensure_config_diagram_png_reports_generate_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Brief: ensure_config_diagram_png returns ok=False when mermaid text generation fails.
+    """Brief: ensure_config_diagram_png returns ok=False when dot text generation fails.
 
     Inputs:
       - Config file exists.
-      - generate_mermaid_text_from_config_path raises.
+      - generate_dot_text_from_config_path raises.
 
     Outputs:
       - None; asserts error message surfaced.
@@ -995,14 +916,14 @@ def test_ensure_config_diagram_png_reports_generate_failure(
 
     monkeypatch.setattr(
         cm,
-        "generate_mermaid_text_from_config_path",
-        lambda _p: (_ for _ in ()).throw(RuntimeError("boom")),
+        "generate_dot_text_from_config_path",
+        lambda _p, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
     ok, detail, png_path = cm.ensure_config_diagram_png(config_path=str(cfg_path))
     assert ok is False
     assert png_path is None
-    assert "failed to generate mermaid text" in detail
+    assert "failed to generate dot text" in detail
 
 
 def test_module_to_file_returns_none_when_unresolvable() -> None:
@@ -1141,8 +1062,8 @@ def test_load_config_calls_validate_config_for_mapping_root(
     assert called["unknown_keys"] == "ignore"
 
 
-def test_render_mermaid_recursive_and_master_modes_include_init_and_no_drop() -> None:
-    """Brief: render_mermaid handles recursive/master modes and init blocks.
+def test_render_dot_recursive_and_master_modes_include_init_and_no_drop() -> None:
+    """Brief: render_dot handles recursive/master modes and init blocks.
 
     Inputs:
       - Empty plugin list.
@@ -1152,7 +1073,7 @@ def test_render_mermaid_recursive_and_master_modes_include_init_and_no_drop() ->
       - None; asserts mode-specific labels and init handling.
     """
 
-    rec = cm.render_mermaid(
+    rec = cm.render_dot(
         [],
         config_path="cfg.yaml",
         resolver_mode="recursive",
@@ -1161,12 +1082,13 @@ def test_render_mermaid_recursive_and_master_modes_include_init_and_no_drop() ->
         direction="LR",
         include_init=True,
     )
-    assert rec.startswith("%%{init:")
-    assert "flowchart LR" in rec
-    assert 'Upstream["Recursive resolver"]' in rec
-    assert "Drop" not in rec
+    assert "digraph config_diagram" in rec
+    assert "rankdir=LR" in rec
+    assert "Recursive resolver" in rec
+    assert "node [shape=box" in rec
+    assert "Drop (no reply)" not in rec
 
-    mas = cm.render_mermaid(
+    mas = cm.render_dot(
         [],
         config_path="cfg.yaml",
         resolver_mode="none",
@@ -1174,43 +1096,14 @@ def test_render_mermaid_recursive_and_master_modes_include_init_and_no_drop() ->
         upstream_lines=[],
         include_init=True,
     )
-    assert "Master mode: no forwarding (REFUSED)" in mas
+    assert "Master mode: no forwarding" in mas
+    assert "(REFUSED)" in mas
 
 
-def test_render_png_with_python_mermaid_not_installed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Brief: _render_png_with_python_mermaid returns a clear message when not installed.
-
-    Inputs:
-      - Import of python_mermaid forced to fail.
-
-    Outputs:
-      - None; asserts ok=False with not-installed detail.
-    """
-
-    import builtins
-
-    real_import = builtins.__import__
-
-    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]
-        if name == "python_mermaid":
-            raise ModuleNotFoundError("nope")
-        return real_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-
-    ok, detail = cm._render_png_with_python_mermaid(
-        mmd_text="x", output_png_path=str(tmp_path / "o.png")
-    )
-    assert ok is False
-    assert "not installed" in detail
-
-
-def test_generate_mermaid_text_from_config_path_wires_through_components(
+def test_generate_dot_text_from_config_path_wires_through_components(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Brief: generate_mermaid_text_from_config_path passes derived values into render_mermaid.
+    """Brief: generate_dot_text_from_config_path passes derived values into render_dot.
 
     Inputs:
       - Monkeypatched load_config/normalize/extract/render to capture arguments.
@@ -1232,7 +1125,7 @@ def test_generate_mermaid_text_from_config_path_wires_through_components(
 
     captured: dict[str, object] = {}
 
-    def fake_render_mermaid(plugins, *, config_path, resolver_mode, listener_lines, upstream_lines, **_k):  # type: ignore[no-untyped-def]
+    def fake_render_dot(plugins, *, config_path, resolver_mode, listener_lines, upstream_lines, **_k):  # type: ignore[no-untyped-def]
         captured["plugins"] = plugins
         captured["config_path"] = config_path
         captured["resolver_mode"] = resolver_mode
@@ -1240,9 +1133,9 @@ def test_generate_mermaid_text_from_config_path_wires_through_components(
         captured["upstream_lines"] = upstream_lines
         return "ok"
 
-    monkeypatch.setattr(cm, "render_mermaid", fake_render_mermaid)
+    monkeypatch.setattr(cm, "render_dot", fake_render_dot)
 
-    out = cm.generate_mermaid_text_from_config_path("cfg.yaml", include_init=False)
+    out = cm.generate_dot_text_from_config_path("cfg.yaml", include_init=False)
     assert out == "ok"
     assert captured["resolver_mode"] == "forward"
     assert captured["listener_lines"] == ["udp: 0.0.0.0:53"]
@@ -1284,28 +1177,6 @@ def test_extract_upstream_lines_returns_empty_on_non_forward_or_bad_shapes() -> 
         )
         == []
     )
-
-
-def test_render_png_with_python_mermaid_no_supported_api(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Brief: _render_png_with_python_mermaid handles missing render() API.
-
-    Inputs:
-      - Injected python_mermaid module without a callable render().
-
-    Outputs:
-      - None; asserts ok=False with helpful message.
-    """
-
-    fake = types.SimpleNamespace()
-    monkeypatch.setitem(sys.modules, "python_mermaid", fake)
-
-    ok, detail = cm._render_png_with_python_mermaid(
-        mmd_text="x", output_png_path=str(tmp_path / "o.png")
-    )
-    assert ok is False
-    assert "supported" in detail
 
 
 def test_is_stale_returns_true_when_input_missing(tmp_path: Path) -> None:

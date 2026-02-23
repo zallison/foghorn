@@ -511,6 +511,7 @@ def pre_resolve(
                     dnssec.add_nsec3_denial_of_existence(
                         reply,
                         name,
+                        qtype_int,
                         zone_apex,
                         records,
                         name_index,
@@ -557,6 +558,7 @@ def pre_resolve(
             dnssec.add_nsec3_denial_of_existence(
                 reply,
                 name,
+                qtype_int,
                 zone_apex,
                 records,
                 name_index,

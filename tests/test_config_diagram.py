@@ -15,7 +15,7 @@ import types
 
 import pytest
 
-from foghorn.utils.config_mermaid import (
+from foghorn.utils.config_diagram import (
     diagram_png_path_for_config,
     ensure_config_diagram_png,
 )
@@ -50,14 +50,14 @@ plugins: []
 """.lstrip()
 
 
-def test_ensure_config_diagram_png_returns_false_when_mmdc_missing(
+def test_ensure_config_diagram_png_returns_false_when_dot_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Brief: ensure_config_diagram_png should fail soft when no renderer exists.
 
     Inputs:
       - config file on disk.
-      - mmdc not present (shutil.which returns None).
+      - dot not present (shutil.which returns None).
 
     Outputs:
       - ok is False, png_path is None.
@@ -66,24 +66,24 @@ def test_ensure_config_diagram_png_returns_false_when_mmdc_missing(
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
 
-    import foghorn.utils.config_mermaid as cm
+    import foghorn.utils.config_diagram as cm
 
     monkeypatch.setattr(cm.shutil, "which", lambda _n: None)
 
     ok, detail, png_path = ensure_config_diagram_png(config_path=str(cfg_path))
     assert ok is False
     assert png_path is None
-    assert "mmdc" in detail
+    assert "dot" in detail
 
 
-def test_ensure_config_diagram_png_renders_when_mmdc_available(
+def test_ensure_config_diagram_png_renders_when_dot_available(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Brief: ensure_config_diagram_png should create PNG when mmdc is available.
+    """Brief: ensure_config_diagram_png should create PNG when dot is available.
 
     Inputs:
       - config file on disk.
-      - mmdc present (shutil.which returns a path).
+      - dot present (shutil.which returns a path).
       - subprocess.run stubbed to write the output PNG.
 
     Outputs:
@@ -93,11 +93,12 @@ def test_ensure_config_diagram_png_renders_when_mmdc_available(
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
 
-    import foghorn.utils.config_mermaid as cm
+    import foghorn.utils.config_diagram as cm
 
-    monkeypatch.setattr(cm.shutil, "which", lambda _n: "/usr/bin/mmdc")
+    monkeypatch.setattr(cm.shutil, "which", lambda _n: "/usr/bin/dot")
 
     def fake_run(cmd, check=False, stdout=None, stderr=None, text=None):  # type: ignore[no-untyped-def]
+        assert "-Tpng" in cmd
         assert "-o" in cmd
         out_path = Path(cmd[cmd.index("-o") + 1])
         out_path.write_bytes(b"\x89PNG\r\n\x1a\nFAKE")
@@ -109,6 +110,10 @@ def test_ensure_config_diagram_png_renders_when_mmdc_available(
     assert ok is True
     assert png_path == str(cfg_path.parent / "diagram.png")
     assert Path(png_path).is_file()
+
+    dark_png = cfg_path.parent / "diagram-dark.png"
+    assert dark_png.is_file()
+
     assert "rendered" in detail
 
 
@@ -130,12 +135,16 @@ def test_ensure_config_diagram_png_skips_when_up_to_date(
     png_path = tmp_path / "diagram.png"
     png_path.write_bytes(b"\x89PNG\r\n\x1a\nEXISTING")
 
-    # Force PNG to be newer than config.
+    dark_png_path = tmp_path / "diagram-dark.png"
+    dark_png_path.write_bytes(b"\x89PNG\r\n\x1a\nEXISTING-DARK")
+
+    # Force PNGs to be newer than config.
     png_path.touch()
+    dark_png_path.touch()
 
-    import foghorn.utils.config_mermaid as cm
+    import foghorn.utils.config_diagram as cm
 
-    # If the function attempted to call mmdc, fail the test.
+    # If the function attempted to call dot, fail the test.
     monkeypatch.setattr(
         cm.subprocess,
         "run",
@@ -148,14 +157,14 @@ def test_ensure_config_diagram_png_skips_when_up_to_date(
     assert detail == "up-to-date"
 
 
-def test_config_diagram_endpoint_regenerates_when_stale_and_mmdc_available(
+def test_config_diagram_endpoint_regenerates_when_stale_and_dot_available(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Brief: GET /api/v1/config/diagram.png refreshes stale diagram when mmdc exists.
+    """Brief: GET /api/v1/config/diagram.png refreshes stale diagram when dot exists.
 
     Inputs:
       - config newer than an existing diagram.png.
-      - mmdc available (shutil.which returns a path).
+      - dot available (shutil.which returns a path).
       - subprocess.run stubbed to write a new PNG.
 
     Outputs:
@@ -168,19 +177,19 @@ def test_config_diagram_endpoint_regenerates_when_stale_and_mmdc_available(
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
 
-    import foghorn.utils.config_mermaid as cm
+    import foghorn.utils.config_diagram as cm
 
     # Ensure the generator doesn't depend on full config parsing in this test.
     monkeypatch.setattr(
         cm,
-        "generate_mermaid_text_from_config_path",
-        lambda _p, **_k: "flowchart TB\n",
+        "generate_dot_text_from_config_path",
+        lambda _p, **_k: "digraph config_diagram {\n}\n",
     )
 
     monkeypatch.setattr(
         cm.shutil,
         "which",
-        lambda n: "/usr/bin/mmdc" if n == "mmdc" else None,
+        lambda n: "/usr/bin/dot" if n == "dot" else None,
     )
 
     def fake_run(cmd, check=False, stdout=None, stderr=None, text=None):  # type: ignore[no-untyped-def]
@@ -210,14 +219,14 @@ def test_config_diagram_endpoint_regenerates_when_stale_and_mmdc_available(
     assert png_path.read_bytes().endswith(b"NEW")
 
 
-def test_config_diagram_endpoint_builds_on_demand_when_missing_and_mmdc_available(
+def test_config_diagram_endpoint_builds_on_demand_when_missing_and_dot_available(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Brief: GET /api/v1/config/diagram.png builds diagram.png on-demand when missing.
 
     Inputs:
       - diagram.png missing.
-      - mmdc available.
+      - dot available.
 
     Outputs:
       - Endpoint returns 200 and creates diagram.png.
@@ -226,15 +235,15 @@ def test_config_diagram_endpoint_builds_on_demand_when_missing_and_mmdc_availabl
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
 
-    import foghorn.utils.config_mermaid as cm
+    import foghorn.utils.config_diagram as cm
 
     monkeypatch.setattr(
         cm,
-        "generate_mermaid_text_from_config_path",
-        lambda _p, **_k: "flowchart TB\n",
+        "generate_dot_text_from_config_path",
+        lambda _p, **_k: "digraph config_diagram {\n}\n",
     )
     monkeypatch.setattr(
-        cm.shutil, "which", lambda n: "/usr/bin/mmdc" if n == "mmdc" else None
+        cm.shutil, "which", lambda n: "/usr/bin/dot" if n == "dot" else None
     )
 
     def fake_run(cmd, check=False, stdout=None, stderr=None, text=None):  # type: ignore[no-untyped-def]
@@ -267,26 +276,26 @@ def test_config_diagram_endpoint_builds_on_demand_only_once_when_generation_fail
 
     Inputs:
       - diagram.png missing.
-      - mmdc available.
+      - dot available.
       - subprocess.run returns non-zero.
 
     Outputs:
       - Both requests return 404.
-      - mmdc subprocess is invoked only once.
+      - dot subprocess is invoked only once.
     """
 
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
 
-    import foghorn.utils.config_mermaid as cm
+    import foghorn.utils.config_diagram as cm
 
     monkeypatch.setattr(
         cm,
-        "generate_mermaid_text_from_config_path",
-        lambda _p, **_k: "flowchart TB\n",
+        "generate_dot_text_from_config_path",
+        lambda _p, **_k: "digraph config_diagram {\n}\n",
     )
     monkeypatch.setattr(
-        cm.shutil, "which", lambda n: "/usr/bin/mmdc" if n == "mmdc" else None
+        cm.shutil, "which", lambda n: "/usr/bin/dot" if n == "dot" else None
     )
 
     calls = {"n": 0}
@@ -352,17 +361,16 @@ def test_config_diagram_endpoint_returns_404_when_missing(
     """Brief: /api/v1/config/diagram.png returns 404 when file is absent.
 
     Notes:
-      - This test forces mmdc to be unavailable so the endpoint doesn't try an
+      - This test forces dot to be unavailable so the endpoint doesn't try an
         on-demand build.
     """
 
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
 
-    import foghorn.utils.config_mermaid as cm
+    import foghorn.utils.config_diagram as cm
 
     monkeypatch.setattr(cm.shutil, "which", lambda _n: None)
-    monkeypatch.setattr(cm, "_mmdc_fallback_paths", lambda: [])
 
     app = create_app(
         stats=None,

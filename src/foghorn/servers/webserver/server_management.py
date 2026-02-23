@@ -216,10 +216,10 @@ def start_webserver(
         return None
 
     # Best-effort: generate a config diagram PNG for the active config when
-    # possible. This is intentionally non-fatal (e.g., mmdc missing).
+    # possible. This is intentionally non-fatal (e.g., dot missing).
     if config_path:
         try:
-            from ...utils.config_mermaid import ensure_config_diagram_png
+            from ...utils.config_diagram import ensure_config_diagram_png
 
             ok, detail, png_path = ensure_config_diagram_png(config_path=config_path)
             if ok:

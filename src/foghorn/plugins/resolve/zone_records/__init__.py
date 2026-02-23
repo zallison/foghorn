@@ -598,7 +598,9 @@ class ZoneRecords(BasePlugin):
                 zone_soa = dict(getattr(self, "_zone_soa", {}) or {})
 
         zones: List[Dict[str, object]] = []
-        for apex, (ttl, values) in sorted(zone_soa.items(), key=lambda kv: str(kv[0])):
+        for apex, entry in sorted(zone_soa.items(), key=lambda kv: str(kv[0])):
+            ttl = entry[0]
+            values = entry[1]
             zones.append(
                 {
                     "zone": str(apex),
@@ -608,9 +610,12 @@ class ZoneRecords(BasePlugin):
             )
 
         rows: List[Dict[str, object]] = []
-        for (owner, qcode), (ttl, values) in sorted(
+        for (owner, qcode), entry in sorted(
             records_map.items(), key=lambda kv: (str(kv[0][0]), int(kv[0][1]))
         ):
+            ttl = entry[0]
+            values = entry[1]
+
             owner_norm = str(owner).rstrip(".").lower()
             zone = helpers.find_zone_for_name(owner_norm, zone_soa)
             try:
@@ -638,7 +643,7 @@ class ZoneRecords(BasePlugin):
             "zones": int(len(zones)),
             "rrsets": int(len(records_map)),
             "records": int(
-                sum(len(vs or []) for _k, (_ttl, vs) in records_map.items())
+                sum(len(entry[1] or []) for _k, entry in records_map.items())
             ),
             "owners": int(len(name_index)),
         }
