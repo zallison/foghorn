@@ -25,7 +25,7 @@ import pytest
 import foghorn.servers.webserver as web_mod
 from foghorn.servers.webserver import AdminPageSpec
 from foghorn.stats import StatsCollector
-from foghorn.utils.config_mermaid import diagram_png_path_for_config
+from foghorn.utils.config_diagram import diagram_png_path_for_config
 
 
 def _one_shot_http_request(
@@ -262,8 +262,8 @@ def test_threaded_config_diagram_png_endpoints(tmp_path: Path) -> None:
     assert body3 == png_bytes
 
 
-def test_threaded_config_diagram_mmd_endpoint(tmp_path: Path) -> None:
-    """Brief: Threaded /api/v1/config/diagram.mmd returns Mermaid source text.
+def test_threaded_config_diagram_dot_endpoint(tmp_path: Path) -> None:
+    """Brief: Threaded /api/v1/config/diagram.dot returns dot source text.
 
     Inputs:
       - No config_path configured.
@@ -271,14 +271,14 @@ def test_threaded_config_diagram_mmd_endpoint(tmp_path: Path) -> None:
 
     Outputs:
       - 500 when config_path missing.
-      - 200 text/plain containing Mermaid flowchart when config_path present.
+      - 200 text/plain containing dot digraph when config_path present.
     """
 
     cfg = {"webserver": {"auth": {"mode": "none"}}}
 
     status, _hdrs, body = _one_shot_http_request(
         method="GET",
-        path="/api/v1/config/diagram.mmd",
+        path="/api/v1/config/diagram.dot",
         config=cfg,
         config_path=None,
     )
@@ -308,14 +308,14 @@ def test_threaded_config_diagram_mmd_endpoint(tmp_path: Path) -> None:
 
     status2, hdrs2, body2 = _one_shot_http_request(
         method="GET",
-        path="/api/v1/config/diagram.mmd",
+        path="/api/v1/config/diagram.dot",
         config=cfg,
         config_path=str(cfg_path),
     )
     assert status2 == 200
     assert hdrs2.get("content-type", "").startswith("text/plain")
     text = body2.decode("utf-8")
-    assert "flowchart" in text
+    assert "digraph" in text
 
 
 def test_threaded_plugin_admin_endpoints() -> None:

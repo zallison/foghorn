@@ -96,12 +96,11 @@
 			<div class="fh-diagram-container">
 					<img id="config-diagram-img" class="fh-diagram-img" alt="Config diagram" />
 					<div id="config-diagram-fallback" class="fh-diagram-fallback" hidden>
-						PNG diagram unavailable. Showing Mermaid output (same as
-						<code>scripts/generate_config_mermaid.py</code>).
+						PNG diagram unavailable. Showing GraphViz dot output.
 						<br />
-						To render a PNG via Docker (Mermaid CLI):
-						<pre class="fh-pre fh-pre-compact">docker run -v ${DATA}:/data minlag/mermaid-cli:11.12.1-beta.5 -i /data/diagram.mmd -o /data/diagram.png</pre>
-						<pre id="config-diagram-mmd" class="fh-pre fh-pre-compact"></pre>
+						To render a PNG locally:
+						<pre class="fh-pre fh-pre-compact">dot -Tpng diagram.dot -o diagram.png</pre>
+						<pre id="config-diagram-dot" class="fh-pre fh-pre-compact"></pre>
 						<div class="fh-config-actions" style="margin-top: 10px; gap: 10px; flex-wrap: wrap;">
 							<input id="config-diagram-upload" type="file" accept="image/png" />
 							<button id="btn-config-diagram-upload" class="fh-btn fh-btn-secondary" type="button">Upload PNG (max 1MB)</button>
@@ -166,7 +165,7 @@
 			var configDiagramImgEl = document.getElementById('config-diagram-img');
 			var configDiagramStatusEl = document.getElementById('config-diagram-status');
 			var configDiagramFallbackEl = document.getElementById('config-diagram-fallback');
-			var configDiagramMmdEl = document.getElementById('config-diagram-mmd');
+			var configDiagramDotEl = document.getElementById('config-diagram-dot');
 			var configDiagramUploadEl = document.getElementById('config-diagram-upload');
 			var btnConfigDiagramUploadEl = document.getElementById('btn-config-diagram-upload');
 			var configDiagramUploadStatusEl = document.getElementById('config-diagram-upload-status');
@@ -1590,13 +1589,13 @@
 					if (configDiagramFallbackEl) {
 						configDiagramFallbackEl.hidden = true;
 					}
-					if (configDiagramMmdEl) {
-						configDiagramMmdEl.textContent = '';
+					if (configDiagramDotEl) {
+						configDiagramDotEl.textContent = '';
 					}
 
-					// Best-effort: fetch only headers from /diagram.mmd so we can surface
+					// Best-effort: fetch only headers from /diagram.dot so we can surface
 					// staleness warnings even when the PNG loads successfully.
-					fetch('/api/v1/config/diagram.mmd?meta=1&ts=' + Date.now(), { cache: 'no-store' })
+					fetch('/api/v1/config/diagram.dot?meta=1&ts=' + Date.now(), { cache: 'no-store' })
 						.then(function (resp) {
 							var warn = resp.headers.get('x-foghorn-warning');
 							if (warn && configDiagramStatusEl) {
@@ -1609,18 +1608,18 @@
 				};
 				configDiagramImgEl.onerror = function () {
 					if (configDiagramStatusEl) {
-						configDiagramStatusEl.textContent = 'PNG unavailable; showing Mermaid source.';
+						configDiagramStatusEl.textContent = 'PNG unavailable; showing GraphViz dot source.';
 					}
-					// Diagram missing (usually mmdc not available on the server): keep the
-					// standard two-pane layout and show the Mermaid output in the diagram
+					// Diagram missing (usually dot is not available on the server): keep the
+					// standard two-pane layout and show the dot output in the diagram
 					// area instead of collapsing to a single column.
 					configDiagramImgEl.style.display = 'none';
 					if (configDiagramFallbackEl) {
 						configDiagramFallbackEl.hidden = false;
 					}
-					if (configDiagramMmdEl) {
-						configDiagramMmdEl.textContent = 'Loading Mermaid source...';
-						fetch('/api/v1/config/diagram.mmd?ts=' + Date.now(), { cache: 'no-store' })
+					if (configDiagramDotEl) {
+						configDiagramDotEl.textContent = 'Loading dot source...';
+						fetch('/api/v1/config/diagram.dot?ts=' + Date.now(), { cache: 'no-store' })
 							.then(function (resp) {
 								var warn = resp.headers.get('x-foghorn-warning');
 								if (warn && configDiagramStatusEl) {
@@ -1632,42 +1631,67 @@
 								return resp.text();
 							})
 							.then(function (text) {
-								configDiagramMmdEl.textContent = text || '';
+								configDiagramDotEl.textContent = text || '';
 							})
 							.catch(function (err) {
-								configDiagramMmdEl.textContent = 'Failed to load Mermaid source: ' + (err && err.message ? err.message : String(err));
+								configDiagramDotEl.textContent = 'Failed to load dot source: ' + (err && err.message ? err.message : String(err));
 							});
 					}
 				};
 
 				var ts = Date.now();
-				// Ask the server if a PNG exists without downloading it. When mmdc is
-				// not available, the PNG is typically missing; in that case we show the
-				// Mermaid output (same as scripts/generate_config_mermaid.py) instead
-				// of leaving the diagram area blank.
-				fetch('/api/v1/config/diagram.png?meta=1&ts=' + ts, { cache: 'no-store' })
-					.then(function (resp) {
-						if (!resp.ok) {
-							throw new Error('HTTP ' + resp.status);
+
+				function isDarkThemeSelected() {
+					try {
+						var t = root && root.getAttribute ? root.getAttribute('data-theme') : null;
+						if (t === 'light') {
+							return false;
 						}
-						var warn = resp.headers.get('x-foghorn-warning');
-						if (warn && configDiagramStatusEl) {
-							configDiagramStatusEl.textContent = warn;
+						if (t === 'dark') {
+							return true;
 						}
-						var exists = resp.headers.get('x-foghorn-exists');
-						if (exists === '0') {
-							if (typeof configDiagramImgEl.onerror === 'function') {
-								configDiagramImgEl.onerror();
+					} catch (e) {}
+					// Fallback to OS preference when the UI theme is not set.
+					try {
+						return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+					} catch (e2) {
+						return false;
+					}
+				}
+
+				var primaryPng = isDarkThemeSelected() ? '/api/v1/config/diagram-dark.png' : '/api/v1/config/diagram.png';
+				var fallbackPng = '/api/v1/config/diagram.png';
+
+				function probeAndLoad(pngUrl, maybeFallbackUrl) {
+					fetch(pngUrl + '?meta=1&ts=' + ts, { cache: 'no-store' })
+						.then(function (resp) {
+							if (!resp.ok) {
+								throw new Error('HTTP ' + resp.status);
 							}
-							return;
-						}
-						configDiagramImgEl.src = '/api/v1/config/diagram.png?ts=' + ts;
-					})
-					.catch(function () {
-						// Older servers may not support the meta probe; fall back to
-						// the img load/onerror path.
-						configDiagramImgEl.src = '/api/v1/config/diagram.png?ts=' + ts;
-					});
+							var warn = resp.headers.get('x-foghorn-warning');
+							if (warn && configDiagramStatusEl) {
+								configDiagramStatusEl.textContent = warn;
+							}
+							var exists = resp.headers.get('x-foghorn-exists');
+							if (exists === '0') {
+								if (maybeFallbackUrl) {
+									return probeAndLoad(maybeFallbackUrl, null);
+								}
+								if (typeof configDiagramImgEl.onerror === 'function') {
+									configDiagramImgEl.onerror();
+								}
+								return;
+							}
+							configDiagramImgEl.src = pngUrl + '?ts=' + ts;
+						})
+						.catch(function () {
+							// Older servers may not support the meta probe; fall back to
+							// the img load/onerror path.
+							configDiagramImgEl.src = pngUrl + '?ts=' + ts;
+						});
+				}
+
+				probeAndLoad(primaryPng, primaryPng !== fallbackPng ? fallbackPng : null);
 			}
 
 			function setDiagramUploadStatus(text) {
@@ -3106,6 +3130,13 @@
 					btnThemeDark.classList.remove('fh-theme-btn-active');
 					btnThemeDark.setAttribute('aria-checked', 'false');
 				}
+
+				// Reload diagram so it matches the selected UI theme.
+				try {
+					if (page1 && page1.style && page1.style.display !== 'none') {
+						loadConfigDiagram();
+					}
+				} catch (e) {}
 			}
 
 
@@ -3286,7 +3317,7 @@
 				saveConfig();
 			});
 
-			// Upload config diagram PNG (only shown when Mermaid fallback is visible)
+			// Upload config diagram PNG (only shown when dot fallback is visible)
 			if (btnConfigDiagramUploadEl) {
 				btnConfigDiagramUploadEl.addEventListener('click', function () {
 					uploadConfigDiagramPng();

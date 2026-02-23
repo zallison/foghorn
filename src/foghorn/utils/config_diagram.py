@@ -1,23 +1,17 @@
-"""Brief: Generate Mermaid diagrams (and optional PNG renders) for a Foghorn config.
+"""Brief: Generate Graphviz dot config diagrams (and optional PNG renders) for a Foghorn config.
 
-This module is a reusable library version of `scripts/generate_config_mermaid.py`.
-It is used both by:
-  - the CLI script (for ad-hoc generation), and
-  - the running server (to generate a config diagram PNG on startup).
+This module is a reusable library version of `scripts/generate_config_diagram.py`.
 
 Inputs:
   - Config path (YAML) or already-parsed config mapping.
   - Optional rendering knobs (direction, spacing, font size).
 
 Outputs:
-  - Mermaid flowchart text.
-  - Optional PNG image written to disk when a renderer (mmdc or python_mermaid)
-    is available.
+  - Graphviz dot text.
+  - Optional PNG image written to disk when the `dot` binary is available.
 
 Notes:
   - PNG generation is best-effort and should never prevent server startup.
-  - `mmdc` (Mermaid CLI) is preferred. If unavailable, this module can
-    optionally attempt to use `python_mermaid` when installed.
   - The PNG is regenerated when missing or when the config file mtime is newer
     than the PNG mtime.
 """
@@ -39,16 +33,56 @@ import yaml
 
 from foghorn.config.config_schema import get_default_schema_path, validate_config
 
-logger = logging.getLogger("foghorn.utils.config_mermaid")
+logger = logging.getLogger("foghorn.utils.config_diagram")
 
 
 _ALLOWED_PIPELINE_ACTIONS = {"deny", "override", "drop", "allow"}
 
-# Mermaid render defaults.
+# Diagram render defaults.
+#
+# Notes:
+#   - direction uses GraphViz rankdir-style values: TB or LR.
+#   - node/rank spacing are GraphViz-style floats (nodesep/ranksep).
 _DEFAULT_DIRECTION = "TB"  # Top-to-bottom.
+_DEFAULT_THEME = "light"  # "light" | "dark".
+
+# Prefer a generic sans family. Graphviz will map this to a platform-available font
+# (e.g. DejaVu Sans on Linux, Helvetica on macOS).
+_DEFAULT_FONT_FAMILY = "sans"
+
+# Use a Graphviz colorscheme so the light/dark diagrams can share palette logic.
+# Paired has light+dark variants for each hue, which works well across backgrounds.
+_DEFAULT_COLORSCHEME = "paired12"
+
+# Listener transport highlight colors.
+# - Secure: blue
+# - Insecure: red
+#
+# Notes:
+#   - For the dark-theme diagram we choose the *lighter* paired colors for contrast.
+#   - For the light-theme diagram we choose the *darker* paired colors for contrast.
+_LISTENER_SECURE_FILL_DARK = f"/{_DEFAULT_COLORSCHEME}/1"
+_LISTENER_INSECURE_FILL_DARK = f"/{_DEFAULT_COLORSCHEME}/5"
+_LISTENER_SECURE_FILL_LIGHT = f"/{_DEFAULT_COLORSCHEME}/2"
+_LISTENER_INSECURE_FILL_LIGHT = f"/{_DEFAULT_COLORSCHEME}/6"
+
+# Subgraph/cluster shading (subtle background tint).
+_CLUSTER_FILL_DARK = "#0f172a"
+_CLUSTER_FILL_LIGHT = "#f3f4f6"
+
+# Dark-theme outlines should be bright for contrast.
+_DARK_OUTLINE = "#ffffff"
+
+_CLUSTER_BORDER_DARK = _DARK_OUTLINE
+_CLUSTER_BORDER_LIGHT = "#94a3b8"
+
+# Highlight the resolver-mode decision node with a subtle fill distinct from default nodes.
+_RESOLVER_FILL_DARK = "#1f2937"
+_RESOLVER_FILL_LIGHT = "#e5e7eb"
+
 _DEFAULT_FONT_SIZE_PX = 18
-_DEFAULT_NODE_SPACING = 80
-_DEFAULT_RANK_SPACING = 90
+_DEFAULT_NODE_SPACING = 0.8
+_DEFAULT_RANK_SPACING = 0.9
 
 
 @dataclass(frozen=True)
@@ -809,7 +843,7 @@ def normalize_plugins(cfg: dict[str, Any]) -> list[PluginInfo]:
 
 
 def _node_id(prefix: str, name: str, idx: int) -> str:
-    """Brief: Build a Mermaid-safe node identifier.
+    """Brief: Build a diagram-safe node identifier.
 
     Inputs:
       - prefix: Namespace prefix (e.g. 'pre', 'post', 'setup').
@@ -817,7 +851,10 @@ def _node_id(prefix: str, name: str, idx: int) -> str:
       - idx: Plugin index, included to ensure uniqueness.
 
     Outputs:
-      - str: Mermaid node id (alphanumerics/underscores only).
+      - str: Node id (alphanumerics/underscores only).
+
+    Notes:
+      - This id format is compatible with Graphviz dot identifiers.
     """
 
     safe = re.sub(r"[^a-zA-Z0-9_]", "_", name)
@@ -827,8 +864,15 @@ def _node_id(prefix: str, name: str, idx: int) -> str:
     return f"{prefix}_{idx}_{safe}"
 
 
-def _escape_mermaid_label(text: str) -> str:
-    """Brief: Escape a string for use inside a Mermaid double-quoted label.
+_ESCAPE_DOT_REPLACEMENTS = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\n": "\\n",
+}
+
+
+def _escape_dot_label(text: str) -> str:
+    """Brief: Escape a string for use inside a GraphViz dot double-quoted label.
 
     Inputs:
       - text: Label text.
@@ -837,11 +881,23 @@ def _escape_mermaid_label(text: str) -> str:
       - str: Escaped label text.
 
     Notes:
-      - Mermaid node labels often use the syntax: Node["..."]
-      - We only escape double quotes here to avoid prematurely terminating labels.
+      - We use dot's normal string labels ("...") rather than HTML labels.
+      - Newlines are represented as "\\n".
+      - Comma-separated segments are split onto separate lines to keep nodes narrow.
     """
 
-    return str(text).replace('"', '\\"')
+    out = str(text)
+
+    # Keep label blocks readable by splitting delimiter-separated segments onto new lines.
+    # Handle both delimited+space and bare delimiter.
+    out = out.replace(", ", "\n")
+    out = out.replace(",", "\n")
+    out = out.replace("; ", "\n")
+    out = out.replace(";", "\n")
+
+    for orig, repl in _ESCAPE_DOT_REPLACEMENTS.items():
+        out = out.replace(orig, repl)
+    return out
 
 
 def extract_listener_lines(cfg: dict[str, Any]) -> list[str]:
@@ -944,7 +1000,7 @@ def extract_upstream_lines(cfg: dict[str, Any], *, resolver_mode: str) -> list[s
     return lines
 
 
-def render_mermaid(
+def render_dot(
     plugins: list[PluginInfo],
     *,
     config_path: str,
@@ -952,12 +1008,30 @@ def render_mermaid(
     listener_lines: list[str],
     upstream_lines: list[str],
     direction: str = _DEFAULT_DIRECTION,
+    theme: str = _DEFAULT_THEME,
     font_size_px: int = _DEFAULT_FONT_SIZE_PX,
-    node_spacing: int = _DEFAULT_NODE_SPACING,
-    rank_spacing: int = _DEFAULT_RANK_SPACING,
+    node_spacing: float = _DEFAULT_NODE_SPACING,
+    rank_spacing: float = _DEFAULT_RANK_SPACING,
     include_init: bool = True,
 ) -> str:
-    """Brief: Render the full Mermaid diagram."""
+    """Brief: Render the full GraphViz dot diagram.
+
+    Inputs:
+      - plugins: Normalized plugins.
+      - config_path: Path to config file (for a header comment).
+      - resolver_mode: forward|recursive|master (none).
+      - listener_lines: Extracted listener lines.
+      - upstream_lines: Extracted upstream endpoint lines.
+      - direction: TB or LR.
+      - theme: "light" or "dark".
+      - font_size_px: Graph font size.
+      - node_spacing: nodesep.
+      - rank_spacing: ranksep.
+      - include_init: When True, include global node/edge attributes.
+
+    Outputs:
+      - str: GraphViz dot text.
+    """
 
     pre_chain = [p for p in plugins if p.pre_priority is not None]
     pre_chain.sort(key=lambda p: (int(p.pre_priority or 0), p.idx))
@@ -969,87 +1043,213 @@ def render_mermaid(
         ("drop" in p.post_actions) for p in post_chain
     )
 
-    setup_chain = [p for p in plugins if p.setup_priority is not None]
-    setup_chain.sort(key=lambda p: (int(p.setup_priority or 0), p.idx))
-
     direction = str(direction or _DEFAULT_DIRECTION).strip().upper()
     if direction not in {"TB", "LR"}:
         direction = _DEFAULT_DIRECTION
 
+    theme = str(theme or _DEFAULT_THEME).strip().lower()
+    if theme not in {"light", "dark"}:
+        theme = _DEFAULT_THEME
+
     font_size_px = int(font_size_px or _DEFAULT_FONT_SIZE_PX)
-    node_spacing = int(node_spacing or _DEFAULT_NODE_SPACING)
-    rank_spacing = int(rank_spacing or _DEFAULT_RANK_SPACING)
+    node_spacing = float(node_spacing or _DEFAULT_NODE_SPACING)
+    rank_spacing = float(rank_spacing or _DEFAULT_RANK_SPACING)
 
-    lines: list[str] = []
-
-    if include_init:
-        init_cfg = {
-            "flowchart": {
-                "nodeSpacing": node_spacing,
-                "rankSpacing": rank_spacing,
-            },
-            "themeVariables": {
-                "fontSize": f"{font_size_px}px",
-            },
-        }
-        lines.append(f"%%{{init: {json.dumps(init_cfg)} }}%%")
-
-    lines.append(f"%% Generated from: {config_path}")
-    lines.append(f"flowchart {direction}")
-
-    lines.append("  %% Styles")
-    lines.append(
-        "  classDef secure fill:#E3F2FD,stroke:#1E88E5,stroke-width:2px,color:#0D47A1;"
-    )
-    lines.append(
-        "  classDef insecure fill:#FFEBEE,stroke:#E53935,stroke-width:2px,color:#B71C1C;"
-    )
-
-    lines.append("  %% Core nodes")
-
-    lines.append("  Q([Query])")
-    lines.append("  Cache{Cache hit?}")
-    lines.append(
-        f'  Resolver["Resolver mode: {_escape_mermaid_label(resolver_mode)}<br/>options: forward | recursive | master (none)"]'
-    )
+    rankdir = "TB" if direction == "TB" else "LR"
 
     mode = str(resolver_mode or "forward").lower()
     if mode == "none":
         mode = "master"
-    if mode == "recursive":
-        lines.append('  Upstream["Recursive resolver"]')
-    elif mode == "master":
-        # Use a quoted label to avoid Mermaid parsing issues with punctuation.
-        lines.append('  Upstream["Master mode: no forwarding (REFUSED)"]')
-    else:
-        lines.append('  Upstream["Forward to upstreams"]')
 
-    # Listener nodes (split by protocol).
+    # Build endpoint groups.
+    meta_bits = [str(x).strip() for x in upstream_lines if x and ":" not in str(x)]
+    endpoint_lines = [str(x).strip() for x in upstream_lines if x and ":" in str(x)]
+
+    seen: set[str] = set()
+    items_insecure: list[str] = []
+    items_secure: list[str] = []
+    protos: set[str] = set()
+
+    for raw_s in endpoint_lines:
+        raw_s = raw_s.strip()
+        if not raw_s or raw_s in seen:
+            continue
+        seen.add(raw_s)
+
+        proto, _, rest = raw_s.partition(":")
+        proto = proto.strip().lower()
+        rest = rest.strip()
+        if not proto or not rest:
+            continue
+
+        protos.add(proto)
+        item = f"{proto}: {rest}"
+        if proto in {"udp", "tcp"}:
+            items_insecure.append(item)
+        elif proto in {"dot", "doh"}:
+            items_secure.append(item)
+        else:
+            items_insecure.append(item)
+
+    has_insecure = bool(protos & {"udp", "tcp"}) or bool(items_insecure)
+    has_secure = bool(protos & {"dot", "doh"}) or bool(items_secure)
+
+    lines: list[str] = []
+    lines.append(f"// Generated from: {config_path}")
+    lines.append("digraph config_diagram {")
+    lines.append(f"  rankdir={rankdir};")
+    lines.append(f"  nodesep={node_spacing};")
+    lines.append(f"  ranksep={rank_spacing};")
+    lines.append(f"  fontsize={font_size_px};")
+
+    if include_init:
+        if theme == "dark":
+            lines.append(
+                f'  graph [bgcolor="#0b1020", fontcolor="#e5e7eb", fontname="{_DEFAULT_FONT_FAMILY}", colorscheme="{_DEFAULT_COLORSCHEME}"];'
+            )
+            lines.append(
+                f'  node [shape=box, style="rounded,filled", fillcolor="#111827", fontcolor="#e5e7eb", color="{_DARK_OUTLINE}", fontname="{_DEFAULT_FONT_FAMILY}"];'
+            )
+            lines.append(
+                f'  edge [color="#e5e7eb", fontcolor="#e5e7eb", fontname="{_DEFAULT_FONT_FAMILY}"];'
+            )
+        else:
+            lines.append(
+                f'  graph [fontname="{_DEFAULT_FONT_FAMILY}", colorscheme="{_DEFAULT_COLORSCHEME}"];'
+            )
+            lines.append(
+                f'  node [shape=box, style="rounded,filled", fillcolor="#FFFFFF", fontname="{_DEFAULT_FONT_FAMILY}"];'
+            )
+            lines.append(
+                f'  edge [color="#555555", fontcolor="#111827", fontname="{_DEFAULT_FONT_FAMILY}"];'
+            )
+
+    # Core nodes.
+    #
+    # Keep the primary request pipeline nodes aligned by using a shared dot "group".
+    lines.append('  Q [shape=ellipse, label="Query", group="pipeline"];')
+    lines.append('  Cache [shape=diamond, label="Cache hit?", group="pipeline"];')
+
+    resolver_label = "Resolver mode: " + _escape_dot_label(resolver_mode)
+    if include_init:
+        resolver_fill = _RESOLVER_FILL_DARK if theme == "dark" else _RESOLVER_FILL_LIGHT
+        lines.append(
+            f'  Resolver [label="{resolver_label}", fillcolor="{resolver_fill}", group="pipeline"];'
+        )
+    else:
+        lines.append(f'  Resolver [label="{resolver_label}", group="pipeline"];')
+
+    if mode == "recursive":
+        lines.append('  Upstream [label="Recursive resolver", group="pipeline"];')
+    elif mode == "master":
+        lines.append(
+            '  Upstream [label="Master mode: no forwarding\\n(REFUSED)", group="pipeline"];'
+        )
+    else:
+        lines.append('  Upstream [label="Forward to upstreams", group="pipeline"];')
+
+    lines.append('  Resp [shape=ellipse, label="Response", group="pipeline"];')
+    if has_drop:
+        lines.append('  Drop [shape=ellipse, label="Drop (no reply)"];')
+
+    def _comma_newlines(text: str) -> str:
+        """Brief: Split comma-separated label segments into separate lines.
+
+        Inputs:
+          - text: Label text.
+
+        Outputs:
+          - str: Label text with commas replaced by newlines.
+        """
+
+        s = str(text or "")
+        # Handle both ", " and ",".
+        s = s.replace(", ", "\n")
+        s = s.replace(",", "\n")
+        return s
+
+    def _cluster_outline_attrs() -> tuple[str, str]:
+        """Brief: Get (color, style) attributes for cluster outlines.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - (color, style): Dot attribute values.
+        """
+
+        if theme == "dark":
+            return _DARK_OUTLINE, "rounded"
+        return _CLUSTER_BORDER_LIGHT, "rounded"
+
+    # Listener nodes.
     if listener_lines:
-        lines.append('  Listeners["Listeners"]')
+        lines.append("  subgraph cluster_listeners {")
+        lines.append('    label="Listeners";')
+        if include_init:
+            c, st = _cluster_outline_attrs()
+            lines.append(f'    style="{st}";')
+            lines.append(f'    color="{c}";')
         for raw in listener_lines:
             raw = str(raw or "").strip()
             if not raw:
                 continue
             proto = raw.split(":", 1)[0].strip().lower() if ":" in raw else ""
             nid = f'Listener_{re.sub(r"[^a-zA-Z0-9_]", "_", proto) or "unknown"}'
-            label = _escape_mermaid_label(raw)
-            lines.append(f'  {nid}["{label}"]')
-            lines.append(f"  Listeners --> {nid}")
-            lines.append(f"  {nid} --> Q")
 
-            if proto in {"dot", "doh"}:
-                lines.append(f"  class {nid} secure")
-            elif proto in {"udp", "tcp"}:
-                lines.append(f"  class {nid} insecure")
+            is_secure = proto in {"dot", "doh"}
+            if is_secure:
+                fill = (
+                    _LISTENER_SECURE_FILL_DARK
+                    if theme == "dark"
+                    else _LISTENER_SECURE_FILL_LIGHT
+                )
+            else:
+                fill = (
+                    _LISTENER_INSECURE_FILL_DARK
+                    if theme == "dark"
+                    else _LISTENER_INSECURE_FILL_LIGHT
+                )
 
-    lines.append("  Resp([Response])")
-    if has_drop:
-        lines.append('  Drop(["Drop (no reply)"])')
-    lines.append("")
+            border = _DARK_OUTLINE if theme == "dark" else "#111827"
+            # The palette choices use light fills on dark background, and dark
+            # fills on light background.
+            listener_font = "#111827" if theme == "dark" else "#ffffff"
 
-    lines.append("  subgraph QueryPath[DNS query path]")
-    lines.append("    direction TB")
+            # Secure listeners are shaded blue, insecure listeners red.
+            lines.append(
+                f'    {nid} [label="{_escape_dot_label(_comma_newlines(raw))}", fillcolor="{fill}", fontcolor="{listener_font}", color="{border}"];'
+            )
+        lines.append("  }")
+        for raw in listener_lines:
+            raw = str(raw or "").strip()
+            if not raw:
+                continue
+            proto = raw.split(":", 1)[0].strip().lower() if ":" in raw else ""
+            nid = f'Listener_{re.sub(r"[^a-zA-Z0-9_]", "_", proto) or "unknown"}'
+            lines.append(f"  {nid} -> Q;")
+
+    # Plugin chains and upstreams.
+    lines.append("  subgraph cluster_query {")
+    lines.append('    label="DNS query path";')
+    if include_init:
+        c, st = _cluster_outline_attrs()
+        lines.append(f'    style="{st}";')
+        lines.append(f'    color="{c}";')
+
+    # Box the resolver pipeline elements together.
+    lines.append("    subgraph cluster_resolver {")
+    lines.append('      label="Resolver";')
+    if include_init:
+        c, _st = _cluster_outline_attrs()
+        fill = _CLUSTER_FILL_DARK if theme == "dark" else _CLUSTER_FILL_LIGHT
+        lines.append('      style="rounded,filled";')
+        lines.append(f'      fillcolor="{fill}";')
+        lines.append(f'      color="{c}";')
+    lines.append("      Cache;")
+    lines.append("      Resolver;")
+    lines.append("      Upstream;")
+    lines.append("    }")
 
     has_pre_merge = any(
         (("deny" in p.pre_actions) or ("override" in p.pre_actions)) for p in pre_chain
@@ -1059,36 +1259,32 @@ def render_mermaid(
         for p in post_chain
     )
 
-    if has_pre_merge:
-        lines.append('    PreMerge(["Pre short-circuit"])')
-        lines.append("    PreMerge --> Resp")
-    if has_post_merge:
-        lines.append('    PostMerge(["Post short-circuit"])')
-        lines.append("    PostMerge --> Resp")
-
-    # Setup plugins are intentionally not shown in this diagram.
-
+    # Pre plugins.
     pre_node_ids: dict[int, str] = {}
-
     if pre_chain:
-        lines.append("    subgraph PrePlugins[Pre plugins]")
-        lines.append("      direction TB")
-
-        first_pre = None
-        prev = None
+        lines.append("    subgraph cluster_pre {")
+        lines.append('      label="Pre-Resolve Plugins";')
+        if include_init:
+            fill = _CLUSTER_FILL_DARK if theme == "dark" else _CLUSTER_FILL_LIGHT
+            border = _CLUSTER_BORDER_DARK if theme == "dark" else _CLUSTER_BORDER_LIGHT
+            lines.append('      style="rounded,filled";')
+            lines.append(f'      fillcolor="{fill}";')
+            lines.append(f'      color="{border}";')
+        first_pre: str | None = None
+        prev_pre: str | None = None
         for p in pre_chain:
             nid = _node_id("pre", p.name, p.idx)
             pre_node_ids[p.idx] = nid
-            label = f"{p.name}<br/>{p.type_key}<br/>pre={p.pre_priority}"
+            label = f"{_escape_dot_label(p.name)}\\n{_escape_dot_label(p.type_key)}\\npre={p.pre_priority}"
             if p.sets_upstreams:
-                label += "<br/>routes upstream"
-            lines.append(f'      {nid}["{label}"]')
-
+                label += "\\nroutes upstream"
+            # Keep pre plugins aligned with the main pipeline.
+            lines.append(f'      {nid} [label="{label}", group="pipeline"];')
             if first_pre is None:
                 first_pre = nid
-            if prev is not None:
-                lines.append(f"      {prev} --> {nid}")
-            prev = nid
+            if prev_pre is not None:
+                lines.append(f"      {prev_pre} -> {nid};")
+            prev_pre = nid
 
             resp_bits: list[str] = []
             if "deny" in p.pre_actions:
@@ -1096,186 +1292,213 @@ def render_mermaid(
             if "override" in p.pre_actions:
                 resp_bits.append("override (wire reply)")
             if resp_bits and has_pre_merge:
-                label_txt = "; ".join(resp_bits)
-                lines.append(f'      {nid} -->|"{label_txt}"| PreMerge')
-
+                # Avoid these side edges distorting the main vertical chain layout.
+                lines.append(
+                    f'      {nid} -> PreMerge [label="{_escape_dot_label("; ".join(resp_bits))}", constraint=false];'
+                )
             if "drop" in p.pre_actions:
-                lines.append(f"      {nid} -->|drop| Drop")
+                lines.append(f'      {nid} -> Drop [label="drop", constraint=false];')
 
-        lines.append("    end")
+        if has_pre_merge:
+            # Place the merge node at the bottom of the pre-plugins box.
+            lines.append('      PreMerge [shape=ellipse, label="Pre short-circuit"];')
+            if prev_pre is not None:
+                lines.append(f"      {prev_pre} -> PreMerge [style=invis, weight=10];")
 
-        assert first_pre is not None
-        assert prev is not None
-        lines.append(f"    Q --> {first_pre}")
-        lines.append(f"    {prev} --> Cache")
+        lines.append("    }")
+        if first_pre is not None and prev_pre is not None:
+            lines.append(f"    Q -> {first_pre};")
+            lines.append(f"    {prev_pre} -> Cache;")
+
+        if has_pre_merge:
+            lines.append("    PreMerge -> Resp;")
     else:
-        lines.append("    Q --> Cache")
+        lines.append("    Q -> Cache;")
 
-    lines.append("    Cache -->|hit| Resp")
-    lines.append("    Cache -->|miss| Resolver")
-    lines.append("    Resolver --> Upstream")
+    lines.append('    Cache -> Resp [label="hit"];')
+    lines.append('    Cache -> Resolver [label="miss"];')
+    lines.append("    Resolver -> Upstream;")
 
     # Routed upstreams (e.g., via upstream_router) are shown as a separate
     # upstream block inside the query path, near the forwarding section.
     routed_plugins = [p for p in pre_chain if p.routed_upstream_lines]
     if routed_plugins:
-        lines.append("    subgraph RoutedUpstreams[Upstream router upstreams]")
-        lines.append("      direction TB")
+        lines.append("    subgraph cluster_routed_upstreams {")
+        lines.append('      label="Upstream router upstreams";')
+        if include_init:
+            c, st = _cluster_outline_attrs()
+            lines.append(f'      style="{st}";')
+            lines.append(f'      color="{c}";')
         for p in routed_plugins:
             safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", p.name).strip("_") or "plugin"
             rid = f"RoutedUpstreams_{p.idx}_{safe_name}"
 
             raw_lines = list(p.routed_upstream_lines or [])
-            payload = "<br/>".join(_escape_mermaid_label(x) for x in raw_lines)
-            lines.append(f'      {rid}["Upstreams<br/>{payload}"]')
+            payload = "\\n".join(
+                _escape_dot_label(_comma_newlines(x)) for x in raw_lines if x
+            )
+            label = "Upstreams"
+            if payload:
+                label += "\\n" + payload
 
-            transports: set[str] = set()
-            for ln in raw_lines:
-                head = str(ln).split(":", 1)[0].strip().lower()
-                if head in {"udp", "tcp", "dot", "doh"}:
-                    transports.add(head)
+            lines.append(f'      {rid} [label="{label}"];')
 
-            if transports & {"udp", "tcp"}:
-                lines.append(f"      class {rid} insecure")
-            elif transports & {"dot", "doh"}:
-                lines.append(f"      class {rid} secure")
-
-            # Link from the plugin node (if we can find it) to its routed-upstreams.
             pre_nid = pre_node_ids.get(p.idx)
             if pre_nid:
-                lines.append(f"      {pre_nid} -.-> {rid}")
+                # Do not let routed-upstream annotation edges influence node ranking.
+                lines.append(
+                    f"      {pre_nid} -> {rid} [style=dashed, constraint=false];"
+                )
 
-        lines.append("    end")
+        lines.append("    }")
 
+    # Upstreams block (forward mode only).
     upstream_tails: list[str] = ["Upstream"]
     if upstream_lines and mode == "forward":
-        meta_bits = [str(x).strip() for x in upstream_lines if x and ":" not in str(x)]
-
-        lines.append("    subgraph UpstreamCfg[Upstreams]")
-        lines.append("      direction TB")
-
-        endpoint_lines = [str(x).strip() for x in upstream_lines if x and ":" in str(x)]
-
-        # Preserve order while de-duping exact entries.
-        seen: set[str] = set()
-        items_insecure: list[str] = []
-        items_secure: list[str] = []
-        protos: set[str] = set()
-
-        for raw_s in endpoint_lines:
-            raw_s = raw_s.strip()
-            if not raw_s or raw_s in seen:
-                continue
-            seen.add(raw_s)
-
-            proto, _, rest = raw_s.partition(":")
-            proto = proto.strip().lower()
-            rest = rest.strip()
-            if not proto or not rest:
-                continue
-
-            protos.add(proto)
-            item = f"{proto}: {rest}"
-            if proto in {"udp", "tcp"}:
-                items_insecure.append(item)
-            elif proto in {"dot", "doh"}:
-                items_secure.append(item)
-            else:
-                # Unknown transports are treated as insecure.
-                items_insecure.append(item)
-
-        has_insecure = bool(protos & {"udp", "tcp"}) or bool(items_insecure)
-        has_secure = bool(protos & {"dot", "doh"}) or bool(items_secure)
+        lines.append("    subgraph cluster_upstreams {")
+        lines.append('      label="Upstreams";')
+        if include_init:
+            c, _st = _cluster_outline_attrs()
+            fill = _CLUSTER_FILL_DARK if theme == "dark" else _CLUSTER_FILL_LIGHT
+            lines.append('      style="rounded,filled";')
+            lines.append(f'      fillcolor="{fill}";')
+            lines.append(f'      color="{c}";')
 
         def _emit_upstreams_node(
-            *, node_id: str, items: list[str], class_name: str
+            *,
+            node_id: str,
+            items: list[str],
+            security: str | None,
         ) -> None:
-            """Brief: Emit a single upstreams node into the diagram.
+            """Brief: Emit an upstream endpoint node with optional security styling.
 
             Inputs:
-              - node_id: Mermaid node identifier.
-              - items: Endpoint lines to include.
-              - class_name: Mermaid class to apply (secure/insecure).
+              - node_id: Dot node id.
+              - items: Endpoint label items.
+              - security: "secure", "insecure", or None.
 
             Outputs:
-              - None; appends Mermaid lines to the output list.
+              - None; appends to lines.
             """
 
-            label_bits: list[str] = ["Upstreams"]
-            label_bits.extend(meta_bits)
-            label_bits.extend(items)
+            if security == "secure":
+                title = "Upstreams (secure)"
+                fill = (
+                    _LISTENER_SECURE_FILL_DARK
+                    if theme == "dark"
+                    else _LISTENER_SECURE_FILL_LIGHT
+                )
+                font = "#111827" if theme == "dark" else "#ffffff"
+            elif security == "insecure":
+                title = "Upstreams (insecure)"
+                fill = (
+                    _LISTENER_INSECURE_FILL_DARK
+                    if theme == "dark"
+                    else _LISTENER_INSECURE_FILL_LIGHT
+                )
+                font = "#111827" if theme == "dark" else "#ffffff"
+            else:
+                title = "Upstreams"
+                fill = None
+                font = None
 
-            label = "<br/>".join(_escape_mermaid_label(x) for x in label_bits if x)
-            lines.append(f'      {node_id}["{label}"]')
-            lines.append(f"      class {node_id} {class_name}")
+            label_bits = [title] + meta_bits + items
+            label = "\\n".join(
+                _escape_dot_label(_comma_newlines(x)) for x in label_bits if x
+            )
+
+            attrs = [f'label="{label}"', 'group="pipeline"']
+            if fill and font:
+                attrs.append(f'fillcolor="{fill}"')
+                attrs.append(f'fontcolor="{font}"')
+
+            lines.append(f"      {node_id} [{', '.join(attrs)}];")
 
         if has_insecure and has_secure:
             _emit_upstreams_node(
-                node_id="UpstreamsInsecure", items=items_insecure, class_name="insecure"
+                node_id="UpstreamsInsecure",
+                items=items_insecure,
+                security="insecure",
             )
             _emit_upstreams_node(
-                node_id="UpstreamsSecure", items=items_secure, class_name="secure"
+                node_id="UpstreamsSecure",
+                items=items_secure,
+                security="secure",
             )
             upstream_tails = ["UpstreamsInsecure", "UpstreamsSecure"]
-
-            lines.append("    end")
-
-            lines.append("    Upstream --> UpstreamsInsecure")
-            lines.append("    Upstream --> UpstreamsSecure")
         else:
-            # Single transport group (or none): preserve the legacy single-node view.
             items = items_insecure if has_insecure else items_secure
-            class_name = "insecure" if has_insecure else "secure"
-            _emit_upstreams_node(
-                node_id="Upstreams", items=items, class_name=class_name
+            security = (
+                "insecure" if has_insecure else ("secure" if has_secure else None)
             )
+            _emit_upstreams_node(node_id="Upstreams", items=items, security=security)
             upstream_tails = ["Upstreams"]
 
-            lines.append("    end")
+        lines.append("    }")
 
-            lines.append("    Upstream --> Upstreams")
+        for tail in upstream_tails:
+            lines.append(f"    Upstream -> {tail};")
 
+    # Post plugins.
     if post_chain:
-        lines.append("    subgraph PostPlugins[Post plugins]")
-        lines.append("      direction TB")
-
-        first_post = None
-        prev_post = None
+        lines.append("    subgraph cluster_post {")
+        lines.append('      label="Post-Resolve Plugins";')
+        if include_init:
+            fill = _CLUSTER_FILL_DARK if theme == "dark" else _CLUSTER_FILL_LIGHT
+            border = _CLUSTER_BORDER_DARK if theme == "dark" else _CLUSTER_BORDER_LIGHT
+            lines.append('      style="rounded,filled";')
+            lines.append(f'      fillcolor="{fill}";')
+            lines.append(f'      color="{border}";')
+        first_post: str | None = None
+        prev_post: str | None = None
         for p in post_chain:
             nid = _node_id("post", p.name, p.idx)
-            label = f"{p.name}<br/>{p.type_key}<br/>post={p.post_priority}"
-            lines.append(f'      {nid}["{label}"]')
+            label = f"{_escape_dot_label(p.name)}\\n{_escape_dot_label(p.type_key)}\\npost={p.post_priority}"
+            # Keep post plugins aligned with the main pipeline.
+            lines.append(f'      {nid} [label="{label}", group="pipeline"];')
 
             if first_post is None:
                 first_post = nid
             if prev_post is not None:
-                lines.append(f"      {prev_post} --> {nid}")
+                lines.append(f"      {prev_post} -> {nid};")
             prev_post = nid
 
-            resp_bits = []
+            resp_bits: list[str] = []
             if "deny" in p.post_actions:
                 resp_bits.append("deny (NXDOMAIN)")
             if "override" in p.post_actions:
                 resp_bits.append("override (wire reply)")
             if resp_bits and has_post_merge:
-                label_txt = "; ".join(resp_bits)
-                lines.append(f'      {nid} -->|"{label_txt}"| PostMerge')
-
+                # Avoid these side edges distorting the main vertical chain layout.
+                lines.append(
+                    f'      {nid} -> PostMerge [label="{_escape_dot_label("; ".join(resp_bits))}", constraint=false];'
+                )
             if "drop" in p.post_actions:
-                lines.append(f"      {nid} -->|drop| Drop")
+                lines.append(f'      {nid} -> Drop [label="drop", constraint=false];')
 
-        lines.append("    end")
+        if has_post_merge:
+            # Place the merge node at the bottom of the post-plugins box.
+            lines.append('      PostMerge [shape=ellipse, label="Post short-circuit"];')
+            if prev_post is not None:
+                lines.append(
+                    f"      {prev_post} -> PostMerge [style=invis, weight=10];"
+                )
 
-        assert first_post is not None
-        assert prev_post is not None
-        for tail in upstream_tails:
-            lines.append(f"    {tail} --> {first_post}")
-        lines.append(f"    {prev_post} --> Resp")
+        lines.append("    }")
+
+        if has_post_merge:
+            lines.append("    PostMerge -> Resp;")
+
+        if first_post is not None and prev_post is not None:
+            for tail in upstream_tails:
+                lines.append(f"    {tail} -> {first_post};")
+            lines.append(f"    {prev_post} -> Resp;")
     else:
         for tail in upstream_tails:
-            lines.append(f"    {tail} --> Resp")
+            lines.append(f"    {tail} -> Resp;")
 
-    lines.append("  end")
+    lines.append("  }")
+    lines.append("}")
 
     return "\n".join(lines) + "\n"
 
@@ -1305,22 +1528,29 @@ def load_config(config_path: str) -> dict[str, Any]:
     return obj
 
 
-def generate_mermaid_text_from_config_path(
+def generate_dot_text_from_config_path(
     config_path: str,
     *,
     direction: str = _DEFAULT_DIRECTION,
+    theme: str = _DEFAULT_THEME,
     font_size_px: int = _DEFAULT_FONT_SIZE_PX,
-    node_spacing: int = _DEFAULT_NODE_SPACING,
-    rank_spacing: int = _DEFAULT_RANK_SPACING,
+    node_spacing: float = _DEFAULT_NODE_SPACING,
+    rank_spacing: float = _DEFAULT_RANK_SPACING,
     include_init: bool = True,
 ) -> str:
-    """Brief: Generate Mermaid diagram text for a config file.
+    """Brief: Generate GraphViz dot diagram text for a config file.
 
     Inputs:
       - config_path: YAML config path.
+      - direction: TB or LR.
+      - theme: "light" or "dark".
+      - font_size_px: Graph font size.
+      - node_spacing: nodesep.
+      - rank_spacing: ranksep.
+      - include_init: When True, include global node/edge attrs.
 
     Outputs:
-      - Mermaid diagram text.
+      - str: dot diagram text.
     """
 
     cfg = load_config(config_path)
@@ -1337,18 +1567,32 @@ def generate_mermaid_text_from_config_path(
     listener_lines = extract_listener_lines(cfg)
     upstream_lines = extract_upstream_lines(cfg, resolver_mode=resolver_mode)
 
-    return render_mermaid(
+    return render_dot(
         plugins,
         config_path=str(config_path),
         resolver_mode=resolver_mode,
         listener_lines=listener_lines,
         upstream_lines=upstream_lines,
         direction=direction,
+        theme=theme,
         font_size_px=font_size_px,
         node_spacing=node_spacing,
         rank_spacing=rank_spacing,
         include_init=include_init,
     )
+
+
+def diagram_dark_png_path_for_config(config_path: str) -> str:
+    """Brief: Compute the diagram dark-theme PNG path for a given config path.
+
+    Inputs:
+      - config_path: Path to the YAML config.
+
+    Outputs:
+      - str: Dark PNG path used by ensure_config_diagram_png().
+    """
+
+    return f"{config_path}.dot-dark.png"
 
 
 def diagram_png_path_for_config(config_path: str) -> str:
@@ -1361,20 +1605,43 @@ def diagram_png_path_for_config(config_path: str) -> str:
       - str: PNG path used by ensure_config_diagram_png().
     """
 
-    return f"{config_path}.mermaid.png"
+    return f"{config_path}.dot.png"
 
 
-def diagram_mmd_path_for_config(config_path: str) -> str:
-    """Brief: Compute the diagram .mmd path for a given config path.
+def diagram_dot_path_for_config(config_path: str) -> str:
+    """Brief: Compute the diagram .dot path for a given config path.
 
     Inputs:
       - config_path: Path to the YAML config.
 
     Outputs:
-      - str: Mermaid source path used by ensure_config_diagram_png().
+      - str: dot source path used by ensure_config_diagram_png().
     """
 
-    return f"{config_path}.mermaid.mmd"
+    return f"{config_path}.dot"
+
+
+def diagram_dark_png_candidate_paths_for_config(config_path: str) -> list[Path]:
+    """Brief: Candidate locations to find a pre-generated dark-theme diagram PNG.
+
+    Inputs:
+      - config_path: YAML config path.
+
+    Outputs:
+      - list[Path]: Candidate dark PNG paths, in priority order.
+
+    Notes:
+      - Prefer a canonical file in the config directory (diagram-dark.png).
+      - Fall back to the auto-generated sibling of the config file
+        (<config>.dot-dark.png).
+    """
+
+    cfg = Path(str(config_path))
+    cfg_dir = cfg.parent
+    return [
+        cfg_dir / "diagram-dark.png",
+        Path(diagram_dark_png_path_for_config(str(cfg))),
+    ]
 
 
 def diagram_png_candidate_paths_for_config(config_path: str) -> list[Path]:
@@ -1389,7 +1656,7 @@ def diagram_png_candidate_paths_for_config(config_path: str) -> list[Path]:
     Notes:
       - Prefer a canonical file in the config directory (diagram.png).
       - Fall back to the auto-generated sibling of the config file
-        (<config>.mermaid.png).
+        (<config>.dot.png).
     """
 
     cfg = Path(str(config_path))
@@ -1397,24 +1664,24 @@ def diagram_png_candidate_paths_for_config(config_path: str) -> list[Path]:
     return [cfg_dir / "diagram.png", Path(diagram_png_path_for_config(str(cfg)))]
 
 
-def diagram_mmd_candidate_paths_for_config(config_path: str) -> list[Path]:
-    """Brief: Candidate locations to find a pre-generated config diagram Mermaid source.
+def diagram_dot_candidate_paths_for_config(config_path: str) -> list[Path]:
+    """Brief: Candidate locations to find a pre-generated config diagram dot source.
 
     Inputs:
       - config_path: YAML config path.
 
     Outputs:
-      - list[Path]: Candidate Mermaid source paths, in priority order.
+      - list[Path]: Candidate dot source paths, in priority order.
 
     Notes:
-      - Prefer a canonical file in the config directory (diagram.mmd).
+      - Prefer a canonical file in the config directory (diagram.dot).
       - Fall back to the auto-generated sibling of the config file
-        (<config>.mermaid.mmd).
+        (<config>.dot).
     """
 
     cfg = Path(str(config_path))
     cfg_dir = cfg.parent
-    return [cfg_dir / "diagram.mmd", Path(diagram_mmd_path_for_config(str(cfg)))]
+    return [cfg_dir / "diagram.dot", Path(diagram_dot_path_for_config(str(cfg)))]
 
 
 def find_first_existing_path(paths: list[Path]) -> Path | None:
@@ -1441,7 +1708,7 @@ def stale_diagram_warning(*, config_path: str, diagram_path: str) -> str | None:
 
     Inputs:
       - config_path: YAML config path.
-      - diagram_path: Diagram artifact path (PNG or .mmd).
+      - diagram_path: Diagram artifact path (PNG or .dot).
 
     Outputs:
       - str | None: Warning text when stale, otherwise None.
@@ -1489,85 +1756,42 @@ def _is_stale(input_path: str, output_path: str) -> bool:
     return float(in_stat.st_mtime) > float(out_stat.st_mtime)
 
 
-def _mmdc_fallback_paths() -> list[Path]:
-    """Brief: Candidate filesystem locations for mmdc in containerized envs.
+def _find_dot_cmd() -> str | None:
+    """Brief: Locate the GraphViz dot binary.
 
     Inputs:
       - None.
 
     Outputs:
-      - list[Path]: Paths to check when `mmdc` is not available on PATH.
-
-    Notes:
-      - Some Docker images mount the repo at /foghorn and install node
-        dependencies there.
+      - str | None: Path to dot, else None.
     """
 
-    return [
-        Path("/foghorn/node_modules/mmdc"),
-        Path("/foghorn/node_modules/.bin/mmdc"),
-    ]
+    return shutil.which("dot")
 
 
-def _find_mmdc_cmd() -> list[str] | None:
-    """Brief: Locate a runnable command for mmdc.
+def _render_png_with_dot(*, dot_text: str, output_png_path: str) -> tuple[bool, str]:
+    """Brief: Render dot text to PNG using dot.
 
     Inputs:
-      - None.
-
-    Outputs:
-      - list[str] | None: Command prefix to invoke mmdc, else None.
-
-    Behaviour:
-      - Prefer PATH (shutil.which('mmdc')).
-      - If missing, check for /foghorn/node_modules/mmdc (and .bin/mmdc).
-      - If a fallback file exists but is not executable, try running it via node
-        (when node is available on PATH).
-    """
-
-    mmdc = shutil.which("mmdc")
-    if mmdc:
-        return [mmdc]
-
-    node = shutil.which("node")
-
-    for p in _mmdc_fallback_paths():
-        try:
-            if not p.is_file():
-                continue
-            if os.access(str(p), os.X_OK):
-                return [str(p)]
-            if node:
-                return [node, str(p)]
-        except Exception:
-            continue
-
-    return None
-
-
-def _render_png_with_mmdc(*, mmd_text: str, output_png_path: str) -> tuple[bool, str]:
-    """Brief: Render Mermaid text to a PNG using mmdc.
-
-    Inputs:
-      - mmd_text: Mermaid flowchart text.
-      - output_png_path: Destination PNG path.
+      - dot_text: GraphViz dot text.
+      - output_png_path: Destination path.
 
     Outputs:
       - (ok, detail)
     """
 
-    mmdc_cmd = _find_mmdc_cmd()
-    if not mmdc_cmd:
-        return False, "mmdc not found"
+    dot_cmd = _find_dot_cmd()
+    if not dot_cmd:
+        return False, "dot not found"
 
     out_path = Path(output_png_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="foghorn-mermaid-") as td:
-        in_path = Path(td) / "diagram.mmd"
-        in_path.write_text(mmd_text, encoding="utf-8")
+    with tempfile.TemporaryDirectory(prefix="foghorn-dot-") as td:
+        in_path = Path(td) / "diagram.dot"
+        in_path.write_text(dot_text, encoding="utf-8")
 
-        cmd = [*mmdc_cmd, "-i", str(in_path), "-o", str(out_path)]
+        cmd = [dot_cmd, "-Tpng", "-o", str(out_path), str(in_path)]
         try:
             proc = subprocess.run(
                 cmd,
@@ -1577,34 +1801,31 @@ def _render_png_with_mmdc(*, mmd_text: str, output_png_path: str) -> tuple[bool,
                 text=True,
             )
         except Exception as exc:
-            return False, f"failed to run mmdc: {exc}"
+            return False, f"failed to run dot: {exc}"
 
         if proc.returncode != 0:
             err = (proc.stderr or proc.stdout or "").strip()
-            return False, f"mmdc failed: {err}" if err else "mmdc failed"
+            return False, f"dot failed: {err}" if err else "dot failed"
 
     return True, "ok"
 
 
-def _render_png_with_mmdc_atomic(
-    *, mmd_text: str, output_png_path: str
+def _render_png_with_dot_atomic(
+    *, dot_text: str, output_png_path: str
 ) -> tuple[bool, str]:
-    """Brief: Render via mmdc and atomically replace the destination file.
+    """Brief: Render via dot and atomically replace the destination file.
 
     Inputs:
-      - mmd_text: Mermaid flowchart text.
+      - dot_text: GraphViz dot text.
       - output_png_path: Final destination PNG path.
 
     Outputs:
       - (ok, detail)
-
-    Notes:
-      - This avoids leaving a partially-written PNG behind when mmdc fails.
     """
 
     tmp_path = f"{output_png_path}.new"
 
-    ok, detail = _render_png_with_mmdc(mmd_text=mmd_text, output_png_path=tmp_path)
+    ok, detail = _render_png_with_dot(dot_text=dot_text, output_png_path=tmp_path)
     if not ok:
         try:
             if os.path.exists(tmp_path):
@@ -1626,51 +1847,17 @@ def _render_png_with_mmdc_atomic(
     return True, "ok"
 
 
-def _render_png_with_python_mermaid(
-    *, mmd_text: str, output_png_path: str
-) -> tuple[bool, str]:
-    """Brief: Best-effort PNG rendering via python_mermaid.
-
-    Inputs:
-      - mmd_text: Mermaid flowchart text.
-      - output_png_path: Destination PNG path.
-
-    Outputs:
-      - (ok, detail)
-
-    Notes:
-      - The python_mermaid API differs across versions; this function is very
-        defensive and should be treated as an optional fallback.
-    """
-
-    try:
-        import python_mermaid  # type: ignore
-    except Exception:
-        return False, "python_mermaid not installed"
-
-    # Try a few likely APIs.
-    try:
-        fn = getattr(python_mermaid, "render", None)
-        if callable(fn):
-            out = fn(mmd_text, output_format="png")
-            if isinstance(out, (bytes, bytearray, memoryview)):
-                Path(output_png_path).write_bytes(bytes(out))
-                return True, "ok"
-    except Exception as exc:
-        return False, f"python_mermaid render() failed: {exc}"
-
-    return False, "python_mermaid has no supported render API"
-
-
 def ensure_config_diagram_png(
     *,
     config_path: str,
     output_png_path: str | None = None,
-    output_mmd_path: str | None = None,
+    output_png_dark_path: str | None = None,
+    output_dot_path: str | None = None,
+    output_dot_dark_path: str | None = None,
     direction: str = _DEFAULT_DIRECTION,
     font_size_px: int = _DEFAULT_FONT_SIZE_PX,
-    node_spacing: int = _DEFAULT_NODE_SPACING,
-    rank_spacing: int = _DEFAULT_RANK_SPACING,
+    node_spacing: float = _DEFAULT_NODE_SPACING,
+    rank_spacing: float = _DEFAULT_RANK_SPACING,
     include_init: bool = True,
 ) -> tuple[bool, str, str | None]:
     """Brief: Ensure a PNG config diagram exists and is up-to-date.
@@ -1678,19 +1865,21 @@ def ensure_config_diagram_png(
     Inputs:
       - config_path: YAML config path.
       - output_png_path: Optional explicit output path for PNG.
-      - output_mmd_path: Optional explicit output path for Mermaid source.
-      - direction: Mermaid flow direction (TB or LR).
-      - font_size_px: Mermaid theme font size in pixels.
-      - node_spacing: Mermaid flowchart node spacing.
-      - rank_spacing: Mermaid flowchart rank spacing.
-      - include_init: When True, include Mermaid init directive.
+      - output_png_dark_path: Optional explicit output path for dark-theme PNG.
+      - output_dot_path: Optional explicit output path for dot source.
+      - output_dot_dark_path: Optional explicit output path for dark-theme dot source.
+      - direction: GraphViz rankdir (TB or LR).
+      - font_size_px: Font size in pixels.
+      - node_spacing: GraphViz nodesep.
+      - rank_spacing: GraphViz ranksep.
+      - include_init: When True, include global dot attributes.
 
     Outputs:
       - (ok, detail, png_path)
 
     Behaviour:
       - If the PNG is missing or older than the config file, regenerate it.
-      - If no renderer is available, returns ok=False with a helpful detail.
+      - If dot is unavailable, returns ok=False with a helpful detail.
     """
 
     cfg_path = str(config_path)
@@ -1701,15 +1890,29 @@ def ensure_config_diagram_png(
 
     if output_png_path is None:
         output_png_path = str(cfg_dir / "diagram.png")
-    if output_mmd_path is None:
-        output_mmd_path = str(cfg_dir / "diagram.mmd")
+
+    if output_png_dark_path is None:
+        try:
+            p = Path(str(output_png_path))
+            output_png_dark_path = str(p.with_name(p.stem + "-dark" + p.suffix))
+        except Exception:
+            output_png_dark_path = str(cfg_dir / "diagram-dark.png")
+
+    if output_dot_path is None:
+        output_dot_path = str(cfg_dir / "diagram.dot")
+
+    if output_dot_dark_path is None:
+        try:
+            p = Path(str(output_dot_path))
+            output_dot_dark_path = str(p.with_name(p.stem + "-dark" + p.suffix))
+        except Exception:
+            output_dot_dark_path = str(cfg_dir / "diagram-dark.dot")
 
     if not os.path.isfile(cfg_path):
         return False, f"config not found: {cfg_path}", None
 
     # Consider the diagram stale not just when the config changes, but also
-    # when the generator implementation or schema changes. This avoids serving
-    # a stale PNG after upgrading foghorn without touching the config file.
+    # when the generator implementation or schema changes.
     stale_inputs: list[str] = [cfg_path]
 
     try:
@@ -1726,37 +1929,68 @@ def ensure_config_diagram_png(
     except Exception:
         pass
 
-    if not any(_is_stale(p, output_png_path) for p in stale_inputs):
+    stale_light = any(_is_stale(p, output_png_path) for p in stale_inputs)
+    stale_dark = any(_is_stale(p, str(output_png_dark_path)) for p in stale_inputs)
+
+    if not stale_light and not stale_dark:
         return True, "up-to-date", output_png_path
 
-    try:
-        mmd_text = generate_mermaid_text_from_config_path(
-            cfg_path,
-            direction=direction,
-            font_size_px=font_size_px,
-            node_spacing=node_spacing,
-            rank_spacing=rank_spacing,
-            include_init=include_init,
+    dot_text_light: str | None = None
+    dot_text_dark: str | None = None
+
+    if stale_light:
+        try:
+            dot_text_light = generate_dot_text_from_config_path(
+                cfg_path,
+                direction=direction,
+                theme="light",
+                font_size_px=font_size_px,
+                node_spacing=node_spacing,
+                rank_spacing=rank_spacing,
+                include_init=include_init,
+            )
+        except Exception as exc:
+            return False, f"failed to generate dot text: {exc}", None
+
+        # Best-effort: also write the .dot next to the PNG for debugging.
+        try:
+            Path(output_dot_path).write_text(dot_text_light, encoding="utf-8")
+        except Exception:
+            pass
+
+        ok_light, detail_light = _render_png_with_dot_atomic(
+            dot_text=dot_text_light, output_png_path=output_png_path
         )
-    except Exception as exc:
-        return False, f"failed to generate mermaid text: {exc}", None
+        if not ok_light:
+            return False, detail_light, None
 
-    # Best-effort: also write the .mmd next to the PNG for debugging.
-    try:
-        Path(output_mmd_path).write_text(mmd_text, encoding="utf-8")
-    except Exception:
-        pass
+    if stale_dark:
+        try:
+            dot_text_dark = generate_dot_text_from_config_path(
+                cfg_path,
+                direction=direction,
+                theme="dark",
+                font_size_px=font_size_px,
+                node_spacing=node_spacing,
+                rank_spacing=rank_spacing,
+                include_init=include_init,
+            )
+        except Exception as exc:
+            return False, f"failed to generate dot text: {exc}", None
 
-    ok, detail = _render_png_with_mmdc_atomic(
-        mmd_text=mmd_text, output_png_path=output_png_path
-    )
-    if not ok:
-        # Optional fallback.
-        ok2, detail2 = _render_png_with_python_mermaid(
-            mmd_text=mmd_text, output_png_path=output_png_path
+        # Best-effort: also write the .dot next to the PNG for debugging.
+        try:
+            Path(str(output_dot_dark_path)).write_text(dot_text_dark, encoding="utf-8")
+        except Exception:
+            pass
+
+        ok_dark, detail_dark = _render_png_with_dot_atomic(
+            dot_text=dot_text_dark, output_png_path=str(output_png_dark_path)
         )
-        if ok2:
-            return True, "rendered with python_mermaid", output_png_path
-        return False, detail, None
+        if not ok_dark:
+            # If the light theme rendered successfully, treat this as best-effort.
+            if not stale_light:
+                return False, detail_dark, None
+            return True, f"rendered light; dark failed: {detail_dark}", output_png_path
 
-    return True, "rendered with mmdc", output_png_path
+    return True, "rendered with dot", output_png_path

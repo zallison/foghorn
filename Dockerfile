@@ -1,7 +1,8 @@
 # NB: Use `make docker-build` to get a cleaner build (no .git, etc)
 
 # Use the latest official Python image
-FROM python:slim
+FROM python
+#:slim
 
 # Set working directory inside the container
 WORKDIR /foghorn
@@ -12,19 +13,20 @@ COPY . /foghorn
 # Ensure dependencies for databases and diagram rendering in the webui
 RUN DEBIAN_FRONTEND=noninteractive apt update && \
 	DEBIAN_FRONTEND=noninteractive apt install -y \
-	  build-essential \
-	  gcc \
-	  libfontconfig \
-	  libmariadb-dev \
-	  postgresql-server-dev-all && \
+	  # build-essential \
+	  # gcc \
+	  # libmariadb-dev \
+	  # postgresql-server-dev-all \
+	  graphviz && \
 	DEBIAN_FRONTEND=noninteractive apt clean && \
 	rm -rf /var/lib/apt/lists/*
 
 # build-essential, gcc, and libmariadb for maraidb support
-# postgresql-server-dev-all for postgres
-# libfontconfig for rendering text in diagrams.
+# build-essential, gcc, and postgresql-server-dev-all for postgres
+# graphviz (dot) for rendering config diagrams.
 
-RUN pip install --root-user-action=ignore --upgrade pip && pip install --root-user-action=ignore "."
+RUN pip install --root-user-action=ignore --upgrade pip \
+	&& pip install --root-user-action=ignore "."
 
 ## Suggested expose and mappings
 # Listens on ports > 1024 by default.

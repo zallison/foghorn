@@ -260,12 +260,12 @@ For local development there is a `Makefile` with a few convenience targets:
 - `make package-build` / `make package-publish` / `make package-publish-dev` – build and (optionally) publish Python packages.
 - `make ssl-cert` – generate a self-signed TLS key and certificate under `./var` using `openssl req -x509`.
 
-### Rendering Mermaid diagrams via Docker (mmdc)
+### Rendering config diagrams (Graphviz dot)
 
-If you have a `diagram.mmd` and want to render it to `diagram.png` without installing `mmdc` locally:
+If you have a `diagram.dot` and want to render it to `diagram.png`:
 
 ```bash
-docker run -v ${DATA}:/data minlag/mermaid-cli:11.12.1-beta.5 -i /data/diagram.mmd -o /data/diagram.png
+dot -Tpng diagram.dot -o diagram.png
 ```
 
 ---
