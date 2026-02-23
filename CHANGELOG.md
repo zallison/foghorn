@@ -20,15 +20,24 @@ All notable changes to this project will be documented in this file.
 
 - AXFR-backed zones now respect `minimum_reload_time` and reload only when enough time has elapsed since initial load or last NOTIFY reception, or when `load_mode=replace` forces a full reload.
 - Performance: added LRU caches to hot-path helpers used during resolution and admin polling (ZoneRecords wildcard parsing, RateLimit base-domain extraction, AccessControl IP parsing, DoH/DoT SSL context creation, stats ignore-filter IP parsing, and webserver UTC datetime parsing).
-- Admin UI: when the config diagram PNG is unavailable, the UI now preserves the normal two-pane layout and shows Mermaid source in the diagram pane.
-- Logging: upstream skip de-duplication messages are now logged at INFO (was WARNING).
-- Packaging: `mmdc` is now treated as optional (no longer a default dependency); docs/UI include Docker-based rendering instructions.
-- Docker image: added `libfontconfig` to support diagram text rendering.
+- Admin UI: diagram rendering now prefers a light/dark PNG that matches the selected UI theme.
+- Admin UI: when the config diagram PNG is unavailable, the UI now preserves the normal two-pane layout and shows Graphviz dot source in the diagram pane.
+- Admin UI: light theme success messages (e.g. config save) now use higher-contrast colors.
+- Logging: upstream skip de-duplication messages are now logged at DEBUG (was WARNING).
+- Diagrams: config diagram source and PNG rendering now use Graphviz (`dot`) (replacing Mermaid/mmdc).
+- Diagrams: added a dark-theme diagram PNG endpoint.
+- Diagrams: dot output styling now defaults to a sans font, uses a Graphviz colorscheme, and applies light/dark-aware shading for resolver/upstream/plugin clusters.
+- Docker image: install `graphviz` (`dot`) to support diagram rendering.
+
+### Fixed
+
+- ZoneRecords DNSSEC: improved NSEC3 denial-of-existence handling so NODATA responses only include relevant NSEC3 proofs.
+- Diagrams: config diagram endpoints now expose `.dot` source consistently.
 
 ### Documentation
 
 - Updated ZoneRecords docs to clarify source precedence order and AXFR reload timing behavior.
-- Added Docker-based Mermaid CLI (mmdc) rendering instructions.
+- Added Graphviz `dot` rendering instructions for config diagrams.
 
 ----
 
@@ -39,16 +48,16 @@ All notable changes to this project will be documented in this file.
 - Added `foghorn.stats` package providing a thread-safe `StatsCollector`, a SQLite-backed `StatsSQLiteStore`, and a background `StatsReporter`.
 - Added generic resolve-plugin admin UI snapshots via `BasePlugin.get_http_snapshot()`.
 - Added ZoneRecords admin snapshot payload (`ZoneRecords.get_http_snapshot()`) including per-record source labels.
-- Added `scripts/generate_config_mermaid.py` to generate a Mermaid diagram of plugin ordering and short-circuit behavior from a config file.
-- `scripts/generate_config_mermaid.py`: added diagram rendering knobs (`--direction`, `--font-size`, `--node-spacing`, `--rank-spacing`, `--no-init`) and config-derived listener/upstream summaries.
+- Added `scripts/generate_config_diagram.py` to generate a Graphviz dot diagram of plugin ordering and short-circuit behavior from a config file.
+- `scripts/generate_config_diagram.py`: added diagram rendering knobs (`--direction`, `--font-size`, `--node-spacing`, `--rank-spacing`, `--no-init`) and config-derived listener/upstream summaries.
 - Admin web UI: added a config diagram PNG generated on startup (when possible) and served at `/api/v1/config/diagram.png`.
-- Admin web UI: added a Mermaid source endpoint for the config diagram at `/api/v1/config/diagram.mmd`.
+- Admin web UI: added a Graphviz dot source endpoint for the config diagram at `/api/v1/config/diagram.dot`.
 - Admin web UI: added a config diagram upload endpoint at `POST /api/v1/config/diagram.png`.
 - Admin web UI: updated the "JSON & Config" tab to show the config diagram (left) and config YAML (right).
 - Admin web UI: added server-side paginated table data for stats via `/api/v1/stats/table/{table_id}` (supports paging, sorting, and search).
 - Admin web UI: added server-side paginated table data for cache via `/api/v1/cache/table/{table_id}`.
 - Admin web UI: added server-side paginated table data for plugin admin tables via `/api/v1/plugins/{plugin_name}/table/{table_id}`.
-- Config Mermaid diagram generation now splits listeners and upstream endpoints into individual nodes, and highlights secure transports (DoT/DoH) vs insecure (UDP/TCP).
+- Config diagram generation now splits listeners and upstream endpoints into individual nodes, and highlights secure transports (DoT/DoH) vs insecure (UDP/TCP).
 - Filter plugin: added `deny_response: drop` to allow silently dropping denied queries (no reply).
 - ZoneRecords (`zone`) now supports configurable reload semantics via `load_mode` and conflict handling via `merge_policy`.
 - ZoneRecords now supports wildcard owner patterns (`*` labels) in record sources, selecting a single best match based on leading-wildcard depth.
@@ -62,7 +71,7 @@ All notable changes to this project will be documented in this file.
 - `server.resolver.mode: none` is now treated as an alias for authoritative-only operation (master mode): queries do not recurse/forward.
 - Filter plugin now normalizes domain keys (case/trailing-dot) for consistent allow/deny and record handling.
 - Resolve Echo plugin class renamed from `EchoPlugin` to `Echo`.
-- Refactored `scripts/generate_config_mermaid.py` to use shared library code under `foghorn.utils.config_mermaid`.
+- Refactored `scripts/generate_config_diagram.py` to use shared library code under `foghorn.utils.config_diagram`.
 - MySQL/MariaDB cache and stats backends now support explicit driver selection and fallback policy (`driver`, `driver_fallback`).
 - `EtcHosts.watchdog_poll_interval_seconds` now defaults to `60.0` to enable a stat-based reload fallback when filesystem events are unreliable.
 - Regenerated `assets/config-schema.json` (via `scripts/generate_foghorn_schema.py`) to reflect updated resolver options and plugin config models.
@@ -77,11 +86,11 @@ All notable changes to this project will be documented in this file.
 - Filter allow/deny behavior is now consistent across mixed-case names and trailing-dot variants.
 - Authoritative-only resolver behavior now returns REFUSED with an EDE explanation instead of attempting upstream resolution.
 - Reduced log spam in upstream failover by emitting upstream skip warnings once per upstream target.
-- The admin config diagram endpoint now attempts on-demand generation/refresh (when `mmdc` is available) if the PNG is missing or stale.
-- Mermaid config diagram PNG generation now uses an atomic replace to avoid leaving partially-written files on render failure.
+- The admin config diagram endpoint now attempts on-demand generation/refresh (when `dot` is available) if the PNG is missing or stale.
+- Config diagram PNG generation now uses an atomic replace to avoid leaving partially-written files on render failure.
 - The admin `/config` endpoint now supports `server.http.redact_keys` as a compatibility fallback when `webserver.redact_keys` is not set.
 - Redacted YAML output now quotes the placeholder (`'***'`) to ensure redacted config output remains parseable.
-- Fixed Mermaid config diagram rendering when resolver mode is `master` (authoritative-only / no forwarding).
+- Fixed config diagram generation when resolver mode is `master` (authoritative-only / no forwarding).
 
 ### Tests
 
