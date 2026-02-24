@@ -2215,10 +2215,11 @@
 				var result = [];
 				Object.keys(bestByShortName).forEach(function (shortName) {
 					var g = bestByShortName[shortName];
-					// Build HTML for the Name column: main short name, then aliases
-					// (including hash-like) indented 2em.
-					var nameHtml = '';
-					nameHtml += '<div>' + escapeHtml(stripSuffix(shortName)) + '</div>';
+					// Build multiline text for the Name column: main short name, then
+					// aliases (including hash-like) indented. We keep the name value as
+					// plain text (not HTML) so it is safe and copy/paste friendly.
+					var nameLines = [];
+					nameLines.push(stripSuffix(shortName));
 					// Merge aliases from *all* TXT groups that share this short
 					// name so that per-container short hashes (sha1[:12]) for every
 					// backend appear as aliases, not just those from the chosen main
@@ -2261,9 +2262,12 @@
 							aliasSet[disp] = true;
 						});
 					});
-					Object.keys(aliasSet).forEach(function (alias) {
-						nameHtml += '<div style="margin-left:2em">' + escapeHtml(alias) + '</div>';
-					});
+					var aliasPrefix = '    ';
+					Object.keys(aliasSet)
+						.sort()
+						.forEach(function (alias) {
+							nameLines.push(aliasPrefix + String(alias));
+						});
 					// Render cleaned TXT lines with indentation, as before.
 					var cleanedLines = g.cleanedLines || [];
 					var txtHtml = escapeHtml((cleanedLines[0] || ''));
@@ -2276,10 +2280,9 @@
 					}
 					// Add a small spacer at the bottom of each row so Docker entries
 					// do not visually run together in the admin table.
-					nameHtml += '<div style="margin-top:0.35em"></div>';
 					txtHtml += '<br>&nbsp;';
 					var base = Object.assign({}, g.base);
-					base.name = nameHtml;
+					base.name = nameLines.join('\n');
 					base.txt = txtHtml;
 					// Tooltip: original TXT plus any full 64-char IDs.
 					var tooltipParts = (g.allTxtLines || []).slice();
@@ -2289,17 +2292,6 @@
 					base._txtTooltip = tooltipParts.join('\n');
 					result.push(base);
 				});
-				// Mark the Name column as HTML-capable so nameHtml is not escaped.
-				if (section && Array.isArray(section.columns)) {
-					section.columns = section.columns.map(function (col) {
-						if (col && col.key === 'name') {
-							var copy = Object.assign({}, col);
-							copy.html = true;
-							return copy;
-						}
-						return col;
-					});
-				}
 				return result;
 			}
 
@@ -2444,6 +2436,9 @@
 						}
 						if (col.nowrap) {
 							td.style.whiteSpace = 'nowrap';
+						}
+						if (section && section.style === 'docker_group_by_txt' && col && col.key === 'name') {
+							td.classList.add('fh-cell-multiline');
 						}
 						var text = '';
 						if (key === 'last_seen') {
@@ -2713,6 +2708,9 @@
 							}
 							if (col.nowrap) {
 								td.style.whiteSpace = 'nowrap';
+							}
+							if (section && section.style === 'docker_group_by_txt' && col && col.key === 'name') {
+								td.classList.add('fh-cell-multiline');
 							}
 							var text = '';
 							if (key === 'last_seen') {
