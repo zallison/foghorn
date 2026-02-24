@@ -121,7 +121,7 @@ def test_send_query_with_failover_parse_error_then_success(monkeypatch, caplog):
     Inputs:
       - First returns garbage bytes; second returns valid reply.
     Outputs:
-      - Success from second; warning logged for parse failure.
+      - Success from second; debug log emitted for parse failure.
     """
     q = DNSRecord.question("example.com", "A")
     r_ok = q.reply()
@@ -147,7 +147,7 @@ def test_send_query_with_failover_parse_error_then_success(monkeypatch, caplog):
     )
     srv._reset_upstream_skip_warning(upstream_key)
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("DEBUG"):
         resp, used, reason = srv.send_query_with_failover(
             q, upstreams, 300, "example.com", QTYPE.A
         )

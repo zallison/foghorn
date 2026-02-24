@@ -78,7 +78,7 @@ def _upstream_key_for_skip_warning(
 
 
 def _warn_upstream_skip_once(upstream_key: str, fmt: str, *args) -> None:
-    """Brief: Log a skip warning only once per upstream until it succeeds again.
+    """Brief: Log a skip message only once per upstream until it succeeds again.
 
     Inputs:
       - upstream_key: Identifier returned by _upstream_key_for_skip_warning.
@@ -86,7 +86,7 @@ def _warn_upstream_skip_once(upstream_key: str, fmt: str, *args) -> None:
       - *args: Logger formatting arguments.
 
     Outputs:
-      - None. Emits a single warning for this upstream_key if not previously
+      - None. Emits a single DEBUG log for this upstream_key if not previously
         emitted since the last reset.
     """
     try:
