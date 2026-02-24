@@ -299,6 +299,12 @@ a:visited {
     text-align: right;
 }
 
+/* Multiline table cells (used by DockerHosts name column) */
+.fh-cell-multiline {
+    white-space: pre-line;
+    vertical-align: top;
+}
+
 table {
     border-collapse: collapse;
 }
