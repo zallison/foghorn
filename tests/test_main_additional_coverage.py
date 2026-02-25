@@ -1159,7 +1159,7 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
     def fake_get_event_loop() -> DummyLoop:
         return holder["loop"]
 
-    async def fake_serve_tcp(host, port, resolver):  # noqa: ARG002
+    async def fake_serve_tcp(host, port, resolver, **kwargs):  # noqa: ARG002
         return None
 
     class DummyThread:

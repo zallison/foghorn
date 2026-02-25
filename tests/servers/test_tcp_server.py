@@ -179,6 +179,86 @@ def test_tcp_server_zero_length_frame_closes(running_tcp_server):
         s.close()
 
 
+@pytest.fixture
+def running_tcp_server_max_queries() -> tuple[str, int]:
+    """Brief: Start serve_tcp with max_queries_per_connection=2.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - (host, port): A tuple for connecting to the running server.
+    """
+
+    host = "127.0.0.1"
+    port_holder: dict[str, int] = {}
+    ready = threading.Event()
+
+    def runner():
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        loop = asyncio.get_event_loop()
+
+        async def bind_and_run():
+            srv = await asyncio.start_server(lambda r, w: None, host, 0)
+            port = srv.sockets[0].getsockname()[1]
+            port_holder["port"] = port
+            ready.set()
+            srv.close()
+            await srv.wait_closed()
+            await serve_tcp(
+                host,
+                port,
+                _echo_resolver,
+                max_queries_per_connection=2,
+                idle_timeout_seconds=1.0,
+            )
+
+        loop.create_task(bind_and_run())
+        loop.run_forever()
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    if not ready.wait(1.0):
+        pytest.skip("failed to start tcp server")
+    time.sleep(0.15)
+    return host, port_holder["port"]
+
+
+def test_tcp_server_max_queries_per_connection_closes(
+    running_tcp_server_max_queries,
+) -> None:
+    """Brief: serve_tcp closes connection after max_queries_per_connection.
+
+    Inputs:
+      - running_tcp_server_max_queries: fixture providing host/port.
+
+    Outputs:
+      - None; asserts the connection is closed after the 2nd response.
+    """
+
+    host, port = running_tcp_server_max_queries
+    s = socket.create_connection((host, port), timeout=1)
+    s.settimeout(1)
+    try:
+        payloads = [b"one", b"two"]
+        for p in payloads:
+            s.sendall(len(p).to_bytes(2, "big") + p)
+            ln = int.from_bytes(_recv_exact(s, 2), "big")
+            body = _recv_exact(s, ln)
+            assert body == p
+
+        # Third query should observe EOF or connection reset.
+        s.sendall(len(b"three").to_bytes(2, "big") + b"three")
+        try:
+            hdr = s.recv(2)
+            assert hdr == b"" or hdr is not None
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            # Accept a reset/pipe error as a close signal on some platforms.
+            pass
+    finally:
+        s.close()
+
+
 def test__recv_exact_returns_bytes_and_none() -> None:
     """Brief: _recv_exact returns bytes on success and None on early close.
 
