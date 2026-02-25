@@ -1,4 +1,7 @@
 server:
+  limits:
+    resolver_executor_workers: null
+
   listen:
     udp:
       enabled: true
@@ -8,6 +11,10 @@ server:
       enabled: true
       host: 127.0.0.1
       port: 5360
+      max_connections: 1024
+      max_connections_per_ip: 64
+      max_queries_per_connection: 100
+      idle_timeout_seconds: 15.0
   dnssec:
     mode: ignore
     validation: upstream_ad
