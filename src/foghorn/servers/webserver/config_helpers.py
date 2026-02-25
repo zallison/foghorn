@@ -34,22 +34,40 @@ _last_config_text_ts: float = 0.0
 
 
 def _get_web_cfg(config: Dict[str, Any] | None) -> Dict[str, Any]:
-    """Return the webserver config subsection from a full config mapping.
+    """Return the admin HTTP/webserver config subsection from a full config mapping.
 
     Inputs:
       - config: Full configuration mapping loaded from YAML (or None).
 
     Outputs:
-      - Dict representing ``config['webserver']`` when present; otherwise ``{}``.
+      - dict: Effective web configuration mapping.
 
     Notes:
+      - Preferred v2 location: ``config['server']['http']``.
+      - Legacy fallback (tests/older configs): ``config['webserver']``.
       - Centralising this avoids drift between FastAPI and threaded HTTP paths.
     """
 
-    if isinstance(config, dict):
-        web_cfg = config.get("webserver") or {}
-        return web_cfg if isinstance(web_cfg, dict) else {}
-    return {}
+    if not isinstance(config, dict):
+        return {}
+
+    server_cfg = config.get("server") or {}
+    legacy = config.get("webserver")
+
+    if isinstance(server_cfg, dict):
+        http_cfg = server_cfg.get("http")
+        if isinstance(http_cfg, dict):
+            # Backwards-compatibility: some older configs/tests still place
+            # fields such as auth under the legacy webserver block. Merge those
+            # keys as defaults when they are not present in server.http.
+            out: Dict[str, Any] = dict(http_cfg)
+            if isinstance(legacy, dict):
+                for k, v in legacy.items():
+                    if k not in out:
+                        out[k] = v
+            return out
+
+    return legacy if isinstance(legacy, dict) else {}
 
 
 def _get_redact_keys(config: Dict[str, Any] | None) -> List[str]:
