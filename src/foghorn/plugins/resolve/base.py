@@ -1354,6 +1354,32 @@ class BasePlugin:
         """
         return None
 
+    def shutdown(self) -> None:
+        """Brief: Best-effort teardown hook invoked during config reload or shutdown.
+
+        Inputs:
+          - None
+
+        Outputs:
+          - None
+
+        Notes:
+          - Base implementation is a no-op.
+          - Plugins may override this to stop background threads, close sockets,
+            or release file handles.
+          - Callers should treat shutdown() as best-effort and must not allow
+            plugin errors to crash the server.
+
+        Example:
+            >>> from foghorn.plugins.resolve.base import BasePlugin
+            >>> class P(BasePlugin):
+            ...     def shutdown(self):
+            ...         self.stopped = True
+            >>> p = P()
+            >>> p.shutdown()
+        """
+        return None
+
     def _make_a_response(
         self,
         qname: str,
