@@ -145,34 +145,40 @@ def _build_auth_dependency(web_cfg: Dict[str, Any]):
     return _no_auth
 
 
-def _schedule_sighup_after_config_save(delay_seconds: float = 1.0) -> None:
-    """Brief: Schedule SIGHUP to the main process after a small delay.
+def _schedule_process_signal(
+    sig: int,
+    *,
+    delay_seconds: float = 1.0,
+    pid: int | None = None,
+) -> None:
+    """Brief: Schedule delivery of a Unix signal to this process.
 
     Inputs:
-      - delay_seconds: Number of seconds to wait before sending SIGHUP. A value
-        of 0 or less sends the signal synchronously in the current thread.
+      - sig: Integer signal number (e.g., signal.SIGHUP).
+      - delay_seconds: Seconds to wait before sending. When <= 0, sends
+        synchronously.
+      - pid: Optional explicit PID; defaults to os.getpid().
 
     Outputs:
-      - None; best-effort scheduling of a background timer that will send
-        signal.SIGHUP to the current process ID. Failures are logged.
+      - None; best-effort scheduling of os.kill(pid, sig). Failures are logged.
+
+    Notes:
+      - The delayed mode is used by HTTP handlers so they can return a response
+        before the signal terminates the process.
     """
 
-    pid = os.getpid()
+    target_pid = int(pid or os.getpid())
 
     def _send() -> None:
         try:
-            os.kill(pid, signal.SIGHUP)
+            os.kill(target_pid, int(sig))
         except Exception as exc:  # pragma: no cover - platform specific
-            logger.error("Failed to send SIGHUP after config save: %s", exc)
+            logger.error("Failed to send signal %s to pid=%s: %s", sig, target_pid, exc)
 
-    # For callers that explicitly opt out of delayed delivery (e.g., tests or
-    # short-lived helper processes), allow synchronous delivery to avoid the
-    # signal firing after the surrounding context (such as monkeypatches) has
-    # been torn down.
     if delay_seconds <= 0:
         _send()
         return
 
-    timer = threading.Timer(delay_seconds, _send)
+    timer = threading.Timer(float(delay_seconds), _send)
     timer.daemon = True
     timer.start()
