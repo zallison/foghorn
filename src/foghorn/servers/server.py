@@ -96,10 +96,10 @@ def _warn_upstream_skip_once(upstream_key: str, fmt: str, *args) -> None:
             _UPSTREAM_SKIP_WARNED[upstream_key] = True
     except Exception:  # pragma: no cover - defensive
         # If the de-dupe bookkeeping fails, fall back to logging.
-        logger.debug(fmt + " !!!", *args)
+        logger.warning(fmt + " !!!", *args)
         return
 
-    logger.debug(fmt, *args)
+    logger.warning(fmt, *args)
 
 
 def _reset_upstream_skip_warning(upstream_key: str) -> None:
