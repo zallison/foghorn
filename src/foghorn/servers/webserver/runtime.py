@@ -39,31 +39,61 @@ def _expected_listeners_from_config(config: Dict[str, Any] | None) -> Dict[str, 
     Notes:
       - Mirrors the defaults in ``foghorn.main``: UDP defaults to enabled, others
         default to disabled.
+      - Preferred v2 location is ``config['server']['listen']`` with legacy
+        fallback to root-level ``listen``.
     """
 
     cfg = config if isinstance(config, dict) else {}
-    listen = cfg.get("listen") or {}
+
+    server_cfg = cfg.get("server") or {}
+    listen: Any
+    if isinstance(server_cfg, dict) and isinstance(server_cfg.get("listen"), dict):
+        listen = server_cfg.get("listen") or {}
+    else:
+        # Legacy fallback: root-level listen (used in older tests/configs).
+        listen = cfg.get("listen") or {}
     if not isinstance(listen, dict):
         listen = {}
 
-    def _enabled(subkey: str, default: bool) -> bool:
-        sub = listen.get(subkey)
-        if not isinstance(sub, dict):
-            return bool(default)
-        return bool(sub.get("enabled", default))
+    dns_cfg = listen.get("dns")
+    if not isinstance(dns_cfg, dict):
+        dns_cfg = {}
+
+    def _enabled_section(section_name: str, *, default_enabled: bool) -> bool:
+        section = listen.get(section_name)
+        if isinstance(section, dict):
+            return bool(section.get("enabled", default_enabled))
+        return bool(default_enabled)
+
+    # Match foghorn.main defaults, including dns.{udp,tcp} legacy booleans.
+    udp_section = listen.get("udp")
+    if isinstance(udp_section, dict):
+        udp_default_enabled = bool(udp_section.get("enabled", True))
+    else:
+        udp_default_enabled = bool(dns_cfg.get("udp")) if "udp" in dns_cfg else True
+
+    tcp_section = listen.get("tcp")
+    if isinstance(tcp_section, dict):
+        tcp_default_enabled = bool(tcp_section.get("enabled", True))
+    else:
+        tcp_default_enabled = bool(dns_cfg.get("tcp")) if "tcp" in dns_cfg else False
+
+    dot_section = listen.get("dot")
+    dot_default_enabled = True if isinstance(dot_section, dict) else False
+
+    doh_section = listen.get("doh")
+    doh_default_enabled = True if isinstance(doh_section, dict) else False
 
     web_cfg = _get_web_cfg(cfg)
-    # If a webserver block exists, treat it as enabled by default unless
-    # explicitly disabled with enabled: false.
     has_web_cfg = bool(web_cfg)
     raw_web_enabled = web_cfg.get("enabled") if isinstance(web_cfg, dict) else None
     web_enabled = bool(raw_web_enabled) if raw_web_enabled is not None else has_web_cfg
 
     return {
-        "udp": _enabled("udp", True),
-        "tcp": _enabled("tcp", False),
-        "dot": _enabled("dot", False),
-        "doh": _enabled("doh", False),
+        "udp": _enabled_section("udp", default_enabled=udp_default_enabled),
+        "tcp": _enabled_section("tcp", default_enabled=tcp_default_enabled),
+        "dot": _enabled_section("dot", default_enabled=dot_default_enabled),
+        "doh": _enabled_section("doh", default_enabled=doh_default_enabled),
         "webserver": web_enabled,
     }
 
@@ -111,9 +141,14 @@ def evaluate_readiness(
         not_ready.append("startup not complete")
 
     # Upstream configuration: required in forwarder mode.
+    server_cfg = cfg.get("server") or {}
+    if not isinstance(server_cfg, dict):
+        server_cfg = {}
+
     fog_cfg = cfg.get("foghorn") or {}
     resolver_cfg = (
-        (fog_cfg.get("resolver") if isinstance(fog_cfg, dict) else None)
+        (server_cfg.get("resolver") if isinstance(server_cfg, dict) else None)
+        or (fog_cfg.get("resolver") if isinstance(fog_cfg, dict) else None)
         or cfg.get("resolver")
         or {}
     )
@@ -124,7 +159,11 @@ def evaluate_readiness(
         mode = "master"
 
     if mode == "forward":
-        upstreams = cfg.get("upstreams") or []
+        upstream_block = cfg.get("upstreams")
+        if isinstance(upstream_block, dict) and "endpoints" in upstream_block:
+            upstreams = upstream_block.get("endpoints")
+        else:
+            upstreams = upstream_block or []
         if not isinstance(upstreams, list) or not any(
             isinstance(u, dict) for u in upstreams
         ):
@@ -144,7 +183,12 @@ def evaluate_readiness(
             not_ready.append(f"{name} listener not running")
 
     # Store availability (only when persistence is configured).
-    stats_cfg = cfg.get("statistics") or {}
+    # Prefer v2 root 'stats' but keep legacy 'statistics' support.
+    stats_cfg = (
+        cfg.get("stats")
+        if isinstance(cfg.get("stats"), dict)
+        else (cfg.get("statistics") or {})
+    )
     if not isinstance(stats_cfg, dict):
         stats_cfg = {}
     persistence_cfg = stats_cfg.get("persistence") or {}

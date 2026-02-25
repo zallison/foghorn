@@ -122,9 +122,9 @@
 				</div>
 			</div>
 			<div class="fh-warning" id="config-warning">
-				<strong>Warning:</strong> Saving will overwrite <code>config.yaml</code>, then after a brief
-				delay send SIGHUP to the main process. Changes take effect after the server restarts;
-				SIGUSR1/SIGUSR2 only notify plugins and may reset statistics when configured.
+				<strong>Warning:</strong> Saving will overwrite <code>config.yaml</code> on disk. After saving,
+				you can choose to apply changes via a zero-downtime <em>reload</em> or a full <em>restart</em>
+				(depending on what changed).
 			</div>
 
 			<div id="config-messages" class="fh-messages" aria-live="polite"></div>
@@ -3071,7 +3071,7 @@
 					return;
 				}
 
-				if (!window.confirm('Are you sure you want to overwrite config.yaml and request a restart via SIGHUP?')) {
+				if (!window.confirm('Are you sure you want to overwrite config.yaml on disk?')) {
 					return;
 				}
 
@@ -3091,10 +3091,89 @@
 						});
 					})
 					.then(function (data) {
-						setMessage('Configuration saved; restart requested via SIGHUP. Path: ' + (data.path || ''), 'success');
+						var analysis = (data && data.analysis) || {};
+						var msg = 'Configuration saved. Path: ' + (data.path || '') + '.';
+						if (analysis && analysis.restart_required) {
+							msg += ' Restart is required to apply some changes.';
+						} else if (analysis && analysis.reload_required) {
+							msg += ' A zero-downtime reload is recommended to apply changes.';
+						} else if (analysis && analysis.changed === false) {
+							msg += ' No changes detected.';
+						}
+						setMessage(msg, 'success');
 						exitEditMode(true);
 						loadDiskConfig();
 						loadStats();
+
+						function doPost(url, payload) {
+							return fetch(url, {
+								method: 'POST',
+								headers: { 'Content-Type': 'application/json' },
+								body: payload ? JSON.stringify(payload) : JSON.stringify({}),
+							}).then(function (resp) {
+								return resp.text().then(function (text) {
+									var obj = {};
+									try {
+										obj = text ? JSON.parse(text) : {};
+									} catch (e) {
+										obj = { raw: text };
+									}
+									if (!resp.ok) {
+										var detail = (obj && (obj.detail || obj.message)) || text || ('HTTP ' + resp.status);
+										throw new Error(detail);
+									}
+									return obj;
+								});
+							});
+						}
+
+						// Prompt to continue based on analysis.
+						if (analysis && analysis.restart_required) {
+							var choice = window.prompt(
+								'Restart is required to apply some changes. Choose an action:\n' +
+								'1) Restart now\n' +
+								'2) Reload reloadable settings now (zero downtime; restart later)\n' +
+								'3) Do nothing',
+								'1'
+							);
+							if (choice === null) {
+								return;
+							}
+							choice = String(choice || '').trim();
+
+							if (choice === '2') {
+								setMessage('Reloading reloadable settings...', 'info');
+								doPost('/api/v1/reload_reloadable', {})
+									.then(function () {
+										setMessage('Reloaded reloadable settings. Restart is still required for some changes.', 'success');
+										loadStats();
+									})
+									.catch(function (err) {
+										setMessage('Reload-reloadable failed: ' + err.message, 'error');
+									});
+							} else if (choice === '1') {
+								setMessage('Restarting...', 'info');
+								doPost('/api/v1/restart', { delay_seconds: 1.0 })
+									.then(function () {
+										setMessage('Restart scheduled via SIGHUP.', 'success');
+									})
+									.catch(function (err) {
+										setMessage('Failed to schedule restart: ' + err.message, 'error');
+									});
+							}
+						} else if (analysis && analysis.reload_required) {
+							if (window.confirm('Apply a zero-downtime reload now?')) {
+								setMessage('Reloading...', 'info');
+								doPost('/api/v1/reload', {})
+									.then(function () {
+										setMessage('Reload completed.', 'success');
+										loadStats();
+									})
+									.catch(function (err) {
+										setMessage('Reload failed: ' + err.message, 'error');
+									});
+							}
+						}
 					})
 					.catch(function (err) {
 						setMessage('Failed to save configuration: ' + err.message, 'error');
