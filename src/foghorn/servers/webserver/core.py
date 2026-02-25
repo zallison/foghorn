@@ -129,7 +129,6 @@ from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 from ..udp_server import DNSUDPHandler
 from ...plugins.resolve.base import AdminPageSpec
 
-
 logger = logging.getLogger("foghorn.webserver")
 
 # Short-lived cache for RateLimit statistics derived from its SQLite
@@ -193,7 +192,21 @@ def create_app(
         install_uvicorn_2xx_suppression()
         yield
 
-    app = FastAPI(title="Foghorn Admin HTTP API", lifespan=lifespan)
+    enable_api = bool(web_cfg.get("enable_api", True))
+    enable_schema = bool(web_cfg.get("enable_schema", True))
+    enable_docs = bool(web_cfg.get("enable_docs", True))
+
+    # FastAPI only supports Swagger UI when OpenAPI is enabled.
+    docs_url = "/docs" if enable_docs and enable_schema else None
+    openapi_url = "/openapi.json" if enable_schema else None
+
+    app = FastAPI(
+        title="Foghorn Admin HTTP API",
+        lifespan=lifespan,
+        docs_url=docs_url,
+        redoc_url=None,
+        openapi_url=openapi_url,
+    )
 
     # Allow configuration to tune the system info cache TTL used by
     # get_system_info(), while keeping a conservative default.
@@ -259,11 +272,13 @@ def create_app(
     auth_dep = _build_auth_dependency(web_cfg)
 
     # Register route groups via helper functions to keep create_app concise.
-    _register_core_routes(app)
-    _register_stats_routes(app, auth_dep, FOGHORN_VERSION)
-    _register_config_routes(app, auth_dep)
-    _register_query_log_routes(app, auth_dep)
-    _register_plugin_routes(app, auth_dep)
+    if enable_api:
+        _register_core_routes(app)
+        _register_stats_routes(app, auth_dep, FOGHORN_VERSION)
+        _register_config_routes(app, auth_dep)
+        _register_query_log_routes(app, auth_dep)
+        _register_plugin_routes(app, auth_dep)
+
     _register_static_routes(app, web_cfg, www_root, auth_dep)
 
     return app
