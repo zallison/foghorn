@@ -24,6 +24,7 @@ import yaml
 from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 from ...utils.config_diagram import (
     diagram_png_candidate_paths_for_config,
+    diagram_dark_png_candidate_paths_for_config,
     diagram_dot_candidate_paths_for_config,
     find_first_existing_path,
     stale_diagram_warning,
@@ -368,6 +369,131 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 getattr(self, "path", ""),
             )
             return
+
+    def _get_openapi_schema_cached(self) -> Dict[str, Any] | None:
+        """Brief: Return OpenAPI schema for the admin API, caching it on the server.
+
+        Inputs: none
+
+        Outputs:
+          - OpenAPI schema dict when FastAPI is available.
+          - None when schema generation is not possible.
+
+        Notes:
+          - The threaded fallback server does not use FastAPI at runtime, but we
+            reuse the FastAPI app's OpenAPI generation to keep the schema aligned
+            with the uvicorn path.
+          - runtime_state is intentionally not passed to create_app() to avoid
+            mutating the shared RuntimeState from a docs/schema request.
+        """
+
+        server = self._server()
+        cached = getattr(server, "_openapi_schema_cache", None)
+        if isinstance(cached, dict):
+            return cached
+
+        try:
+            from .core import create_app as _create_app
+        except Exception as exc:  # pragma: no cover - optional dependency
+            logger.debug("OpenAPI schema unavailable (FastAPI import failed): %s", exc)
+            return None
+
+        app = _create_app(
+            stats=getattr(server, "stats", None),
+            config=getattr(server, "config", None) or {},
+            log_buffer=getattr(server, "log_buffer", None),
+            config_path=getattr(server, "config_path", None),
+            runtime_state=None,
+            plugins=getattr(server, "plugins", None) or [],
+        )
+        schema = app.openapi()
+        setattr(server, "_openapi_schema_cache", schema)
+        return schema
+
+    def _handle_openapi_json(self) -> None:
+        """Brief: Handle GET /openapi.json.
+
+        Inputs: none
+        Outputs: None (writes JSON response).
+        """
+
+        web_cfg = self._web_cfg()
+        if not bool(web_cfg.get("enable_schema", True)):
+            self._send_text(404, "openapi schema not available")
+            return
+
+        schema = self._get_openapi_schema_cached()
+        if schema is None:
+            self._send_json(404, {"detail": "openapi schema not available"})
+            return
+        self._send_json(200, schema)
+
+    def _handle_docs(self) -> None:
+        """Brief: Handle GET /docs.
+
+        Inputs: none
+        Outputs: None (writes HTML response).
+        """
+
+        web_cfg = self._web_cfg()
+        if not bool(web_cfg.get("enable_docs", True)) or not bool(
+            web_cfg.get("enable_schema", True)
+        ):
+            self._send_text(404, "docs not available")
+            return
+
+        try:
+            from fastapi.openapi.docs import get_swagger_ui_html
+        except Exception as exc:  # pragma: no cover - optional dependency
+            logger.debug("Swagger UI unavailable (FastAPI import failed): %s", exc)
+            self._send_text(404, "docs not available")
+            return
+
+        # NOTE: We intentionally do not require auth for /docs so that Swagger UI
+        # can load the schema. Operators can still enable auth for the actual API
+        # endpoints; Swagger UI will prompt for auth when making requests.
+        resp = get_swagger_ui_html(
+            openapi_url="/openapi.json",
+            title="Foghorn Admin HTTP API - Swagger UI",
+            swagger_ui_parameters={"persistAuthorization": True},
+        )
+        body = (
+            resp.body.decode("utf-8")
+            if isinstance(resp.body, (bytes, bytearray))
+            else str(resp.body)
+        )
+        self._send_html(200, body)
+
+    def _handle_docs_oauth2_redirect(self) -> None:
+        """Brief: Handle GET /docs/oauth2-redirect.
+
+        Inputs: none
+        Outputs: None (writes HTML response).
+        """
+
+        web_cfg = self._web_cfg()
+        if not bool(web_cfg.get("enable_docs", True)) or not bool(
+            web_cfg.get("enable_schema", True)
+        ):
+            self._send_text(404, "not found")
+            return
+
+        try:
+            from fastapi.openapi.docs import get_swagger_ui_oauth2_redirect_html
+        except Exception as exc:  # pragma: no cover - optional dependency
+            logger.debug(
+                "Swagger OAuth2 redirect unavailable (FastAPI import failed): %s", exc
+            )
+            self._send_text(404, "not found")
+            return
+
+        resp = get_swagger_ui_oauth2_redirect_html()
+        body = (
+            resp.body.decode("utf-8")
+            if isinstance(resp.body, (bytes, bytearray))
+            else str(resp.body)
+        )
+        self._send_html(200, body)
 
     def _require_auth(
         self,
@@ -959,6 +1085,301 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
                 getattr(self, "path", ""),
             )
             return
+
+    def _handle_config_diagram_png_dark(self, params: Dict[str, list[str]]) -> None:
+        """Brief: Handle GET /api/v1/config/diagram-dark.png.
+
+        Inputs:
+          - params: Query parameters mapping.
+
+        Outputs:
+          - None (sends image/png body when present).
+          - When meta=1 is provided, sends an empty 200 with:
+              - X-Foghorn-Exists: '1' or '0'
+              - X-Foghorn-Warning (optional)
+        """
+
+        if not self._require_auth():
+            return
+
+        cfg_path = getattr(self._server(), "config_path", None)
+        if not cfg_path:
+            self._send_json(
+                500,
+                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
+            )
+            return
+
+        # Allow a best-effort on-demand build attempt, but only once per config signature.
+        try:
+            st = os.stat(str(cfg_path))
+            cfg_sig = f"{cfg_path}:{int(st.st_mtime_ns)}:{int(st.st_size)}"
+        except Exception:
+            cfg_sig = str(cfg_path)
+
+        attempted_sig = getattr(
+            self._server(), "_config_diagram_build_attempt_sig", None
+        )
+
+        png_file = find_first_existing_path(
+            diagram_dark_png_candidate_paths_for_config(cfg_path)
+        )
+
+        # If missing and dot exists, attempt an on-demand build once.
+        if png_file is None and attempted_sig != cfg_sig:
+            try:
+                from ...utils.config_diagram import (
+                    _find_dot_cmd,
+                    ensure_config_diagram_png,
+                )
+
+                if _find_dot_cmd() is not None:
+                    setattr(
+                        self._server(), "_config_diagram_build_attempt_sig", cfg_sig
+                    )
+                    ensure_config_diagram_png(config_path=str(cfg_path))
+                    png_file = find_first_existing_path(
+                        diagram_dark_png_candidate_paths_for_config(cfg_path)
+                    )
+            except Exception:
+                pass
+
+        warn: str | None = None
+        if png_file is not None:
+            warn = stale_diagram_warning(
+                config_path=str(cfg_path), diagram_path=str(png_file)
+            )
+
+        headers: dict[str, str] = {
+            "X-Foghorn-Exists": "1" if png_file is not None else "0",
+        }
+        if warn:
+            headers["X-Foghorn-Warning"] = warn
+
+        meta_only = False
+        try:
+            meta_only = bool(
+                params.get("meta")
+                and str(params.get("meta")[0]) not in {"", "0", "false"}
+            )
+        except Exception:
+            meta_only = False
+
+        if meta_only:
+            self._send_text(200, "", headers=headers)
+            return
+
+        if png_file is None:
+            self._send_text(404, "config diagram not found")
+            return
+
+        try:
+            with open(str(png_file), "rb") as f:
+                data = f.read()
+        except Exception as exc:  # pragma: no cover
+            self._send_text(500, f"failed to read diagram: {exc}")
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Connection", "close")
+        self.send_header("Content-Length", str(len(data)))
+        for k, v in headers.items():
+            self.send_header(str(k), str(v))
+        self._apply_cors_headers()
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except BrokenPipeError:  # pragma: no cover
+            logger.warning(
+                "Client disconnected while sending diagram for %s %s",
+                getattr(self, "command", "GET"),
+                getattr(self, "path", ""),
+            )
+            return
+
+    def _parse_multipart_form_file(
+        self, *, body: bytes, content_type: str, field_name: str = "file"
+    ) -> tuple[str, bytes] | None:
+        """Brief: Extract a single file field from multipart/form-data.
+
+        Inputs:
+          - body: Raw HTTP request body bytes.
+          - content_type: Content-Type header value.
+          - field_name: Form field name to extract (default: 'file').
+
+        Outputs:
+          - (filename, data) tuple when found, otherwise None.
+
+        Notes:
+          - This is a lightweight parser intended for small uploads.
+          - It intentionally ignores non-file fields.
+        """
+
+        ct = str(content_type or "")
+        if "multipart/form-data" not in ct.lower():
+            return None
+
+        boundary = ""
+        for part in ct.split(";"):
+            part = part.strip()
+            if part.lower().startswith("boundary="):
+                boundary = part.split("=", 1)[1].strip().strip('"')
+                break
+        if not boundary:
+            return None
+
+        delim = ("--" + boundary).encode("utf-8")
+        chunks = body.split(delim)
+        for chunk in chunks:
+            if not chunk:
+                continue
+            if chunk.startswith(b"--"):
+                continue
+            if chunk.startswith(b"\r\n"):
+                chunk = chunk[2:]
+            header_end = chunk.find(b"\r\n\r\n")
+            if header_end < 0:
+                continue
+            header_blob = chunk[:header_end].decode("utf-8", errors="replace")
+            payload = chunk[header_end + 4 :]
+            if payload.endswith(b"\r\n"):
+                payload = payload[:-2]
+
+            disp = ""
+            for line in header_blob.split("\r\n"):
+                if line.lower().startswith("content-disposition:"):
+                    disp = line.split(":", 1)[1].strip()
+                    break
+            if not disp:
+                continue
+
+            name_val = None
+            filename_val = ""
+            for item in disp.split(";"):
+                item = item.strip()
+                if item.startswith("name="):
+                    name_val = item.split("=", 1)[1].strip().strip('"')
+                elif item.startswith("filename="):
+                    filename_val = item.split("=", 1)[1].strip().strip('"')
+
+            if name_val != field_name:
+                continue
+
+            return filename_val, bytes(payload)
+
+        return None
+
+    def _handle_config_diagram_png_upload(self, body: bytes) -> None:
+        """Brief: Handle POST /api/v1/config/diagram.png.
+
+        Inputs:
+          - body: Raw HTTP request body bytes.
+
+        Outputs:
+          - None (sends JSON response with status and saved path).
+        """
+
+        if not self._require_auth():
+            return
+
+        cfg_path = getattr(self._server(), "config_path", None)
+        if not cfg_path:
+            self._send_json(
+                500,
+                {"detail": "config_path not configured", "server_time": _utc_now_iso()},
+            )
+            return
+
+        max_bytes = 1_000_000
+        if len(body) > max_bytes + 1024:
+            self._send_json(
+                413,
+                {
+                    "detail": "file too large (max 1,000,000 bytes)",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        content_type = self.headers.get("Content-Type") or ""
+        parsed = self._parse_multipart_form_file(
+            body=body,
+            content_type=content_type,
+            field_name="file",
+        )
+        if parsed is None:
+            self._send_json(
+                400,
+                {"detail": "invalid multipart upload", "server_time": _utc_now_iso()},
+            )
+            return
+
+        filename, payload = parsed
+        if filename and not str(filename).lower().endswith(".png"):
+            self._send_json(
+                400,
+                {
+                    "detail": "file must have .png extension",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        if len(payload) > max_bytes:
+            self._send_json(
+                413,
+                {
+                    "detail": "file too large (max 1,000,000 bytes)",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+            self._send_json(
+                400,
+                {
+                    "detail": "file does not look like a PNG",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        try:
+            from pathlib import Path
+
+            cfg_dir = Path(str(cfg_path)).resolve().parent
+            dst_path = cfg_dir / "diagram.png"
+            tmp_path = cfg_dir / "diagram.png.new"
+
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path.write_bytes(payload)
+            os.replace(str(tmp_path), str(dst_path))
+        except Exception as exc:  # pragma: no cover
+            try:
+                if "tmp_path" in locals() and tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+            self._send_json(
+                500,
+                {
+                    "detail": f"failed to write diagram png: {exc}",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        self._send_json(
+            200,
+            {
+                "status": "ok",
+                "server_time": _utc_now_iso(),
+                "path": str(dst_path),
+                "size_bytes": len(payload),
+            },
+        )
 
     def _handle_config_diagram_dot(self, params: Dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/config/diagram.dot.
@@ -2455,7 +2876,41 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         path = parsed.path
         params = urllib.parse.parse_qs(parsed.query)
 
-        if path in {"/health", "/api/v1/health"}:
+        web_cfg = self._web_cfg()
+        enable_api = bool(web_cfg.get("enable_api", True))
+
+        if not enable_api:
+            # Keep a minimal surface when the admin API is disabled.
+            # - Allow / and /index.html (static UI)
+            # - Allow /docs and /openapi.json only when separately enabled
+            # - Block all other known API endpoints (both /api/v1/* and short aliases)
+            blocked_prefixes = (
+                "/api/v1/",
+                "/config",
+                "/stats",
+                "/traffic",
+                "/health",
+                "/about",
+                "/ready",
+                "/logs",
+                "/query_log",
+                "/reload",
+                "/restart",
+            )
+            if path.startswith(blocked_prefixes):
+                # /openapi.json and /docs are handled below and may still be enabled
+                # even when the API is disabled.
+                if path not in {"/openapi.json", "/docs", "/docs/oauth2-redirect"}:
+                    self._send_text(404, "not found")
+                    return
+
+        if path == "/openapi.json":
+            self._handle_openapi_json()
+        elif path == "/docs":
+            self._handle_docs()
+        elif path == "/docs/oauth2-redirect":
+            self._handle_docs_oauth2_redirect()
+        elif path in {"/health", "/api/v1/health"}:
             self._handle_health()
         elif path in {"/about", "/api/v1/about"}:
             self._handle_about()
@@ -2477,29 +2932,21 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_config()
         elif path in {"/config.json", "/api/v1/config.json"}:
             self._handle_config_json()
-        elif path in {
-            "/config/raw",
-            "/config_raw",
-            "/api/v1/config/raw",
-            "/api/v1/config_raw",
-        }:
+        elif path in {"/config/raw", "/api/v1/config/raw"}:
             self._handle_config_raw()
-        elif path in {
-            "/config/raw.json",
-            "/config_raw.json",
-            "/api/v1/config/raw.json",
-            "/api/v1/config_raw.json",
-        }:
+        elif path in {"/config/raw.json", "/api/v1/config/raw.json"}:
             self._handle_config_raw_json()
         elif path in {"/api/v1/config/diagram.png", "/config/diagram.png"}:
             self._handle_config_diagram_png(params)
+        elif path in {"/api/v1/config/diagram-dark.png", "/config/diagram-dark.png"}:
+            self._handle_config_diagram_png_dark(params)
         elif path in {"/api/v1/config/diagram.dot", "/config/diagram.dot"}:
             self._handle_config_diagram_dot(params)
         elif path in {"/logs", "/api/v1/logs"}:
             self._handle_logs(params)
         elif path in {"/query_log", "/api/v1/query_log"}:
             self._handle_query_log(params)
-        elif path == "/api/v1/query_log/aggregate":
+        elif path in {"/api/v1/query_log/aggregate", "/query_log/aggregate"}:
             self._handle_query_log_aggregate(params)
         elif path == "/api/v1/upstream_status":
             self._handle_upstream_status()
@@ -2542,6 +2989,13 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
 
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+
+        web_cfg = self._web_cfg()
+        enable_api = bool(web_cfg.get("enable_api", True))
+
+        if not enable_api:
+            self._send_text(404, "not found")
+            return
 
         if path in {"/stats/reset", "/api/v1/stats/reset"}:
             self._handle_stats_reset()

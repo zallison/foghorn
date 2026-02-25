@@ -40,6 +40,7 @@ def start_doh_server(
     cert_file: str | None = None,
     key_file: str | None = None,
     use_asyncio: bool = True,
+    allow_threaded_fallback: bool = True,
 ) -> object | None:
     """Brief: Start the optional DoH (DNS-over-HTTPS) server.
 
@@ -53,6 +54,7 @@ def start_doh_server(
       - cert_file: Optional TLS certificate path.
       - key_file: Optional TLS private key path.
       - use_asyncio: When true, prefer asyncio; otherwise use threaded fallback when supported.
+      - allow_threaded_fallback: When false, refuse to start the threaded fallback.
 
     Outputs:
       - object | None: A server handle/thread-like object, or None on failure.
@@ -71,6 +73,7 @@ def start_doh_server(
         cert_file=cert_file,
         key_file=key_file,
         use_asyncio=use_asyncio,
+        allow_threaded_fallback=allow_threaded_fallback,
     )
 
 
@@ -554,6 +557,24 @@ def main(argv: List[str] | None = None) -> int:
     # Global knob to disable asyncio-based listeners/admin servers in restricted
     # environments. When false, threaded fallbacks are used where available.
     use_asyncio = bool(resolver_cfg.get("use_asyncio", True))
+
+    # Configure a shared, bounded ThreadPoolExecutor for asyncio-based listeners
+    # (TCP/DoT and any other paths that call run_in_executor).
+    try:
+        from .servers.executors import configure_resolver_executor
+
+        limits_cfg = server_cfg.get("limits") if isinstance(server_cfg, dict) else None
+        if not isinstance(limits_cfg, dict):
+            limits_cfg = {}
+        raw_workers = limits_cfg.get("resolver_executor_workers")
+        try:
+            resolver_workers = int(raw_workers) if raw_workers is not None else None
+        except Exception:
+            resolver_workers = None
+
+        configure_resolver_executor(max_workers=resolver_workers)
+    except Exception:
+        logger.debug("Failed to configure resolver executor", exc_info=True)
 
     # Cache plugin selection.
     #
@@ -1414,7 +1435,21 @@ def main(argv: List[str] | None = None) -> int:
         if use_asyncio:
             logger.info("Starting TCP listener on %s:%d (asyncio)", thost, tport)
             _start_asyncio_server(
-                lambda: serve_tcp(thost, tport, _resolve_tcp),
+                lambda: serve_tcp(
+                    thost,
+                    tport,
+                    _resolve_tcp,
+                    max_connections=int(tcp_cfg.get("max_connections", 1024) or 1024),
+                    max_connections_per_ip=int(
+                        tcp_cfg.get("max_connections_per_ip", 64) or 64
+                    ),
+                    max_queries_per_connection=int(
+                        tcp_cfg.get("max_queries_per_connection", 100) or 100
+                    ),
+                    idle_timeout_seconds=float(
+                        tcp_cfg.get("idle_timeout_seconds", 15.0) or 15.0
+                    ),
+                ),
                 name="foghorn-tcp",
                 listener_key="tcp",
                 on_permission_error=lambda: serve_tcp_threaded(
@@ -1452,6 +1487,16 @@ def main(argv: List[str] | None = None) -> int:
                     _resolve_dot,
                     cert_file=cert_file,
                     key_file=key_file,
+                    max_connections=int(dot_cfg.get("max_connections", 1024) or 1024),
+                    max_connections_per_ip=int(
+                        dot_cfg.get("max_connections_per_ip", 64) or 64
+                    ),
+                    max_queries_per_connection=int(
+                        dot_cfg.get("max_queries_per_connection", 100) or 100
+                    ),
+                    idle_timeout_seconds=float(
+                        dot_cfg.get("idle_timeout_seconds", 15.0) or 15.0
+                    ),
                 ),
                 name="foghorn-dot",
                 listener_key="dot",
@@ -1464,6 +1509,7 @@ def main(argv: List[str] | None = None) -> int:
         key_file = doh_cfg.get("key_file")
         logger.info("Starting DoH listener on %s:%d", h, p)
 
+        allow_threaded_fallback = bool(doh_cfg.get("allow_threaded_fallback", True))
         try:
             # Start uvicorn-based DoH FastAPI server in background thread.
             doh_handle = start_doh_server(
@@ -1473,6 +1519,7 @@ def main(argv: List[str] | None = None) -> int:
                 cert_file=cert_file,
                 key_file=key_file,
                 use_asyncio=use_asyncio,
+                allow_threaded_fallback=allow_threaded_fallback,
             )
         except Exception as exc:
             runtime_state.set_listener_error("doh", exc)
