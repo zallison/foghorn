@@ -165,6 +165,52 @@ def test_ready_endpoint_200_when_requirements_met() -> None:
     assert body["ready"] is True
 
 
+def test_config_raw_paths_match(tmp_path) -> None:
+    """Brief: /api/v1/config/raw paths behave the same as /config/raw in FastAPI mode.
+
+    Inputs:
+      - tmp_path: Temporary directory containing a config YAML file.
+
+    Outputs:
+      - None: Asserts both URLs return the same raw YAML / raw.json payload.
+    """
+
+    cfg_path = tmp_path / "config.yaml"
+    initial_yaml = "initial: 1\nwebserver:\n  enabled: true\n"
+    cfg_path.write_text(initial_yaml, encoding="utf-8")
+
+    cfg = {
+        "webserver": {"enabled": True},
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    app = create_app(
+        stats=None,
+        config=cfg,
+        log_buffer=RingBuffer(),
+        config_path=str(cfg_path),
+    )
+    client = TestClient(app)
+
+    for path in [
+        "/config/raw",
+        "/api/v1/config/raw",
+    ]:
+        resp = client.get(path)
+        assert resp.status_code == 200
+        assert resp.text == initial_yaml
+
+    for path in [
+        "/config/raw.json",
+        "/api/v1/config/raw.json",
+    ]:
+        resp = client.get(path)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["raw_yaml"] == initial_yaml
+        assert data["config"]["initial"] == 1
+
+
 def test_health_endpoint_returns_ok() -> None:
     """Brief: /health must respond with HTTP 200 and status "ok".
 
@@ -1837,31 +1883,151 @@ def test_config_raw_json_threaded_endpoint_reads_from_disk(tmp_path) -> None:
     assert parsed["answer"] == 42
 
 
-def test_save_config_persists_raw_yaml_and_signals(monkeypatch, tmp_path) -> None:
-    """Brief: /config/save must overwrite config file and schedule SIGHUP.
+def test_reload_threaded_refuses_when_restart_required_but_reload_reloadable_applies(
+    tmp_path,
+) -> None:
+    """Brief: Threaded /reload refuses when restart_required but /reload_reloadable still applies.
+
+    Inputs:
+      - tmp_path: Temporary directory containing a config.yaml.
+
+    Outputs:
+      - POST /reload returns HTTP 409 and does not change runtime generation.
+      - POST /reload_reloadable returns HTTP 200 and increments runtime generation.
+    """
+
+    import http.client
+
+    import foghorn.servers.webserver as web_mod
+
+    from foghorn import runtime_config
+
+    cfg_path = tmp_path / "config.yaml"
+    current_yaml = (
+        "upstreams:\n"
+        "  endpoints:\n"
+        "  - host: 8.8.8.8\n"
+        "server:\n"
+        "  listen: {}\n"
+        "plugins: []\n"
+    )
+
+    restart_yaml = (
+        "upstreams:\n"
+        "  endpoints:\n"
+        "  - host: 8.8.8.8\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5353\n"
+        "plugins: []\n"
+    )
+
+    httpd = None
+    t = None
+
+    runtime_config.clear_runtime()
+    try:
+        cfg_path.write_text(current_yaml, encoding="utf-8")
+        current_cfg = runtime_config.load_config_from_disk(config_path=str(cfg_path))
+        runtime_config.reload_from_config(current_cfg, mode="reload_only")
+
+        # Swap the config on disk to require restart.
+        cfg_path.write_text(restart_yaml, encoding="utf-8")
+
+        httpd = web_mod._AdminHTTPServer(
+            ("127.0.0.1", 0),
+            web_mod._ThreadedAdminRequestHandler,
+            stats=None,
+            config=current_cfg,
+            log_buffer=RingBuffer(),
+            config_path=str(cfg_path),
+        )
+
+        host, port = httpd.server_address
+
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+
+        gen_before = runtime_config.get_runtime_snapshot().generation
+
+        conn = http.client.HTTPConnection(host, port, timeout=5)
+        try:
+            conn.request(
+                "POST",
+                "/reload",
+                body=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8")
+        finally:
+            conn.close()
+
+        assert resp.status == 409
+        payload = json.loads(body)
+        assert payload.get("analysis", {}).get("restart_required") is True
+        assert runtime_config.get_runtime_snapshot().generation == gen_before
+
+        conn2 = http.client.HTTPConnection(host, port, timeout=5)
+        try:
+            conn2.request(
+                "POST",
+                "/reload_reloadable",
+                body=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+            resp2 = conn2.getresponse()
+            body2 = resp2.read().decode("utf-8")
+        finally:
+            conn2.close()
+
+        assert resp2.status == 200
+        payload2 = json.loads(body2)
+        assert payload2.get("analysis", {}).get("restart_required") is True
+        assert payload2.get("reload", {}).get("ok") is True
+        assert payload2.get("reload", {}).get("restart_required") is True
+        assert runtime_config.get_runtime_snapshot().generation == gen_before + 1
+
+    finally:
+        if httpd is not None:
+            try:
+                httpd.shutdown()
+            except Exception:
+                pass
+            try:
+                httpd.server_close()
+            except Exception:
+                pass
+
+        if t is not None:
+            t.join(timeout=1.0)
+
+        runtime_config.clear_runtime()
+
+
+def test_save_config_persists_raw_yaml_and_returns_analysis(tmp_path) -> None:
+    """Brief: /config/save must overwrite config file and return reload/restart analysis.
 
     Inputs:
       - Existing config file path and JSON body containing raw_yaml.
 
     Outputs:
       - Config file on disk is updated to the raw_yaml content.
-      - os.kill is invoked with SIGUSR1 for the current process so plugins can
-        react to configuration changes.
+      - Response includes an analysis block indicating whether reload or restart is required.
     """
 
-    import os
-
-    import foghorn.servers.webserver as web_mod
-
     cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text("initial: 1\n", encoding="utf-8")
-
-    kill_calls: dict[str, tuple[int, int] | None] = {"args": None}
-
-    def fake_kill(pid: int, sig: int) -> None:
-        kill_calls["args"] = (pid, sig)
-
-    monkeypatch.setattr(web_mod.os, "kill", fake_kill)
+    cfg_path.write_text(
+        "upstreams:\n"
+        "  endpoints:\n"
+        "  - host: 8.8.8.8\n"
+        "server:\n"
+        "  listen: {}\n",
+        encoding="utf-8",
+    )
 
     app = create_app(
         stats=None,
@@ -1871,7 +2037,13 @@ def test_save_config_persists_raw_yaml_and_signals(monkeypatch, tmp_path) -> Non
     )
     client = TestClient(app)
 
-    new_yaml = "answer: 42\n"
+    new_yaml = (
+        "upstreams:\n"
+        "  endpoints:\n"
+        "  - host: 9.9.9.9\n"
+        "server:\n"
+        "  listen: {}\n"
+    )
     resp = client.post("/config/save", json={"raw_yaml": new_yaml})
     assert resp.status_code == 200
 
@@ -1879,19 +2051,85 @@ def test_save_config_persists_raw_yaml_and_signals(monkeypatch, tmp_path) -> Non
     on_disk = cfg_path.read_text(encoding="utf-8")
     assert on_disk == new_yaml
 
-    # SIGHUP should be scheduled for the current process shortly after the
-    # config write. Because the signal is sent from a background timer, wait
-    # briefly for os.kill to be invoked.
-    import time
+    data = resp.json()
+    assert data["status"] == "ok"
+    analysis = data.get("analysis") or {}
+    assert analysis.get("restart_required") is False
+    assert analysis.get("reload_required") is True
 
-    deadline = time.time() + 2.0
-    while kill_calls["args"] is None and time.time() < deadline:
-        time.sleep(0.01)
 
-    assert kill_calls["args"] is not None
-    pid, sig = kill_calls["args"]  # type: ignore[assignment]
-    assert pid == os.getpid()
-    assert sig == web_mod.signal.SIGHUP
+def test_reload_fastapi_refuses_when_restart_required_but_reload_reloadable_applies(
+    tmp_path,
+) -> None:
+    """Brief: FastAPI /reload refuses when restart_required but /reload_reloadable still applies.
+
+    Inputs:
+      - tmp_path: Temporary directory containing a config.yaml.
+
+    Outputs:
+      - POST /reload returns HTTP 409 and does not change runtime generation.
+      - POST /reload_reloadable returns HTTP 200 and increments runtime generation.
+    """
+
+    from foghorn import runtime_config
+
+    cfg_path = tmp_path / "config.yaml"
+    current_yaml = (
+        "upstreams:\n"
+        "  endpoints:\n"
+        "  - host: 8.8.8.8\n"
+        "server:\n"
+        "  listen: {}\n"
+        "plugins: []\n"
+    )
+
+    restart_yaml = (
+        "upstreams:\n"
+        "  endpoints:\n"
+        "  - host: 8.8.8.8\n"
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5353\n"
+        "plugins: []\n"
+    )
+
+    runtime_config.clear_runtime()
+    try:
+        cfg_path.write_text(current_yaml, encoding="utf-8")
+        current_cfg = runtime_config.load_config_from_disk(config_path=str(cfg_path))
+        runtime_config.reload_from_config(current_cfg, mode="reload_only")
+
+        app = create_app(
+            stats=None,
+            config=current_cfg,
+            log_buffer=RingBuffer(),
+            config_path=str(cfg_path),
+        )
+        client = TestClient(app)
+
+        # Swap the config on disk to require restart.
+        cfg_path.write_text(restart_yaml, encoding="utf-8")
+
+        gen_before = runtime_config.get_runtime_snapshot().generation
+
+        resp = client.post("/reload")
+        assert resp.status_code == 409
+        assert resp.json().get("analysis", {}).get("restart_required") is True
+        assert runtime_config.get_runtime_snapshot().generation == gen_before
+
+        resp2 = client.post("/reload_reloadable")
+        assert resp2.status_code == 200
+        body2 = resp2.json()
+        assert body2.get("analysis", {}).get("restart_required") is True
+        assert body2.get("reload", {}).get("ok") is True
+        assert body2.get("reload", {}).get("restart_required") is True
+        assert runtime_config.get_runtime_snapshot().generation == gen_before + 1
+
+    finally:
+        runtime_config.clear_runtime()
 
 
 def test_read_proc_meminfo_parses_sample_file(tmp_path) -> None:
@@ -2388,13 +2626,13 @@ def test_save_config_500_when_config_path_missing() -> None:
 
 
 def test_save_config_400_when_raw_yaml_missing(tmp_path) -> None:
-    """Brief: /config/save surfaces raw_yaml validation error via wrapped 500.
+    """Brief: /config/save returns HTTP 400 when raw_yaml is missing.
 
     Inputs:
       - Existing config file and JSON body missing raw_yaml.
 
     Outputs:
-      - HTTP 500 whose detail mentions the missing raw_yaml field.
+      - HTTP 400 with detail mentioning the missing raw_yaml field.
     """
 
     cfg_path = tmp_path / "config.yaml"
@@ -2409,8 +2647,7 @@ def test_save_config_400_when_raw_yaml_missing(tmp_path) -> None:
     client = TestClient(app)
 
     resp = client.post("/config/save", json={})
-    # HTTPException from validation is wrapped by the outer handler into a 500
-    assert resp.status_code == 500
+    assert resp.status_code == 400
     detail = resp.json()["detail"]
     assert "request body must include 'raw_yaml' string field" in detail
 
@@ -2951,8 +3188,8 @@ def test_collect_rate_limit_stats_handles_empty_and_populated_dbs(
     assert populated_summary["max_max_rps"] >= 0.0
 
 
-def test_schedule_sighup_after_config_save_zero_delay_calls_kill(monkeypatch) -> None:
-    """Brief: _schedule_sighup_after_config_save sends SIGHUP synchronously when delay <= 0.
+def test_restart_endpoint_zero_delay_calls_kill(monkeypatch) -> None:
+    """Brief: POST /restart sends SIGHUP synchronously when delay_seconds <= 0.
 
     Inputs:
       - monkeypatch fixture to stub os.kill.
@@ -2972,7 +3209,15 @@ def test_schedule_sighup_after_config_save_zero_delay_calls_kill(monkeypatch) ->
 
     monkeypatch.setattr(web_mod.os, "kill", fake_kill)
 
-    web_mod._schedule_sighup_after_config_save(delay_seconds=0.0)
+    app = create_app(
+        stats=None,
+        config={"webserver": {"enabled": True}},
+        log_buffer=RingBuffer(),
+    )
+    client = TestClient(app)
+
+    resp = client.post("/restart", json={"delay_seconds": 0.0})
+    assert resp.status_code == 200
 
     assert calls, "expected os.kill to be called synchronously"
     pid, sig = calls[0]
