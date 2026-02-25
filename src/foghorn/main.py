@@ -5,9 +5,15 @@ import functools
 import gc
 import logging
 import os
+import platform
+import re
 import signal
+import socket
+import sys
 import threading
 from typing import List, Optional
+
+from foghorn.stats.meta import FOGHORN_VERSION
 
 from .config.config_parser import (
     load_plugins,
@@ -19,9 +25,11 @@ from foghorn.utils.register_caches import apply_decorated_cache_overrides
 from .config.logging_config import init_logging
 from .plugins.querylog import BaseStatsStore, load_stats_store_backend
 from .plugins.resolve.base import BasePlugin
+from .plugins.setup import run_setup_plugins
 from .servers.runtime_state import RingBuffer, RuntimeState
 from .servers.server import DNSServer
 from .stats import StatsCollector, StatsReporter
+from .runtime_config import RuntimeSnapshot, initialize_runtime
 
 
 def start_doh_server(
@@ -108,6 +116,147 @@ def start_webserver(
     )
 
 
+def _env_first(*keys: str) -> str | None:
+    """Brief: Return the first non-empty environment variable value.
+
+    Inputs:
+      - keys: Environment variable names to check in order.
+
+    Outputs:
+      - str | None: The first non-empty value, or None if none are set.
+    """
+
+    for key in keys:
+        val = os.environ.get(key)
+        if val:
+            return str(val)
+    return None
+
+
+def _format_bytes(num_bytes: int) -> str:
+    """Brief: Human-friendly bytes formatter.
+
+    Inputs:
+      - num_bytes: Size in bytes.
+
+    Outputs:
+      - str: Formatted size (e.g., '123B', '4.5KiB', '12.0MiB').
+
+    Example:
+      >>> _format_bytes(1024)
+      '1.0KiB'
+    """
+
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    size = float(max(0, num_bytes))
+    for unit in units:
+        if size < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(size)}{unit}"
+            return f"{size:.1f}{unit}"
+        size /= 1024.0
+    return f"{int(num_bytes)}B"
+
+
+def _get_file_size_bytes(path: str) -> int | None:
+    """Brief: Best-effort file size lookup.
+
+    Inputs:
+      - path: File path.
+
+    Outputs:
+      - int | None: Size in bytes, or None if not found/unreadable.
+    """
+
+    try:
+        return int(os.stat(path).st_size)
+    except Exception:
+        return None
+
+
+def _detect_docker_container_id() -> str | None:
+    """Brief: Best-effort Docker container id detection.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - str | None: Container id (typically 12-64 hex chars), or None if not detected.
+
+    Notes:
+      - In Docker, HOSTNAME commonly equals the container id.
+      - cgroup parsing is best-effort and may fail in some environments.
+    """
+
+    candidate = os.environ.get("HOSTNAME")
+    if candidate and re.fullmatch(r"[0-9a-f]{12,64}", candidate):
+        return candidate
+
+    if not os.path.exists("/.dockerenv"):
+        return None
+
+    try:
+        with open("/proc/self/cgroup", "r", encoding="utf-8") as f:
+            for line in f:
+                m = re.search(r"([0-9a-f]{12,64})", line)
+                if m:
+                    return m.group(1)
+    except Exception:
+        return None
+
+    return None
+
+
+def _log_startup_banner(logger: logging.Logger, *, config_path: str) -> None:
+    """Brief: Log startup metadata immediately after logging is configured.
+
+    Inputs:
+      - logger: Logger to write startup messages to.
+      - config_path: Path to the config file used for this run.
+
+    Outputs:
+      - None.
+    """
+
+    abs_cfg = os.path.abspath(config_path)
+    cfg_size = _get_file_size_bytes(abs_cfg)
+    cfg_size_str = (
+        f"{cfg_size} bytes ({_format_bytes(cfg_size)})"
+        if cfg_size is not None
+        else "unknown"
+    )
+
+    hostname = socket.gethostname()
+    arch = platform.machine() or "unknown"
+    os_id = f"{platform.system()} {platform.release()}".strip()
+    py_ver = sys.version.split()[0] if sys.version else "unknown"
+    pid = os.getpid()
+
+    container_id = _detect_docker_container_id()
+    git_sha = _env_first("FOGHORN_GIT_SHA", "GIT_SHA")
+    build_id = _env_first(
+        "FOGHORN_BUILD_ID",
+        "BUILD_ID",
+        "FOGHORN_IMAGE_ID",
+        "IMAGE_ID",
+        "IMAGE_SHA",
+        "DOCKER_IMAGE_SHA",
+    )
+
+    logger.info("Starting Foghorn")
+    logger.info("  version=%s", FOGHORN_VERSION)
+    logger.info("  config=%s (size=%s)", abs_cfg, cfg_size_str)
+    logger.info("  hostname=%s", hostname)
+    logger.info("  arch=%s", arch)
+    logger.info("  os=%s", os_id)
+    logger.info("  python=%s", py_ver)
+    logger.info("  pid=%d", pid)
+    logger.info("  container_id=%s", container_id or "not-detected")
+    logger.info("  image_or_build_id=%s", build_id or "unknown")
+    if git_sha:
+        logger.info("  git_sha=%s", git_sha)
+
+
 def _clear_lru_caches(wrappers: Optional[List[object]]):
     # Collect all cached function wrappers
     gc.collect()
@@ -123,85 +272,8 @@ def _clear_lru_caches(wrappers: Optional[List[object]]):
         wrapper.cache_clear()
 
 
-def _is_setup_plugin(plugin: BasePlugin) -> bool:
-    """Brief: Determine whether a plugin overrides BasePlugin.setup.
-
-    Inputs:
-      - plugin: BasePlugin instance.
-
-    Outputs:
-      - bool: True when plugin defines its own setup() implementation.
-
-    Example use:
-      >>> from foghorn.plugins.resolve.base import BasePlugin
-      >>> class P(BasePlugin):
-      ...     def setup(self):
-      ...         pass
-      >>> p = P()
-      >>> _is_setup_plugin(p)
-      True
-    """
-
-    try:
-        return plugin.__class__.setup is not BasePlugin.setup
-    except Exception:
-        return False
-
-
-def run_setup_plugins(plugins: List[BasePlugin]) -> None:
-    """Brief: Run setup() on setup-aware plugins in ascending setup_priority order.
-
-    Inputs:
-      - plugins: List[BasePlugin] instances, typically from load_plugins().
-
-    Outputs:
-      - None; raises RuntimeError if a setup plugin with abort_on_failure=True fails.
-
-    Notes:
-      - Plugins that override BasePlugin.setup are considered setup plugins.
-      - Execution order is controlled by each plugin's setup_priority attribute
-        (default 100).
-    """
-
-    logger = logging.getLogger("foghorn.main.setup")
-
-    setup_entries: List[tuple[int, BasePlugin]] = []
-    for p in plugins or []:
-        if not _is_setup_plugin(p):
-            continue
-        try:
-            prio = int(getattr(p, "setup_priority", 100))
-        except Exception:
-            prio = 100
-        setup_entries.append((prio, p))
-
-    setup_entries.sort(key=lambda item: item[0])
-
-    for prio, plugin in setup_entries:
-        cfg = getattr(plugin, "config", {}) or {}
-        abort_on_failure = bool(cfg.get("abort_on_failure", True))
-        name = plugin.__class__.__name__
-        logger.info(
-            "Running setup for plugin %s (setup_priority=%d, abort_on_failure=%s)",
-            name,
-            prio,
-            abort_on_failure,
-        )
-        try:
-            plugin.setup()
-        except Exception as e:  # pragma: no cover
-            logger.error("Setup for plugin %s failed: %s", name, e, exc_info=True)
-            if abort_on_failure:
-                raise RuntimeError(f"Setup for plugin {name} failed") from e
-            logger.warning(
-                "Continuing startup despite setup failure in plugin %s because abort_on_failure is False",
-                name,
-            )
-
-
 def main(argv: List[str] | None = None) -> int:
     """
-    Main entry point for the DNS server.
     Parses arguments, loads configuration, initializes plugins, and starts the server.
 
     Args:
@@ -294,7 +366,7 @@ def main(argv: List[str] | None = None) -> int:
     init_logging(python_logging_cfg or None)
 
     logger = logging.getLogger("foghorn.main")
-    logger.info("Loaded config from %s", args.config)
+    _log_startup_banner(logger, config_path=str(args.config))
 
     # Apply any configured overrides for decorated caches (registered_cached /
     # registered_lru_cached) before listeners are started so that diagnostic
@@ -1072,6 +1144,49 @@ def main(argv: List[str] | None = None) -> int:
     # normal forwarding. In recursive mode there are no forwarder upstreams; in
     # that case, route all DNSSEC helper lookups through Foghorn's own
     # RecursiveResolver rather than the system resolver.
+
+    # Initialize the in-process runtime snapshot before starting any listeners
+    # so that shared resolver paths (UDP/TCP/DoT/DoH) can consult a consistent,
+    # per-request configuration snapshot.
+    try:
+        import time as _time
+
+        snapshot = RuntimeSnapshot(
+            cfg=cfg,
+            plugins=list(plugins or []),
+            upstream_addrs=list(upstreams or []),
+            timeout_ms=int(timeout_ms),
+            upstream_strategy=str(upstream_strategy),
+            upstream_max_concurrent=int(upstream_max_concurrent),
+            resolver_mode=str(resolver_mode),
+            recursive_max_depth=int(recursive_max_depth),
+            recursive_timeout_ms=int(recursive_timeout_ms),
+            recursive_per_try_timeout_ms=int(recursive_per_try_timeout_ms),
+            dnssec_mode=str(dnssec_mode),
+            dnssec_validation=str(dnssec_validation),
+            edns_udp_payload=max(512, int(edns_payload)),
+            enable_ede=bool(enable_ede),
+            forward_local=bool(forward_local),
+            min_cache_ttl=int(min_cache_ttl),
+            # Cache prefetch is not config-plumbed yet; keep defaults.
+            cache_prefetch_enabled=False,
+            cache_prefetch_min_ttl=0,
+            cache_prefetch_max_ttl=0,
+            cache_prefetch_refresh_before_expiry=0.0,
+            cache_prefetch_allow_stale_after_expiry=0.0,
+            stats_collector=stats_collector,
+            cache_plugin=cache_plugin,
+            generation=1,
+            applied_at_epoch=_time.time(),
+        )
+        initialize_runtime(
+            snapshot=snapshot,
+            config_path=cfg_path,
+            cli_vars=list(getattr(args, "var", []) or []),
+            unknown_keys_policy=str(getattr(args, "config_extras", "warn") or "warn"),
+        )
+    except Exception:
+        logger.debug("Failed to initialize runtime snapshot", exc_info=True)
     if dnssec_mode == "validate" and dnssec_validation in {"local", "local_extended"}:
         try:
             from foghorn.dnssec.dnssec_validate import (
@@ -1532,6 +1647,15 @@ def main(argv: List[str] | None = None) -> int:
         if web_handle is not None:
             logger.info("Stopping webserver")
             web_handle.stop()
+
+        # Clear in-process runtime snapshot state. This is mostly relevant for
+        # unit tests that call main() multiple times in one Python process.
+        try:
+            from foghorn import runtime_config as _runtime_config
+
+            _runtime_config.clear_runtime()
+        except Exception:
+            pass
 
         # Mark shutdown as complete so any pending hard-kill timers can detect
         # successful termination and avoid forcing an unnecessary SIGKILL.

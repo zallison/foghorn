@@ -59,7 +59,6 @@ from .meta_helpers import (
 from .http_helpers import (
     _build_auth_dependency,
     _json_safe,
-    _schedule_sighup_after_config_save,
     resolve_www_root,
 )
 from .rate_limit_helpers import _collect_rate_limit_stats
@@ -177,7 +176,7 @@ def create_app(
       >>> app = create_app(collector, {"webserver": {"enabled": True}}, config_path="config.yaml")
     """
 
-    web_cfg = (config.get("webserver") or {}) if isinstance(config, dict) else {}
+    web_cfg = _config_helpers._get_web_cfg(config)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

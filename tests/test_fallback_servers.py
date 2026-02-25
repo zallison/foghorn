@@ -369,7 +369,15 @@ def test_admin_fallback_config_raw_and_save(monkeypatch: Any, tmp_path) -> None:
 
     # Create a temporary config file.
     cfg_path = tmp_path / "config.yaml"
-    initial_yaml = "initial: 1\nwebserver:\n  enabled: true\n"
+
+    # Use a schema-valid v2 config so /config/save can parse + validate it.
+    initial_yaml = (
+        "upstreams:\n"
+        "  endpoints:\n"
+        "  - host: 8.8.8.8\n"
+        "server:\n"
+        "  listen: {}\n"
+    )
     cfg_path.write_text(initial_yaml, encoding="utf-8")
 
     cfg = {
@@ -393,21 +401,43 @@ def test_admin_fallback_config_raw_and_save(monkeypatch: Any, tmp_path) -> None:
 
     time.sleep(0.05)
 
-    # Test GET /config/raw.json returns the on-disk YAML and parsed config.
-    conn = http.client.HTTPConnection(host, port, timeout=1)
-    try:
-        conn.request("GET", "/config/raw.json")
-        resp = conn.getresponse()
-        body = resp.read()
-        assert resp.status == 200
-        data = json.loads(body.decode("utf-8"))
-        assert data["raw_yaml"] == initial_yaml
-        assert data["config"]["initial"] == 1
-    finally:
-        conn.close()
+    # Test GET /config/raw.json endpoints return the on-disk YAML and parsed config.
+    for path in [
+        "/config/raw.json",
+        "/api/v1/config/raw.json",
+    ]:
+        conn = http.client.HTTPConnection(host, port, timeout=1)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            body = resp.read()
+            assert resp.status == 200
+            data = json.loads(body.decode("utf-8"))
+            assert data["raw_yaml"] == initial_yaml
+            assert data["config"]["upstreams"]["endpoints"][0]["host"] == "8.8.8.8"
+        finally:
+            conn.close()
+
+    # Raw YAML endpoints.
+    for path in [
+        "/config/raw",
+        "/api/v1/config/raw",
+    ]:
+        conn_y = http.client.HTTPConnection(host, port, timeout=1)
+        try:
+            conn_y.request("GET", path)
+            resp_y = conn_y.getresponse()
+            body_y = resp_y.read()
+            assert resp_y.status == 200
+            assert body_y.decode("utf-8") == initial_yaml
+        finally:
+            conn_y.close()
 
     # Test POST /config/save overwrites the config file.
-    new_cfg = {"answer": 42, "webserver": {"enabled": True}}
+    new_cfg = {
+        "upstreams": {"endpoints": [{"host": "9.9.9.9"}]},
+        "server": {"listen": {}},
+    }
     import yaml
 
     new_yaml = yaml.safe_dump(new_cfg)
@@ -435,8 +465,8 @@ def test_admin_fallback_config_raw_and_save(monkeypatch: Any, tmp_path) -> None:
     import yaml
 
     reloaded = yaml.safe_load(on_disk)
-    assert reloaded["answer"] == 42
-    assert reloaded["webserver"]["enabled"] is True
+    assert reloaded["upstreams"]["endpoints"][0]["host"] == "9.9.9.9"
+    assert isinstance(reloaded.get("server", {}).get("listen"), dict)
 
     handle.stop()
 
