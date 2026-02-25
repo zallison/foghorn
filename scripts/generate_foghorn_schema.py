@@ -449,6 +449,194 @@ def _augment_statistics_persistence_schema(base: Dict[str, Any]) -> None:
         logger.exception("Failed to augment statistics.persistence schema")
 
 
+def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
+    """Brief: Extend the base schema with DoS-hardening listener limit knobs.
+
+    Inputs:
+      - base: Mutable JSON Schema mapping loaded from assets/config-schema.json.
+
+    Outputs:
+      - None; ``base`` is updated in place when the expected server/listen/http
+        shapes exist.
+
+    Notes:
+      - This is intentionally additive and uses setdefault so repeated schema
+        generation is idempotent.
+    """
+
+    def _ensure_obj_schema(node: Any) -> Dict[str, Any] | None:
+        if not isinstance(node, dict):
+            return None
+        node.setdefault("type", "object")
+        node.setdefault("additionalProperties", True)
+        props = node.get("properties")
+        if not isinstance(props, dict):
+            props = {}
+            node["properties"] = props
+        return node
+
+    def _ensure_limit_keys(listener_node: Dict[str, Any]) -> None:
+        props = listener_node.get("properties")
+        if not isinstance(props, dict):
+            props = {}
+            listener_node["properties"] = props
+
+        props.setdefault(
+            "max_connections",
+            {
+                "type": "integer",
+                "minimum": 1,
+                "default": 1024,
+                "description": "Maximum concurrent connections accepted by this listener.",
+            },
+        )
+        props.setdefault(
+            "max_connections_per_ip",
+            {
+                "type": "integer",
+                "minimum": 1,
+                "default": 64,
+                "description": "Maximum concurrent connections from a single client IP.",
+            },
+        )
+        props.setdefault(
+            "max_queries_per_connection",
+            {
+                "type": "integer",
+                "minimum": 1,
+                "default": 100,
+                "description": "Maximum number of DNS queries processed per connection before closing it.",
+            },
+        )
+        props.setdefault(
+            "idle_timeout_seconds",
+            {
+                "type": "number",
+                "minimum": 0,
+                "default": 15.0,
+                "description": "Idle timeout (seconds) before closing an inactive connection.",
+            },
+        )
+
+    try:
+        root_props = base.get("properties")
+        if not isinstance(root_props, dict):
+            return
+
+        server_obj = root_props.get("server")
+        server_schema = _ensure_obj_schema(server_obj)
+        if server_schema is None:
+            return
+
+        server_props = server_schema.get("properties")
+        if not isinstance(server_props, dict):
+            return
+
+        # server.limits: global hardening knobs.
+        limits_obj = server_props.setdefault("limits", {"type": "object"})
+        limits_schema = _ensure_obj_schema(limits_obj)
+        if limits_schema is not None:
+            limits_props = limits_schema.get("properties")
+            if isinstance(limits_props, dict):
+                limits_props.setdefault(
+                    "resolver_executor_workers",
+                    {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "description": (
+                            "Max workers for the shared resolver ThreadPoolExecutor used by asyncio "
+                            "listeners (TCP/DoT). Null uses a conservative default."
+                        ),
+                        "default": None,
+                    },
+                )
+
+        # server.listen.{tcp,dot} hardening knobs.
+        listen_obj = server_props.get("listen")
+        listen_schema = _ensure_obj_schema(listen_obj)
+        if listen_schema is not None:
+            listen_props = listen_schema.get("properties")
+            if isinstance(listen_props, dict):
+                for key in ("tcp", "dot"):
+                    child = listen_props.get(key)
+                    if not isinstance(child, dict):
+                        child = {"type": "object"}
+                        listen_props[key] = child
+                    child_schema = _ensure_obj_schema(child)
+                    if child_schema is not None:
+                        _ensure_limit_keys(child_schema)
+
+                for key in ("doh",):
+                    child = listen_props.get(key)
+                    if not isinstance(child, dict):
+                        child = {"type": "object"}
+                        listen_props[key] = child
+
+                # listen.doh.allow_threaded_fallback
+                doh_obj = listen_props.get("doh")
+                doh_schema = _ensure_obj_schema(doh_obj)
+                if doh_schema is not None:
+                    doh_props = doh_schema.get("properties")
+                    if isinstance(doh_props, dict):
+                        doh_props.setdefault(
+                            "allow_threaded_fallback",
+                            {
+                                "type": "boolean",
+                                "default": True,
+                                "description": (
+                                    "When false, refuse to start the threaded stdlib DoH fallback when "
+                                    "FastAPI/uvicorn or asyncio is unavailable."
+                                ),
+                            },
+                        )
+
+        # server.http.*
+        http_obj = server_props.get("http")
+        http_schema = _ensure_obj_schema(http_obj)
+        if http_schema is not None:
+            http_props = http_schema.get("properties")
+            if isinstance(http_props, dict):
+                http_props.setdefault(
+                    "allow_threaded_fallback",
+                    {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "When false, refuse to start the threaded stdlib admin HTTP fallback when "
+                            "FastAPI/uvicorn or asyncio is unavailable."
+                        ),
+                    },
+                )
+                http_props.setdefault(
+                    "enable_api",
+                    {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "When false, do not serve the admin API endpoints (e.g. /api/v1/stats, /config, /logs)."
+                        ),
+                    },
+                )
+                http_props.setdefault(
+                    "enable_schema",
+                    {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "When false, disable OpenAPI schema generation and /openapi.json.",
+                    },
+                )
+                http_props.setdefault(
+                    "enable_docs",
+                    {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "When false, disable Swagger UI at /docs (requires enable_schema=true).",
+                    },
+                )
+    except Exception:  # pragma: no cover - defensive logging only
+        logger.exception("Failed to augment server.listen/server.limits schema")
+
+
 def _build_v2_root_schema(
     base: Dict[str, Any], plugins: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -491,11 +679,110 @@ def _build_v2_root_schema(
         if isinstance(server_props, dict) and "listen" in server_props
         else base_props.get("listen", {"type": "object"})
     )
+
+    # Ensure the listener schemas are concrete enough for editor tooling even
+    # when the base schema is permissive.
+    if isinstance(listen_schema, dict):
+        listen_schema.setdefault("type", "object")
+        listen_schema.setdefault("additionalProperties", True)
+        listen_props = listen_schema.setdefault("properties", {})
+        if isinstance(listen_props, dict):
+
+            def _ensure_listener_child(key: str) -> Dict[str, Any]:
+                child = listen_props.get(key)
+                if not isinstance(child, dict):
+                    child = {"type": "object", "additionalProperties": True}
+                    listen_props[key] = child
+                child.setdefault("type", "object")
+                child.setdefault("additionalProperties", True)
+                cprops = child.setdefault("properties", {})
+                if not isinstance(cprops, dict):
+                    cprops = {}
+                    child["properties"] = cprops
+                return child
+
+            def _ensure_conn_limit_props(child: Dict[str, Any]) -> None:
+                cprops = child.get("properties")
+                if not isinstance(cprops, dict):
+                    return
+                cprops.setdefault(
+                    "max_connections",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 1024,
+                        "description": "Maximum concurrent connections accepted by this listener.",
+                    },
+                )
+                cprops.setdefault(
+                    "max_connections_per_ip",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 64,
+                        "description": "Maximum concurrent connections from a single client IP.",
+                    },
+                )
+                cprops.setdefault(
+                    "max_queries_per_connection",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 100,
+                        "description": "Maximum DNS queries processed per connection before closing it.",
+                    },
+                )
+                cprops.setdefault(
+                    "idle_timeout_seconds",
+                    {
+                        "type": "number",
+                        "minimum": 0,
+                        "default": 15.0,
+                        "description": "Idle timeout (seconds) before closing an inactive connection.",
+                    },
+                )
+
+            tcp_child = _ensure_listener_child("tcp")
+            dot_child = _ensure_listener_child("dot")
+            _ensure_conn_limit_props(tcp_child)
+            _ensure_conn_limit_props(dot_child)
+
+            doh_child = _ensure_listener_child("doh")
+            doh_props = doh_child.get("properties")
+            if isinstance(doh_props, dict):
+                doh_props.setdefault(
+                    "allow_threaded_fallback",
+                    {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "When false, refuse to start the threaded stdlib DoH fallback when "
+                            "FastAPI/uvicorn or asyncio is unavailable."
+                        ),
+                    },
+                )
     resolver_schema = (
         server_props.get("resolver")  # type: ignore[union-attr]
         if isinstance(server_props, dict) and "resolver" in server_props
         else base_props.get("resolver", {"type": "object"})
     )
+
+    # server.limits: hardening knobs.
+    limits_schema: Dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "resolver_executor_workers": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "default": None,
+                "description": (
+                    "Max workers for the shared resolver ThreadPoolExecutor used by asyncio listeners "
+                    "(TCP/DoT). Null uses a conservative default."
+                ),
+            }
+        },
+    }
 
     # Ensure server.resolver exposes the runtime configuration surface. Some
     # older base schemas model this as a generic object; augment it here so
@@ -986,6 +1273,7 @@ def _build_v2_root_schema(
                     "dnssec": dnssec_schema,
                     "resolver": resolver_schema,
                     "cache": cache_schema,
+                    "limits": limits_schema,
                     # Preferred v2 placement for admin HTTP/web UI config.
                     "http": webserver_schema,
                     # Feature gate for Extended DNS Errors (RFC 8914). When true,
@@ -1068,6 +1356,10 @@ def build_document(base_schema_path: Optional[str] = None) -> Dict[str, Any]:
     # Ensure statistics.persistence documents the backend loader options used
     # by foghorn.plugins.querylog.load_stats_store_backend().
     _augment_statistics_persistence_schema(base)
+
+    # Ensure schema includes hardening knobs for threaded fallbacks, connection
+    # limits, and the shared resolver executor sizing.
+    _augment_server_limits_and_listen_schema(base)
 
     # Heuristically fill in missing descriptions/default notes across the base
     # schema so that editor tooling always has something useful to display.
