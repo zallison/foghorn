@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import shutil
+import signal
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from . import admin_logic as _admin_logic
 from . import config_persistence as _config_persistence
+from .http_helpers import _schedule_process_signal
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi import File, UploadFile
@@ -50,19 +53,6 @@ def _json_safe(value: Any) -> Any:
     return web_core._json_safe(value)
 
 
-def _schedule_sighup_after_config_save(delay_seconds: float = 1.0) -> None:
-    """Schedule SIGHUP delivery using the helper defined in core.
-
-    A small wrapper is used here so that FastAPI routes can trigger the shared
-    behaviour without importing core at module import time.
-    """
-
-    import importlib
-
-    web_core = importlib.import_module("foghorn.servers.webserver.core")
-    web_core._schedule_sighup_after_config_save(delay_seconds=delay_seconds)
-
-
 def _get_about_payload() -> Dict[str, Any]:
     """Build the /about payload using the canonical helper from core."""
 
@@ -85,13 +75,11 @@ def _register_core_routes(app: FastAPI) -> None:
     async def about() -> Dict[str, Any]:
         return _get_about_payload()
 
-    @app.get("/api/v1/status")
-    @app.get("/status")
     @app.get("/api/v1/ready")
     @app.get("/ready")
     async def ready() -> JSONResponse:
         state: RuntimeState | None = getattr(app.state, "runtime_state", None)
-        ready_ok, _not_ready, details = evaluate_readiness(
+        ready_ok, not_ready, details = evaluate_readiness(
             stats=getattr(app.state, "stats_collector", None),
             config=getattr(app.state, "config", None),
             runtime_state=state,
@@ -99,6 +87,7 @@ def _register_core_routes(app: FastAPI) -> None:
         payload = {
             "server_time": _utc_now_iso(),
             "ready": bool(ready_ok),
+            "not_ready": list(not_ready or []),
             "details": details,
         }
         return JSONResponse(
@@ -110,7 +99,6 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
     """Register configuration management endpoints."""
 
     @app.get("/api/v1/config", dependencies=[Depends(auth_dep)])
-    @app.get("/apti/v1/config", dependencies=[Depends(auth_dep)])
     @app.get("/config", dependencies=[Depends(auth_dep)])
     async def get_config() -> PlainTextResponse:
         cfg = app.state.config or {}
@@ -140,7 +128,6 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         return PlainTextResponse(raw_text, media_type="application/x-yaml")
 
     @app.get("/api/v1/config.json", dependencies=[Depends(auth_dep)])
-    @app.get("/apti/v1/config.json", dependencies=[Depends(auth_dep)])
     @app.get("/config.json", dependencies=[Depends(auth_dep)])
     async def get_config_json() -> Dict[str, Any]:
         cfg = app.state.config or {}
@@ -493,9 +480,35 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
             "raw_yaml": raw["raw_yaml"],
         }
 
-    @app.post("/api/v1/config/save", dependencies=[Depends(auth_dep)])
-    @app.post("/config/save", dependencies=[Depends(auth_dep)])
-    async def save_config(body: Dict[str, Any]) -> Dict[str, Any]:
+    def _schedule_restart(*, delay_seconds: float = 1.0) -> None:
+        """Brief: Schedule a process restart by delivering SIGHUP.
+
+        Inputs:
+          - delay_seconds: Delay before sending SIGHUP so HTTP responses can flush.
+
+        Outputs:
+          - None.
+        """
+
+        _schedule_process_signal(signal.SIGHUP, delay_seconds=float(delay_seconds))
+
+    def _save_config_to_disk(*, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Brief: Persist raw YAML to disk and validate it.
+
+        Inputs:
+          - body: JSON object containing required 'raw_yaml' string.
+
+        Outputs:
+          - Dict containing:
+              - cfg_path_abs
+              - backup_path
+              - desired_cfg (parsed/validated)
+              - analysis (restart/reload recommendation)
+
+        Notes:
+          - On validation failure, restores the backup and raises HTTPException.
+        """
+
         if not isinstance(body, dict):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -513,16 +526,14 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         ts = datetime.now(timezone.utc).isoformat().replace(":", "-")
         backup_path = f"{cfg_path_abs}.bak.{ts}"
 
-        try:
-            raw_yaml = body.get("raw_yaml")
-            if not isinstance(raw_yaml, str):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="request body must include 'raw_yaml' string field",
-                )
+        raw_yaml = body.get("raw_yaml")
+        if not isinstance(raw_yaml, str):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="request body must include 'raw_yaml' string field",
+            )
 
-            # Preserve historic FastAPI behaviour: write to <cfg>.new and then
-            # copy over the destination.
+        try:
             _config_persistence.safe_write_raw_yaml(
                 dst_path=cfg_path_abs,
                 raw_yaml=raw_yaml,
@@ -531,21 +542,408 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
                 strategy="copy",
                 cleanup_tmp=False,
             )
-
         except Exception as exc:  # pragma: no cover - file system specific
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"failed to write config to {cfg_path_abs}: {exc}",
             ) from exc
 
-        _schedule_sighup_after_config_save(delay_seconds=0.1)
+        from foghorn import runtime_config as _runtime_config
+
+        restored = False
+        try:
+            desired_cfg = _runtime_config.load_config_from_disk(
+                config_path=cfg_path_abs
+            )
+        except Exception as exc:
+            try:
+                if os.path.exists(backup_path):
+                    shutil.copy(backup_path, cfg_path_abs)
+                    restored = True
+            except Exception:
+                restored = False
+
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"failed to parse/validate saved config (restored_backup={restored}): {exc}",
+            ) from exc
+
+        analysis = _runtime_config.analyze_config_change(
+            desired_cfg,
+            current_cfg=getattr(app.state, "config", None) or {},
+        )
 
         return {
+            "cfg_path_abs": cfg_path_abs,
+            "backup_path": backup_path,
+            "desired_cfg": desired_cfg,
+            "analysis": analysis,
+        }
+
+    @app.post("/api/v1/config/save", dependencies=[Depends(auth_dep)])
+    @app.post("/config/save", dependencies=[Depends(auth_dep)])
+    async def save_config(body: Dict[str, Any]) -> JSONResponse:
+        """Brief: Persist config YAML without applying reload or restart.
+
+        Inputs:
+          - body: JSON object containing required 'raw_yaml' string.
+
+        Outputs:
+          - JSONResponse describing whether a reload or restart is recommended.
+
+        Notes:
+          - This endpoint is intentionally side-effect free (no reload, no restart)
+            so operators can save now and choose when to reload/restart.
+        """
+
+        saved = _save_config_to_disk(body=body)
+        analysis = saved["analysis"]
+
+        msg = "saved"
+        if analysis.get("restart_required"):
+            msg = "saved (restart required to apply some changes)"
+        elif analysis.get("reload_required"):
+            msg = "saved (reload recommended to apply changes without downtime)"
+
+        payload = {
             "status": "ok",
             "server_time": _utc_now_iso(),
-            "path": cfg_path_abs,
-            "backed_up_to": backup_path,
+            "path": saved["cfg_path_abs"],
+            "backed_up_to": saved["backup_path"],
+            "message": msg,
+            "analysis": analysis,
         }
+        return JSONResponse(content=_json_safe(payload), status_code=200)
+
+    @app.post("/api/v1/config/save_and_reload", dependencies=[Depends(auth_dep)])
+    @app.post("/config/save_and_reload", dependencies=[Depends(auth_dep)])
+    async def save_and_reload_config(body: Dict[str, Any]) -> JSONResponse:
+        """Brief: Persist config YAML and apply an in-process reload when possible.
+
+        Inputs:
+          - body: JSON object containing required 'raw_yaml' string.
+
+        Outputs:
+          - JSONResponse with save metadata and reload outcome.
+
+        Notes:
+          - If the saved config implies restart_required, this schedules SIGHUP
+            instead of applying reload_only.
+        """
+
+        saved = _save_config_to_disk(body=body)
+        analysis = saved["analysis"]
+
+        from foghorn import runtime_config as _runtime_config
+
+        if analysis.get("restart_required"):
+            payload = {
+                "status": "error",
+                "server_time": _utc_now_iso(),
+                "path": saved["cfg_path_abs"],
+                "backed_up_to": saved["backup_path"],
+                "message": "saved but reload refused (restart required; call /restart or /config/save_and_restart)",
+                "analysis": analysis,
+            }
+            return JSONResponse(content=_json_safe(payload), status_code=409)
+
+        reload_res = _runtime_config.reload_from_disk(
+            config_path=saved["cfg_path_abs"],
+            mode="reload_only",
+        )
+
+        if reload_res.ok:
+            try:
+                snap = _runtime_config.get_runtime_snapshot()
+                app.state.config = snap.cfg
+                app.state.plugins = list(snap.plugins or [])
+            except Exception:
+                pass
+
+        # reload_from_disk(mode='reload_only') can report restart_required when
+        # listener/http changes are present. Under /save_and_reload semantics we
+        # refuse to apply reload in that case.
+        if reload_res.ok and reload_res.restart_required:
+            payload = {
+                "status": "error",
+                "server_time": _utc_now_iso(),
+                "path": saved["cfg_path_abs"],
+                "backed_up_to": saved["backup_path"],
+                "message": "saved but reload refused (restart required; call /restart or /config/save_and_restart)",
+                "analysis": analysis,
+                "reload": {
+                    "ok": bool(reload_res.ok),
+                    "generation": int(reload_res.generation),
+                    "restart_required": bool(reload_res.restart_required),
+                    "restart_reasons": list(reload_res.restart_reasons or []),
+                    "error": reload_res.error,
+                    "mode": "reload_only",
+                },
+            }
+            return JSONResponse(content=_json_safe(payload), status_code=409)
+
+        msg = "saved and reloaded" if reload_res.ok else "saved but reload failed"
+
+        payload = {
+            "status": "ok" if reload_res.ok else "error",
+            "server_time": _utc_now_iso(),
+            "path": saved["cfg_path_abs"],
+            "backed_up_to": saved["backup_path"],
+            "message": msg,
+            "analysis": analysis,
+            "reload": {
+                "ok": bool(reload_res.ok),
+                "generation": int(reload_res.generation),
+                "restart_required": bool(reload_res.restart_required),
+                "restart_reasons": list(reload_res.restart_reasons or []),
+                "error": reload_res.error,
+                "mode": "reload_only",
+            },
+            "restart": {
+                "scheduled": bool(reload_res.ok and reload_res.restart_required),
+                "signal": (
+                    "SIGHUP" if reload_res.ok and reload_res.restart_required else None
+                ),
+            },
+        }
+
+        return JSONResponse(
+            content=_json_safe(payload),
+            status_code=200 if reload_res.ok else status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    @app.post("/api/v1/config/save_and_restart", dependencies=[Depends(auth_dep)])
+    @app.post("/config/save_and_restart", dependencies=[Depends(auth_dep)])
+    async def save_and_restart_config(body: Dict[str, Any]) -> JSONResponse:
+        """Brief: Persist config YAML and schedule a restart (SIGHUP).
+
+        Inputs:
+          - body: JSON object containing required 'raw_yaml' string.
+
+        Outputs:
+          - JSONResponse with save metadata.
+        """
+
+        saved = _save_config_to_disk(body=body)
+        _schedule_restart(delay_seconds=1.0)
+
+        payload = {
+            "status": "ok",
+            "server_time": _utc_now_iso(),
+            "path": saved["cfg_path_abs"],
+            "backed_up_to": saved["backup_path"],
+            "message": "saved; restart scheduled (SIGHUP)",
+            "analysis": saved["analysis"],
+            "restart": {"scheduled": True, "signal": "SIGHUP"},
+        }
+        return JSONResponse(content=_json_safe(payload), status_code=200)
+
+    @app.post("/api/v1/config/reload", dependencies=[Depends(auth_dep)])
+    @app.post("/config/reload", dependencies=[Depends(auth_dep)])
+    @app.post("/api/v1/reload", dependencies=[Depends(auth_dep)])
+    @app.post("/reload", dependencies=[Depends(auth_dep)])
+    async def reload_config() -> JSONResponse:
+        """Brief: Reload runtime config from the on-disk YAML.
+
+        Inputs:
+          - None (uses app.state.config_path).
+
+        Outputs:
+          - JSONResponse with reload metadata.
+
+        Notes:
+          - If restart_required is detected, reload is refused (HTTP 409) so the
+            operator can restart explicitly via /restart.
+        """
+
+        cfg_path = getattr(app.state, "config_path", None)
+        if not cfg_path:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="config_path not configured",
+            )
+
+        cfg_path_abs = os.path.abspath(cfg_path)
+
+        from foghorn import runtime_config as _runtime_config
+
+        try:
+            desired_cfg = _runtime_config.load_config_from_disk(
+                config_path=cfg_path_abs
+            )
+        except Exception as exc:
+            payload = {
+                "status": "error",
+                "server_time": _utc_now_iso(),
+                "path": cfg_path_abs,
+                "message": f"failed to parse/validate config: {exc}",
+            }
+            return JSONResponse(content=_json_safe(payload), status_code=400)
+
+        analysis = _runtime_config.analyze_config_change(
+            desired_cfg,
+            current_cfg=getattr(app.state, "config", None) or {},
+        )
+
+        if analysis.get("restart_required"):
+            payload = {
+                "status": "error",
+                "server_time": _utc_now_iso(),
+                "path": cfg_path_abs,
+                "message": "reload refused (restart required; call /restart)",
+                "analysis": analysis,
+            }
+            return JSONResponse(content=_json_safe(payload), status_code=409)
+
+        reload_res = _runtime_config.reload_from_config(desired_cfg, mode="reload_only")
+
+        if reload_res.ok:
+            try:
+                snap = _runtime_config.get_runtime_snapshot()
+                app.state.config = snap.cfg
+                app.state.plugins = list(snap.plugins or [])
+            except Exception:
+                pass
+
+        msg = "reloaded" if reload_res.ok else "reload failed"
+
+        payload = {
+            "status": "ok" if reload_res.ok else "error",
+            "server_time": _utc_now_iso(),
+            "path": cfg_path_abs,
+            "message": msg,
+            "analysis": analysis,
+            "reload": {
+                "ok": bool(reload_res.ok),
+                "generation": int(reload_res.generation),
+                "restart_required": bool(reload_res.restart_required),
+                "restart_reasons": list(reload_res.restart_reasons or []),
+                "error": reload_res.error,
+                "mode": "reload_only",
+            },
+        }
+
+        return JSONResponse(
+            content=_json_safe(payload),
+            status_code=200 if reload_res.ok else status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    @app.post("/api/v1/reload_reloadable", dependencies=[Depends(auth_dep)])
+    @app.post("/reload_reloadable", dependencies=[Depends(auth_dep)])
+    @app.post("/api/v1/config/reload_reloadable", dependencies=[Depends(auth_dep)])
+    @app.post("/config/reload_reloadable", dependencies=[Depends(auth_dep)])
+    async def reload_reloadable() -> JSONResponse:
+        """Brief: Reload only zero-downtime-safe settings, even if restart is required.
+
+        Inputs:
+          - None (uses app.state.config_path).
+
+        Outputs:
+          - JSONResponse with reload metadata.
+
+        Notes:
+          - When restart-required changes are present (listener/http), this still
+            applies reloadable settings and returns restart_required=true.
+          - This endpoint never schedules a restart; callers may invoke /restart
+            later when convenient.
+        """
+
+        cfg_path = getattr(app.state, "config_path", None)
+        if not cfg_path:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="config_path not configured",
+            )
+
+        cfg_path_abs = os.path.abspath(cfg_path)
+
+        from foghorn import runtime_config as _runtime_config
+
+        try:
+            desired_cfg = _runtime_config.load_config_from_disk(
+                config_path=cfg_path_abs
+            )
+        except Exception as exc:
+            payload = {
+                "status": "error",
+                "server_time": _utc_now_iso(),
+                "path": cfg_path_abs,
+                "message": f"failed to parse/validate config: {exc}",
+            }
+            return JSONResponse(content=_json_safe(payload), status_code=400)
+
+        analysis = _runtime_config.analyze_config_change(
+            desired_cfg,
+            current_cfg=getattr(app.state, "config", None) or {},
+        )
+
+        reload_res = _runtime_config.reload_from_config(desired_cfg, mode="reload_only")
+
+        if reload_res.ok:
+            try:
+                snap = _runtime_config.get_runtime_snapshot()
+                app.state.config = snap.cfg
+                app.state.plugins = list(snap.plugins or [])
+            except Exception:
+                pass
+
+        msg = "reloaded" if reload_res.ok else "reload failed"
+        if reload_res.ok and analysis.get("restart_required"):
+            msg = "reloaded reloadable settings (restart required for some changes)"
+
+        payload = {
+            "status": "ok" if reload_res.ok else "error",
+            "server_time": _utc_now_iso(),
+            "path": cfg_path_abs,
+            "message": msg,
+            "analysis": analysis,
+            "reload": {
+                "ok": bool(reload_res.ok),
+                "generation": int(reload_res.generation),
+                "restart_required": bool(reload_res.restart_required),
+                "restart_reasons": list(reload_res.restart_reasons or []),
+                "error": reload_res.error,
+                "mode": "reload_only",
+            },
+        }
+
+        return JSONResponse(
+            content=_json_safe(payload),
+            status_code=200 if reload_res.ok else status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    @app.post("/api/v1/restart", dependencies=[Depends(auth_dep)])
+    @app.post("/restart", dependencies=[Depends(auth_dep)])
+    async def restart_process(body: Dict[str, Any] | None = None) -> JSONResponse:
+        """Brief: Schedule a process restart (SIGHUP) without saving or reloading.
+
+        Inputs:
+          - body: Optional JSON object that may include delay_seconds.
+
+        Outputs:
+          - JSONResponse indicating restart has been scheduled.
+        """
+
+        delay_seconds = 1.0
+        if isinstance(body, dict):
+            try:
+                delay_seconds = float(body.get("delay_seconds", delay_seconds))
+            except Exception:
+                delay_seconds = 1.0
+
+        _schedule_restart(delay_seconds=delay_seconds)
+
+        payload = {
+            "status": "ok",
+            "server_time": _utc_now_iso(),
+            "message": f"restart scheduled via SIGHUP (delay_seconds={delay_seconds})",
+            "restart": {
+                "scheduled": True,
+                "signal": "SIGHUP",
+                "delay_seconds": float(delay_seconds),
+            },
+        }
+        return JSONResponse(content=_json_safe(payload), status_code=200)
 
 
 def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
@@ -619,6 +1017,7 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
         return payload
 
     @app.get("/api/v1/query_log/aggregate", dependencies=[Depends(auth_dep)])
+    @app.get("/query_log/aggregate", dependencies=[Depends(auth_dep)])
     async def get_query_log_aggregate(
         interval: int,
         interval_units: str,
