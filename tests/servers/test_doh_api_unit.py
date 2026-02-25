@@ -646,3 +646,35 @@ def test_start_doh_server_handles_generic_asyncio_error(
     # Depending on environment this may choose uvicorn or fall back to threaded HTTP.
     if isinstance(handle, doh_api.DoHServerHandle):
         handle.stop(timeout=0.5)
+
+
+def test_start_doh_server_disables_threaded_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: start_doh_server returns None when threaded fallback is disabled.
+
+    Inputs:
+      - monkeypatch: forces asyncio.new_event_loop() to raise PermissionError.
+
+    Outputs:
+      - None; asserts the starter returns None when allow_threaded_fallback=false.
+    """
+
+    import asyncio
+
+    def boom_new_event_loop() -> asyncio.AbstractEventLoop:  # type: ignore[override]
+        raise PermissionError("no self-pipe")
+
+    monkeypatch.setattr(asyncio, "new_event_loop", boom_new_event_loop)
+
+    def echo_resolver(q: bytes, client_ip: str) -> bytes:  # noqa: ARG001
+        return q
+
+    handle = doh_api.start_doh_server(
+        "127.0.0.1",
+        0,
+        echo_resolver,
+        allow_threaded_fallback=False,
+    )
+
+    assert handle is None
