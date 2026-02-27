@@ -12,11 +12,11 @@ import ipaddress
 from contextlib import closing
 
 import pytest
-from dnslib import AAAA, QTYPE, RR, TXT, A, DNSRecord, RCODE
+from dnslib import AAAA, QTYPE, RCODE, RR, TXT, A, DNSRecord
 
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision
-from foghorn.plugins.resolve.filter import FilterConfig, Filter
+from foghorn.plugins.resolve.filter import Filter, FilterConfig
 
 
 def _mk_query(name="example.com", qtype="A"):

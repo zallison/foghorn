@@ -10,8 +10,8 @@ Outputs:
 
 from __future__ import annotations
 
-from pathlib import Path
 import types
+from pathlib import Path
 
 import pytest
 

@@ -16,9 +16,9 @@ import pytest
 
 from foghorn.servers.transports.tcp import (
     TCPError,
+    _recv_exact,
     get_tcp_pool,
     tcp_query,
-    _recv_exact,
 )
 
 

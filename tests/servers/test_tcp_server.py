@@ -179,6 +179,99 @@ def test_tcp_server_zero_length_frame_closes(running_tcp_server):
         s.close()
 
 
+def test_tcp_server_oversized_frame_closes_connection(monkeypatch) -> None:
+    """Brief: serve_tcp closes when length prefix exceeds MAX_DNS_TCP_MESSAGE_BYTES.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts the connection is closed without a response.
+
+    Notes:
+      - The TCP length prefix is 2 bytes (max 65535). Because the project-wide
+        cap is also 65535, we monkeypatch the cap lower to exercise the branch.
+    """
+
+    monkeypatch.setattr(tcp_server_mod, "MAX_DNS_TCP_MESSAGE_BYTES", 10)
+
+    host = "127.0.0.1"
+    port_holder: dict[str, int] = {}
+    ready = threading.Event()
+
+    def runner() -> None:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        loop = asyncio.get_event_loop()
+
+        async def bind_and_run() -> None:
+            srv = await asyncio.start_server(lambda r, w: None, host, 0)
+            port = srv.sockets[0].getsockname()[1]
+            port_holder["port"] = port
+            ready.set()
+            srv.close()
+            await srv.wait_closed()
+            await serve_tcp(host, port, _echo_resolver, idle_timeout_seconds=0.5)
+
+        loop.create_task(bind_and_run())
+        loop.run_forever()
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    if not ready.wait(1.0):
+        pytest.skip("failed to start tcp server")
+    time.sleep(0.15)
+
+    port = port_holder["port"]
+    s = socket.create_connection((host, port), timeout=1)
+    s.settimeout(1)
+    try:
+        s.sendall((11).to_bytes(2, "big"))
+        data = s.recv(2)
+        assert data == b""
+    finally:
+        s.close()
+
+
+def test_tcphandler_oversized_frame_breaks_without_sending(monkeypatch) -> None:
+    """Brief: _TCPHandler breaks on oversize frame and sends nothing.
+
+    Inputs:
+      - monkeypatch: patches _recv_exact.
+
+    Outputs:
+      - None; asserts handle exits without sending a response frame.
+    """
+
+    from foghorn.security_limits import MAX_DNS_TCP_MESSAGE_BYTES
+
+    class _Sock:
+        def __init__(self):
+            self.timeout = None
+            self.sent = []
+
+        def settimeout(self, t: float) -> None:
+            self.timeout = t
+
+        def sendall(self, data: bytes) -> None:
+            self.sent.append(data)
+
+    calls = {"n": 0}
+
+    def fake_recv_exact(sock, n):  # noqa: ARG001
+        calls["n"] += 1
+        if calls["n"] == 1 and n == 2:
+            oversize = int(MAX_DNS_TCP_MESSAGE_BYTES) + 1
+            return oversize.to_bytes(2, "big")
+        return b""
+
+    monkeypatch.setattr(tcp_server_mod, "_recv_exact", fake_recv_exact)
+
+    sock = _Sock()
+    tcp_server_mod._TCPHandler(sock, ("1.2.3.4", 5353), None)
+
+    assert sock.sent == []
+
+
 @pytest.fixture
 def running_tcp_server_max_queries() -> tuple[str, int]:
     """Brief: Start serve_tcp with max_queries_per_connection=2.

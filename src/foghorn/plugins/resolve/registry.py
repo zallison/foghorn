@@ -9,7 +9,6 @@ from typing import Dict, Iterable, Type
 
 from .base import BasePlugin
 
-
 # Module import errors encountered during plugin discovery.
 #
 # Brief:

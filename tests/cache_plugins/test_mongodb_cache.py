@@ -9,9 +9,9 @@ Outputs:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
 import importlib
 import sys
+from typing import Any, Dict, Optional
 
 import pytest
 

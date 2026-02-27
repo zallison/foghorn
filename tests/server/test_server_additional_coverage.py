@@ -503,20 +503,9 @@ def test_schedule_cache_refresh_runs_worker_and_ignores_errors(monkeypatch):
 
     monkeypatch.setattr(srv, "resolve_query_bytes", _fake_resolve)
 
-    # Replace threading.Thread so that the worker runs synchronously for coverage.
-    class _FakeThread:
-        def __init__(self, target, name=None, daemon=None):  # noqa: D401, ANN001
-            """Record target/name/daemon and immediately run the worker."""
-
-            assert callable(target)
-            self.target = target
-            self.name = name
-            self.daemon = daemon
-
-        def start(self) -> None:
-            self.target()
-
-    monkeypatch.setattr(srv.threading, "Thread", _FakeThread)
+    # Replace the bounded background submit helper so that the worker runs
+    # synchronously for coverage.
+    monkeypatch.setattr(srv, "_bg_submit", lambda _key, fn: fn())
 
     q = DNSRecord.question("refresh.example", "A")
     wire = q.pack()
