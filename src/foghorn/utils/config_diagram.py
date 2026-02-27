@@ -98,6 +98,9 @@ class PluginInfo:
       - pre_priority: pre_resolve order (lower runs first) when enabled.
       - post_priority: post_resolve order (lower runs first) when enabled.
       - pre_actions/post_actions: Pipeline actions the plugin may emit.
+      - pre_deny_rcode/post_deny_rcode: Optional hint used by the diagram renderer
+        to label deny edges with the effective RCODE (e.g. REFUSED) instead of
+        assuming NXDOMAIN.
       - sets_upstreams: Whether plugin may set ctx.upstream_candidates/override.
       - routed_upstream_lines: Human-friendly route upstream lines (for upstream_router).
 
@@ -116,6 +119,9 @@ class PluginInfo:
 
     pre_actions: set[str] = field(default_factory=set)
     post_actions: set[str] = field(default_factory=set)
+
+    pre_deny_rcode: Optional[str] = None
+    post_deny_rcode: Optional[str] = None
 
     sets_upstreams: bool = False
     routed_upstream_lines: list[str] = field(default_factory=list)
@@ -740,6 +746,33 @@ def _extract_upstream_router_route_lines(entry_config: dict[str, Any]) -> list[s
     return out
 
 
+def _deny_response_to_rcode_label(deny_response: str) -> Optional[str]:
+    """Brief: Map a deny_response mode to a concise diagram label.
+
+    Inputs:
+      - deny_response: Config string like 'nxdomain', 'refused', or 'nodata'.
+
+    Outputs:
+      - Optional[str]: Diagram label (e.g. 'REFUSED'), or None when the mode is
+        better represented via a separate 'drop' edge.
+    """
+
+    mode = str(deny_response or "").strip().lower()
+    if mode == "nxdomain":
+        return "NXDOMAIN"
+    if mode == "refused":
+        return "REFUSED"
+    if mode == "servfail":
+        return "SERVFAIL"
+    if mode in {"noerror_empty", "nodata"}:
+        return "NOERROR (empty)"
+    if mode == "ip":
+        return "NOERROR (synthetic)"
+    if mode == "drop":
+        return None
+    return None
+
+
 def _constrain_plugin_info_for_config(
     info: PluginInfo, *, entry_config: dict[str, Any]
 ) -> PluginInfo:
@@ -747,13 +780,38 @@ def _constrain_plugin_info_for_config(
 
     if info.cls_path == "foghorn.plugins.resolve.filter.Filter":
         deny_response = str(entry_config.get("deny_response", "nxdomain")).lower()
+        deny_label = _deny_response_to_rcode_label(deny_response)
 
         pre_actions = set(info.pre_actions)
         post_actions = set(info.post_actions)
 
+        # Drop is only relevant when explicitly configured.
         if deny_response != "drop":
             pre_actions.discard("drop")
             post_actions.discard("drop")
+
+        # The diagram should show the effective RCODE, not the implementation
+        # detail (Filter may use override wire replies for some deny_response
+        # modes).
+        pre_deny_rcode = deny_label
+        post_deny_rcode = deny_label
+
+        # Filter's post-resolve IP deny path intentionally preserves the historic
+        # behaviour by returning a generic deny and letting the core synthesize
+        # NXDOMAIN.
+        if deny_response == "ip":
+            post_deny_rcode = "NXDOMAIN"
+
+        # Pick a single short-circuit edge for the pre path based on deny_response.
+        if deny_response == "drop":
+            pre_actions.discard("override")
+            pre_actions.discard("deny")
+            pre_actions.add("drop")
+            pre_deny_rcode = None
+        else:
+            pre_actions.discard("drop")
+            pre_actions.discard("override")
+            pre_actions.add("deny")
 
         has_ip_rules = _has_nonempty_list(
             entry_config.get("blocked_ips")
@@ -764,9 +822,48 @@ def _constrain_plugin_info_for_config(
                 post_priority=None,
                 post_actions=set(),
                 pre_actions=pre_actions,
+                pre_deny_rcode=pre_deny_rcode,
+                post_deny_rcode=post_deny_rcode,
             )
 
-        return replace(info, pre_actions=pre_actions, post_actions=post_actions)
+        # Post path: mirror the deny_response policy, preferring a single deny edge
+        # over an 'override (wire reply)' implementation detail.
+        if deny_response == "drop":
+            post_actions.discard("override")
+            post_actions.discard("deny")
+            post_actions.add("drop")
+            post_deny_rcode = None
+        else:
+            post_actions.discard("drop")
+            post_actions.discard("override")
+            post_actions.add("deny")
+
+        return replace(
+            info,
+            pre_actions=pre_actions,
+            post_actions=post_actions,
+            pre_deny_rcode=pre_deny_rcode,
+            post_deny_rcode=post_deny_rcode,
+        )
+
+    if info.cls_path == "foghorn.plugins.resolve.rate_limit.RateLimit":
+        deny_response = str(entry_config.get("deny_response", "nxdomain")).lower()
+        deny_label = _deny_response_to_rcode_label(deny_response)
+
+        pre_actions = set(info.pre_actions)
+        # Prefer a single deny edge with the effective RCODE label.
+        pre_actions.discard("override")
+        pre_actions.discard("drop")
+        pre_actions.add("deny")
+
+        return replace(
+            info,
+            pre_actions=pre_actions,
+            post_priority=None,
+            post_actions=set(),
+            pre_deny_rcode=deny_label,
+            post_deny_rcode=None,
+        )
 
     return info
 
@@ -1288,7 +1385,8 @@ def render_dot(
 
             resp_bits: list[str] = []
             if "deny" in p.pre_actions:
-                resp_bits.append("deny (NXDOMAIN)")
+                rcode = getattr(p, "pre_deny_rcode", None) or "NXDOMAIN"
+                resp_bits.append(f"deny ({rcode})")
             if "override" in p.pre_actions:
                 resp_bits.append("override (wire reply)")
             if resp_bits and has_pre_merge:
@@ -1465,7 +1563,8 @@ def render_dot(
 
             resp_bits: list[str] = []
             if "deny" in p.post_actions:
-                resp_bits.append("deny (NXDOMAIN)")
+                rcode = getattr(p, "post_deny_rcode", None) or "NXDOMAIN"
+                resp_bits.append(f"deny ({rcode})")
             if "override" in p.post_actions:
                 resp_bits.append("override (wire reply)")
             if resp_bits and has_post_merge:
