@@ -778,7 +778,10 @@ def _constrain_plugin_info_for_config(
 ) -> PluginInfo:
     """Brief: Adjust inferred plugin phases/actions using config-specific hints."""
 
-    if info.cls_path == "foghorn.plugins.resolve.filter.Filter":
+    if info.cls_path in {
+        "foghorn.plugins.resolve.filter.Filter",
+        "foghorn.plugins.resolve.rate_limit.RateLimit",
+    }:
         deny_response = str(entry_config.get("deny_response", "nxdomain")).lower()
         deny_label = _deny_response_to_rcode_label(deny_response)
 
