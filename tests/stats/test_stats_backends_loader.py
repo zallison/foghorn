@@ -17,9 +17,9 @@ from typing import Any, Dict, Optional
 
 from foghorn.plugins.querylog import (
     BaseStatsStore,
+    MultiStatsStore,
     StatsStoreBackendConfig,
     load_stats_store_backend,
-    MultiStatsStore,
 )
 
 
