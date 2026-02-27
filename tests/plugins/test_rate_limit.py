@@ -8,14 +8,14 @@ Outputs:
   - None (pytest assertions)
 """
 
-from contextlib import closing
 import threading
+from contextlib import closing
 
 from dnslib import QTYPE, DNSRecord
 
+import foghorn.plugins.resolve.rate_limit as rate_limit_module
 from foghorn.plugins.resolve.base import PluginContext
 from foghorn.plugins.resolve.rate_limit import RateLimit
-import foghorn.plugins.resolve.rate_limit as rate_limit_module
 
 
 def _set_time(monkeypatch, value: float) -> None:
@@ -198,9 +198,43 @@ def test_profiles_persist_and_can_be_read_from_db(tmp_path, monkeypatch):
 
 
 def test_to_base_domain_single_label():
-    """Brief: Single-label qname returns as-is (base label path).\n\n    Inputs:\n      - None.\n\n    Outputs:\n      - None: asserts helper returns the original label.\n"""
+    """Brief: Single-label qname returns as-is.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None: asserts helper returns the original label.
+    """
 
     assert rate_limit_module._to_base_domain("localhost.") == "localhost"
+
+
+def test_to_base_domain_is_psl_aware_for_common_suffixes():
+    """Brief: Base domain extraction uses the Public Suffix List (PSL).
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None: asserts multi-label public suffixes (e.g. co.uk) are handled.
+    """
+
+    assert rate_limit_module._to_base_domain("a.b.example.co.uk.") == "example.co.uk"
+    assert rate_limit_module._to_base_domain("a.b.example.com.au.") == "example.com.au"
+
+
+def test_to_base_domain_is_psl_aware_for_private_suffixes_like_github_io():
+    """Brief: PSL extraction respects common private suffix entries.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None: asserts github.io-style suffixes keep the user label.
+    """
+
+    assert rate_limit_module._to_base_domain("a.b.user.github.io.") == "user.github.io"
 
 
 def test_get_config_model_returns_config_class():
