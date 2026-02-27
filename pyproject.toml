@@ -31,6 +31,7 @@ dependencies = [
   "paramiko",
 # Plugins
   "docker>=7.0.0",
+  "publicsuffix2",      # Public Suffix List (PSL) aware domain parsing
   "watchdog",
   "zeroconf",
 # Databases

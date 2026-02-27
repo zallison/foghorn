@@ -11,15 +11,49 @@ from typing import Optional, Tuple
 from dnslib import QTYPE, RCODE, DNSRecord
 from pydantic import BaseModel, Field
 
-from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 from foghorn.plugins.resolve.base import (
     BasePlugin,
     PluginContext,
     PluginDecision,
     plugin_aliases,
 )
+from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=16384)
+def _psl_registrable_domain(qname: str) -> str | None:
+    """Brief: Return the PSL registrable domain (a.k.a. eTLD+1) for qname.
+
+    Inputs:
+      - qname: Domain name string; may include a trailing dot.
+
+    Outputs:
+      - str | None: Registrable domain (e.g. 'example.co.uk', 'user.github.io')
+        or None when it cannot be determined.
+
+    Notes:
+      - Uses the Public Suffix List via publicsuffix2.
+      - Returns None for empty input.
+    """
+
+    s = str(qname).strip().rstrip(".").lower()
+    if not s:
+        return None
+
+    try:
+        from publicsuffix2 import get_sld
+
+        # get_sld() returns the registrable domain (eTLD+1) when possible.
+        out = get_sld(s)
+        if out:
+            return str(out).strip().rstrip(".").lower()
+        return None
+    except Exception:
+        # Defensive: on any import/runtime error, fall back to non-PSL behavior
+        # in the caller.
+        return None
 
 
 class RateLimitConfig(BaseModel):
@@ -68,16 +102,32 @@ class RateLimitConfig(BaseModel):
 
 @lru_cache(maxsize=16384)
 def _to_base_domain(qname: str, base_labels: int = 2) -> str:
-    """Brief: Extract base domain using the last N labels from qname.
+    """Brief: Extract a stable base domain for qname (PSL-aware when available).
 
     Inputs:
       - qname: Fully-qualified domain name string; trailing dot allowed.
-      - base_labels: Number of rightmost labels comprising the base.
+      - base_labels: Legacy fallback number of rightmost labels to use when PSL
+        parsing is unavailable or inconclusive.
 
     Outputs:
-      - str: Base domain such as 'example.com' for 'a.b.example.com.'.
+      - str: Base/registrable domain such as:
+          - 'example.com' for 'a.b.example.com.'
+          - 'example.co.uk' for 'a.b.example.co.uk.'
+          - 'user.github.io' for 'a.user.github.io.'
+        When PSL parsing cannot determine a registrable domain, falls back to
+        joining the last N labels.
+
+    Notes:
+      - This is used by RateLimit keying for per-domain modes, so PSL-awareness
+        helps prevent attackers from evading limits by exploiting multi-label
+        public suffixes (e.g. *.co.uk).
     """
 
+    psl = _psl_registrable_domain(qname)
+    if psl:
+        return psl
+
+    # Fallback: last-N labels (previous behavior).
     s = str(qname).rstrip(".").lower()
     labels = [p for p in s.split(".") if p]
     if len(labels) >= base_labels:
