@@ -586,3 +586,58 @@ def test_db_get_profile_is_thread_safe_with_lock(tmp_path):
     assert avg_rps >= 0.0
     assert max_rps >= avg_rps
     assert samples >= 1
+
+
+def test_db_prunes_by_max_profiles(tmp_path):
+    """Brief: sqlite profile table is bounded by max_profiles via pruning.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite DB.
+
+    Outputs:
+      - None: asserts total rows never exceed max_profiles after updates.
+    """
+
+    db = tmp_path / "rl-prune-max.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        max_profiles=3,
+        prune_interval_seconds=0,
+        profile_ttl_seconds=0,
+    )
+    plugin.setup()
+
+    # Write more profiles than the cap.
+    for i in range(10):
+        plugin._db_update_profile(f"client-{i}", 1.0, now_ts=1000 + i)
+
+    cur = plugin._conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM rate_profiles")
+    count = int(cur.fetchone()[0])
+    assert count <= 3
+
+
+def test_db_prunes_by_profile_ttl_seconds(tmp_path):
+    """Brief: sqlite profiles older than profile_ttl_seconds are pruned.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite DB.
+
+    Outputs:
+      - None: asserts old rows are removed after a later update triggers pruning.
+    """
+
+    db = tmp_path / "rl-prune-ttl.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        max_profiles=100,
+        prune_interval_seconds=0,
+        profile_ttl_seconds=1,
+    )
+    plugin.setup()
+
+    plugin._db_update_profile("old", 1.0, now_ts=0)
+    plugin._db_update_profile("new", 1.0, now_ts=10)
+
+    assert plugin._db_get_profile("new") is not None
+    assert plugin._db_get_profile("old") is None
