@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from typing import Any, Dict, Optional, Tuple
 
 from pydantic import BaseModel, Field
@@ -111,13 +112,42 @@ class BaseStatsStore:
 
         Outputs:
           - None; ensures ``self._op_queue`` and the worker thread exist.
+
+        Notes:
+          - The queue is intentionally bounded by ``max_logging_queue`` to avoid
+            unbounded memory growth under sustained write pressure.
+          - When ``max_logging_queue`` is <= 0, the queue is treated as
+            unbounded (stdlib queue maxsize=0 semantics).
         """
 
         if getattr(self, "_op_queue", None) is not None:
             return
 
-        q: "queue.Queue[tuple[str, tuple[Any, ...], dict[str, Any]]]" = queue.Queue()
+        # Default queue capacity when backends do not override it.
+        max_q = 4096
+        try:
+            max_q_obj = getattr(self, "_max_logging_queue", None)
+            if max_q_obj is None:
+                max_q_obj = getattr(self, "max_logging_queue", None)
+            if max_q_obj is not None:
+                max_q = int(max_q_obj)
+        except Exception:
+            max_q = 4096
+
+        # maxsize=0 in queue.Queue means unbounded.
+        maxsize = max(0, int(max_q))
+
+        q: "queue.Queue[tuple[str, tuple[Any, ...], dict[str, Any]]]" = queue.Queue(
+            maxsize=maxsize
+        )
         self._op_queue = q
+
+        # Queue pressure warnings and drop counters are best-effort and must not
+        # affect backend correctness.
+        self._op_queue_warn_last_ts: dict[int, float] = {}
+        self._op_queue_warn_last_bucket: int | None = None
+        self._op_queue_drops_total: int = 0
+        self._op_queue_drops_by_op: dict[str, int] = {}
 
         worker = threading.Thread(
             target=self._worker_loop,
@@ -170,6 +200,198 @@ class BaseStatsStore:
                     # Defensive: task_done must not raise.
                     pass
 
+    def _queue_pressure_bucket(
+        self, *, size: int, capacity: int
+    ) -> tuple[int, float, float]:
+        """Brief: Classify queue pressure into a bucket with a reminder interval.
+
+        Inputs:
+          - size: Current queue length.
+          - capacity: Queue capacity (maxsize), must be > 0.
+
+        Outputs:
+          - (bucket_pct, pct_full, reminder_seconds)
+
+        Buckets:
+          - <25  -> bucket 0, remind 60m
+          - 25%  -> bucket 25, remind 30m
+          - 50%  -> bucket 50, remind 15m
+          - 75%  -> bucket 75, remind 10m
+          - 90%  -> bucket 90, remind 4m
+          - 100% -> bucket 100, remind 60s
+        """
+
+        cap = max(1, int(capacity))
+        sz = max(0, int(size))
+        pct = (float(sz) / float(cap)) * 100.0
+
+        if pct >= 100.0:
+            return 100, pct, 60.0
+        if pct >= 90.0:
+            return 90, pct, 240.0
+        if pct >= 75.0:
+            return 75, pct, 600.0
+        if pct >= 50.0:
+            return 50, pct, 900.0
+        if pct >= 25.0:
+            return 25, pct, 1800.0
+        return 0, pct, 3600.0
+
+    def _maybe_warn_queue_pressure(self) -> None:
+        """Brief: Emit tiered queue-pressure warnings with rate limiting.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None; logs best-effort.
+
+        Notes:
+          - This is called on the enqueue hot path and must remain lightweight.
+          - Warnings are rate-limited by bucket and also emitted immediately when
+            transitioning between buckets.
+        """
+
+        q = getattr(self, "_op_queue", None)
+        if q is None:
+            return
+
+        try:
+            cap = int(getattr(q, "maxsize", 0) or 0)
+            if cap <= 0:
+                return
+            size = int(q.qsize())
+        except Exception:
+            return
+
+        bucket, pct_full, remind_s = self._queue_pressure_bucket(
+            size=size, capacity=cap
+        )
+        now = time.time()
+
+        try:
+            last_bucket = getattr(self, "_op_queue_warn_last_bucket", None)
+        except Exception:
+            last_bucket = None
+
+        # Emit immediately on bucket changes.
+        bucket_changed = last_bucket != bucket
+
+        last_ts = 0.0
+        try:
+            last_ts = float(
+                (getattr(self, "_op_queue_warn_last_ts", {}) or {}).get(bucket, 0.0)
+            )
+        except Exception:
+            last_ts = 0.0
+
+        due = (now - last_ts) >= float(remind_s)
+        if not bucket_changed and not due:
+            return
+
+        try:
+            getattr(self, "_op_queue_warn_last_ts", {})[bucket] = now
+            self._op_queue_warn_last_bucket = bucket
+        except Exception:
+            pass
+
+        try:
+            drops = int(getattr(self, "_op_queue_drops_total", 0) or 0)
+        except Exception:
+            drops = 0
+
+        msg = (
+            "StatsStore async queue pressure: %d/%d (%.1f%%), bucket=%d%%, drops=%d"
+            % (size, cap, pct_full, bucket, drops)
+        )
+
+        log = logging.getLogger(__name__)
+        if bucket >= 25:
+            log.warning(msg)
+        else:
+            log.info(msg)
+
+    def _record_queue_drop(self, op_name: str) -> None:
+        """Brief: Increment best-effort counters for a dropped queue operation.
+
+        Inputs:
+          - op_name: Operation name (e.g. 'insert_query_log').
+
+        Outputs:
+          - None.
+        """
+
+        try:
+            self._op_queue_drops_total = (
+                int(getattr(self, "_op_queue_drops_total", 0) or 0) + 1
+            )
+        except Exception:
+            return
+
+        try:
+            by_op = getattr(self, "_op_queue_drops_by_op", None)
+            if isinstance(by_op, dict):
+                by_op[op_name] = int(by_op.get(op_name, 0) or 0) + 1
+        except Exception:
+            pass
+
+    def get_async_queue_metrics(self) -> Dict[str, object]:
+        """Brief: Return best-effort metrics for the async worker queue.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - dict with keys:
+              - capacity: int | None queue capacity (None when unbounded)
+              - size: int current queue size (0 when uninitialized)
+              - pct_full: float | None percent full (None when unbounded)
+              - drops_total: int best-effort dropped op count
+              - drops_by_op: dict[str,int] best-effort drops per op
+        """
+
+        q = getattr(self, "_op_queue", None)
+        cap: int | None = None
+        size = 0
+        pct_full: float | None = None
+
+        if q is not None:
+            try:
+                maxsize = int(getattr(q, "maxsize", 0) or 0)
+                if maxsize > 0:
+                    cap = maxsize
+                    size = int(q.qsize())
+                    pct_full = (float(size) / float(maxsize)) * 100.0
+                else:
+                    # Unbounded queue.
+                    cap = None
+                    size = int(q.qsize())
+                    pct_full = None
+            except Exception:
+                cap = None
+                size = 0
+                pct_full = None
+
+        drops_total = int(getattr(self, "_op_queue_drops_total", 0) or 0)
+        drops_by_op_raw = getattr(self, "_op_queue_drops_by_op", {}) or {}
+        drops_by_op: dict[str, int] = {}
+        if isinstance(drops_by_op_raw, dict):
+            for k, v in drops_by_op_raw.items():
+                if not k:
+                    continue
+                try:
+                    drops_by_op[str(k)] = int(v)
+                except Exception:
+                    continue
+
+        return {
+            "capacity": cap,
+            "size": int(size),
+            "pct_full": pct_full,
+            "drops_total": drops_total,
+            "drops_by_op": drops_by_op,
+        }
+
     # ------------------------------------------------------------------
     # Health and lifecycle
     # ------------------------------------------------------------------
@@ -217,9 +439,20 @@ class BaseStatsStore:
 
         try:
             self._ensure_worker()
-            self._op_queue.put(  # type: ignore[attr-defined]
-                ("increment_count", (scope, key, delta), {})
-            )
+            q = getattr(self, "_op_queue", None)
+            if q is None:
+                raise RuntimeError("op queue not initialized")
+
+            try:
+                q.put_nowait(("increment_count", (scope, key, delta), {}))
+            except queue.Full:
+                # Drop on full queue; this is explicitly allowed so query
+                # processing is never delayed by logging backpressure.
+                self._record_queue_drop("increment_count")
+                self._maybe_warn_queue_pressure()
+                return
+
+            self._maybe_warn_queue_pressure()
         except Exception:
             handler = getattr(self, "_increment_count", None)
             if callable(handler):
@@ -354,24 +587,35 @@ class BaseStatsStore:
 
         try:
             self._ensure_worker()
-            self._op_queue.put(  # type: ignore[attr-defined]
-                (
-                    "insert_query_log",
+            q = getattr(self, "_op_queue", None)
+            if q is None:
+                raise RuntimeError("op queue not initialized")
+
+            try:
+                q.put_nowait(
                     (
-                        ts,
-                        client_ip,
-                        name,
-                        qtype,
-                        upstream_id,
-                        rcode,
-                        status,
-                        error,
-                        first,
-                        result_json,
-                    ),
-                    {},
+                        "insert_query_log",
+                        (
+                            ts,
+                            client_ip,
+                            name,
+                            qtype,
+                            upstream_id,
+                            rcode,
+                            status,
+                            error,
+                            first,
+                            result_json,
+                        ),
+                        {},
+                    )
                 )
-            )
+            except queue.Full:
+                self._record_queue_drop("insert_query_log")
+                self._maybe_warn_queue_pressure()
+                return
+
+            self._maybe_warn_queue_pressure()
         except Exception:
             handler = getattr(self, "_insert_query_log", None)
             if callable(handler):
