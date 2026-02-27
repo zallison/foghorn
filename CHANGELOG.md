@@ -11,14 +11,34 @@ All notable changes to this project will be documented in this file.
   - `load_mode=first` order has been updated to reflect the new precedence: inline → axfr → file_paths → bind_paths.
 - AXFR zones now enforce `minimum_reload_time` timing on reload, preventing excessive upstream load. Previously, AXFR was only loaded once at startup.
 - The `minimum_reload_time` field in `axfr_zones` entries now triggers reloads only after the configured seconds have elapsed since initial load or last NOTIFY receipt (default 0 = reload on every load).
+- Threaded UDP/TCP listeners now refuse to start on non-loopback bind hosts unless `server.limits.allow_unsafe_threaded_listeners=true` is set. Prefer asyncio listeners for exposed interfaces.
 
 ### Added
 
 - ZoneRecords plugin: Added `minimum_reload_time` field to `axfr_zones` entries to control when AXFR zones can be reloaded, allowing load balancing between staying current and avoiding excessive upstream transfer load while still honoring NOTIFY events.
+- DoS hardening:
+  - Added a shared, bounded resolver executor for asyncio servers (`server.limits.resolver_executor_workers`).
+  - Added asyncio TCP/DoT connection limits (`max_connections`, `max_connections_per_ip`), per-connection query caps (`max_queries_per_connection`), and idle timeouts (`idle_timeout_seconds`).
+  - Added asyncio UDP listener support with in-flight caps (`server.listen.udp.use_asyncio`, `max_inflight`, `max_inflight_per_ip`, and `max_inflight_by_cidr`) and optional response ceiling (`max_response_bytes`).
+  - Added DoH request size caps (GET param decode and POST body) returning HTTP 413 for oversized requests.
+  - Added TCP DNS and AXFR frame size caps (length-prefixed max 65535 bytes).
+  - Added recursive resolver referral-processing caps (NS names, glue records scanned, and next-hop server list).
+  - Added `allow_threaded_fallback` knobs for DoH (`server.listen.doh.allow_threaded_fallback`) and the admin web UI (`server.http.allow_threaded_fallback`).
+- Caching:
+  - InMemoryTTLCache and SQLite3Cache can reserve capacity for NXDOMAIN responses (`max_size`, `pct_nxdomain`) to avoid NXDOMAIN floods evicting positive entries.
+- Stats/query log:
+  - Stats backends now support bounded async queues with backpressure metrics and optional `max_logging_queue` configuration.
+- AXFR:
+  - Added `axfr_enabled` and `axfr_allow_clients` policy gates for zone transfers.
 
 ### Changed
 
 - AXFR-backed zones now respect `minimum_reload_time` and reload only when enough time has elapsed since initial load or last NOTIFY reception, or when `load_mode=replace` forces a full reload.
+- Upstreams: failover now validates upstream responses (TXID + question) and skips mismatched replies.
+- Transports: UDP upstream queries now ignore unexpected response peers (best-effort defense against off-path injection).
+- Cache: in-memory and SQLite caches can reserve separate capacity for NXDOMAIN responses to prevent cache pollution under NXDOMAIN floods.
+- RateLimit: base-domain extraction is now Public Suffix List aware (eTLD+1) when `publicsuffix2` is available.
+- Stats/query log: async queue is now bounded; under sustained overload some stats operations may be dropped with DEBUG/INFO visibility via queue metrics.
 - Performance: added LRU caches to hot-path helpers used during resolution and admin polling (ZoneRecords wildcard parsing, RateLimit base-domain extraction, AccessControl IP parsing, DoH/DoT SSL context creation, stats ignore-filter IP parsing, and webserver UTC datetime parsing).
 - Admin UI: diagram rendering now prefers a light/dark PNG that matches the selected UI theme.
 - Admin UI: when the config diagram PNG is unavailable, the UI now preserves the normal two-pane layout and shows Graphviz dot source in the diagram pane.
@@ -38,10 +58,15 @@ All notable changes to this project will be documented in this file.
 
 - ZoneRecords DNSSEC negative-response helpers now handle source-aware RRset entries `(ttl, values, sources)` to avoid tuple-unpacking errors.
 
+### Tests
+
+- Updated upstream failover coverage to assert DEBUG-level (de-duplicated) skip logs for malformed upstream responses.
+
 ### Documentation
 
 - Updated ZoneRecords docs to clarify source precedence order and AXFR reload timing behavior.
 - Added Graphviz `dot` rendering instructions for config diagrams.
+- Documented DEBUG-level upstream skip/failover logs and de-duplication behavior in the README.
 
 ----
 
