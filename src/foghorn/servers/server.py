@@ -2,21 +2,20 @@ import ipaddress
 import logging
 import socketserver
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
+from cachetools import TTLCache
 from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
     EDNS0,
-    EDNSOption,
     OPCODE,
     QTYPE,
     RCODE,
     RR,
-    DNSRecord,
     DNSHeader,
+    DNSRecord,
+    EDNSOption,
 )
-
-from cachetools import TTLCache
 
 from foghorn.plugins.resolve import base as plugin_base
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
@@ -24,6 +23,7 @@ from foghorn.servers.recursive_resolver import RecursiveResolver
 from foghorn.servers.transports.dot import DoTError, get_dot_pool
 from foghorn.servers.transports.tcp import TCPError, get_tcp_pool, tcp_query
 from foghorn.utils.register_caches import registered_cached, registered_lru_cached
+
 from .udp_server import DNSUDPHandler
 
 logger = logging.getLogger("foghorn.server")
@@ -78,7 +78,7 @@ def _upstream_key_for_skip_warning(
 
 
 def _warn_upstream_skip_once(upstream_key: str, fmt: str, *args) -> None:
-    """Brief: Log a skip message only once per upstream until it succeeds again.
+    """Brief: Log a skip warning only once per upstream until it succeeds again.
 
     Inputs:
       - upstream_key: Identifier returned by _upstream_key_for_skip_warning.
@@ -86,7 +86,7 @@ def _warn_upstream_skip_once(upstream_key: str, fmt: str, *args) -> None:
       - *args: Logger formatting arguments.
 
     Outputs:
-      - None. Emits a single DEBUG log for this upstream_key if not previously
+      - None. Emits a single warning for this upstream_key if not previously
         emitted since the last reset.
     """
     try:
@@ -122,6 +122,53 @@ def _reset_upstream_skip_warning(upstream_key: str) -> None:
 # refresh queries. When bypass_cache is True, _resolve_core skips the cache
 # hit path and always treats the query as a miss.
 _CACHE_LOCAL = threading.local()
+
+# Bounded background executor used for best-effort work triggered by untrusted
+# network events (NOTIFY and cache refresh). This avoids spawning unbounded
+# threads under attack conditions.
+_BG_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="foghorn-bg")
+_BG_SEM = threading.Semaphore(128)
+_BG_LOCK = threading.Lock()
+_BG_NOTIFY_INFLIGHT: set[str] = set()
+_BG_CACHE_INFLIGHT: set[tuple[bytes, str]] = set()
+
+
+def _bg_submit(key: object, fn) -> None:
+    """Brief: Submit a bounded background task with best-effort coalescing.
+
+    Inputs:
+      - key: Hashable identifier for coalescing (e.g., zone name or (query, ip)).
+      - fn: Zero-arg callable to execute.
+
+    Outputs:
+      - None.
+
+    Notes:
+      - Uses a semaphore to bound outstanding tasks. When the semaphore cannot
+        be acquired immediately, the task is dropped.
+    """
+
+    try:
+        acquired = _BG_SEM.acquire(blocking=False)
+    except Exception:
+        acquired = False
+    if not acquired:
+        return
+
+    def _done(_fut: Future) -> None:
+        try:
+            _BG_SEM.release()
+        except Exception:
+            pass
+
+    try:
+        fut = _BG_EXECUTOR.submit(fn)
+        fut.add_done_callback(_done)
+    except Exception:
+        try:
+            _BG_SEM.release()
+        except Exception:
+            pass
 
 
 def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
@@ -197,16 +244,26 @@ def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
                     exc_info=True,
                 )
 
+        # Coalesce refreshes per zone to avoid unbounded work under repeated NOTIFY.
+        with _BG_LOCK:
+            if zone_norm in _BG_NOTIFY_INFLIGHT:
+                continue
+            _BG_NOTIFY_INFLIGHT.add(zone_norm)
+
+        def _wrapped() -> None:
+            try:
+                _worker()
+            finally:
+                with _BG_LOCK:
+                    _BG_NOTIFY_INFLIGHT.discard(zone_norm)
+
         try:
-            t = threading.Thread(
-                target=_worker,
-                name="FoghornNotifyAXFR",
-                daemon=True,
-            )
-            t.start()
+            _bg_submit(zone_norm, _wrapped)
         except Exception:  # pragma: no cover - defensive logging only
+            with _BG_LOCK:
+                _BG_NOTIFY_INFLIGHT.discard(zone_norm)
             logger.warning(
-                "Failed to start AXFR refresh thread for NOTIFY %s via upstream %r",
+                "Failed to schedule AXFR refresh for NOTIFY %s via upstream %r",
                 zone_norm,
                 upstream,
                 exc_info=True,
@@ -240,17 +297,30 @@ def _schedule_cache_refresh(data: bytes, client_ip: str) -> None:
             # at debug level only.
             logger.debug("Cache refresh failed", exc_info=True)
 
+    # Coalesce refreshes per (query, ip) tuple to prevent thread explosions.
+    key = (bytes(data), str(client_ip))
+    with _BG_LOCK:
+        if key in _BG_CACHE_INFLIGHT:
+            return
+        _BG_CACHE_INFLIGHT.add(key)
+
+    def _wrapped() -> None:
+        try:
+            _worker()
+        finally:
+            with _BG_LOCK:
+                _BG_CACHE_INFLIGHT.discard(key)
+
     try:
-        t = threading.Thread(
-            target=_worker,
-            name="FoghornCacheRefresh",
-            daemon=True,
-        )
-        t.start()  # pragma: no cover - defensive/metrics path excluded from coverage
+        _bg_submit(
+            key, _wrapped
+        )  # pragma: no cover - defensive/metrics path excluded from coverage
     except (
         Exception
     ):  # pragma: no cover - defensive/metrics path excluded from coverage
-        logger.debug("Failed to start cache refresh thread", exc_info=True)
+        with _BG_LOCK:
+            _BG_CACHE_INFLIGHT.discard(key)
+        logger.debug("Failed to schedule cache refresh task", exc_info=True)
 
 
 @registered_lru_cached(maxsize=1024)
@@ -635,6 +705,50 @@ def _set_response_id_bytes(wire: bytes, req_id: int) -> bytes:
         return wire
 
 
+def _client_allowed_for_axfr(client_ip: str | None) -> bool:
+    """Brief: Check whether a client is allowed to perform AXFR/IXFR.
+
+    Inputs:
+      - client_ip: Source IP address string.
+
+    Outputs:
+      - bool: True when AXFR is enabled and the client matches allowlist.
+
+    Notes:
+      - Policy is controlled via DNSUDPHandler.axfr_enabled (bool) and
+        DNSUDPHandler.axfr_allow_clients (list[str] CIDRs/IPs).
+      - Empty or missing allow_clients denies all transfers when enabled.
+    """
+
+    if not bool(getattr(DNSUDPHandler, "axfr_enabled", False)):
+        return False
+
+    if not client_ip:
+        return False
+
+    allow_raw = getattr(DNSUDPHandler, "axfr_allow_clients", None)
+    if not isinstance(allow_raw, list) or not allow_raw:
+        return False
+
+    try:
+        ip_obj = ipaddress.ip_address(str(client_ip).strip())
+    except Exception:
+        return False
+
+    for entry in allow_raw:
+        try:
+            net = ipaddress.ip_network(str(entry), strict=False)
+        except Exception:
+            continue
+        try:
+            if ip_obj in net:
+                return True
+        except Exception:
+            continue
+
+    return False
+
+
 def iter_axfr_messages(req: DNSRecord, client_ip: str | None = None) -> List[bytes]:
     """Brief: Build AXFR/IXFR response message sequence for an authoritative zone.
 
@@ -675,6 +789,12 @@ def iter_axfr_messages(req: DNSRecord, client_ip: str | None = None) -> List[byt
         )  # pragma: no cover - defensive/metrics path excluded from coverage
     except Exception as exc:  # pragma: no cover - defensive parsing
         logger.warning("iter_axfr_messages: malformed query: %s", exc)
+        r = req.reply()
+        r.header.rcode = RCODE.REFUSED
+        return [r.pack()]
+
+    # Enforce AXFR policy gate.
+    if not _client_allowed_for_axfr(client_ip):
         r = req.reply()
         r.header.rcode = RCODE.REFUSED
         return [r.pack()]
@@ -886,6 +1006,76 @@ def send_query_with_failover(
 
         nonlocal last_exception
 
+        def _response_matches_query(parsed: DNSRecord) -> bool:
+            """Brief: Validate response TXID and question match the original query.
+
+            Inputs:
+              - parsed: Parsed DNSRecord response.
+
+            Outputs:
+              - bool: True when TXID matches query.header.id and the first question
+                matches (qname, qtype). False otherwise.
+
+            Notes:
+              - This is a hardening check to reduce risk of accepting injected or
+                mismatched packets during upstream failover.
+            """
+
+            # TXID validation when the caller passed a dnslib-style DNSRecord.
+            try:
+                expected_id = getattr(getattr(query, "header", None), "id", None)
+                if expected_id is not None and int(
+                    getattr(parsed.header, "id", -1)
+                ) != int(expected_id):
+                    return False
+            except Exception:
+                # If we cannot determine the expected ID (legacy objects), skip
+                # TXID validation.
+                pass
+
+            try:
+                qs = getattr(parsed, "questions", None) or []
+                if not qs:
+                    # Best-effort: if we cannot recover the response question
+                    # section, skip question validation rather than rejecting
+                    # the response outright (helps tests/mocks and unusual
+                    # upstreams).
+                    return True
+                q0 = qs[0]
+
+                # Prefer the original DNSRecord question when present; otherwise
+                # fall back to qname/qtype arguments (which some tests use
+                # purely for logging).
+                expected_qname = None
+                expected_qtype = None
+
+                try:
+                    req_qs = getattr(query, "questions", None) or []
+                    if req_qs:
+                        req0 = req_qs[0]
+                        expected_qname = str(getattr(req0, "qname", ""))
+                        expected_qtype = getattr(req0, "qtype", None)
+                except Exception:
+                    expected_qname = None
+                    expected_qtype = None
+
+                if expected_qname is None:
+                    expected_qname = str(qname)
+                if expected_qtype is None:
+                    expected_qtype = qtype
+
+                resp_qname = str(getattr(q0, "qname", "")).rstrip(".").lower()
+                exp_qname_norm = str(expected_qname).rstrip(".").lower()
+                if resp_qname != exp_qname_norm:
+                    return False
+
+                if int(getattr(q0, "qtype", -1)) != int(expected_qtype):
+                    return False
+            except Exception:
+                return False
+
+            return True
+
         # For DoH we may not have host/port; use safe defaults for logging
         host = str(upstream.get("host", ""))
         try:
@@ -1017,6 +1207,21 @@ def send_query_with_failover(
             try:
                 parsed_response = DNSRecord.parse(response_wire)
 
+                # Hardening: ensure response TXID and question match the original.
+                if not _response_matches_query(parsed_response):
+                    _warn_upstream_skip_once(
+                        upstream_key,
+                        "Skipping upstream %s:%d via %s for %s (mismatched response)",
+                        host,
+                        port,
+                        transport,
+                        qname,
+                    )
+                    last_exception = Exception(
+                        f"mismatched response from {host}:{port} via {transport}"
+                    )
+                    return None, None, "all_failed"
+
                 # EDNS(0) compatibility shim: if an upstream returns FORMERR in
                 # response to an EDNS-enabled UDP query, retry once without
                 # EDNS. This covers servers that mishandle OPT records.
@@ -1049,6 +1254,20 @@ def send_query_with_failover(
                             timeout_ms=timeout_ms,
                         )
                         parsed_response = DNSRecord.parse(response_wire)
+
+                        if not _response_matches_query(parsed_response):
+                            _warn_upstream_skip_once(
+                                upstream_key,
+                                "Skipping upstream %s:%d via %s for %s (mismatched response after EDNS fallback)",
+                                host,
+                                port,
+                                transport,
+                                qname,
+                            )
+                            last_exception = Exception(
+                                f"mismatched response from {host}:{port} without EDNS"
+                            )
+                            return None, None, "all_failed"
                     except Exception as e2:  # pragma: no cover - defensive
                         _warn_upstream_skip_once(
                             upstream_key,
@@ -1106,6 +1325,22 @@ def send_query_with_failover(
                             connect_timeout_ms=timeout_ms,
                             read_timeout_ms=timeout_ms,
                         )
+                        try:
+                            parsed_tcp = DNSRecord.parse(response_wire)
+                            if not _response_matches_query(parsed_tcp):
+                                raise ValueError("mismatched TCP response")
+                        except Exception as e3:
+                            _warn_upstream_skip_once(
+                                upstream_key,
+                                "Skipping upstream %s:%d via tcp for %s (mismatched TCP response after truncation): %s",
+                                host,
+                                port,
+                                qname,
+                                e3,
+                            )
+                            last_exception = e3
+                            return None, None, "all_failed"
+
                         _reset_upstream_skip_warning(upstream_key)
                         return (
                             response_wire,
@@ -1252,20 +1487,7 @@ def _resolve_core(
     """
     import time as _time  # Local import to avoid impacting module import time
 
-    # Snapshot runtime configuration once per request so config reloads cannot be
-    # observed partially mid-request.
-    try:
-        from foghorn import runtime_config as _runtime_config
-
-        rt = _runtime_config.get_runtime_snapshot()
-    except Exception:  # pragma: no cover - defensive
-        rt = None
-
-    stats = (
-        rt.stats_collector
-        if rt is not None
-        else getattr(DNSUDPHandler, "stats_collector", None)
-    )
+    stats = getattr(DNSUDPHandler, "stats_collector", None)
     t0 = _time.perf_counter() if stats is not None else None
     # Optional EDE info-code/text for logging and metrics when responses carry
     # Extended DNS Errors (RFC 8914). This is populated in specific branches
@@ -1397,8 +1619,9 @@ def _resolve_core(
             ctx.qname = qname
         except Exception:  # pragma: no cover - defensive
             pass
-        plugins = rt.plugins if rt is not None else DNSUDPHandler.plugins
-        for p in sorted(plugins, key=lambda p: getattr(p, "pre_priority", 50)):
+        for p in sorted(
+            DNSUDPHandler.plugins, key=lambda p: getattr(p, "pre_priority", 50)
+        ):
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
             try:
@@ -1808,31 +2031,23 @@ def _resolve_core(
 
             # Decide whether to schedule a background refresh for this cache hit
             prefetch_enabled = bool(
-                rt.cache_prefetch_enabled
-                if rt is not None
-                else getattr(DNSUDPHandler, "cache_prefetch_enabled", False)
+                getattr(DNSUDPHandler, "cache_prefetch_enabled", False)
             )
-            min_ttl = int(
-                rt.cache_prefetch_min_ttl
-                if rt is not None
-                else getattr(DNSUDPHandler, "cache_prefetch_min_ttl", 0) or 0
-            )
-            max_ttl = int(
-                rt.cache_prefetch_max_ttl
-                if rt is not None
-                else getattr(DNSUDPHandler, "cache_prefetch_max_ttl", 0) or 0
-            )
+            min_ttl = int(getattr(DNSUDPHandler, "cache_prefetch_min_ttl", 0) or 0)
+            max_ttl = int(getattr(DNSUDPHandler, "cache_prefetch_max_ttl", 0) or 0)
             window_before = float(
-                rt.cache_prefetch_refresh_before_expiry
-                if rt is not None
-                else getattr(DNSUDPHandler, "cache_prefetch_refresh_before_expiry", 0.0)
+                getattr(
+                    DNSUDPHandler,
+                    "cache_prefetch_refresh_before_expiry",
+                    0.0,
+                )
                 or 0.0
             )
             window_after = float(
-                rt.cache_prefetch_allow_stale_after_expiry
-                if rt is not None
-                else getattr(
-                    DNSUDPHandler, "cache_prefetch_allow_stale_after_expiry", 0.0
+                getattr(
+                    DNSUDPHandler,
+                    "cache_prefetch_allow_stale_after_expiry",
+                    0.0,
                 )
                 or 0.0
             )
@@ -1897,11 +2112,7 @@ def _resolve_core(
         # Block forwarding of .local queries unless forward_local is True.
         # RFC 6762 reserves .local for mDNS; forwarding to upstream resolvers
         # can cause delays and incorrect answers.
-        forward_local = (
-            bool(rt.forward_local)
-            if rt is not None
-            else bool(getattr(DNSUDPHandler, "forward_local", False))
-        )
+        forward_local = bool(getattr(DNSUDPHandler, "forward_local", False))
         qname_lower = qname.lower()
         if not forward_local and (
             qname_lower.endswith(".local") or qname_lower == "local"
@@ -1949,11 +2160,7 @@ def _resolve_core(
 
         # Decide between forwarding, recursion, and authoritative-only (no
         # forwarding) based on resolver_mode.
-        resolver_mode = (
-            str(rt.resolver_mode).lower()
-            if rt is not None
-            else str(getattr(DNSUDPHandler, "resolver_mode", "forward")).lower()
-        )
+        resolver_mode = str(getattr(DNSUDPHandler, "resolver_mode", "forward")).lower()
         if resolver_mode == "none":
             resolver_mode = "master"
 
@@ -1964,42 +2171,30 @@ def _resolve_core(
             # are already handled earlier in the pipeline) and we reuse
             # DNSUDPHandler's recursion knobs.
             try:
-                max_depth = (
-                    int(rt.recursive_max_depth)
-                    if rt is not None
-                    else int(getattr(DNSUDPHandler, "recursive_max_depth", 16) or 16)
-                )
+                max_depth = int(getattr(DNSUDPHandler, "recursive_max_depth", 16) or 16)
             except Exception:  # pragma: no cover - defensive
                 max_depth = 16
             try:
-                recursion_timeout_ms = (
-                    int(rt.recursive_timeout_ms)
-                    if rt is not None
-                    else int(
-                        getattr(
-                            DNSUDPHandler,
-                            "recursive_timeout_ms",
-                            getattr(DNSUDPHandler, "timeout_ms", 2000),
-                        )
-                        or getattr(DNSUDPHandler, "timeout_ms", 2000)
+                recursion_timeout_ms = int(
+                    getattr(
+                        DNSUDPHandler,
+                        "recursive_timeout_ms",
+                        getattr(DNSUDPHandler, "timeout_ms", 2000),
                     )
+                    or getattr(DNSUDPHandler, "timeout_ms", 2000)
                 )
             except Exception:  # pragma: no cover - defensive
                 recursion_timeout_ms = int(
                     getattr(DNSUDPHandler, "timeout_ms", 2000) or 2000
                 )
             try:
-                per_try_ms = (
-                    int(rt.recursive_per_try_timeout_ms)
-                    if rt is not None
-                    else int(
-                        getattr(
-                            DNSUDPHandler,
-                            "recursive_per_try_timeout_ms",
-                            recursion_timeout_ms,
-                        )
-                        or recursion_timeout_ms
+                per_try_ms = int(
+                    getattr(
+                        DNSUDPHandler,
+                        "recursive_per_try_timeout_ms",
+                        recursion_timeout_ms,
                     )
+                    or recursion_timeout_ms
                 )
             except Exception:  # pragma: no cover - defensive
                 per_try_ms = recursion_timeout_ms
@@ -2037,26 +2232,14 @@ def _resolve_core(
             # When no upstreams are configured we skip EDNS normalization so that
             # synthesized SERVFAIL responses can echo the client's original OPT
             # record unchanged.
-            upstreams = (
-                list(rt.upstream_addrs or [])
-                if rt is not None
-                else list(getattr(DNSUDPHandler, "upstream_addrs", []) or [])
-            )
+            upstreams = list(getattr(DNSUDPHandler, "upstream_addrs", []) or [])
             try:
-                mode = (
-                    str(rt.dnssec_mode).lower()
-                    if rt is not None
-                    else str(getattr(DNSUDPHandler, "dnssec_mode", "ignore")).lower()
-                )
+                mode = str(getattr(DNSUDPHandler, "dnssec_mode", "ignore")).lower()
                 if mode in ("ignore", "passthrough", "validate") and upstreams:
                     handler = type("_H", (), {})()
-                    handler.dnssec_mode = (
-                        rt.dnssec_mode if rt is not None else DNSUDPHandler.dnssec_mode
-                    )
-                    handler.edns_udp_payload = (
-                        int(rt.edns_udp_payload)
-                        if rt is not None
-                        else getattr(DNSUDPHandler, "edns_udp_payload", 1232)
+                    handler.dnssec_mode = DNSUDPHandler.dnssec_mode
+                    handler.edns_udp_payload = getattr(
+                        DNSUDPHandler, "edns_udp_payload", 1232
                     )
                     ensure = getattr(DNSUDPHandler, "_ensure_edns", None)
                     if callable(ensure):
@@ -2070,19 +2253,10 @@ def _resolve_core(
             # frequently monkeypatch send_query_with_failover directly, so we call
             # it here rather than DNSUDPHandler._forward_with_failover_helper.
             upstream_id = None
-            timeout_ms = (
-                int(rt.timeout_ms)
-                if rt is not None
-                else getattr(DNSUDPHandler, "timeout_ms", 2000)
-            )
+            timeout_ms = getattr(DNSUDPHandler, "timeout_ms", 2000)
             try:
                 max_concurrent = int(
-                    (
-                        rt.upstream_max_concurrent
-                        if rt is not None
-                        else getattr(DNSUDPHandler, "upstream_max_concurrent", 1)
-                    )
-                    or 1
+                    getattr(DNSUDPHandler, "upstream_max_concurrent", 1) or 1
                 )  # pragma: no cover - defensive/metrics path excluded from coverage
             except (
                 Exception
@@ -2207,8 +2381,9 @@ def _resolve_core(
         except Exception:  # pragma: no cover - defensive
             pass
         out = reply
-        plugins = rt.plugins if rt is not None else DNSUDPHandler.plugins
-        for p in sorted(plugins, key=lambda p: getattr(p, "post_priority", 50)):
+        for p in sorted(
+            DNSUDPHandler.plugins, key=lambda p: getattr(p, "post_priority", 50)
+        ):
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
             try:
@@ -2316,21 +2491,9 @@ def _resolve_core(
             # directly) see consistent dnssec_status values.
             from ..dnssec.dnssec_validate import classify_dnssec_status
 
-            mode = (
-                str(rt.dnssec_mode)
-                if rt is not None
-                else str(getattr(DNSUDPHandler, "dnssec_mode", "ignore"))
-            )
-            validation = (
-                str(rt.dnssec_validation)
-                if rt is not None
-                else str(getattr(DNSUDPHandler, "dnssec_validation", "upstream_ad"))
-            )
-            edns_udp_payload = (
-                int(rt.edns_udp_payload)
-                if rt is not None
-                else int(getattr(DNSUDPHandler, "edns_udp_payload", 1232))
-            )
+            mode = str(getattr(DNSUDPHandler, "dnssec_mode", "ignore"))
+            validation = str(getattr(DNSUDPHandler, "dnssec_validation", "upstream_ad"))
+            edns_udp_payload = int(getattr(DNSUDPHandler, "edns_udp_payload", 1232))
             dnssec_status = classify_dnssec_status(
                 dnssec_mode=mode,
                 dnssec_validation=validation,
@@ -2377,20 +2540,18 @@ def _resolve_core(
 
                 # Negative caching per RFC 2308: NXDOMAIN or NODATA responses
                 # with an SOA in the authority section.
-                fallback_ttl = (
-                    int(rt.min_cache_ttl)
-                    if rt is not None
-                    else int(getattr(DNSUDPHandler, "min_cache_ttl", 0) or 0)
-                )
-
                 if has_soa and (
                     rcode == RCODE.NXDOMAIN or (rcode == RCODE.NOERROR and not r.rr)
                 ):
-                    ttl = _compute_negative_ttl(r, fallback_ttl)
+                    ttl = _compute_negative_ttl(
+                        r, getattr(DNSUDPHandler, "min_cache_ttl", 0)
+                    )
                 # Delegation / referral caching: NOERROR with no answers but NS
                 # in the authority section.
                 elif has_ns and rcode == RCODE.NOERROR and not r.rr:
-                    ttl = _compute_negative_ttl(r, fallback_ttl)
+                    ttl = _compute_negative_ttl(
+                        r, getattr(DNSUDPHandler, "min_cache_ttl", 0)
+                    )
 
             if ttl is not None and ttl > 0:
                 cache = getattr(plugin_base, "DNS_CACHE", None)
@@ -2653,6 +2814,10 @@ class DNSServer:
         cache_prefetch_allow_stale_after_expiry: float = 0.0,
         enable_ede: bool = False,
         forward_local: bool = False,
+        max_response_bytes: int | None = None,
+        axfr_enabled: bool = False,
+        axfr_allow_clients: list[str] | None = None,
+        create_server: bool = True,
     ) -> None:
         """Initialize a UDP DNSServer.
 
@@ -2742,6 +2907,15 @@ class DNSServer:
             Exception
         ):  # pragma: nocover - defensive: invalid EDNS UDP payload config falls back to default
             DNSUDPHandler.edns_udp_payload = 1232
+
+        # Optional explicit UDP response ceiling override.
+        try:
+            if max_response_bytes is None:
+                DNSUDPHandler.max_response_bytes = None
+            else:
+                DNSUDPHandler.max_response_bytes = max(0, int(max_response_bytes))
+        except Exception:  # pragma: nocover - defensive
+            DNSUDPHandler.max_response_bytes = None
         # Extended DNS Errors (RFC 8914) feature gate. When enable_ede is false
         # the resolver pipeline will not add any EDE options of its own and
         # will continue to treat upstream EDNS options opaquely.
@@ -2757,26 +2931,41 @@ class DNSServer:
             Exception
         ):  # pragma: nocover - defensive: invalid forward_local config falls back to False
             DNSUDPHandler.forward_local = False
-        try:
-            self.server = socketserver.ThreadingUDPServer(
-                (host, port), DNSUDPHandler
-            )  # pragma: no cover - defensive/metrics path excluded from coverage
-        except (
-            PermissionError
-        ) as e:  # pragma: no cover - defensive/metrics path excluded from coverage
-            logger.error(
-                "Permission denied when binding to %s:%d. Try a port >1024 or run with elevated privileges. Original error: %s",
-                host,
-                port,
-                e,
-            )  # pragma: no cover - defensive/metrics path excluded from coverage
-            raise  # Re-raise the exception after logging
 
-        # Ensure request handler threads do not block shutdown
-        self.server.daemon_threads = True  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        logger.debug(
-            "DNS UDP server bound to %s:%d", host, port
-        )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+        # AXFR/IXFR transfer policy (applies to TCP/DoT listeners).
+        try:
+            DNSUDPHandler.axfr_enabled = bool(axfr_enabled)
+        except Exception:  # pragma: nocover - defensive
+            DNSUDPHandler.axfr_enabled = False
+        try:
+            DNSUDPHandler.axfr_allow_clients = (
+                list(axfr_allow_clients or []) if axfr_allow_clients is not None else []
+            )
+        except Exception:  # pragma: nocover - defensive
+            DNSUDPHandler.axfr_allow_clients = []
+
+        self.server = None
+        if create_server:
+            try:
+                self.server = socketserver.ThreadingUDPServer(
+                    (host, port), DNSUDPHandler
+                )  # pragma: no cover - defensive/metrics path excluded from coverage
+            except (
+                PermissionError
+            ) as e:  # pragma: no cover - defensive/metrics path excluded from coverage
+                logger.error(
+                    "Permission denied when binding to %s:%d. Try a port >1024 or run with elevated privileges. Original error: %s",
+                    host,
+                    port,
+                    e,
+                )  # pragma: no cover - defensive/metrics path excluded from coverage
+                raise  # Re-raise the exception after logging
+
+            # Ensure request handler threads do not block shutdown
+            self.server.daemon_threads = True  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+            logger.debug(
+                "DNS UDP server bound to %s:%d", host, port
+            )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
 
     def serve_forever(self) -> None:
         """Start the UDP server loop and listen for requests.
@@ -2786,6 +2975,8 @@ class DNSServer:
         Outputs:
           - None; runs until shutdown is requested or KeyboardInterrupt occurs.
         """
+        if self.server is None:
+            return
         try:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             self.server.serve_forever()  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
         except (
@@ -2801,6 +2992,8 @@ class DNSServer:
         Outputs:
           - None; best-effort shutdown suitable for use from signal handlers.
         """
+        if self.server is None:
+            return
         try:
             # First ask the ThreadingUDPServer loop to stop accepting requests.
             self.server.shutdown()
