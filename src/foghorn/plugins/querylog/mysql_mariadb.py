@@ -242,6 +242,7 @@ class MySqlStatsStore(BaseStatsStore):
         database: str = "foghorn_stats",
         connect_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = False,
+        max_logging_queue: int = 4096,
         driver: Optional[str] = None,
         driver_fallback: object = None,
         **_: Any,
@@ -268,6 +269,11 @@ class MySqlStatsStore(BaseStatsStore):
 
         # Use synchronous logging by default for SQL stats backends.
         self._async_logging = bool(async_logging)
+        # BaseStatsStore worker queue capacity
+        try:
+            self._max_logging_queue = int(max_logging_queue)
+        except Exception:
+            self._max_logging_queue = 4096
 
         self._ensure_schema()
 
