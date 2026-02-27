@@ -18,8 +18,8 @@ import json
 import logging
 import threading
 
-import yaml
 import pytest
+import yaml
 
 try:  # FastAPI is an optional dependency
     from fastapi.testclient import TestClient
@@ -29,7 +29,6 @@ except ModuleNotFoundError:  # pragma: no cover - environment dependent
         allow_module_level=True,
     )
 
-from foghorn.stats import StatsCollector, StatsSQLiteStore
 from foghorn.servers.webserver import (
     RingBuffer,
     RuntimeState,
@@ -45,6 +44,7 @@ from foghorn.servers.webserver import (
     sanitize_config,
     start_webserver,
 )
+from foghorn.stats import StatsCollector, StatsSQLiteStore
 
 
 def test_sanitize_config_redacts_simple_keys() -> None:
@@ -2013,7 +2013,6 @@ def test_reload_threaded_refuses_when_restart_required_but_reload_reloadable_app
     import http.client
 
     import foghorn.servers.webserver as web_mod
-
     from foghorn import runtime_config
 
     cfg_path = tmp_path / "config.yaml"
@@ -3556,6 +3555,7 @@ def test_query_log_fastapi_defensive_parsing_by_direct_calls() -> None:
 
     import pytest
     from fastapi import HTTPException
+
     from foghorn.stats import StatsCollector
 
     class DummyStore:

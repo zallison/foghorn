@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
-import logging
 from .logging_utils import RingBuffer
-
 
 logger = logging.getLogger("foghorn.webserver")
 
