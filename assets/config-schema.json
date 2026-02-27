@@ -3335,6 +3335,73 @@
                 }
               },
               "type": "object"
+            },
+            "udp": {
+              "additionalProperties": true,
+              "description": "Type: object. Object with subkeys: allow_threaded_fallback, exit_on_asyncio_failure, max_inflight, max_inflight_by_cidr, max_inflight_per_ip, max_response_bytes, use_asyncio.",
+              "properties": {
+                "allow_threaded_fallback": {
+                  "default": true,
+                  "description": "When false, refuse to fall back to the threaded ThreadingUDPServer when asyncio UDP cannot start. Default: true.",
+                  "type": "boolean"
+                },
+                "exit_on_asyncio_failure": {
+                  "default": false,
+                  "description": "When true, exit non-zero if the asyncio UDP listener fails to start, instead of falling back to a threaded UDP server. Default: false.",
+                  "type": "boolean"
+                },
+                "max_inflight": {
+                  "default": 1024,
+                  "description": "Global cap on in-flight UDP queries for asyncio UDP listener. Default: 1024.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_inflight_by_cidr": {
+                  "description": "Optional CIDR bucket limits for UDP in-flight queries. Each entry is {cidr, max_inflight}. When multiple buckets match a client IP, the strictest (smallest max_inflight) wins.",
+                  "items": {
+                    "additionalProperties": false,
+                    "description": "Type: object. Object with subkeys: cidr, max_inflight.",
+                    "properties": {
+                      "cidr": {
+                        "description": "CIDR block (e.g. '10.0.0.0/8' or '2001:db8::/32').",
+                        "type": "string"
+                      },
+                      "max_inflight": {
+                        "description": "Maximum in-flight UDP queries for clients within this CIDR.",
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "cidr",
+                      "max_inflight"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "max_inflight_per_ip": {
+                  "default": 64,
+                  "description": "Per-client-IP cap on in-flight UDP queries for asyncio UDP listener. Default: 64.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_response_bytes": {
+                  "default": null,
+                  "description": "Optional explicit UDP response size ceiling. When null, defaults to server.dnssec.udp_payload_size. Effective ceiling per query is min(client advertised EDNS UDP size (or 512 without EDNS), server ceiling).",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "use_asyncio": {
+                  "default": true,
+                  "description": "When true, prefer the asyncio UDP listener when available. Default: true.",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
             }
           },
           "type": "object"
