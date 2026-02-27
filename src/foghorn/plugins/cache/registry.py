@@ -7,8 +7,9 @@ import pkgutil
 import re
 from typing import Dict, Iterable, Optional, Type
 
-from .base import CachePlugin
 from foghorn.utils.register_caches import registered_lru_cached
+
+from .base import CachePlugin
 
 _CAMEL_1 = re.compile(r"(.)([A-Z][a-z]+)")
 _CAMEL_2 = re.compile(r"([a-z0-9])([A-Z])")

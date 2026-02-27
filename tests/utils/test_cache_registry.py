@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from cachetools import TTLCache, LFUCache, RRCache
+from cachetools import LFUCache, RRCache, TTLCache
 
 import foghorn.utils.register_caches as cache_reg
 

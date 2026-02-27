@@ -233,6 +233,42 @@ def test_in_memory_ttl_cache_snapshot_includes_plugin_targets_and_decorated(
     assert decorated_row["hit_pct"] == 60.0
 
 
+def test_in_memory_ttl_cache_nxdomain_partition_does_not_evict_positive() -> None:
+    """Brief: NXDOMAIN partition evicts within its own budget and preserves positives.
+
+    Inputs:
+      - InMemoryTTLCache with small max_size and pct_nxdomain.
+
+    Outputs:
+      - None; asserts positive entries remain present after flooding NXDOMAIN.
+    """
+
+    from dnslib import RCODE, DNSRecord
+
+    plugin = InMemoryTTLCache(max_size=4, pct_nxdomain=0.5, eviction_policy="lfu")
+
+    # Fill positive partition (budget = 2).
+    plugin.set(("a.example", 1), 60, b"pos-a")
+    plugin.set(("b.example", 1), 60, b"pos-b")
+
+    assert plugin.get(("a.example", 1)) == b"pos-a"
+    assert plugin.get(("b.example", 1)) == b"pos-b"
+
+    # Flood NXDOMAIN partition (budget = 2). Only NXDOMAIN entries should churn.
+    q = DNSRecord.question("nx.example")
+    nx_resp = q.reply()
+    nx_resp.header.rcode = RCODE.NXDOMAIN
+    nx_wire = nx_resp.pack()
+
+    plugin.set(("nx1.example", 1), 60, nx_wire)
+    plugin.set(("nx2.example", 1), 60, nx_wire)
+    plugin.set(("nx3.example", 1), 60, nx_wire)
+
+    # Positive entries should still be present.
+    assert plugin.get(("a.example", 1)) == b"pos-a"
+    assert plugin.get(("b.example", 1)) == b"pos-b"
+
+
 def test_in_memory_ttl_cache_purge_and_admin_descriptor() -> None:
     """Brief: purge() returns an int and admin descriptor has expected shape.
 
