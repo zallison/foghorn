@@ -4,9 +4,9 @@ Foghorn is a versatile DNS server designed for flexibility and performance. Buil
 
 With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard. Newer releases add DNSSEC signing helpers, zone transfers (AXFR/IXFR), RFC 8914 Extended DNS Errors (EDE), and SSH host key utilities so you can treat DNS as a first-class security and operations tool.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-87%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-86%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
-<img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" width=300px /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-2.png" width=300px /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-3.png" width=300px /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-4.png" width=300px />
+<img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-2.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-3.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-4.png" height="300" />
 
 ## Foghorn DNS Server
 
@@ -395,9 +395,9 @@ Without `trust-ad`, glibc clears the AD flag before handing answers to applicati
 - `endpoints`: list of `upstream_host` definitions.
 
 Notes:
-- If an upstream returns `SERVFAIL` or replies with malformed/unparseable DNS bytes, Foghorn treats that upstream as failed for that query and continues failover.
+- If an upstream returns `SERVFAIL`, malformed DNS bytes, or a **mismatched response** (TXID/question), Foghorn treats that upstream as failed for that query and continues failover.
 - Skip/failover events are logged at **DEBUG**, but de-duplicated *per upstream* until that upstream succeeds again (to avoid log spam).
-- To surface these events in logs, set `logging.python.level: debug`.
+- To surface these events, set `logging.python.level: debug`.
 
 An `upstream_host` entry:
 
@@ -1538,7 +1538,7 @@ plugins:
 
 From here you can mix and match plugins, caches, and stats backends to shape Foghorn into exactly the DNS service you need.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-87%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-86%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 ## Stargazers over time
 [![Stargazers over time](https://starchart.cc/zallison/foghorn.svg?variant=adaptive)](https://starchart.cc/zallison/foghorn)
