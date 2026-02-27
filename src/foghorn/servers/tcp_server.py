@@ -3,6 +3,8 @@ import socketserver
 from concurrent.futures import Executor
 from typing import Callable
 
+from foghorn.security_limits import MAX_DNS_TCP_MESSAGE_BYTES
+
 
 class _TCPHandler(socketserver.BaseRequestHandler):
     """
@@ -22,7 +24,8 @@ class _TCPHandler(socketserver.BaseRequestHandler):
 
     def handle(self) -> None:
         try:
-            from dnslib import DNSRecord, QTYPE
+            from dnslib import QTYPE, DNSRecord
+
             from foghorn.servers import server as _server_mod
 
             sock = self.request  # type: ignore
@@ -39,6 +42,9 @@ class _TCPHandler(socketserver.BaseRequestHandler):
                     break
                 ln = int.from_bytes(hdr, "big")
                 if ln <= 0:  # pragma: no cover - network error
+                    break
+                if ln > int(MAX_DNS_TCP_MESSAGE_BYTES):
+                    # Oversized DNS message; close connection to avoid memory DoS.
                     break
                 body = _recv_exact(sock, ln)
                 if body is None or len(body) != ln:  # pragma: no cover - network error
@@ -268,6 +274,8 @@ async def _handle_conn(
             ln = int.from_bytes(hdr, byteorder="big")
             if ln <= 0:
                 break
+            if ln > int(MAX_DNS_TCP_MESSAGE_BYTES):
+                break
             query = await asyncio.wait_for(
                 _read_exact(reader, ln), timeout=idle_timeout
             )
@@ -278,10 +286,11 @@ async def _handle_conn(
             is_transfer = False
             req = None
             try:
-                from dnslib import (
-                    DNSRecord,
+                from dnslib import (  # local import for parity with threaded handler
                     QTYPE,
-                )  # local import for parity with threaded handler
+                    DNSRecord,
+                )
+
                 from foghorn.servers import server as _server_mod
 
                 req = DNSRecord.parse(query)
