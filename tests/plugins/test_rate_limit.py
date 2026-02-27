@@ -11,7 +11,9 @@ Outputs:
 from contextlib import closing
 import threading
 
+import pytest
 from dnslib import QTYPE, DNSRecord
+from pydantic import ValidationError
 
 from foghorn.plugins.resolve.base import PluginContext
 from foghorn.plugins.resolve.rate_limit import RateLimit
@@ -208,6 +210,126 @@ def test_get_config_model_returns_config_class():
 
     model = RateLimit.get_config_model()
     assert model is rate_limit_module.RateLimitConfig
+
+
+def test_rate_limit_config_applies_defaults_for_new_fields():
+    """Brief: New RateLimitConfig fields default correctly when omitted.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None: asserts new fields are populated with documented defaults.
+    """
+
+    cfg = rate_limit_module.RateLimitConfig()
+
+    assert cfg.max_profiles == 10000
+    assert cfg.profile_ttl_seconds == 7 * 24 * 60 * 60
+    assert cfg.prune_interval_seconds == 60
+
+    assert cfg.udp_keying == "cidr"
+    assert cfg.udp_client_prefix_v4 == 24
+    assert cfg.udp_client_prefix_v6 == 56
+
+
+def test_rate_limit_config_validates_max_profiles_ge_1():
+    """Brief: max_profiles must be >= 1.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None: asserts ValidationError for invalid values.
+    """
+
+    rate_limit_module.RateLimitConfig(max_profiles=1)
+
+    with pytest.raises(ValidationError):
+        rate_limit_module.RateLimitConfig(max_profiles=0)
+
+
+def test_rate_limit_config_validates_ttls_and_prune_interval_ge_0():
+    """Brief: profile_ttl_seconds and prune_interval_seconds must be >= 0.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None: asserts ValidationError for invalid values.
+    """
+
+    rate_limit_module.RateLimitConfig(profile_ttl_seconds=0, prune_interval_seconds=0)
+
+    with pytest.raises(ValidationError):
+        rate_limit_module.RateLimitConfig(profile_ttl_seconds=-1)
+
+    with pytest.raises(ValidationError):
+        rate_limit_module.RateLimitConfig(prune_interval_seconds=-1)
+
+
+def test_rate_limit_config_validates_udp_client_prefix_ranges():
+    """Brief: udp_client_prefix_v4/v6 must be within CIDR prefix bounds.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None: asserts v4 in [0,32] and v6 in [0,128].
+    """
+
+    rate_limit_module.RateLimitConfig(udp_client_prefix_v4=0, udp_client_prefix_v6=0)
+    rate_limit_module.RateLimitConfig(udp_client_prefix_v4=32, udp_client_prefix_v6=128)
+
+    with pytest.raises(ValidationError):
+        rate_limit_module.RateLimitConfig(udp_client_prefix_v4=-1)
+
+    with pytest.raises(ValidationError):
+        rate_limit_module.RateLimitConfig(udp_client_prefix_v4=33)
+
+    with pytest.raises(ValidationError):
+        rate_limit_module.RateLimitConfig(udp_client_prefix_v6=-1)
+
+    with pytest.raises(ValidationError):
+        rate_limit_module.RateLimitConfig(udp_client_prefix_v6=129)
+
+
+def test_rate_limit_config_udp_keying_valid_and_invalid_values():
+    """Brief: udp_keying accepts strings; None is invalid.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None: asserts valid values are preserved and None raises.
+    """
+
+    assert rate_limit_module.RateLimitConfig(udp_keying="cidr").udp_keying == "cidr"
+    assert rate_limit_module.RateLimitConfig(udp_keying="domain").udp_keying == "domain"
+
+    with pytest.raises(ValidationError):
+        rate_limit_module.RateLimitConfig(udp_keying=None)  # type: ignore[arg-type]
+
+
+def test_setup_normalizes_udp_keying_valid_and_invalid_values(tmp_path):
+    """Brief: plugin.setup lowercases udp_keying and defaults invalid values.
+
+    Inputs:
+      - tmp_path: pytest tmp path for sqlite db.
+
+    Outputs:
+      - None: asserts plugin.udp_keying is normalized.
+    """
+
+    db1 = tmp_path / "rl-udp-keying-1.db"
+    plugin1 = RateLimit(db_path=str(db1), udp_keying="DOMAIN")
+    plugin1.setup()
+    assert plugin1.udp_keying == "domain"
+
+    db2 = tmp_path / "rl-udp-keying-2.db"
+    plugin2 = RateLimit(db_path=str(db2), udp_keying="bogus")
+    plugin2.setup()
+    assert plugin2.udp_keying == "cidr"
 
 
 def test_invalid_mode_defaults_to_per_client(tmp_path):
