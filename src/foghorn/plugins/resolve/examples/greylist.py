@@ -8,9 +8,9 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
 from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 from foghorn.utils.register_caches import registered_lru_cached
-from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
 
 log = logging.getLogger(__name__)
 

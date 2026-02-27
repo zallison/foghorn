@@ -120,7 +120,8 @@ async def _handle_conn(
 
     query_count = 0
     try:
-        from dnslib import DNSRecord, QTYPE
+        from dnslib import QTYPE, DNSRecord
+
         from foghorn.servers import server as _server_mod
 
         while True:

@@ -15,9 +15,9 @@ from typing import (
     List,
     Optional,
     Sequence,
+    Set,
     Tuple,
     Union,
-    Set,
     final,
 )
 
@@ -27,6 +27,7 @@ from dnslib import (  # noqa: F401 - imports are for implementations of this cla
     CNAME,
     MX,
     NAPTR,
+    OPCODE,
     PTR,
     QTYPE,
     RR,
@@ -35,12 +36,11 @@ from dnslib import (  # noqa: F401 - imports are for implementations of this cla
     A,
     DNSHeader,
     DNSRecord,
-    OPCODE,
 )
 
+from foghorn.config.logging_config import BracketLevelFormatter, SyslogFormatter
 from foghorn.plugins.cache.base import CachePlugin
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
-from foghorn.config.logging_config import BracketLevelFormatter, SyslogFormatter
 
 # Canonical DNS response cache used by the resolver.
 #

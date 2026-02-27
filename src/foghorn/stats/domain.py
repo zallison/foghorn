@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from foghorn.utils.register_caches import registered_lru_cached
 
-
 # Heuristic support for common ccTLD + second-level public suffix patterns.
 #
 # This is intentionally a lightweight approximation (not a full Public Suffix List).
