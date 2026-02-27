@@ -78,7 +78,7 @@ def _upstream_key_for_skip_warning(
 
 
 def _warn_upstream_skip_once(upstream_key: str, fmt: str, *args) -> None:
-    """Brief: Log a skip message only once per upstream until it succeeds again.
+    """Brief: Log a skip warning only once per upstream until it succeeds again.
 
     Inputs:
       - upstream_key: Identifier returned by _upstream_key_for_skip_warning.
@@ -86,7 +86,7 @@ def _warn_upstream_skip_once(upstream_key: str, fmt: str, *args) -> None:
       - *args: Logger formatting arguments.
 
     Outputs:
-      - None. Emits a single DEBUG log for this upstream_key if not previously
+      - None. Emits a single warning for this upstream_key if not previously
         emitted since the last reset.
     """
     try:
@@ -1252,20 +1252,7 @@ def _resolve_core(
     """
     import time as _time  # Local import to avoid impacting module import time
 
-    # Snapshot runtime configuration once per request so config reloads cannot be
-    # observed partially mid-request.
-    try:
-        from foghorn import runtime_config as _runtime_config
-
-        rt = _runtime_config.get_runtime_snapshot()
-    except Exception:  # pragma: no cover - defensive
-        rt = None
-
-    stats = (
-        rt.stats_collector
-        if rt is not None
-        else getattr(DNSUDPHandler, "stats_collector", None)
-    )
+    stats = getattr(DNSUDPHandler, "stats_collector", None)
     t0 = _time.perf_counter() if stats is not None else None
     # Optional EDE info-code/text for logging and metrics when responses carry
     # Extended DNS Errors (RFC 8914). This is populated in specific branches
@@ -1397,8 +1384,9 @@ def _resolve_core(
             ctx.qname = qname
         except Exception:  # pragma: no cover - defensive
             pass
-        plugins = rt.plugins if rt is not None else DNSUDPHandler.plugins
-        for p in sorted(plugins, key=lambda p: getattr(p, "pre_priority", 50)):
+        for p in sorted(
+            DNSUDPHandler.plugins, key=lambda p: getattr(p, "pre_priority", 50)
+        ):
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
             try:
@@ -1808,31 +1796,23 @@ def _resolve_core(
 
             # Decide whether to schedule a background refresh for this cache hit
             prefetch_enabled = bool(
-                rt.cache_prefetch_enabled
-                if rt is not None
-                else getattr(DNSUDPHandler, "cache_prefetch_enabled", False)
+                getattr(DNSUDPHandler, "cache_prefetch_enabled", False)
             )
-            min_ttl = int(
-                rt.cache_prefetch_min_ttl
-                if rt is not None
-                else getattr(DNSUDPHandler, "cache_prefetch_min_ttl", 0) or 0
-            )
-            max_ttl = int(
-                rt.cache_prefetch_max_ttl
-                if rt is not None
-                else getattr(DNSUDPHandler, "cache_prefetch_max_ttl", 0) or 0
-            )
+            min_ttl = int(getattr(DNSUDPHandler, "cache_prefetch_min_ttl", 0) or 0)
+            max_ttl = int(getattr(DNSUDPHandler, "cache_prefetch_max_ttl", 0) or 0)
             window_before = float(
-                rt.cache_prefetch_refresh_before_expiry
-                if rt is not None
-                else getattr(DNSUDPHandler, "cache_prefetch_refresh_before_expiry", 0.0)
+                getattr(
+                    DNSUDPHandler,
+                    "cache_prefetch_refresh_before_expiry",
+                    0.0,
+                )
                 or 0.0
             )
             window_after = float(
-                rt.cache_prefetch_allow_stale_after_expiry
-                if rt is not None
-                else getattr(
-                    DNSUDPHandler, "cache_prefetch_allow_stale_after_expiry", 0.0
+                getattr(
+                    DNSUDPHandler,
+                    "cache_prefetch_allow_stale_after_expiry",
+                    0.0,
                 )
                 or 0.0
             )
@@ -1897,11 +1877,7 @@ def _resolve_core(
         # Block forwarding of .local queries unless forward_local is True.
         # RFC 6762 reserves .local for mDNS; forwarding to upstream resolvers
         # can cause delays and incorrect answers.
-        forward_local = (
-            bool(rt.forward_local)
-            if rt is not None
-            else bool(getattr(DNSUDPHandler, "forward_local", False))
-        )
+        forward_local = bool(getattr(DNSUDPHandler, "forward_local", False))
         qname_lower = qname.lower()
         if not forward_local and (
             qname_lower.endswith(".local") or qname_lower == "local"
@@ -1949,11 +1925,7 @@ def _resolve_core(
 
         # Decide between forwarding, recursion, and authoritative-only (no
         # forwarding) based on resolver_mode.
-        resolver_mode = (
-            str(rt.resolver_mode).lower()
-            if rt is not None
-            else str(getattr(DNSUDPHandler, "resolver_mode", "forward")).lower()
-        )
+        resolver_mode = str(getattr(DNSUDPHandler, "resolver_mode", "forward")).lower()
         if resolver_mode == "none":
             resolver_mode = "master"
 
@@ -1964,42 +1936,30 @@ def _resolve_core(
             # are already handled earlier in the pipeline) and we reuse
             # DNSUDPHandler's recursion knobs.
             try:
-                max_depth = (
-                    int(rt.recursive_max_depth)
-                    if rt is not None
-                    else int(getattr(DNSUDPHandler, "recursive_max_depth", 16) or 16)
-                )
+                max_depth = int(getattr(DNSUDPHandler, "recursive_max_depth", 16) or 16)
             except Exception:  # pragma: no cover - defensive
                 max_depth = 16
             try:
-                recursion_timeout_ms = (
-                    int(rt.recursive_timeout_ms)
-                    if rt is not None
-                    else int(
-                        getattr(
-                            DNSUDPHandler,
-                            "recursive_timeout_ms",
-                            getattr(DNSUDPHandler, "timeout_ms", 2000),
-                        )
-                        or getattr(DNSUDPHandler, "timeout_ms", 2000)
+                recursion_timeout_ms = int(
+                    getattr(
+                        DNSUDPHandler,
+                        "recursive_timeout_ms",
+                        getattr(DNSUDPHandler, "timeout_ms", 2000),
                     )
+                    or getattr(DNSUDPHandler, "timeout_ms", 2000)
                 )
             except Exception:  # pragma: no cover - defensive
                 recursion_timeout_ms = int(
                     getattr(DNSUDPHandler, "timeout_ms", 2000) or 2000
                 )
             try:
-                per_try_ms = (
-                    int(rt.recursive_per_try_timeout_ms)
-                    if rt is not None
-                    else int(
-                        getattr(
-                            DNSUDPHandler,
-                            "recursive_per_try_timeout_ms",
-                            recursion_timeout_ms,
-                        )
-                        or recursion_timeout_ms
+                per_try_ms = int(
+                    getattr(
+                        DNSUDPHandler,
+                        "recursive_per_try_timeout_ms",
+                        recursion_timeout_ms,
                     )
+                    or recursion_timeout_ms
                 )
             except Exception:  # pragma: no cover - defensive
                 per_try_ms = recursion_timeout_ms
@@ -2037,26 +1997,14 @@ def _resolve_core(
             # When no upstreams are configured we skip EDNS normalization so that
             # synthesized SERVFAIL responses can echo the client's original OPT
             # record unchanged.
-            upstreams = (
-                list(rt.upstream_addrs or [])
-                if rt is not None
-                else list(getattr(DNSUDPHandler, "upstream_addrs", []) or [])
-            )
+            upstreams = list(getattr(DNSUDPHandler, "upstream_addrs", []) or [])
             try:
-                mode = (
-                    str(rt.dnssec_mode).lower()
-                    if rt is not None
-                    else str(getattr(DNSUDPHandler, "dnssec_mode", "ignore")).lower()
-                )
+                mode = str(getattr(DNSUDPHandler, "dnssec_mode", "ignore")).lower()
                 if mode in ("ignore", "passthrough", "validate") and upstreams:
                     handler = type("_H", (), {})()
-                    handler.dnssec_mode = (
-                        rt.dnssec_mode if rt is not None else DNSUDPHandler.dnssec_mode
-                    )
-                    handler.edns_udp_payload = (
-                        int(rt.edns_udp_payload)
-                        if rt is not None
-                        else getattr(DNSUDPHandler, "edns_udp_payload", 1232)
+                    handler.dnssec_mode = DNSUDPHandler.dnssec_mode
+                    handler.edns_udp_payload = getattr(
+                        DNSUDPHandler, "edns_udp_payload", 1232
                     )
                     ensure = getattr(DNSUDPHandler, "_ensure_edns", None)
                     if callable(ensure):
@@ -2070,19 +2018,10 @@ def _resolve_core(
             # frequently monkeypatch send_query_with_failover directly, so we call
             # it here rather than DNSUDPHandler._forward_with_failover_helper.
             upstream_id = None
-            timeout_ms = (
-                int(rt.timeout_ms)
-                if rt is not None
-                else getattr(DNSUDPHandler, "timeout_ms", 2000)
-            )
+            timeout_ms = getattr(DNSUDPHandler, "timeout_ms", 2000)
             try:
                 max_concurrent = int(
-                    (
-                        rt.upstream_max_concurrent
-                        if rt is not None
-                        else getattr(DNSUDPHandler, "upstream_max_concurrent", 1)
-                    )
-                    or 1
+                    getattr(DNSUDPHandler, "upstream_max_concurrent", 1) or 1
                 )  # pragma: no cover - defensive/metrics path excluded from coverage
             except (
                 Exception
@@ -2207,8 +2146,9 @@ def _resolve_core(
         except Exception:  # pragma: no cover - defensive
             pass
         out = reply
-        plugins = rt.plugins if rt is not None else DNSUDPHandler.plugins
-        for p in sorted(plugins, key=lambda p: getattr(p, "post_priority", 50)):
+        for p in sorted(
+            DNSUDPHandler.plugins, key=lambda p: getattr(p, "post_priority", 50)
+        ):
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
             try:
@@ -2316,21 +2256,9 @@ def _resolve_core(
             # directly) see consistent dnssec_status values.
             from ..dnssec.dnssec_validate import classify_dnssec_status
 
-            mode = (
-                str(rt.dnssec_mode)
-                if rt is not None
-                else str(getattr(DNSUDPHandler, "dnssec_mode", "ignore"))
-            )
-            validation = (
-                str(rt.dnssec_validation)
-                if rt is not None
-                else str(getattr(DNSUDPHandler, "dnssec_validation", "upstream_ad"))
-            )
-            edns_udp_payload = (
-                int(rt.edns_udp_payload)
-                if rt is not None
-                else int(getattr(DNSUDPHandler, "edns_udp_payload", 1232))
-            )
+            mode = str(getattr(DNSUDPHandler, "dnssec_mode", "ignore"))
+            validation = str(getattr(DNSUDPHandler, "dnssec_validation", "upstream_ad"))
+            edns_udp_payload = int(getattr(DNSUDPHandler, "edns_udp_payload", 1232))
             dnssec_status = classify_dnssec_status(
                 dnssec_mode=mode,
                 dnssec_validation=validation,
@@ -2377,20 +2305,18 @@ def _resolve_core(
 
                 # Negative caching per RFC 2308: NXDOMAIN or NODATA responses
                 # with an SOA in the authority section.
-                fallback_ttl = (
-                    int(rt.min_cache_ttl)
-                    if rt is not None
-                    else int(getattr(DNSUDPHandler, "min_cache_ttl", 0) or 0)
-                )
-
                 if has_soa and (
                     rcode == RCODE.NXDOMAIN or (rcode == RCODE.NOERROR and not r.rr)
                 ):
-                    ttl = _compute_negative_ttl(r, fallback_ttl)
+                    ttl = _compute_negative_ttl(
+                        r, getattr(DNSUDPHandler, "min_cache_ttl", 0)
+                    )
                 # Delegation / referral caching: NOERROR with no answers but NS
                 # in the authority section.
                 elif has_ns and rcode == RCODE.NOERROR and not r.rr:
-                    ttl = _compute_negative_ttl(r, fallback_ttl)
+                    ttl = _compute_negative_ttl(
+                        r, getattr(DNSUDPHandler, "min_cache_ttl", 0)
+                    )
 
             if ttl is not None and ttl > 0:
                 cache = getattr(plugin_base, "DNS_CACHE", None)
