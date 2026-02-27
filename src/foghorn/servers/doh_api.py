@@ -75,14 +75,19 @@ def create_doh_app(
         Outputs:
         - Response with application/dns-message body on success.
         """
+        from foghorn.security_limits import MAX_DOH_QUERY_PARAM_BYTES
+
         dns_param = request.query_params.get("dns")
         try:
             qbytes = _logic.parse_doh_get_dns_param(
                 dns_param,
                 decoder=_b64url_decode_nopad,
+                max_decoded_bytes=int(MAX_DOH_QUERY_PARAM_BYTES),
             )
-        except _logic.DohLogicError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
+        except _logic.DohLogicError as exc:
+            raise HTTPException(
+                status_code=int(getattr(exc, "status_code", 400) or 400)
+            )
         # Resolve using provided resolver (sync on threadpool would be ideal; keep simple)
         client_ip = request.client.host if request.client else "0.0.0.0"
         try:
@@ -111,12 +116,29 @@ def create_doh_app(
         Outputs:
         - Response with application/dns-message body on success.
         """
+        from foghorn.security_limits import MAX_DOH_DNS_MESSAGE_BYTES
+
         ctype = request.headers.get("content-type", "")
         try:
             _logic.validate_doh_post_content_type(ctype, dns_ct=_DNS_CT)
         except _logic.DohLogicError:
             raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
+
+        try:
+            content_length = request.headers.get("content-length")
+            if content_length is not None and int(content_length) > int(
+                MAX_DOH_DNS_MESSAGE_BYTES
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+                )
+        except ValueError:
+            # Invalid content-length; treat as bad request.
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
+
         body = await request.body()
+        if len(body) > int(MAX_DOH_DNS_MESSAGE_BYTES):
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
         client_ip = request.client.host if request.client else "0.0.0.0"
         try:
             resp = _logic.call_resolver(resolver, query=body, client_ip=client_ip)
@@ -378,9 +400,12 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
         params = urllib.parse.parse_qs(parsed.query)
         dns_param = params.get("dns", [None])[0]
         try:
+            from foghorn.security_limits import MAX_DOH_QUERY_PARAM_BYTES
+
             qbytes = _logic.parse_doh_get_dns_param(
                 str(dns_param) if dns_param is not None else None,
                 decoder=_b64url_decode_nopad,
+                max_decoded_bytes=int(MAX_DOH_QUERY_PARAM_BYTES),
             )
         except _logic.DohLogicError as exc:
             self._send_empty(exc.status_code)
@@ -422,11 +447,21 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_empty(415)
             return
 
+        from foghorn.security_limits import MAX_DOH_DNS_MESSAGE_BYTES
+
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = 0
+
+        if length > int(MAX_DOH_DNS_MESSAGE_BYTES):
+            self._send_empty(413)
+            return
+
         body = self.rfile.read(length) if length > 0 else b""
+        if len(body) > int(MAX_DOH_DNS_MESSAGE_BYTES):
+            self._send_empty(413)
+            return
 
         resolver = self.resolver or (lambda q, ip: q)
         client_ip = self._client_ip()
