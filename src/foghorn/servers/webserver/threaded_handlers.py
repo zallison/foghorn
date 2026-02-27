@@ -1358,6 +1358,16 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             current_cfg=getattr(self._server(), "config", None) or {},
         )
 
+        # Best-effort: keep the config diagram in sync with the on-disk config.
+        # This should never block config persistence.
+        if analysis.get("changed"):
+            try:
+                from ...utils.config_diagram import ensure_config_diagram_png
+
+                ensure_config_diagram_png(config_path=str(cfg_path_abs))
+            except Exception:
+                pass
+
         return {
             "cfg_path_abs": cfg_path_abs,
             "backup_path": backup_path,
