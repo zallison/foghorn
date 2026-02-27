@@ -38,6 +38,9 @@ All notable changes to this project will be documented in this file.
 - Transports: UDP upstream queries now ignore unexpected response peers (best-effort defense against off-path injection).
 - Cache: in-memory and SQLite caches can reserve separate capacity for NXDOMAIN responses to prevent cache pollution under NXDOMAIN floods.
 - RateLimit: base-domain extraction is now Public Suffix List aware (eTLD+1) when `publicsuffix2` is available.
+- RateLimit: sqlite `rate_profiles` storage is now bounded and pruned (TTL + max rows) via `max_profiles`, `profile_ttl_seconds`, and `prune_interval_seconds`.
+- RateLimit: UDP keying can be made spoofing-robust via `udp_keying` (default `cidr`) and `udp_client_prefix_v4`/`udp_client_prefix_v6` bucketing.
+- UpstreamRouter: `_forward_with_failover` now delegates to the hardened core `send_query_with_failover` implementation (TXID/question validation, transport support), avoiding inconsistent forwarding behavior.
 - Stats/query log: async queue is now bounded; under sustained overload some stats operations may be dropped with DEBUG/INFO visibility via queue metrics.
 - Performance: added LRU caches to hot-path helpers used during resolution and admin polling (ZoneRecords wildcard parsing, RateLimit base-domain extraction, AccessControl IP parsing, DoH/DoT SSL context creation, stats ignore-filter IP parsing, and webserver UTC datetime parsing).
 - Admin UI: diagram rendering now prefers a light/dark PNG that matches the selected UI theme.
