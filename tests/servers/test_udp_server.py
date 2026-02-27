@@ -13,10 +13,10 @@ import threading
 import time
 
 import pytest
-from dnslib import DNSRecord, QTYPE, RCODE, RR, TXT, EDNSOption
+from dnslib import QTYPE, RCODE, RR, TXT, DNSRecord, EDNSOption
 
-from foghorn.servers.udp_server import DNSUDPHandler, serve_udp
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision
+from foghorn.servers.udp_server import DNSUDPHandler, serve_udp
 
 
 def _echo_resolver(q: bytes, client_ip: str) -> bytes:
@@ -708,6 +708,75 @@ def test_udp_handle_outer_exception_attaches_other_ede(monkeypatch):
     code, text = edes[0]
     assert code == 0
     assert "internal" in text.lower() or "error" in text.lower()
+
+
+def test_enforce_udp_response_size_ceiling_non_edns_returns_tc_under_512() -> None:
+    """Brief: Helper truncates oversized non-EDNS UDP responses to <=512 with TC=1.
+
+    Inputs:
+      - Non-EDNS query.
+      - Oversized DNS response wire.
+
+    Outputs:
+      - None; asserts TC=1 and packed response length <= 512.
+    """
+
+    from foghorn.servers.udp_server import enforce_udp_response_size_ceiling
+
+    q = DNSRecord.question("big-tc-helper.example", "A")
+
+    rep = q.reply()
+    rep.add_answer(
+        RR(
+            "big-tc-helper.example",
+            QTYPE.TXT,
+            rdata=TXT(["x" * 255, "y" * 255, "z" * 100]),
+            ttl=60,
+        )
+    )
+    big_wire = rep.pack()
+    assert len(big_wire) > 512
+
+    out = enforce_udp_response_size_ceiling(q.pack(), big_wire)
+    assert len(out) <= 512
+    parsed = DNSRecord.parse(out)
+    assert parsed.header.tc == 1
+
+
+def test_enforce_udp_response_size_ceiling_edns_honors_server_override() -> None:
+    """Brief: Helper uses min(client EDNS size, server override) as ceiling.
+
+    Inputs:
+      - EDNS query advertising a large UDP size.
+      - Oversized response > server override.
+
+    Outputs:
+      - None; asserts TC=1 and output fits within server override.
+    """
+
+    from dnslib import EDNS0
+
+    from foghorn.servers.udp_server import enforce_udp_response_size_ceiling
+
+    q = DNSRecord.question("big-tc-edns.example", "A")
+    q.add_ar(EDNS0(udp_len=4096))
+
+    rep = q.reply()
+    rep.add_answer(
+        RR(
+            "big-tc-edns.example",
+            QTYPE.TXT,
+            rdata=TXT(["x" * 255, "y" * 255, "z" * 255, "w" * 255]),
+            ttl=60,
+        )
+    )
+    big_wire = rep.pack()
+    assert len(big_wire) > 800
+
+    out = enforce_udp_response_size_ceiling(q.pack(), big_wire, server_max_bytes=800)
+    assert len(out) <= 800
+    parsed = DNSRecord.parse(out)
+    assert parsed.header.tc == 1
 
 
 def test_handle_non_edns_large_response_sets_tc(monkeypatch):
