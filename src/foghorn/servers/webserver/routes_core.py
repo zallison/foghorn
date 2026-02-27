@@ -573,6 +573,16 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
             current_cfg=getattr(app.state, "config", None) or {},
         )
 
+        # Best-effort: keep the config diagram in sync with the on-disk config.
+        # This should never block config persistence.
+        if analysis.get("changed"):
+            try:
+                from ...utils.config_diagram import ensure_config_diagram_png
+
+                ensure_config_diagram_png(config_path=str(cfg_path_abs))
+            except Exception:
+                pass
+
         return {
             "cfg_path_abs": cfg_path_abs,
             "backup_path": backup_path,
