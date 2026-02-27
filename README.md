@@ -6,7 +6,7 @@ With built-in admin and API server support, Foghorn empowers you to monitor and 
 
 [![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-89%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
-<img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" width=300px /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-2.png" width=300px /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-3.png" width=300px /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-4.png" width=300px />
+<img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-2.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-3.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-4.png" height="300" />
 
 ## Foghorn DNS Server
 

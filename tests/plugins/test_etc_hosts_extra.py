@@ -498,12 +498,28 @@ def test_have_files_changed_handles_missing_and_oserror(monkeypatch, tmp_path):
 
     real_stat = os.stat
 
-    def fake_stat(path: str):
-        if path == str(missing):
+    def fake_stat(
+        path: str | os.PathLike,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        """Brief: os.stat replacement that injects FileNotFoundError/OSError.
+
+        Inputs:
+          - path: Path-like object passed to os.stat.
+          - dir_fd: Optional directory file descriptor.
+          - follow_symlinks: Whether to follow symlinks (passed through).
+
+        Outputs:
+          - os.stat_result for non-error paths.
+        """
+        p = os.fspath(path)
+        if p == str(missing):
             raise FileNotFoundError
-        if path == str(error):
+        if p == str(error):
             raise OSError("boom")
-        return real_stat(path)
+        return real_stat(p, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
 
     plugin.file_paths = [str(hosts_file), str(missing), str(error)]  # type: ignore[assignment]
 
