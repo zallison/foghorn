@@ -36,8 +36,8 @@ src_dir = project_root / "src"
 if src_dir.is_dir() and str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
-from foghorn.plugins.resolve.base import BasePlugin
 from foghorn.plugins.resolve import registry as plugin_registry
+from foghorn.plugins.resolve.base import BasePlugin
 
 logger = logging.getLogger(__name__)
 
@@ -551,7 +551,7 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
                     },
                 )
 
-        # server.listen.{tcp,dot} hardening knobs.
+        # server.listen.{udp,tcp,dot} hardening knobs.
         listen_obj = server_props.get("listen")
         listen_schema = _ensure_obj_schema(listen_obj)
         if listen_schema is not None:
@@ -565,6 +565,102 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
                     child_schema = _ensure_obj_schema(child)
                     if child_schema is not None:
                         _ensure_limit_keys(child_schema)
+
+                # UDP hardening knobs (asyncio UDP and response sizing).
+                udp_obj = listen_props.get("udp")
+                if not isinstance(udp_obj, dict):
+                    udp_obj = {"type": "object"}
+                    listen_props["udp"] = udp_obj
+                udp_schema = _ensure_obj_schema(udp_obj)
+                if udp_schema is not None:
+                    udp_props = udp_schema.get("properties")
+                    if isinstance(udp_props, dict):
+                        udp_props.setdefault(
+                            "use_asyncio",
+                            {
+                                "type": "boolean",
+                                "default": True,
+                                "description": "When true, prefer the asyncio UDP listener when available.",
+                            },
+                        )
+                        udp_props.setdefault(
+                            "allow_threaded_fallback",
+                            {
+                                "type": "boolean",
+                                "default": True,
+                                "description": (
+                                    "When false, refuse to fall back to the threaded ThreadingUDPServer when "
+                                    "asyncio UDP cannot start."
+                                ),
+                            },
+                        )
+                        udp_props.setdefault(
+                            "exit_on_asyncio_failure",
+                            {
+                                "type": "boolean",
+                                "default": False,
+                                "description": (
+                                    "When true, exit non-zero if the asyncio UDP listener fails to start, instead "
+                                    "of falling back to a threaded UDP server."
+                                ),
+                            },
+                        )
+                        udp_props.setdefault(
+                            "max_inflight",
+                            {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 1024,
+                                "description": "Global cap on in-flight UDP queries for asyncio UDP listener.",
+                            },
+                        )
+                        udp_props.setdefault(
+                            "max_inflight_per_ip",
+                            {
+                                "type": "integer",
+                                "minimum": 1,
+                                "default": 64,
+                                "description": "Per-client-IP cap on in-flight UDP queries for asyncio UDP listener.",
+                            },
+                        )
+                        udp_props.setdefault(
+                            "max_inflight_by_cidr",
+                            {
+                                "type": "array",
+                                "description": (
+                                    "Optional CIDR bucket limits for UDP in-flight queries. Each entry is {cidr, max_inflight}. "
+                                    "When multiple buckets match a client IP, the strictest (smallest max_inflight) wins."
+                                ),
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "cidr": {
+                                            "type": "string",
+                                            "description": "CIDR block (e.g. '10.0.0.0/8' or '2001:db8::/32').",
+                                        },
+                                        "max_inflight": {
+                                            "type": "integer",
+                                            "minimum": 1,
+                                            "description": "Maximum in-flight UDP queries for clients within this CIDR.",
+                                        },
+                                    },
+                                    "required": ["cidr", "max_inflight"],
+                                },
+                            },
+                        )
+                        udp_props.setdefault(
+                            "max_response_bytes",
+                            {
+                                "type": ["integer", "null"],
+                                "minimum": 0,
+                                "default": None,
+                                "description": (
+                                    "Optional explicit UDP response size ceiling. When null, defaults to server.dnssec.udp_payload_size. "
+                                    "Effective ceiling per query is min(client advertised EDNS UDP size (or 512 without EDNS), server ceiling)."
+                                ),
+                            },
+                        )
 
                 for key in ("doh",):
                     child = listen_props.get(key)
@@ -744,8 +840,99 @@ def _build_v2_root_schema(
 
             tcp_child = _ensure_listener_child("tcp")
             dot_child = _ensure_listener_child("dot")
+            udp_child = _ensure_listener_child("udp")
             _ensure_conn_limit_props(tcp_child)
             _ensure_conn_limit_props(dot_child)
+
+            # UDP-specific hardening knobs.
+            udp_props = udp_child.get("properties")
+            if isinstance(udp_props, dict):
+                udp_props.setdefault(
+                    "use_asyncio",
+                    {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "When true, prefer the asyncio UDP listener when available.",
+                    },
+                )
+                udp_props.setdefault(
+                    "allow_threaded_fallback",
+                    {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "When false, refuse to fall back to the threaded ThreadingUDPServer when "
+                            "asyncio UDP cannot start."
+                        ),
+                    },
+                )
+                udp_props.setdefault(
+                    "exit_on_asyncio_failure",
+                    {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "When true, exit non-zero if the asyncio UDP listener fails to start, instead "
+                            "of falling back to a threaded UDP server."
+                        ),
+                    },
+                )
+                udp_props.setdefault(
+                    "max_inflight",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 1024,
+                        "description": "Global cap on in-flight UDP queries for asyncio UDP listener.",
+                    },
+                )
+                udp_props.setdefault(
+                    "max_inflight_per_ip",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 64,
+                        "description": "Per-client-IP cap on in-flight UDP queries for asyncio UDP listener.",
+                    },
+                )
+                udp_props.setdefault(
+                    "max_inflight_by_cidr",
+                    {
+                        "type": "array",
+                        "description": (
+                            "Optional CIDR bucket limits for UDP in-flight queries. Each entry is {cidr, max_inflight}. "
+                            "When multiple buckets match a client IP, the strictest (smallest max_inflight) wins."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "cidr": {
+                                    "type": "string",
+                                    "description": "CIDR block (e.g. '10.0.0.0/8' or '2001:db8::/32').",
+                                },
+                                "max_inflight": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": "Maximum in-flight UDP queries for clients within this CIDR.",
+                                },
+                            },
+                            "required": ["cidr", "max_inflight"],
+                        },
+                    },
+                )
+                udp_props.setdefault(
+                    "max_response_bytes",
+                    {
+                        "type": ["integer", "null"],
+                        "minimum": 0,
+                        "default": None,
+                        "description": (
+                            "Optional explicit UDP response size ceiling. When null, defaults to server.dnssec.udp_payload_size. "
+                            "Effective ceiling per query is min(client advertised EDNS UDP size (or 512 without EDNS), server ceiling)."
+                        ),
+                    },
+                )
 
             doh_child = _ensure_listener_child("doh")
             doh_props = doh_child.get("properties")
