@@ -17,37 +17,40 @@ import signal
 import time
 import urllib.parse
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+
+# Forward declaration - _AdminHTTPServer is defined in server_management
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import yaml
 
 from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 from ...utils.config_diagram import (
-    diagram_png_candidate_paths_for_config,
     diagram_dark_png_candidate_paths_for_config,
     diagram_dot_candidate_paths_for_config,
+    diagram_png_candidate_paths_for_config,
     find_first_existing_path,
-    stale_diagram_warning,
     generate_dot_text_from_config_path,
+    stale_diagram_warning,
 )
 from ..udp_server import DNSUDPHandler
 from . import admin_logic as _admin_logic
 from . import config_persistence as _config_persistence
 from .config_helpers import (
-    _get_web_cfg,
-    _get_redact_keys,
-    _get_config_raw_text,
     _get_config_raw_json,
+    _get_config_raw_text,
+    _get_redact_keys,
+    _get_sanitized_config_yaml_cached,
+    _get_web_cfg,
     _parse_utc_datetime,
     sanitize_config,
-    _get_sanitized_config_yaml_cached,
 )
 from .http_helpers import (
     _json_safe,
     _schedule_process_signal,
     resolve_www_root,
 )
-from .meta_helpers import _get_about_payload, FOGHORN_VERSION
+from .logging_utils import RingBuffer
+from .meta_helpers import FOGHORN_VERSION, _get_about_payload
 from .rate_limit_helpers import _collect_rate_limit_stats
 from .runtime import evaluate_readiness
 from .stats_helpers import (
@@ -58,10 +61,6 @@ from .stats_helpers import (
     _utc_now_iso,
     get_system_info,
 )
-from .logging_utils import RingBuffer
-
-# Forward declaration - _AdminHTTPServer is defined in server_management
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .server_management import _AdminHTTPServer

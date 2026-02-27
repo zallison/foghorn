@@ -8,6 +8,8 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
+from . import admin_logic as _admin_logic
+from . import core as web_mod
 from .stats_helpers import (
     _build_stats_payload_from_snapshot,
     _build_traffic_payload_from_snapshot,
@@ -15,8 +17,6 @@ from .stats_helpers import (
     _trim_top_fields,
     _utc_now_iso,
 )
-from . import admin_logic as _admin_logic
-from . import core as web_mod
 
 
 def _register_stats_routes(app: FastAPI, auth_dep: Any, version: str) -> None:

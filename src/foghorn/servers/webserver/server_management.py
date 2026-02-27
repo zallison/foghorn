@@ -13,17 +13,16 @@ import logging
 import os
 import socket
 import threading
-from typing import Any, Dict, Optional
+
+# Forward declaration for create_app - actual import happens in start_webserver
+# to avoid circular dependency
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ...stats import StatsCollector
 from .logging_utils import RingBuffer
 from .runtime import RuntimeState
-from .types_and_buffers import WebServerHandle
 from .threaded_handlers import _ThreadedAdminRequestHandler
-
-# Forward declaration for create_app - actual import happens in start_webserver
-# to avoid circular dependency
-from typing import TYPE_CHECKING
+from .types_and_buffers import WebServerHandle
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
