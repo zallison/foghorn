@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- AccessControl plugin: Added `deny_response` configuration option to customize response codes when denying DNS queries (supports: 'nxdomain', 'refused', 'servfail', 'noerror_empty', 'nodata', 'ip', or 'drop'). Default is 'refused' for AccessControl.
 - ZoneRecords plugin: Added `minimum_reload_time` field to `axfr_zones` entries to control when AXFR zones can be reloaded, allowing load balancing between staying current and avoiding excessive upstream transfer load while still honoring NOTIFY events.
 
 ### Changed
@@ -32,7 +33,11 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - ZoneRecords DNSSEC: improved NSEC3 denial-of-existence handling so NODATA responses only include relevant NSEC3 proofs.
+- Diagrams: upstream routes now handle template variable hosts (e.g., `${host}`) by showing placeholder when host is a template variable and transport/port are present.
+- Diagrams: endpoint protocol tracking now correctly classifies dot/doh/tcp/udp for security styling, defaulting to insecure when protocols cannot be determined.
 - Diagrams: config diagram endpoints now expose `.dot` source consistently.
+- Diagrams: routed upstreams now render as color-coded nodes inside the upstreams cluster based on security level (secure vs insecure), with dashed connections from plugins to their routed upstreams.
+- Diagrams: deny and override edge labels now use multi-line format (e.g., `deny\nIP`, `override\nwire reply`) with proper DOT escaping.
 
 ### Fixed
 
