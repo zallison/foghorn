@@ -38,6 +38,7 @@ def test_warn_on_exposed_without_rate_limit(caplog: logging.LogCaptureFixture) -
     assert "No rate limiting plugin" in caplog.text
     assert "type: rate" in caplog.text
     assert "50 RPS" in caplog.text
+    assert "REFUSED" in caplog.text
 
 
 def test_no_warn_on_loopback_without_rate_limit(caplog: logging.LogCaptureFixture) -> None:

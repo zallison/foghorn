@@ -253,13 +253,13 @@ def test_invalid_mode_defaults_to_per_client(tmp_path):
     assert plugin.mode == "per_client"
 
 
-def test_invalid_deny_response_defaults_to_nxdomain(tmp_path):
-    """Brief: Unknown deny_response falls back to 'nxdomain'.\n\n    Inputs:\n      - tmp_path: pytest tmp path for sqlite db.\n\n    Outputs:\n      - None: asserts deny_response attribute is normalized.\n"""
+def test_invalid_deny_response_defaults_to_refused(tmp_path):
+    """Brief: Unknown deny_response falls back to 'refused'.\n\n    Inputs:\n      - tmp_path: pytest tmp path for sqlite db.\n\n    Outputs:\n      - None: asserts deny_response attribute is normalized.\n"""
 
     db = tmp_path / "rl-deny.db"
     plugin = RateLimit(db_path=str(db), deny_response="bogus")
     plugin.setup()
-    assert plugin.deny_response == "nxdomain"
+    assert plugin.deny_response == "refused"
 
 
 def test_int_config_parsing_and_clamping(tmp_path):

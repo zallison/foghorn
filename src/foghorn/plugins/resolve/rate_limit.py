@@ -88,7 +88,7 @@ class RateLimitConfig(BaseModel):
       - udp_client_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.
 
       - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',
-        'noerror_empty'/'nodata', or 'ip').
+        'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.
       - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.
       - ttl: Optional TTL used when synthesizing IP responses.
 
@@ -114,7 +114,7 @@ class RateLimitConfig(BaseModel):
     udp_client_prefix_v4: int = Field(default=24, ge=0, le=32)
     udp_client_prefix_v6: int = Field(default=56, ge=0, le=128)
 
-    deny_response: str = Field(default="nxdomain")
+    deny_response: str = Field(default="refused")
     deny_response_ip4: Optional[str] = None
     deny_response_ip6: Optional[str] = None
     ttl: int = Field(default=60, ge=0)
@@ -254,7 +254,7 @@ class RateLimit(BasePlugin):
 
         # Deny policy configuration
         deny_resp = str(
-            self.config.get("deny_response", "nxdomain") or "nxdomain"
+            self.config.get("deny_response", "refused") or "refused"
         ).lower()
         valid_deny = {
             "nxdomain",
@@ -266,10 +266,10 @@ class RateLimit(BasePlugin):
         }
         if deny_resp not in valid_deny:
             logger.warning(
-                "RateLimit: unknown deny_response %r; defaulting to 'nxdomain'",
+                "RateLimit: unknown deny_response %r; defaulting to 'refused'",
                 deny_resp,
             )
-            deny_resp = "nxdomain"
+            deny_resp = "refused"
         self.deny_response: str = deny_resp
         self.deny_response_ip4: Optional[str] = self.config.get("deny_response_ip4")
         self.deny_response_ip6: Optional[str] = self.config.get("deny_response_ip6")
@@ -732,7 +732,7 @@ class RateLimit(BasePlugin):
           - PluginDecision with action 'deny' or 'override' based on configuration.
         """
 
-        mode = (getattr(self, "deny_response", "nxdomain") or "nxdomain").lower()
+        mode = (getattr(self, "deny_response", "refused") or "refused").lower()
         if mode == "nxdomain":
             return PluginDecision(action="deny", stat="rate_limit")
 
@@ -781,7 +781,7 @@ class RateLimit(BasePlugin):
                         stat="rate_limit",
                     )
 
-        # Fallback: simple deny
+        # Fallback: simple deny (refused by default)
         return PluginDecision(action="deny", stat="rate_limit")
 
     def pre_resolve(
