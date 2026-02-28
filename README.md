@@ -834,6 +834,18 @@ plugins:
 	  network_enabled: true
 ```
 
+### Security hardening and DNS amplification protection
+
+Foghorn includes several built-in security protections to mitigate DoS/DDoS attacks and DNS amplification risks:
+
+- **DoH parameter size validation**: Oversized base64-encoded DNS parameters are rejected (HTTP 413) before decoding, preventing processing of megabyte-scale payloads.
+- **Recursive resolver depth limits**: Default `max_depth` is 12 (configurable via `server.resolver.max_depth`) to limit recursion depth and prevent abuse through deep delegation chains.
+- **Upstream health cleanup**: The `DNSUDPHandler._cleanup_upstream_health()` method periodically removes stale healthy entries from the `upstream_health` tracking dictionary to prevent unbounded memory growth.
+- **Rate limiting and concurrency controls**: The `rate` plugin provides per-client or per-(client,domain) rate limiting (see below). Combined with listener connection limits (`max_connections`, `max_connections_per_ip`) and per-connection query caps (`max_queries_per_connection`), this provides defense at multiple layers.
+- **DNS response size limits**: UDP responses are capped at 1232 bytes to minimize amplification potential. DoH response sizes are also limited to large payloads.
+
+When deploying Foghorn as an authoritative or recursive resolver on exposed interfaces, consider enabling these protections and monitoring the metrics exposed via the admin UI for query patterns and error rates.
+
 ### 4.8 Rate limiting (`rate`)
 
 Adaptive rate limiting per client or per (client,domain).
