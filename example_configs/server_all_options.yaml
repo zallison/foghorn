@@ -97,8 +97,8 @@ server:
     timeout_ms: 2000
     per_try_timeout_ms: 2000
 
-    # Recursive-only tuning
-    max_depth: 16
+    # Recursive-only tuning (default is 12 for better DoS resistance)
+    max_depth: 12
 
     # Master switch for asyncio-based listeners and uvicorn-based admin/DoH.
     # When false, threaded fallbacks are used where available.

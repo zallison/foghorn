@@ -24,6 +24,9 @@ All notable changes to this project will be documented in this file.
   - Added TCP DNS and AXFR frame size caps (length-prefixed max 65535 bytes).
   - Added recursive resolver referral-processing caps (NS names, glue records scanned, and next-hop server list).
   - Added `allow_threaded_fallback` knobs for DoH (`server.listen.doh.allow_threaded_fallback`) and the admin web UI (`server.http.allow_threaded_fallback`).
+  - Added DoH parameter size validation before base64 decoding to prevent processing oversized payloads.
+  - Added automated upstream health cleanup to prevent unbounded memory growth in `upstream_health` dict.
+  - Reduced default recursive `max_depth` from 16 to 12 for better DoS resistance (fully configurable via `server.resolver.max_depth`).
 - Caching:
   - InMemoryTTLCache and SQLite3Cache can reserve capacity for NXDOMAIN responses (`max_size`, `pct_nxdomain`) to avoid NXDOMAIN floods evicting positive entries.
 - Stats/query log:
