@@ -523,9 +523,9 @@ def main(argv: List[str] | None = None) -> int:
     if resolver_mode == "none":
         resolver_mode = "master"
     try:
-        recursive_max_depth = int(resolver_cfg.get("max_depth", 16))
+        recursive_max_depth = int(resolver_cfg.get("max_depth", 12))
     except (TypeError, ValueError):
-        recursive_max_depth = 16
+        recursive_max_depth = 12
     try:
         recursive_timeout_ms = int(resolver_cfg.get("timeout_ms", 2000))
     except (TypeError, ValueError):
@@ -624,6 +624,13 @@ def main(argv: List[str] | None = None) -> int:
     logger.info(
         "Loaded %d plugins: %s", len(plugins), [p.__class__.__name__ for p in plugins]
     )
+
+    # Warn if exposed listeners lack rate limiting
+    try:
+        from .config.rate_limit_check import check_rate_limit_plugin_config
+        check_rate_limit_plugin_config(plugins=plugins, cfg=cfg)
+    except Exception:
+        pass
 
     # Run setup phase for setup-aware plugins before starting listeners
     try:

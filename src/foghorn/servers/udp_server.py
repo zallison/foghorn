@@ -265,7 +265,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
     # Resolver mode and recursion controls.
     resolver_mode: str = "forward"  # forward | recursive
-    recursive_max_depth: int = 16
+    recursive_max_depth: int = 12
     recursive_timeout_ms: int = 2000
     recursive_per_try_timeout_ms: int = 2000
     root_hints_path: Optional[str] = None
@@ -369,6 +369,54 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             return
         # Mark as healthy immediately; keep a small fail_count history if desired.
         cls.upstream_health[up_id] = {"fail_count": 0.0, "down_until": 0.0}
+
+    @classmethod
+    def _cleanup_upstream_health(cls, max_age_hours: float = 24.0) -> None:
+        """Brief: Remove stale upstream_health entries to prevent unbounded growth.
+
+        Inputs:
+          - max_age_hours: Maximum age in hours for healthy entries before cleanup.
+            Defaults to 24 hours.
+
+        Outputs:
+          - None; modifies cls.upstream_health in-place.
+
+        Notes:
+          - Removed entries can be recreated when needed without data loss.
+          - Healthy entries older than max_age_hours are removed.
+          - Unhealthy entries (down_until in future) are preserved.
+          - This should be called periodically, e.g., after reload or via a.
+            background maintenance task.
+        """
+
+        now = time.time()
+        max_age_seconds = float(max_age_hours) * 3600.0
+        entries_to_remove = []
+
+        for up_id, entry in list(cls.upstream_health.items()):
+            if not isinstance(entry, dict):
+                entries_to_remove.append(up_id)
+                continue
+
+            down_until = float(entry.get("down_until", 0.0) or 0.0)
+
+            # Keep unhealthy entries still in backoff window.
+            if down_until > now:
+                continue
+
+            # For healthy entries, check if they've been healthy for too long.
+            # We consider an entry eligible for removal if it has been healthy
+            # (fail_count=0, down_until <= now) for max_age_hours.
+            # Since we don't track when it became healthy, we conservatively use
+            # the last backoff completion time as a proxy.
+            fail_count = float(entry.get("fail_count", 0) or 0)
+            if fail_count == 0 and down_until <= now:
+                # Entry has been healthy; if down_until is very old, remove it.
+                if now - down_until > max_age_seconds:
+                    entries_to_remove.append(up_id)
+
+        for up_id in entries_to_remove:
+            cls.upstream_health.pop(up_id, None)
 
     def _cache_and_send_response(
         self,

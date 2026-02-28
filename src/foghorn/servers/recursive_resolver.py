@@ -152,7 +152,7 @@ class RecursiveResolver:
         *,
         cache,
         stats,
-        max_depth: int = 16,
+        max_depth: int = 12,
         timeout_ms: int = 2000,
         per_try_timeout_ms: int = 2000,
     ) -> None:
