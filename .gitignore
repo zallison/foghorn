@@ -31,17 +31,16 @@ Thumbs.db
 *.db
 *.db-wal
 *.db-shm
+
+# Runtime config and state (keep source, ignore generated state)
+config.yaml
+config.yaml.new
 my-config-test.yaml
 my-config.yaml
 var/
-config.yaml
-config.yaml.new
+!/src/
+!/tests/coverage.json
 
 # Profiling artifacts
 foghorn_cpu.svg
 keys
-# Config directory exclusions (keep source, ignore runtime state)
-config/
-!/config/**/*.py
-!/config/**/*.yaml
-/coverage.json
