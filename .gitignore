@@ -40,5 +40,8 @@ config.yaml.new
 # Profiling artifacts
 foghorn_cpu.svg
 keys
-config
+# Config directory exclusions (keep source, ignore runtime state)
+config/
+!/config/**/*.py
+!/config/**/*.yaml
 /coverage.json

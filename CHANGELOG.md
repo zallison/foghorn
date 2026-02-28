@@ -15,6 +15,8 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Rate limit configuration warning: Foghorn now warns at startup when listeners bind to non-loopback addresses without a rate_limit plugin configured. This provides operators guidance for DoS protection on exposed deployments.
+
 - ZoneRecords plugin: Added `minimum_reload_time` field to `axfr_zones` entries to control when AXFR zones can be reloaded, allowing load balancing between staying current and avoiding excessive upstream transfer load while still honoring NOTIFY events.
 - DoS hardening:
   - Added a shared, bounded resolver executor for asyncio servers (`server.limits.resolver_executor_workers`).
