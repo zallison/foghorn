@@ -10,51 +10,6 @@ logging:
     level: info
 
 plugins:
-  - type: docker-hosts
-    id: docker_hosts_example
-    enabled: true
-    comment: 'DockerHosts example (resolve container names and reverse PTRs).'
-    config:
-      # BasePlugin options
-      abort_on_failure: false
-      enabled: true
-      comment: 'Config-level comment (ignored).'
-      priority: 40
-      pre_priority: 40
-      post_priority: 40
-      setup_priority: 40
-      targets:
-        - 0.0.0.0/0
-      targets_ignore: []
-      targets_cache_ttl_seconds: 300
-      targets_listener: any
-      targets_domains: []
-      targets_domains_mode: any
-      target_qtypes:
-        - '*'
-      target_opcodes:
-        - QUERY
-      logging:
-        level: info
-        stderr: true
-      cache:
-        module: in_memory_ttl
-        config:
-          min_cache_ttl: 0
-
-      # DockerHosts-specific options
-      endpoints:
-        - url: unix:///var/run/docker.sock
-          reload_interval_second: 60
-          use_ipv4: 192.0.2.100
-          use_ipv6: '2001:db8::100'
-          ttl: 60
-      ttl: 300
-      health:
-        - healthy
-        - running
-      discovery: true
-
   - type: etc-hosts
     id: etc_hosts_example
     enabled: true
