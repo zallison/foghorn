@@ -36,6 +36,8 @@ class AccessControlConfig(BaseModel):
       - default: Default policy ("allow" or "deny").
       - allow: List of CIDR/IP strings to allow.
       - deny: List of CIDR/IP strings to deny.
+      - deny_response: Response code when denying ('nxdomain', 'refused', 'servfail',
+        'noerror_empty'/'nodata', 'ip', or 'drop').
 
     Outputs:
       - AccessControlConfig instance with normalized types.
@@ -44,6 +46,7 @@ class AccessControlConfig(BaseModel):
     default: str = Field(default="allow")
     allow: List[str] = Field(default_factory=list)
     deny: List[str] = Field(default_factory=list)
+    deny_response: str = Field(default="refused")
 
     class Config:
         extra = "allow"
@@ -99,6 +102,9 @@ class AccessControl(BasePlugin):
         self.deny_nets = [
             ipaddress.ip_network(n, strict=False) for n in self.config.get("deny", [])
         ]
+        self.deny_response = (
+            self.config.get("deny_response", "refused") or "refused"
+        ).lower()
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
@@ -116,7 +122,7 @@ class AccessControl(BasePlugin):
         Example use:
             >>> from foghorn.plugins.access_control import AccessControl
             >>> from foghorn.plugins.resolve.base import PluginContext
-            >>> config = {"default": "allow", "deny": ["192.168.1.10"]}
+            >>> config = {"default": "deny", "allow": ["192.168.1.0/24"]}
             >>> plugin = AccessControl(**config)
             >>> ctx = PluginContext(client_ip="192.168.1.10")
             >>> decision = plugin.pre_resolve("example.com", 1, b'', ctx)
