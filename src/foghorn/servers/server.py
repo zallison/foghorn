@@ -2,6 +2,7 @@ import ipaddress
 import logging
 import socketserver
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -325,6 +326,8 @@ def _schedule_cache_refresh(data: bytes, client_ip: str) -> None:
         with _BG_LOCK:
             _BG_CACHE_INFLIGHT.discard(key)
         logger.debug("Failed to schedule cache refresh task", exc_info=True)
+
+    # Periodic upstream health cleanup can be called via DNSUDPHandler._cleanup_upstream_health
 
 
 @registered_lru_cached(maxsize=1024)
@@ -2175,9 +2178,9 @@ def _resolve_core(
             # are already handled earlier in the pipeline) and we reuse
             # DNSUDPHandler's recursion knobs.
             try:
-                max_depth = int(getattr(DNSUDPHandler, "recursive_max_depth", 16) or 16)
+                max_depth = int(getattr(DNSUDPHandler, "recursive_max_depth", 12) or 12)
             except Exception:  # pragma: no cover - defensive
-                max_depth = 16
+                max_depth = 12
             try:
                 recursion_timeout_ms = int(
                     getattr(
