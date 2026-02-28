@@ -726,6 +726,17 @@ def _extract_upstream_router_route_lines(entry_config: dict[str, Any]) -> list[s
 
             host = u.get("host")
             port = u.get("port")
+            # For diagram purposes, if we have transport and port but host is a template variable
+            # we still want to show SOMETHING to indicate the endpoint exists
+            is_template_host = isinstance(host, str) and "${" in host
+            if is_template_host and transport and port is not None:
+                try:
+                    p = int(port)
+                except Exception:
+                    p = port
+                out.append(f"{transport}: {{host}}:{p}")
+                continue
+
             if not isinstance(host, str) or not host.strip():
                 continue
 
@@ -767,7 +778,7 @@ def _deny_response_to_rcode_label(deny_response: str) -> Optional[str]:
     if mode in {"noerror_empty", "nodata"}:
         return "NOERROR (empty)"
     if mode == "ip":
-        return "NOERROR (synthetic)"
+        return "IP"
     if mode == "drop":
         return None
     return None
@@ -781,8 +792,15 @@ def _constrain_plugin_info_for_config(
     if info.cls_path in {
         "foghorn.plugins.resolve.filter.Filter",
         "foghorn.plugins.resolve.rate_limit.RateLimit",
+        "foghorn.plugins.resolve.access_control.AccessControl",
     }:
-        deny_response = str(entry_config.get("deny_response", "nxdomain")).lower()
+        # For AccessControl, default to REFUSED instead of NXDOMAIN
+        default_deny = (
+            "refused"
+            if info.cls_path == "foghorn.plugins.resolve.access_control.AccessControl"
+            else "nxdomain"
+        )
+        deny_response = str(entry_config.get("deny_response", default_deny)).lower()
         deny_label = _deny_response_to_rcode_label(deny_response)
 
         pre_actions = set(info.pre_actions)
@@ -799,11 +817,10 @@ def _constrain_plugin_info_for_config(
         pre_deny_rcode = deny_label
         post_deny_rcode = deny_label
 
-        # Filter's post-resolve IP deny path intentionally preserves the historic
-        # behaviour by returning a generic deny and letting the core synthesize
-        # NXDOMAIN.
+        # IP-based deny_response shows "deny\nIP" edge label
         if deny_response == "ip":
-            post_deny_rcode = "NXDOMAIN"
+            pre_deny_rcode = "IP"
+            post_deny_rcode = "IP"
 
         # Pick a single short-circuit edge for the pre path based on deny_response.
         if deny_response == "drop":
@@ -1163,14 +1180,23 @@ def render_dot(
 
     # Build endpoint groups.
     meta_bits = [str(x).strip() for x in upstream_lines if x and ":" not in str(x)]
-    endpoint_lines = [str(x).strip() for x in upstream_lines if x and ":" in str(x)]
+    endpoints = [str(x).strip() for x in upstream_lines if x and ":" in str(x)]
+
+    # Track protocols separately for security detection
+    endpoint_protocols: set[str] = set()
+    for raw_s in endpoints:
+        raw_s = raw_s.strip()
+        proto, _, _rest = raw_s.partition(":")
+        proto = proto.strip().lower()
+        if proto:
+            endpoint_protocols.add(proto)
 
     seen: set[str] = set()
     items_insecure: list[str] = []
     items_secure: list[str] = []
     protos: set[str] = set()
 
-    for raw_s in endpoint_lines:
+    for raw_s in endpoints:
         raw_s = raw_s.strip()
         if not raw_s or raw_s in seen:
             continue
@@ -1191,8 +1217,9 @@ def render_dot(
         else:
             items_insecure.append(item)
 
-    has_insecure = bool(protos & {"udp", "tcp"}) or bool(items_insecure)
-    has_secure = bool(protos & {"dot", "doh"}) or bool(items_secure)
+    # Use tracked protocols for security detection
+    has_insecure = bool(endpoint_protocols & {"udp", "tcp"}) or bool(items_insecure)
+    has_secure = bool(endpoint_protocols & {"dot", "doh"}) or bool(items_secure)
 
     lines: list[str] = []
     lines.append(f"// Generated from: {config_path}")
@@ -1389,13 +1416,16 @@ def render_dot(
             resp_bits: list[str] = []
             if "deny" in p.pre_actions:
                 rcode = getattr(p, "pre_deny_rcode", None) or "NXDOMAIN"
-                resp_bits.append(f"deny ({rcode})")
+                resp_bits.append(r"deny\n" + rcode)
             if "override" in p.pre_actions:
-                resp_bits.append("override (wire reply)")
+                resp_bits.append(r"override\nwire reply")
             if resp_bits and has_pre_merge:
                 # Avoid these side edges distorting the main vertical chain layout.
+                label_text = "; ".join(resp_bits)
+                # Manually escape quotes for DOT
+                label_text = label_text.replace('"', '\\"')
                 lines.append(
-                    f'      {nid} -> PreMerge [label="{_escape_dot_label("; ".join(resp_bits))}", constraint=false];'
+                    f'      {nid} -> PreMerge [label="{label_text}", weight=1, constraint=false];'
                 )
             if "drop" in p.pre_actions:
                 lines.append(f'      {nid} -> Drop [label="drop", constraint=false];')
@@ -1420,40 +1450,8 @@ def render_dot(
     lines.append('    Cache -> Resolver [label="miss"];')
     lines.append("    Resolver -> Upstream;")
 
-    # Routed upstreams (e.g., via upstream_router) are shown as a separate
-    # upstream block inside the query path, near the forwarding section.
-    routed_plugins = [p for p in pre_chain if p.routed_upstream_lines]
-    if routed_plugins:
-        lines.append("    subgraph cluster_routed_upstreams {")
-        lines.append('      label="Upstream router upstreams";')
-        if include_init:
-            c, st = _cluster_outline_attrs()
-            lines.append(f'      style="{st}";')
-            lines.append(f'      color="{c}";')
-        for p in routed_plugins:
-            safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", p.name).strip("_") or "plugin"
-            rid = f"RoutedUpstreams_{p.idx}_{safe_name}"
-
-            raw_lines = list(p.routed_upstream_lines or [])
-            payload = "\\n".join(
-                _escape_dot_label(_comma_newlines(x)) for x in raw_lines if x
-            )
-            label = "Upstreams"
-            if payload:
-                label += "\\n" + payload
-
-            lines.append(f'      {rid} [label="{label}"];')
-
-            pre_nid = pre_node_ids.get(p.idx)
-            if pre_nid:
-                # Do not let routed-upstream annotation edges influence node ranking.
-                lines.append(
-                    f"      {pre_nid} -> {rid} [style=dashed, constraint=false];"
-                )
-
-        lines.append("    }")
-
     # Upstreams block (forward mode only).
+    routed_plugins = [p for p in pre_chain if p.routed_upstream_lines]
     upstream_tails: list[str] = ["Upstream"]
     if upstream_lines and mode == "forward":
         lines.append("    subgraph cluster_upstreams {")
@@ -1490,6 +1488,13 @@ def render_dot(
                     else _LISTENER_SECURE_FILL_LIGHT
                 )
                 font = "#111827" if theme == "dark" else "#ffffff"
+                # Use blue color for secure
+                fill = (
+                    _LISTENER_SECURE_FILL_DARK
+                    if theme == "dark"
+                    else _LISTENER_SECURE_FILL_LIGHT
+                )
+                font = "#111827" if theme == "dark" else "#ffffff"
             elif security == "insecure":
                 title = "Upstreams (insecure)"
                 fill = (
@@ -1499,9 +1504,14 @@ def render_dot(
                 )
                 font = "#111827" if theme == "dark" else "#ffffff"
             else:
-                title = "Upstreams"
-                fill = None
-                font = None
+                title = "Upstreams (insecure)"
+                # If we couldn't detect security, default to insecure styling
+                fill = (
+                    _LISTENER_INSECURE_FILL_DARK
+                    if theme == "dark"
+                    else _LISTENER_INSECURE_FILL_LIGHT
+                )
+                font = "#111827" if theme == "dark" else "#ffffff"
 
             label_bits = [title] + meta_bits + items
             label = "\\n".join(
@@ -1532,15 +1542,107 @@ def render_dot(
             security = (
                 "insecure" if has_insecure else ("secure" if has_secure else None)
             )
+            security = (
+                "insecure" if has_insecure else ("secure" if has_secure else None)
+            )
+            # If we couldn't detect from endpoint_lines (old config), default to insecure
+            if not security and upstream_lines:
+                security = "insecure"
             _emit_upstreams_node(node_id="Upstreams", items=items, security=security)
             upstream_tails = ["Upstreams"]
 
-        lines.append("    }")
+        # Emit routed upstreams as additional nodes in the upstreams cluster
+        for p in routed_plugins:
+            safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", p.name).strip("_") or "plugin"
+            rid = f"RoutedUpstream_{p.idx}_{safe_name}"
+
+            raw_lines = list(p.routed_upstream_lines or [])
+
+            # Analyze transported endpoints for security coloring
+            routed_secure: list[str] = []
+            routed_insecure: list[str] = []
+            for line in raw_lines:
+                if not line:
+                    continue
+                line = line.strip()
+                # Only analyze endpoint lines (protocol: endpoint pattern), skip metadata like "route:"
+                if ":" in line:
+                    proto, _, _rest = line.partition(":")
+                    proto = proto.strip().lower()
+                    # Only classify transport-based endpoints, not metadata like "route:", "upstreams:", etc.
+                    if proto in {"dot", "doh", "tcp", "udp"}:
+                        if proto in {"dot", "doh"}:
+                            routed_secure.append(line)
+                        else:
+                            routed_insecure.append(line)
+
+            # Determine styling based on transported endpoints
+            if routed_secure and routed_insecure:
+                # Mixed: default to insecure styling
+                r_fill = (
+                    _LISTENER_INSECURE_FILL_DARK
+                    if theme == "dark"
+                    else _LISTENER_INSECURE_FILL_LIGHT
+                )
+                r_font = "#111827" if theme == "dark" else "#ffffff"
+            elif routed_secure:
+                r_fill = (
+                    _LISTENER_SECURE_FILL_DARK
+                    if theme == "dark"
+                    else _LISTENER_SECURE_FILL_LIGHT
+                )
+                r_font = "#111827" if theme == "dark" else "#ffffff"
+            elif routed_insecure:
+                r_fill = (
+                    _LISTENER_INSECURE_FILL_DARK
+                    if theme == "dark"
+                    else _LISTENER_INSECURE_FILL_LIGHT
+                )
+                r_font = "#111827" if theme == "dark" else "#ffffff"
+            else:
+                # No endpoints: default to insecure styling
+                r_fill = (
+                    _LISTENER_INSECURE_FILL_DARK
+                    if theme == "dark"
+                    else _LISTENER_INSECURE_FILL_LIGHT
+                )
+                r_font = "#111827" if theme == "dark" else "#ffffff"
+
+            # Label: "Upstreams for\\n<plugin_name>"
+            r_label = r"Upstreams for\n" + _escape_dot_label(p.name)
+            payload = "\\n".join(
+                _escape_dot_label(_comma_newlines(x)) for x in raw_lines if x
+            )
+            if payload:
+                r_label += "\\n" + payload
+
+            attrs = [
+                f'label="{r_label}"',
+                f'fillcolor="{r_fill}"',
+                f'fontcolor="{r_font}"',
+            ]
+            lines.append(f"      {rid} [{', '.join(attrs)}];")
+            upstream_tails.append(rid)
+
+            # Add dashed arrow from plugin to its routed upstreams
+            pre_nid = pre_node_ids.get(p.idx)
+            if pre_nid:
+                lines.append(
+                    f"    {pre_nid} -> {rid} [style=dashed, constraint=false];"
+                )
+
+            # Upstream router plugins affect the cache by setting upstreams
+            lines.append(f"    {pre_nid} -> Cache [style=solid, constraint=false];")
 
         for tail in upstream_tails:
-            lines.append(f"    Upstream -> {tail};")
+            if tail.startswith("RoutedUpstream"):
+                lines.append(f"    Upstream -> {tail} [style=dashed, splines=3];")
+            else:
+                lines.append(f"    Upstream -> {tail};")
 
-    # Post plugins.
+        lines.append("    }")
+
+        # Post plugins.
     if post_chain:
         lines.append("    subgraph cluster_post {")
         lines.append('      label="Post-Resolve Plugins";')
@@ -1550,6 +1652,9 @@ def render_dot(
             lines.append('      style="rounded,filled";')
             lines.append(f'      fillcolor="{fill}";')
             lines.append(f'      color="{border}";')
+        # Add post cluster drop node for post-resolve drop actions
+        if any("drop" in p.post_actions for p in post_chain):
+            lines.append('      PostDrop [shape=ellipse, label="Drop (no reply)"];')
         first_post: str | None = None
         prev_post: str | None = None
         for p in post_chain:
@@ -1567,16 +1672,21 @@ def render_dot(
             resp_bits: list[str] = []
             if "deny" in p.post_actions:
                 rcode = getattr(p, "post_deny_rcode", None) or "NXDOMAIN"
-                resp_bits.append(f"deny ({rcode})")
+                resp_bits.append(r"deny\n" + rcode)
             if "override" in p.post_actions:
-                resp_bits.append("override (wire reply)")
+                resp_bits.append(r"override\nwire reply")
             if resp_bits and has_post_merge:
                 # Avoid these side edges distorting the main vertical chain layout.
+                label_text = "; ".join(resp_bits)
+                # Manually escape quotes for DOT
+                label_text = label_text.replace('"', '\\"')
                 lines.append(
-                    f'      {nid} -> PostMerge [label="{_escape_dot_label("; ".join(resp_bits))}", constraint=false];'
+                    f'      {nid} -> PostMerge [label="{label_text}", weight=1, constraint=false];'
                 )
             if "drop" in p.post_actions:
-                lines.append(f'      {nid} -> Drop [label="drop", constraint=false];')
+                lines.append(
+                    f'      {nid} -> PostDrop [label="drop", constraint=false];'
+                )
 
         if has_post_merge:
             # Place the merge node at the bottom of the post-plugins box.
