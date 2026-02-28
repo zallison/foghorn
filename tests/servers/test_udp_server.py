@@ -837,3 +837,91 @@ def test_handle_non_edns_large_response_sets_tc(monkeypatch):
     sent_wire, addr = sock.sent[0]
     resp = DNSRecord.parse(sent_wire)
     assert resp.header.tc == 1
+
+
+def test_cleanup_upstream_health_removes_stale_healthy_entries(monkeypatch):
+    """Brief: _cleanup_upstream_health removes old healthy entries.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that healthy entries older than max_age_hours are removed.
+    """
+    from foghorn.servers import udp_server as udp_mod
+    import time as _time_module
+
+    now = 1000000.0
+    monkeypatch.setattr(udp_mod.time, "time", lambda: now)
+
+    DNSUDPHandler.upstream_health.clear()
+
+    # Add an old healthy entry (down_until long past, fail_count=0)
+    up_old = {"host": "8.8.8.8", "port": 53}
+    up_id_old = DNSUDPHandler._upstream_id(up_old)
+    # down_until 25 hours ago (well past default 24h threshold)
+    DNSUDPHandler.upstream_health[up_id_old] = {
+        "fail_count": 0.0,
+        "down_until": now - (25 * 3600),
+    }
+
+    # Add a recent healthy entry (down_until recently, fail_count=0)
+    up_recent = {"host": "1.1.1.1", "port": 53}
+    up_id_recent = DNSUDPHandler._upstream_id(up_recent)
+    # down_until 1 hour ago (within 24h threshold)
+    DNSUDPHandler.upstream_health[up_id_recent] = {
+        "fail_count": 0.0,
+        "down_until": now - 3600,
+    }
+
+    # Add an unhealthy entry still in backoff window
+    up_down = {"host": "9.9.9.9", "port": 53}
+    up_id_down = DNSUDPHandler._upstream_id(up_down)
+    # down_until 1 hour in the future
+    DNSUDPHandler.upstream_health[up_id_down] = {
+        "fail_count": 2.0,
+        "down_until": now + 3600,
+    }
+
+    # Cleanup should remove old healthy but keep recent and unhealthy entries
+    DNSUDPHandler._cleanup_upstream_health(max_age_hours=24.0)
+
+    assert up_id_old not in DNSUDPHandler.upstream_health, "old healthy entry should be removed"
+    assert up_id_recent in DNSUDPHandler.upstream_health, "recent healthy entry should be kept"
+    assert up_id_down in DNSUDPHandler.upstream_health, "unhealthy entry in backoff should be kept"
+
+
+def test_cleanup_upstream_health_handles_corrupted_entries(monkeypatch):
+    """Brief: _cleanup_upstream_health safely skips malformed entries.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts that cleanup continues despite bad data.
+    """
+    from foghorn.servers import udp_server as udp_mod
+
+    now = 1000000.0
+    monkeypatch.setattr(udp_mod.time, "time", lambda: now)
+
+    DNSUDPHandler.upstream_health.clear()
+
+    # Add a valid entry
+    up_valid = {"host": "8.8.8.8", "port": 53}
+    up_id_valid = DNSUDPHandler._upstream_id(up_valid)
+    DNSUDPHandler.upstream_health[up_id_valid] = {
+        "fail_count": 0.0,
+        "down_until": now - 86400.0,  # 24 hours ago
+    }
+
+    # Add a corrupted entry (not a dict)
+    up_id_bad = "bad-key"
+    DNSUDPHandler.upstream_health[up_id_bad] = "not-a-dict"
+
+    # Cleanup should not raise and should produce a clean state
+    DNSUDPHandler._cleanup_upstream_health(max_age_hours=1.0)
+
+    # Invalid entry removed, old valid entry removed (older than 1 hour)
+    assert up_id_bad not in DNSUDPHandler.upstream_health
+    assert up_id_valid not in DNSUDPHandler.upstream_health
