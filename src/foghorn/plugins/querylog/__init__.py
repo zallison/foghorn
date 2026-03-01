@@ -56,6 +56,35 @@ class MultiStatsStore(BaseStatsStore):
 
         self._backends = list(backends)
 
+        # Derive an effective queue capacity for BaseStatsStore async operations.
+        # When multiple backends specify a capacity, prefer the smallest value
+        # (stricter wins) to avoid unbounded memory growth.
+        effective_max: int | None = None
+        for b in self._backends:
+            raw = None
+            try:
+                raw = getattr(b, "_max_logging_queue", None)
+                if raw is None:
+                    raw = getattr(b, "max_logging_queue", None)
+            except Exception:
+                raw = None
+            if raw is None:
+                continue
+            try:
+                v = int(raw)
+            except Exception:
+                continue
+            if effective_max is None:
+                effective_max = v
+            else:
+                effective_max = min(effective_max, v)
+
+        if effective_max is not None:
+            try:
+                self._max_logging_queue = int(effective_max)
+            except Exception:
+                self._max_logging_queue = 4096
+
     # Health and lifecycle -------------------------------------------------
     def health_check(self) -> bool:
         """Brief: Return True when the primary backend reports healthy.

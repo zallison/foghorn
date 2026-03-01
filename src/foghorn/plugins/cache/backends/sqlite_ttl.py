@@ -8,7 +8,6 @@ import threading
 import time
 from typing import Any, Optional, Tuple
 
-
 _logger = logging.getLogger(__name__)
 
 
@@ -55,6 +54,7 @@ class SQLite3TTLCache:
         table: Optional[str] = None,
         journal_mode: str = "WAL",
         create_dir: bool = True,
+        maxsize: int | None = None,
     ) -> None:
         """Brief: Initialize the sqlite TTL cache and ensure schema exists.
 
@@ -63,6 +63,9 @@ class SQLite3TTLCache:
           - table: table name.
           - journal_mode: sqlite journal mode.
           - create_dir: create parent directory for on-disk db_path.
+          - maxsize: Optional positive integer capacity bound. When set, the
+            cache performs best-effort eviction by deleting rows with the
+            earliest expiry after inserts.
 
         Outputs:
           - None.
@@ -74,6 +77,14 @@ class SQLite3TTLCache:
         self.journal_mode = str(journal_mode or "WAL")
         self.create_dir = bool(create_dir)
 
+        try:
+            max_i = int(maxsize) if maxsize is not None else None
+        except Exception:
+            max_i = None
+        if isinstance(max_i, int) and max_i <= 0:
+            max_i = None
+        self.maxsize: int | None = max_i
+
         # Per-cache access counters used by admin snapshots. These are best-effort
         # only and do not affect core cache semantics.
         self.calls_total: int = 0
@@ -81,10 +92,12 @@ class SQLite3TTLCache:
         self.cache_misses: int = 0
 
         # Eviction counters (best-effort) for diagnostics.
-        # evictions_total: total rows removed due to TTL expiry.
+        # evictions_total: total rows removed due to TTL expiry or maxsize.
         # evictions_ttl: TTL-based purges.
+        # evictions_capacity: best-effort size-based evictions.
         self.evictions_total: int = 0
         self.evictions_ttl: int = 0
+        self.evictions_capacity: int = 0
 
         self._lock = threading.RLock()
         self._conn = self._init_connection()
@@ -307,6 +320,69 @@ class SQLite3TTLCache:
 
         return value, remaining, ttl_i
 
+    def _enforce_maxsize_locked(self) -> int:
+        """Brief: Best-effort size enforcement by deleting rows with oldest expiry.
+
+        Inputs:
+          - None (uses self.maxsize and the current sqlite table).
+
+        Outputs:
+          - int: Number of rows removed.
+
+        Notes:
+          - This is intentionally best-effort; failures should not affect normal
+            caching behaviour.
+          - Eviction policy is "almost_expired" (oldest expiry first).
+        """
+
+        if not isinstance(self.maxsize, int) or self.maxsize <= 0:
+            return 0
+
+        table = self.namespace
+        try:
+            cur = self._conn.cursor()
+            cur.execute(f"SELECT COUNT(*) FROM {table}")
+            row = cur.fetchone()
+            count = int(row[0]) if row and row[0] is not None else 0
+        except Exception:
+            return 0
+
+        over = int(count - int(self.maxsize))
+        if over <= 0:
+            return 0
+
+        try:
+            cur2 = self._conn.cursor()
+            cur2.execute(
+                f"SELECT key_blob, key_is_pickle FROM {table} ORDER BY expiry ASC LIMIT ?",
+                (int(over),),
+            )
+            victims = list(cur2.fetchall() or [])
+        except Exception:
+            return 0
+
+        if not victims:
+            return 0
+
+        removed = 0
+        try:
+            cur3 = self._conn.cursor()
+            cur3.executemany(
+                f"DELETE FROM {table} WHERE key_blob=? AND key_is_pickle=?",
+                [(v[0], int(v[1])) for v in victims],
+            )
+            removed = int(cur3.rowcount or 0)
+        except Exception:
+            removed = 0
+
+        if removed > 0:
+            try:
+                self.evictions_total += removed
+                self.evictions_capacity += removed
+            except Exception:  # pragma: no cover
+                pass
+        return int(removed)
+
     def set(self, key: Any, ttl: int, value: Any) -> None:
         """Brief: Store a value under a key with TTL.
 
@@ -339,6 +415,13 @@ class SQLite3TTLCache:
                     int(value_is_pickle),
                 ),
             )
+
+            # Best-effort size enforcement.
+            try:
+                self._enforce_maxsize_locked()
+            except Exception:
+                pass
+
             self._conn.commit()
 
     def delete(self, key: Any) -> int:

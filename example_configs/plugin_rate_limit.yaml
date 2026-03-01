@@ -41,7 +41,7 @@ plugins:
           min_cache_ttl: 0
 
       # RateLimit-specific options
-      mode: per_domain
+      mode: per_client  # options: per_client | per_client_domain | per_domain
       window_seconds: 10
       warmup_windows: 3
       alpha: 0.4
@@ -49,8 +49,20 @@ plugins:
       burst_factor: 5.0
       min_enforce_rps: 4.0
       global_max_rps: 50.0
-      db_path: ./config/var/rate_limit.db
-      deny_response: ip
+      db_path: ./config/var/rate_limit.db # :memory:
+
+      # sqlite profile bounding/pruning
+      max_profiles: 10000
+      profile_ttl_seconds: 604800  # 7 days
+      prune_interval_seconds: 60
+
+      # Spoofing-robust UDP keying
+      udp_keying: cidr  # options: cidr | domain
+      udp_client_prefix_v4: 24
+      udp_client_prefix_v6: 56
+
+      deny_response: ip  # options: nxdomain | refused | servfail
+                         #     noerror_empty | nodata  | ip
       deny_response_ip4: 0.0.0.0
       deny_response_ip6: '::'
       ttl: 60

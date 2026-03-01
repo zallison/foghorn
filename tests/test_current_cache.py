@@ -17,13 +17,13 @@ import pytest
 
 import foghorn.utils.current_cache as current_cache_module
 from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
+from foghorn.plugins.cache.base import CachePlugin
+from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.utils.current_cache import (
     TTLCacheAdapter,
     get_current_namespaced_cache,
     module_namespace,
 )
-from foghorn.plugins.cache.base import CachePlugin
-from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 
 
 class _FakeBackendWithMeta:

@@ -10,13 +10,12 @@ Outputs:
 
 from __future__ import annotations
 
-from typing import List
-
-import pytest
-
 import importlib.util
 import pathlib
 import sys
+from typing import List
+
+import pytest
 
 # Load the sshfp_scan script as a module so we can call main() directly
 _SCRIPTS_DIR = pathlib.Path(__file__).resolve().parents[2] / "scripts"

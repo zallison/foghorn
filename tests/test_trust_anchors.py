@@ -10,8 +10,8 @@ Outputs:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
 import pathlib
+from datetime import datetime, timedelta, timezone
 
 import dns.dnssec
 import dns.name

@@ -11,15 +11,49 @@ from typing import Optional, Tuple
 from dnslib import QTYPE, RCODE, DNSRecord
 from pydantic import BaseModel, Field
 
-from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 from foghorn.plugins.resolve.base import (
     BasePlugin,
     PluginContext,
     PluginDecision,
     plugin_aliases,
 )
+from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=16384)
+def _psl_registrable_domain(qname: str) -> str | None:
+    """Brief: Return the PSL registrable domain (a.k.a. eTLD+1) for qname.
+
+    Inputs:
+      - qname: Domain name string; may include a trailing dot.
+
+    Outputs:
+      - str | None: Registrable domain (e.g. 'example.co.uk', 'user.github.io')
+        or None when it cannot be determined.
+
+    Notes:
+      - Uses the Public Suffix List via publicsuffix2.
+      - Returns None for empty input.
+    """
+
+    s = str(qname).strip().rstrip(".").lower()
+    if not s:
+        return None
+
+    try:
+        from publicsuffix2 import get_sld
+
+        # get_sld() returns the registrable domain (eTLD+1) when possible.
+        out = get_sld(s)
+        if out:
+            return str(out).strip().rstrip(".").lower()
+        return None
+    except Exception:
+        # Defensive: on any import/runtime error, fall back to non-PSL behavior
+        # in the caller.
+        return None
 
 
 class RateLimitConfig(BaseModel):
@@ -39,8 +73,22 @@ class RateLimitConfig(BaseModel):
       - min_enforce_rps: Minimum RPS threshold for enforcement.
       - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).
       - db_path: Path to sqlite3 database storing learned profiles.
+
+      - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).
+      - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this
+        are pruned during periodic maintenance (0 disables TTL pruning).
+      - prune_interval_seconds: Minimum seconds between prune passes (>= 0).
+
+      - udp_keying: Keying override applied when ctx.listener == 'udp' and the
+        request is not secure. Options:
+          - 'cidr' (default): bucket client IPs into /udp_client_prefix_v4 or
+            /udp_client_prefix_v6 to reduce spoofed-IP cardinality.
+          - 'domain': ignore client identity and key only by base domain.
+      - udp_client_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.
+      - udp_client_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.
+
       - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',
-        'noerror_empty'/'nodata', or 'ip').
+        'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.
       - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.
       - ttl: Optional TTL used when synthesizing IP responses.
 
@@ -57,7 +105,16 @@ class RateLimitConfig(BaseModel):
     min_enforce_rps: float = Field(default=50.0, ge=0.0)
     global_max_rps: float = Field(default=5000.0, ge=0.0)
     db_path: str = Field(default="./config/var/rate_limit.db")
-    deny_response: str = Field(default="nxdomain")
+
+    max_profiles: int = Field(default=10000, ge=1)
+    profile_ttl_seconds: int = Field(default=7 * 24 * 60 * 60, ge=0)
+    prune_interval_seconds: int = Field(default=60, ge=0)
+
+    udp_keying: str = Field(default="cidr")
+    udp_client_prefix_v4: int = Field(default=24, ge=0, le=32)
+    udp_client_prefix_v6: int = Field(default=56, ge=0, le=128)
+
+    deny_response: str = Field(default="refused")
     deny_response_ip4: Optional[str] = None
     deny_response_ip6: Optional[str] = None
     ttl: int = Field(default=60, ge=0)
@@ -68,16 +125,32 @@ class RateLimitConfig(BaseModel):
 
 @lru_cache(maxsize=16384)
 def _to_base_domain(qname: str, base_labels: int = 2) -> str:
-    """Brief: Extract base domain using the last N labels from qname.
+    """Brief: Extract a stable base domain for qname (PSL-aware when available).
 
     Inputs:
       - qname: Fully-qualified domain name string; trailing dot allowed.
-      - base_labels: Number of rightmost labels comprising the base.
+      - base_labels: Legacy fallback number of rightmost labels to use when PSL
+        parsing is unavailable or inconclusive.
 
     Outputs:
-      - str: Base domain such as 'example.com' for 'a.b.example.com.'.
+      - str: Base/registrable domain such as:
+          - 'example.com' for 'a.b.example.com.'
+          - 'example.co.uk' for 'a.b.example.co.uk.'
+          - 'user.github.io' for 'a.user.github.io.'
+        When PSL parsing cannot determine a registrable domain, falls back to
+        joining the last N labels.
+
+    Notes:
+      - This is used by RateLimit keying for per-domain modes, so PSL-awareness
+        helps prevent attackers from evading limits by exploiting multi-label
+        public suffixes (e.g. *.co.uk).
     """
 
+    psl = _psl_registrable_domain(qname)
+    if psl:
+        return psl
+
+    # Fallback: last-N labels (previous behavior).
     s = str(qname).rstrip(".").lower()
     labels = [p for p in s.split(".") if p]
     if len(labels) >= base_labels:
@@ -125,6 +198,44 @@ class RateLimit(BasePlugin):
             raw_mode = "per_client"
         self.mode = raw_mode
 
+        # Spoofing-aware keying for UDP (best-effort).
+        raw_udp_keying = str(self.config.get("udp_keying", "cidr") or "cidr").lower()
+        if raw_udp_keying not in {"cidr", "domain"}:
+            logger.warning(
+                "RateLimit: invalid udp_keying %r; using 'cidr'",
+                raw_udp_keying,
+            )
+            raw_udp_keying = "cidr"
+        self.udp_keying = raw_udp_keying
+
+        self.udp_client_prefix_v4 = self._parse_int_config(
+            "udp_client_prefix_v4",
+            24,
+            minimum=0,
+        )
+        self.udp_client_prefix_v6 = self._parse_int_config(
+            "udp_client_prefix_v6",
+            56,
+            minimum=0,
+        )
+        # Clamp prefix bounds explicitly.
+        self.udp_client_prefix_v4 = max(0, min(32, int(self.udp_client_prefix_v4)))
+        self.udp_client_prefix_v6 = max(0, min(128, int(self.udp_client_prefix_v6)))
+
+        # sqlite bounds / pruning knobs.
+        self.max_profiles = self._parse_int_config("max_profiles", 10000, minimum=1)
+        self.profile_ttl_seconds = self._parse_int_config(
+            "profile_ttl_seconds",
+            7 * 24 * 60 * 60,
+            minimum=0,
+        )
+        self.prune_interval_seconds = self._parse_int_config(
+            "prune_interval_seconds",
+            60,
+            minimum=0,
+        )
+        self._last_prune_ts: int = 0
+
         # Numeric configuration with defensive parsing
         self.window_seconds = self._parse_int_config("window_seconds", 10, minimum=1)
         self.warmup_windows = self._parse_int_config("warmup_windows", 6, minimum=0)
@@ -143,7 +254,7 @@ class RateLimit(BasePlugin):
 
         # Deny policy configuration
         deny_resp = str(
-            self.config.get("deny_response", "nxdomain") or "nxdomain"
+            self.config.get("deny_response", "refused") or "refused"
         ).lower()
         valid_deny = {
             "nxdomain",
@@ -155,10 +266,10 @@ class RateLimit(BasePlugin):
         }
         if deny_resp not in valid_deny:
             logger.warning(
-                "RateLimit: unknown deny_response %r; defaulting to 'nxdomain'",
+                "RateLimit: unknown deny_response %r; defaulting to 'refused'",
                 deny_resp,
             )
-            deny_resp = "nxdomain"
+            deny_resp = "refused"
         self.deny_response: str = deny_resp
         self.deny_response_ip4: Optional[str] = self.config.get("deny_response_ip4")
         self.deny_response_ip6: Optional[str] = self.config.get("deny_response_ip6")
@@ -263,6 +374,9 @@ class RateLimit(BasePlugin):
 
         Outputs:
           - None (creates self._conn and the rate_profiles table).
+
+        Notes:
+          - The database is bounded via best-effort pruning in _maybe_prune_db().
         """
 
         dir_path = os.path.dirname(self.db_path)
@@ -287,6 +401,11 @@ class RateLimit(BasePlugin):
                 "samples INTEGER NOT NULL, "
                 "last_update INTEGER NOT NULL"
                 ")"
+            )
+            # Index to support efficient pruning and stats inspection.
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rate_profiles_last_update "
+                "ON rate_profiles(last_update)"
             )
             self._conn.commit()
 
@@ -320,6 +439,87 @@ class RateLimit(BasePlugin):
                 exc,
             )
             return None
+
+    def _maybe_prune_db(self, *, now_ts: int) -> None:
+        """Brief: Best-effort pruning to bound sqlite3 growth.
+
+        Inputs:
+          - now_ts: Current epoch seconds used for TTL comparisons.
+
+        Outputs:
+          - None. May delete old rows and/or cap the total row count.
+
+        Notes:
+          - Pruning is intentionally best-effort and must never raise.
+          - TTL pruning is controlled via profile_ttl_seconds (0 disables).
+          - Row-count bounding is controlled via max_profiles.
+          - prune_interval_seconds throttles how often this runs.
+        """
+
+        try:
+            if int(self.prune_interval_seconds) > 0 and int(now_ts) - int(
+                getattr(self, "_last_prune_ts", 0) or 0
+            ) < int(self.prune_interval_seconds):
+                return
+        except Exception:
+            # If throttling fails, err on the side of skipping pruning.
+            return
+
+        with self._db_lock:
+            cur = self._conn.cursor()
+
+            # TTL-based pruning.
+            try:
+                ttl = int(getattr(self, "profile_ttl_seconds", 0) or 0)
+            except Exception:
+                ttl = 0
+            if ttl > 0:
+                try:
+                    cutoff = int(now_ts) - ttl
+                    cur.execute(
+                        "DELETE FROM rate_profiles WHERE last_update < ?",
+                        (int(cutoff),),
+                    )
+                except Exception:
+                    pass
+
+            # Row-count bound.
+            try:
+                max_rows = int(getattr(self, "max_profiles", 10000) or 10000)
+            except Exception:
+                max_rows = 10000
+            if max_rows < 1:
+                max_rows = 1
+
+            try:
+                cur.execute("SELECT COUNT(*) FROM rate_profiles")
+                row = cur.fetchone()
+                total = int(row[0]) if row and row[0] is not None else 0
+            except Exception:
+                total = 0
+
+            if total > max_rows:
+                try:
+                    excess = int(total - max_rows)
+                    # Delete the oldest rows first.
+                    cur.execute(
+                        "DELETE FROM rate_profiles WHERE key IN ("
+                        "SELECT key FROM rate_profiles ORDER BY last_update ASC LIMIT ?"
+                        ")",
+                        (int(excess),),
+                    )
+                except Exception:
+                    pass
+
+            try:
+                self._conn.commit()
+            except Exception:
+                pass
+
+        try:
+            self._last_prune_ts = int(now_ts)
+        except Exception:
+            self._last_prune_ts = 0
 
     def _db_update_profile(self, key: str, rps: float, now_ts: int) -> None:
         """Brief: Update or insert the learned profile for a key.
@@ -378,6 +578,39 @@ class RateLimit(BasePlugin):
                     )
             self._conn.commit()
 
+        # Best-effort pruning outside of the DB lock critical path.
+        try:
+            self._maybe_prune_db(now_ts=int(now_ts))
+        except Exception:
+            pass
+
+    def _client_ip_bucket(self, client_ip: str) -> str:
+        """Brief: Bucket a client IP into a CIDR prefix to reduce key cardinality.
+
+        Inputs:
+          - client_ip: Client IP string (IPv4 or IPv6).
+
+        Outputs:
+          - str: Canonical CIDR string like '192.0.2.0/24' or '2001:db8::/56'.
+
+        Notes:
+          - This is best-effort. On parse failures it returns the original client_ip.
+        """
+
+        try:
+            import ipaddress
+
+            ip_obj = ipaddress.ip_address(str(client_ip).strip())
+            if ip_obj.version == 4:
+                prefix = int(getattr(self, "udp_client_prefix_v4", 24) or 24)
+            else:
+                prefix = int(getattr(self, "udp_client_prefix_v6", 56) or 56)
+            prefix = max(0, min(32 if ip_obj.version == 4 else 128, prefix))
+            net = ipaddress.ip_network(f"{ip_obj}/{prefix}", strict=False)
+            return str(net)
+        except Exception:
+            return str(client_ip)
+
     def _make_key(self, qname: str, ctx: PluginContext) -> str:
         """Brief: Build the profiling key according to the configured mode.
 
@@ -386,10 +619,26 @@ class RateLimit(BasePlugin):
           - ctx: PluginContext providing client_ip.
 
         Outputs:
-          - str: Normalized key string (e.g., '1.2.3.4' or '1.2.3.4|example.com').
+          - str: Normalized key string (e.g., '1.2.3.4' or '1.2.3.0/24|example.com').
+
+        Notes:
+          - When ctx.listener == 'udp' and ctx.secure is falsey, the keying can be
+            overridden via udp_keying to reduce spoofed-source cardinality.
         """
 
         client_ip = getattr(ctx, "client_ip", "") or "unknown"
+        listener = str(getattr(ctx, "listener", "") or "").lower()
+        secure = bool(getattr(ctx, "secure", False))
+
+        # Spoofing-aware UDP overrides.
+        if listener == "udp" and not secure:
+            udp_keying = str(getattr(self, "udp_keying", "cidr") or "cidr").lower()
+            if udp_keying == "domain":
+                # Ignore client identity entirely for UDP.
+                return _to_base_domain(qname)
+            # Default: bucket client IP.
+            client_ip = self._client_ip_bucket(str(client_ip))
+
         if self.mode == "per_client_domain":
             base = _to_base_domain(qname)
             return f"{client_ip}|{base}"
@@ -483,7 +732,7 @@ class RateLimit(BasePlugin):
           - PluginDecision with action 'deny' or 'override' based on configuration.
         """
 
-        mode = (getattr(self, "deny_response", "nxdomain") or "nxdomain").lower()
+        mode = (getattr(self, "deny_response", "refused") or "refused").lower()
         if mode == "nxdomain":
             return PluginDecision(action="deny", stat="rate_limit")
 
@@ -532,7 +781,7 @@ class RateLimit(BasePlugin):
                         stat="rate_limit",
                     )
 
-        # Fallback: simple deny
+        # Fallback: simple deny (refused by default)
         return PluginDecision(action="deny", stat="rate_limit")
 
     def pre_resolve(

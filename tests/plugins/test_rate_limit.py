@@ -8,16 +8,16 @@ Outputs:
   - None (pytest assertions)
 """
 
-from contextlib import closing
 import threading
+from contextlib import closing
 
 import pytest
 from dnslib import QTYPE, DNSRecord
 from pydantic import ValidationError
 
+import foghorn.plugins.resolve.rate_limit as rate_limit_module
 from foghorn.plugins.resolve.base import PluginContext
 from foghorn.plugins.resolve.rate_limit import RateLimit
-import foghorn.plugins.resolve.rate_limit as rate_limit_module
 
 
 def _set_time(monkeypatch, value: float) -> None:
@@ -200,9 +200,43 @@ def test_profiles_persist_and_can_be_read_from_db(tmp_path, monkeypatch):
 
 
 def test_to_base_domain_single_label():
-    """Brief: Single-label qname returns as-is (base label path).\n\n    Inputs:\n      - None.\n\n    Outputs:\n      - None: asserts helper returns the original label.\n"""
+    """Brief: Single-label qname returns as-is.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None: asserts helper returns the original label.
+    """
 
     assert rate_limit_module._to_base_domain("localhost.") == "localhost"
+
+
+def test_to_base_domain_is_psl_aware_for_common_suffixes():
+    """Brief: Base domain extraction uses the Public Suffix List (PSL).
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None: asserts multi-label public suffixes (e.g. co.uk) are handled.
+    """
+
+    assert rate_limit_module._to_base_domain("a.b.example.co.uk.") == "example.co.uk"
+    assert rate_limit_module._to_base_domain("a.b.example.com.au.") == "example.com.au"
+
+
+def test_to_base_domain_is_psl_aware_for_private_suffixes_like_github_io():
+    """Brief: PSL extraction respects common private suffix entries.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None: asserts github.io-style suffixes keep the user label.
+    """
+
+    assert rate_limit_module._to_base_domain("a.b.user.github.io.") == "user.github.io"
 
 
 def test_get_config_model_returns_config_class():
@@ -341,13 +375,13 @@ def test_invalid_mode_defaults_to_per_client(tmp_path):
     assert plugin.mode == "per_client"
 
 
-def test_invalid_deny_response_defaults_to_nxdomain(tmp_path):
-    """Brief: Unknown deny_response falls back to 'nxdomain'.\n\n    Inputs:\n      - tmp_path: pytest tmp path for sqlite db.\n\n    Outputs:\n      - None: asserts deny_response attribute is normalized.\n"""
+def test_invalid_deny_response_defaults_to_refused(tmp_path):
+    """Brief: Unknown deny_response falls back to 'refused'.\n\n    Inputs:\n      - tmp_path: pytest tmp path for sqlite db.\n\n    Outputs:\n      - None: asserts deny_response attribute is normalized.\n"""
 
     db = tmp_path / "rl-deny.db"
     plugin = RateLimit(db_path=str(db), deny_response="bogus")
     plugin.setup()
-    assert plugin.deny_response == "nxdomain"
+    assert plugin.deny_response == "refused"
 
 
 def test_int_config_parsing_and_clamping(tmp_path):
@@ -674,3 +708,58 @@ def test_db_get_profile_is_thread_safe_with_lock(tmp_path):
     assert avg_rps >= 0.0
     assert max_rps >= avg_rps
     assert samples >= 1
+
+
+def test_db_prunes_by_max_profiles(tmp_path):
+    """Brief: sqlite profile table is bounded by max_profiles via pruning.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite DB.
+
+    Outputs:
+      - None: asserts total rows never exceed max_profiles after updates.
+    """
+
+    db = tmp_path / "rl-prune-max.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        max_profiles=3,
+        prune_interval_seconds=0,
+        profile_ttl_seconds=0,
+    )
+    plugin.setup()
+
+    # Write more profiles than the cap.
+    for i in range(10):
+        plugin._db_update_profile(f"client-{i}", 1.0, now_ts=1000 + i)
+
+    cur = plugin._conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM rate_profiles")
+    count = int(cur.fetchone()[0])
+    assert count <= 3
+
+
+def test_db_prunes_by_profile_ttl_seconds(tmp_path):
+    """Brief: sqlite profiles older than profile_ttl_seconds are pruned.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite DB.
+
+    Outputs:
+      - None: asserts old rows are removed after a later update triggers pruning.
+    """
+
+    db = tmp_path / "rl-prune-ttl.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        max_profiles=100,
+        prune_interval_seconds=0,
+        profile_ttl_seconds=1,
+    )
+    plugin.setup()
+
+    plugin._db_update_profile("old", 1.0, now_ts=0)
+    plugin._db_update_profile("new", 1.0, now_ts=10)
+
+    assert plugin._db_get_profile("new") is not None
+    assert plugin._db_get_profile("old") is None

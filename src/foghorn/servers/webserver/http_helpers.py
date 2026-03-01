@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import threading
@@ -10,9 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException, Request, status
 
-import logging
 from .stats_helpers import _utc_now_iso
-
 
 logger = logging.getLogger("foghorn.webserver")
 

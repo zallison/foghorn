@@ -807,7 +807,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip').\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /udp_client_prefix_v4 or\n        /udp_client_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - udp_client_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - udp_client_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip').\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
           "properties": {
             "alpha": {
               "default": 0.2,
@@ -887,6 +887,13 @@
               "title": "Global Max Rps",
               "type": "number"
             },
+            "max_profiles": {
+              "default": 10000,
+              "description": "Type: integer. Default: 10000.",
+              "minimum": 1,
+              "title": "Max Profiles",
+              "type": "integer"
+            },
             "min_enforce_rps": {
               "default": 50.0,
               "description": "Type: number. Default: 50.0.",
@@ -900,12 +907,48 @@
               "title": "Mode",
               "type": "string"
             },
+            "profile_ttl_seconds": {
+              "default": 604800,
+              "description": "Type: integer. Default: 604800.",
+              "minimum": 0,
+              "title": "Profile Ttl Seconds",
+              "type": "integer"
+            },
+            "prune_interval_seconds": {
+              "default": 60,
+              "description": "Type: integer. Default: 60.",
+              "minimum": 0,
+              "title": "Prune Interval Seconds",
+              "type": "integer"
+            },
             "ttl": {
               "default": 60,
               "description": "Type: integer. Default: 60.",
               "minimum": 0,
               "title": "Ttl",
               "type": "integer"
+            },
+            "udp_client_prefix_v4": {
+              "default": 24,
+              "description": "Type: integer. Default: 24.",
+              "maximum": 32,
+              "minimum": 0,
+              "title": "Udp Client Prefix V4",
+              "type": "integer"
+            },
+            "udp_client_prefix_v6": {
+              "default": 56,
+              "description": "Type: integer. Default: 56.",
+              "maximum": 128,
+              "minimum": 0,
+              "title": "Udp Client Prefix V6",
+              "type": "integer"
+            },
+            "udp_keying": {
+              "default": "cidr",
+              "description": "Type: string. Default: \"cidr\".",
+              "title": "Udp Keying",
+              "type": "string"
             },
             "warmup_windows": {
               "default": 6,
@@ -926,6 +969,64 @@
           "type": "object"
         },
         "module": "foghorn.plugins.resolve.rate_limit.RateLimit"
+      },
+      "ssh_keys": {
+        "aliases": [
+          "ssh_keys"
+        ],
+        "config_schema": {
+          "additionalProperties": true,
+          "description": "Brief: Typed configuration model for SshKeys.\n\nInputs:\n  - targets: List of IPs, CIDR ranges, and/or hostnames to scan.\n  - scan_threads: Maximum number of concurrent SSH probes.\n  - ttl: DNS TTL to apply to synthesized SSHFP answers.\n  - db_path: Filesystem path to the sqlite database storing SSH keys.\n  - port: SSH TCP port used when probing hosts.\n  - timeout_seconds: Socket/handshake timeout when fetching keys.\n\nOutputs:\n  - SshKeysConfig instance with normalized field types.",
+          "properties": {
+            "db_path": {
+              "default": "./config/var/ssh_keys.db",
+              "description": "Type: string. Default: \"./config/var/ssh_keys.db\".",
+              "title": "Db Path",
+              "type": "string"
+            },
+            "port": {
+              "default": 22,
+              "description": "Type: integer. Default: 22.",
+              "maximum": 65535,
+              "minimum": 1,
+              "title": "Port",
+              "type": "integer"
+            },
+            "scan_threads": {
+              "default": 4,
+              "description": "Type: integer. Default: 4.",
+              "minimum": 1,
+              "title": "Scan Threads",
+              "type": "integer"
+            },
+            "targets": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Targets",
+              "type": "array"
+            },
+            "timeout_seconds": {
+              "default": 5.0,
+              "description": "Type: number. Default: 5.0.",
+              "minimum": 0.1,
+              "title": "Timeout Seconds",
+              "type": "number"
+            },
+            "ttl": {
+              "default": 300,
+              "description": "Type: integer. Default: 300.",
+              "minimum": 0,
+              "title": "Ttl",
+              "type": "integer"
+            }
+          },
+          "title": "SshKeysConfig",
+          "type": "object"
+        },
+        "module": "foghorn.plugins.resolve.ssh_keys.SshKeys"
       },
       "upstream_router": {
         "aliases": [
@@ -1104,7 +1205,7 @@
             },
             "AxfrZoneConfig": {
               "additionalProperties": false,
-              "description": "Brief: Configuration for a single AXFR-backed zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - upstreams: List of upstream servers to transfer from.\n  - masters: Legacy alias for upstreams (deprecated).\n  - allow_no_dnssec: Accept transfer even if DNSSEC is missing or invalid\n    (default True). When False, zones without valid DNSSEC will be rejected\n    once DNSSEC validation for AXFR is implemented.\n\nOutputs:\n  - AxfrZoneConfig instance.",
+              "description": "Brief: Configuration for a single AXFR-backed zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - upstreams: List of upstream servers to transfer from.\n  - masters: Legacy alias for upstreams (deprecated).\n  - allow_no_dnssec: Accept transfer even if DNSSEC is missing or invalid\n    (default True). When False, zones without valid DNSSEC will be rejected\n    once DNSSEC validation for AXFR is implemented.\n  - minimum_reload_time: Minimum seconds between AXFR reloads. Reloads will\n    only occur after this time has elapsed since the original load or since\n    the last NOTIFY was received for the zone.\n\nOutputs:\n  - AxfrZoneConfig instance.",
               "properties": {
                 "allow_no_dnssec": {
                   "default": true,
@@ -1129,6 +1230,13 @@
                   "default": null,
                   "description": "Legacy alias for upstreams (deprecated).",
                   "title": "Masters"
+                },
+                "minimum_reload_time": {
+                  "default": 0,
+                  "description": "Minimum seconds between AXFR reloads. Reloads only occur after this time has elapsed since the original load or since the last NOTIFY was received for the zone. A value of 0 reloads on every load. Default: 0.",
+                  "minimum": 0,
+                  "title": "Minimum Reload Time",
+                  "type": "number"
                 },
                 "upstreams": {
                   "anyOf": [
@@ -1306,7 +1414,7 @@
             }
           },
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"merge\" (default): preserve existing records and overlay newly loaded ones.\n    - \"replace\": rebuild records from configured sources on each load.\n    - \"first\": use the first configured source group in this order:\n      file_paths \u2192 bind_paths \u2192 axfr_zones \u2192 records (inline), and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - axfr_zones: Optional list of AXFR-backed zones.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"merge\" (default): preserve existing records and overlay newly loaded ones.\n    - \"replace\": rebuild records from configured sources on each load.\n    - \"first\": use the first configured source group in this order:\n      records (inline) \u2192 axfr_zones \u2192 file_paths \u2192 bind_paths, and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - axfr_zones: Optional list of AXFR-backed zones.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
           "properties": {
             "axfr_notify": {
               "anyOf": [
@@ -3152,11 +3260,193 @@
           "type": "boolean"
         },
         "http": {
+          "additionalProperties": true,
           "description": "Type: object.",
+          "properties": {
+            "allow_threaded_fallback": {
+              "default": true,
+              "description": "When false, refuse to start the threaded stdlib admin HTTP fallback when FastAPI/uvicorn or asyncio is unavailable. Default: true.",
+              "type": "boolean"
+            },
+            "enable_api": {
+              "default": true,
+              "description": "When false, do not serve the admin API endpoints (e.g. /api/v1/stats, /config, /logs). Default: true.",
+              "type": "boolean"
+            },
+            "enable_docs": {
+              "default": true,
+              "description": "When false, disable Swagger UI at /docs (requires enable_schema=true). Default: true.",
+              "type": "boolean"
+            },
+            "enable_schema": {
+              "default": true,
+              "description": "When false, disable OpenAPI schema generation and /openapi.json. Default: true.",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "limits": {
+          "additionalProperties": true,
+          "properties": {
+            "resolver_executor_workers": {
+              "default": null,
+              "description": "Max workers for the shared resolver ThreadPoolExecutor used by asyncio listeners (TCP/DoT). Null uses a conservative default.",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         },
         "listen": {
+          "additionalProperties": true,
           "description": "Type: object.",
+          "properties": {
+            "doh": {
+              "additionalProperties": true,
+              "description": "Type: object. Object with subkeys: allow_threaded_fallback.",
+              "properties": {
+                "allow_threaded_fallback": {
+                  "default": true,
+                  "description": "When false, refuse to start the threaded stdlib DoH fallback when FastAPI/uvicorn or asyncio is unavailable. Default: true.",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "dot": {
+              "additionalProperties": true,
+              "description": "Type: object. Object with subkeys: idle_timeout_seconds, max_connections, max_connections_per_ip, max_queries_per_connection.",
+              "properties": {
+                "idle_timeout_seconds": {
+                  "default": 15.0,
+                  "description": "Idle timeout (seconds) before closing an inactive connection. Default: 15.0.",
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "max_connections": {
+                  "default": 1024,
+                  "description": "Maximum concurrent connections accepted by this listener. Default: 1024.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_connections_per_ip": {
+                  "default": 64,
+                  "description": "Maximum concurrent connections from a single client IP. Default: 64.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_queries_per_connection": {
+                  "default": 100,
+                  "description": "Maximum number of DNS queries processed per connection before closing it. Default: 100.",
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "tcp": {
+              "additionalProperties": true,
+              "description": "Type: object. Object with subkeys: idle_timeout_seconds, max_connections, max_connections_per_ip, max_queries_per_connection.",
+              "properties": {
+                "idle_timeout_seconds": {
+                  "default": 15.0,
+                  "description": "Idle timeout (seconds) before closing an inactive connection. Default: 15.0.",
+                  "minimum": 0,
+                  "type": "number"
+                },
+                "max_connections": {
+                  "default": 1024,
+                  "description": "Maximum concurrent connections accepted by this listener. Default: 1024.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_connections_per_ip": {
+                  "default": 64,
+                  "description": "Maximum concurrent connections from a single client IP. Default: 64.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_queries_per_connection": {
+                  "default": 100,
+                  "description": "Maximum number of DNS queries processed per connection before closing it. Default: 100.",
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "udp": {
+              "additionalProperties": true,
+              "description": "Type: object. Object with subkeys: allow_threaded_fallback, exit_on_asyncio_failure, max_inflight, max_inflight_by_cidr, max_inflight_per_ip, max_response_bytes, use_asyncio.",
+              "properties": {
+                "allow_threaded_fallback": {
+                  "default": true,
+                  "description": "When false, refuse to fall back to the threaded ThreadingUDPServer when asyncio UDP cannot start. Default: true.",
+                  "type": "boolean"
+                },
+                "exit_on_asyncio_failure": {
+                  "default": false,
+                  "description": "When true, exit non-zero if the asyncio UDP listener fails to start, instead of falling back to a threaded UDP server. Default: false.",
+                  "type": "boolean"
+                },
+                "max_inflight": {
+                  "default": 1024,
+                  "description": "Global cap on in-flight UDP queries for asyncio UDP listener. Default: 1024.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_inflight_by_cidr": {
+                  "description": "Optional CIDR bucket limits for UDP in-flight queries. Each entry is {cidr, max_inflight}. When multiple buckets match a client IP, the strictest (smallest max_inflight) wins.",
+                  "items": {
+                    "additionalProperties": false,
+                    "description": "Type: object. Object with subkeys: cidr, max_inflight.",
+                    "properties": {
+                      "cidr": {
+                        "description": "CIDR block (e.g. '10.0.0.0/8' or '2001:db8::/32').",
+                        "type": "string"
+                      },
+                      "max_inflight": {
+                        "description": "Maximum in-flight UDP queries for clients within this CIDR.",
+                        "minimum": 1,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "cidr",
+                      "max_inflight"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "max_inflight_per_ip": {
+                  "default": 64,
+                  "description": "Per-client-IP cap on in-flight UDP queries for asyncio UDP listener. Default: 64.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_response_bytes": {
+                  "default": null,
+                  "description": "Optional explicit UDP response size ceiling. When null, defaults to server.dnssec.udp_payload_size. Effective ceiling per query is min(client advertised EDNS UDP size (or 512 without EDNS), server ceiling).",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "use_asyncio": {
+                  "default": true,
+                  "description": "When true, prefer the asyncio UDP listener when available. Default: true.",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            }
+          },
           "type": "object"
         },
         "resolver": {

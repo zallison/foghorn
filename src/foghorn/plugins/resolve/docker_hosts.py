@@ -15,11 +15,12 @@ import logging
 import threading
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from dnslib import AAAA, PTR, QTYPE, RR, A, DNSHeader, DNSRecord, TXT
+from dnslib import AAAA, PTR, QTYPE, RR, TXT, A, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field
 
 try:  # cachetools is an optional dependency; fall back to shim when missing.
-    from cachetools import TTLCache, LRUCache, Cache  # type: ignore[import]
+    from cachetools import Cache, LRUCache, TTLCache  # type: ignore[import]
+
     from foghorn.utils.register_caches import registered_cached
 except (
     Exception

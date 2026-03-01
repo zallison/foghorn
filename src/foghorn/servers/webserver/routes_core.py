@@ -3,38 +3,33 @@ from __future__ import annotations
 import os
 import shutil
 import signal
+import sys as _sys
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from . import admin_logic as _admin_logic
-from . import config_persistence as _config_persistence
-from .http_helpers import _schedule_process_signal
-
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi import File, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
-from fastapi import status
-
-from ...utils.config_diagram import (
-    diagram_png_candidate_paths_for_config,
-    diagram_dark_png_candidate_paths_for_config,
-    diagram_dot_candidate_paths_for_config,
-    find_first_existing_path,
-    stale_diagram_warning,
-    generate_dot_text_from_config_path,
-)
-
-import sys as _sys
 
 from ...stats import StatsCollector
+from ...utils.config_diagram import (
+    diagram_dark_png_candidate_paths_for_config,
+    diagram_dot_candidate_paths_for_config,
+    diagram_png_candidate_paths_for_config,
+    find_first_existing_path,
+    generate_dot_text_from_config_path,
+    stale_diagram_warning,
+)
+from . import admin_logic as _admin_logic
+from . import config_persistence as _config_persistence
 from .config_helpers import (
-    _get_redact_keys,
-    _get_config_raw_text,
     _get_config_raw_json,
+    _get_config_raw_text,
+    _get_redact_keys,
+    _get_sanitized_config_yaml_cached,
     _parse_utc_datetime,
     sanitize_config,
-    _get_sanitized_config_yaml_cached,
 )
+from .http_helpers import _schedule_process_signal
 from .runtime import RuntimeState, evaluate_readiness
 from .stats_helpers import _utc_now_iso
 
@@ -66,17 +61,29 @@ def _register_core_routes(app: FastAPI) -> None:
     """Register core health/about/ready endpoints on the FastAPI app."""
 
     @app.get("/api/v1/health")
-    @app.get("/health")
+    @app.get("/health", include_in_schema=False)
     async def health() -> Dict[str, Any]:
+        """Health check.
+
+        Aliases:
+          - /health
+        """
+
         return {"status": "ok", "server_time": _utc_now_iso()}
 
     @app.get("/api/v1/about")
-    @app.get("/about")
+    @app.get("/about", include_in_schema=False)
     async def about() -> Dict[str, Any]:
+        """About/build metadata.
+
+        Aliases:
+          - /about
+        """
+
         return _get_about_payload()
 
     @app.get("/api/v1/ready")
-    @app.get("/ready")
+    @app.get("/ready", include_in_schema=False)
     async def ready() -> JSONResponse:
         state: RuntimeState | None = getattr(app.state, "runtime_state", None)
         ready_ok, not_ready, details = evaluate_readiness(
@@ -99,7 +106,7 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
     """Register configuration management endpoints."""
 
     @app.get("/api/v1/config", dependencies=[Depends(auth_dep)])
-    @app.get("/config", dependencies=[Depends(auth_dep)])
+    @app.get("/config", dependencies=[Depends(auth_dep)], include_in_schema=False)
     async def get_config() -> PlainTextResponse:
         cfg = app.state.config or {}
         redact_keys = _get_redact_keys(cfg)
@@ -108,7 +115,7 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         return PlainTextResponse(body, media_type="application/x-yaml")
 
     @app.get("/api/v1/config/raw", dependencies=[Depends(auth_dep)])
-    @app.get("/config/raw", dependencies=[Depends(auth_dep)])
+    @app.get("/config/raw", dependencies=[Depends(auth_dep)], include_in_schema=False)
     async def get_config_raw() -> PlainTextResponse:
         cfg_path = getattr(app.state, "config_path", None)
         if not cfg_path:
@@ -128,7 +135,7 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         return PlainTextResponse(raw_text, media_type="application/x-yaml")
 
     @app.get("/api/v1/config.json", dependencies=[Depends(auth_dep)])
-    @app.get("/config.json", dependencies=[Depends(auth_dep)])
+    @app.get("/config.json", dependencies=[Depends(auth_dep)], include_in_schema=False)
     async def get_config_json() -> Dict[str, Any]:
         cfg = app.state.config or {}
         redact_keys = _get_redact_keys(cfg)
@@ -136,7 +143,11 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         return {"server_time": _utc_now_iso(), "config": clean}
 
     @app.get("/api/v1/config/diagram.png", dependencies=[Depends(auth_dep)])
-    @app.get("/config/diagram.png", dependencies=[Depends(auth_dep)])
+    @app.get(
+        "/config/diagram.png",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     async def get_config_diagram_png(meta: int | None = None):
         """Serve the config diagram PNG (when available).
 
@@ -235,7 +246,11 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         return FileResponse(str(png_file), media_type="image/png", headers=headers)
 
     @app.get("/api/v1/config/diagram-dark.png", dependencies=[Depends(auth_dep)])
-    @app.get("/config/diagram-dark.png", dependencies=[Depends(auth_dep)])
+    @app.get(
+        "/config/diagram-dark.png",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     async def get_config_diagram_png_dark(meta: int | None = None):
         """Serve the config diagram dark-theme PNG (when available).
 
@@ -308,7 +323,11 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         return FileResponse(str(png_file), media_type="image/png", headers=headers)
 
     @app.post("/api/v1/config/diagram.png", dependencies=[Depends(auth_dep)])
-    @app.post("/config/diagram.png", dependencies=[Depends(auth_dep)])
+    @app.post(
+        "/config/diagram.png",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     async def upload_config_diagram_png(file: UploadFile = File(...)) -> Dict[str, Any]:
         """Brief: Upload a custom config diagram PNG.
 
@@ -400,7 +419,11 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         }
 
     @app.get("/api/v1/config/diagram.dot", dependencies=[Depends(auth_dep)])
-    @app.get("/config/diagram.dot", dependencies=[Depends(auth_dep)])
+    @app.get(
+        "/config/diagram.dot",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     async def get_config_diagram_dot(meta: int | None = None) -> PlainTextResponse:
         cfg_path = getattr(app.state, "config_path", None)
         if not cfg_path:
@@ -456,7 +479,11 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         return PlainTextResponse(text, media_type="text/plain", headers=headers)
 
     @app.get("/api/v1/config/raw.json", dependencies=[Depends(auth_dep)])
-    @app.get("/config/raw.json", dependencies=[Depends(auth_dep)])
+    @app.get(
+        "/config/raw.json",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     async def get_config_raw_json() -> Dict[str, Any]:
         cfg_path = getattr(app.state, "config_path", None)
         if not cfg_path:
@@ -591,7 +618,11 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         }
 
     @app.post("/api/v1/config/save", dependencies=[Depends(auth_dep)])
-    @app.post("/config/save", dependencies=[Depends(auth_dep)])
+    @app.post(
+        "/config/save",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     async def save_config(body: Dict[str, Any]) -> JSONResponse:
         """Brief: Persist config YAML without applying reload or restart.
 
@@ -626,7 +657,11 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         return JSONResponse(content=_json_safe(payload), status_code=200)
 
     @app.post("/api/v1/config/save_and_reload", dependencies=[Depends(auth_dep)])
-    @app.post("/config/save_and_reload", dependencies=[Depends(auth_dep)])
+    @app.post(
+        "/config/save_and_reload",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     async def save_and_reload_config(body: Dict[str, Any]) -> JSONResponse:
         """Brief: Persist config YAML and apply an in-process reload when possible.
 
@@ -723,7 +758,11 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         )
 
     @app.post("/api/v1/config/save_and_restart", dependencies=[Depends(auth_dep)])
-    @app.post("/config/save_and_restart", dependencies=[Depends(auth_dep)])
+    @app.post(
+        "/config/save_and_restart",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     async def save_and_restart_config(body: Dict[str, Any]) -> JSONResponse:
         """Brief: Persist config YAML and schedule a restart (SIGHUP).
 
@@ -748,10 +787,22 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         }
         return JSONResponse(content=_json_safe(payload), status_code=200)
 
-    @app.post("/api/v1/config/reload", dependencies=[Depends(auth_dep)])
-    @app.post("/config/reload", dependencies=[Depends(auth_dep)])
+    @app.post(
+        "/api/v1/config/reload",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
+    @app.post(
+        "/config/reload",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     @app.post("/api/v1/reload", dependencies=[Depends(auth_dep)])
-    @app.post("/reload", dependencies=[Depends(auth_dep)])
+    @app.post(
+        "/reload",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     async def reload_config() -> JSONResponse:
         """Brief: Reload runtime config from the on-disk YAML.
 
@@ -839,9 +890,21 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         )
 
     @app.post("/api/v1/reload_reloadable", dependencies=[Depends(auth_dep)])
-    @app.post("/reload_reloadable", dependencies=[Depends(auth_dep)])
-    @app.post("/api/v1/config/reload_reloadable", dependencies=[Depends(auth_dep)])
-    @app.post("/config/reload_reloadable", dependencies=[Depends(auth_dep)])
+    @app.post(
+        "/reload_reloadable",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
+    @app.post(
+        "/api/v1/config/reload_reloadable",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
+    @app.post(
+        "/config/reload_reloadable",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     async def reload_reloadable() -> JSONResponse:
         """Brief: Reload only zero-downtime-safe settings, even if restart is required.
 
@@ -923,7 +986,11 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         )
 
     @app.post("/api/v1/restart", dependencies=[Depends(auth_dep)])
-    @app.post("/restart", dependencies=[Depends(auth_dep)])
+    @app.post(
+        "/restart",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     async def restart_process(body: Dict[str, Any] | None = None) -> JSONResponse:
         """Brief: Schedule a process restart (SIGHUP) without saving or reloading.
 
@@ -960,7 +1027,11 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
     """Register query_log and query_log/aggregate endpoints."""
 
     @app.get("/api/v1/query_log", dependencies=[Depends(auth_dep)])
-    @app.get("/query_log", dependencies=[Depends(auth_dep)])
+    @app.get(
+        "/query_log",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     async def get_query_log(
         client_ip: str | None = None,
         qtype: str | None = None,
@@ -1027,7 +1098,11 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
         return payload
 
     @app.get("/api/v1/query_log/aggregate", dependencies=[Depends(auth_dep)])
-    @app.get("/query_log/aggregate", dependencies=[Depends(auth_dep)])
+    @app.get(
+        "/query_log/aggregate",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     async def get_query_log_aggregate(
         interval: int,
         interval_units: str,
@@ -1479,7 +1554,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         return out
 
     @app.get("/api/v1/logs", dependencies=[Depends(auth_dep)])
-    @app.get("/logs", dependencies=[Depends(auth_dep)])
+    @app.get("/logs", dependencies=[Depends(auth_dep)], include_in_schema=False)
     async def get_logs(limit: int = 100) -> Dict[str, Any]:
         buf = app.state.log_buffer
         entries = buf.snapshot(limit=max(0, int(limit)))
