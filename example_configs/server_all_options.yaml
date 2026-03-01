@@ -19,6 +19,10 @@ server:
     # - integer: explicit max worker count
     resolver_executor_workers: 32
 
+    # Allow threaded listeners on non-loopback addresses (DANGEROUS: DoS-vulnerable).
+    # This is only for restricted environments where asyncio is unavailable.
+    allow_unsafe_threaded_listeners: false
+
   # ----- Listener configuration -----
   listen:
     # Optional defaults (used as fallback for per-listener host/port when set)
@@ -37,6 +41,11 @@ server:
       enabled: true
       host: 127.0.0.1
       port: 5335
+
+      # UDP listener uses asyncio by default, except on localhost.
+      # Set use_asyncio: false to force the legacy threaded implementation.
+      # Set allow_unsafe_threaded_listeners: true (in server.limits) to use
+      # threading on non-loopback addresses (not recommended due to DoS).
 
     tcp:
       enabled: false

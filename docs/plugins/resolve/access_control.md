@@ -14,16 +14,18 @@ Typical use cases:
 ```yaml path=null start=null
 plugins:
   - id: acl-lan-only
-    type: access_control
-    hooks:
-      pre_resolve: { priority: 10 }
-    config:
-      # Default policy: deny everything not explicitly allowed
-      default: deny
-      # Allow RFC1918 LANs
-      allow:
-        - 192.168.0.0/16
-        - 10.0.0.0/8
+	type: access_control
+	hooks:
+	  pre_resolve: { priority: 10 }
+	config:
+	  # Default policy: deny everything not explicitly allowed
+	  default: deny
+	  # Allow RFC1918 LANs
+	  allow:
+		- 192.168.0.0/16
+		- 172.16.0.0/12
+		- 10.0.0.0/8
+		- 127.0.0.1/8
 ```
 
 ## Full configuration (all plugin + base options)
@@ -31,35 +33,35 @@ plugins:
 ```yaml path=null start=null
 plugins:
   - id: acl-example
-    type: access_control
-    hooks:
-      pre_resolve:  { priority: 10 }
-      post_resolve: { priority: 10 }
-    config:
-      # BasePlugin targeting
-      targets:
-        - 0.0.0.0/0          # apply to all clients
-      targets_ignore:
-        - 192.0.2.10/32      # but skip this one IP completely
-      targets_listener: any  # udp|tcp|dot|doh|secure|insecure|any
-      target_qtypes: [ '*' ]
+	type: access_control
+	hooks:
+	  pre_resolve:  { priority: 10 }
+	  post_resolve: { priority: 10 }
+	config:
+	  # BasePlugin targeting
+	  targets:
+		- 0.0.0.0/0          # apply to all clients
+	  targets_ignore:
+		- 192.0.2.10/32      # but skip this one IP completely
+	  targets_listener: any  # udp|tcp|dot|doh|secure|insecure|any
+	  target_qtypes: [ '*' ]
 
-      # BasePlugin logging
-      logging:
-        level: info
-        stderr: true
+	  # BasePlugin logging
+	  logging:
+		level: info
+		stderr: true
 
-      # AccessControl-specific options
-      # Default decision when a client does not match allow/deny lists.
-      default: allow          # 'allow' (default) or 'deny'
+	  # AccessControl-specific options
+	  # Default decision when a client does not match allow/deny lists.
+	  default: allow          # 'allow' (default) or 'deny'
 
-      # Explicit allowlist / denylist of client networks.
-      allow:
-        - 192.168.0.0/16
-        - 10.0.0.0/8
-      deny:
-        - 203.0.113.0/24
-        - 198.51.100.23/32
+	  # Explicit allowlist / denylist of client networks.
+	  allow:
+		- 192.168.0.0/16
+		- 10.0.0.0/8
+	  deny:
+		- 203.0.113.0/24
+		- 198.51.100.23/32
 ```
 
 ## Options
@@ -73,11 +75,11 @@ plugins:
 - `allow: list[str]`
   - List of IPv4/IPv6 CIDR ranges or single IPs that are explicitly allowed.
   - When a client IP is in this list, the plugin always allows the query
-    (subject to other plugins).
+	(subject to other plugins).
 - `deny: list[str]`
   - List of IPv4/IPv6 CIDR ranges or single IPs that are explicitly denied.
   - Deny rules take precedence over allow rules. When matched, the plugin
-    returns a `PluginDecision(action="deny")` and no further resolution occurs.
+	returns a `PluginDecision(action="deny")` and no further resolution occurs.
 
 ### Behaviour
 
@@ -85,7 +87,7 @@ plugins:
 - Evaluation order:
   1. If client IP matches any entry in `deny`, the query is denied.
   2. Else if client IP matches any entry in `allow`, the plugin returns `None`
-     (request is allowed to continue).
+	 (request is allowed to continue).
   3. Otherwise the `default` policy is applied.
 
 ### Common BasePlugin options
