@@ -1,0 +1,5 @@
+rate_limit:
+  lan:
+    min_enforce_rps: 75
+    global_max_rps: 2000
+    burst_factor: 5.0
