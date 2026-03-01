@@ -35,20 +35,20 @@ With built-in admin and API server support, Foghorn empowers you to monitor and 
 ### Plugins
 Key plugins include:
 
-- **ACL**: Access control
-- **EtcHosts**: Serve a hosts-file-style set of A/AAAA records via DNS. Ideal for small, simple setups.
-- **FileDownloader + Filter**: Download blocklists and filter queries, similar to Pi-hole. Can return:
+- **[ACL](docs/plugins/resolve/access_control.md)**: Access control
+- **[EtcHosts](docs/plugins/resolve/etc_hosts.md)**: Serve a hosts-file-style set of A/AAAA records via DNS. Ideal for small, simple setups.
+- **[FileDownloader](docs/plugins/resolve/file_downloader.md) + [Filter](docs/plugins/resolve/filter.md)**: Download blocklists and filter queries, similar to Pi-hole. Can return:
   - An IP
   - `REFUSED`
   - `SERVFAIL`
   - Or silently drop the connection
-- **ZoneRecords**: Load BIND9 zone files and/or define arbitrary records without creating a full zone. Supports combining multiple files and enabling DNSSEC.
-- **UpstreamRouter**: Route queries to different upstreams based on name, for example forwarding `.corp` to a VPN resolver.
+- **[ZoneRecords](docs/plugins/resolve/zone_records.md)**: Load BIND9 zone files and/or define arbitrary records without creating a full zone. Supports combining multiple files and enabling DNSSEC.
+- **[UpstreamRouter](docs/plugins/resolve/upstream_router.md)**: Route queries to different upstreams based on name, for example forwarding `.corp` to a VPN resolver.
 - Additional plugins for:
-  - Rate limiting - Static or Dynamic
-  - Docker host discovery - Add containers to DNS
-  - Zeroconf / mDNS / Bonjour - Forward mDNS over DNS, alo the admin ui offers oberservability.
-  - Simulating unreliable upstreams for development, including on-the-wire fuzzing. Seedable for testing purposes.
+  - [Rate limiting](docs/plugins/resolve/rate_limit.md) - Static or Dynamic
+  - [Docker host discovery](docs/plugins/resolve/docker_hosts.md) - Add containers to DNS
+  - [Zeroconf / mDNS / Bonjour](docs/plugins/resolve/mdns_bridge.md) - Forward mDNS over DNS, also the admin UI offers observability.
+  - [Simulating unreliable upstreams](docs/plugins/resolve/flaky_server.md) for development, including on-the-wire fuzzing. Seedable for testing purposes.
 
 "Targets" let you limit the scope of the plugin to given client IPs, domain names, query types, listener type, and more.
 
