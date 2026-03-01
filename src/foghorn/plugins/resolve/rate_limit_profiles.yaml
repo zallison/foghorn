@@ -1,0 +1,27 @@
+# RateLimit plugin profiles
+# These profiles provide preset configuration bundles for different deployment sizes
+
+default:
+  min_enforce_rps: 50
+  global_max_rps: 5000
+  burst_factor: 3.0
+
+single:
+  min_enforce_rps: 10
+  global_max_rps: 100
+  burst_factor: 5.0
+
+lan:
+  min_enforce_rps: 50
+  global_max_rps: 1000
+  burst_factor: 4.0
+
+smb:
+  min_enforce_rps: 100
+  global_max_rps: 5000
+  burst_factor: 3.0
+
+enterprise:
+  min_enforce_rps: 200
+  global_max_rps: 15000
+  burst_factor: 2.0
