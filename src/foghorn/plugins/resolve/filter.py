@@ -13,9 +13,9 @@ import time
 from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
 
 from dnslib import AAAA as RDATA_AAAA
-from dnslib import DNSHeader, QTYPE, RCODE, RR
+from dnslib import QTYPE, RCODE, RR
 from dnslib import A as RDATA_A
-from dnslib import DNSRecord
+from dnslib import DNSHeader, DNSRecord
 from pydantic import BaseModel, Field
 
 from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace

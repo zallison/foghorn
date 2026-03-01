@@ -1,13 +1,14 @@
 import importlib
+import ipaddress
+import logging
 import os
 import pathlib
 import threading
-import logging
 
 import pytest
-from dnslib import QTYPE, RCODE, DNSRecord, RR
+from dnslib import QTYPE, RCODE, RR, DNSRecord
+
 from foghorn.plugins.resolve.base import PluginContext
-import ipaddress
 
 
 def _make_query(name: str, qtype: int) -> bytes:

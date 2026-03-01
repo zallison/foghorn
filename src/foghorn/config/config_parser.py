@@ -25,10 +25,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
 
-from .config_schema import validate_config
 from ..plugins.cache.registry import load_cache_plugin
 from ..plugins.resolve.base import BasePlugin
 from ..plugins.resolve.registry import discover_plugins, get_plugin_class
+from .config_schema import validate_config
 
 
 def _is_var_key(key: str) -> bool:

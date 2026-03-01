@@ -7,7 +7,6 @@ from typing import Any, Dict
 
 from .stats_helpers import _utc_now_iso
 
-
 _GITHUB_URL = "https://github.com/zallison/foghorn"
 
 try:  # pragma: no cover - defensive fallback matches _core behaviour

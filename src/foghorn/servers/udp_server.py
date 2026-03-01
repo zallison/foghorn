@@ -11,6 +11,193 @@ from ..plugins.resolve.base import BasePlugin, PluginDecision
 logger = logging.getLogger("foghorn.server")
 
 
+def _client_udp_payload_limit(req: DNSRecord) -> int:
+    """Brief: Determine the client-advertised UDP response size limit.
+
+    Inputs:
+      - req: Parsed DNSRecord request.
+
+    Outputs:
+      - int: Client UDP payload limit in bytes. Returns 512 when the client did
+        not advertise EDNS(0) support.
+
+    Notes:
+      - For EDNS(0) requests, this returns the advertised UDP payload size from
+        the OPT RR (rclass), clamped to >= 512.
+    """
+
+    try:
+        additional = getattr(req, "ar", None) or []
+        for rr in additional:
+            if getattr(rr, "rtype", None) == QTYPE.OPT:
+                try:
+                    payload = int(getattr(rr, "rclass", 0) or 0)
+                except Exception:
+                    payload = 0
+                return max(512, payload) if payload > 0 else 512
+    except Exception:
+        return 512
+
+    return 512
+
+
+def _pack_minimal_tc_header(*, req_id: int, rcode: int, rd: bool = True) -> bytes:
+    """Brief: Build a minimal DNS response header with TC=1.
+
+    Inputs:
+      - req_id: DNS transaction id.
+      - rcode: Integer response code (0-15).
+      - rd: Whether to set the RD bit.
+
+    Outputs:
+      - bytes: 12-byte DNS header.
+
+    Notes:
+      - Used only as a last-resort when dnslib packing cannot produce a response
+        under a configured size ceiling.
+    """
+
+    try:
+        rid = int(req_id) & 0xFFFF
+    except Exception:
+        rid = 0
+
+    try:
+        rc = int(rcode) & 0xF
+    except Exception:
+        rc = int(RCODE.SERVFAIL) & 0xF
+
+    flags = 0x8000  # QR=1
+    flags |= 0x0200  # TC=1
+    flags |= 0x0080  # RA=1
+    if rd:
+        flags |= 0x0100
+    flags |= rc
+
+    # QD/AN/NS/AR all zero.
+    return (
+        int(rid).to_bytes(2, "big")
+        + int(flags).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+    )
+
+
+def enforce_udp_response_size_ceiling(
+    query_wire: bytes,
+    response_wire: bytes,
+    *,
+    server_max_bytes: int | None = None,
+) -> bytes:
+    """Brief: Enforce a UDP response size ceiling; signal truncation with TC=1.
+
+    Inputs:
+      - query_wire: Wire-format DNS request bytes.
+      - response_wire: Wire-format DNS response bytes.
+      - server_max_bytes: Optional explicit server-side UDP ceiling override. When
+        None, this uses DNSUDPHandler.edns_udp_payload as the server-side ceiling.
+
+    Outputs:
+      - bytes: Response bytes. When the original response exceeds the effective
+        ceiling, a smaller response is synthesized with TC=1 so the client can
+        retry over TCP.
+
+    Effective ceiling:
+      - client_limit: client EDNS UDP payload size when present; otherwise 512.
+      - server_limit: server_max_bytes when set; otherwise DNSUDPHandler.edns_udp_payload.
+      - effective = min(client_limit, server_limit)
+
+    Notes:
+      - This helper is designed for use on UDP listener hot paths and is best-effort.
+      - When packing a dnslib DNSRecord cannot fit under the ceiling (for example,
+        due to extreme configuration), a minimal 12-byte header-only response is
+        returned when possible.
+    """
+
+    if not response_wire:
+        return response_wire
+
+    try:
+        resp_bytes = bytes(response_wire)
+    except Exception:
+        return response_wire
+
+    # Parse request to determine client limit and to construct truncated replies.
+    try:
+        req = DNSRecord.parse(query_wire)
+    except Exception:
+        return resp_bytes
+
+    client_limit = _client_udp_payload_limit(req)
+
+    if server_max_bytes is None:
+        try:
+            server_max_bytes = int(
+                getattr(DNSUDPHandler, "edns_udp_payload", 1232) or 1232
+            )
+        except Exception:
+            server_max_bytes = 1232
+
+    try:
+        server_limit = max(0, int(server_max_bytes))
+    except Exception:
+        server_limit = 1232
+
+    effective = min(client_limit, server_limit) if server_limit > 0 else client_limit
+
+    if effective <= 0:
+        return resp_bytes
+
+    if len(resp_bytes) <= effective:
+        return resp_bytes
+
+    # Determine rcode from the oversized response when possible.
+    rcode = int(RCODE.SERVFAIL)
+    try:
+        parsed_resp = DNSRecord.parse(resp_bytes)
+        rcode = int(getattr(parsed_resp.header, "rcode", int(RCODE.SERVFAIL)))
+    except Exception:
+        rcode = int(RCODE.SERVFAIL)
+
+    # Build a minimal response based on the request.
+    try:
+        r = req.reply()
+        r.header.rcode = rcode
+        r.header.tc = 1
+
+        # Echo client EDNS OPT when possible so EDNS-capable clients can still
+        # see a consistent EDNS envelope.
+        try:
+            from . import server as _server_mod
+
+            _server_mod._echo_client_edns(req, r)
+        except Exception:
+            pass
+
+        out = r.pack()
+        if len(out) <= effective:
+            return _set_response_id(out, req.header.id)
+
+        # If OPT makes the response too large, retry without additional records.
+        try:
+            r.ar = []
+        except Exception:
+            pass
+
+        out2 = r.pack()
+        if len(out2) <= effective:
+            return _set_response_id(out2, req.header.id)
+
+        # Last resort: header-only truncated response.
+        rd_flag = bool(getattr(req.header, "rd", 1))
+        return _pack_minimal_tc_header(req_id=req.header.id, rcode=rcode, rd=rd_flag)
+    except Exception:
+        # Do not risk returning invalid bytes; keep the original response.
+        return resp_bytes
+
+
 def _set_response_id(wire: bytes, req_id: int) -> bytes:
     """Ensure the response DNS ID matches the request ID.
 
@@ -62,6 +249,11 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
     dnssec_validation = "upstream_ad"  # upstream_ad | local | local_extended
     edns_udp_payload = 1232
 
+    # Optional explicit UDP response size ceiling. When None, the effective
+    # ceiling is computed from the client EDNS payload size (or 512 for non-EDNS)
+    # and edns_udp_payload.
+    max_response_bytes: int | None = None
+
     # Cache prefetch / stale-while-revalidate knobs controlled by DNSServer.
     # When enabled, cache hits near expiry can trigger a background refresh via
     # the shared resolver without delaying the client response.
@@ -73,7 +265,7 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
     # Resolver mode and recursion controls.
     resolver_mode: str = "forward"  # forward | recursive
-    recursive_max_depth: int = 16
+    recursive_max_depth: int = 12
     recursive_timeout_ms: int = 2000
     recursive_per_try_timeout_ms: int = 2000
     root_hints_path: Optional[str] = None
@@ -177,6 +369,54 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
             return
         # Mark as healthy immediately; keep a small fail_count history if desired.
         cls.upstream_health[up_id] = {"fail_count": 0.0, "down_until": 0.0}
+
+    @classmethod
+    def _cleanup_upstream_health(cls, max_age_hours: float = 24.0) -> None:
+        """Brief: Remove stale upstream_health entries to prevent unbounded growth.
+
+        Inputs:
+          - max_age_hours: Maximum age in hours for healthy entries before cleanup.
+            Defaults to 24 hours.
+
+        Outputs:
+          - None; modifies cls.upstream_health in-place.
+
+        Notes:
+          - Removed entries can be recreated when needed without data loss.
+          - Healthy entries older than max_age_hours are removed.
+          - Unhealthy entries (down_until in future) are preserved.
+          - This should be called periodically, e.g., after reload or via a.
+            background maintenance task.
+        """
+
+        now = time.time()
+        max_age_seconds = float(max_age_hours) * 3600.0
+        entries_to_remove = []
+
+        for up_id, entry in list(cls.upstream_health.items()):
+            if not isinstance(entry, dict):
+                entries_to_remove.append(up_id)
+                continue
+
+            down_until = float(entry.get("down_until", 0.0) or 0.0)
+
+            # Keep unhealthy entries still in backoff window.
+            if down_until > now:
+                continue
+
+            # For healthy entries, check if they've been healthy for too long.
+            # We consider an entry eligible for removal if it has been healthy
+            # (fail_count=0, down_until <= now) for max_age_hours.
+            # Since we don't track when it became healthy, we conservatively use
+            # the last backoff completion time as a proxy.
+            fail_count = float(entry.get("fail_count", 0) or 0)
+            if fail_count == 0 and down_until <= now:
+                # Entry has been healthy; if down_until is very old, remove it.
+                if now - down_until > max_age_seconds:
+                    entries_to_remove.append(up_id)
+
+        for up_id in entries_to_remove:
+            cls.upstream_health.pop(up_id, None)
 
     def _cache_and_send_response(
         self,
@@ -777,32 +1017,20 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
                 # something back (useful for diagnosing corruption).
                 wire = data
 
-        # RFC 6891 compliance for non-EDNS clients: when the client did not
-        # advertise EDNS(0) support, avoid sending very large UDP responses.
-        # If the final wire payload exceeds the classic 512-byte limit, mark
-        # the response as truncated (TC=1) so compliant stub resolvers know to
-        # retry over TCP. We do not attempt to re-flow or aggressively truncate
-        # the message here; this is a conservative best-effort signal.
+        # Enforce UDP response ceiling; synthesize TC=1 response when needed.
         try:
-            req = DNSRecord.parse(data)
-        except Exception:  # pragma: no cover - defensive: corrupted query
-            req = None
+            server_max = getattr(DNSUDPHandler, "max_response_bytes", None)
+        except Exception:
+            server_max = None
 
-        if isinstance(req, DNSRecord):
-            # Detect whether the client advertised EDNS(0) via an OPT RR.
-            has_opt = any(
-                getattr(rr, "rtype", None) == QTYPE.OPT
-                for rr in (getattr(req, "ar", None) or [])
+        try:
+            wire = enforce_udp_response_size_ceiling(
+                query_wire=data,
+                response_wire=wire,
+                server_max_bytes=server_max,
             )
-            # Only apply the 512-byte clamp when the client did not send EDNS.
-            if not has_opt and isinstance(wire, (bytes, bytearray, memoryview)):
-                try:
-                    if len(wire) > 512:
-                        resp = DNSRecord.parse(bytes(wire))
-                        resp.header.tc = 1
-                        wire = _set_response_id(resp.pack(), resp.header.id)
-                except Exception:  # pragma: no cover - defensive: parsing/truncation
-                    pass
+        except Exception:  # pragma: no cover - defensive
+            pass
 
         sock.sendto(wire, self.client_address)
 

@@ -8,7 +8,7 @@ Outputs:
   - None
 """
 
-from dnslib import DNSRecord, QTYPE
+from dnslib import QTYPE, DNSRecord
 
 from foghorn.plugins.resolve.base import PluginContext
 from foghorn.plugins.resolve.echo import Echo

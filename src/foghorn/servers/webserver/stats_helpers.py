@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import logging
 import os
 import sqlite3
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from cachetools import TTLCache
 
 from foghorn.utils.register_caches import registered_cached
-from ...stats import StatsCollector, StatsSnapshot
 
+from ...stats import StatsCollector, StatsSnapshot
 
 logger = logging.getLogger("foghorn.webserver")
 

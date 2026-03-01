@@ -12,10 +12,10 @@ Outputs:
 from typing import Any
 
 import pytest
-from dnslib import A, NS, QTYPE, RCODE, RR, SOA, DNSRecord
+from dnslib import NS, QTYPE, RCODE, RR, SOA, A, DNSRecord
 
-from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 import foghorn.servers.recursive_resolver as rr_mod
+from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 from foghorn.servers.recursive_resolver import RecursiveResolver
 
 

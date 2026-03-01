@@ -22,7 +22,7 @@ import datetime
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import List, Optional, Tuple
 
 import dns.dnssec
 import dns.name

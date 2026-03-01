@@ -13,9 +13,10 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from dnslib import QTYPE, RR
 
+from foghorn.servers.transports.axfr import axfr_transfer
+
 from . import axfr_dnssec as _axfr_dnssec
 from . import helpers
-from foghorn.servers.transports.axfr import axfr_transfer
 
 logger = logging.getLogger(__name__)
 

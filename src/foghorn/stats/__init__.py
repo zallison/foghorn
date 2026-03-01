@@ -10,6 +10,7 @@ Public API is preserved for imports such as:
 
 from __future__ import annotations
 
+from .collector import StatsCollector
 from .domain import _is_subdomain, _normalize_domain
 from .formatters import format_snapshot_json
 from .histogram import LatencyHistogram
@@ -18,7 +19,6 @@ from .reporter import StatsReporter
 from .snapshot import StatsSnapshot
 from .sqlite_store import StatsSQLiteStore
 from .topk import TOPK_CAPACITY_FACTOR, TOPK_MIN_CAPACITY, TopK
-from .collector import StatsCollector
 
 # Compatibility: preserve historical pickling/introspection module name.
 for _cls in (

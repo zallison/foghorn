@@ -310,21 +310,30 @@ def test_match_exact_domain_vs_suffix_priority():
 
 
 def test_forward_success_first_upstream(monkeypatch):
-    """
-    Brief: First upstream returns NOERROR; function returns success with that wire.
+    """Brief: Delegates to core send_query_with_failover; returns success on response.
 
     Inputs:
-      - targets: 1.1.1.1:53, 8.8.8.8:53; outcomes: NOERROR then (unused)
+      - send_query_with_failover returns a NOERROR wire response.
 
     Outputs:
-      - None: asserts success=True and single attempt
+      - None: asserts success=True and returned bytes match.
     """
+
+    import foghorn.servers.server as server_mod
+
     plugin = UpstreamRouter()
     q, wire = _mk_query("ok.example", "A")
     ok_wire = _mk_reply(q, RCODE.NOERROR, answers=[("ok.example", "1.2.3.4", 60)])
 
-    fake_send = _send_factory([ok_wire])
-    monkeypatch.setattr(DNSRecord, "send", fake_send)
+    calls: dict[str, int] = {"count": 0}
+
+    def fake_send_query_with_failover(*args, **kwargs):
+        calls["count"] += 1
+        return ok_wire, {"host": "1.1.1.1", "port": 53}, "ok"
+
+    monkeypatch.setattr(
+        server_mod, "send_query_with_failover", fake_send_query_with_failover
+    )
 
     success, out = plugin._forward_with_failover(
         wire,
@@ -333,53 +342,31 @@ def test_forward_success_first_upstream(monkeypatch):
     )
     assert success is True
     assert out == ok_wire
-    assert fake_send.attempts["count"] == 1
-
-
-def test_forward_servfail_then_success(monkeypatch):
-    """
-    Brief: SERVFAIL from first upstream triggers failover to second which succeeds.
-
-    Inputs:
-      - outcomes: SERVFAIL then NOERROR
-
-    Outputs:
-      - None: asserts success=True and two attempts
-    """
-    plugin = UpstreamRouter()
-    q, wire = _mk_query("svc.example", "A")
-    servfail = _mk_reply(q, RCODE.SERVFAIL)
-    ok_wire = _mk_reply(q, RCODE.NOERROR)
-
-    fake_send = _send_factory([servfail, ok_wire])
-    monkeypatch.setattr(DNSRecord, "send", fake_send)
-
-    success, out = plugin._forward_with_failover(
-        wire,
-        targets=[{"host": "1.1.1.1", "port": 53}, {"host": "8.8.8.8", "port": 53}],
-        timeout_ms=2000,
-    )
-    assert success is True
-    assert out == ok_wire
-    assert fake_send.attempts["count"] == 2
+    assert calls["count"] == 1
 
 
 def test_forward_nxdomain_is_accepted(monkeypatch):
-    """
-    Brief: NXDOMAIN is treated as a valid response (no failover).
+    """Brief: NXDOMAIN is a valid response; no additional behavior required.
 
     Inputs:
-      - outcomes: NXDOMAIN
+      - send_query_with_failover returns an NXDOMAIN wire response.
 
     Outputs:
-      - None: asserts success=True and single attempt
+      - None: asserts success=True.
     """
+
+    import foghorn.servers.server as server_mod
+
     plugin = UpstreamRouter()
     q, wire = _mk_query("nx.example", "A")
-    nx = _mk_reply(q, RCODE.NXDOMAIN)
+    nx_wire = _mk_reply(q, RCODE.NXDOMAIN)
 
-    fake_send = _send_factory([nx])
-    monkeypatch.setattr(DNSRecord, "send", fake_send)
+    def fake_send_query_with_failover(*args, **kwargs):
+        return nx_wire, {"host": "1.1.1.1", "port": 53}, "ok"
+
+    monkeypatch.setattr(
+        server_mod, "send_query_with_failover", fake_send_query_with_failover
+    )
 
     success, out = plugin._forward_with_failover(
         wire,
@@ -387,80 +374,63 @@ def test_forward_nxdomain_is_accepted(monkeypatch):
         timeout_ms=2000,
     )
     assert success is True
-    assert out == nx
-    assert fake_send.attempts["count"] == 1
+    assert out == nx_wire
 
 
-def test_forward_exception_then_success(monkeypatch):
-    """
-    Brief: Exception from first attempt fails over to second which succeeds.
+def test_forward_unparseable_reply_is_rejected(monkeypatch):
+    """Brief: Unparseable replies should not be accepted; core returns failure.
 
     Inputs:
-      - outcomes: RuntimeError, NOERROR
+      - send_query_with_failover returns (None, None, 'all_failed').
 
     Outputs:
-      - None: asserts success=True and two attempts
+      - None: asserts success=False and synthesized SERVFAIL is returned.
     """
-    plugin = UpstreamRouter()
-    q, wire = _mk_query("ex.example", "A")
-    ok_wire = _mk_reply(q, RCODE.NOERROR)
 
-    fake_send = _send_factory([RuntimeError("timeout"), ok_wire])
-    monkeypatch.setattr(DNSRecord, "send", fake_send)
+    import foghorn.servers.server as server_mod
 
-    success, out = plugin._forward_with_failover(
-        wire,
-        targets=[{"host": "1.1.1.1", "port": 53}, {"host": "8.8.8.8", "port": 53}],
-        timeout_ms=2000,
-    )
-    assert success is True
-    assert out == ok_wire
-    assert fake_send.attempts["count"] == 2
-
-
-def test_forward_unparseable_reply_is_accepted(monkeypatch):
-    """
-    Brief: Unparseable reply bytes are accepted as success per implementation.
-
-    Inputs:
-      - outcomes: b"xxxx" (invalid wire)
-
-    Outputs:
-      - None: asserts success=True and returned bytes match
-    """
     plugin = UpstreamRouter()
     q, wire = _mk_query("junk.example", "A")
-    junk = b"xxxx"
 
-    fake_send = _send_factory([junk])
-    monkeypatch.setattr(DNSRecord, "send", fake_send)
+    def fake_send_query_with_failover(*args, **kwargs):
+        return None, None, "all_failed"
+
+    monkeypatch.setattr(
+        server_mod, "send_query_with_failover", fake_send_query_with_failover
+    )
 
     success, out = plugin._forward_with_failover(
         wire,
         targets=[{"host": "1.1.1.1", "port": 53}],
         timeout_ms=2000,
     )
-    assert success is True
-    assert out == junk
-    assert fake_send.attempts["count"] == 1
+    assert success is False
+    resp = DNSRecord.parse(out)
+    assert resp.header.rcode == RCODE.SERVFAIL
+    assert resp.header.id == q.header.id
 
 
 def test_forward_all_failures_return_synth_servfail(monkeypatch):
-    """
-    Brief: All attempts failing returns synthesized SERVFAIL with original ID.
+    """Brief: When core returns no response, helper synthesizes SERVFAIL.
 
     Inputs:
-      - outcomes: exceptions and/or SERVFAIL for all targets
+      - send_query_with_failover returns (None, None, 'all_failed').
 
     Outputs:
-      - None: asserts success=False and response parses as SERVFAIL with matching ID
+      - None: asserts synthesized SERVFAIL with matching ID.
     """
+
+    import foghorn.servers.server as server_mod
+
     plugin = UpstreamRouter()
     q, wire = _mk_query("allfail.example", "A")
-    servfail = _mk_reply(q, RCODE.SERVFAIL)
 
-    fake_send = _send_factory([RuntimeError("boom"), servfail])
-    monkeypatch.setattr(DNSRecord, "send", fake_send)
+    def fake_send_query_with_failover(*args, **kwargs):
+        return None, None, "all_failed"
+
+    monkeypatch.setattr(
+        server_mod, "send_query_with_failover", fake_send_query_with_failover
+    )
 
     success, out = plugin._forward_with_failover(
         wire,
@@ -474,21 +444,27 @@ def test_forward_all_failures_return_synth_servfail(monkeypatch):
 
 
 def test_forward_truncated_reply_is_accepted(monkeypatch):
-    """
-    Brief: Truncated (TC=1) reply is accepted as success (no failover).
+    """Brief: A TC=1 wire response is still a response; helper returns success.
 
     Inputs:
-      - outcomes: NOERROR reply with header.tc=1
+      - send_query_with_failover returns a TC=1 response.
 
     Outputs:
-      - None: asserts success=True and single attempt
+      - None.
     """
+
+    import foghorn.servers.server as server_mod
+
     plugin = UpstreamRouter()
     q, wire = _mk_query("tc.example", "A")
     tc_wire = _mk_reply(q, RCODE.NOERROR, truncated=True)
 
-    fake_send = _send_factory([tc_wire])
-    monkeypatch.setattr(DNSRecord, "send", fake_send)
+    def fake_send_query_with_failover(*args, **kwargs):
+        return tc_wire, {"host": "1.1.1.1", "port": 53}, "ok"
+
+    monkeypatch.setattr(
+        server_mod, "send_query_with_failover", fake_send_query_with_failover
+    )
 
     success, out = plugin._forward_with_failover(
         wire,
@@ -497,4 +473,3 @@ def test_forward_truncated_reply_is_accepted(monkeypatch):
     )
     assert success is True
     assert out == tc_wire
-    assert fake_send.attempts["count"] == 1

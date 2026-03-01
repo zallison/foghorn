@@ -35,7 +35,7 @@ def test_main_dot_missing_cert_logs_error(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
-        "    use_asyncio: true\n"
+        "    use_asyncio: false\n"
     )
 
     class DummyServer:

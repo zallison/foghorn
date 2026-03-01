@@ -11,7 +11,7 @@ Outputs:
 from typing import Any
 
 import pytest
-from dnslib import A, NS, QTYPE, RCODE, RR, SOA, DNSRecord
+from dnslib import NS, QTYPE, RCODE, RR, SOA, A, DNSRecord
 
 from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
 from foghorn.recursive_resolver import RecursiveResolver
@@ -117,6 +117,7 @@ def test_recursive_resolver_positive_referral_chain(
 
     monkeypatch.setattr(rr_mod, "tcp_query", _boom_tcp)
 
+    # Note: default max_depth is 12, using 8 here to test depth limiting
     resolver = RecursiveResolver(
         cache=FoghornTTLCache(),
         stats=None,
@@ -401,6 +402,8 @@ def test_default_root_hints_and_choose_initial_servers() -> None:
     servers = resolver._choose_initial_servers()
     assert servers
     assert all(isinstance(s, rr_mod._Server) for s in servers)
+
+
 
 
 def test_query_single_udp_and_tcp_flow(monkeypatch: pytest.MonkeyPatch) -> None:

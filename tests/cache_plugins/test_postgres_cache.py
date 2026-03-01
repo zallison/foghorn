@@ -143,8 +143,9 @@ def test_postgres_cache_plugin_initialization_with_defaults() -> None:
       - None; asserts defaults are applied when config is None or empty.
     """
 
-    from foghorn.plugins.cache.postgres_cache import PostgresCache
     from unittest.mock import MagicMock, patch
+
+    from foghorn.plugins.cache.postgres_cache import PostgresCache
 
     # Mock the PostgresTTLCache to avoid real DB connection
     with patch(
@@ -175,8 +176,9 @@ def test_postgres_cache_plugin_initialization_with_config() -> None:
       - None; asserts config values override defaults.
     """
 
-    from foghorn.plugins.cache.postgres_cache import PostgresCache
     from unittest.mock import MagicMock, patch
+
+    from foghorn.plugins.cache.postgres_cache import PostgresCache
 
     with patch(
         "foghorn.plugins.cache.postgres_cache.PostgresTTLCache"
@@ -217,8 +219,9 @@ def test_postgres_cache_plugin_set_enforces_min_ttl() -> None:
       - None; asserts effective TTL is max of requested TTL and min_cache_ttl.
     """
 
-    from foghorn.plugins.cache.postgres_cache import PostgresCache
     from unittest.mock import MagicMock, patch
+
+    from foghorn.plugins.cache.postgres_cache import PostgresCache
 
     with patch(
         "foghorn.plugins.cache.postgres_cache.PostgresTTLCache"
@@ -247,8 +250,9 @@ def test_postgres_cache_plugin_get_returns_bytes() -> None:
       - None; asserts get returns bytes or None, filtering non-bytes.
     """
 
-    from foghorn.plugins.cache.postgres_cache import PostgresCache
     from unittest.mock import MagicMock, patch
+
+    from foghorn.plugins.cache.postgres_cache import PostgresCache
 
     with patch(
         "foghorn.plugins.cache.postgres_cache.PostgresTTLCache"
@@ -284,8 +288,9 @@ def test_postgres_cache_plugin_close() -> None:
       - None; asserts close() is called on backend.
     """
 
-    from foghorn.plugins.cache.postgres_cache import PostgresCache
     from unittest.mock import MagicMock, patch
+
+    from foghorn.plugins.cache.postgres_cache import PostgresCache
 
     with patch(
         "foghorn.plugins.cache.postgres_cache.PostgresTTLCache"
@@ -308,8 +313,9 @@ def test_postgres_cache_plugin_backend_initialization_error() -> None:
       - None; asserts RuntimeError wraps backend initialization errors.
     """
 
-    from foghorn.plugins.cache.postgres_cache import PostgresCache
     from unittest.mock import patch
+
+    from foghorn.plugins.cache.postgres_cache import PostgresCache
 
     with patch(
         "foghorn.plugins.cache.postgres_cache.PostgresTTLCache"

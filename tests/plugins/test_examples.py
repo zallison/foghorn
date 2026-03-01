@@ -308,7 +308,8 @@ def test_examples_plugin_post_resolve_with_rewrite():
     plugin_v6 = Examples(rewrite_first_ipv4=rewrite_first_ipv6)
     plugin_v6.setup()
 
-    from dnslib import RR, DNSHeader, AAAA as AAAA_RDATA
+    from dnslib import AAAA as AAAA_RDATA
+    from dnslib import RR, DNSHeader
 
     query_v6 = DNSRecord.question("example.com", "AAAA")
     response_v6 = DNSRecord(

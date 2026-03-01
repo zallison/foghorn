@@ -14,22 +14,21 @@ import threading
 from typing import List, Optional
 
 from foghorn.stats.meta import FOGHORN_VERSION
+from foghorn.utils.register_caches import apply_decorated_cache_overrides
 
 from .config.config_parser import (
     load_plugins,
     normalize_upstream_config,
     parse_config_file,
 )
-from foghorn.utils.register_caches import apply_decorated_cache_overrides
-
 from .config.logging_config import init_logging
 from .plugins.querylog import BaseStatsStore, load_stats_store_backend
 from .plugins.resolve.base import BasePlugin
 from .plugins.setup import run_setup_plugins
+from .runtime_config import RuntimeSnapshot, initialize_runtime
 from .servers.runtime_state import RingBuffer, RuntimeState
 from .servers.server import DNSServer
 from .stats import StatsCollector, StatsReporter
-from .runtime_config import RuntimeSnapshot, initialize_runtime
 
 
 def start_doh_server(
@@ -40,6 +39,7 @@ def start_doh_server(
     cert_file: str | None = None,
     key_file: str | None = None,
     use_asyncio: bool = True,
+    allow_threaded_fallback: bool = True,
 ) -> object | None:
     """Brief: Start the optional DoH (DNS-over-HTTPS) server.
 
@@ -53,6 +53,7 @@ def start_doh_server(
       - cert_file: Optional TLS certificate path.
       - key_file: Optional TLS private key path.
       - use_asyncio: When true, prefer asyncio; otherwise use threaded fallback when supported.
+      - allow_threaded_fallback: When false, refuse to start the threaded fallback.
 
     Outputs:
       - object | None: A server handle/thread-like object, or None on failure.
@@ -71,6 +72,7 @@ def start_doh_server(
         cert_file=cert_file,
         key_file=key_file,
         use_asyncio=use_asyncio,
+        allow_threaded_fallback=allow_threaded_fallback,
     )
 
 
@@ -521,9 +523,9 @@ def main(argv: List[str] | None = None) -> int:
     if resolver_mode == "none":
         resolver_mode = "master"
     try:
-        recursive_max_depth = int(resolver_cfg.get("max_depth", 16))
+        recursive_max_depth = int(resolver_cfg.get("max_depth", 12))
     except (TypeError, ValueError):
-        recursive_max_depth = 16
+        recursive_max_depth = 12
     try:
         recursive_timeout_ms = int(resolver_cfg.get("timeout_ms", 2000))
     except (TypeError, ValueError):
@@ -554,6 +556,25 @@ def main(argv: List[str] | None = None) -> int:
     # Global knob to disable asyncio-based listeners/admin servers in restricted
     # environments. When false, threaded fallbacks are used where available.
     use_asyncio = bool(resolver_cfg.get("use_asyncio", True))
+
+    # Configure a shared, bounded ThreadPoolExecutor for asyncio-based listeners
+    # (TCP/DoT and any other paths that call run_in_executor).
+    limits_cfg = server_cfg.get("limits") if isinstance(server_cfg, dict) else None
+    if not isinstance(limits_cfg, dict):
+        limits_cfg = {}
+
+    try:
+        from .servers.executors import configure_resolver_executor
+
+        raw_workers = limits_cfg.get("resolver_executor_workers")
+        try:
+            resolver_workers = int(raw_workers) if raw_workers is not None else None
+        except Exception:
+            resolver_workers = None
+
+        configure_resolver_executor(max_workers=resolver_workers)
+    except Exception:
+        logger.debug("Failed to configure resolver executor", exc_info=True)
 
     # Cache plugin selection.
     #
@@ -603,6 +624,13 @@ def main(argv: List[str] | None = None) -> int:
     logger.info(
         "Loaded %d plugins: %s", len(plugins), [p.__class__.__name__ for p in plugins]
     )
+
+    # Warn if exposed listeners lack rate limiting
+    try:
+        from .config.rate_limit_check import check_rate_limit_plugin_config
+        check_rate_limit_plugin_config(plugins=plugins, cfg=cfg)
+    except Exception:
+        pass
 
     # Run setup phase for setup-aware plugins before starting listeners
     try:
@@ -1138,6 +1166,16 @@ def main(argv: List[str] | None = None) -> int:
     # forwarded to upstream resolvers and return NXDOMAIN instead.
     forward_local = bool(server_cfg.get("forward_local", False))
 
+    # AXFR/IXFR transfer policy (applies to TCP/DoT listeners).
+    axfr_cfg = server_cfg.get("axfr") or {}
+    if not isinstance(axfr_cfg, dict):
+        axfr_cfg = {}
+    axfr_enabled = bool(axfr_cfg.get("enabled", False))
+    axfr_allow_clients = axfr_cfg.get("allow_clients") or []
+    if not isinstance(axfr_allow_clients, list):
+        axfr_allow_clients = []
+    axfr_allow_clients = [str(x) for x in axfr_allow_clients if x]
+
     # When performing local DNSSEC validation (including local_extended), point
     # the validator's internal resolver at the configured upstream hosts so that
     # chain validation and extended lookups use the same recursive resolvers as
@@ -1223,15 +1261,95 @@ def main(argv: List[str] | None = None) -> int:
             pass
 
     server = None
+    udp_handle = None
     udp_thread: threading.Thread | None = None
     udp_error: Exception | None = None
     # Track background listener threads (UDP, TCP, DoT, etc.) uniformly so the
     # keepalive loop does not treat UDP as a special case.
     loop_threads: list[threading.Thread] = []
+
+    # Shared resolver adapter for UDP listener.
+    from .servers.server import resolve_query_bytes as _resolve_query_bytes
+
+    def _resolve_udp(query_bytes: bytes, client_ip: str) -> bytes:
+        """Brief: Resolve a DNS query received via UDP listener.
+
+        Inputs:
+          - query_bytes: Wire-format DNS query bytes.
+          - client_ip: Client IP address string.
+
+        Outputs:
+          - bytes: Wire-format DNS response produced by the shared resolver.
+
+        Notes:
+          - Enforces the UDP response size ceiling (TC=1) after resolution so
+            both asyncio and threaded UDP paths share consistent truncation
+            behavior.
+        """
+
+        wire = _resolve_query_bytes(
+            query_bytes,
+            client_ip,
+            listener="udp",
+            secure=False,
+        )
+
+        try:
+            from .servers.udp_server import (
+                DNSUDPHandler,
+                enforce_udp_response_size_ceiling,
+            )
+
+            server_max = getattr(DNSUDPHandler, "max_response_bytes", None)
+            wire = enforce_udp_response_size_ceiling(
+                query_wire=query_bytes,
+                response_wire=wire,
+                server_max_bytes=server_max,
+            )
+        except Exception:
+            pass
+
+        return wire
+
     if bool(udp_cfg.get("enabled", True)):
         uhost = str(udp_cfg.get("host", default_host))
         uport = int(udp_cfg.get("port", default_port))
-        server = DNSServer(
+
+        # UDP listener defaults to threaded unless explicitly opted into asyncio.
+        # This preserves historical behaviour and avoids binding real sockets in
+        # unit tests that only monkeypatch DNSServer.
+        udp_use_asyncio = bool(udp_cfg.get("use_asyncio", False))
+
+        allow_threaded_fallback = bool(udp_cfg.get("allow_threaded_fallback", True))
+        exit_on_asyncio_failure = bool(
+            udp_cfg.get("exit_on_asyncio_failure", False)
+            or udp_cfg.get("refuse_threaded_fallback", False)
+        )
+
+        try:
+            max_inflight = int(udp_cfg.get("max_inflight", 1024) or 1024)
+        except Exception:
+            max_inflight = 1024
+        try:
+            max_inflight_per_ip = int(udp_cfg.get("max_inflight_per_ip", 64) or 64)
+        except Exception:
+            max_inflight_per_ip = 64
+
+        max_inflight_by_cidr = udp_cfg.get("max_inflight_by_cidr")
+        if max_inflight_by_cidr is not None and not isinstance(
+            max_inflight_by_cidr, list
+        ):
+            max_inflight_by_cidr = None
+
+        udp_max_response_bytes = udp_cfg.get("max_response_bytes")
+        if udp_max_response_bytes is not None:
+            try:
+                udp_max_response_bytes = int(udp_max_response_bytes)
+            except Exception:
+                udp_max_response_bytes = None
+
+        # Configure DNSUDPHandler globals without binding a threaded UDP socket.
+        DNSServer(
             uhost,
             uport,
             upstreams,
@@ -1252,7 +1370,121 @@ def main(argv: List[str] | None = None) -> int:
             recursive_per_try_timeout_ms=recursive_per_try_timeout_ms,
             enable_ede=enable_ede,
             forward_local=forward_local,
+            max_response_bytes=udp_max_response_bytes,
+            axfr_enabled=axfr_enabled,
+            axfr_allow_clients=axfr_allow_clients,
+            create_server=False,
         )
+
+        if use_asyncio and udp_use_asyncio:
+            try:
+                from .servers.executors import get_resolver_executor
+                from .servers.udp_asyncio_server import start_udp_asyncio_threaded
+
+                logger.info(
+                    "Starting UDP listener on %s:%d (asyncio)",
+                    uhost,
+                    uport,
+                )
+
+                udp_handle = start_udp_asyncio_threaded(
+                    uhost,
+                    uport,
+                    _resolve_udp,
+                    max_inflight=max_inflight,
+                    max_inflight_per_ip=max_inflight_per_ip,
+                    max_inflight_by_cidr=max_inflight_by_cidr,
+                    executor=get_resolver_executor(),
+                    thread_name="foghorn-udp",
+                )
+                udp_thread = udp_handle.thread
+                loop_threads.append(udp_thread)
+                runtime_state.set_listener("udp", enabled=True, thread=udp_thread)
+            except PermissionError as exc:
+                runtime_state.set_listener_error("udp", exc)
+                if not allow_threaded_fallback or exit_on_asyncio_failure:
+                    logger.error(
+                        "Asyncio UDP listener failed with PermissionError and threaded fallback is disabled; exiting. Error: %s",
+                        exc,
+                    )
+                    return 1
+
+                logger.warning(
+                    "Asyncio UDP listener failed with PermissionError; falling back to ThreadingUDPServer (less robust under DDoS). "
+                    "Consider enabling asyncio UDP. Error: %s",
+                    exc,
+                )
+            except Exception as exc:
+                runtime_state.set_listener_error("udp", exc)
+                logger.error("Failed to start asyncio UDP listener: %s", exc)
+                return 1
+
+        if udp_thread is None:
+            # Threaded UDP (legacy fallback).
+            from foghorn.security_limits import is_loopback_host
+
+            allow_unsafe = bool(
+                limits_cfg.get("allow_unsafe_threaded_listeners", False)
+            )
+            if not is_loopback_host(uhost) and not allow_unsafe:
+                logger.error(
+                    "Refusing to start threaded UDP listener on non-loopback host %s. "
+                    "Enable UDP asyncio listener or set server.limits.allow_unsafe_threaded_listeners=true.",
+                    uhost,
+                )
+                return 1
+
+            server = DNSServer(
+                uhost,
+                uport,
+                upstreams,
+                plugins,
+                timeout=timeout_ms / 1000.0,
+                timeout_ms=timeout_ms,
+                min_cache_ttl=min_cache_ttl,
+                stats_collector=stats_collector,
+                cache=cache_plugin,
+                dnssec_mode=dnssec_mode,
+                edns_udp_payload=edns_payload,
+                dnssec_validation=dnssec_validation,
+                upstream_strategy=upstream_strategy,
+                upstream_max_concurrent=upstream_max_concurrent,
+                resolver_mode=resolver_mode,
+                recursive_max_depth=recursive_max_depth,
+                recursive_timeout_ms=recursive_timeout_ms,
+                recursive_per_try_timeout_ms=recursive_per_try_timeout_ms,
+                enable_ede=enable_ede,
+                forward_local=forward_local,
+                max_response_bytes=udp_max_response_bytes,
+                axfr_enabled=axfr_enabled,
+                axfr_allow_clients=axfr_allow_clients,
+            )
+
+            # Run UDP server in a background thread so the main thread can manage
+            # coordinated shutdown alongside TCP/DoT/DoH listeners. Capture
+            # unexpected exceptions so main() can reflect them in its exit code.
+            def _run_udp() -> None:
+                nonlocal udp_error
+                try:
+                    server.serve_forever()
+                except Exception as e:  # pragma: no cover - propagated via udp_error
+                    udp_error = e
+                    runtime_state.set_listener_error("udp", e)
+
+            logger.info(
+                "Starting UDP listener on %s:%d (threaded)",
+                uhost,
+                uport,
+            )
+
+            udp_thread = threading.Thread(
+                target=_run_udp,
+                name="foghorn-udp-threaded",
+                daemon=True,
+            )
+            udp_thread.start()
+            loop_threads.append(udp_thread)
+            runtime_state.set_listener("udp", enabled=True, thread=udp_thread)
 
     # Log startup info
     if resolver_mode == "forward":
@@ -1271,33 +1503,7 @@ def main(argv: List[str] | None = None) -> int:
         timeout_ms,
     )
 
-    if server is not None:
-        # Run UDP server in a background thread so the main thread can manage
-        # coordinated shutdown alongside TCP/DoT/DoH listeners. Capture
-        # unexpected exceptions so main() can reflect them in its exit code.
-        def _run_udp() -> None:
-            nonlocal udp_error
-            try:
-                server.serve_forever()
-            except Exception as e:  # pragma: no cover - propagated via udp_error
-                udp_error = e
-                runtime_state.set_listener_error("udp", e)
-
-        logger.info(
-            "Starting UDP listener on %s:%d",
-            uhost,
-            uport,
-        )
-
-        udp_thread = threading.Thread(
-            target=_run_udp,
-            name="foghorn-udp",
-            daemon=True,
-        )
-        udp_thread.start()
-        loop_threads.append(udp_thread)
-        runtime_state.set_listener("udp", enabled=True, thread=udp_thread)
-    else:
+    if not bool(udp_cfg.get("enabled", True)):
         # When no UDP listener is configured, the main thread still enters the
         # keepalive loop below so that TCP/DoT/DoH listeners (or tests that
         # disable UDP entirely) can drive shutdown via signals or KeyboardInterrupt.
@@ -1309,8 +1515,6 @@ def main(argv: List[str] | None = None) -> int:
 
     # Resolver adapter for TCP/DoT servers
     import asyncio
-
-    from .servers.server import resolve_query_bytes as _resolve_query_bytes
 
     def _resolve_tcp(query_bytes: bytes, client_ip: str) -> bytes:
         """Brief: Resolve a DNS query received via TCP listener.
@@ -1407,24 +1611,60 @@ def main(argv: List[str] | None = None) -> int:
         return t
 
     if bool(tcp_cfg.get("enabled", False)):
+        from foghorn.security_limits import is_loopback_host
+
         from .servers.tcp_server import serve_tcp, serve_tcp_threaded
 
         thost = str(tcp_cfg.get("host", default_host))
         tport = int(tcp_cfg.get("port", 53))
+
+        def _start_tcp_threaded() -> None:
+            allow_unsafe = bool(
+                limits_cfg.get("allow_unsafe_threaded_listeners", False)
+            )
+            if not is_loopback_host(thost) and not allow_unsafe:
+                raise RuntimeError(
+                    "Refusing to start threaded TCP listener on non-loopback host. "
+                    "Enable asyncio TCP listener or set server.limits.allow_unsafe_threaded_listeners=true."
+                )
+            serve_tcp_threaded(thost, tport, _resolve_tcp)
+
         if use_asyncio:
             logger.info("Starting TCP listener on %s:%d (asyncio)", thost, tport)
             _start_asyncio_server(
-                lambda: serve_tcp(thost, tport, _resolve_tcp),
+                lambda: serve_tcp(
+                    thost,
+                    tport,
+                    _resolve_tcp,
+                    max_connections=int(tcp_cfg.get("max_connections", 1024) or 1024),
+                    max_connections_per_ip=int(
+                        tcp_cfg.get("max_connections_per_ip", 64) or 64
+                    ),
+                    max_queries_per_connection=int(
+                        tcp_cfg.get("max_queries_per_connection", 100) or 100
+                    ),
+                    idle_timeout_seconds=float(
+                        tcp_cfg.get("idle_timeout_seconds", 15.0) or 15.0
+                    ),
+                ),
                 name="foghorn-tcp",
                 listener_key="tcp",
-                on_permission_error=lambda: serve_tcp_threaded(
-                    thost, tport, _resolve_tcp
-                ),
+                on_permission_error=_start_tcp_threaded,
             )
         else:
             logger.info("Starting TCP listener on %s:%d (threaded)", thost, tport)
+            allow_unsafe = bool(
+                limits_cfg.get("allow_unsafe_threaded_listeners", False)
+            )
+            if not is_loopback_host(thost) and not allow_unsafe:
+                logger.error(
+                    "Refusing to start threaded TCP listener on non-loopback host %s. "
+                    "Enable asyncio TCP listener or set server.limits.allow_unsafe_threaded_listeners=true.",
+                    thost,
+                )
+                return 1
             t = threading.Thread(
-                target=lambda: serve_tcp_threaded(thost, tport, _resolve_tcp),
+                target=_start_tcp_threaded,
                 name="foghorn-tcp-threaded",
                 daemon=True,
             )
@@ -1452,6 +1692,16 @@ def main(argv: List[str] | None = None) -> int:
                     _resolve_dot,
                     cert_file=cert_file,
                     key_file=key_file,
+                    max_connections=int(dot_cfg.get("max_connections", 1024) or 1024),
+                    max_connections_per_ip=int(
+                        dot_cfg.get("max_connections_per_ip", 64) or 64
+                    ),
+                    max_queries_per_connection=int(
+                        dot_cfg.get("max_queries_per_connection", 100) or 100
+                    ),
+                    idle_timeout_seconds=float(
+                        dot_cfg.get("idle_timeout_seconds", 15.0) or 15.0
+                    ),
                 ),
                 name="foghorn-dot",
                 listener_key="dot",
@@ -1464,6 +1714,7 @@ def main(argv: List[str] | None = None) -> int:
         key_file = doh_cfg.get("key_file")
         logger.info("Starting DoH listener on %s:%d", h, p)
 
+        allow_threaded_fallback = bool(doh_cfg.get("allow_threaded_fallback", True))
         try:
             # Start uvicorn-based DoH FastAPI server in background thread.
             doh_handle = start_doh_server(
@@ -1473,6 +1724,7 @@ def main(argv: List[str] | None = None) -> int:
                 cert_file=cert_file,
                 key_file=key_file,
                 use_asyncio=use_asyncio,
+                allow_threaded_fallback=allow_threaded_fallback,
             )
         except Exception as exc:
             runtime_state.set_listener_error("doh", exc)
@@ -1602,6 +1854,12 @@ def main(argv: List[str] | None = None) -> int:
         # Request UDP server shutdown and close sockets before tearing down
         # statistics and web components so that no new requests are processed
         # during shutdown.
+        if udp_handle is not None:
+            try:
+                udp_handle.stop()
+            except Exception:
+                logger.exception("Unexpected error while stopping asyncio UDP listener")
+
         if server is not None:
             try:
                 if hasattr(server, "stop"):

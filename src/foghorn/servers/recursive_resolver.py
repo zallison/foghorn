@@ -6,15 +6,15 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
-
 from dnslib import QTYPE, RCODE, DNSRecord
+
+from foghorn.servers.transports.tcp import tcp_query as _tcp_transport_query
+from foghorn.servers.transports.udp import udp_query as _udp_transport_query
+from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 
 from . import (
     recursive_resolver as _recursive_module,  # Self-import to honour test monkeypatching.
 )
-from foghorn.servers.transports.tcp import tcp_query as _tcp_transport_query
-from foghorn.servers.transports.udp import udp_query as _udp_transport_query
 
 """Iterative recursive resolver for Foghorn.
 
@@ -38,6 +38,11 @@ logger = logging.getLogger("foghorn.recursive")
 #   minimisation budget.
 _MAX_MINIMISE_COUNT = 10
 _MINIMISE_ONE_LAB = 2
+
+# DoS hardening: bounds on referral processing.
+_MAX_NS_NAMES = 20
+_MAX_GLUE_RECORDS = 50
+_MAX_NEXT_SERVERS = 25
 
 
 def udp_query(host: str, port: int, wire: bytes, *, timeout_ms: int = 2000) -> bytes:
@@ -147,7 +152,7 @@ class RecursiveResolver:
         *,
         cache,
         stats,
-        max_depth: int = 16,
+        max_depth: int = 12,
         timeout_ms: int = 2000,
         per_try_timeout_ms: int = 2000,
     ) -> None:
@@ -294,11 +299,19 @@ class RecursiveResolver:
         if not ns_names:
             return []
 
+        # Cap NS names processed to avoid pathological authority sections.
+        if len(ns_names) > _MAX_NS_NAMES:
+            ns_names = ns_names[:_MAX_NS_NAMES]
+
         # Build a simple glue map from additional A/AAAA records.
         glue: Dict[str, List[_Server]] = {}
+        glue_seen = 0
         for rr in addl:
             if rr.rtype not in (QTYPE.A, QTYPE.AAAA):
                 continue
+            glue_seen += 1
+            if glue_seen > _MAX_GLUE_RECORDS:
+                break
             name = str(rr.rname).rstrip(".")
             try:
                 host = str(rr.rdata)
@@ -311,7 +324,10 @@ class RecursiveResolver:
         servers: List[_Server] = []
         for ns_name in ns_names:
             key = ns_name.rstrip(".").lower()
-            servers.extend(glue.get(key, []))
+            for s in glue.get(key, []):
+                servers.append(s)
+                if len(servers) >= _MAX_NEXT_SERVERS:
+                    return servers
 
         return servers
 

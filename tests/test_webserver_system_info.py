@@ -3,8 +3,8 @@ import types
 import pytest
 
 import foghorn.servers.webserver as webserver
-from foghorn.stats import StatsCollector
 from foghorn.servers.webserver import RingBuffer, create_app
+from foghorn.stats import StatsCollector
 
 
 def _reset_system_info_cache() -> None:

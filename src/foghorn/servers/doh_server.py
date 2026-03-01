@@ -64,8 +64,19 @@ async def _read_request(
     # Body if present
     body = b""
     if headers.get("content-length"):
+        from foghorn.security_limits import MAX_DOH_DNS_MESSAGE_BYTES
+
         try:
             ln = int(headers.get("content-length", "0"))
+        except Exception:
+            ln = 0
+
+        if ln > int(MAX_DOH_DNS_MESSAGE_BYTES):
+            # Too large; mark and return so the caller can respond with 413.
+            headers["x-foghorn-body-too-large"] = "1"
+            return req_line, headers, b""
+
+        try:
             body = await reader.readexactly(ln)
         except (
             Exception
@@ -123,6 +134,12 @@ async def _handle_conn(
                 writer.write(_HTTP_UNSUPPORTED + _CONN_CLOSE + _CRLF)
                 await writer.drain()
                 return
+            if headers.get("x-foghorn-body-too-large") == "1":
+                writer.write(
+                    b"HTTP/1.1 413 Request Entity Too Large\r\n" + _CONN_CLOSE + _CRLF
+                )
+                await writer.drain()
+                return
             qbytes = body
         elif method.upper() == "GET":
             from urllib.parse import parse_qs, urlparse
@@ -132,10 +149,19 @@ async def _handle_conn(
                 writer.write(_HTTP_BAD + _CONN_CLOSE + _CRLF)
                 await writer.drain()
                 return
+            from foghorn.security_limits import MAX_DOH_QUERY_PARAM_BYTES
+
             try:
                 qbytes = _b64url_decode_nopad(qs["dns"][0])
             except Exception:
                 writer.write(_HTTP_BAD + _CONN_CLOSE + _CRLF)
+                await writer.drain()
+                return
+
+            if len(qbytes) > int(MAX_DOH_QUERY_PARAM_BYTES):
+                writer.write(
+                    b"HTTP/1.1 413 Request Entity Too Large\r\n" + _CONN_CLOSE + _CRLF
+                )
                 await writer.drain()
                 return
         else:
@@ -145,6 +171,15 @@ async def _handle_conn(
 
         # Resolve
         loop = asyncio.get_running_loop()
+        from foghorn.security_limits import MAX_DOH_DNS_MESSAGE_BYTES
+
+        if len(qbytes) > int(MAX_DOH_DNS_MESSAGE_BYTES):
+            writer.write(
+                b"HTTP/1.1 413 Request Entity Too Large\r\n" + _CONN_CLOSE + _CRLF
+            )
+            await writer.drain()
+            return
+
         resp = await loop.run_in_executor(None, resolver, qbytes, client_ip)
         # Reply
         writer.write(_HTTP_OK + _CT_DNS + _CONN_CLOSE + _CRLF)

@@ -547,6 +547,12 @@ def _build_snapshot(
 
     # Plugins
     plugins = load_plugins(cfg.get("plugins", []))
+    # Warn if exposed listeners lack rate limiting
+    try:
+        from .config.rate_limit_check import check_rate_limit_plugin_config
+        check_rate_limit_plugin_config(plugins=plugins, cfg=cfg)
+    except Exception:
+        pass
     run_setup_plugins(plugins)
 
     # DNSSEC / EDNS

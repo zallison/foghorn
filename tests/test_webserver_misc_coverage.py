@@ -317,17 +317,18 @@ def test_query_log_endpoints_disabled_when_no_store() -> None:
     assert resp1.status_code == 200
     assert resp1.json()["status"] == "disabled"
 
-    resp2 = client.get(
-        "/api/v1/query_log/aggregate",
-        params={
-            "interval": 15,
-            "interval_units": "minutes",
-            "start": "2025-12-10 01:00:00",
-            "end": "2025-12-10 02:00:00",
-        },
-    )
-    assert resp2.status_code == 200
-    assert resp2.json()["status"] == "disabled"
+    for path in ["/api/v1/query_log/aggregate", "/query_log/aggregate"]:
+        resp2 = client.get(
+            path,
+            params={
+                "interval": 15,
+                "interval_units": "minutes",
+                "start": "2025-12-10 01:00:00",
+                "end": "2025-12-10 02:00:00",
+            },
+        )
+        assert resp2.status_code == 200
+        assert resp2.json()["status"] == "disabled"
 
 
 def test_upstream_status_more_defensive_branches(

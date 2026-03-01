@@ -12,9 +12,9 @@ Outputs:
 
 from __future__ import annotations
 
+import signal
 import subprocess
 import time
-import signal
 from typing import Generator
 
 import pytest
@@ -200,8 +200,9 @@ def test_memcached_cache_expiry_with_real_server(
       - None; asserts expired entries are removed.
     """
 
-    from foghorn.plugins.cache.memcached_cache import MemcachedCache
     import time
+
+    from foghorn.plugins.cache.memcached_cache import MemcachedCache
 
     try:
         cache = MemcachedCache(

@@ -28,8 +28,9 @@ import socket
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from .base import BaseStatsStore
 from foghorn.stats import FOGHORN_VERSION
+
+from .base import BaseStatsStore
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ class JsonLogging(BaseStatsStore):
         self,
         file_path: str,
         async_logging: bool = False,
+        max_logging_queue: int = 4096,
         **_: Any,
     ) -> None:
         self._healthy = False
@@ -84,6 +86,11 @@ class JsonLogging(BaseStatsStore):
 
         # Configure logging behaviour for BaseStatsStore insert_query_log.
         self._async_logging = bool(async_logging)
+        # BaseStatsStore worker queue capacity
+        try:
+            self._max_logging_queue = int(max_logging_queue)
+        except Exception:
+            self._max_logging_queue = 4096
 
         # Emit a header line that marks the start of a logging session. Downstream
         # tools can treat this as a lightweight metadata record preceding the

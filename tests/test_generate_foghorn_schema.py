@@ -10,10 +10,9 @@ Outputs:
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import json
 import runpy
+from pathlib import Path
 
 
 def _load_schema_module():

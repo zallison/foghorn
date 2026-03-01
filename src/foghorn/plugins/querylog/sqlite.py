@@ -97,6 +97,7 @@ class SqliteStatsStore(BaseStatsStore):
         batch_time_sec: float = 15.0,
         batch_max_size: int = 1000,
         async_logging: bool = False,
+        max_logging_queue: int = 4096,
         **_: Any,
     ) -> None:
         """Initialize SQLite backend and ensure schema exists.
@@ -116,6 +117,11 @@ class SqliteStatsStore(BaseStatsStore):
 
         # Logging/queuing behaviour
         self._async_logging = bool(async_logging)
+        # BaseStatsStore worker queue capacity
+        try:
+            self._max_logging_queue = int(max_logging_queue)
+        except Exception:
+            self._max_logging_queue = 4096
 
         # Batching configuration
         self._batch_writes = bool(batch_writes)

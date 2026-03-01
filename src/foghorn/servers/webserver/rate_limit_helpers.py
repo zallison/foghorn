@@ -8,7 +8,6 @@ from typing import Any, Dict
 from .stats_helpers import _find_rate_limit_db_paths_from_config
 from .stats_helpers import logger as _stats_logger
 
-
 # Reuse the existing webserver logger name for consistency
 logger = _stats_logger
 

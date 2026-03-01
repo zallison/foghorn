@@ -9,9 +9,9 @@ The functions here deliberately avoid importing FastAPI or http.server types.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
-import math
 from functools import cmp_to_key
 from typing import Any, Dict, Iterable, List, Optional
 

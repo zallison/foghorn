@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Iterator, Tuple
 
 import dns.name
+import dns.node
 import dns.rdata
 import dns.rdataclass
-import dns.node
 import dns.rdatatype
 import dns.zone
 import pytest

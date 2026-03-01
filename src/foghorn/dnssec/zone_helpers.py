@@ -523,11 +523,10 @@ def build_dnssec_helper_mapping(
                 # unknown types carrying raw RDATA bytes encoded by dnspython.
                 if qcode_int in {int(nsec3_code_idx), int(nsec3param_code_idx)}:
                     try:
-                        from dnslib.dns import RD
-
                         import dns.rdata as _dns_rdata
                         import dns.rdataclass as _dns_rdataclass
                         import dns.rdatatype as _dns_rdatatype
+                        from dnslib.dns import RD
 
                         if qcode_int == int(nsec3_code_idx):
                             rdtype = _dns_rdatatype.NSEC3

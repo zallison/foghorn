@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from dnslib import DNSHeader, DNSRecord, QTYPE, RR, TXT
+from dnslib import QTYPE, RR, TXT, DNSHeader, DNSRecord
 
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
 

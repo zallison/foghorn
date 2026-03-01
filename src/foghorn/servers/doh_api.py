@@ -1,4 +1,5 @@
 import http.server
+import json
 import logging
 import ssl
 import threading
@@ -58,9 +59,9 @@ def create_doh_app(
 
     app = FastAPI(
         title="Foghorn DoH",
-        docs_url=None,
+        docs_url="/docs",
         redoc_url=None,
-        openapi_url=None,
+        openapi_url="/openapi.json",
     )
 
     @app.get("/dns-query")
@@ -74,14 +75,19 @@ def create_doh_app(
         Outputs:
         - Response with application/dns-message body on success.
         """
+        from foghorn.security_limits import MAX_DOH_QUERY_PARAM_BYTES
+
         dns_param = request.query_params.get("dns")
         try:
             qbytes = _logic.parse_doh_get_dns_param(
                 dns_param,
                 decoder=_b64url_decode_nopad,
+                max_decoded_bytes=int(MAX_DOH_QUERY_PARAM_BYTES),
             )
-        except _logic.DohLogicError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
+        except _logic.DohLogicError as exc:
+            raise HTTPException(
+                status_code=int(getattr(exc, "status_code", 400) or 400)
+            )
         # Resolve using provided resolver (sync on threadpool would be ideal; keep simple)
         client_ip = request.client.host if request.client else "0.0.0.0"
         try:
@@ -110,12 +116,29 @@ def create_doh_app(
         Outputs:
         - Response with application/dns-message body on success.
         """
+        from foghorn.security_limits import MAX_DOH_DNS_MESSAGE_BYTES
+
         ctype = request.headers.get("content-type", "")
         try:
             _logic.validate_doh_post_content_type(ctype, dns_ct=_DNS_CT)
         except _logic.DohLogicError:
             raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
+
+        try:
+            content_length = request.headers.get("content-length")
+            if content_length is not None and int(content_length) > int(
+                MAX_DOH_DNS_MESSAGE_BYTES
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+                )
+        except ValueError:
+            # Invalid content-length; treat as bad request.
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
+
         body = await request.body()
+        if len(body) > int(MAX_DOH_DNS_MESSAGE_BYTES):
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
         client_ip = request.client.host if request.client else "0.0.0.0"
         try:
             resp = _logic.call_resolver(resolver, query=body, client_ip=client_ip)
@@ -187,15 +210,189 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
         Outputs:
         - None
         """
+
         self._send_bytes(status_code, b"", "text/plain; charset=utf-8")
 
+    def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
+        """Brief: Send a JSON response.
+
+        Inputs:
+        - status_code: HTTP status code
+        - payload: JSON-serializable object
+
+        Outputs:
+        - None
+        """
+
+        body = json.dumps(payload).encode("utf-8")
+        self._send_bytes(status_code, body, "application/json; charset=utf-8")
+
+    def _send_html(self, status_code: int, html_body: str) -> None:
+        """Brief: Send an HTML response.
+
+        Inputs:
+        - status_code: HTTP status code
+        - html_body: HTML document to send
+
+        Outputs:
+        - None
+        """
+
+        self._send_bytes(
+            status_code, html_body.encode("utf-8"), "text/html; charset=utf-8"
+        )
+
+    def _openapi_schema(self) -> dict[str, Any]:
+        """Brief: Build a minimal OpenAPI schema for the threaded DoH server.
+
+        Inputs: none
+
+        Outputs:
+        - dict OpenAPI schema describing /dns-query GET and POST.
+        """
+
+        return {
+            "openapi": "3.0.0",
+            "info": {"title": "Foghorn DoH", "version": "unknown"},
+            "paths": {
+                "/dns-query": {
+                    "get": {
+                        "summary": "DoH GET",
+                        "parameters": [
+                            {
+                                "name": "dns",
+                                "in": "query",
+                                "required": True,
+                                "schema": {"type": "string"},
+                                "description": "Base64url-encoded DNS message (no padding)",
+                            }
+                        ],
+                        "responses": {
+                            "200": {
+                                "description": "DNS response",
+                                "content": {
+                                    "application/dns-message": {
+                                        "schema": {"type": "string", "format": "binary"}
+                                    }
+                                },
+                            },
+                            "400": {"description": "Bad request"},
+                        },
+                    },
+                    "post": {
+                        "summary": "DoH POST",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/dns-message": {
+                                    "schema": {"type": "string", "format": "binary"}
+                                }
+                            },
+                        },
+                        "responses": {
+                            "200": {
+                                "description": "DNS response",
+                                "content": {
+                                    "application/dns-message": {
+                                        "schema": {"type": "string", "format": "binary"}
+                                    }
+                                },
+                            },
+                            "400": {"description": "Bad request"},
+                            "415": {"description": "Unsupported media type"},
+                        },
+                    },
+                }
+            },
+        }
+
+    def _docs_html(self) -> str:
+        """Brief: Return Swagger UI HTML for the threaded DoH server.
+
+        Inputs: none
+        Outputs: HTML string.
+        """
+
+        return """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>Foghorn DoH - Swagger UI</title>
+  <link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css\" />
+</head>
+<body>
+  <div id=\"swagger-ui\"></div>
+  <script src=\"https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js\"></script>
+  <script src=\"https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-standalone-preset.js\"></script>
+  <script>
+  window.onload = () => {
+    window.ui = SwaggerUIBundle({
+      url: '/openapi.json',
+      dom_id: '#swagger-ui',
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+      layout: 'StandaloneLayout',
+    });
+  };
+  </script>
+</body>
+</html>
+"""
+
+    def _oauth2_redirect_html(self) -> str:
+        """Brief: Return a minimal oauth2 redirect HTML page for Swagger UI.
+
+        Inputs: none
+        Outputs: HTML string.
+        """
+
+        return """<!doctype html>
+<html lang=\"en-US\">
+<head>
+  <title>Swagger UI: OAuth2 Redirect</title>
+</head>
+<body>
+<script>
+'use strict';
+(function() {
+  function run() {
+    var oauth2 = window.opener && window.opener.swaggerUIRedirectOauth2;
+    if (!oauth2) {
+      window.close();
+      return;
+    }
+    oauth2.callback({ url: window.location.href });
+    window.close();
+  }
+  run();
+})();
+</script>
+</body>
+</html>
+"""
+
     def do_GET(self) -> None:  # noqa: N802 (HTTP verb name)
-        """Brief: Handle GET /dns-query?dns=<base64url> requests.
+        """Brief: Handle GET requests for threaded DoH server.
 
         Inputs: None
         Outputs: None (writes HTTP response to client socket).
+
+        Notes:
+        - Supports DoH at /dns-query.
+        - Also exposes lightweight docs/schema endpoints to match the FastAPI path.
         """
         parsed = urllib.parse.urlparse(self.path)
+
+        if parsed.path == "/openapi.json":
+            self._send_json(200, self._openapi_schema())
+            return
+        if parsed.path == "/docs":
+            self._send_html(200, self._docs_html())
+            return
+        if parsed.path == "/docs/oauth2-redirect":
+            self._send_html(200, self._oauth2_redirect_html())
+            return
+
         if parsed.path != "/dns-query":
             self._send_empty(404)
             return
@@ -203,9 +400,12 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
         params = urllib.parse.parse_qs(parsed.query)
         dns_param = params.get("dns", [None])[0]
         try:
+            from foghorn.security_limits import MAX_DOH_QUERY_PARAM_BYTES
+
             qbytes = _logic.parse_doh_get_dns_param(
                 str(dns_param) if dns_param is not None else None,
                 decoder=_b64url_decode_nopad,
+                max_decoded_bytes=int(MAX_DOH_QUERY_PARAM_BYTES),
             )
         except _logic.DohLogicError as exc:
             self._send_empty(exc.status_code)
@@ -247,11 +447,21 @@ class _ThreadedDoHRequestHandler(http.server.BaseHTTPRequestHandler):
             self._send_empty(415)
             return
 
+        from foghorn.security_limits import MAX_DOH_DNS_MESSAGE_BYTES
+
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = 0
+
+        if length > int(MAX_DOH_DNS_MESSAGE_BYTES):
+            self._send_empty(413)
+            return
+
         body = self.rfile.read(length) if length > 0 else b""
+        if len(body) > int(MAX_DOH_DNS_MESSAGE_BYTES):
+            self._send_empty(413)
+            return
 
         resolver = self.resolver or (lambda q, ip: q)
         client_ip = self._client_ip()
@@ -411,6 +621,7 @@ def start_doh_server(
     cert_file: Optional[str] = None,
     key_file: Optional[str] = None,
     use_asyncio: bool = True,
+    allow_threaded_fallback: bool = True,
 ) -> Optional[DoHServerHandle]:
     """Brief: Start DoH server, preferring uvicorn but falling back to threaded HTTP.
 
@@ -452,6 +663,15 @@ def start_doh_server(
             can_use_asyncio = bool(use_asyncio)
 
     if not can_use_asyncio:
+        if not bool(allow_threaded_fallback):
+            logger.warning(
+                "DoH threaded fallback is disabled (allow_threaded_fallback=false). "
+                "Refusing to start DoH without uvicorn/FastAPI."
+            )
+            return None
+        logger.warning(
+            "Starting DoH using threaded stdlib HTTP fallback. This mode lacks full DoS/DDoS hardening and is not recommended for production."
+        )
         return _start_doh_server_threaded(
             host,
             port,
@@ -465,7 +685,16 @@ def start_doh_server(
     except (
         Exception
     ) as exc:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        logger.error("uvicorn not available for DoH: %s; using threaded fallback", exc)
+        if not bool(allow_threaded_fallback):
+            logger.warning(
+                "uvicorn not available for DoH (%s) and threaded fallback is disabled (allow_threaded_fallback=false)",
+                exc,
+            )
+            return None
+        logger.warning(
+            "uvicorn not available for DoH (%s); starting threaded stdlib HTTP fallback (not recommended for production)",
+            exc,
+        )
         return _start_doh_server_threaded(
             host,
             port,
@@ -477,7 +706,16 @@ def start_doh_server(
     try:
         app = create_doh_app(resolver)
     except Exception as exc:  # pragma: no cover
-        logger.error("FastAPI not available for DoH: %s; using threaded fallback", exc)
+        if not bool(allow_threaded_fallback):
+            logger.warning(
+                "FastAPI not available for DoH (%s) and threaded fallback is disabled (allow_threaded_fallback=false)",
+                exc,
+            )
+            return None
+        logger.warning(
+            "FastAPI not available for DoH (%s); starting threaded stdlib HTTP fallback (not recommended for production)",
+            exc,
+        )
         return _start_doh_server_threaded(
             host,
             port,

@@ -8,6 +8,7 @@ Outputs:
 """
 
 import base64
+
 import dns.name
 import dns.rcode
 import pytest

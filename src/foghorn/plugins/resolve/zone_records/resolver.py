@@ -58,6 +58,18 @@ def handle_opcode(
         # Fallback: NOTIFY handling not available
         return None
 
+    # NOTIFY must come over UDP (RFC 1996). Refuse on other listeners.
+    try:
+        listener = getattr(ctx, "listener", None)
+        if listener is not None and str(listener).lower() != "udp":
+            return PluginDecision(
+                action="deny",
+                ede_code=22,
+                ede_text="Not Supported",
+            )
+    except Exception:
+        pass
+
     # Validate that the sender is a configured upstream
     try:
         upstream = _resolve_notify_sender_upstream(ctx.client_ip)

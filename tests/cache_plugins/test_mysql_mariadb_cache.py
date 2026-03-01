@@ -161,8 +161,9 @@ def test_mysql_cache_plugin_initialization_defaults() -> None:
       - None; asserts defaults are applied.
     """
 
+    from unittest.mock import MagicMock, patch
+
     from foghorn.plugins.cache.mysql_mariadb_cache import MySqlCache
-    from unittest.mock import patch, MagicMock
 
     with patch(
         "foghorn.plugins.cache.mysql_mariadb_cache.MySQLTTLCache"
@@ -190,8 +191,9 @@ def test_mysql_cache_plugin_initialization_custom_config() -> None:
       - None; asserts config values override defaults.
     """
 
+    from unittest.mock import MagicMock, patch
+
     from foghorn.plugins.cache.mysql_mariadb_cache import MySqlCache
-    from unittest.mock import patch, MagicMock
 
     with patch(
         "foghorn.plugins.cache.mysql_mariadb_cache.MySQLTTLCache"
@@ -232,8 +234,9 @@ def test_mysql_cache_plugin_fallback_namespace_to_table() -> None:
       - None; asserts table key used when namespace missing.
     """
 
+    from unittest.mock import MagicMock, patch
+
     from foghorn.plugins.cache.mysql_mariadb_cache import MySqlCache
-    from unittest.mock import patch, MagicMock
 
     with patch(
         "foghorn.plugins.cache.mysql_mariadb_cache.MySQLTTLCache"
@@ -258,8 +261,9 @@ def test_mysql_cache_plugin_invalid_port_defaults() -> None:
       - None; asserts port defaults when conversion fails.
     """
 
+    from unittest.mock import MagicMock, patch
+
     from foghorn.plugins.cache.mysql_mariadb_cache import MySqlCache
-    from unittest.mock import patch, MagicMock
 
     with patch(
         "foghorn.plugins.cache.mysql_mariadb_cache.MySQLTTLCache"
@@ -284,8 +288,9 @@ def test_mysql_cache_plugin_invalid_config_types() -> None:
       - None; asserts bad types are corrected.
     """
 
+    from unittest.mock import MagicMock, patch
+
     from foghorn.plugins.cache.mysql_mariadb_cache import MySqlCache
-    from unittest.mock import patch, MagicMock
 
     with patch(
         "foghorn.plugins.cache.mysql_mariadb_cache.MySQLTTLCache"
@@ -320,8 +325,9 @@ def test_mysql_cache_plugin_min_ttl_enforcement() -> None:
       - None; asserts negative TTL becomes 0.
     """
 
+    from unittest.mock import MagicMock, patch
+
     from foghorn.plugins.cache.mysql_mariadb_cache import MySqlCache
-    from unittest.mock import patch, MagicMock
 
     with patch(
         "foghorn.plugins.cache.mysql_mariadb_cache.MySQLTTLCache"
@@ -344,8 +350,9 @@ def test_mysql_cache_plugin_methods_delegate() -> None:
       - None; asserts method calls reach backend.
     """
 
+    from unittest.mock import MagicMock, patch
+
     from foghorn.plugins.cache.mysql_mariadb_cache import MySqlCache
-    from unittest.mock import patch, MagicMock
 
     with patch(
         "foghorn.plugins.cache.mysql_mariadb_cache.MySQLTTLCache"
@@ -392,8 +399,9 @@ def test_mysql_cache_plugin_close_handles_exceptions() -> None:
       - None; asserts exceptions are suppressed.
     """
 
+    from unittest.mock import MagicMock, patch
+
     from foghorn.plugins.cache.mysql_mariadb_cache import MySqlCache
-    from unittest.mock import patch, MagicMock
 
     with patch(
         "foghorn.plugins.cache.mysql_mariadb_cache.MySQLTTLCache"

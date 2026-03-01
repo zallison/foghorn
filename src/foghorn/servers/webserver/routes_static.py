@@ -4,7 +4,7 @@ import os
 from typing import Any, Dict
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 
 def _register_static_routes(

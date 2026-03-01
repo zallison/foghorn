@@ -15,7 +15,6 @@ import pytest
 
 from foghorn.servers import doh_server
 
-
 pytestmark = pytest.mark.slow
 
 
@@ -233,6 +232,44 @@ def test_handle_conn_post_wrong_content_type(monkeypatch: pytest.MonkeyPatch) ->
     assert writer.written[0].startswith(b"HTTP/1.1 415 Unsupported Media Type\r\n")
 
 
+def test_handle_conn_post_body_too_large_413(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Brief: _handle_conn returns 413 when _read_request marks body too large.
+
+    Inputs:
+      - monkeypatch: stubs _read_request to set x-foghorn-body-too-large.
+
+    Outputs:
+      - None; asserts 413 is written and resolver is not called.
+    """
+
+    writer = _FakeWriter()
+
+    async def fake_read_request(reader):  # type: ignore[override]
+        return (
+            "POST /dns-query HTTP/1.1",
+            {
+                "content-type": "application/dns-message",
+                "content-length": "999999",
+                "x-foghorn-body-too-large": "1",
+            },
+            b"",
+        )
+
+    def resolver(q: bytes, ip: str) -> bytes:  # pragma: no cover - defensive
+        raise AssertionError("resolver should not be called")
+
+    monkeypatch.setattr(doh_server, "_read_request", fake_read_request)
+
+    async def _run() -> None:
+        await doh_server._handle_conn(reader=object(), writer=writer, resolver=resolver)
+
+    asyncio.run(_run())
+
+    assert writer.closed is True
+    assert writer.written
+    assert writer.written[0].startswith(b"HTTP/1.1 413 Request Entity Too Large\r\n")
+
+
 def test_handle_conn_get_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """Brief: _handle_conn decodes GET /dns-query?dns=<b64> and returns 200.
 
@@ -271,6 +308,47 @@ def test_handle_conn_get_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     assert writer.written[0].startswith(b"HTTP/1.1 200 OK\r\n")
     assert b"Content-Type: application/dns-message\r\n" in writer.written[0]
     assert writer.written[1] == b"resp2"
+
+
+def test_handle_conn_get_oversized_decoded_query_returns_413(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: _handle_conn returns 413 when GET dns param decodes over the limit.
+
+    Inputs:
+      - monkeypatch: stubs _read_request and patches decoder/limit.
+
+    Outputs:
+      - None; asserts 413 response and resolver is not called.
+    """
+
+    import foghorn.security_limits as limits
+
+    monkeypatch.setattr(limits, "MAX_DOH_QUERY_PARAM_BYTES", 10)
+    monkeypatch.setattr(doh_server, "_b64url_decode_nopad", lambda _s: b"x" * 11)
+
+    writer = _FakeWriter()
+
+    async def fake_read_request(reader):  # type: ignore[override]
+        return (
+            "GET /dns-query?dns=small HTTP/1.1",
+            {},
+            b"",
+        )
+
+    def resolver(qbytes: bytes, ip: str) -> bytes:  # pragma: no cover - defensive
+        raise AssertionError("resolver should not be called")
+
+    monkeypatch.setattr(doh_server, "_read_request", fake_read_request)
+
+    async def _run() -> None:
+        await doh_server._handle_conn(reader=object(), writer=writer, resolver=resolver)
+
+    asyncio.run(_run())
+
+    assert writer.closed is True
+    assert writer.written
+    assert writer.written[0].startswith(b"HTTP/1.1 413 Request Entity Too Large\r\n")
 
 
 def test_handle_conn_get_missing_dns_param(monkeypatch: pytest.MonkeyPatch) -> None:

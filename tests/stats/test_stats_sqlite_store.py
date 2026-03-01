@@ -11,12 +11,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from foghorn.stats import StatsSQLiteStore
 from foghorn.plugins.querylog.sqlite import (
     SqliteStatsStore,
     _is_subdomain,
     _normalize_domain,
 )
+from foghorn.stats import StatsSQLiteStore
 
 
 def test_health_check_true_and_false(monkeypatch) -> None:

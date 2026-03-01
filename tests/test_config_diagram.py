@@ -10,8 +10,8 @@ Outputs:
 
 from __future__ import annotations
 
-from pathlib import Path
 import types
+from pathlib import Path
 
 import pytest
 
@@ -30,7 +30,6 @@ except ModuleNotFoundError:  # pragma: no cover - environment dependent
     )
 
 from foghorn.servers.webserver import create_app
-
 
 _MINIMAL_CONFIG_YAML = """
 server:

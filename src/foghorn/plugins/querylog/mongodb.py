@@ -24,7 +24,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import BaseStatsStore
-from .sqlite import _normalize_domain, _is_subdomain
+from .sqlite import _is_subdomain, _normalize_domain
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,7 @@ class MongoStatsStore(BaseStatsStore):
         database: str = "foghorn_stats",
         connect_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = False,
+        max_logging_queue: int = 4096,
         **_: Any,
     ) -> None:
         mongo_mod = _import_mongo_driver()
@@ -107,6 +108,11 @@ class MongoStatsStore(BaseStatsStore):
 
         # Use synchronous logging by default for Mongo stats backend.
         self._async_logging = bool(async_logging)
+        # BaseStatsStore worker queue capacity
+        try:
+            self._max_logging_queue = int(max_logging_queue)
+        except Exception:
+            self._max_logging_queue = 4096
 
         self._db = self._client[database]
         self._counts = self._db["counts"]

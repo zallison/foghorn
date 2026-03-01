@@ -18,8 +18,8 @@ import json
 import logging
 import threading
 
-import yaml
 import pytest
+import yaml
 
 try:  # FastAPI is an optional dependency
     from fastapi.testclient import TestClient
@@ -29,7 +29,6 @@ except ModuleNotFoundError:  # pragma: no cover - environment dependent
         allow_module_level=True,
     )
 
-from foghorn.stats import StatsCollector, StatsSQLiteStore
 from foghorn.servers.webserver import (
     RingBuffer,
     RuntimeState,
@@ -45,6 +44,7 @@ from foghorn.servers.webserver import (
     sanitize_config,
     start_webserver,
 )
+from foghorn.stats import StatsCollector, StatsSQLiteStore
 
 
 def test_sanitize_config_redacts_simple_keys() -> None:
@@ -70,6 +70,108 @@ def test_sanitize_config_redacts_simple_keys() -> None:
     assert auth["user"] == "u"
     # Original dict is unmodified
     assert cfg["webserver"]["auth"]["token"] == "abc"
+
+
+def test_docs_and_openapi_endpoints_enabled() -> None:
+    """Brief: FastAPI admin app exposes /docs and /openapi.json.
+
+    Inputs:
+      - App created with minimal config.
+
+    Outputs:
+      - /docs returns HTML.
+    # /openapi.json returns a schema that includes the canonical /api/v1 paths.
+    """
+
+    cfg = {
+        "webserver": {"enabled": True},
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    resp_docs = client.get("/docs")
+    assert resp_docs.status_code == 200
+
+    resp_schema = client.get("/openapi.json")
+    assert resp_schema.status_code == 200
+    schema = resp_schema.json()
+    paths = schema.get("paths") or {}
+    assert "/api/v1/health" in paths
+    assert "/health" not in paths
+
+
+def test_disable_schema_disables_openapi_and_docs() -> None:
+    """Brief: server.http.enable_schema=false disables /openapi.json and /docs.
+
+    Inputs:
+      - create_app config with server.http.enable_schema=false.
+
+    Outputs:
+      - /openapi.json is 404.
+      - /docs is 404.
+    """
+
+    cfg = {
+        "server": {"http": {"enabled": True, "enable_schema": False}},
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    assert client.get("/openapi.json").status_code == 404
+    assert client.get("/docs").status_code == 404
+
+
+def test_disable_docs_disables_docs_but_keeps_openapi() -> None:
+    """Brief: server.http.enable_docs=false disables /docs but keeps /openapi.json.
+
+    Inputs:
+      - create_app config with server.http.enable_docs=false.
+
+    Outputs:
+      - /openapi.json is 200.
+      - /docs is 404.
+    """
+
+    cfg = {
+        "server": {"http": {"enabled": True, "enable_docs": False}},
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    assert client.get("/openapi.json").status_code == 200
+    assert client.get("/docs").status_code == 404
+
+
+def test_disable_api_removes_core_endpoints_from_openapi() -> None:
+    """Brief: server.http.enable_api=false removes admin API endpoints.
+
+    Inputs:
+      - create_app config with server.http.enable_api=false.
+
+    Outputs:
+      - /api/v1/health is 404.
+      - /openapi.json does not contain /api/v1/health.
+    """
+
+    cfg = {
+        "server": {"http": {"enabled": True, "enable_api": False}},
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    assert client.get("/api/v1/health").status_code == 404
+
+    schema = client.get("/openapi.json").json()
+    paths = schema.get("paths") or {}
+    assert "/api/v1/health" not in paths
 
 
 def test_about_endpoint_includes_version_and_github_url() -> None:
@@ -434,6 +536,13 @@ def test_stats_includes_upstreams_and_upstream_rcodes() -> None:
         keyed by qtype.
     """
 
+    import foghorn.servers.webserver as web_mod
+
+    # Ensure deterministic behaviour in tests: the stats snapshot cache is keyed
+    # by id(collector), so clear it to avoid any potential id reuse collisions.
+    with web_mod._STATS_SNAPSHOT_CACHE_LOCK:
+        web_mod._last_stats_snapshots.clear()
+
     collector = StatsCollector(
         track_uniques=False,
         include_qtype_breakdown=False,
@@ -487,6 +596,11 @@ def test_stats_fastapi_and_threaded_payloads_match(monkeypatch) -> None:
     """
 
     import foghorn.servers.webserver as web_mod
+
+    # Ensure deterministic behaviour in tests: the stats snapshot cache is keyed
+    # by id(collector), so clear it to avoid any potential id reuse collisions.
+    with web_mod._STATS_SNAPSHOT_CACHE_LOCK:
+        web_mod._last_stats_snapshots.clear()
 
     # Build a collector with enough data to exercise the rich stats fields.
     collector = StatsCollector(
@@ -1899,7 +2013,6 @@ def test_reload_threaded_refuses_when_restart_required_but_reload_reloadable_app
     import http.client
 
     import foghorn.servers.webserver as web_mod
-
     from foghorn import runtime_config
 
     cfg_path = tmp_path / "config.yaml"
@@ -3442,6 +3555,7 @@ def test_query_log_fastapi_defensive_parsing_by_direct_calls() -> None:
 
     import pytest
     from fastapi import HTTPException
+
     from foghorn.stats import StatsCollector
 
     class DummyStore:

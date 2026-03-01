@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import ipaddress  # reused by DNSSEC auto-sign helper when building PTRs, kept for future use
 import logging
 import pathlib
 import time
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-import ipaddress  # reused by DNSSEC auto-sign helper when building PTRs, kept for future use
 from dnslib import QTYPE, RR
 
 from foghorn.dnssec import zone_helpers as _zone_helpers

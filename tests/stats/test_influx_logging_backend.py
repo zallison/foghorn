@@ -186,6 +186,7 @@ def test_influx_logging_close_marks_unhealthy_and_closes_session(
     """
 
     import types as _types
+
     import foghorn.plugins.querylog.influxdb as influx_mod
 
     def _session_factory(**kwargs: Any) -> _FakeSession:  # type: ignore[no-untyped-def]
@@ -218,6 +219,7 @@ def test_insert_query_log_posts_line_protocol_and_parses_result_json(
     """
 
     import types as _types
+
     import foghorn.plugins.querylog.influxdb as influx_mod
 
     def _session_factory(**kwargs: Any) -> _FakeSession:  # type: ignore[no-untyped-def]
@@ -283,6 +285,7 @@ def test_insert_query_log_marks_unhealthy_on_http_error(monkeypatch: pytest.Monk
     """
 
     import types as _types
+
     import foghorn.plugins.querylog.influxdb as influx_mod
 
     class _ErrorSession(_FakeSession):
@@ -330,6 +333,7 @@ def test_insert_query_log_returns_early_when_unhealthy(monkeypatch: pytest.Monke
     """
 
     import types as _types
+
     import foghorn.plugins.querylog.influxdb as influx_mod
 
     def _session_factory(**kwargs: Any) -> _FakeSession:  # type: ignore[no-untyped-def]

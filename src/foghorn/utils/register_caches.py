@@ -5,9 +5,8 @@ import logging
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from cachetools import TTLCache, LFUCache, RRCache, FIFOCache, LRUCache, cached
+from cachetools import FIFOCache, LFUCache, LRUCache, RRCache, TTLCache, cached
 from cachetools.keys import hashkey
-
 
 # In-process registry of functions/methods decorated with cache-aware helpers
 # (registered_cached / registered_lru_cached / registered_foghorn_ttl /

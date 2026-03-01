@@ -10,7 +10,6 @@ import threading
 from typing import Dict, List, Optional, Tuple
 
 from dnslib import QTYPE
-
 from pydantic import BaseModel, Field
 
 from foghorn.plugins.resolve.base import (

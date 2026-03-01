@@ -8,6 +8,8 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
+from . import admin_logic as _admin_logic
+from . import core as web_mod
 from .stats_helpers import (
     _build_stats_payload_from_snapshot,
     _build_traffic_payload_from_snapshot,
@@ -15,8 +17,6 @@ from .stats_helpers import (
     _trim_top_fields,
     _utc_now_iso,
 )
-from . import admin_logic as _admin_logic
-from . import core as web_mod
 
 
 def _register_stats_routes(app: FastAPI, auth_dep: Any, version: str) -> None:
@@ -32,7 +32,7 @@ def _register_stats_routes(app: FastAPI, auth_dep: Any, version: str) -> None:
     """
 
     @app.get("/api/v1/stats", dependencies=[Depends(auth_dep)])
-    @app.get("/stats", dependencies=[Depends(auth_dep)])
+    @app.get("/stats", dependencies=[Depends(auth_dep)], include_in_schema=False)
     async def get_stats(reset: bool = False, top: int = 10) -> Dict[str, Any]:
         """Return statistics snapshot from StatsCollector as JSON.
 
@@ -222,7 +222,11 @@ def _register_stats_routes(app: FastAPI, auth_dep: Any, version: str) -> None:
         return payload
 
     @app.post("/api/v1/stats/reset", dependencies=[Depends(auth_dep)])
-    @app.post("/stats/reset", dependencies=[Depends(auth_dep)])
+    @app.post(
+        "/stats/reset",
+        dependencies=[Depends(auth_dep)],
+        include_in_schema=False,
+    )
     async def reset_stats() -> Dict[str, Any]:
         """Reset all statistics counters if collector is active."""
 
@@ -233,7 +237,7 @@ def _register_stats_routes(app: FastAPI, auth_dep: Any, version: str) -> None:
         return {"status": "ok", "server_time": _utc_now_iso()}
 
     @app.get("/api/v1/traffic", dependencies=[Depends(auth_dep)])
-    @app.get("/traffic", dependencies=[Depends(auth_dep)])
+    @app.get("/traffic", dependencies=[Depends(auth_dep)], include_in_schema=False)
     async def get_traffic(top: int = 10) -> Dict[str, Any]:
         """Return a summarized traffic view derived from statistics snapshot."""
 

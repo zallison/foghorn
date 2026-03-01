@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import dns.message
 import dns.name
+import dns.rcode
 import dns.rdataclass
 import dns.rdatatype
-import dns.rcode
 import dns.resolver
 
 import foghorn.dnssec.dnssec_validate as dval

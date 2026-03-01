@@ -22,7 +22,6 @@ from typing import Dict, Iterable, Type
 
 from .base import BaseStatsStore
 
-
 _CAMEL_1 = re.compile(r"(.)([A-Z][a-z]+)")
 _CAMEL_2 = re.compile(r"([a-z0-9])([A-Z])")
 

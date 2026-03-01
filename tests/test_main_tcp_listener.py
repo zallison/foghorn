@@ -73,7 +73,6 @@ def test_main_tcp_listener_uses_legacy_host_and_starts(monkeypatch):
         def join(self, timeout=None):
             return
 
-    import sys
     import threading as real_threading
 
     class _FakeThreadingModule:
@@ -90,8 +89,21 @@ def test_main_tcp_listener_uses_legacy_host_and_starts(monkeypatch):
 
     monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
-    # Ensure `import threading` inside main() gets our shim
-    monkeypatch.setitem(sys.modules, "threading", fake_threading)
+    monkeypatch.setattr(main_mod, "threading", fake_threading)
+
+    # main._start_asyncio_server imports threading dynamically via importlib so
+    # tests can override it. Patch importlib.import_module('threading') to return
+    # our shim without mutating sys.modules.
+    import importlib
+
+    real_import_module = importlib.import_module
+
+    def _fake_import_module(name, package=None):  # type: ignore[no-untyped-def]
+        if name == "threading":
+            return fake_threading
+        return real_import_module(name, package=package)
+
+    monkeypatch.setattr(importlib, "import_module", _fake_import_module)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main_mod.main(["--config", "x.yaml"])
@@ -119,6 +131,8 @@ def test_listen_dns_populates_udp_and_tcp(monkeypatch):
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
         "server:\n"
+        "  limits:\n"
+        "    allow_unsafe_threaded_listeners: true\n"
         "  listen:\n"
         "    dns:\n"
         "      host: 0.0.0.0\n"
@@ -179,7 +193,6 @@ def test_listen_dns_populates_udp_and_tcp(monkeypatch):
             return
 
     import threading as real_threading
-    import sys
 
     class _FakeThreadingModule:
         """Test helper: module-like shim that overrides Thread but proxies others."""
@@ -200,9 +213,6 @@ def test_listen_dns_populates_udp_and_tcp(monkeypatch):
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
     monkeypatch.setattr(tcp_server_mod, "serve_tcp_threaded", fake_serve_tcp_threaded)
     monkeypatch.setattr(tcp_server_mod, "serve_tcp", lambda *a, **k: None)
-    # Ensure imports of threading inside main() see our fake module and that
-    # the already-imported main_mod.threading uses DummyThread.Thread.
-    monkeypatch.setitem(sys.modules, "threading", fake_threading)
     monkeypatch.setattr(main_mod, "threading", fake_threading)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):

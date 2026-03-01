@@ -9,7 +9,7 @@ Outputs:
 """
 
 import pytest
-from dnslib import QTYPE, RCODE, DNSRecord, RR, A
+from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 import foghorn.servers.server as server_mod
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache

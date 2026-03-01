@@ -12,9 +12,9 @@ Outputs:
 
 from __future__ import annotations
 
+import signal
 import subprocess
 import time
-import signal
 from typing import Generator
 
 import pytest
@@ -197,8 +197,9 @@ def test_mongodb_cache_expiry_with_real_db(mongodb_container: str) -> None:
       - None; asserts expired entries are removed.
     """
 
-    from foghorn.plugins.cache.mongodb_cache import MongoDBCache
     import time
+
+    from foghorn.plugins.cache.mongodb_cache import MongoDBCache
 
     try:
         cache = MongoDBCache(

@@ -4,7 +4,10 @@ import socket
 import ssl
 from typing import List, Optional, Tuple
 
-from dnslib import DNSRecord, QTYPE, RR
+from dnslib import QTYPE, RR, DNSRecord
+
+from foghorn.security_limits import MAX_AXFR_FRAME_BYTES
+
 from .dot import _build_ssl_context
 
 
@@ -131,6 +134,10 @@ def axfr_transfer(
             ln = int.from_bytes(hdr, "big")
             if ln <= 0:
                 break
+            if ln > int(MAX_AXFR_FRAME_BYTES):
+                raise AXFRError(
+                    f"AXFR response frame too large ({ln} bytes > {int(MAX_AXFR_FRAME_BYTES)})"
+                )
 
             body = _recv_exact(io_sock, ln)
             if len(body) != ln:

@@ -240,15 +240,28 @@ plugins:
       validity_days: 30
       nsec3: true
 server:
+  # DoS hardening knobs
+  limits:
+    # Shared threadpool used by asyncio listeners (TCP/DoT). Set to null to use a
+    # conservative default.
+    resolver_executor_workers: null
+
   listen:
     udp:
       enabled: true
       host: 127.0.0.1
       port: 5335
+
     tcp:
       enabled: false
       host: 127.0.0.1
       port: 5335
+      # Connection hardening (asyncio TCP listener only)
+      max_connections: 1024
+      max_connections_per_ip: 64
+      max_queries_per_connection: 100
+      idle_timeout_seconds: 15.0
+
     dot:
       # DNS-over-TLS (DoT) listener (example using self-signed / internal CA certs).
       # Generate lab certs (./keys by default):
@@ -260,10 +273,19 @@ server:
       port: 8853
       cert_file: ./keys/foghorn_localhost.crt
       key_file: ./keys/foghorn_localhost.key
+      # Connection hardening (asyncio DoT listener only)
+      max_connections: 1024
+      max_connections_per_ip: 64
+      max_queries_per_connection: 100
+      idle_timeout_seconds: 15.0
+
     doh:
       enabled: false
       host: 127.0.0.1
       port: 5380
+      # When false, refuse to start the threaded stdlib DoH fallback when
+      # FastAPI/uvicorn or asyncio is unavailable.
+      allow_threaded_fallback: true
   cache:
     module: in_memory_ttl
     config:
@@ -279,6 +301,15 @@ server:
     enabled: false
     host: 127.0.0.1
     port: 5380
+
+    # Optional feature gates
+    enable_api: true
+    enable_schema: true
+    enable_docs: true
+
+    # When false, refuse to start the threaded stdlib admin HTTP fallback when
+    # FastAPI/uvicorn or asyncio is unavailable.
+    allow_threaded_fallback: true
     logs:
       buffer_size: 500
     system_info_ttl_seconds: 2.0

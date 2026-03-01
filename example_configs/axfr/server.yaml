@@ -1,15 +1,37 @@
 # primary.yaml
 server:
+  # DoS hardening knobs
+  limits:
+    # Shared threadpool used by asyncio listeners (TCP/DoT). Set to null to use a
+    # conservative default.
+    resolver_executor_workers: null
+
   listen:
-    dns:
-      udp:
-        enabled: true
-        host: 0.0.0.0
-        port: 53
-      tcp:
-        enabled: true
-        host: 0.0.0.0
-        port: 53
+    udp:
+      enabled: true
+      host: 0.0.0.0
+      port: 53
+
+    tcp:
+      enabled: true
+      host: 0.0.0.0
+      port: 53
+      # Connection hardening (asyncio TCP listener only)
+      max_connections: 1024
+      max_connections_per_ip: 64
+      max_queries_per_connection: 100
+      idle_timeout_seconds: 15.0
+
+    # Optional: DNS-over-HTTPS (disabled by default). If enabled, you can
+    # prevent falling back to the threaded stdlib server.
+    doh:
+      enabled: false
+      allow_threaded_fallback: true
+
+  # Optional: Admin HTTP UI (disabled by default)
+  http:
+    enabled: false
+    allow_threaded_fallback: true
   dnssec:
     mode: ignore          # or 'validate' if you’re signing zones
     validation: upstream_ad

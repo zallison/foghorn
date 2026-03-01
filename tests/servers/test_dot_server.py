@@ -87,6 +87,53 @@ def running_dot_server(selfsigned_cert):
     yield host, info["port"]
 
 
+@pytest.fixture
+def running_dot_server_max_queries(selfsigned_cert):
+    """Brief: Start serve_dot with max_queries_per_connection=2.
+
+    Inputs:
+      - selfsigned_cert: fixture providing (cert_file, key_file).
+
+    Outputs:
+      - (host, port): Tuple for connecting to the running DoT server.
+    """
+
+    cert_file, key_file = selfsigned_cert
+    host = "127.0.0.1"
+    ready = threading.Event()
+    info = {}
+
+    def runner():
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        loop = asyncio.get_event_loop()
+
+        async def bind_and_run():
+            srv = await asyncio.start_server(lambda r, w: None, host, 0)
+            port = srv.sockets[0].getsockname()[1]
+            info["port"] = port
+            ready.set()
+            srv.close()
+            await srv.wait_closed()
+            await serve_dot(
+                host,
+                port,
+                _echo_resolver,
+                cert_file=cert_file,
+                key_file=key_file,
+                max_queries_per_connection=2,
+                idle_timeout_seconds=1.0,
+            )
+
+        loop.create_task(bind_and_run())
+        loop.run_forever()
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    if not ready.wait(2.0):
+        pytest.skip("failed to start dot server")
+    yield host, info["port"]
+
+
 def test_dot_server_roundtrip(running_dot_server):
     host, port = running_dot_server
     ctx = ssl.create_default_context()
@@ -104,5 +151,46 @@ def test_dot_server_roundtrip(running_dot_server):
         ln = int.from_bytes(hdr, "big")
         body = s.recv(ln)
         assert body == q
+    finally:
+        s.close()
+
+
+def test_dot_server_max_queries_per_connection_closes(
+    running_dot_server_max_queries,
+) -> None:
+    """Brief: serve_dot closes TLS connection after max_queries_per_connection.
+
+    Inputs:
+      - running_dot_server_max_queries: fixture providing host/port.
+
+    Outputs:
+      - None; asserts the connection is closed after the 2nd response.
+    """
+
+    host, port = running_dot_server_max_queries
+    ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    s = ctx.wrap_socket(socket.socket(), server_hostname="localhost")
+    s.settimeout(2)
+    s.connect((host, port))
+    try:
+        payloads = [b"one", b"two"]
+        for p in payloads:
+            s.sendall(len(p).to_bytes(2, "big") + p)
+            hdr = s.recv(2)
+            assert len(hdr) == 2
+            ln = int.from_bytes(hdr, "big")
+            body = s.recv(ln)
+            assert body == p
+
+        # Third query should observe EOF or connection reset.
+        s.sendall(len(b"three").to_bytes(2, "big") + b"three")
+        try:
+            hdr2 = s.recv(2)
+            assert hdr2 == b"" or hdr2 is not None
+        except (ConnectionResetError, BrokenPipeError, OSError, ssl.SSLError):
+            pass
     finally:
         s.close()

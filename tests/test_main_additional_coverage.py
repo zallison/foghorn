@@ -42,9 +42,9 @@ class _FakeThreadingModule:
         return getattr(self._real, name)
 
 
-from foghorn.plugins.cache.none import NullCache
 from foghorn.config.config_parser import normalize_upstream_config
 from foghorn.main import _clear_lru_caches, run_setup_plugins
+from foghorn.plugins.cache.none import NullCache
 from foghorn.plugins.resolve.base import BasePlugin
 
 
@@ -317,6 +317,7 @@ def test_sigusr1_skip_reset_and_coalescing(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -429,6 +430,7 @@ def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -485,6 +487,7 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -615,6 +618,7 @@ def test_sigusr2_logs_no_collector_active(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -679,6 +683,7 @@ def test_sigusr2_registration_failure_logs_warning(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -736,6 +741,7 @@ def test_sighup_with_udp_enabled_exits_cleanly(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -870,6 +876,8 @@ def test_tcp_permission_error_falls_back_to_threaded(monkeypatch, caplog):
         "  listen:\n"
         "    host: 127.0.0.1\n"
         "    port: 5354\n"
+        "    udp:\n"
+        "      enabled: false\n"
         "    tcp:\n"
         "      enabled: true\n"
         "      host: 127.0.0.1\n"
@@ -957,6 +965,8 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
         "  listen:\n"
         "    host: 127.0.0.1\n"
         "    port: 5354\n"
+        "    udp:\n"
+        "      enabled: false\n"
         "    dot:\n"
         "      enabled: true\n"
         "      host: 127.0.0.1\n"
@@ -1039,6 +1049,8 @@ def test_dot_start_logs_info(monkeypatch, caplog):
         "  listen:\n"
         "    host: 127.0.0.1\n"
         "    port: 5354\n"
+        "    udp:\n"
+        "      enabled: false\n"
         "    dot:\n"
         "      enabled: true\n"
         "      host: 127.0.0.1\n"
@@ -1109,6 +1121,8 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
         "  listen:\n"
         "    host: 127.0.0.1\n"
         "    port: 5354\n"
+        "    udp:\n"
+        "      enabled: false\n"
         "    tcp:\n"
         "      enabled: true\n"
         "      host: 127.0.0.1\n"
@@ -1159,7 +1173,7 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
     def fake_get_event_loop() -> DummyLoop:
         return holder["loop"]
 
-    async def fake_serve_tcp(host, port, resolver):  # noqa: ARG002
+    async def fake_serve_tcp(host, port, resolver, **kwargs):  # noqa: ARG002
         return None
 
     class DummyThread:
@@ -1214,6 +1228,8 @@ def test_doh_start_failure_returns_one(monkeypatch, caplog):
         "  listen:\n"
         "    host: 127.0.0.1\n"
         "    port: 5354\n"
+        "    udp:\n"
+        "      enabled: false\n"
         "    doh:\n"
         "      enabled: true\n"
         "      host: 127.0.0.1\n"
@@ -1276,6 +1292,7 @@ def test_webserver_stop_called_on_shutdown(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -1380,6 +1397,7 @@ def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -1519,6 +1537,7 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"
@@ -1603,6 +1622,7 @@ def test_udp_teardown_outer_exception_logs_unexpected_error(monkeypatch, caplog)
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
         "upstreams:\n"
         "  strategy: failover\n"
         "  max_concurrent: 1\n"

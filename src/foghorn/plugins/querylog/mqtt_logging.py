@@ -108,6 +108,7 @@ class MqttLogging(BaseStatsStore):
         retain: bool = False,
         connect_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = False,
+        max_logging_queue: int = 4096,
         **_: Any,
     ) -> None:
         mqtt = _import_mqtt_driver()
@@ -123,6 +124,11 @@ class MqttLogging(BaseStatsStore):
         # ``async_logging``; MQTT logging defaults to synchronous behaviour so
         # tests and callers see publishes immediately.
         self._async_logging = bool(async_logging)
+        # BaseStatsStore worker queue capacity
+        try:
+            self._max_logging_queue = int(max_logging_queue)
+        except Exception:
+            self._max_logging_queue = 4096
 
         self._client = mqtt.Client(client_id=client_id or "foghorn_mqtt_logger")
         if username is not None:

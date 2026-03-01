@@ -149,6 +149,7 @@ class InfluxLogging(BaseStatsStore):
         timeout: float = 2.0,
         session_kwargs: Optional[Dict[str, Any]] = None,
         async_logging: bool = True,
+        max_logging_queue: int = 4096,
         **_: Any,
     ) -> None:
         self._write_url = str(write_url)
@@ -160,6 +161,11 @@ class InfluxLogging(BaseStatsStore):
         # Logging behaviour: default to async for remote HTTP logging, but
         # allow callers to disable it via config.
         self._async_logging = bool(async_logging)
+        # BaseStatsStore worker queue capacity
+        try:
+            self._max_logging_queue = int(max_logging_queue)
+        except Exception:
+            self._max_logging_queue = 4096
 
         self._session = requests.Session(**(session_kwargs or {}))
         self._params: Dict[str, str] = {"precision": self._precision}

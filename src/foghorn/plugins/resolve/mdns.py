@@ -1,18 +1,16 @@
 from __future__ import annotations
 
+import html
 import ipaddress
 import logging
 import threading
-import html
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
-from dnslib import A, AAAA, PTR, QTYPE, RR, SRV, TXT, DNSHeader, DNSRecord
+from cachetools import Cache, LRUCache
+from dnslib import AAAA, PTR, QTYPE, RR, SRV, TXT, A, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field, validator
-
-from cachetools import LRUCache, Cache
-from foghorn.utils.register_caches import registered_cached
 
 from foghorn.plugins.resolve.base import (
     AdminPageSpec,
@@ -21,6 +19,7 @@ from foghorn.plugins.resolve.base import (
     PluginDecision,
     plugin_aliases,
 )
+from foghorn.utils.register_caches import registered_cached
 
 logger = logging.getLogger(__name__)
 
@@ -428,8 +427,8 @@ class MdnsBridge(BasePlugin):
 
         try:
             from zeroconf import (
-                IPVersion,
                 InterfaceChoice,
+                IPVersion,
                 ServiceBrowser,
                 ServiceInfo,
                 ServiceStateChange,

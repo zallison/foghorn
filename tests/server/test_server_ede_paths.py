@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import List, Tuple
 
 import pytest
-from dnslib import DNSRecord, EDNS0, EDNSOption, OPCODE, QTYPE, RCODE
+from dnslib import EDNS0, OPCODE, QTYPE, RCODE, DNSRecord, EDNSOption
 
 import foghorn.servers.server as srv
 
@@ -503,7 +503,8 @@ def test_notify_known_sender_triggers_axfr_refresh(monkeypatch, tmp_path) -> Non
     def fake_axfr_transfer(host, port, zone, **kwargs):  # noqa: ANN001,ARG001
         """Inputs: host/port/zone/kwargs. Outputs: minimal synthetic AXFR RRset."""
 
-        from dnslib import A as _A, RR as _RR
+        from dnslib import RR as _RR
+        from dnslib import A as _A
 
         calls["axfr"] += 1
         return [_RR("host.%s." % zone, QTYPE.A, rdata=_A("203.0.113.5"), ttl=123)]
@@ -534,21 +535,9 @@ def test_notify_known_sender_triggers_axfr_refresh(monkeypatch, tmp_path) -> Non
     if resolver is not None and hasattr(resolver, "cache_clear"):
         resolver.cache_clear()
 
-    # Make background AXFR refresh deterministic by replacing Thread with a stub
-    # that runs the target synchronously when start() is called.
-    class _ImmediateThread:
-        def __init__(self, target=None, name=None, daemon=None):  # noqa: D401,ANN001
-            """Inputs: target/name/daemon. Outputs: thread-like stub."""
-
-            self._target = target
-
-        def start(self) -> None:  # noqa: D401
-            """Inputs: None. Outputs: immediately runs the target callable."""
-
-            if callable(self._target):
-                self._target()
-
-    monkeypatch.setattr(srv.threading, "Thread", _ImmediateThread)
+    # Make background AXFR refresh deterministic by running scheduled work
+    # synchronously.
+    monkeypatch.setattr(srv, "_bg_submit", lambda _key, fn: fn())
 
     q = _make_notify_query("notify-known.example")
     result = srv._resolve_core(q.pack(), sender_ip, listener="tcp")
@@ -589,7 +578,8 @@ def test_notify_sends_axfr_to_correct_upstream(monkeypatch, tmp_path) -> None:
     def fake_axfr_transfer(host, port, zone, **kwargs):  # noqa: ANN001
         """Inputs: host/port/zone/kwargs. Outputs: minimal synthetic AXFR RRset."""
 
-        from dnslib import A as _A, RR as _RR
+        from dnslib import RR as _RR
+        from dnslib import A as _A
 
         axfr_calls.append({"host": host, "port": port, "zone": zone, "kwargs": kwargs})
         return [_RR("host.%s." % zone, QTYPE.A, rdata=_A("203.0.113.5"), ttl=123)]
@@ -630,20 +620,9 @@ def test_notify_sends_axfr_to_correct_upstream(monkeypatch, tmp_path) -> None:
     if resolver is not None and hasattr(resolver, "cache_clear"):
         resolver.cache_clear()
 
-    # Make background AXFR refresh deterministic.
-    class _ImmediateThread:
-        def __init__(self, target=None, name=None, daemon=None):  # noqa: D401,ANN001
-            """Inputs: target/name/daemon. Outputs: thread-like stub."""
-
-            self._target = target
-
-        def start(self) -> None:  # noqa: D401
-            """Inputs: None. Outputs: immediately runs the target callable."""
-
-            if callable(self._target):
-                self._target()
-
-    monkeypatch.setattr(srv.threading, "Thread", _ImmediateThread)
+    # Make background AXFR refresh deterministic by running scheduled work
+    # synchronously.
+    monkeypatch.setattr(srv, "_bg_submit", lambda _key, fn: fn())
 
     # Send NOTIFY for the zone.
     q = _make_notify_query(zone_name)

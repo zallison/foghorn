@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import threading
 
-from dnslib import DNSRecord, OPCODE, QTYPE
+from dnslib import OPCODE, QTYPE, DNSRecord
 
 from foghorn.plugins.resolve.zone_records import notify
 
