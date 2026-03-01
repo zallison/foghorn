@@ -20,12 +20,11 @@ from typing import Any
 
 import pytest
 
+# API / index.html / stats
 # DNS-over-HTTP(s) - Provide cert and key to enable HTTPS, otherwise use an ssl terminator
 from foghorn.servers import doh_api as doh_mod
-from foghorn.servers.doh_api import DoHServerHandle, start_doh_server
-
-# API / index.html / stats
 from foghorn.servers import webserver as web_mod
+from foghorn.servers.doh_api import DoHServerHandle, start_doh_server
 from foghorn.servers.webserver import RingBuffer, WebServerHandle, start_webserver
 from foghorn.stats import StatsCollector, StatsSQLiteStore
 
@@ -81,6 +80,28 @@ def test_doh_fallback_threaded_server_roundtrip(monkeypatch: Any) -> None:
     # Give the server a brief moment to start accepting connections.
     time.sleep(0.05)
 
+    # Test /openapi.json and /docs exist in threaded mode.
+    conn0 = http.client.HTTPConnection(host, port, timeout=1)
+    try:
+        conn0.request("GET", "/openapi.json")
+        resp0 = conn0.getresponse()
+        body0 = resp0.read()
+        assert resp0.status == 200
+        schema = json.loads(body0.decode("utf-8"))
+        assert "/dns-query" in (schema.get("paths") or {})
+    finally:
+        conn0.close()
+
+    conn0b = http.client.HTTPConnection(host, port, timeout=1)
+    try:
+        conn0b.request("GET", "/docs")
+        resp0b = conn0b.getresponse()
+        body0b = resp0b.read()
+        assert resp0b.status == 200
+        assert b"SwaggerUIBundle" in body0b
+    finally:
+        conn0b.close()
+
     # Test POST /dns-query
     conn = http.client.HTTPConnection(host, port, timeout=1)
     try:
@@ -112,6 +133,42 @@ def test_doh_fallback_threaded_server_roundtrip(monkeypatch: Any) -> None:
         conn2.close()
 
     handle.stop()
+
+
+def test_admin_fallback_disabled_returns_none(monkeypatch: Any, tmp_path) -> None:
+    """Brief: start_webserver returns None when threaded fallback is disabled.
+
+    Inputs:
+      - monkeypatch: forces asyncio.new_event_loop() to raise PermissionError.
+      - tmp_path: temp directory for a minimal www_root.
+
+    Outputs:
+      - None; asserts start_webserver returns None.
+    """
+
+    def boom_new_loop(*_a: Any, **_kw: Any) -> asyncio.AbstractEventLoop:
+        raise PermissionError("no self-pipe")
+
+    monkeypatch.setattr(asyncio, "new_event_loop", boom_new_loop, raising=True)
+
+    www_root = tmp_path / "html"
+    www_root.mkdir()
+    (www_root / "index.html").write_text("ok", encoding="utf-8")
+
+    cfg = {
+        "server": {
+            "http": {
+                "enabled": True,
+                "host": "127.0.0.1",
+                "port": 0,
+                "www_root": str(www_root),
+                "allow_threaded_fallback": False,
+            }
+        }
+    }
+
+    handle = start_webserver(stats=None, config=cfg, log_buffer=None)
+    assert handle is None
 
 
 def test_admin_fallback_logs_with_limit_and_static_files(
@@ -169,6 +226,38 @@ def test_admin_fallback_logs_with_limit_and_static_files(
     host, port = server.server_address
 
     time.sleep(0.05)
+
+    # Test /openapi.json and /docs exist in threaded mode when FastAPI is installed.
+    try:
+        import fastapi  # noqa: F401
+
+        fastapi_available = True
+    except ModuleNotFoundError:
+        fastapi_available = False
+
+    if fastapi_available:
+        conn_docs = http.client.HTTPConnection(host, port, timeout=1)
+        try:
+            conn_docs.request("GET", "/openapi.json")
+            resp_docs = conn_docs.getresponse()
+            body_docs = resp_docs.read()
+            assert resp_docs.status == 200
+            schema = json.loads(body_docs.decode("utf-8"))
+            paths = schema.get("paths") or {}
+            assert "/api/v1/health" in paths
+            assert "/health" not in paths
+        finally:
+            conn_docs.close()
+
+        conn_docs2 = http.client.HTTPConnection(host, port, timeout=1)
+        try:
+            conn_docs2.request("GET", "/docs")
+            resp_docs2 = conn_docs2.getresponse()
+            body_docs2 = resp_docs2.read()
+            assert resp_docs2.status == 200
+            assert b"Swagger UI" in body_docs2 or b"SwaggerUIBundle" in body_docs2
+        finally:
+            conn_docs2.close()
 
     # Test /logs with a limit query parameter.
     conn = http.client.HTTPConnection(host, port, timeout=1)

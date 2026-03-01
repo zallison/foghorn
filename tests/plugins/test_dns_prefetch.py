@@ -58,8 +58,8 @@ def test_dns_prefetch_setup_starts_thread_once_and_sigusr2_stops(monkeypatch) ->
       - None; asserts thread is started once and stop event is set.
     """
 
-    from foghorn.plugins.resolve.dns_prefetch import DnsPrefetch
     import foghorn.plugins.resolve.dns_prefetch as mod
+    from foghorn.plugins.resolve.dns_prefetch import DnsPrefetch
 
     created = {"count": 0}
 
@@ -290,8 +290,8 @@ def test_dns_prefetch_prefetch_single_sets_and_resets_threadlocal(monkeypatch) -
       - None; asserts threadlocal marker is reset even on exceptions.
     """
 
-    from foghorn.plugins.resolve.dns_prefetch import DnsPrefetch, _PREFETCH_LOCAL
     import foghorn.plugins.resolve.dns_prefetch as mod
+    from foghorn.plugins.resolve.dns_prefetch import _PREFETCH_LOCAL, DnsPrefetch
 
     plugin = DnsPrefetch(interval_seconds=60)
     plugin.interval_seconds = 0

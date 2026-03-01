@@ -7,10 +7,9 @@ import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from typing_extensions import Literal
-
 from dnslib import QTYPE, RR, TXT, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field
+from typing_extensions import Literal
 
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
 from foghorn.utils.register_caches import registered_lru_cached

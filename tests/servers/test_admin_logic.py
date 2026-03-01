@@ -15,19 +15,19 @@ from unittest.mock import Mock
 
 import pytest
 
+from foghorn.plugins.resolve.base import AdminPageSpec
 from foghorn.servers.webserver.admin_logic import (
     AdminLogicHttpError,
     _get_store_from_collector,
-    build_query_log_payload,
+    build_named_plugin_snapshot,
     build_query_log_aggregate_payload,
+    build_query_log_payload,
     build_upstream_status_payload,
     collect_admin_pages_for_response,
-    find_admin_page_detail,
     collect_plugin_ui_descriptors,
+    find_admin_page_detail,
     find_plugin_instance_by_name,
-    build_named_plugin_snapshot,
 )
-from foghorn.plugins.resolve.base import AdminPageSpec
 
 
 class TestAdminLogicHttpError:

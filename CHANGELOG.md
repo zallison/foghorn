@@ -11,15 +11,42 @@ All notable changes to this project will be documented in this file.
   - `load_mode=first` order has been updated to reflect the new precedence: inline → axfr → file_paths → bind_paths.
 - AXFR zones now enforce `minimum_reload_time` timing on reload, preventing excessive upstream load. Previously, AXFR was only loaded once at startup.
 - The `minimum_reload_time` field in `axfr_zones` entries now triggers reloads only after the configured seconds have elapsed since initial load or last NOTIFY receipt (default 0 = reload on every load).
+- Threaded UDP/TCP listeners now refuse to start on non-loopback bind hosts unless `server.limits.allow_unsafe_threaded_listeners=true` is set. Prefer asyncio listeners for exposed interfaces.
 
 ### Added
 
-- AccessControl plugin: Added `deny_response` configuration option to customize response codes when denying DNS queries (supports: 'nxdomain', 'refused', 'servfail', 'noerror_empty', 'nodata', 'ip', or 'drop'). Default is 'refused' for AccessControl.
+- Rate limit configuration warning: Foghorn now warns at startup when listeners bind to non-loopback addresses without a rate_limit plugin configured. This provides operators guidance for DoS protection on exposed deployments.
+
 - ZoneRecords plugin: Added `minimum_reload_time` field to `axfr_zones` entries to control when AXFR zones can be reloaded, allowing load balancing between staying current and avoiding excessive upstream transfer load while still honoring NOTIFY events.
+- DoS hardening:
+  - Added a shared, bounded resolver executor for asyncio servers (`server.limits.resolver_executor_workers`).
+  - Added asyncio TCP/DoT connection limits (`max_connections`, `max_connections_per_ip`), per-connection query caps (`max_queries_per_connection`), and idle timeouts (`idle_timeout_seconds`).
+  - Added asyncio UDP listener support with in-flight caps (`server.listen.udp.use_asyncio`, `max_inflight`, `max_inflight_per_ip`, and `max_inflight_by_cidr`) and optional response ceiling (`max_response_bytes`).
+  - Added DoH request size caps (GET param decode and POST body) returning HTTP 413 for oversized requests.
+  - Added TCP DNS and AXFR frame size caps (length-prefixed max 65535 bytes).
+  - Added recursive resolver referral-processing caps (NS names, glue records scanned, and next-hop server list).
+  - Added `allow_threaded_fallback` knobs for DoH (`server.listen.doh.allow_threaded_fallback`) and the admin web UI (`server.http.allow_threaded_fallback`).
+  - Added DoH parameter size validation before base64 decoding to prevent processing oversized payloads.
+  - Added automated upstream health cleanup to prevent unbounded memory growth in `upstream_health` dict.
+  - Reduced default recursive `max_depth` from 16 to 12 for better DoS resistance (fully configurable via `server.resolver.max_depth`).
+- Caching:
+  - InMemoryTTLCache and SQLite3Cache can reserve capacity for NXDOMAIN responses (`max_size`, `pct_nxdomain`) to avoid NXDOMAIN floods evicting positive entries.
+- Stats/query log:
+  - Stats backends now support bounded async queues with backpressure metrics and optional `max_logging_queue` configuration.
+- AXFR:
+  - Added `axfr_enabled` and `axfr_allow_clients` policy gates for zone transfers.
 
 ### Changed
 
 - AXFR-backed zones now respect `minimum_reload_time` and reload only when enough time has elapsed since initial load or last NOTIFY reception, or when `load_mode=replace` forces a full reload.
+- Upstreams: failover now validates upstream responses (TXID + question) and skips mismatched replies.
+- Transports: UDP upstream queries now ignore unexpected response peers (best-effort defense against off-path injection).
+- Cache: in-memory and SQLite caches can reserve separate capacity for NXDOMAIN responses to prevent cache pollution under NXDOMAIN floods.
+- RateLimit: base-domain extraction is now Public Suffix List aware (eTLD+1) when `publicsuffix2` is available.
+- RateLimit: sqlite `rate_profiles` storage is now bounded and pruned (TTL + max rows) via `max_profiles`, `profile_ttl_seconds`, and `prune_interval_seconds`.
+- RateLimit: UDP keying can be made spoofing-robust via `udp_keying` (default `cidr`) and `udp_client_prefix_v4`/`udp_client_prefix_v6` bucketing.
+- UpstreamRouter: `_forward_with_failover` now delegates to the hardened core `send_query_with_failover` implementation (TXID/question validation, transport support), avoiding inconsistent forwarding behavior.
+- Stats/query log: async queue is now bounded; under sustained overload some stats operations may be dropped with DEBUG/INFO visibility via queue metrics.
 - Performance: added LRU caches to hot-path helpers used during resolution and admin polling (ZoneRecords wildcard parsing, RateLimit base-domain extraction, AccessControl IP parsing, DoH/DoT SSL context creation, stats ignore-filter IP parsing, and webserver UTC datetime parsing).
 - Admin UI: diagram rendering now prefers a light/dark PNG that matches the selected UI theme.
 - Admin UI: when the config diagram PNG is unavailable, the UI now preserves the normal two-pane layout and shows Graphviz dot source in the diagram pane.
@@ -43,10 +70,15 @@ All notable changes to this project will be documented in this file.
 
 - ZoneRecords DNSSEC negative-response helpers now handle source-aware RRset entries `(ttl, values, sources)` to avoid tuple-unpacking errors.
 
+### Tests
+
+- Updated upstream failover coverage to assert DEBUG-level (de-duplicated) skip logs for malformed upstream responses.
+
 ### Documentation
 
 - Updated ZoneRecords docs to clarify source precedence order and AXFR reload timing behavior.
 - Added Graphviz `dot` rendering instructions for config diagrams.
+- Documented DEBUG-level upstream skip/failover logs and de-duplication behavior in the README.
 
 ----
 

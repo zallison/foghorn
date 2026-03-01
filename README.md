@@ -4,7 +4,7 @@ Foghorn is a versatile DNS server designed for flexibility and performance. Buil
 
 With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard. Newer releases add DNSSEC signing helpers, zone transfers (AXFR/IXFR), RFC 8914 Extended DNS Errors (EDE), and SSH host key utilities so you can treat DNS as a first-class security and operations tool.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-89%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-86%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-2.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-3.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-4.png" height="300" />
 
@@ -393,6 +393,11 @@ Without `trust-ad`, glibc clears the AD flag before handing answers to applicati
 - `strategy`: `failover` (try in order), `round_robin`, or `random`.
 - `max_concurrent`: maximum simultaneous outstanding upstream queries.
 - `endpoints`: list of `upstream_host` definitions.
+
+Notes:
+- If an upstream returns `SERVFAIL`, malformed DNS bytes, or a **mismatched response** (TXID/question), Foghorn treats that upstream as failed for that query and continues failover.
+- Skip/failover events are logged at **DEBUG**, but de-duplicated *per upstream* until that upstream succeeds again (to avoid log spam).
+- To surface these events, set `logging.python.level: debug`.
 
 An `upstream_host` entry:
 
@@ -828,6 +833,18 @@ plugins:
 	  include_ipv6: true   # true | false
 	  network_enabled: true
 ```
+
+### Security hardening and DNS amplification protection
+
+Foghorn includes several built-in security protections to mitigate DoS/DDoS attacks and DNS amplification risks:
+
+- **DoH parameter size validation**: Oversized base64-encoded DNS parameters are rejected (HTTP 413) before decoding, preventing processing of megabyte-scale payloads.
+- **Recursive resolver depth limits**: Default `max_depth` is 12 (configurable via `server.resolver.max_depth`) to limit recursion depth and prevent abuse through deep delegation chains.
+- **Upstream health cleanup**: The `DNSUDPHandler._cleanup_upstream_health()` method periodically removes stale healthy entries from the `upstream_health` tracking dictionary to prevent unbounded memory growth.
+- **Rate limiting and concurrency controls**: The `rate` plugin provides per-client or per-(client,domain) rate limiting (see below). Combined with listener connection limits (`max_connections`, `max_connections_per_ip`) and per-connection query caps (`max_queries_per_connection`), this provides defense at multiple layers.
+- **DNS response size limits**: UDP responses are capped at 1232 bytes to minimize amplification potential. DoH response sizes are also limited to large payloads.
+
+When deploying Foghorn as an authoritative or recursive resolver on exposed interfaces, consider enabling these protections and monitoring the metrics exposed via the admin UI for query patterns and error rates.
 
 ### 4.8 Rate limiting (`rate`)
 
@@ -1533,7 +1550,7 @@ plugins:
 
 From here you can mix and match plugins, caches, and stats backends to shape Foghorn into exactly the DNS service you need.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-89%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-86%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 ## Stargazers over time
 [![Stargazers over time](https://starchart.cc/zallison/foghorn.svg?variant=adaptive)](https://starchart.cc/zallison/foghorn)

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
-
 TOPK_CAPACITY_FACTOR = 100
 TOPK_MIN_CAPACITY = 1024
 

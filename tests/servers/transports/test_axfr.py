@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import List
 
 import pytest
-from dnslib import QTYPE, DNSRecord, RR, SOA
+from dnslib import QTYPE, RR, SOA, DNSRecord
 
 import foghorn.servers.transports.axfr as axfr_mod
 

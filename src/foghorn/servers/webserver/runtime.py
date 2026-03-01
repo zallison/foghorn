@@ -11,20 +11,21 @@ preserving the public/semi-public API via re-exports from ``core``.
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict, Optional, Tuple, List
-
-from foghorn.stats import StatsCollector
-
-from .config_helpers import _get_web_cfg
+from typing import Any, Dict, List, Optional, Tuple
 
 # Re-export shared types from the FastAPI-free servers.runtime_state module so
 # minimal/headless builds can import foghorn.main without pulling in the web UI.
+from foghorn.servers.runtime_state import (
+    RingBuffer,  # kept for backwards compatibility; some callers import it from webserver
+)
 from foghorn.servers.runtime_state import (  # noqa: F401
     RuntimeState,
-    RingBuffer,  # kept for backwards compatibility; some callers import it from webserver
     _ListenerRuntime,
     _thread_is_alive,
 )
+from foghorn.stats import StatsCollector
+
+from .config_helpers import _get_web_cfg
 
 
 def _expected_listeners_from_config(config: Dict[str, Any] | None) -> Dict[str, bool]:

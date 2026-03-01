@@ -13,17 +13,16 @@ import logging
 import os
 import socket
 import threading
-from typing import Any, Dict, Optional
+
+# Forward declaration for create_app - actual import happens in start_webserver
+# to avoid circular dependency
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ...stats import StatsCollector
 from .logging_utils import RingBuffer
 from .runtime import RuntimeState
-from .types_and_buffers import WebServerHandle
 from .threaded_handlers import _ThreadedAdminRequestHandler
-
-# Forward declaration for create_app - actual import happens in start_webserver
-# to avoid circular dependency
-from typing import TYPE_CHECKING
+from .types_and_buffers import WebServerHandle
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -215,6 +214,8 @@ def start_webserver(
     if not enabled:
         return None
 
+    allow_threaded_fallback = bool(web_cfg.get("allow_threaded_fallback", True))
+
     # Best-effort: generate a config diagram PNG for the active config when
     # possible. This is intentionally non-fatal (e.g., dot missing).
     if config_path:
@@ -318,6 +319,15 @@ def start_webserver(
             can_use_asyncio = use_asyncio
 
     if not can_use_asyncio:
+        if not allow_threaded_fallback:
+            logger.warning(
+                "Admin webserver threaded fallback is disabled (allow_threaded_fallback=false). "
+                "Refusing to start admin webserver without uvicorn/FastAPI."
+            )
+            return None
+        logger.warning(
+            "Starting admin webserver using threaded stdlib HTTP fallback. This mode lacks full DoS/DDoS hardening and is not recommended for production."
+        )
         handle = _call_threaded(
             stats_obj=stats,
             cfg_obj=config,
@@ -333,8 +343,14 @@ def start_webserver(
     try:
         import uvicorn
     except Exception as exc:  # pragma: no cover - missing optional dependency
-        logger.error(
-            "webserver.enabled=true but uvicorn is not available: %s; using threaded fallback",
+        if not allow_threaded_fallback:
+            logger.warning(
+                "webserver.enabled=true but uvicorn is not available (%s) and threaded fallback is disabled (allow_threaded_fallback=false)",
+                exc,
+            )
+            return None
+        logger.warning(
+            "webserver.enabled=true but uvicorn is not available (%s); starting threaded stdlib HTTP fallback (not recommended for production)",
             exc,
         )
         handle = _call_threaded(

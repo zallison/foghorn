@@ -44,6 +44,42 @@ class _StatsCollectorSnapshotMixin:
             totals.setdefault("cache_deny_pre", 0)
             totals.setdefault("cache_override_pre", 0)
 
+            # Best-effort: surface async persistence queue pressure + drops.
+            store = getattr(self, "_store", None)
+            metrics_fn = getattr(store, "get_async_queue_metrics", None)
+            if callable(metrics_fn):
+                try:
+                    metrics = metrics_fn()
+                except Exception:  # pragma: no cover
+                    metrics = None
+
+                if isinstance(metrics, dict):
+                    try:
+                        totals["logging_queue_drops"] = int(
+                            metrics.get("drops_total", 0) or 0
+                        )
+                    except Exception:  # pragma: no cover
+                        totals["logging_queue_drops"] = 0
+
+                    try:
+                        totals["logging_queue_size"] = int(metrics.get("size", 0) or 0)
+                    except Exception:  # pragma: no cover
+                        totals["logging_queue_size"] = 0
+
+                    cap = metrics.get("capacity")
+                    if cap is not None:
+                        try:
+                            totals["logging_queue_capacity"] = int(cap)
+                        except Exception:  # pragma: no cover
+                            pass
+
+                    pct = metrics.get("pct_full")
+                    if pct is not None:
+                        try:
+                            totals["logging_queue_pct"] = float(pct)
+                        except Exception:  # pragma: no cover
+                            pass
+
             rcodes = dict(self._rcodes)
             qtypes = dict(self._qtypes)
 

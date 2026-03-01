@@ -1,0 +1,198 @@
+# server_all_options.yaml
+#
+# Brief: A single-file example that enumerates the server.* configuration surface,
+# including the DoS-hardening knobs added for asyncio TCP/DoT and threaded fallbacks.
+#
+# Notes:
+# - This is intended as a reference. Not every key below is required.
+# - In forward mode (default), upstreams.endpoints is required.
+# - Listener defaults:
+#   - UDP defaults to enabled.
+#   - TCP defaults to disabled.
+#   - DoT/DoH default to disabled unless their blocks exist.
+
+server:
+  # ----- DoS hardening knobs -----
+  limits:
+    # Shared threadpool used by asyncio listeners (TCP/DoT) via run_in_executor().
+    # - null: use a conservative built-in default
+    # - integer: explicit max worker count
+    resolver_executor_workers: 32
+
+  # ----- Listener configuration -----
+  listen:
+    # Optional defaults (used as fallback for per-listener host/port when set)
+    host: 127.0.0.1
+    port: 5335
+
+    # Legacy compatibility block. Prefer server.listen.{udp,tcp} instead.
+    dns:
+      host: 127.0.0.1
+      port: 5335
+      # Legacy booleans (only used when the udp/tcp listener blocks are absent)
+      udp: true
+      tcp: false
+
+    udp:
+      enabled: true
+      host: 127.0.0.1
+      port: 5335
+
+    tcp:
+      enabled: false
+      host: 127.0.0.1
+      port: 5335
+
+      # Connection hardening (asyncio TCP listener only)
+      max_connections: 1024
+      max_connections_per_ip: 64
+      max_queries_per_connection: 100
+      idle_timeout_seconds: 15.0
+
+    dot:
+      # DNS-over-TLS (DoT) listener.
+      enabled: false
+      host: 127.0.0.1
+      port: 8853
+
+      # Required when enabled: true
+      cert_file: ./keys/foghorn_localhost.crt
+      key_file: ./keys/foghorn_localhost.key
+
+      # Connection hardening (asyncio DoT listener only)
+      max_connections: 1024
+      max_connections_per_ip: 64
+      max_queries_per_connection: 100
+      idle_timeout_seconds: 15.0
+
+    doh:
+      # DNS-over-HTTPS (DoH) listener.
+      enabled: false
+      host: 127.0.0.1
+      port: 5380
+      cert_file: null
+      key_file: null
+
+      # When false, refuse to start the threaded stdlib DoH fallback when
+      # FastAPI/uvicorn or asyncio is unavailable.
+      allow_threaded_fallback: true
+
+  # ----- DNSSEC / EDNS defaults -----
+  dnssec:
+    # ignore | validate
+    mode: ignore
+
+    # upstream_ad | local | local_extended
+    validation: upstream_ad
+
+    # Default EDNS UDP payload size advertised/used by the server.
+    udp_payload_size: 1232
+
+  # ----- Resolver mode -----
+  resolver:
+    # forward | recursive | master | none
+    mode: forward
+
+    # Time budgets
+    timeout_ms: 2000
+    per_try_timeout_ms: 2000
+
+    # Recursive-only tuning (default is 12 for better DoS resistance)
+    max_depth: 12
+
+    # Master switch for asyncio-based listeners and uvicorn-based admin/DoH.
+    # When false, threaded fallbacks are used where available.
+    use_asyncio: true
+
+  # ----- Cache plugin selection / cache knobs -----
+  #
+  # This block selects the cache plugin implementation (if any), and also
+  # optionally overrides decorated cache maxsize/ttl values for hot-path helpers.
+  cache:
+    # Cache plugin selection (example; actual available modules depend on plugins)
+    module: in_memory_ttl
+    config:
+      # Example cache-plugin option (varies by backend)
+      min_cache_ttl: 60
+
+    # Decorated-cache overrides
+    func_caches:
+      - module: foghorn.utils.config_diagram
+        name: generate_dot_text_from_config_path
+        backend: lru_cache
+        maxsize: 256
+        ttl: null
+        reset_on_ttl_change: false
+
+  # ----- Feature gates -----
+  enable_ede: false     # Extended DNS Errors
+  forward_local: false  # Forward requests for .local upstream?
+
+  # ----- Admin HTTP server (web UI) -----
+  http:
+    enabled: false
+    host: 127.0.0.1
+    port: 5380
+
+    # Optional feature gates
+    enable_api: true
+    enable_schema: true
+    enable_docs: true
+
+    # When false, refuse to start the threaded stdlib admin HTTP fallback when
+    # FastAPI/uvicorn or asyncio is unavailable.
+    allow_threaded_fallback: true
+
+    # Static assets root (directory containing index.html, css/js, etc.).
+    # If null/unset, falls back to $FOGHORN_WWW_ROOT, ./html, or package html/.
+    www_root: null
+
+    # Whether to serve / and /index.html.
+    index: true
+
+    logs:
+      buffer_size: 500
+
+    # Optional caching TTL tuning for admin endpoints.
+    system_info_ttl_seconds: 2.0
+    stats_snapshot_ttl_seconds: 2.0
+    config_cache_ttl_seconds: 2.0
+
+    # basic | full
+    system_metrics_detail: full
+
+    # Emit timing diagnostics for expensive admin endpoints.
+    debug_timings: false
+
+    cors:
+      enabled: false
+      allowlist: []
+
+    auth:
+      # none | token
+      mode: none
+      token: null
+
+    # Keys that will be redacted in /config and /config.json outputs.
+    redact_keys:
+      - token
+      - password
+      - secret
+
+# Minimal upstreams block for forward mode.
+upstreams:
+  strategy: failover
+  max_concurrent: 1
+  endpoints:
+    - host: 1.1.1.1
+      port: 53
+      transport: udp
+
+logging:
+  python:
+    level: info
+
+stats:
+  enabled: false
+
+plugins: []
