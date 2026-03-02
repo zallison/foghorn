@@ -12,6 +12,9 @@ All notable changes to this project will be documented in this file.
 - AXFR zones now enforce `minimum_reload_time` timing on reload, preventing excessive upstream load. Previously, AXFR was only loaded once at startup.
 - The `minimum_reload_time` field in `axfr_zones` entries now triggers reloads only after the configured seconds have elapsed since initial load or last NOTIFY receipt (default 0 = reload on every load).
 - Threaded UDP/TCP listeners now refuse to start on non-loopback bind hosts unless `server.limits.allow_unsafe_threaded_listeners=true` is set. Prefer asyncio listeners for exposed interfaces.
+- UDP listener now defaults to asyncio everywhere (including localhost). Threaded fallback only allowed on localhost or when explicitly permitted via `allow_unsafe_threaded_listeners`.
+- Extended DNS Errors (RFC 8914) now enabled by default for improved error diagnostics across DNS resolvers, rate limiting, and access control.
+- Rate limit plugin now adds EDE messages (code 17 "Rate-Limited") when rate limiting, providing better visibility into why queries were rejected.
 
 ### Added
 
@@ -67,9 +70,6 @@ All notable changes to this project will be documented in this file.
 - Diagrams: config diagram endpoints now expose `.dot` source consistently.
 - Diagrams: routed upstreams now render as color-coded nodes inside the upstreams cluster based on security level (secure vs insecure), with dashed connections from plugins to their routed upstreams.
 - Diagrams: deny and override edge labels now use multi-line format (e.g., `deny\nIP`, `override\nwire reply`) with proper DOT escaping.
-
-### Fixed
-
 - ZoneRecords DNSSEC negative-response helpers now handle source-aware RRset entries `(ttl, values, sources)` to avoid tuple-unpacking errors.
 
 ### Tests
@@ -83,6 +83,8 @@ All notable changes to this project will be documented in this file.
 - Documented DEBUG-level upstream skip/failover logs and de-duplication behavior in the README.
 
 ----
+
+Note: v0.6.5 was pulled due to a breaking bug.
 
 > Release notes for changes between **v0.6.4** and **v0.6.5**.
 
