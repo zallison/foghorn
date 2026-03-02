@@ -628,6 +628,7 @@ def main(argv: List[str] | None = None) -> int:
     # Warn if exposed listeners lack rate limiting
     try:
         from .config.rate_limit_check import check_rate_limit_plugin_config
+
         check_rate_limit_plugin_config(plugins=plugins, cfg=cfg)
     except Exception:
         pass
@@ -1159,7 +1160,7 @@ def main(argv: List[str] | None = None) -> int:
     # Extended DNS Errors (RFC 8914) feature gate. When false, the resolver
     # will not add any EDE options of its own and will continue to treat
     # upstream EDNS options opaquely.
-    enable_ede = bool(server_cfg.get("enable_ede", False))
+    enable_ede = bool(server_cfg.get("enable_ede", True))
 
     # .local forward blocking (RFC 6762). When false (default), queries for
     # .local names that are not answered by plugins are blocked from being
@@ -1315,12 +1316,23 @@ def main(argv: List[str] | None = None) -> int:
         uhost = str(udp_cfg.get("host", default_host))
         uport = int(udp_cfg.get("port", default_port))
 
-        # UDP listener defaults to threaded unless explicitly opted into asyncio.
-        # This preserves historical behaviour and avoids binding real sockets in
-        # unit tests that only monkeypatch DNSServer.
-        udp_use_asyncio = bool(udp_cfg.get("use_asyncio", False))
+        # UDP listener defaults to asyncio. Threaded fallback is only allowed
+        # on localhost or when allow_unsafe_threaded_listeners is true.
+        allow_unsafe = bool(limits_cfg.get("allow_unsafe_threaded_listeners", False))
+        from foghorn.security_limits import is_loopback_host
 
-        allow_threaded_fallback = bool(udp_cfg.get("allow_threaded_fallback", True))
+        is_loopback = is_loopback_host(uhost)
+        # Default to asyncio everywhere. Config can override with explicit
+        # use_asyncio setting.
+        udp_use_asyncio = bool(udp_cfg.get("use_asyncio", True))
+
+        # Allow threaded fallback only on localhost or when allow_unsafe is true.
+        # If neither is true and threaded is needed due to PermissionError,
+        # the server will refuse to start.
+        allow_threaded_default = is_loopback or allow_unsafe
+        allow_threaded_fallback = bool(
+            udp_cfg.get("allow_threaded_fallback", allow_threaded_default)
+        )
         exit_on_asyncio_failure = bool(
             udp_cfg.get("exit_on_asyncio_failure", False)
             or udp_cfg.get("refuse_threaded_fallback", False)

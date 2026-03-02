@@ -8,7 +8,7 @@ import time
 from functools import lru_cache
 from typing import Optional, Tuple
 
-from dnslib import QTYPE, RCODE, DNSRecord
+from dnslib import QTYPE, RCODE, DNSRecord, EDNSOption
 from pydantic import BaseModel, Field
 
 from foghorn.plugins.resolve.base import (
@@ -757,6 +757,26 @@ class RateLimit(BasePlugin):
                 reply.header.rcode = RCODE.NOERROR
                 # Produce NOERROR with no answers (NODATA-style response)
                 reply.rr = []
+
+            # Add EDE message for rate limit (code 17) when enable_ede is true
+            try:
+                from foghorn.servers.server import (
+                    _echo_client_edns,
+                    _attach_ede_option,
+                )
+                from foghorn.servers.udp_server import DNSUDPHandler
+
+                if getattr(DNSUDPHandler, "enable_ede", False):
+                    _echo_client_edns(req, reply)
+                    _attach_ede_option(
+                        req,
+                        reply,
+                        17,
+                        "Rate-Limited",
+                    )
+            except Exception as exc:
+                logger.debug("RateLimit: failed to attach EDE option: %s", exc)
+
             return PluginDecision(
                 action="override",
                 response=reply.pack(),

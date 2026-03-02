@@ -290,15 +290,19 @@ docker-clean:
 .PHONY: docker-run
 docker-run: docker-build
 	docker rm -f foghorn
-	docker run -d --privileged --net=host --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ \
+	docker run -d --net=host --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ \
+        --privileged \
 		--label "com.foghorn.priority=${FH_PRIORITY}" \
-		-v /etc/hosts:/etc/hosts:ro --restart unless-stopped  ${PREFIX}/${CONTAINER_NAME}:${TAG}
+		-v /etc/hosts:/etc/hosts:ro \
+        --restart unless-stopped \
+        ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 # Port forwarding
 .PHONY: docker-run-not-host
 docker-run-not-host: docker-build
 	docker rm -f foghorn
-	docker run -d --privileged --name foghorn \
+	docker run -d --name foghorn \
+        --privileged \
 	    -v ${CONTAINER_DATA}:/foghorn/config/ \
 		-p ${UDPPORT}:5335/udp \
 		-p ${TCPPORT}:5335/tcp \
