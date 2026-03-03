@@ -123,17 +123,18 @@ Key pieces:
 
 - `BasePlugin` in `resolve/base.py`:
   - Handles per-instance name, logging, and priorities (`pre_priority`, `post_priority`, `setup_priority`).
-  - Implements client targeting via `targets()` using CIDR lists (`targets` and
-    `targets_ignore`) plus a per-client TTL cache (`targets_cache_ttl_seconds`).
-  - Implements listener/transport targeting via `targets()` using
-    `targets_listener`, which is normalized into a set of listener names
-    (`udp`, `tcp`, `dot`, `doh`) with aliases such as `secure` (dot+doh) and
+  - Implements client targeting via `targets()` using the nested `targets.ips` /
+    `targets.ignore_ips` config plus a per-client TTL cache (`targets_cache_ttl_seconds`).
+  - Implements listener/transport targeting via `targets.listeners`, normalized into
+    `udp`, `tcp`, `dot`, `doh` with aliases such as `secure` (dot+doh) and
     `unsecure`/`insecure` (udp+tcp).
-  - Implements domain targeting via `targets()` using `targets_domains` and
-    `targets_domains_mode` (exact/suffix/any) against a normalized qname
-    attached to the `PluginContext` when available.
-  - Implements qtype targeting via `targets_qtype()` driven by
-    `target_qtypes` / `apply_to_qtypes`.
+  - Implements domain targeting via `targets.domains` and `targets.domains_mode`
+    (exact/suffix/any) against a normalized qname attached to the `PluginContext`
+    when available.
+  - Implements qtype targeting via `targets.qtypes` (and optional per-plugin
+    `apply_to_qtypes`).
+  - Implements opcode and response-code targeting via `targets.opcodes` and
+    `targets.rcodes` (the latter for post-resolve plugins).
   - Provides hook methods:
     - `pre_resolve(qname, qtype, req, ctx)`
     - `post_resolve(qname, qtype, response_wire, ctx)`

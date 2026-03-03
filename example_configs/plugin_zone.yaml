@@ -19,24 +19,18 @@ plugins:
   - type: zone
     id: zone-full-example
     hooks:
-      pre_resolve: { priority: 60 }
+      pre_resolve: 60
     config:
       # BasePlugin targeting + logging
       abort_on_failure: false
       enabled: true
       comment: 'Config-level comment (ignored).'
-      priority: 60
-      pre_priority: 60
-      post_priority: 60
-      setup_priority: 60
-      targets: [ 0.0.0.0/0 ]
-      targets_ignore: []
+      targets:
+        ips: [ 0.0.0.0/0 ]
+        listeners: any
+        qtypes: [ '*' ]
+        opcodes: [ 'QUERY', 'NOTIFY' ]
       targets_cache_ttl_seconds: 300
-      targets_listener: any
-      targets_domains: []
-      targets_domains_mode: any
-      target_qtypes: [ '*' ]
-      target_opcodes: [ 'QUERY', 'NOTIFY' ]
       logging:
         level: info
         stderr: true

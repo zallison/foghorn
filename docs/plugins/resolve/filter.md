@@ -26,8 +26,7 @@ plugins:
   - id: adblock-filter
     type: filter
     hooks:
-      pre_resolve:  { priority: 25 }
-      post_resolve: { priority: 25 }
+      priority: 25
     config:
       default: allow                 # allow everything unless blocked
       ttl: 300                       # TTL for synthetic IP responses
@@ -46,13 +45,13 @@ plugins:
   - id: filter-advanced
     type: filter
     hooks:
-      pre_resolve:  { priority: 25 }
-      post_resolve: { priority: 25 }
+      priority: 25
     config:
       # BasePlugin targeting + logging
-      targets: [ 0.0.0.0/0 ]
-      targets_listener: any
-      target_qtypes: [ '*' ]          # apply to all qtypes logically supported
+      targets:
+        ips: [0.0.0.0/0 ]
+        listeners: any
+        qtypes: [ '*' ]          # apply to all qtypes logically supported
       logging:
         level: info
         stderr: true

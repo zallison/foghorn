@@ -4,7 +4,7 @@ Foghorn is a versatile DNS server designed for flexibility and performance. Buil
 
 With built-in admin and API server support, Foghorn empowers you to monitor and manage its operations efficiently. Plugins extend its functionality by providing their own status pages, seamlessly integrated into the admin dashboard. Newer releases add DNSSEC signing helpers, zone transfers (AXFR/IXFR), RFC 8914 Extended DNS Errors (EDE), and SSH host key utilities so you can treat DNS as a first-class security and operations tool.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-86%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-84%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-1.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-2.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-3.png" height="300" /> <img src="https://raw.githubusercontent.com/zallison/foghorn/refs/heads/main/assets/screenshot-4.png" height="300" />
 
@@ -536,24 +536,22 @@ You normally care about:
 
 Common plugin‑wide config options:
 
-Targeting:
+Targeting (preferred shape uses a nested `targets` block):
 
-- **Client targeting**
-  - `config.targets`: list (or single string) of CIDR/IPs to explicitly target. When set, only matching clients are affected.
-  - `config.targets_ignore`: list (or single string) of CIDR/IPs to skip. When only `targets_ignore` is set, all other clients are targeted by default.
-- **Listener / transport targeting**:
-  - `config.targets_listener`: restrict a plugin to specific listeners. Accepts one
-	or more of `"udp"`, `"tcp"`, `"dot"`, `"doh"`, or aliases:
-	  * `"secure"`               → `["dot", "doh"]`
-	  * `"unsecure"` / `"insecure"` → `["udp", "tcp"]`
-	  * `"any"`, `"*"`, or `null`   → no listener restriction.
-- **Domain targeting**:
-  - `config.targets_domains`: list (or single string) of domain names to match.
-  - `config.targets_domains_mode`: `"exact"` (qname must equal one of `targets_domains`) or `"suffix"` (qname is that domain or ends with
-	`"." + domain`). Omit `targets_domains` (or set it to an empty list) for no domain restriction.
-- **qtype targeting**:
-  - `config.target_qtypes`: list of qtype names or `'*'` for all types, e.g.
-	`['A', 'AAAA']`, `['MX']` or `['*']`.
+- `config.targets` (object or legacy list/string)
+  - **Preferred object keys**:
+    - `ips`: list/string of CIDR/IPs to target.
+    - `ignore_ips`: list/string of CIDR/IPs to exclude.
+    - `listeners`: list/string of listeners (`udp`, `tcp`, `dot`, `doh`) or aliases:
+      - `secure` → `dot` + `doh`
+      - `unsecure`/`insecure` → `udp` + `tcp`
+      - `any`/`*`/`null` → no restriction
+    - `domains`: list/string of domain names to match.
+    - `domains_mode`: `exact` or `suffix` (defaults to `suffix` when `domains` is set).
+    - `qtypes`: list/string of qtype names or `'*'` for all types (e.g. `['A', 'AAAA']`).
+    - `opcodes`: list/string of DNS opcodes (e.g. `['QUERY']`).
+    - `rcodes`: list/string of response codes for post‑resolve plugins (e.g. `['NOERROR', 'NXDOMAIN']`).
+  - **Legacy form**: if `targets` is a list/string, it is treated as `targets.ips`.
 
 Logging
 
@@ -566,31 +564,22 @@ Example with all common knobs:
 ```yaml
 plugins:
   - type: some-plugin
-	 id: example
-	 enabled: true
-	 logging:
-	   level: debug
-	 config:
-		# Client IP targeting
-	   targets:
-		 - 192.168.0.0/16
-		 - 10.10.10.0/24
-
-	   # JSON Lines
-	   targets_ignore: [ "192.168.0.10" ]
-
-	   # Listener / transport targeting: only DoT/DoH
-	   targets_listener:
-			- dot
-			- doh
-
-	   # Domain targeting: only *.corp.example
-	   targets_domains:
-		 - corp.example
-	   targets_domains_mode: suffix  # exact | suffix
-
-	   # qtype targeting: A/AAAA only
-		 target_qtypes: ['A', 'AAAA']  # '*' | ['A'] | ['A', 'AAAA']
+    id: example
+    enabled: true
+    logging:
+      level: debug
+    config:
+      targets:
+        ips:
+          - 192.168.0.0/16
+          - 10.10.10.0/24
+        ignore_ips: [ "192.168.0.10" ]
+        listeners: [ dot, doh ]
+        domains: [ corp.example ]
+        domains_mode: suffix  # exact | suffix
+        qtypes: [ 'A', 'AAAA' ]
+        opcodes: [ 'QUERY' ]
+        rcodes: [ 'NOERROR', 'NXDOMAIN' ]
 ```
 
 ---
@@ -747,8 +736,8 @@ Fetches remote blocklists/allowlists on a schedule and stores them as files for 
 ```yaml
 plugins:
   - type: lists
-	hooks: # Setup early so other plugins have their files available.
-	  setup:  { priority: 10 }
+	hooks:
+	  setup: { priority: 10 } # Setup early so other plugins have their files available.
 	config:
 	  download_path: ./config/var/lists
 	  interval_days: 1
@@ -767,10 +756,9 @@ Flexible domain/IP/pattern filter used to build adblockers and kid-safe DNS.
 ```yaml
 plugins:
   - type: filter
+	hooks:
+	  priority: 25 # Applies to pre_resolve + post_resolve + setup unless overridden.
 	config:
-	  hooks:
-		pre_resolve:  { priority: 25 } # Run early in block queries so other plugins don't do anything
-		post_resolve: { priority: 25 } # Post-resolve IP filtering and policy
 	  default: allow  # deny | allow
 	  targets:
 		- 10.0.1.0/24 # Kids subnet
@@ -1484,7 +1472,7 @@ plugins:
   - type: acl
 	id: lan-only
 	hooks:
-	  pre_resolve: { priority: 10 }
+	  pre_resolve: 10
 	config:
 	  default: deny
 	  allow:
@@ -1493,7 +1481,7 @@ plugins:
   - type: docker
 	id: lan-docker
 	hooks:
-	  pre_resolve: { priority: 20 }
+	  pre_resolve: 20
 	config:
 	  targets: ${LAN}
 	  endpoints:
@@ -1503,14 +1491,14 @@ plugins:
   - type: mdns
 	id: enterprise-mdns
 	hooks:
-	  pre_resolve: { priority: 30 }
+	  pre_resolve: 30
 	  domain: 'devices.lan'
 	  ttl: 120
 
   - type: zone
 	id: zone-1-office
 	hooks:
-	  pre_resolve: { priority: 40 }
+	  pre_resolve: 40
 	config:
 	  pre_priority: 40
 	  targets: ${OFFICE}
@@ -1530,7 +1518,7 @@ plugins:
   - type: router
 	id: corp-router
 	hooks:
-	  pre_resolve: { priority: 60 }
+	  pre_resolve: 60
 	config:
 	  routes:
 		- suffix: corp.example
@@ -1541,7 +1529,7 @@ plugins:
   - type: filter
 	id: global-filter
 	hooks:
-	  pre_resolve: { priority: 80 }
+	  pre_resolve: 80
 	config:
 	  default: allow
 	  blocked_domains_files:
@@ -1550,7 +1538,7 @@ plugins:
 
 From here you can mix and match plugins, caches, and stats backends to shape Foghorn into exactly the DNS service you need.
 
-[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-86%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
+[![Python Tests](https://github.com/zallison/foghorn/actions/workflows/pytest.yml/badge.svg)](https://github.com/zallison/foghorn/actions/workflows/pytest.yml) ![Test Coverage](https://img.shields.io/badge/test_coverage-84%25-blue) [![Docker Pulls](https://img.shields.io/docker/pulls/zallison/foghorn)](https://hub.docker.com/r/zallison/foghorn/)  [![PyPI Downloads](https://static.pepy.tech/personalized-badge/foghorn?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/foghorn)  [![BuyMeACoffee](https://raw.githubusercontent.com/pachadotdev/buymeacoffee-badges/main/bmc-blue.svg)](https://www.buymeacoffee.com/foghorndns)
 
 ## Stargazers over time
 [![Stargazers over time](https://starchart.cc/zallison/foghorn.svg?variant=adaptive)](https://starchart.cc/zallison/foghorn)

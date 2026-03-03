@@ -24,7 +24,7 @@ plugins:
   - id: custom-zone
 	type: zone_records
 	hooks:
-	  pre_resolve: { priority: 60 }
+	  pre_resolve: 60
 	config:
 	  file_paths:
 		- ./config/var/records.txt    # Foghorn pipe-delimited format
@@ -44,12 +44,13 @@ plugins:
   - id: zone-advanced
 	type: zone_records
 	hooks:
-	  pre_resolve: { priority: 60 }
+	  pre_resolve: 60
 	config:
 	  # BasePlugin targeting + logging
-	  targets: [ 0.0.0.0/0 ]
-	  targets_listener: any
-	  target_qtypes: [ '*' ]
+	  targets:
+        ips: [0.0.0.0/0 ]
+	    listeners: any
+	    qtypes: [ '*' ]
 	  logging:
 		level: info
 		stderr: true
@@ -118,7 +119,7 @@ load/reload time using the same primitives as the helper script. Example:
 plugins:
   - type: zone_records
     hooks:
-      pre_resolve: { priority: 60 }
+      pre_resolve: 60
     config:
       file_paths:
         - ./config/var/example.com.txt

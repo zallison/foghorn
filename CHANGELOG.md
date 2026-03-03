@@ -17,6 +17,10 @@ All notable changes to this project will be documented in this file.
 - Rate limit plugin now adds EDE messages (code 17 "Rate-Limited") when rate limiting, providing better visibility into why queries were rejected.
 
 ### Added
+- Upstreams: support backup upstream endpoints via `upstreams.backup.endpoints` (normalized alongside primary endpoints).
+- Upstreams: added `upstreams.health` tuning config (health thresholds/probes) and surfaced it in admin upstream status payloads.
+- Admin UI: added AccessControl and RateLimit plugin snapshot endpoints and UI descriptors.
+- Plugins: added `targets.rcodes` support for post-resolve plugin targeting.
 
 - Rate limit configuration warning: Foghorn now warns at startup when listeners bind to non-loopback addresses without a rate_limit plugin configured. This provides operators guidance for DoS protection on exposed deployments.
 - Tooling: added `scripts/dump_effective_config.py` and `foghorn.config.config_dump` helpers to render an "effective" config (variables expanded + core runtime defaults made explicit) as YAML or JSON for debugging.
@@ -42,6 +46,9 @@ All notable changes to this project will be documented in this file.
   - Added `axfr_enabled` and `axfr_allow_clients` policy gates for zone transfers.
 
 ### Changed
+- Plugin priorities: `hooks.priority` and per-hook priorities now accept either an integer or `{priority: <int>}` shorthand; legacy `*_priority` fields remain supported.
+- Plugin targeting: configuration now prefers a nested `targets` object with `ips`, `ignore_ips`, `listeners`, `domains`, `domains_mode`, `qtypes`, `opcodes`, and `rcodes` (legacy flat keys still accepted).
+- Admin upstream status now reads from runtime snapshots, including backup upstreams when present.
 
 - AXFR-backed zones now respect `minimum_reload_time` and reload only when enough time has elapsed since initial load or last NOTIFY reception, or when `load_mode=replace` forces a full reload.
 - Upstreams: failover now validates upstream responses (TXID + question) and skips mismatched replies.
@@ -77,6 +84,7 @@ All notable changes to this project will be documented in this file.
 - Updated upstream failover coverage to assert DEBUG-level (de-duplicated) skip logs for malformed upstream responses.
 
 ### Documentation
+- Updated README and plugin docs/examples to reflect the nested `targets` config and hook priority shorthands.
 
 - Updated ZoneRecords docs to clarify source precedence order and AXFR reload timing behavior.
 - Added Graphviz `dot` rendering instructions for config diagrams.

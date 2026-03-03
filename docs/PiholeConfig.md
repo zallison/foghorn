@@ -49,8 +49,8 @@ for more information about caching.
 ## 2. Plugins Overview
 
 Plugins extend Foghorn’s behavior. Each plugin is listed under `plugins` and
-configured independently. All plugins support `targets` (and `targets_ignore`),
-a list of CIDRs used to decide whether the plugin applies to a given client.
+configured independently. All plugins support `targets` with `ips`/`ignore_ips`
+to decide whether the plugin applies to a given client.
 
 Common plugin categories include:
 
@@ -109,9 +109,8 @@ Example configuration:
 plugins:
   - type: filter
     hooks:
-      setup:        { priority: 20 }  # Load after the files have been downloaded
-      pre_resolve:  { priority: 20 }  # Run early, before any other lookups happen
-      post_resolve: { priority: 20 }  # Run early in post-resolve to deny/modify responses
+      setup: { priority: 20 }  # Load after the files have been downloaded
+      priority: 20  # Run early (pre + post)
     config:
       default: allow
       deny_response: nxdomain
@@ -156,7 +155,7 @@ Example configuration:
 plugins:
   - type: etc_hosts
     hooks:
-      pre_resolve: { priority: 10 }  # Resolve local names first
+      pre_resolve: 10  # Resolve local names first
     config:  # Default values below
       file_paths:
         - /etc/hosts
@@ -214,7 +213,7 @@ plugins:
 
   - type: etc_hosts
     hooks:
-      pre_resolve: { priority: 10 }  # Resolve local names first
+      pre_resolve: 10  # Resolve local names first
     config:
       file_paths:
         - /etc/hosts
@@ -222,9 +221,8 @@ plugins:
 
   - type: filter
     hooks:
-      setup:        { priority: 20 }
-      pre_resolve:  { priority: 20 }
-      post_resolve: { priority: 20 }
+      setup: { priority: 20 }
+      priority: 20
     config:
       default: allow
       deny_response: nxdomain
