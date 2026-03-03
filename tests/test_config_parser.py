@@ -136,6 +136,20 @@ def test_normalize_upstream_config_invalid_foghorn_and_timeout_fallback() -> Non
     assert upstreams and timeout_ms == 2000
 
 
+def test_normalize_upstream_backup_config_returns_empty_when_missing() -> None:
+    """Brief: normalize_upstream_backup_config returns [] when backup is absent.
+
+    Inputs:
+      - cfg without upstreams.backup.
+
+    Outputs:
+      - Empty list.
+    """
+
+    cfg = {"upstreams": {"endpoints": [{"host": "1.1.1.1", "port": 53}]}}
+    assert cp.normalize_upstream_backup_config(cfg) == []
+
+
 class DummyPlugin(BasePlugin):
     """Brief: Minimal BasePlugin subclass for config_parser tests.
 
