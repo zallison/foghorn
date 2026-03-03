@@ -187,6 +187,67 @@ def parse_config_file(
     return cfg
 
 
+def _normalize_upstream_endpoints_list(
+    upstream_raw: List[Any],
+) -> List[Dict[str, Union[str, int, dict]]]:
+    """Brief: Normalize a raw upstream endpoints list.
+
+    Inputs:
+      - upstream_raw: List of upstream endpoint mappings.
+
+    Outputs:
+      - list[dict]: Normalized upstream endpoint mappings compatible with
+        foghorn.servers.server.send_query_with_failover.
+
+    Raises:
+      - ValueError: When items are not mappings or required fields are missing.
+
+    Notes:
+      - This helper is shared by normalize_upstream_config() and
+        normalize_upstream_backup_config() so that the 'endpoints' and
+        'upstreams.backup.endpoints' blocks share identical parsing rules.
+    """
+
+    upstreams: List[Dict[str, Union[str, int, dict]]] = []
+    for u in upstream_raw:
+        if not isinstance(u, dict):
+            raise ValueError("each upstream entry must be a mapping")
+
+        transport = str(u.get("transport", "udp")).lower()
+
+        if transport == "doh":
+            rec: Dict[str, Union[str, int, dict]] = {
+                "transport": "doh",
+                "url": str(u["url"]),
+            }
+            if "method" in u:
+                rec["method"] = str(u.get("method"))
+            if "headers" in u and isinstance(u["headers"], dict):
+                rec["headers"] = u["headers"]
+            if "tls" in u and isinstance(u["tls"], dict):
+                rec["tls"] = u["tls"]
+            upstreams.append(rec)
+            continue
+
+        if "host" not in u:
+            raise ValueError("each upstream entry must include 'host'")
+
+        default_port = 853 if transport == "dot" else 53
+        rec2: Dict[str, Union[str, int, dict]] = {
+            "host": str(u["host"]),
+            "port": int(u.get("port", default_port)),
+        }
+        if "transport" in u:
+            rec2["transport"] = transport
+        if "tls" in u and isinstance(u["tls"], dict):
+            rec2["tls"] = u["tls"]
+        if "pool" in u and isinstance(u["pool"], dict):
+            rec2["pool"] = u["pool"]
+        upstreams.append(rec2)
+
+    return upstreams
+
+
 def normalize_upstream_config(
     cfg: Dict[str, Any],
 ) -> Tuple[List[Dict[str, Union[str, int, dict]]], int]:
@@ -236,42 +297,7 @@ def normalize_upstream_config(
             "config.upstreams must be a list or an object with an 'endpoints' list",
         )
 
-    upstreams: List[Dict[str, Union[str, int, dict]]] = []
-    for u in upstream_raw:
-        if not isinstance(u, dict):
-            raise ValueError("each upstream entry must be a mapping")
-
-        transport = str(u.get("transport", "udp")).lower()
-
-        if transport == "doh":
-            rec: Dict[str, Union[str, int, dict]] = {
-                "transport": "doh",
-                "url": str(u["url"]),
-            }
-            if "method" in u:
-                rec["method"] = str(u.get("method"))
-            if "headers" in u and isinstance(u["headers"], dict):
-                rec["headers"] = u["headers"]
-            if "tls" in u and isinstance(u["tls"], dict):
-                rec["tls"] = u["tls"]
-            upstreams.append(rec)
-            continue
-
-        if "host" not in u:
-            raise ValueError("each upstream entry must include 'host'")
-
-        default_port = 853 if transport == "dot" else 53
-        rec2: Dict[str, Union[str, int, dict]] = {
-            "host": str(u["host"]),
-            "port": int(u.get("port", default_port)),
-        }
-        if "transport" in u:
-            rec2["transport"] = transport
-        if "tls" in u and isinstance(u["tls"], dict):
-            rec2["tls"] = u["tls"]
-        if "pool" in u and isinstance(u["pool"], dict):
-            rec2["pool"] = u["pool"]
-        upstreams.append(rec2)
+    upstreams = _normalize_upstream_endpoints_list(upstream_raw)
 
     # Timeout source: prefer v2 server.resolver.timeout_ms when present, falling
     # back to legacy foghorn.timeout_ms for older callers/tests.
@@ -300,6 +326,48 @@ def normalize_upstream_config(
                 timeout_ms = 2000
 
     return upstreams, timeout_ms
+
+
+def normalize_upstream_backup_config(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Brief: Normalize upstreams.backup.endpoints to a list of upstream dicts.
+
+    Inputs:
+      - cfg: Parsed configuration mapping.
+
+    Outputs:
+      - list[dict]: Normalized backup upstream endpoints.
+
+    Notes:
+      - This is a v2-only helper. When upstreams.backup.endpoints is missing,
+        returns an empty list.
+      - Backup endpoints are normalized using the same parsing rules as primary
+        upstream endpoints.
+
+    Example:
+      >>> cfg = {'upstreams': {'endpoints': [{'host': '1.1.1.1'}], 'backup': {'endpoints': [{'host': '8.8.8.8'}]}}}
+      >>> normalize_upstream_backup_config(cfg)[0]['host']
+      '8.8.8.8'
+    """
+
+    upstream_cfg = cfg.get("upstreams")
+    if not isinstance(upstream_cfg, dict):
+        return []
+
+    backup_cfg = upstream_cfg.get("backup")
+    if backup_cfg is None:
+        return []
+    if not isinstance(backup_cfg, dict):
+        raise ValueError("config.upstreams.backup must be a mapping when present")
+
+    raw = backup_cfg.get("endpoints")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(
+            "config.upstreams.backup.endpoints must be a list when present"
+        )
+
+    return [dict(x) for x in _normalize_upstream_endpoints_list(raw)]
 
 
 def _validate_plugin_config(plugin_cls: type[BasePlugin], config: dict | None) -> dict:
@@ -523,6 +591,15 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         spec_setup: object | None = None
         spec_enabled: object | None = None
 
+        # Hooks shorthands (preferred):
+        # - hooks.pre_resolve: <int> or {priority: <int>}
+        # - hooks.post_resolve: <int> or {priority: <int>}
+        # - hooks.priority: <int> sets pre/post/setup priorities
+        hooks_priority: object | None = None
+        hooks_pre: object | None = None
+        hooks_post: object | None = None
+        hooks_setup: object | None = None
+
         if isinstance(spec, str):
             module_path = spec
             plugin_name = None
@@ -538,6 +615,30 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
             # human-visible plugin names.
             plugin_name = spec.get("name") or spec.get("id")
 
+            # Hooks are the preferred way to set per-hook priorities.
+            hooks_obj = spec.get("hooks")
+            if isinstance(hooks_obj, dict):
+                hooks_priority = hooks_obj.get("priority")
+
+                pre_obj = hooks_obj.get("pre_resolve")
+                if isinstance(pre_obj, dict):
+                    hooks_pre = pre_obj.get("priority")
+                elif pre_obj is not None:
+                    hooks_pre = pre_obj
+
+                post_obj = hooks_obj.get("post_resolve")
+                if isinstance(post_obj, dict):
+                    hooks_post = post_obj.get("priority")
+                elif post_obj is not None:
+                    hooks_post = post_obj
+
+                setup_obj = hooks_obj.get("setup")
+                if isinstance(setup_obj, dict):
+                    hooks_setup = setup_obj.get("priority")
+                elif setup_obj is not None:
+                    hooks_setup = setup_obj
+
+            # Deprecated (to be removed next major release): *_priority and priority
             spec_priority = spec.get("priority")
             spec_pre = spec.get("pre_priority")
             spec_post = spec.get("post_priority")
@@ -576,12 +677,34 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         cfg_post = raw_config.get("post_priority")
         cfg_setup = raw_config.get("setup_priority")
 
+        # Hooks are encouraged as the default priority mechanism.
+        pre_priority: object | None = None
+        post_priority: object | None = None
+        setup_priority: object | None = None
+
+        # 1) Hook-specific priorities (preferred; take precedence).
+        if hooks_priority is not None:
+            pre_priority = hooks_priority
+            post_priority = hooks_priority
+            setup_priority = hooks_priority
+        if hooks_pre is not None:
+            pre_priority = hooks_pre
+        if hooks_post is not None:
+            post_priority = hooks_post
+        if hooks_setup is not None:
+            setup_priority = hooks_setup
+
+        # 2) Deprecated legacy keys (to be removed next major release):
+        #    *_priority (spec or config) and priority.
+        if pre_priority is None:
+            pre_priority = cfg_pre if cfg_pre is not None else spec_pre
+        if post_priority is None:
+            post_priority = cfg_post if cfg_post is not None else spec_post
+        if setup_priority is None:
+            setup_priority = cfg_setup if cfg_setup is not None else spec_setup
+
+        # 3) Deprecated generic priority fallback.
         generic_priority = spec_priority if spec_priority is not None else cfg_priority
-
-        pre_priority = cfg_pre if cfg_pre is not None else spec_pre
-        post_priority = cfg_post if cfg_post is not None else spec_post
-        setup_priority = cfg_setup if cfg_setup is not None else spec_setup
-
         if pre_priority is None and generic_priority is not None:
             pre_priority = generic_priority
         if post_priority is None and generic_priority is not None:

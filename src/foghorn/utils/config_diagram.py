@@ -586,24 +586,51 @@ def _extract_priorities(
 
     setup_block = _get_dict(entry, "setup")
     hooks = _get_dict(entry, "hooks")
+
+    hook_all = _safe_int(hooks.get("priority"))
+
     pre_block = hooks.get("pre_resolve")
     post_block = hooks.get("post_resolve")
+    setup_hook_block = hooks.get("setup")
 
+    # setup priority:
+    # - Prefer entry.setup.priority when present.
+    # - Else accept hooks.setup as <int> or {priority: <int>}.
+    # - Else fall back to hooks.priority.
     setup_prio = _safe_int(setup_block.get("priority"))
+    if setup_prio is None:
+        if isinstance(setup_hook_block, dict):
+            setup_prio = _safe_int(setup_hook_block.get("priority"))
+        else:
+            setup_prio = _safe_int(setup_hook_block)
+    if setup_prio is None:
+        setup_prio = hook_all
 
+    # Hook-specific priority can be configured as either:
+    # - hooks.pre_resolve: <int>
+    # - hooks.pre_resolve: {priority: <int>}
     pre_prio = None
     if isinstance(pre_block, dict):
         pre_prio = _safe_int(pre_block.get("priority"))
+    else:
+        pre_prio = _safe_int(pre_block)
+    if pre_prio is None:
+        pre_prio = hook_all
 
     post_prio = None
     if isinstance(post_block, dict):
         post_prio = _safe_int(post_block.get("priority"))
+    else:
+        post_prio = _safe_int(post_block)
+    if post_prio is None:
+        post_prio = hook_all
 
     generic = _safe_int(entry.get("priority"))
     pre_legacy = _safe_int(entry.get("pre_priority"))
     post_legacy = _safe_int(entry.get("post_priority"))
     setup_legacy = _safe_int(entry.get("setup_priority"))
 
+    # Deprecated legacy fallbacks (kept for backward compatibility).
     if pre_prio is None:
         pre_prio = pre_legacy if pre_legacy is not None else generic
     if post_prio is None:

@@ -108,7 +108,7 @@ def check_rate_limit_plugin_config(
             "    - type: rate\n"
             "      id: rate_limit\n"
             "      hooks:\n"
-            "        pre_resolve: { priority: 10 }\n"
+            "        pre_resolve: 10\n"
             "This uses sensible defaults: 50 RPS minimum, 5000 RPS global max, "
             "learning-based enforcement with 3x burst factor, and PSL-aware base domain keys. "
             "Rate-limited queries return REFUSED by default (configurable to NXDOMAIN, SERVFAIL, etc)."
