@@ -156,6 +156,60 @@ def test_normalize_variables_embeds_non_scalar_as_json_in_string() -> None:
     assert '"a": 1' in text
 
 
+def test_normalize_variables_expands_inside_templates_and_strips_templates() -> None:
+    """Brief: variables expand inside templates and templates are stripped.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts:
+        - ${VARS} are expanded inside the templates subtree.
+        - templates is removed from the config mapping after expansion.
+        - anchored/aliased structures that are referenced elsewhere still work
+          after templates is stripped.
+    """
+
+    # Simulate a YAML anchor/alias by reusing the same Python object in two
+    # places. (PyYAML aliases also preserve object identity for sequences/maps.)
+    shared_cfg: Dict[str, Any] = {
+        "db_path": "${DATABASES}/greylist.db",
+        "ttl": "$TTL",
+    }
+    templates: Dict[str, Any] = {
+        "paths": {
+            "db_dir": "${DATABASES}",
+        },
+        "shared": shared_cfg,
+    }
+
+    cfg: Dict[str, Any] = {
+        "vars": {
+            "DATABASES": "/var/lib/foghorn",
+            "TTL": 300,
+        },
+        "templates": templates,
+        "plugins": [
+            {
+                "module": "dummy",
+                "config": shared_cfg,
+            }
+        ],
+    }
+
+    config_schema_mod._normalize_variables_for_validation(cfg)
+
+    # templates must always be stripped.
+    assert "templates" not in cfg
+
+    plugin_cfg = cfg["plugins"][0]["config"]
+
+    # Expansion occurred for plugin config values (including values that were
+    # originally shared with templates via YAML aliases).
+    assert plugin_cfg["db_path"] == "/var/lib/foghorn/greylist.db"
+    assert plugin_cfg["ttl"] == 300
+
+
 def test_normalize_dnssec_config_lowercases_validation_fields() -> None:
     """Brief: _normalize_dnssec_config_for_validation lowercases validation.
 
