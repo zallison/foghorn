@@ -7,15 +7,246 @@ Inputs/Outputs:
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import logging
+import time
 from typing import Dict, List, Optional, Tuple
 
-from dnslib import DNSRecord, DNSHeader, QTYPE, RCODE, RR
-
-from foghorn.plugins.resolve.base import PluginContext, PluginDecision
-from foghorn.plugins.resolve.zone_records import update_helpers
+from dnslib import DNSRecord, QTYPE, RCODE, RR
 
 logger = logging.getLogger(__name__)
+
+# HMAC algorithms per RFC 2845
+TSIG_ALGORITHMS = {
+    "hmac-md5": hashlib.md5,
+    "hmac-sha1": hashlib.sha1,
+    "hmac-sha256": hashlib.sha256,
+    "hmac-sha384": hashlib.sha384,
+    "hmac-sha512": hashlib.sha512,
+}
+
+# Timestamp skew fudge (in seconds) - RFC 2845 suggests 5 minutes
+TSIG_TIMESTAMP_FUDGE = 300
+
+
+def parse_tsig_record(additional: List[RR]) -> Optional[Tuple[str, str, str, int]]:
+    """Brief: Parse a TSIG record from the additional section.
+
+    Inputs:
+      - additional: Additional section RRs.
+
+    Outputs:
+      - Tuple of (key_name, algorithm, signature, timestamp) or None.
+
+    Notes:
+      - dnslib does not currently decode TSIG RDATA into a rich structure.
+        This parser is best-effort and must be hardened before use in
+        production authentication.
+    """
+
+    for rr in additional:
+        if QTYPE[rr.rtype] != "TSIG":
+            continue
+
+        try:
+            data = rr.rdata
+            if not isinstance(data, (bytes, bytearray)):
+                logger.warning("TSIG RDATA is not raw bytes; cannot parse")
+                return None
+
+            if len(data) < 10:
+                return None
+
+            # Extract fields (simplified - RFC 2845 section 4.5.2)
+            key_data_start = 22
+            if len(data) < key_data_start:
+                return None
+
+            key_name_len = data[key_data_start]
+            key_name = data[
+                key_data_start + 1 : key_data_start + 1 + key_name_len
+            ].decode("utf-8")
+
+            sig_data_pos = key_data_start + 1 + key_name_len
+            if len(data) < sig_data_pos + 1:
+                return None
+
+            algorithm = data[sig_data_pos : sig_data_pos + 1].decode("utf-8")
+            signature_offset = sig_data_pos + 1
+
+            timestamp_bytes = data[4:10]
+            timestamp = int.from_bytes(timestamp_bytes, "big")
+
+            signature = base64.b64encode(data[signature_offset:]).decode("utf-8")
+
+            return key_name, algorithm, signature, timestamp
+        except Exception as exc:
+            logger.warning("Failed to parse TSIG record: %s", exc)
+            return None
+
+    return None
+
+
+def verify_tsig_signature(
+    request_data: bytes,
+    key_name: str,
+    algorithm: str,
+    secret: str,
+    signature: str,
+    timestamp: int,
+) -> bool:
+    """Brief: Verify TSIG signature.
+
+    Inputs:
+      - request_data: Original request bytes.
+      - key_name: TSIG key name.
+      - algorithm: HMAC algorithm (hmac-md5, hmac-sha256, hmac-sha512).
+      - secret: Base64-encoded secret.
+      - signature: Signature from TSIG record.
+      - timestamp: TSIG timestamp.
+
+    Outputs:
+      - bool: True if signature valid.
+    """
+    # Check timestamp skew
+    current_time = int(time.time())
+    if abs(current_time - timestamp) > TSIG_TIMESTAMP_FUDGE:
+        logger.warning(
+            "TSIG timestamp skew too large: %s seconds (fudge=%s)",
+            abs(current_time - timestamp),
+            TSIG_TIMESTAMP_FUDGE,
+        )
+        return False
+
+    # Get HMAC function
+    hash_func = TSIG_ALGORITHMS.get(algorithm.lower())
+    if not hash_func:
+        logger.warning("Unsupported TSIG algorithm: %s", algorithm)
+        return False
+
+    # Decode secret
+    try:
+        key_bytes = base64.b64decode(secret)
+    except Exception:
+        logger.warning("Failed to decode TSIG secret")
+        return False
+
+    # Recompute signature
+    try:
+        # Remove TSIG from data to recompute signature
+        # This is simplified - full RFC 2845 requires removing the TSIG RR itself
+        # For now, we'll verify the signature against a known format
+        computed_sig = hmac.new(key_bytes, request_data[:-16], hash_func).digest()
+        computed_sig_base64 = base64.b64encode(computed_sig).decode("utf-8")
+
+        # Constant-time comparison to avoid timing attacks
+        if len(signature) != len(computed_sig_base64):
+            return False
+
+        result = 0
+        for a, b in zip(signature, computed_sig_base64):
+            result |= ord(a) ^ ord(b)
+
+        return result == 0
+    except Exception as exc:
+        logger.warning("TSIG signature verification failed: %s", exc)
+        return False
+
+
+def verify_tsig_auth(
+    request_data: bytes,
+    additional: List[RR],
+    zone_config: dict,
+    key_configs: List[dict],
+) -> Tuple[bool, Optional[str]]:
+    """Brief: Verify TSIG authentication.
+
+    Inputs:
+      - request_data: Raw DNS UPDATE request bytes.
+      - additional: Additional section RRs.
+      - zone_config: Zone configuration.
+      - key_configs: List of TSIG key configurations.
+
+    Outputs:
+      - Tuple of (authorized, error_message) or (False, error).
+    """
+    # Parse TSIG from additional section
+    tsig_data = parse_tsig_record(additional)
+    if not tsig_data:
+        return False, "No valid TSIG record found"
+
+    key_name, algorithm, signature, timestamp = tsig_data
+
+    # Find matching key configuration
+    key_config = None
+    for cfg in key_configs:
+        if isinstance(cfg, dict) and cfg.get("name", "") == key_name:
+            key_config = cfg
+            break
+
+    if not key_config:
+        return False, f"Unknown TSIG key: {key_name}"
+
+    if algorithm != key_config.get("algorithm", "hmac-sha256"):
+        return False, f"TSIG algorithm mismatch: expected {key_config.get('algorithm')}"
+
+    # Verify signature
+    if not verify_tsig_signature(
+        request_data,
+        key_name,
+        algorithm,
+        key_config.get("secret", ""),
+        signature,
+        timestamp,
+    ):
+        return False, "TSIG signature verification failed"
+
+    return True, None
+
+
+def verify_psk_auth(
+    request_token: str,
+    zone_config: dict,
+    listener: Optional[str],
+    token_configs: List[dict],
+) -> Tuple[bool, Optional[str]]:
+    """Brief: Verify PSK authentication.
+
+    Inputs:
+      - request_token: Token from request.
+      - zone_config: Zone configuration.
+      - listener: Listener type (dot/doh/udp/tcp).
+      - token_configs: List of PSK token configurations.
+
+    Outputs:
+      - Tuple of (authorized, error_message).
+    """
+    # PSK only allowed on secure listeners (DoT/DoH)
+    if listener and listener.lower() not in ("dot", "doh"):
+        return False, "PSK authentication only allowed on DoT/DoH listeners"
+
+    try:
+        import bcrypt
+    except ImportError:
+        return False, "bcrypt module not available"
+
+    # Find matching token configuration
+    token_config = None
+    for cfg in token_configs:
+        if isinstance(cfg, dict):
+            stored_token = cfg.get("token", "")
+            if bcrypt.checkpw(
+                request_token.encode("utf-8"), stored_token.encode("utf-8")
+            ):
+                token_config = cfg
+                break
+
+    if not token_config:
+        return False, "Invalid PSK token"
+
+    return True, None
 
 
 class UpdateContext:
@@ -38,6 +269,42 @@ class UpdateContext:
         self.is_authorized = False
         self.auth_method: Optional[str] = None
         self.request_snapshot: Optional[Dict] = None
+        self.tsig_key_config: Optional[dict] = None
+        self.psk_token_config: Optional[dict] = None
+
+
+def process_update_message(
+    request_data: bytes,
+    zone_apex: str,
+    zone_config: dict,
+    *,
+    plugin: object,
+    client_ip: str,
+    listener: Optional[str] = None,
+) -> Tuple[int, Optional[str]]:
+    """Brief: Process a DNS UPDATE message.
+
+    Inputs:
+      - request_data: Wire-format UPDATE request.
+      - zone_apex: Zone apex.
+      - zone_config: Zone configuration dict.
+      - plugin: ZoneRecords plugin instance.
+      - client_ip: Client IP address (string).
+      - listener: Listener type (dot/doh/udp/tcp).
+
+    Outputs:
+      - Tuple of (rcode, error_message).
+
+    Notes:
+      - This function is currently a scaffold; prerequisite checks and update
+        operations are not yet implemented.
+    """
+
+    parsed = parse_update_message(request_data)
+    if not parsed:
+        return RCODE.FORMERR, "Failed to parse UPDATE message"
+
+    return RCODE.NOTIMP, "DNS UPDATE processing not implemented"
 
 
 def verify_client_authorization(
@@ -205,6 +472,33 @@ def check_prerequisites(
         pass
 
     return 0, None
+
+
+def resolve_tsig_key_by_name(
+    key_name: str,
+    zone: dict,
+    dns_update_config: dict,
+) -> Optional[dict]:
+    """Brief: Look up TSIG key configuration by name.
+
+    Inputs:
+      - key_name: TSIG key name from TSIG record.
+      - zone: Zone configuration dict.
+      - dns_update_config: DNS UPDATE config.
+
+    Outputs:
+      - TSIG key configuration dict, or None if not found.
+    """
+    tsig_cfg = zone.get("tsig")
+    if not tsig_cfg:
+        return None
+
+    keys = tsig_cfg.get("keys", []) or []
+    for key in keys:
+        if isinstance(key, dict) and key.get("name", "") == key_name:
+            return key
+
+    return None
 
 
 def apply_update_operations(
