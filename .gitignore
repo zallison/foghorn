@@ -38,6 +38,12 @@ config.yaml.new
 my-config-test.yaml
 my-config.yaml
 var/
+
+# Generated artifacts (local only)
+coverage.json
+schema.json
+*.bak
+
 !/src/
 !/tests/coverage.json
 
