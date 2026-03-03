@@ -210,20 +210,27 @@ async def serve_dot(
     max_queries_per_connection: int = 100,
     idle_timeout_seconds: float = 15.0,
     executor: Executor | None = None,
+    on_listen: Callable[[int], None] | None = None,
 ) -> None:
-    """
-    Serve DNS-over-TLS on host:port with given certificate.
+    """Brief: Serve DNS-over-TLS on host:port with the given certificate.
 
     Inputs:
-      - host: Listen address
-      - port: Listen port (853 typical)
-      - resolver: Callable mapping (query_bytes, client_ip) -> response_bytes
-      - cert_file: Path to PEM certificate
-      - key_file: Path to PEM private key
-      - ca_file: Optional client-auth CA (unused by default)
-      - min_version: Minimum TLS version (default TLS1.2)
+      - host: Listen address.
+      - port: Listen port (853 typical). When 0, the OS chooses an ephemeral port.
+      - resolver: Callable mapping (query_bytes, client_ip) -> response_bytes.
+      - cert_file: Path to PEM certificate.
+      - key_file: Path to PEM private key.
+      - ca_file: Optional client-auth CA (unused by default).
+      - min_version: Minimum TLS version (default TLS1.2).
+      - max_connections / max_connections_per_ip: Connection limiting knobs.
+      - max_queries_per_connection: Close after this many queries.
+      - idle_timeout_seconds: Close idle connections after this many seconds.
+      - executor: Optional executor for resolver work.
+      - on_listen: Optional callback invoked with the bound port after the server
+        starts listening.
+
     Outputs:
-      - None (runs forever)
+      - None (runs forever).
 
     Example:
       >>> asyncio.run(serve_dot('0.0.0.0', 8853, resolver, cert_file='cert.pem', key_file='key.pem'))
@@ -258,5 +265,18 @@ async def serve_dot(
         port,
         ssl=ctx,
     )
+
+    if on_listen is not None:
+        listen_port = int(port)
+        try:
+            if getattr(server, "sockets", None):
+                listen_port = int(server.sockets[0].getsockname()[1])  # type: ignore[index]
+        except Exception:
+            listen_port = int(port)
+        try:
+            on_listen(int(listen_port))
+        except Exception:
+            pass
+
     async with server:
         await server.serve_forever()
