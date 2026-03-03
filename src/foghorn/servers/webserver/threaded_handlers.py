@@ -2870,6 +2870,80 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
+    def _handle_access_control_snapshot(self, path: str) -> None:
+        """Brief: Handle GET /api/v1/plugins/{plugin_name}/access_control.
+
+        Inputs:
+          - path: Request path including the plugin_name segment.
+
+        Outputs:
+          - None (sends JSON response with snapshot or error).
+        """
+
+        if not self._require_auth():
+            return
+        prefix = "/api/v1/plugins/"
+        suffix = "/access_control"
+        raw_segment = path[len(prefix) : -len(suffix)]
+        plugin_name = raw_segment.strip("/")
+        plugins_list = getattr(self._server(), "plugins", []) or []
+        try:
+            snap = _admin_logic.build_named_plugin_snapshot(
+                plugins_list, plugin_name, label="AccessControl"
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            self._send_json(
+                exc.status_code,
+                {"detail": exc.detail, "server_time": _utc_now_iso()},
+            )
+            return
+
+        self._send_json(
+            200,
+            {
+                "server_time": _utc_now_iso(),
+                "plugin": snap["plugin"],
+                "data": _json_safe(snap["data"]),
+            },
+        )
+
+    def _handle_rate_limit_snapshot(self, path: str) -> None:
+        """Brief: Handle GET /api/v1/plugins/{plugin_name}/rate_limit.
+
+        Inputs:
+          - path: Request path including the plugin_name segment.
+
+        Outputs:
+          - None (sends JSON response with snapshot or error).
+        """
+
+        if not self._require_auth():
+            return
+        prefix = "/api/v1/plugins/"
+        suffix = "/rate_limit"
+        raw_segment = path[len(prefix) : -len(suffix)]
+        plugin_name = raw_segment.strip("/")
+        plugins_list = getattr(self._server(), "plugins", []) or []
+        try:
+            snap = _admin_logic.build_named_plugin_snapshot(
+                plugins_list, plugin_name, label="RateLimit"
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            self._send_json(
+                exc.status_code,
+                {"detail": exc.detail, "server_time": _utc_now_iso()},
+            )
+            return
+
+        self._send_json(
+            200,
+            {
+                "server_time": _utc_now_iso(),
+                "plugin": snap["plugin"],
+                "data": _json_safe(snap["data"]),
+            },
+        )
+
     def do_GET(
         self,
     ) -> (
@@ -2977,6 +3051,10 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_mdns_snapshot(path)
         elif path.startswith("/api/v1/plugins/") and path.endswith("/etc_hosts"):
             self._handle_etc_hosts_snapshot(path)
+        elif path.startswith("/api/v1/plugins/") and path.endswith("/access_control"):
+            self._handle_access_control_snapshot(path)
+        elif path.startswith("/api/v1/plugins/") and path.endswith("/rate_limit"):
+            self._handle_rate_limit_snapshot(path)
         elif path in {"/", "/index.html"}:
             self._handle_index()
         else:
