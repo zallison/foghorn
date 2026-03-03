@@ -371,3 +371,119 @@ def test_load_plugins_enabled_and_priority_propagation_and_cache_error(
     assert init_cfg.get("setup_priority") == 9
     # Cache instance should be injected into plugin config.
     assert "cache" in init_cfg
+
+
+def test_load_plugins_hooks_priority_shorthands_and_precedence(monkeypatch) -> None:
+    """Brief: load_plugins supports hooks-based priority shorthands.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts hooks.pre_resolve/hooks.post_resolve accept int or
+        {priority: int}, hooks.priority sets all three, and hooks take
+        precedence over deprecated *_priority/priority fields.
+    """
+
+    monkeypatch.setattr(cp, "discover_plugins", lambda: {})
+    monkeypatch.setattr(cp, "get_plugin_class", lambda ident, reg=None: DummyPlugin)
+
+    # hooks.pre_resolve as int; hooks.post_resolve as {priority: ...}
+    DummyPlugin.last_init = None
+    plugins = cp.load_plugins(
+        [
+            {
+                "module": "dummy",
+                "hooks": {"pre_resolve": 11, "post_resolve": {"priority": 22}},
+            }
+        ]
+    )
+    assert len(plugins) == 1
+    init_cfg = DummyPlugin.last_init or {}
+    assert init_cfg.get("pre_priority") == 11
+    assert init_cfg.get("post_priority") == 22
+    # setup should be untouched (defaults to BasePlugin class default).
+    assert "setup_priority" not in init_cfg
+
+    # hooks.priority sets all three.
+    DummyPlugin.last_init = None
+    plugins2 = cp.load_plugins(
+        [
+            {
+                "module": "dummy",
+                "hooks": {"priority": 7},
+            }
+        ]
+    )
+    assert len(plugins2) == 1
+    init_cfg2 = DummyPlugin.last_init or {}
+    assert init_cfg2.get("pre_priority") == 7
+    assert init_cfg2.get("post_priority") == 7
+    assert init_cfg2.get("setup_priority") == 7
+
+    # hooks.setup overrides setup priority.
+    DummyPlugin.last_init = None
+    plugins2b = cp.load_plugins(
+        [
+            {
+                "module": "dummy",
+                "hooks": {"priority": 7, "setup": 9},
+            }
+        ]
+    )
+    assert len(plugins2b) == 1
+    init_cfg2b = DummyPlugin.last_init or {}
+    assert init_cfg2b.get("pre_priority") == 7
+    assert init_cfg2b.get("post_priority") == 7
+    assert init_cfg2b.get("setup_priority") == 9
+
+    # hooks.setup can also be {priority: ...}.
+    DummyPlugin.last_init = None
+    plugins2c = cp.load_plugins(
+        [
+            {
+                "module": "dummy",
+                "hooks": {"setup": {"priority": 12}},
+            }
+        ]
+    )
+    assert len(plugins2c) == 1
+    init_cfg2c = DummyPlugin.last_init or {}
+    assert init_cfg2c.get("setup_priority") == 12
+
+    # Hook-specific values override hooks.priority.
+    DummyPlugin.last_init = None
+    plugins3 = cp.load_plugins(
+        [
+            {
+                "module": "dummy",
+                "hooks": {"priority": 3, "pre_resolve": 9},
+            }
+        ]
+    )
+    assert len(plugins3) == 1
+    init_cfg3 = DummyPlugin.last_init or {}
+    assert init_cfg3.get("pre_priority") == 9
+    assert init_cfg3.get("post_priority") == 3
+    assert init_cfg3.get("setup_priority") == 3
+
+    # Hooks take precedence over deprecated *_priority and priority.
+    DummyPlugin.last_init = None
+    plugins4 = cp.load_plugins(
+        [
+            {
+                "module": "dummy",
+                "hooks": {"priority": 1},
+                "pre_priority": 99,
+                "post_priority": 98,
+                "setup_priority": 97,
+                "priority": 96,
+                "config": {"pre_priority": 95, "priority": 94},
+            }
+        ]
+    )
+    assert len(plugins4) == 1
+    init_cfg4 = DummyPlugin.last_init or {}
+    assert init_cfg4.get("pre_priority") == 1
+    assert init_cfg4.get("post_priority") == 1
+    assert init_cfg4.get("setup_priority") == 1

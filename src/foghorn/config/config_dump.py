@@ -29,7 +29,10 @@ from typing import Any, Dict
 
 import yaml
 
-from foghorn.config.config_parser import normalize_upstream_config
+from foghorn.config.config_parser import (
+    normalize_upstream_backup_config,
+    normalize_upstream_config,
+)
 
 
 def build_effective_config_for_display(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -435,6 +438,30 @@ def _expand_upstreams_defaults(out: Dict[str, Any]) -> None:
         "strategy", str(upstream_cfg.get("strategy", "failover") or "failover")
     )
 
+    # Optional upstream health tuning defaults (used by server.py).
+    health_cfg = upstream_cfg.get("health")
+    if not isinstance(health_cfg, dict):
+        health_cfg = {}
+        upstream_cfg["health"] = health_cfg
+    health_cfg.setdefault("max_serv_fail", 3)
+    health_cfg.setdefault("unknown_after_seconds", 300)
+    health_cfg.setdefault("probe_percent", 1.0)
+    health_cfg.setdefault("probe_min_percent", 0.0)
+    health_cfg.setdefault("probe_max_percent", 50.0)
+    health_cfg.setdefault("probe_increase", 1.0)
+    health_cfg.setdefault("probe_decrease", 1.0)
+    health_cfg.setdefault("success_recovery", 1)
+    health_cfg.setdefault("failure_cap", 100)
+
+    # Optional backup upstream endpoints.
+    backup_cfg = upstream_cfg.get("backup")
+    if backup_cfg is None:
+        backup_cfg = {"endpoints": []}
+        upstream_cfg["backup"] = backup_cfg
+    elif not isinstance(backup_cfg, dict):
+        # Best-effort: keep invalid backup cfg unmodified.
+        backup_cfg = None
+
     try:
         max_conc = int(upstream_cfg.get("max_concurrent", 1) or 1)
     except Exception:
@@ -463,6 +490,17 @@ def _expand_upstreams_defaults(out: Dict[str, Any]) -> None:
     # Preserve the v2 layout when present.
     if "endpoints" in upstream_cfg and isinstance(upstream_cfg.get("endpoints"), list):
         upstream_cfg["endpoints"] = normalized
+
+    # Normalize backup endpoints when present.
+    if isinstance(upstream_cfg.get("backup"), dict) and isinstance(
+        upstream_cfg["backup"].get("endpoints"), list
+    ):
+        try:
+            backup_normalized = normalize_upstream_backup_config(out)
+            upstream_cfg["backup"]["endpoints"] = backup_normalized
+        except Exception:
+            # Best-effort: keep original backup endpoints on errors.
+            return
 
 
 def _expand_logging_defaults(out: Dict[str, Any]) -> None:

@@ -53,7 +53,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for AccessControl used for startup validation.\n\nInputs:\n  - default: Default policy (\"allow\" or \"deny\").\n  - allow: List of CIDR/IP strings to allow.\n  - deny: List of CIDR/IP strings to deny.\n\nOutputs:\n  - AccessControlConfig instance with normalized types.",
+          "description": "Brief: Typed configuration model for AccessControl used for startup validation.\n\nInputs:\n  - default: Default policy (\"allow\" or \"deny\").\n  - allow: List of CIDR/IP strings to allow.\n  - deny: List of CIDR/IP strings to deny.\n  - deny_response: Response code when denying ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', 'ip', or 'drop').\n\nOutputs:\n  - AccessControlConfig instance with normalized types.",
           "properties": {
             "allow": {
               "description": "Type: array.",
@@ -78,6 +78,12 @@
               },
               "title": "Deny",
               "type": "array"
+            },
+            "deny_response": {
+              "default": "refused",
+              "description": "Type: string. Default: \"refused\".",
+              "title": "Deny Response",
+              "type": "string"
             }
           },
           "title": "AccessControlConfig",
@@ -807,7 +813,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /udp_client_prefix_v4 or\n        /udp_client_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - udp_client_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - udp_client_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip').\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /udp_client_prefix_v4 or\n        /udp_client_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - udp_client_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - udp_client_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
           "properties": {
             "alpha": {
               "default": 0.2,
@@ -847,8 +853,8 @@
               "type": "string"
             },
             "deny_response": {
-              "default": "nxdomain",
-              "description": "Type: string. Default: \"nxdomain\".",
+              "default": "refused",
+              "description": "Type: string. Default: \"refused\".",
               "title": "Deny Response",
               "type": "string"
             },
@@ -3499,6 +3505,34 @@
     "upstreams": {
       "additionalProperties": false,
       "properties": {
+        "backup": {
+          "allOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "endpoints": {
+                  "items": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/$defs/upstream_host"
+                      },
+                      {
+                        "$ref": "#/$defs/upstream_doh"
+                      }
+                    ]
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "endpoints"
+              ],
+              "type": "object"
+            }
+          ],
+          "description": "Optional backup upstream endpoints used only when no eligible primary upstreams are available."
+        },
         "endpoints": {
           "items": {
             "oneOf": [
@@ -3512,6 +3546,72 @@
           },
           "minItems": 1,
           "type": "array"
+        },
+        "health": {
+          "additionalProperties": false,
+          "description": "Upstream health tracking and failover probing knobs.",
+          "properties": {
+            "failure_cap": {
+              "default": 100,
+              "description": "Maximum value for an upstream failure counter (prevents unbounded growth).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "max_serv_fail": {
+              "default": 3,
+              "description": "Mark an upstream unhealthy when its failure counter exceeds this threshold.",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "probe_decrease": {
+              "default": 1.0,
+              "description": "Amount to decrease probe_percent after a failed unhealthy probe.",
+              "maximum": 100,
+              "minimum": 0,
+              "type": "number"
+            },
+            "probe_increase": {
+              "default": 1.0,
+              "description": "Amount to increase probe_percent after a successful unhealthy probe.",
+              "maximum": 100,
+              "minimum": 0,
+              "type": "number"
+            },
+            "probe_max_percent": {
+              "default": 50.0,
+              "description": "Upper bound for the dynamic probe percent.",
+              "maximum": 100,
+              "minimum": 0,
+              "type": "number"
+            },
+            "probe_min_percent": {
+              "default": 0.0,
+              "description": "Lower bound for the dynamic probe percent.",
+              "maximum": 100,
+              "minimum": 0,
+              "type": "number"
+            },
+            "probe_percent": {
+              "default": 1.0,
+              "description": "Percent of queries that should probe an unhealthy upstream first (before healthy/unknown upstreams).",
+              "maximum": 100,
+              "minimum": 0,
+              "type": "number"
+            },
+            "success_recovery": {
+              "default": 1,
+              "description": "How much to decrement an upstream's failure counter after a successful response.",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "unknown_after_seconds": {
+              "default": 300,
+              "description": "If an upstream has not had a successful response in this many seconds, its status becomes 'unknown' (treated as eligible like healthy).",
+              "minimum": 0,
+              "type": "number"
+            }
+          },
+          "type": "object"
         },
         "max_concurrent": {
           "default": 1,

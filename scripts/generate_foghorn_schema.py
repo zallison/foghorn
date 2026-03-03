@@ -1361,6 +1361,86 @@ def _build_v2_root_schema(
     upstream_host_ref = {"$ref": "#/$defs/upstream_host"}
     upstream_doh_ref = {"$ref": "#/$defs/upstream_doh"}
 
+    upstreams_backup_v2: Dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "endpoints": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"oneOf": [upstream_host_ref, upstream_doh_ref]},
+            }
+        },
+        "required": ["endpoints"],
+    }
+
+    upstreams_health_v2: Dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "description": "Upstream health tracking and failover probing knobs.",
+        "properties": {
+            "max_serv_fail": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Mark an upstream unhealthy when its failure counter exceeds this threshold.",
+                "default": 3,
+            },
+            "unknown_after_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "description": "If an upstream has not had a successful response in this many seconds, its status becomes 'unknown' (treated as eligible like healthy).",
+                "default": 300,
+            },
+            "probe_percent": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Percent of queries that should probe an unhealthy upstream first (before healthy/unknown upstreams).",
+                "default": 1.0,
+            },
+            "probe_min_percent": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Lower bound for the dynamic probe percent.",
+                "default": 0.0,
+            },
+            "probe_max_percent": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Upper bound for the dynamic probe percent.",
+                "default": 50.0,
+            },
+            "probe_increase": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Amount to increase probe_percent after a successful unhealthy probe.",
+                "default": 1.0,
+            },
+            "probe_decrease": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Amount to decrease probe_percent after a failed unhealthy probe.",
+                "default": 1.0,
+            },
+            "success_recovery": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "How much to decrement an upstream's failure counter after a successful response.",
+                "default": 1,
+            },
+            "failure_cap": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum value for an upstream failure counter (prevents unbounded growth).",
+                "default": 100,
+            },
+        },
+    }
+
     upstreams_v2: Dict[str, Any] = {
         "type": "object",
         "additionalProperties": False,
@@ -1384,6 +1464,11 @@ def _build_v2_root_schema(
                     "oneOf": [upstream_host_ref, upstream_doh_ref],
                 },
             },
+            "backup": {
+                "description": "Optional backup upstream endpoints used only when no eligible primary upstreams are available.",
+                "allOf": [upstreams_backup_v2],
+            },
+            "health": upstreams_health_v2,
         },
         "required": ["endpoints"],
     }

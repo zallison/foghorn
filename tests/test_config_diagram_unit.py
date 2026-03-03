@@ -649,12 +649,14 @@ def test_render_dot_renders_routed_upstreams_block_like_endpoints() -> None:
         include_init=False,
     )
 
-    assert "cluster_routed_upstreams" in out
-    assert 'label="Upstream router upstreams"' in out
-    assert "RoutedUpstreams_0_router" in out
+    # Routed upstreams are rendered as additional nodes within the upstreams
+    # cluster, linked from the routing plugin via a dashed edge.
+    assert "cluster_upstreams" in out
+    assert "RoutedUpstream_0_router" in out
+    assert "Upstreams for\\nrouter" in out
     assert "route: domain=internal.example" in out
     assert "udp: 10.0.0.2:53" in out
-    assert "pre_0_router -> RoutedUpstreams_0_router" in out
+    assert "pre_0_router -> RoutedUpstream_0_router" in out
     assert "style=dashed" in out
 
 
