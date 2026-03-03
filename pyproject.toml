@@ -71,7 +71,10 @@ package-dir = {"" = "src"}
 [tool.setuptools.package-data]
 # Include the built-in admin web UI assets in wheels/installs so the webserver
 # can serve / and /index.html when running from an installed package.
-"foghorn" = ["html/*", "html/**/*"]
+#
+# Also include built-in plugin profile YAML files (e.g. rate_limit_profiles.yaml)
+# so importlib.resources can load them from installed distributions.
+"foghorn" = ["html/*", "html/**/*", "plugins/resolve/*_profiles.yaml"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
