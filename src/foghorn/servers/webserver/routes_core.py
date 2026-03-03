@@ -1561,6 +1561,42 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
         return {"server_time": _utc_now_iso(), "entries": entries}
 
     @app.get(
+        "/api/v1/plugins/{plugin_name}/access_control", dependencies=[Depends(auth_dep)]
+    )
+    async def get_access_control_snapshot(plugin_name: str) -> Dict[str, Any]:
+        plugins_list = getattr(app.state, "plugins", []) or []
+        try:
+            snap = _admin_logic.build_named_plugin_snapshot(
+                plugins_list, plugin_name, label="AccessControl"
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+        return {
+            "server_time": _utc_now_iso(),
+            "plugin": snap["plugin"],
+            "data": _json_safe(snap["data"]),
+        }
+
+    @app.get(
+        "/api/v1/plugins/{plugin_name}/rate_limit", dependencies=[Depends(auth_dep)]
+    )
+    async def get_rate_limit_snapshot(plugin_name: str) -> Dict[str, Any]:
+        plugins_list = getattr(app.state, "plugins", []) or []
+        try:
+            snap = _admin_logic.build_named_plugin_snapshot(
+                plugins_list, plugin_name, label="RateLimit"
+            )
+        except _admin_logic.AdminLogicHttpError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+        return {
+            "server_time": _utc_now_iso(),
+            "plugin": snap["plugin"],
+            "data": _json_safe(snap["data"]),
+        }
+
+    @app.get(
         "/api/v1/plugins/{plugin_name}/docker_hosts", dependencies=[Depends(auth_dep)]
     )
     async def get_docker_hosts_snapshot(plugin_name: str) -> Dict[str, Any]:

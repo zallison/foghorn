@@ -422,94 +422,53 @@ class TestBuildUpstreamStatusPayload:
         assert payload["max_concurrent"] == 1
         assert payload["items"] == []
 
-    def test_upstream_with_health_status(self) -> None:
-        """Brief: Build upstream items from config and health status.
+    def test_upstream_with_health_status(self, set_runtime_snapshot) -> None:
+        """Brief: Build upstream items from the active RuntimeSnapshot.
 
         Inputs:
-          - config: Config with upstreams
-          - Mock DNSUDPHandler health/strategy attributes
+          - set_runtime_snapshot: Fixture helper to override RuntimeSnapshot fields.
 
         Outputs:
-          - Assert items include state/fail_count/down_until.
+          - Assert payload includes upstream strategy/max_concurrent and per-upstream items.
         """
 
-        from foghorn.servers import udp_server
-
-        # Save original values to restore later
-        orig_health = getattr(udp_server.DNSUDPHandler, "upstream_health", {})
-        orig_strategy = getattr(
-            udp_server.DNSUDPHandler, "upstream_strategy", "failover"
+        upstreams = [
+            {"host": "8.8.8.8", "port": 53},
+            {"host": "1.1.1.1", "port": 53},
+        ]
+        set_runtime_snapshot(
+            upstream_addrs=upstreams,
+            upstream_backup_addrs=[],
+            upstream_strategy="round_robin",
+            upstream_max_concurrent=5,
         )
-        orig_upstream_id = udp_server.DNSUDPHandler._upstream_id
 
-        try:
-            # Set up mocks
-            udp_server.DNSUDPHandler.upstream_health = {
-                "up1": {"fail_count": 0, "down_until": 0.0},
-                "down1": {"fail_count": 3, "down_until": 9999999999.0},
-            }
-            udp_server.DNSUDPHandler.upstream_strategy = "round_robin"
-            udp_server.DNSUDPHandler.upstream_max_concurrent = 5
+        now_ts = 1707752400.0
+        payload = build_upstream_status_payload({}, now_ts=now_ts)
 
-            config = {
-                "upstreams": [
-                    {"host": "8.8.8.8", "port": 53},
-                    {"host": "1.1.1.1", "port": 53},
-                ]
-            }
+        assert payload["strategy"] == "round_robin"
+        assert payload["max_concurrent"] == 5
+        assert len(payload["items"]) == 2
+        assert {it.get("role") for it in payload["items"]} == {"primary"}
 
-            # Mock _upstream_id to return predictable IDs
-            def mock_upstream_id(up: Dict[str, Any]) -> str:
-                if isinstance(up, dict) and "host" in up:
-                    return f"up_{up['host']}"
-                return ""
-
-            udp_server.DNSUDPHandler._upstream_id = staticmethod(mock_upstream_id)  # type: ignore[assignment]
-
-            now_ts = 1707752400.0
-            payload = build_upstream_status_payload(config, now_ts=now_ts)
-
-            assert payload["strategy"] == "round_robin"
-            assert payload["max_concurrent"] == 5
-            assert len(payload["items"]) > 0
-
-        finally:
-            # Restore original values
-            udp_server.DNSUDPHandler.upstream_health = orig_health  # type: ignore[attr-defined]
-            udp_server.DNSUDPHandler.upstream_strategy = orig_strategy  # type: ignore[attr-defined]
-            udp_server.DNSUDPHandler._upstream_id = orig_upstream_id  # type: ignore[attr-defined]
-
-    def test_health_only_upstreams(self) -> None:
-        """Brief: Include upstreams from health that are not in config.
+    def test_health_only_upstreams(self, set_runtime_snapshot) -> None:
+        """Brief: Upstream status payload lists only configured upstreams.
 
         Inputs:
-          - config: Empty upstreams list
-          - Mock DNSUDPHandler with health entries
+          - set_runtime_snapshot: Fixture helper.
 
         Outputs:
-          - Assert health-only upstreams are included.
+          - Assert payload items reflect only upstream_addrs / upstream_backup_addrs.
         """
 
-        from foghorn.servers import udp_server
+        set_runtime_snapshot(
+            upstream_addrs=[],
+            upstream_backup_addrs=[],
+        )
 
-        orig_health = getattr(udp_server.DNSUDPHandler, "upstream_health", {})
-
-        try:
-            udp_server.DNSUDPHandler.upstream_health = {
-                "health_only": {"fail_count": 1, "down_until": 0.0}
-            }
-
-            config = {"upstreams": []}
-            now_ts = 1707752400.0
-            payload = build_upstream_status_payload(config, now_ts=now_ts)
-
-            # Should include the health-only entry
-            assert len(payload["items"]) >= 1
-            ids = {item["id"] for item in payload["items"]}
-            assert "health_only" in ids
-
-        finally:
-            udp_server.DNSUDPHandler.upstream_health = orig_health  # type: ignore[attr-defined]
+        now_ts = 1707752400.0
+        payload = build_upstream_status_payload({}, now_ts=now_ts)
+        assert payload["items"] == []
 
 
 class TestCollectAdminPagesForResponse:

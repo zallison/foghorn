@@ -12,6 +12,7 @@ from dnslib import QTYPE, RCODE, DNSRecord, EDNSOption
 from pydantic import BaseModel, Field
 
 from foghorn.plugins.resolve.base import (
+    AdminPageSpec,
     BasePlugin,
     PluginContext,
     PluginDecision,
@@ -876,3 +877,186 @@ class RateLimit(BasePlugin):
             allowed_rps,
         )
         return self._build_deny_decision(qname, qtype, req, ctx)
+
+    def get_admin_pages(self) -> list[AdminPageSpec]:
+        """Brief: Describe the RateLimit admin page for the web UI.
+
+        Inputs:
+          - None; uses the plugin instance name for routing.
+
+        Outputs:
+          - list[AdminPageSpec]: A single page descriptor for rate limiting config.
+        """
+
+        return [
+            AdminPageSpec(
+                slug="rate-limit",
+                title="Rate Limit",
+                description=(
+                    "Rate limiting configuration and derived settings for this RateLimit instance."
+                ),
+                layout="one_column",
+                kind="rate_limit",
+            )
+        ]
+
+    def get_admin_ui_descriptor(self) -> dict[str, object]:
+        """Brief: Describe RateLimit admin UI using a generic snapshot layout.
+
+        Inputs:
+          - None (uses the plugin instance name for routing).
+
+        Outputs:
+          - dict with keys:
+              * name: Effective plugin instance name.
+              * title: Human-friendly tab title.
+              * order: Integer ordering hint among plugin tabs.
+              * endpoints: Mapping with at least a "snapshot" URL.
+              * layout: Generic section/column description for the frontend.
+        """
+
+        plugin_name = getattr(self, "name", "rate_limit")
+        snapshot_url = f"/api/v1/plugins/{plugin_name}/rate_limit"
+        base_title = "Rate Limit"
+        title = f"{base_title} ({plugin_name})" if plugin_name else base_title
+
+        layout: dict[str, object] = {
+            "sections": [
+                {
+                    "id": "settings",
+                    "title": "Settings",
+                    "type": "kv",
+                    "path": "settings",
+                    "rows": [
+                        {"key": "mode", "label": "Mode"},
+                        {"key": "window_seconds", "label": "Window (s)"},
+                        {"key": "warmup_windows", "label": "Warmup windows"},
+                        {"key": "burst_factor", "label": "Burst factor"},
+                        {"key": "min_enforce_rps", "label": "Min enforce RPS"},
+                        {"key": "global_max_rps", "label": "Global max RPS"},
+                        {"key": "udp_keying", "label": "UDP keying"},
+                        {"key": "db_path", "label": "DB path"},
+                    ],
+                },
+                {
+                    "id": "config",
+                    "title": "Config",
+                    "type": "table",
+                    "path": "config_items",
+                    "columns": [
+                        {"key": "key", "label": "Key"},
+                        {"key": "value", "label": "Value"},
+                    ],
+                },
+            ]
+        }
+
+        return {
+            "name": str(plugin_name),
+            "title": str(title),
+            "order": 40,
+            "endpoints": {"snapshot": snapshot_url},
+            "layout": layout,
+        }
+
+    def get_http_snapshot(self) -> dict[str, object]:
+        """Brief: Summarize RateLimit configuration and derived runtime settings.
+
+        Inputs:
+          - None (reads runtime-parsed attributes when setup() has run).
+
+        Outputs:
+          - dict with keys:
+              * summary/config_items (from BasePlugin.get_http_snapshot)
+              * settings: derived settings used for enforcement and keying
+        """
+
+        snapshot = super().get_http_snapshot()
+
+        db_path = str(getattr(self, "db_path", self.config.get("db_path", "")) or "")
+        snapshot["settings"] = {
+            "mode": str(getattr(self, "mode", self.config.get("mode", "per_client"))),
+            "window_seconds": int(
+                getattr(self, "window_seconds", self.config.get("window_seconds", 10))
+                or 10
+            ),
+            "warmup_windows": int(
+                getattr(self, "warmup_windows", self.config.get("warmup_windows", 6))
+                or 0
+            ),
+            "alpha": float(
+                getattr(self, "alpha", self.config.get("alpha", 0.2)) or 0.0
+            ),
+            "alpha_down": float(
+                getattr(
+                    self,
+                    "alpha_down",
+                    self.config.get("alpha_down", getattr(self, "alpha", 0.2)),
+                )
+                or 0.0
+            ),
+            "burst_factor": float(
+                getattr(self, "burst_factor", self.config.get("burst_factor", 3.0))
+                or 0.0
+            ),
+            "min_enforce_rps": float(
+                getattr(
+                    self, "min_enforce_rps", self.config.get("min_enforce_rps", 50.0)
+                )
+                or 0.0
+            ),
+            "global_max_rps": float(
+                getattr(
+                    self, "global_max_rps", self.config.get("global_max_rps", 5000.0)
+                )
+                or 0.0
+            ),
+            "udp_keying": str(
+                getattr(self, "udp_keying", self.config.get("udp_keying", "cidr"))
+            ),
+            "udp_client_prefix_v4": int(
+                getattr(
+                    self,
+                    "udp_client_prefix_v4",
+                    self.config.get("udp_client_prefix_v4", 24),
+                )
+                or 0
+            ),
+            "udp_client_prefix_v6": int(
+                getattr(
+                    self,
+                    "udp_client_prefix_v6",
+                    self.config.get("udp_client_prefix_v6", 56),
+                )
+                or 0
+            ),
+            "deny_response": str(
+                getattr(
+                    self, "deny_response", self.config.get("deny_response", "refused")
+                )
+            ),
+            "db_path": db_path,
+            "max_profiles": int(
+                getattr(self, "max_profiles", self.config.get("max_profiles", 10000))
+                or 0
+            ),
+            "profile_ttl_seconds": int(
+                getattr(
+                    self,
+                    "profile_ttl_seconds",
+                    self.config.get("profile_ttl_seconds", 7 * 24 * 60 * 60),
+                )
+                or 0
+            ),
+            "prune_interval_seconds": int(
+                getattr(
+                    self,
+                    "prune_interval_seconds",
+                    self.config.get("prune_interval_seconds", 60),
+                )
+                or 0
+            ),
+        }
+
+        # Keep the snapshot JSON-safe and cheap: no DB scans here.
+        return snapshot

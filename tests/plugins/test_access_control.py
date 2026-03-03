@@ -8,6 +8,8 @@ Outputs:
   - None
 """
 
+from dnslib import DNSRecord, QTYPE, RCODE
+
 from foghorn.plugins.resolve.access_control import AccessControl
 from foghorn.plugins.resolve.base import PluginContext
 
@@ -86,7 +88,9 @@ def test_access_control_allows_by_default(tmp_path):
     plugin = AccessControl(default="allow")
     plugin.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
-    decision = plugin.pre_resolve("example.com", 1, b"", ctx)
+    decision = plugin.pre_resolve(
+        "example.com", QTYPE.A, DNSRecord.question("example.com", "A").pack(), ctx
+    )
     assert decision.action == "allow"
 
 
@@ -104,8 +108,12 @@ def test_access_control_denies_by_default(tmp_path):
     plugin = AccessControl(default="deny")
     plugin.setup()
     ctx = PluginContext(client_ip="1.2.3.4")
-    decision = plugin.pre_resolve("example.com", 1, b"", ctx)
-    assert decision.action == "deny"
+    decision = plugin.pre_resolve(
+        "example.com", QTYPE.A, DNSRecord.question("example.com", "A").pack(), ctx
+    )
+    assert decision.action == "override"
+    denied = DNSRecord.parse(decision.response)
+    assert denied.header.rcode == RCODE.REFUSED
 
 
 def test_access_control_allow_rule_matches(tmp_path):
@@ -140,9 +148,13 @@ def test_access_control_deny_rule_matches(tmp_path):
     plugin = AccessControl(default="allow", deny=["192.168.1.10"])
     plugin.setup()
     ctx = PluginContext(client_ip="192.168.1.10")
-    decision = plugin.pre_resolve("example.com", 1, b"", ctx)
+    decision = plugin.pre_resolve(
+        "example.com", QTYPE.A, DNSRecord.question("example.com", "A").pack(), ctx
+    )
     assert decision is not None
-    assert decision.action == "deny"
+    assert decision.action == "override"
+    denied = DNSRecord.parse(decision.response)
+    assert denied.header.rcode == RCODE.REFUSED
 
 
 def test_access_control_deny_takes_precedence(tmp_path):
@@ -161,9 +173,13 @@ def test_access_control_deny_takes_precedence(tmp_path):
     )
     plugin.setup()
     ctx = PluginContext(client_ip="192.168.1.10")
-    decision = plugin.pre_resolve("example.com", 1, b"", ctx)
+    decision = plugin.pre_resolve(
+        "example.com", QTYPE.A, DNSRecord.question("example.com", "A").pack(), ctx
+    )
     assert decision is not None
-    assert decision.action == "deny"
+    assert decision.action == "override"
+    denied = DNSRecord.parse(decision.response)
+    assert denied.header.rcode == RCODE.REFUSED
 
 
 def test_access_control_ipv6_support(tmp_path):
@@ -199,9 +215,13 @@ def test_access_control_single_ip_no_mask(tmp_path):
     plugin = AccessControl(default="allow", deny=["10.0.0.1"])
     plugin.setup()
     ctx = PluginContext(client_ip="10.0.0.1")
-    decision = plugin.pre_resolve("example.com", 1, b"", ctx)
+    decision = plugin.pre_resolve(
+        "example.com", QTYPE.A, DNSRecord.question("example.com", "A").pack(), ctx
+    )
     assert decision is not None
-    assert decision.action == "deny"
+    assert decision.action == "override"
+    denied = DNSRecord.parse(decision.response)
+    assert denied.header.rcode == RCODE.REFUSED
 
 
 def test_access_control_no_rules_default_allow(tmp_path):
@@ -218,7 +238,9 @@ def test_access_control_no_rules_default_allow(tmp_path):
     plugin = AccessControl(default="allow")
     plugin.setup()
     ctx = PluginContext(client_ip="203.0.113.1")
-    decision = plugin.pre_resolve("example.com", 1, b"", ctx)
+    decision = plugin.pre_resolve(
+        "example.com", QTYPE.A, DNSRecord.question("example.com", "A").pack(), ctx
+    )
     assert decision.action == "allow"
 
 
@@ -236,8 +258,12 @@ def test_access_control_no_rules_default_deny(tmp_path):
     plugin = AccessControl(default="deny")
     plugin.setup()
     ctx = PluginContext(client_ip="203.0.113.1")
-    decision = plugin.pre_resolve("example.com", 1, b"", ctx)
-    assert decision.action == "deny"
+    decision = plugin.pre_resolve(
+        "example.com", QTYPE.A, DNSRecord.question("example.com", "A").pack(), ctx
+    )
+    assert decision.action == "override"
+    denied = DNSRecord.parse(decision.response)
+    assert denied.header.rcode == RCODE.REFUSED
 
 
 def test_access_control_respects_baseplugin_targets(tmp_path):
@@ -254,5 +280,7 @@ def test_access_control_respects_baseplugin_targets(tmp_path):
     plugin = AccessControl(default="deny", targets=["10.0.0.0/8"])
     plugin.setup()
     ctx = PluginContext(client_ip="192.0.2.1")
-    decision = plugin.pre_resolve("example.com", 1, b"", ctx)
+    decision = plugin.pre_resolve(
+        "example.com", QTYPE.A, DNSRecord.question("example.com", "A").pack(), ctx
+    )
     assert decision is None
