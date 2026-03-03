@@ -57,6 +57,32 @@ class UpdateTsigKeyConfig(BaseModel):
         description="Base64-encoded shared secret.",
     )
 
+    # Per-key authorization scopes
+    allow_names: Optional[List[str]] = Field(
+        default=None, description="Hostnames this key can update (wildcards supported)."
+    )
+    allow_names_files: Optional[List[str]] = Field(
+        default=None, description="File paths containing allowed names for this key."
+    )
+    block_names: Optional[List[str]] = Field(
+        default=None, description="Hostnames this key cannot update."
+    )
+    block_names_files: Optional[List[str]] = Field(
+        default=None, description="File paths containing blocked names for this key."
+    )
+    allow_update_ips: Optional[List[str]] = Field(
+        default=None, description="IP addresses this key can set in A/AAAA records."
+    )
+    allow_update_ips_files: Optional[List[str]] = Field(
+        default=None, description="File paths containing allowed IPs for this key."
+    )
+    block_update_ips: Optional[List[str]] = Field(
+        default=None, description="Blocked IPs for this key."
+    )
+    block_update_ips_files: Optional[List[str]] = Field(
+        default=None, description="File paths containing blocked IPs."
+    )
+
     class Config:
         extra = "forbid"
 
@@ -74,6 +100,33 @@ class UpdatePskTokenConfig(BaseModel):
     token: str = Field(
         ...,
         description="Pre-shared token (hashed).",
+    )
+
+    # Per-token authorization scopes
+    allow_names: Optional[List[str]] = Field(
+        default=None,
+        description="Hostnames this token can update (wildcards supported).",
+    )
+    allow_names_files: Optional[List[str]] = Field(
+        default=None, description="File paths containing allowed names for this token."
+    )
+    block_names: Optional[List[str]] = Field(
+        default=None, description="Hostnames this token cannot update."
+    )
+    block_names_files: Optional[List[str]] = Field(
+        default=None, description="File paths containing blocked names for this token."
+    )
+    allow_update_ips: Optional[List[str]] = Field(
+        default=None, description="IP addresses this token can set in A/AAAA records."
+    )
+    allow_update_ips_files: Optional[List[str]] = Field(
+        default=None, description="File paths containing allowed IPs for this token."
+    )
+    block_update_ips: Optional[List[str]] = Field(
+        default=None, description="Blocked IPs for this token."
+    )
+    block_update_ips_files: Optional[List[str]] = Field(
+        default=None, description="File paths containing blocked IPs."
     )
 
     class Config:
