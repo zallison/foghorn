@@ -65,19 +65,21 @@ def running_dot_server(selfsigned_cert):
         asyncio.set_event_loop(asyncio.new_event_loop())
         loop = asyncio.get_event_loop()
 
-        async def bind_and_run():
-            # Bind temp to get free port
-            srv = await asyncio.start_server(lambda r, w: None, host, 0)
-            port = srv.sockets[0].getsockname()[1]
-            info["port"] = port
-            ready.set()
-            srv.close()
-            await srv.wait_closed()
+        async def run():
+            def _on_listen(port: int) -> None:
+                info["port"] = int(port)
+                ready.set()
+
             await serve_dot(
-                host, port, _echo_resolver, cert_file=cert_file, key_file=key_file
+                host,
+                0,
+                _echo_resolver,
+                cert_file=cert_file,
+                key_file=key_file,
+                on_listen=_on_listen,
             )
 
-        loop.create_task(bind_and_run())
+        loop.create_task(run())
         loop.run_forever()
 
     t = threading.Thread(target=runner, daemon=True)
@@ -107,24 +109,23 @@ def running_dot_server_max_queries(selfsigned_cert):
         asyncio.set_event_loop(asyncio.new_event_loop())
         loop = asyncio.get_event_loop()
 
-        async def bind_and_run():
-            srv = await asyncio.start_server(lambda r, w: None, host, 0)
-            port = srv.sockets[0].getsockname()[1]
-            info["port"] = port
-            ready.set()
-            srv.close()
-            await srv.wait_closed()
+        async def run():
+            def _on_listen(port: int) -> None:
+                info["port"] = int(port)
+                ready.set()
+
             await serve_dot(
                 host,
-                port,
+                0,
                 _echo_resolver,
                 cert_file=cert_file,
                 key_file=key_file,
                 max_queries_per_connection=2,
                 idle_timeout_seconds=1.0,
+                on_listen=_on_listen,
             )
 
-        loop.create_task(bind_and_run())
+        loop.create_task(run())
         loop.run_forever()
 
     t = threading.Thread(target=runner, daemon=True)
