@@ -25,36 +25,6 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
-# Default rate_limit profiles (used when YAML loading fails)
-_DEFAULT_RATE_LIMIT_PROFILES = {
-    "default": {
-        "min_enforce_rps": 50,
-        "global_max_rps": 5000,
-        "burst_factor": 3.0,
-    },
-    "single": {
-        "min_enforce_rps": 10,
-        "global_max_rps": 100,
-        "burst_factor": 5.0,
-    },
-    "lan": {
-        "min_enforce_rps": 50,
-        "global_max_rps": 1000,
-        "burst_factor": 4.0,
-    },
-    "smb": {
-        "min_enforce_rps": 100,
-        "global_max_rps": 5000,
-        "burst_factor": 3.0,
-    },
-    "enterprise": {
-        "min_enforce_rps": 200,
-        "global_max_rps": 15000,
-        "burst_factor": 2.0,
-    },
-}
-
-
 def _load_profiles_from_file(path: str) -> Dict[str, Any]:
     """Brief: Load profile mapping from a YAML file.
 
@@ -96,7 +66,7 @@ def _load_profiles_from_file(path: str) -> Dict[str, Any]:
 
 
 def load_builtin_profiles(plugin_type: str = "rate_limit") -> Dict[str, Any]:
-    """Brief: Load built-in profiles for a plugin type from source tree.
+    """Brief: Load built-in profiles for a plugin type from the installed package.
 
     Inputs:
       - plugin_type: Plugin identifier (e.g., 'rate_limit').
@@ -105,8 +75,8 @@ def load_builtin_profiles(plugin_type: str = "rate_limit") -> Dict[str, Any]:
       - dict: Profile name → config mapping, empty if not found.
 
     Notes:
-      - Searches for {plugin_type}_profiles.yaml in plugin package dir.
-      - Falls back to hardcoded defaults for rate_limit if missing.
+      - Searches for {plugin_type}_profiles.yaml alongside resolve plugins.
+      - These YAML files must be included as package data for installed distributions.
     """
     try:
         # Built-in profile YAML lives alongside the resolve plugin modules.
@@ -141,10 +111,6 @@ def load_builtin_profiles(plugin_type: str = "rate_limit") -> Dict[str, Any]:
 
     except Exception as exc:
         logger.debug("Failed to load built-in profiles for %s: %s", plugin_type, exc)
-
-    # Fallback to hardcoded defaults for rate_limit
-    if plugin_type == "rate_limit":
-        return _DEFAULT_RATE_LIMIT_PROFILES.copy()
 
     return {}
 

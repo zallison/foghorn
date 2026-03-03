@@ -20,8 +20,8 @@ from foghorn.config.plugin_profiles import (
 )
 
 
-def test_load_builtin_profiles_rate_limit_returns_defaults() -> None:
-    """Brief: load_builtin_profiles returns default rate_limit profiles when file missing.
+def test_load_builtin_profiles_rate_limit_returns_yaml_profiles() -> None:
+    """Brief: load_builtin_profiles returns built-in rate_limit profiles from YAML.
 
     Inputs:
       - None.
