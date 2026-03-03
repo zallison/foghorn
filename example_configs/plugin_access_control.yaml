@@ -24,19 +24,20 @@ plugins:
       post_priority: 50
       setup_priority: 50
       targets:
-        - 0.0.0.0/0
-        - 2001:db8::/32
-      targets_ignore:
-        - 127.0.0.1/32
+        ips:
+          - 0.0.0.0/0
+          - 2001:db8::/32
+        ignore_ips:
+          - 127.0.0.1/32
+        listeners: any
+        domains:
+          - corp.example
+        domains_mode: suffix
+        qtypes:
+          - '*'
+        opcodes:
+          - QUERY
       targets_cache_ttl_seconds: 300
-      targets_listener: any
-      targets_domains:
-        - corp.example
-      targets_domains_mode: suffix
-      target_qtypes:
-        - '*'
-      target_opcodes:
-        - QUERY
       logging:
         level: info
         stderr: true

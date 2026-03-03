@@ -21,10 +21,11 @@ plugins:
   - id: mdns-default
     type: mdns_bridge
     hooks:
-      pre_resolve: { priority: 200 }
+      pre_resolve: 200
     config:
       # Serve mDNS data under your main domain
-      targets: [ 192.168.0.0/16 ]
+      targets:
+        ips: [192.168.0.0/16 ]
       domain: .zaa
 ```
 
@@ -35,12 +36,13 @@ plugins:
   - id: mdns-advanced
     type: mdns_bridge
     hooks:
-      pre_resolve: { priority: 200 }
+      pre_resolve: 200
     config:
       # BasePlugin targeting + logging
-      targets: [ 192.168.0.0/16, 10.0.0.0/8 ]
-      targets_listener: secure         # only DoT/DoH queries
-      target_qtypes: [ 'PTR', 'SRV', 'TXT', 'A', 'AAAA' ]
+      targets:
+        ips: [192.168.0.0/16, 10.0.0.0/8 ]
+        listeners: secure         # only DoT/DoH queries
+        qtypes: [ 'PTR', 'SRV', 'TXT', 'A', 'AAAA' ]
       logging:
         level: info
         stderr: true
@@ -134,6 +136,7 @@ These fields are defined by `MdnsBridgeConfig` and live under the plugin
 
 ### Common BasePlugin options
 
-MdnsBridge supports all BasePlugin options (`targets*`, `targets_listener`,
-`targets_domains*`, `target_qtypes`, `logging`, etc.) as shown in the full
+MdnsBridge supports all BasePlugin options via the nested `targets` block
+(`ips`, `ignore_ips`, `listeners`, `domains`, `domains_mode`, `qtypes`,
+`opcodes`, `rcodes`) and per-plugin `logging`, as shown in the full
 configuration example above.

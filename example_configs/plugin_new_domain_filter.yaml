@@ -24,17 +24,17 @@ plugins:
       post_priority: 80
       setup_priority: 80
       targets:
-        - 0.0.0.0/0
-      targets_ignore: []
+        ips:
+          - 0.0.0.0/0
+        listeners: any
+        domains:
+          - example.com
+        domains_mode: suffix
+        qtypes:
+          - '*'
+        opcodes:
+          - QUERY
       targets_cache_ttl_seconds: 300
-      targets_listener: any
-      targets_domains:
-        - example.com
-      targets_domains_mode: suffix
-      target_qtypes:
-        - '*'
-      target_opcodes:
-        - QUERY
       logging:
         level: info
         stderr: true

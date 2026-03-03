@@ -19,12 +19,13 @@ plugins:
   - id: lan-hosts
     type: etc_hosts
     hooks:
-      pre_resolve: { priority: 30 }
+      pre_resolve: 30
     config:
       # Answer for clients on the LAN only
       targets:
-        - 192.168.0.0/16
-        - 10.0.0.0/8
+        ips:
+          - 192.168.0.0/16
+          - 10.0.0.0/8
       # Default: [/etc/hosts]
       file_paths:
         - /etc/hosts
@@ -37,19 +38,19 @@ plugins:
   - id: lan-hosts-full
     type: etc_hosts
     hooks:
-      pre_resolve:  { priority: 30 }
-      post_resolve: { priority: 30 }
+      priority: 30
     config:
       # BasePlugin targeting
       targets:
-        - 192.168.0.0/16
-      targets_ignore:
-        - 192.168.1.50/32
-      targets_listener: secure           # only DoT/DoH listeners
-      targets_domains:
-        - example.internal
-      targets_domains_mode: suffix       # only qnames under example.internal
-      target_qtypes: [ 'A', 'AAAA', 'PTR' ]
+        ips:
+          - 192.168.0.0/16
+        ignore_ips:
+          - 192.168.1.50/32
+        listeners: secure           # only DoT/DoH listeners
+        domains:
+          - example.internal
+        domains_mode: suffix        # only qnames under example.internal
+        qtypes: [ 'A', 'AAAA', 'PTR' ]
 
       # BasePlugin logging
       logging:
@@ -106,21 +107,19 @@ plugins:
 
 These options are shared by all resolve plugins:
 
-- `targets: list[str] | str | null`
-  - CIDR/IP list of client networks this plugin should apply to. When omitted and
-    `targets_ignore` is empty, all clients are targeted.
-- `targets_ignore: list[str] | str | null`
-  - CIDR/IP list of clients to exclude. When `targets` is empty and this is
-    non-empty, targeting is "everyone except these".
-- `targets_listener: str | list[str] | null`
-  - Restrict to specific listeners: any of `udp`, `tcp`, `dot`, `doh`.
-  - Aliases: `secure` → `dot`+`doh`, `unsecure`/`insecure` → `udp`+`tcp`, `any`/`*` → no restriction.
-- `targets_domains: str | list[str] | null`, `targets_domains_mode: str`
-  - Optional domain-level targeting. `targets_domains_mode` is one of `any`,
-    `exact`, `suffix`.
-- `target_qtypes: str | list[str] | null`
-  - Restrict plugin to specific qtypes (e.g. `["A", "AAAA"]`). `"*"` or omission
-    means all qtypes.
+- `targets: dict | null`
+  - Nested targeting configuration with the following keys:
+    - `ips: list[str] | str | null` - CIDR/IP list for client targeting.
+    - `ignore_ips: list[str] | str | null` - CIDR/IP list to exclude from targeting.
+    - `listeners: str | list[str] | null` - Restrict to specific listeners: any of `udp`, `tcp`, `dot`, `doh`.
+      Aliases: `secure` → `dot`+`doh`, `unsecure`/`insecure` → `udp`+`tcp`, `any`/`*` → no restriction.
+    - `domains: list[str] | str | null` - Optional domain-level targeting.
+    - `domains_mode: str` - One of `any`, `exact`, `suffix` for domain matching.
+    - `qtypes: list[str] | str | null` - Restrict plugin to specific qtypes (e.g. `["A", "AAAA"]`).
+      `"*"` or omission means all qtypes.
+    - `opcodes: list[str] | str | null` - Restrict plugin to specific DNS opcodes (e.g. `QUERY`).
+    - `rcodes: list[str] | str | null` - Restrict post-resolve plugins to specific response codes
+      (e.g. `NOERROR`, `NXDOMAIN`, `SERVFAIL`).
 - `targets_cache_ttl_seconds: int`
   - Hints the size/behaviour of the internal LRU cache for targeting decisions.
 - `logging: { level, stderr, file, syslog }`

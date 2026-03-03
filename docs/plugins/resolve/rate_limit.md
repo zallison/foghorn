@@ -23,7 +23,7 @@ plugins:
   - id: rl-per-client
     type: rate_limit
     hooks:
-      pre_resolve: { priority: 50 }
+      pre_resolve: 50
     config:
       mode: per_client
       window_seconds: 10
@@ -40,12 +40,14 @@ plugins:
   - id: rl-advanced
     type: rate_limit
     hooks:
-      pre_resolve: { priority: 50 }
+      pre_resolve: 50
     config:
       # BasePlugin targeting + logging
-      targets: [ 0.0.0.0/0 ]
-      targets_listener: any
-      target_qtypes: [ '*' ]
+      targets:
+        ips: [ 0.0.0.0/0 ]
+        listeners: any
+        qtypes: [ '*' ]
+        opcodes: [ 'QUERY' ]
       logging:
         level: info
         stderr: true

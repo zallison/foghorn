@@ -23,16 +23,16 @@ plugins:
       setup_priority: 60
       targets:
         - 0.0.0.0/0
-      targets_ignore: []
+      targets:
+        listeners: any
+        domains:
+          - home.arpa
+        domains_mode: suffix
+        qtypes:
+          - '*'
+        opcodes:
+          - QUERY
       targets_cache_ttl_seconds: 300
-      targets_listener: any
-      targets_domains:
-        - home.arpa
-      targets_domains_mode: suffix
-      target_qtypes:
-        - '*'
-      target_opcodes:
-        - QUERY
       logging:
         level: info
         stderr: true

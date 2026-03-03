@@ -16,7 +16,7 @@ plugins:
   - id: acl-lan-only
 	type: access_control
 	hooks:
-	  pre_resolve: { priority: 10 }
+	  pre_resolve: 10
 	config:
 	  # Default policy: deny everything not explicitly allowed
 	  default: deny
@@ -35,16 +35,16 @@ plugins:
   - id: acl-example
 	type: access_control
 	hooks:
-	  pre_resolve:  { priority: 10 }
-	  post_resolve: { priority: 10 }
+	  priority: 10
 	config:
 	  # BasePlugin targeting
 	  targets:
-		- 0.0.0.0/0          # apply to all clients
-	  targets_ignore:
-		- 192.0.2.10/32      # but skip this one IP completely
-	  targets_listener: any  # udp|tcp|dot|doh|secure|insecure|any
-	  target_qtypes: [ '*' ]
+		ips:
+		  - 0.0.0.0/0          # apply to all clients
+		ignore_ips:
+		  - 192.0.2.10/32      # but skip this one IP completely
+		listeners: any  # udp|tcp|dot|doh|secure|insecure|any
+		qtypes: [ '*' ]
 
 	  # BasePlugin logging
 	  logging:
@@ -55,7 +55,7 @@ plugins:
 	  # Default decision when a client does not match allow/deny lists.
 	  default: allow          # 'allow' (default) or 'deny'
 
-	  # Explicit allowlist / denylist of client networks.
+	  # Explicit allow/deny lists of client networks.
 	  allow:
 		- 192.168.0.0/16
 		- 10.0.0.0/8
@@ -92,11 +92,10 @@ plugins:
 
 ### Common BasePlugin options
 
-AccessControl supports the standard resolve plugin base options for:
+AccessControl supports the standard resolve plugin base options:
 
-- client targeting (`targets`, `targets_ignore`),
-- listener targeting (`targets_listener`),
-- optional domain/qtype targeting (`targets_domains*`, `target_qtypes`), and
+- `targets` (nested targeting config with `ips`, `ignore_ips`, `listeners`, `domains`,
+  `domains_mode`, `qtypes`, `opcodes`, `rcodes`), and
 - per-plugin logging (`logging.level`, `logging.file`, `logging.syslog`, ...).
 
 See the full configuration example above for a concrete use of these fields.

@@ -46,8 +46,9 @@ plugins:
       setup: { priority: 10 }
     config:
       # BasePlugin targeting + logging (mostly unused but supported)
-      targets: [ '0.0.0.0/0' ]
-      targets_listener: any
+      targets:
+        ips: ['0.0.0.0/0' ]
+        listeners: any
       logging:
         level: info
         stderr: true

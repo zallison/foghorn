@@ -24,36 +24,30 @@ plugins:
       setup_priority: 50
 
       # Demonstrates BasePlugin targeting options in a single plugin.
-      # 1) Client IP targeting
+      # 1) Client IP targeting, 2) Listener targeting (only secure listeners: DoT/DoH)
+      #    3) Domain targeting (only *.corp.example and *.internal.corp)
+      #    4) Qtype targeting (only A/AAAA/PTR), 5) Opcode targeting
       targets:
-        - 10.0.0.0/8
-        - 192.168.0.0/16
-      targets_ignore:
-        - 10.0.10.0/24
-        - 192.168.100.50/32
+        ips:
+          - 10.0.0.0/8
+          - 192.168.0.0/16
+        ignore_ips:
+          - 10.0.10.0/24
+          - 192.168.100.50/32
+        listeners:
+          - dot
+          - doh
+        domains:
+          - corp.example
+          - internal.corp
+        domains_mode: suffix
+        qtypes:
+          - A
+          - AAAA
+          - PTR
+        opcodes:
+          - QUERY
       targets_cache_ttl_seconds: 300
-
-      # 2) Listener targeting (only secure listeners: DoT/DoH)
-      #    Accepts ["udp", "tcp", "dot", "doh"] or aliases like "secure".
-      targets_listener:
-        - dot
-        - doh
-
-      # 3) Domain targeting (only *.corp.example and *.internal.corp)
-      targets_domains:
-        - corp.example
-        - internal.corp
-      targets_domains_mode: suffix
-
-      # 4) Qtype targeting (only A/AAAA/PTR)
-      target_qtypes:
-        - A
-        - AAAA
-        - PTR
-
-      # 5) Opcode targeting
-      target_opcodes:
-        - QUERY
 
       # Per-plugin logging and cache examples
       logging:
