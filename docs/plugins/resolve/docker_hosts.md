@@ -22,9 +22,10 @@ plugins:
   - id: docker-lan
 	type: docker_hosts
 	hooks:
-	  pre_resolve: { priority: 40 }
+	  pre_resolve: 40
 	config:
-	  targets: [ 192.168.0.0/16 ]
+	  targets:
+	    ips: [192.168.0.0/16 ]
 	  suffix: docker.${DOMAIN}
 	  discovery: true
 	  endpoints:
@@ -38,13 +39,14 @@ plugins:
   - id: docker-advanced
 	type: docker_hosts
 	hooks:
-	  pre_resolve: { priority: 40 }
+	  pre_resolve: 40
 	config:
 	  # BasePlugin targeting + logging
 	  targets:
-		- 192.168.0.0/16
-	  targets_listener: any
-	  target_qtypes: [ 'A', 'AAAA', 'PTR', 'TXT' ]
+		ips:
+		  - 192.168.0.0/16
+		listeners: any
+		qtypes: [ 'A', 'AAAA', 'PTR', 'TXT' ]
 	  logging:
 		level: info
 		stderr: true
