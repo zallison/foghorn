@@ -144,6 +144,31 @@ dnssec-sign-zone: $(VENV)/bin/foghorn
 	  --algorithm "$$ALGO" \
 	  --validity-days "$$VALIDITY_DAYS"
 
+## DNS UPDATE Keys
+##################
+
+# Generate a TSIG key for DNS UPDATE authentication
+.PHONY: gen-tsig-key
+gen-tsig-key: $(VENV)/bin/foghorn
+	. ${VENV}/bin/activate
+	@NAME=$${NAME:-dynamic-key.example.com} ; \
+	ALGO=$${ALGO:-hmac-sha256} ; \
+	echo "Generating TSIG key: $$NAME ($$ALGO)" ; \
+	${VENV}/bin/python scripts/generate_dns_update_keys.py \
+	  --tsig \
+	  --name "$$NAME" \
+	  --algorithm "$$ALGO" \
+	  --config-snippet
+
+# Generate a PSK token for DNS UPDATE authentication
+.PHONY: gen-psk-token
+gen-psk-token: $(VENV)/bin/foghorn
+	. ${VENV}/bin/activate
+	@echo "Generating PSK token" ; \
+	${VENV}/bin/python scripts/generate_dns_update_keys.py \
+	  --psk \
+	  --config-snippet
+
 # ------------------------------------------------------------
 # Run tests
 # ------------------------------------------------------------
@@ -354,6 +379,8 @@ help:
 	@echo "  schema           - Regenerate assets/config-schema.json"
 	@echo "  test             - Run pytest with coverage and update README coverage badge"
 	@echo "  dnssec-sign-zone - Sign a DNS zone file with DNSSEC records (see target for ZONE/INPUT/OUTPUT args)"
+	@echo "  gen-tsig-key     - Generate a TSIG key for DNS UPDATE (use NAME= and ALGO=)"
+	@echo "  gen-psk-token    - Generate a PSK token for DNS UPDATE"
 	@echo "Variable inspection:"
 	@echo "  vars-print-all-all - Print all make variables (debug/introspection)"
 	@echo "  vars-print-all     - Print grouped Foghorn-related variables (make/docker/SSL/Python)"
