@@ -33,6 +33,16 @@ plugins:
       db_path: ./config/var/rate_limit.db
 ```
 
+## Configuration profiles (presets)
+
+RateLimit ships with a small set of preset configuration bundles (profiles)
+stored in an external YAML file:
+
+- `src/foghorn/plugins/resolve/rate_limit_profiles.yaml`
+
+These are loaded by `foghorn.config.plugin_profiles.load_builtin_profiles('rate_limit')`
+(and are intended to be merged with explicit config in higher-level config logic).
+
 ## Full configuration (all plugin + base options)
 
 ```yaml path=null start=null

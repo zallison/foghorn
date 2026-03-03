@@ -19,13 +19,16 @@ All notable changes to this project will be documented in this file.
 ### Added
 - Upstreams: support backup upstream endpoints via `upstreams.backup.endpoints` (normalized alongside primary endpoints).
 - Upstreams: added `upstreams.health` tuning config (health thresholds/probes) and surfaced it in admin upstream status payloads.
+- Upstreams: added `upstreams.health.profile` to apply built-in upstream health preset bundles from `upstreams_health_profiles.yaml`.
 - Admin UI: added AccessControl and RateLimit plugin snapshot endpoints and UI descriptors.
 - Plugins: added `targets.rcodes` support for post-resolve plugin targeting.
 
 - Rate limit configuration warning: Foghorn now warns at startup when listeners bind to non-loopback addresses without a rate_limit plugin configured. This provides operators guidance for DoS protection on exposed deployments.
 - Tooling: added `scripts/dump_effective_config.py` and `foghorn.config.config_dump` helpers to render an "effective" config (variables expanded + core runtime defaults made explicit) as YAML or JSON for debugging.
 - Plugins/config: added plugin profile preset loading helpers plus built-in RateLimit profile presets (default/single/lan/smb/enterprise) and an example configuration demonstrating profile selection and per-field overrides.
+- Plugins/config: include built-in `*_profiles.yaml` in installed distributions so presets can be loaded via package resources.
 
+- ZoneRecords plugin: Added `dns_update` configuration scaffolding for DNS UPDATE (RFC 2136) authorization and parsing (currently returns Not Implemented).
 - ZoneRecords plugin: Added `minimum_reload_time` field to `axfr_zones` entries to control when AXFR zones can be reloaded, allowing load balancing between staying current and avoiding excessive upstream transfer load while still honoring NOTIFY events.
 - DoS hardening:
   - Added a shared, bounded resolver executor for asyncio servers (`server.limits.resolver_executor_workers`).
@@ -49,6 +52,10 @@ All notable changes to this project will be documented in this file.
 - Plugin priorities: `hooks.priority` and per-hook priorities now accept either an integer or `{priority: <int>}` shorthand; legacy `*_priority` fields remain supported.
 - Plugin targeting: configuration now prefers a nested `targets` object with `ips`, `ignore_ips`, `listeners`, `domains`, `domains_mode`, `qtypes`, `opcodes`, and `rcodes` (legacy flat keys still accepted).
 - Admin upstream status now reads from runtime snapshots, including backup upstreams when present.
+- Upstreams health config:
+  - Added `upstreams.health.profile` (preset bundles).
+  - `probe_min_percent` now has a non-zero floor (0.5) to ensure unhealthy upstreams are eventually retried.
+  - Removed deprecated `success_recovery` / `failure_cap` keys from the schema.
 
 - AXFR-backed zones now respect `minimum_reload_time` and reload only when enough time has elapsed since initial load or last NOTIFY reception, or when `load_mode=replace` forces a full reload.
 - Upstreams: failover now validates upstream responses (TXID + question) and skips mismatched replies.

@@ -1379,6 +1379,14 @@ def _build_v2_root_schema(
         "additionalProperties": False,
         "description": "Upstream health tracking and failover probing knobs.",
         "properties": {
+            "profile": {
+                "type": "string",
+                "description": (
+                    "Optional name of a built-in health profile loaded from "
+                    "upstreams_health_profiles.yaml. Explicit keys under upstreams.health "
+                    "override profile values."
+                ),
+            },
             "max_serv_fail": {
                 "type": "integer",
                 "minimum": 0,
@@ -1400,10 +1408,13 @@ def _build_v2_root_schema(
             },
             "probe_min_percent": {
                 "type": "number",
-                "minimum": 0,
+                "minimum": 0.5,
                 "maximum": 100,
-                "description": "Lower bound for the dynamic probe percent.",
-                "default": 0.0,
+                "description": (
+                    "Lower bound for the dynamic probe percent. Must be > 0 so "
+                    "unhealthy upstreams are eventually retried."
+                ),
+                "default": 0.5,
             },
             "probe_max_percent": {
                 "type": "number",
@@ -1425,18 +1436,6 @@ def _build_v2_root_schema(
                 "maximum": 100,
                 "description": "Amount to decrease probe_percent after a failed unhealthy probe.",
                 "default": 1.0,
-            },
-            "success_recovery": {
-                "type": "integer",
-                "minimum": 1,
-                "description": "How much to decrement an upstream's failure counter after a successful response.",
-                "default": 1,
-            },
-            "failure_cap": {
-                "type": "integer",
-                "minimum": 1,
-                "description": "Maximum value for an upstream failure counter (prevents unbounded growth).",
-                "default": 100,
             },
         },
     }
