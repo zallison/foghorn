@@ -7,10 +7,20 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
-
 from cachetools import Cache, LRUCache
-from dnslib import AAAA, PTR, QTYPE, RR, SRV, TXT, A, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field, validator
+from dnslib import (
+    AAAA,
+    PTR,
+    QTYPE,
+    RR,
+    SRV,
+    TXT,
+    A,
+    DNSHeader,
+    DNSRecord,
+)
+
 
 from foghorn.plugins.resolve.base import (
     AdminPageSpec,
@@ -19,7 +29,11 @@ from foghorn.plugins.resolve.base import (
     PluginDecision,
     plugin_aliases,
 )
-from foghorn.utils.register_caches import registered_cached
+
+from foghorn.utils.register_caches import (
+    registered_cached,
+    registered_lru_cached,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -583,6 +597,7 @@ class MdnsBridge(BasePlugin):
         except Exception:
             return str(name).lower().rstrip(".")
 
+    @registered_lru_cached(maxsize=4096)
     def _to_dns_domain(self, fqdn: str) -> str:  # pragma: nocover suffix rewrite helper
         """Brief: Map a `.local` mDNS name to the configured DNS suffix.
 

@@ -11,7 +11,7 @@ Outputs:
 import datetime as dt
 from contextlib import closing
 
-from foghorn.plugins.resolve.new_domain_filter import NewDomainFilterExample
+from foghorn.plugins.resolve.examples.new_domain_filter import NewDomainFilterExample
 
 
 def test_fetch_creation_date_uses_fresh_db_and_seeds_cache(tmp_path, monkeypatch):
