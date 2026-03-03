@@ -152,7 +152,9 @@ def test_targets_domain_filter_requires_qname_and_matches_modes() -> None:
     Outputs:
       - None.
     """
-    p_exact = BasePlugin(targets_domains=["example.com"], targets_domains_mode="exact")
+    p_exact = BasePlugin(
+        targets={"domains": ["example.com"], "domains_mode": "exact"}
+    )
     p_exact.setup()
 
     ctx = PluginContext(client_ip="192.0.2.1")
@@ -168,8 +170,7 @@ def test_targets_domain_filter_requires_qname_and_matches_modes() -> None:
     assert p_exact.targets(ctx) is True
 
     p_suffix = BasePlugin(
-        targets_domains=["example.com"],
-        targets_domains_mode="suffix",
+        targets={"domains": ["example.com"], "domains_mode": "suffix"},
     )
     p_suffix.setup()
 
@@ -231,7 +232,7 @@ def test_cache_counter_assignment_failures_are_tolerated() -> None:
         def __setitem__(self, key, value):  # type: ignore[no-untyped-def]
             self._store[key] = value
 
-    p = BasePlugin(targets=["10.0.0.0/8"])
+    p = BasePlugin(targets={"ips": ["10.0.0.0/8"]})
     p.setup()
 
     # Cache-hit path -> exercises calls_total and cache_hits set failures.

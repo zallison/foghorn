@@ -130,6 +130,9 @@ class EtcHosts(BasePlugin):
         self._poll_interval = float(
             self.config.get("watchdog_poll_interval_seconds", 60.0)
         )
+        self._poll_interval_configured = (
+            "watchdog_poll_interval_seconds" in self.config
+        )
         self._last_stat_snapshot = None
         self._poll_stop = None
         self._poll_thread = None
@@ -154,13 +157,18 @@ class EtcHosts(BasePlugin):
         # network filesystems). When enabled, this runs alongside watchdog and
         # is further rate-limited by the reload debouncing in
         # _reload_hosts_from_watchdog.
-        if self._poll_interval > 0.0:
+        if (
+            (watchdog_enabled or self._poll_interval_configured)
+            and self._poll_interval > 0.0
+        ):
             logger.info(
                 "EtcHosts polling enabled (interval_seconds=%s)",
                 self._poll_interval,
             )
             self._poll_stop = threading.Event()
             self._start_polling()
+        elif not watchdog_enabled and not self._poll_interval_configured:
+            self._poll_interval = 0.0
 
     def _normalize_paths(
         self, file_paths: Optional[Iterable[str]], legacy: Optional[str]

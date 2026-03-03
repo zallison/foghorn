@@ -1,5 +1,5 @@
 """
-Brief: Tests for foghorn.plugins.resolve.examples module.
+Brief: Tests for foghorn.plugins.resolve.examples.examples module.
 
 Inputs:
   - None
@@ -11,7 +11,7 @@ Outputs:
 from dnslib import QTYPE, A, DNSRecord
 
 from foghorn.plugins.resolve.base import PluginContext
-from foghorn.plugins.resolve.examples import (
+from foghorn.plugins.resolve.examples.examples import (
     Examples,
     ExamplesConfig,
     _count_subdomains,
