@@ -27,10 +27,157 @@ from . import (
     notify,
     resolver,
     transfer,
+    update_processor,
+    update_helpers,
     watchdog,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class UpdateTsigKeyConfig(BaseModel):
+    """Brief: Configuration for a TSIG key for DNS UPDATE authentication.
+
+    Inputs:
+      - name: Key name (domain name). Used as TSIG key owner name.
+      - algorithm: HMAC algorithm (hmac-md5, hmac-sha256, hmac-sha512).
+      - secret: Base64-encoded shared secret.
+
+    Outputs:
+      - UpdateTsigKeyConfig instance.
+    """
+
+    name: str = Field(..., description="TSIG key name (domain name).")
+    algorithm: str = Field(
+        default="hmac-sha256",
+        description="HMAC algorithm: 'hmac-md5', 'hmac-sha256', or 'hmac-sha512'.",
+    )
+    secret: str = Field(
+        ...,
+        description="Base64-encoded shared secret.",
+    )
+
+    class Config:
+        extra = "forbid"
+
+
+class UpdatePskTokenConfig(BaseModel):
+    """Brief: Configuration for a PSK token for DNS UPDATE authentication.
+
+    Inputs:
+      - token: Pre-shared token (hashed).
+
+    Outputs:
+      - UpdatePskTokenConfig instance.
+    """
+
+    token: str = Field(
+        ...,
+        description="Pre-shared token (hashed).",
+    )
+
+    class Config:
+        extra = "forbid"
+
+
+class UpdateZoneApexConfig(BaseModel):
+    """Brief: DNS UPDATE configuration for a specific zone.
+
+    Inputs:
+      - zone: Zone apex (e.g. "example.com").
+      - tsig: TSIG configuration.
+      - psk: PSK configuration.
+      - allow_names: List of allowed name patterns (wildcards supported).
+      - allow_names_files: File paths containing allowed names.
+      - block_names: List of blocked names.
+      - block_names_files: File paths containing blocked names.
+      - allow_clients: CIDR list of clients allowed to send UPDATE.
+      - allow_clients_files: File paths containing allowed client CIDRs.
+      - allow_update_ips: CIDR list of IPs allowed in A/AAAA record values.
+      - allow_update_ips_files: File paths containing allowed update IPs.
+      - block_update_ips: CIDR list of IPs blocked from A/AAAA record values.
+      - block_update_ips_files: File paths containing blocked update IPs.
+
+    Outputs:
+      - UpdateZoneApexConfig instance.
+    """
+
+    zone: str = Field(..., description="Zone apex (e.g. 'example.com').")
+    tsig: Optional[dict] = Field(
+        default=None,
+        description="TSIG authentication configuration.",
+    )
+    psk: Optional[dict] = Field(
+        default=None,
+        description="PSK authentication configuration.",
+    )
+    allow_names: Optional[List[str]] = Field(
+        default=None,
+        description="Allowed name patterns (wildcards supported).",
+    )
+    allow_names_files: Optional[List[str]] = Field(
+        default=None,
+        description="File paths containing allowed names.",
+    )
+    block_names: Optional[List[str]] = Field(
+        default=None,
+        description="Blocked names.",
+    )
+    block_names_files: Optional[List[str]] = Field(
+        default=None,
+        description="File paths containing blocked names.",
+    )
+    allow_clients: Optional[List[str]] = Field(
+        default=None,
+        description="CIDR list of clients allowed to send UPDATE.",
+    )
+    allow_clients_files: Optional[List[str]] = Field(
+        default=None,
+        description="File paths containing allowed client CIDRs.",
+    )
+    allow_update_ips: Optional[List[str]] = Field(
+        default=None,
+        description="CIDR list of IPs allowed in A/AAAA record values.",
+    )
+    allow_update_ips_files: Optional[List[str]] = Field(
+        default=None,
+        description="File paths containing allowed update IPs.",
+    )
+    block_update_ips: Optional[List[str]] = Field(
+        default=None,
+        description="CIDR list of IPs blocked from A/AAAA record values.",
+    )
+    block_update_ips_files: Optional[List[str]] = Field(
+        default=None,
+        description="File paths containing blocked update IPs.",
+    )
+
+    class Config:
+        extra = "forbid"
+
+
+class DnsUpdateConfig(BaseModel):
+    """Brief: DNS UPDATE configuration for ZoneRecords.
+
+    Inputs:
+      - enabled: Whether DNS UPDATE is enabled.
+      - zones: Per-zone UPDATE configuration.
+
+    Outputs:
+      - DnsUpdateConfig instance.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable DNS UPDATE support.",
+    )
+    zones: Optional[List[UpdateZoneApexConfig]] = Field(
+        default=None,
+        description="Per-zone DNS UPDATE configuration.",
+    )
+
+    class Config:
+        extra = "forbid"
 
 
 class AxfrUpstreamConfig(BaseModel):
@@ -319,6 +466,7 @@ class ZoneRecordsConfig(BaseModel):
         ),
     )
     dnssec_signing: Optional[ZoneDnssecSigningConfig] = None
+    dns_update: Optional[DnsUpdateConfig] = None
 
     class Config:
         extra = "allow"
@@ -326,9 +474,9 @@ class ZoneRecordsConfig(BaseModel):
 
 @plugin_aliases("zone", "zone_records", "custom", "records")
 class ZoneRecords(BasePlugin):
-    """DNS zone records plugin with AXFR, DNSSEC, and file watching support."""
+    """DNS zone records plugin with AXFR, DNSSEC, and DNS UPDATE support."""
 
-    target_opcodes = ("NOTIFY",)
+    target_opcodes = ("NOTIFY", "UPDATE")
 
     def handle_opcode(
         self, opcode: int, qname: str, qtype: int, req: bytes, ctx: PluginContext
@@ -426,6 +574,19 @@ class ZoneRecords(BasePlugin):
         self._axfr_notify_learned: Dict[str, Dict[str, Dict[str, object]]] = {}
         self._axfr_notify_health: Dict[str, Dict[str, object]] = {}
         self._axfr_notify_lock = threading.RLock()
+
+        # Normalize DNS UPDATE configuration
+        dns_update_cfg = self.config.get("dns_update")
+        self._dns_update_config = dns_update_cfg
+        if dns_update_cfg:
+            self._dns_update_file_paths = update_helpers.collect_update_file_paths(
+                dns_update_cfg
+            )
+        else:
+            self._dns_update_file_paths = []
+        self._dns_update_timestamps: Dict[str, float] = {}
+        self._dns_update_lists_cache: Dict[str, List[str]] = {}
+        self._dns_update_cache_lock = threading.RLock()
 
         # Initialize state and locks
         self._records_lock = threading.RLock()
@@ -757,4 +918,8 @@ __all__ = [
     "AxfrUpstreamConfig",
     "AxfrZoneConfig",
     "ZoneDnssecSigningConfig",
+    "DnsUpdateConfig",
+    "UpdateTsigKeyConfig",
+    "UpdatePskTokenConfig",
+    "UpdateZoneApexConfig",
 ]

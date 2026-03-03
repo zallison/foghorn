@@ -13,7 +13,7 @@ from dnslib import OPCODE, QTYPE, RCODE, DNSHeader, DNSRecord
 
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision
 
-from . import dnssec, helpers, notify
+from . import dnssec, helpers, notify, update_processor
 
 logger = logging.getLogger(__name__)
 
