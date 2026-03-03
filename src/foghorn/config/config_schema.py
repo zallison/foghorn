@@ -227,6 +227,12 @@ def _normalize_variables_for_validation(cfg: Dict[str, Any]) -> None:
     cfg.pop("vars", None)
     cfg.pop("variables", None)
 
+    # templates is a YAML authoring convenience (anchors/aliases) and is not part
+    # of the runtime config schema. Strip it after expansion so that:
+    #  - ${VARS} are expanded inside templates
+    #  - JSON Schema validation does not warn/fail on the extra property
+    cfg.pop("templates", None)
+
 
 def _normalize_dnssec_config_for_validation(cfg: Dict[str, Any]) -> None:
     """Brief: Normalize DNSSEC config fields for schema/runtime compatibility.
