@@ -1,0 +1,67 @@
+# Upstreams health profiles
+#
+# Brief:
+#   Preset bundles for upstreams.health.* knobs (failure thresholds, unknown timeout,
+#   and unhealthy probing parameters).
+#
+# Inputs:
+#   - Selected by name via upstreams.health.profile
+#
+# Outputs:
+#   - Each profile yields a mapping that is merged with explicit upstreams.health
+#     config (explicit keys override profile keys).
+#
+# Notes:
+#   - Percent values are expressed as 0.0–100.0.
+#   - These are conservative defaults; tune based on your upstream reliability
+#     and desired failover aggressiveness.
+#
+# Example usage (in your main config YAML):
+#   upstreams:
+#     endpoints:
+#       - host: 1.1.1.1
+#       - host: 8.8.8.8
+#     health:
+#       profile: aggressive
+#       max_serv_fail: 3  # Optional override; explicit keys override profile keys.
+#     backup:
+#       endpoints:
+#         - host: 9.9.9.9
+#         - host: 208.67.222.222
+#
+#
+default:
+  # Mark unhealthy when failures > 3
+  max_serv_fail: 5
+  unknown_after_seconds: 300
+
+  # Probe 1% of traffic into unhealthy upstreams; bounded [0.5, 50]
+  probe_percent: 1.0
+  probe_min_percent: 1
+  probe_max_percent: 50.0
+  probe_increase: 1.0
+  probe_decrease: 2.0
+
+
+conservative:
+  # Requires more failures to mark unhealthy and keeps 'unknown' status longer.
+  max_serv_fail: 15
+  unknown_after_seconds: 900
+
+  probe_percent: 1.0
+  probe_min_percent: 0.5
+  probe_max_percent: 25.0
+  probe_increase: 0.5
+  probe_decrease: 1.0
+
+
+aggressive:
+  # Faster to declare unhealthy and more aggressive probing.
+  max_serv_fail: 2
+  unknown_after_seconds: 120
+
+  probe_percent: 5.0
+  probe_min_percent: 1.5
+  probe_max_percent: 75.0
+  probe_increase: 3.0
+  probe_decrease: 1.0
