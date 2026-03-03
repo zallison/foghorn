@@ -15,7 +15,7 @@ import foghorn.servers.server as server_mod
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.plugins.resolve import base as plugin_base
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
-from foghorn.servers.server import DNSUDPHandler, resolve_query_bytes
+from foghorn.servers.server import resolve_query_bytes
 
 
 class _DenyPlugin(BasePlugin):
@@ -40,20 +40,20 @@ class _Stats:
         return _rec
 
 
-def test_resolve_query_bytes_deny_and_override():
-    DNSUDPHandler.plugins = [_DenyPlugin()]
+def test_resolve_query_bytes_deny_and_override(set_runtime_snapshot):
+    set_runtime_snapshot(plugins=[_DenyPlugin()])
     q = DNSRecord.question("deny.example", "A")
     resp = resolve_query_bytes(q.pack(), "127.0.0.1")
     assert DNSRecord.parse(resp).header.rcode == RCODE.NXDOMAIN
 
-    DNSUDPHandler.plugins = [_OverridePlugin()]
+    set_runtime_snapshot(plugins=[_OverridePlugin()])
     q2 = DNSRecord.question("override.example", "A")
     resp2 = resolve_query_bytes(q2.pack(), "127.0.0.1")
     assert DNSRecord.parse(resp2).header.rcode == RCODE.NOERROR
 
 
-def test_resolve_query_bytes_cache_hit():
-    DNSUDPHandler.plugins = []
+def test_resolve_query_bytes_cache_hit(set_runtime_snapshot):
+    set_runtime_snapshot(plugins=[])
     q = DNSRecord.question("cache.example", "A")
     r = q.reply()
     plugin_base.DNS_CACHE.set(("cache.example", QTYPE.A), 10, r.pack())
@@ -62,7 +62,7 @@ def test_resolve_query_bytes_cache_hit():
     assert out.header.rcode == RCODE.NOERROR
 
 
-def test_resolve_query_bytes_stats_pre_deny_and_override():
+def test_resolve_query_bytes_stats_pre_deny_and_override(set_runtime_snapshot):
     """Brief: resolve_query_bytes records stats for pre deny and override paths.
 
     Inputs:
@@ -75,17 +75,14 @@ def test_resolve_query_bytes_stats_pre_deny_and_override():
     plugin_base.DNS_CACHE = InMemoryTTLCache()
 
     stats = _Stats()
-    DNSUDPHandler.stats_collector = stats
 
-    DNSUDPHandler.plugins = [_DenyPlugin()]
+    set_runtime_snapshot(stats_collector=stats, plugins=[_DenyPlugin()])
     q1 = DNSRecord.question("deny-stats.example", "A")
     resolve_query_bytes(q1.pack(), "127.0.0.1")
 
-    DNSUDPHandler.plugins = [_OverridePlugin()]
+    set_runtime_snapshot(stats_collector=stats, plugins=[_OverridePlugin()])
     q2 = DNSRecord.question("override-stats.example", "A")
     resolve_query_bytes(q2.pack(), "127.0.0.1")
-
-    DNSUDPHandler.stats_collector = None
 
     kinds = [k for k, _ in stats.calls]
     assert "record_query" in kinds
@@ -95,7 +92,7 @@ def test_resolve_query_bytes_stats_pre_deny_and_override():
     assert "record_latency" in kinds
 
 
-def test_resolve_query_bytes_stats_cache_and_no_upstreams():
+def test_resolve_query_bytes_stats_cache_and_no_upstreams(set_runtime_snapshot):
     """Brief: resolve_query_bytes records stats for cache hit and no upstreams paths.
 
     Inputs:
@@ -106,10 +103,9 @@ def test_resolve_query_bytes_stats_cache_and_no_upstreams():
     """
 
     stats = _Stats()
-    DNSUDPHandler.stats_collector = stats
 
     # Cache hit
-    DNSUDPHandler.plugins = []
+    set_runtime_snapshot(stats_collector=stats, plugins=[])
     q = DNSRecord.question("cache-stats.example", "A")
     r = q.reply()
     plugin_base.DNS_CACHE.set(("cache-stats.example", QTYPE.A), 10, r.pack())
@@ -117,11 +113,9 @@ def test_resolve_query_bytes_stats_cache_and_no_upstreams():
 
     # No upstreams: clear cache and ensure no upstreams configured
     plugin_base.DNS_CACHE = InMemoryTTLCache()
-    DNSUDPHandler.upstream_addrs = []
+    set_runtime_snapshot(stats_collector=stats, upstream_addrs=[], plugins=[])
     q2 = DNSRecord.question("no-upstreams-stats.example", "A")
     resolve_query_bytes(q2.pack(), "127.0.0.1")
-
-    DNSUDPHandler.stats_collector = None
 
     kinds = [k for k, _ in stats.calls]
     assert "record_cache_hit" in kinds
@@ -133,6 +127,7 @@ def test_resolve_query_bytes_stats_cache_and_no_upstreams():
 
 def test_resolve_query_bytes_stats_upstream_success_and_failure(
     monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
 ) -> None:
     """Brief: resolve_query_bytes records upstream stats for success and all_failed cases.
 
@@ -144,29 +139,37 @@ def test_resolve_query_bytes_stats_upstream_success_and_failure(
     """
 
     stats = _Stats()
-    DNSUDPHandler.stats_collector = stats
-    DNSUDPHandler.plugins = []
 
     q = DNSRecord.question("upstream-stats.example", "A")
     r_ok = q.reply()
 
-    def _forward_ok(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+    def _forward_ok(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+    ):
         return r_ok.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
 
-    def _forward_fail(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+    def _forward_fail(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+    ):
         return None, {"host": "2.2.2.2", "port": 53}, "all_failed"
 
     # Success case
     monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_ok)
-    DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
+    set_runtime_snapshot(
+        stats_collector=stats,
+        plugins=[],
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+    )
     resolve_query_bytes(q.pack(), "127.0.0.1")
 
     # Failure case
     monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_fail)
-    DNSUDPHandler.upstream_addrs = [{"host": "2.2.2.2", "port": 53}]
+    set_runtime_snapshot(
+        stats_collector=stats,
+        plugins=[],
+        upstream_addrs=[{"host": "2.2.2.2", "port": 53}],
+    )
     resolve_query_bytes(q.pack(), "127.0.0.1")
-
-    DNSUDPHandler.stats_collector = None
 
     kinds = [k for k, _ in stats.calls]
     assert "record_upstream_result" in kinds
@@ -178,6 +181,7 @@ def test_resolve_query_bytes_stats_upstream_success_and_failure(
 
 def test_resolve_query_bytes_stats_outer_exception(
     monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
 ) -> None:
     """Brief: resolve_query_bytes outer exception path records SERVFAIL and latency stats.
 
@@ -189,12 +193,16 @@ def test_resolve_query_bytes_stats_outer_exception(
     """
 
     stats = _Stats()
-    DNSUDPHandler.stats_collector = stats
-    DNSUDPHandler.plugins = []
     plugin_base.DNS_CACHE = InMemoryTTLCache()
-    DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
+    set_runtime_snapshot(
+        stats_collector=stats,
+        plugins=[],
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+    )
 
-    def _boom_send(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+    def _boom_send(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+    ):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(server_mod, "send_query_with_failover", _boom_send)
@@ -202,7 +210,6 @@ def test_resolve_query_bytes_stats_outer_exception(
     q = DNSRecord.question("outer-stats.example", "A")
     wire = resolve_query_bytes(q.pack(), "127.0.0.1")
 
-    DNSUDPHandler.stats_collector = None
 
     # Response should be SERVFAIL synthesized by the outer exception handler
     resp = DNSRecord.parse(wire)
@@ -216,6 +223,7 @@ def test_resolve_query_bytes_stats_outer_exception(
 
 def test_resolve_query_bytes_query_context_includes_listener_secure(
     monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
 ) -> None:
     """Brief: resolve_query_bytes records listener and secure flags in query context.
 
@@ -228,23 +236,26 @@ def test_resolve_query_bytes_query_context_includes_listener_secure(
     """
 
     stats = _Stats()
-    DNSUDPHandler.stats_collector = stats
-    DNSUDPHandler.plugins = []
 
     # Configure a fake upstream so the shared resolver takes the normal
     # forwarder path and exercises the upstream statistics branch.
     q = DNSRecord.question("ctx-listener.example", "A")
     r_ok = q.reply()
 
-    def _forward_ok(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+    def _forward_ok(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+    ):
         return r_ok.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
 
     monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_ok)
-    DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
+    set_runtime_snapshot(
+        stats_collector=stats,
+        plugins=[],
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+    )
 
     resolve_query_bytes(q.pack(), "127.0.0.1", listener="udp", secure=False)
 
-    DNSUDPHandler.stats_collector = None
 
     # Extract the result payloads from record_query_result calls.
     results = [
@@ -262,6 +273,7 @@ def test_resolve_query_bytes_query_context_includes_listener_secure(
 
 def test_resolve_query_bytes_recursive_mode_uses_recursive_resolver(
     monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
 ) -> None:
     """Brief: recursive resolver mode uses RecursiveResolver and still caches.
 
@@ -310,11 +322,13 @@ def test_resolve_query_bytes_recursive_mode_uses_recursive_resolver(
 
     monkeypatch.setattr(server_mod, "send_query_with_failover", _boom_send_recursive)
 
-    # Configure handler state for recursive mode.
-    DNSUDPHandler.plugins = []
+    # Configure runtime snapshot for recursive mode.
     plugin_base.DNS_CACHE = InMemoryTTLCache()
-    DNSUDPHandler.resolver_mode = "recursive"
-    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+    set_runtime_snapshot(
+        plugins=[],
+        resolver_mode="recursive",
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+    )
 
     q = DNSRecord.question("rec.example.", "A")
 
@@ -332,12 +346,11 @@ def test_resolve_query_bytes_recursive_mode_uses_recursive_resolver(
 
     assert calls["n"] == 1
 
-    # Restore resolver_mode so other tests see default behaviour.
-    DNSUDPHandler.resolver_mode = "forward"
 
 
 def test_resolve_query_bytes_master_mode_refuses_without_forwarding(
     monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
 ) -> None:
     """Brief: master resolver mode returns REFUSED without contacting upstreams.
 
@@ -353,22 +366,23 @@ def test_resolve_query_bytes_master_mode_refuses_without_forwarding(
 
     monkeypatch.setattr(server_mod, "send_query_with_failover", _boom_send)
 
-    DNSUDPHandler.plugins = []
     plugin_base.DNS_CACHE = InMemoryTTLCache()
-    DNSUDPHandler.resolver_mode = "master"
-    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+    set_runtime_snapshot(
+        plugins=[],
+        resolver_mode="master",
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+    )
 
     q = DNSRecord.question("no-forward.example.", "A")
     resp = resolve_query_bytes(q.pack(), "127.0.0.1")
     out = DNSRecord.parse(resp)
     assert out.header.rcode == RCODE.REFUSED
 
-    # Restore default.
-    DNSUDPHandler.resolver_mode = "forward"
 
 
 def test_resolve_query_bytes_none_alias_behaves_like_master(
     monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
 ) -> None:
     """Brief: resolver mode alias 'none' behaves like master.
 
@@ -384,22 +398,23 @@ def test_resolve_query_bytes_none_alias_behaves_like_master(
 
     monkeypatch.setattr(server_mod, "send_query_with_failover", _boom_send)
 
-    DNSUDPHandler.plugins = []
     plugin_base.DNS_CACHE = InMemoryTTLCache()
-    DNSUDPHandler.resolver_mode = "none"
-    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
+    set_runtime_snapshot(
+        plugins=[],
+        resolver_mode="none",
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+    )
 
     q = DNSRecord.question("no-forward-alias.example.", "A")
     resp = resolve_query_bytes(q.pack(), "127.0.0.1")
     out = DNSRecord.parse(resp)
     assert out.header.rcode == RCODE.REFUSED
 
-    # Restore default.
-    DNSUDPHandler.resolver_mode = "forward"
 
 
 def test_forward_local_false_blocks_local_queries(
     monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
 ) -> None:
     """Brief: .local queries return NXDOMAIN when forward_local is false.
 
@@ -420,10 +435,12 @@ def test_forward_local_false_blocks_local_queries(
 
     monkeypatch.setattr(server_mod, "send_query_with_failover", _fail_send)
 
-    DNSUDPHandler.plugins = []
     plugin_base.DNS_CACHE = InMemoryTTLCache()
-    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
-    DNSUDPHandler.forward_local = False  # default
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        forward_local=False,
+    )
 
     # Query for a .local name should be blocked.
     q = DNSRecord.question("myhost.local.", "A")
@@ -442,6 +459,7 @@ def test_forward_local_false_blocks_local_queries(
 
 def test_forward_local_true_allows_local_queries(
     monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
 ) -> None:
     """Brief: .local queries are forwarded when forward_local is true.
 
@@ -460,16 +478,20 @@ def test_forward_local_true_allows_local_queries(
 
     upstream_calls = {"n": 0}
 
-    def _forward_ok(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+    def _forward_ok(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+    ):
         upstream_calls["n"] += 1
         return r_ok.pack(), {"host": "8.8.8.8", "port": 53}, "ok"
 
     monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_ok)
 
-    DNSUDPHandler.plugins = []
     plugin_base.DNS_CACHE = InMemoryTTLCache()
-    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
-    DNSUDPHandler.forward_local = True
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        forward_local=True,
+    )
 
     resp = resolve_query_bytes(q.pack(), "127.0.0.1")
     out = DNSRecord.parse(resp)
@@ -477,12 +499,10 @@ def test_forward_local_true_allows_local_queries(
     assert upstream_calls["n"] == 1
     assert any(rr.rdata == A("192.168.1.1") for rr in out.rr)
 
-    # Restore default.
-    DNSUDPHandler.forward_local = False
-
 
 def test_forward_local_blocking_does_not_affect_non_local_queries(
     monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
 ) -> None:
     """Brief: Non-.local queries are forwarded regardless of forward_local.
 
@@ -500,16 +520,20 @@ def test_forward_local_blocking_does_not_affect_non_local_queries(
 
     upstream_calls = {"n": 0}
 
-    def _forward_ok(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+    def _forward_ok(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+    ):
         upstream_calls["n"] += 1
         return r_ok.pack(), {"host": "8.8.8.8", "port": 53}, "ok"
 
     monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_ok)
 
-    DNSUDPHandler.plugins = []
     plugin_base.DNS_CACHE = InMemoryTTLCache()
-    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
-    DNSUDPHandler.forward_local = False
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        forward_local=False,
+    )
 
     resp = resolve_query_bytes(q.pack(), "127.0.0.1")
     out = DNSRecord.parse(resp)

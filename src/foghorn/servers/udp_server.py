@@ -97,7 +97,8 @@ def enforce_udp_response_size_ceiling(
       - query_wire: Wire-format DNS request bytes.
       - response_wire: Wire-format DNS response bytes.
       - server_max_bytes: Optional explicit server-side UDP ceiling override. When
-        None, this uses DNSUDPHandler.edns_udp_payload as the server-side ceiling.
+        None, this uses the active RuntimeSnapshot.edns_udp_payload as the server-side
+        ceiling.
 
     Outputs:
       - bytes: Response bytes. When the original response exceeds the effective
@@ -106,7 +107,7 @@ def enforce_udp_response_size_ceiling(
 
     Effective ceiling:
       - client_limit: client EDNS UDP payload size when present; otherwise 512.
-      - server_limit: server_max_bytes when set; otherwise DNSUDPHandler.edns_udp_payload.
+      - server_limit: server_max_bytes when set; otherwise RuntimeSnapshot.edns_udp_payload.
       - effective = min(client_limit, server_limit)
 
     Notes:
@@ -134,9 +135,9 @@ def enforce_udp_response_size_ceiling(
 
     if server_max_bytes is None:
         try:
-            server_max_bytes = int(
-                getattr(DNSUDPHandler, "edns_udp_payload", 1232) or 1232
-            )
+            from foghorn.runtime_config import get_runtime_snapshot
+
+            server_max_bytes = int(get_runtime_snapshot().edns_udp_payload or 1232)
         except Exception:
             server_max_bytes = 1232
 
@@ -1019,7 +1020,9 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
 
         # Enforce UDP response ceiling; synthesize TC=1 response when needed.
         try:
-            server_max = getattr(DNSUDPHandler, "max_response_bytes", None)
+            from foghorn.runtime_config import get_runtime_snapshot
+
+            server_max = get_runtime_snapshot().udp_max_response_bytes
         except Exception:
             server_max = None
 

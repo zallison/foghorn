@@ -41,12 +41,107 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 from .config.config_parser import (
     load_plugins,
+    normalize_upstream_backup_config,
     normalize_upstream_config,
     parse_config_file,
 )
 from .plugins.setup import run_setup_plugins
 
 logger = logging.getLogger("foghorn.runtime_config")
+
+
+@dataclass(frozen=True)
+class UpstreamHealthConfig:
+    """Brief: Configuration knobs for upstream health tracking.
+
+    Inputs:
+      - Parsed from cfg['upstreams']['health'] by runtime_config._build_snapshot.
+
+    Outputs:
+      - UpstreamHealthConfig instance used by the shared resolver.
+
+    Notes:
+      - Percent values are expressed as 0.0–100.0.
+      - unknown_after_seconds controls when a previously healthy upstream becomes
+        status='unknown' due to lack of successful responses. Unknown is treated
+        as eligible for selection (like healthy) but can be used for reporting.
+    """
+
+    max_serv_fail: int
+    unknown_after_seconds: float
+
+    probe_percent: float
+    probe_min_percent: float
+    probe_max_percent: float
+    probe_increase: float
+    probe_decrease: float
+
+    success_recovery: int
+    failure_cap: int
+
+
+def parse_upstream_health_config(upstream_cfg: Dict[str, Any]) -> UpstreamHealthConfig:
+    """Brief: Parse upstream health configuration with defensive defaults.
+
+    Inputs:
+      - upstream_cfg: cfg['upstreams'] mapping.
+
+    Outputs:
+      - UpstreamHealthConfig.
+
+    Notes:
+      - Missing/invalid values are clamped to conservative defaults.
+      - This helper is used by both startup (foghorn.main) and reload snapshots.
+    """
+
+    health_cfg = upstream_cfg.get("health") if isinstance(upstream_cfg, dict) else None
+    if not isinstance(health_cfg, dict):
+        health_cfg = {}
+
+    def _clamp_float(key: str, default: float, *, lo: float, hi: float) -> float:
+        raw = health_cfg.get(key, default)
+        try:
+            val = float(raw)
+        except Exception:
+            val = float(default)
+        return max(lo, min(hi, val))
+
+    def _clamp_int(key: str, default: int, *, lo: int, hi: int | None = None) -> int:
+        raw = health_cfg.get(key, default)
+        try:
+            val = int(raw)
+        except Exception:
+            val = int(default)
+        if hi is not None:
+            return max(lo, min(int(hi), val))
+        return max(lo, val)
+
+    max_serv_fail = _clamp_int("max_serv_fail", 3, lo=0)
+    unknown_after_seconds = _clamp_float("unknown_after_seconds", 300.0, lo=0.0, hi=86400.0)
+
+    probe_min = _clamp_float("probe_min_percent", 0.0, lo=0.0, hi=100.0)
+    probe_max = _clamp_float("probe_max_percent", 50.0, lo=0.0, hi=100.0)
+    # Ensure min <= max.
+    probe_min, probe_max = (probe_min, probe_max) if probe_min <= probe_max else (probe_max, probe_min)
+
+    probe_percent = _clamp_float("probe_percent", 1.0, lo=probe_min, hi=probe_max)
+    probe_increase = _clamp_float("probe_increase", 1.0, lo=0.0, hi=100.0)
+    probe_decrease = _clamp_float("probe_decrease", 1.0, lo=0.0, hi=100.0)
+
+    success_recovery = _clamp_int("success_recovery", 1, lo=1)
+    failure_cap = _clamp_int("failure_cap", 100, lo=1)
+
+    return UpstreamHealthConfig(
+        max_serv_fail=int(max_serv_fail),
+        unknown_after_seconds=float(unknown_after_seconds),
+        probe_percent=float(probe_percent),
+        probe_min_percent=float(probe_min),
+        probe_max_percent=float(probe_max),
+        probe_increase=float(probe_increase),
+        probe_decrease=float(probe_decrease),
+        success_recovery=int(success_recovery),
+        failure_cap=int(failure_cap),
+    )
 
 
 @dataclass(frozen=True)
@@ -60,14 +155,19 @@ class RuntimeSnapshot:
       - RuntimeSnapshot that can be safely shared across threads.
 
     Notes:
-      - Only include values needed on the hot path (_resolve_core). Listener bind
-        settings are intentionally excluded because they cannot be changed without
-        a restart.
+      - Only include values needed on the hot path (_resolve_core) and by request
+        handlers.
+      - Listener bind settings are generally excluded because they cannot be
+        changed without a restart, but a small number of listener-adjacent knobs
+        (e.g. UDP max response bytes) are included because they are consulted by
+        the listener adapter after resolution.
     """
 
     cfg: Dict[str, Any]
     plugins: List[object]
     upstream_addrs: List[Dict[str, Any]]
+    upstream_backup_addrs: List[Dict[str, Any]]
+    upstream_health: UpstreamHealthConfig
     timeout_ms: int
     upstream_strategy: str
     upstream_max_concurrent: int
@@ -88,6 +188,12 @@ class RuntimeSnapshot:
     cache_prefetch_allow_stale_after_expiry: float
     stats_collector: object | None
     cache_plugin: object | None
+    # Optional explicit UDP response size ceiling (bytes). When None, the
+    # effective ceiling is derived from client EDNS(0) and edns_udp_payload.
+    udp_max_response_bytes: int | None
+    # AXFR/IXFR policy for TCP/DoT listeners.
+    axfr_enabled: bool
+    axfr_allow_clients: List[str]
     generation: int
     applied_at_epoch: float
 
@@ -153,7 +259,7 @@ def initialize_runtime(
         _CLI_VARS = list(cli_vars or [])
         _UNKNOWN_KEYS_POLICY = str(unknown_keys_policy or "warn")
 
-    _apply_snapshot_to_legacy_globals(snapshot)
+    _apply_snapshot_to_runtime_globals(snapshot)
 
 
 def clear_runtime() -> None:
@@ -196,16 +302,16 @@ def get_runtime_snapshot() -> RuntimeSnapshot:
     Notes:
       - Readers do not take a lock. The active reference is swapped atomically
         under the GIL.
-      - In tests that call resolver helpers without initializing runtime, this
-        returns a best-effort fallback snapshot derived from DNSUDPHandler.
+      - When runtime is not initialized (common in unit tests), this returns a
+        conservative default snapshot that does not depend on any listener
+        implementation details.
     """
 
     snap = _ACTIVE
     if snap is not None:
         return snap
 
-    # Fallback path for unit tests that bypass foghorn.main.
-    return _fallback_snapshot()
+    return _default_snapshot()
 
 
 def load_config_from_disk(*, config_path: str | None = None) -> Dict[str, Any]:
@@ -401,7 +507,7 @@ def _swap_snapshot(snapshot: RuntimeSnapshot) -> None:
             old_plugins = list(_ACTIVE.plugins or [])
         _ACTIVE = snapshot
 
-    _apply_snapshot_to_legacy_globals(snapshot)
+    _apply_snapshot_to_runtime_globals(snapshot)
 
     if old_plugins:
         with _OLD_PLUGINS_LOCK:
@@ -478,7 +584,9 @@ def _build_snapshot(
       - RuntimeSnapshot.
 
     Notes:
-      - This rebuilds plugins and cache. Listener binds/TLS are not applied here.
+      - This rebuilds plugins and cache. Listener binds/TLS are not applied here,
+        but a small number of listener-adjacent knobs used by request handlers
+        (e.g. UDP max response bytes) are included.
     """
 
     server_cfg = cfg.get("server") or {}
@@ -510,14 +618,20 @@ def _build_snapshot(
 
     if resolver_mode == "forward":
         upstream_addrs, timeout_ms = normalize_upstream_config(cfg)
+        try:
+            upstream_backup_addrs = normalize_upstream_backup_config(cfg)
+        except Exception:
+            upstream_backup_addrs = []
     else:
         upstream_addrs = []
+        upstream_backup_addrs = []
         timeout_ms = recursive_timeout_ms
 
     upstream_cfg = cfg.get("upstreams") or {}
     if not isinstance(upstream_cfg, dict):
         upstream_cfg = {}
     upstream_strategy = str(upstream_cfg.get("strategy", "failover")).lower()
+    upstream_health = parse_upstream_health_config(upstream_cfg)
     try:
         upstream_max_concurrent = int(upstream_cfg.get("max_concurrent", 1) or 1)
     except Exception:
@@ -566,17 +680,41 @@ def _build_snapshot(
     except Exception:
         edns_udp_payload = 1232
 
-    enable_ede = bool(server_cfg.get("enable_ede", False))
-    forward_local = bool(server_cfg.get("forward_local", False))
+    enable_ede = bool(server_cfg.get('enable_ede', False))
+    forward_local = bool(server_cfg.get('forward_local', False))
+
+    # UDP listener-adjacent knobs.
+    udp_max_response_bytes = None
+    try:
+        listen_cfg = server_cfg.get('listen') or {}
+        udp_cfg = listen_cfg.get('udp') or {}
+        if isinstance(udp_cfg, dict):
+            raw_max = udp_cfg.get('max_response_bytes')
+            if raw_max is not None:
+                udp_max_response_bytes = int(raw_max)
+    except Exception:
+        udp_max_response_bytes = None
+
+    # AXFR/IXFR transfer policy (applies to TCP/DoT listeners).
+    axfr_cfg = server_cfg.get('axfr') or {}
+    if not isinstance(axfr_cfg, dict):
+        axfr_cfg = {}
+    axfr_enabled = bool(axfr_cfg.get('enabled', False))
+    axfr_allow_clients = axfr_cfg.get('allow_clients') or []
+    if not isinstance(axfr_allow_clients, list):
+        axfr_allow_clients = []
+    axfr_allow_clients = [str(x) for x in axfr_allow_clients if x]
 
     # Cache prefetch knobs are not yet config-plumbed; preserve current values
-    # from the active DNSUDPHandler when available.
+    # from the active snapshot when available.
     current = get_runtime_snapshot()
 
     return RuntimeSnapshot(
         cfg=cfg,
         plugins=list(plugins or []),
         upstream_addrs=list(upstream_addrs or []),
+        upstream_backup_addrs=list(upstream_backup_addrs or []),
+        upstream_health=upstream_health,
         timeout_ms=int(timeout_ms),
         upstream_strategy=str(upstream_strategy),
         upstream_max_concurrent=int(upstream_max_concurrent),
@@ -601,6 +739,13 @@ def _build_snapshot(
         ),
         stats_collector=stats_collector,
         cache_plugin=cache_plugin,
+        udp_max_response_bytes=(
+            max(0, int(udp_max_response_bytes))
+            if udp_max_response_bytes is not None
+            else None
+        ),
+        axfr_enabled=bool(axfr_enabled),
+        axfr_allow_clients=list(axfr_allow_clients or []),
         generation=int(generation),
         applied_at_epoch=time.time(),
     )
@@ -697,8 +842,8 @@ def _effective_cfg_for_reload_only(
     return eff
 
 
-def _apply_snapshot_to_legacy_globals(snapshot: RuntimeSnapshot) -> None:
-    """Brief: Update legacy global/class-level knobs for compatibility.
+def _apply_snapshot_to_runtime_globals(snapshot: RuntimeSnapshot) -> None:
+    """Brief: Update shared runtime globals for the active snapshot.
 
     Inputs:
       - snapshot: Active runtime snapshot.
@@ -707,9 +852,9 @@ def _apply_snapshot_to_legacy_globals(snapshot: RuntimeSnapshot) -> None:
       - None.
 
     Notes:
-      - The shared resolver is being refactored to use RuntimeSnapshot, but
-        several helper paths still consult DNSUDPHandler class attributes.
-      - This also updates plugin_base.DNS_CACHE.
+      - The shared resolver pipeline consults RuntimeSnapshot directly.
+      - plugin_base.DNS_CACHE remains a global reference used by multiple
+        plugins and resolver helpers.
     """
 
     try:
@@ -717,104 +862,58 @@ def _apply_snapshot_to_legacy_globals(snapshot: RuntimeSnapshot) -> None:
 
         plugin_base.DNS_CACHE = snapshot.cache_plugin  # type: ignore[assignment]
     except Exception:
-        pass
-
-    try:
-        from foghorn.servers.udp_server import DNSUDPHandler
-
-        DNSUDPHandler.plugins = list(snapshot.plugins or [])
-        DNSUDPHandler.upstream_addrs = list(snapshot.upstream_addrs or [])
-        DNSUDPHandler.timeout_ms = int(snapshot.timeout_ms)
-        DNSUDPHandler.min_cache_ttl = int(snapshot.min_cache_ttl)
-        DNSUDPHandler.stats_collector = snapshot.stats_collector
-        DNSUDPHandler.dnssec_mode = str(snapshot.dnssec_mode)
-        DNSUDPHandler.dnssec_validation = str(snapshot.dnssec_validation)
-        DNSUDPHandler.edns_udp_payload = int(snapshot.edns_udp_payload)
-        DNSUDPHandler.upstream_strategy = str(snapshot.upstream_strategy)
-        DNSUDPHandler.upstream_max_concurrent = int(snapshot.upstream_max_concurrent)
-        DNSUDPHandler.resolver_mode = str(snapshot.resolver_mode)
-        DNSUDPHandler.recursive_max_depth = int(snapshot.recursive_max_depth)
-        DNSUDPHandler.recursive_timeout_ms = int(snapshot.recursive_timeout_ms)
-        DNSUDPHandler.recursive_per_try_timeout_ms = int(
-            snapshot.recursive_per_try_timeout_ms
-        )
-        DNSUDPHandler.cache_prefetch_enabled = bool(snapshot.cache_prefetch_enabled)
-        DNSUDPHandler.cache_prefetch_min_ttl = int(snapshot.cache_prefetch_min_ttl)
-        DNSUDPHandler.cache_prefetch_max_ttl = int(snapshot.cache_prefetch_max_ttl)
-        DNSUDPHandler.cache_prefetch_refresh_before_expiry = float(
-            snapshot.cache_prefetch_refresh_before_expiry
-        )
-        DNSUDPHandler.cache_prefetch_allow_stale_after_expiry = float(
-            snapshot.cache_prefetch_allow_stale_after_expiry
-        )
-        DNSUDPHandler.enable_ede = bool(snapshot.enable_ede)
-        DNSUDPHandler.forward_local = bool(snapshot.forward_local)
-    except Exception:
         return
 
 
-def _fallback_snapshot() -> RuntimeSnapshot:
-    """Brief: Construct a best-effort runtime snapshot from DNSUDPHandler globals.
+def _default_snapshot() -> RuntimeSnapshot:
+    """Brief: Construct a conservative default runtime snapshot.
 
     Inputs: none
-    Outputs: RuntimeSnapshot
+
+    Outputs:
+      - RuntimeSnapshot with safe defaults suitable for unit tests.
 
     Notes:
-      - Used only when runtime was not initialized (typically in unit tests).
+      - This does not consult any listener implementation details.
+      - cache_plugin defaults to the current plugin_base.DNS_CACHE when available.
     """
-
-    try:
-        from foghorn.servers.udp_server import DNSUDPHandler
-    except Exception:
-        DNSUDPHandler = None  # type: ignore
 
     try:
         from foghorn.plugins.resolve import base as plugin_base
 
-        cache_plugin = getattr(plugin_base, "DNS_CACHE", None)
+        cache_plugin = getattr(plugin_base, 'DNS_CACHE', None)
     except Exception:
         cache_plugin = None
 
-    def _get(attr: str, default: Any) -> Any:
-        if DNSUDPHandler is None:
-            return default
-        try:
-            return getattr(DNSUDPHandler, attr, default)
-        except Exception:
-            return default
-
     return RuntimeSnapshot(
         cfg={},
-        plugins=list(_get("plugins", []) or []),
-        upstream_addrs=list(_get("upstream_addrs", []) or []),
-        timeout_ms=int(_get("timeout_ms", 2000) or 2000),
-        upstream_strategy=str(_get("upstream_strategy", "failover") or "failover"),
-        upstream_max_concurrent=int(_get("upstream_max_concurrent", 1) or 1),
-        resolver_mode=str(_get("resolver_mode", "forward") or "forward"),
-        recursive_max_depth=int(_get("recursive_max_depth", 16) or 16),
-        recursive_timeout_ms=int(_get("recursive_timeout_ms", 2000) or 2000),
-        recursive_per_try_timeout_ms=int(
-            _get("recursive_per_try_timeout_ms", 2000) or 2000
-        ),
-        dnssec_mode=str(_get("dnssec_mode", "ignore") or "ignore"),
-        dnssec_validation=str(
-            _get("dnssec_validation", "upstream_ad") or "upstream_ad"
-        ),
-        edns_udp_payload=int(_get("edns_udp_payload", 1232) or 1232),
-        enable_ede=bool(_get("enable_ede", False)),
-        forward_local=bool(_get("forward_local", False)),
-        min_cache_ttl=int(_get("min_cache_ttl", 0) or 0),
-        cache_prefetch_enabled=bool(_get("cache_prefetch_enabled", False)),
-        cache_prefetch_min_ttl=int(_get("cache_prefetch_min_ttl", 0) or 0),
-        cache_prefetch_max_ttl=int(_get("cache_prefetch_max_ttl", 0) or 0),
-        cache_prefetch_refresh_before_expiry=float(
-            _get("cache_prefetch_refresh_before_expiry", 0.0) or 0.0
-        ),
-        cache_prefetch_allow_stale_after_expiry=float(
-            _get("cache_prefetch_allow_stale_after_expiry", 0.0) or 0.0
-        ),
-        stats_collector=_get("stats_collector", None),
+        plugins=[],
+        upstream_addrs=[],
+        upstream_backup_addrs=[],
+        upstream_health=parse_upstream_health_config({}),
+        timeout_ms=2000,
+        upstream_strategy='failover',
+        upstream_max_concurrent=1,
+        resolver_mode='forward',
+        recursive_max_depth=16,
+        recursive_timeout_ms=2000,
+        recursive_per_try_timeout_ms=2000,
+        dnssec_mode='ignore',
+        dnssec_validation='upstream_ad',
+        edns_udp_payload=1232,
+        enable_ede=False,
+        forward_local=False,
+        min_cache_ttl=0,
+        cache_prefetch_enabled=False,
+        cache_prefetch_min_ttl=0,
+        cache_prefetch_max_ttl=0,
+        cache_prefetch_refresh_before_expiry=0.0,
+        cache_prefetch_allow_stale_after_expiry=0.0,
+        stats_collector=None,
         cache_plugin=cache_plugin,
+        udp_max_response_bytes=None,
+        axfr_enabled=False,
+        axfr_allow_clients=[],
         generation=0,
         applied_at_epoch=time.time(),
     )

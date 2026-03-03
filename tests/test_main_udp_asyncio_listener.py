@@ -57,7 +57,7 @@ def test_main_udp_defaults_to_asyncio_and_stops_handle(monkeypatch: Any) -> None
         "plugins: []\n"
     )
 
-    called: dict[str, object] = {"start": 0, "stop": 0, "create_server": []}
+    called: dict[str, object] = {"start": 0, "stop": 0}
 
     class DummyThread:
         def is_alive(self) -> bool:
@@ -90,17 +90,6 @@ def test_main_udp_defaults_to_asyncio_and_stops_handle(monkeypatch: Any) -> None
         udp_mod, "start_udp_asyncio_threaded", fake_start_udp_asyncio_threaded
     )
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            called["create_server"].append(kw.get("create_server", True))
-
-        def serve_forever(self) -> None:
-            return
-
-        def stop(self) -> None:
-            return
-
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
 
@@ -110,7 +99,6 @@ def test_main_udp_defaults_to_asyncio_and_stops_handle(monkeypatch: Any) -> None
     assert rc == 0
     assert called["start"] == 1
     assert called["stop"] == 1
-    assert called["create_server"] == [False]
 
 
 def test_main_udp_asyncio_permissionerror_falls_back_to_threaded(
@@ -148,24 +136,33 @@ def test_main_udp_asyncio_permissionerror_falls_back_to_threaded(
         "plugins: []\n"
     )
 
-    def boom_new_loop(*_a: Any, **_kw: Any) -> asyncio.AbstractEventLoop:
+    # Force the UDP asyncio listener startup to fail with PermissionError.
+    from foghorn.servers import udp_asyncio_server as udp_mod
+
+    def boom_start(*_a: Any, **_kw: Any) -> object:
         raise PermissionError("no self-pipe")
 
-    monkeypatch.setattr(asyncio, "new_event_loop", boom_new_loop, raising=True)
+    monkeypatch.setattr(udp_mod, "start_udp_asyncio_threaded", boom_start)
 
-    created: list[bool] = []
+    created: list[str] = []
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            created.append(bool(kw.get("create_server", True)))
+    import socketserver as real_socketserver
+
+    class DummyThreadingUDPServer:
+        def __init__(self, addr, handler_cls):  # type: ignore[no-untyped-def]
+            created.append("threaded")
+            self.daemon_threads = True
 
         def serve_forever(self) -> None:
             return
 
-        def stop(self) -> None:
+        def shutdown(self) -> None:
             return
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+        def server_close(self) -> None:
+            return
+
+    monkeypatch.setattr(real_socketserver, "ThreadingUDPServer", DummyThreadingUDPServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
 
@@ -175,8 +172,7 @@ def test_main_udp_asyncio_permissionerror_falls_back_to_threaded(
 
     assert rc == 0
     assert any("ThreadingUDPServer" in r.message for r in caplog.records)
-    # First call configures handler globals (create_server=False); second binds threaded server.
-    assert created == [False, True]
+    assert created == ["threaded"]
 
 
 def test_main_udp_asyncio_permissionerror_exit_on_failure(
@@ -214,24 +210,33 @@ def test_main_udp_asyncio_permissionerror_exit_on_failure(
         "plugins: []\n"
     )
 
-    def boom_new_loop(*_a: Any, **_kw: Any) -> asyncio.AbstractEventLoop:
+    # Force the UDP asyncio listener startup to fail with PermissionError.
+    from foghorn.servers import udp_asyncio_server as udp_mod
+
+    def boom_start(*_a: Any, **_kw: Any) -> object:
         raise PermissionError("no self-pipe")
 
-    monkeypatch.setattr(asyncio, "new_event_loop", boom_new_loop, raising=True)
+    monkeypatch.setattr(udp_mod, "start_udp_asyncio_threaded", boom_start)
 
-    created: list[bool] = []
+    created: list[str] = []
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            created.append(bool(kw.get("create_server", True)))
+    import socketserver as real_socketserver
+
+    class DummyThreadingUDPServer:
+        def __init__(self, addr, handler_cls):  # type: ignore[no-untyped-def]
+            created.append("threaded")
+            self.daemon_threads = True
 
         def serve_forever(self) -> None:
             return
 
-        def stop(self) -> None:
+        def shutdown(self) -> None:
             return
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+        def server_close(self) -> None:
+            return
+
+    monkeypatch.setattr(real_socketserver, "ThreadingUDPServer", DummyThreadingUDPServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
 
@@ -241,4 +246,4 @@ def test_main_udp_asyncio_permissionerror_exit_on_failure(
 
     assert rc == 1
     assert any("threaded fallback is disabled" in r.message for r in caplog.records)
-    assert created == [False]
+    assert created == []

@@ -13,7 +13,7 @@ from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 import foghorn.servers.server as srv
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.plugins.resolve import base as plugin_base
-from foghorn.servers.udp_server import _set_response_id
+from foghorn.servers.udp_server import DNSUDPHandler, _set_response_id
 
 
 def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
@@ -26,7 +26,7 @@ def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
     Outputs:
       - (handler, sock): a tuple with configured handler and fake sock that records sendto calls
     """
-    h = srv.DNSUDPHandler.__new__(srv.DNSUDPHandler)
+    h = DNSUDPHandler.__new__(DNSUDPHandler)
 
     class _Sock:
         def __init__(self):
@@ -38,9 +38,6 @@ def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
     sock = _Sock()
     h.request = (query_wire, sock)
     h.client_address = (client_ip, 55335)
-    # Reset shared state to avoid leakage between tests
-    srv.DNSUDPHandler.plugins = []
-    srv.DNSUDPHandler.upstream_addrs = []
     # Reset cache by swapping the instance.
     plugin_base.DNS_CACHE = InMemoryTTLCache()
     return h, sock
@@ -62,7 +59,7 @@ def test__set_response_id_overwrites_first_two_bytes():
     assert new[2:] == resp[2:]
 
 
-def test__ensure_edns_does_not_crash_in_all_modes(monkeypatch):
+def test__ensure_edns_does_not_crash_in_all_modes(monkeypatch, set_runtime_snapshot):
     """
     Brief: handle() should tolerate EDNS adjustments across modes without crashing.
 
@@ -73,21 +70,25 @@ def test__ensure_edns_does_not_crash_in_all_modes(monkeypatch):
     """
     q = DNSRecord.question("example.com", "A")
 
-    def fake_forward(self, request, upstreams, qname, qtype):
+    def fake_forward(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+    ):
         # Return a simple NOERROR reply
-        rep = request.reply()
+        rep = req.reply()
         return rep.pack(), {"host": "8.8.8.8", "port": 53}, "ok"
 
-    monkeypatch.setattr(
-        srv.DNSUDPHandler, "_forward_with_failover_helper", fake_forward
-    )
+    monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
 
     for mode in ("ignore", "passthrough", "validate"):
+        set_runtime_snapshot(
+            dnssec_mode=mode,
+            edns_udp_payload=1400,
+            upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+            plugins=[],
+            resolver_mode="forward",
+            forward_local=False,
+        )
         h, sock = _mk_handler(q.pack())
-        srv.DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
-        srv.DNSUDPHandler.plugins = []
-        h.dnssec_mode = mode
-        h.edns_udp_payload = 1400
         h.handle()
         assert len(sock.sent) >= 1
 
@@ -112,7 +113,7 @@ def test__ensure_edns_sets_do_bit_for_validate_mode():
     assert flags_validate & 0x8000 == 0x8000
 
 
-def test_resolve_query_bytes_cache_store_variants(monkeypatch):
+def test_resolve_query_bytes_cache_store_variants(monkeypatch, set_runtime_snapshot):
     """Brief: Core resolver caches positive answers but not TTL=0 or SERVFAIL variants.
 
     Inputs:
@@ -140,10 +141,16 @@ def test_resolve_query_bytes_cache_store_variants(monkeypatch):
 
     # Fresh cache and upstreams for this test
     plugin_base.DNS_CACHE = InMemoryTTLCache()
-    srv.DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
-    srv.DNSUDPHandler.plugins = []
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+        plugins=[],
+        resolver_mode="forward",
+        forward_local=False,
+    )
 
-    def fake_forward(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+    def fake_forward(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+    ):
         if qname == name_ok:
             return r_ok.pack(), upstreams[0], "ok"
         if qname == name_zero:
@@ -167,7 +174,7 @@ def test_resolve_query_bytes_cache_store_variants(monkeypatch):
     assert plugin_base.DNS_CACHE.get((name_sf, QTYPE.A)) is None
 
 
-def test__apply_pre_plugins_override_short_circuits():
+def test__apply_pre_plugins_override_short_circuits(set_runtime_snapshot):
     """
     Brief: pre plugin override should send response and return.
 
@@ -190,7 +197,7 @@ def test__apply_pre_plugins_override_short_circuits():
         def post_resolve(self, qname, qtype, data, ctx):
             return None
 
-    srv.DNSUDPHandler.plugins = [_PreOverride()]
+    set_runtime_snapshot(plugins=[_PreOverride()], upstream_addrs=[])
 
     h.handle()
     assert len(sock.sent) >= 1
@@ -198,7 +205,7 @@ def test__apply_pre_plugins_override_short_circuits():
     assert last.header.rcode == RCODE.NXDOMAIN
 
 
-def test__apply_post_plugins_override_path(monkeypatch):
+def test__apply_post_plugins_override_path(monkeypatch, set_runtime_snapshot):
     """
     Brief: post plugin override path should replace reply.
 
@@ -210,7 +217,9 @@ def test__apply_post_plugins_override_path(monkeypatch):
     q = DNSRecord.question("post.example", "A")
     ok = q.reply().pack()
 
-    def fake_forward(self, request, upstreams, qname, qtype):
+    def fake_forward(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+    ):
         return ok, {"host": "8.8.8.8", "port": 53}, "ok"
 
     class _PostOverride:
@@ -224,19 +233,22 @@ def test__apply_post_plugins_override_path(monkeypatch):
             rep.header.rcode = RCODE.NXDOMAIN
             return srv.PluginDecision(action="override", response=rep.pack())
 
-    monkeypatch.setattr(
-        srv.DNSUDPHandler, "_forward_with_failover_helper", fake_forward
+    monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
+
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        plugins=[_PostOverride()],
+        resolver_mode="forward",
+        forward_local=False,
     )
 
     h, sock = _mk_handler(q.pack())
-    srv.DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
-    srv.DNSUDPHandler.plugins = [_PostOverride()]
     h.handle()
     last = DNSRecord.parse(sock.sent[-1][0])
     assert last.header.rcode == RCODE.NXDOMAIN
 
 
-def test_resolve_query_bytes_end_to_end_paths(monkeypatch):
+def test_resolve_query_bytes_end_to_end_paths(monkeypatch, set_runtime_snapshot):
     """
     Brief: resolve_query_bytes handles cache miss/hit, no upstreams -> SERVFAIL, and pre override.
 
@@ -247,9 +259,13 @@ def test_resolve_query_bytes_end_to_end_paths(monkeypatch):
     """
     # 1) No upstreams -> SERVFAIL
     q = DNSRecord.question("no-up.example", "A")
-    srv.DNSUDPHandler.upstream_addrs = []
-    srv.DNSUDPHandler.plugins = []
     plugin_base.DNS_CACHE = InMemoryTTLCache()
+    set_runtime_snapshot(
+        upstream_addrs=[],
+        plugins=[],
+        resolver_mode="forward",
+        forward_local=False,
+    )
     wire = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
     assert DNSRecord.parse(wire).header.rcode == RCODE.SERVFAIL
 
@@ -265,21 +281,32 @@ def test_resolve_query_bytes_end_to_end_paths(monkeypatch):
         def post_resolve(self, qname, qtype, data, ctx):
             return None
 
-    srv.DNSUDPHandler.plugins = [_PreOverride()]
+    set_runtime_snapshot(
+        upstream_addrs=[],
+        plugins=[_PreOverride()],
+        resolver_mode="forward",
+        forward_local=False,
+    )
     wire2 = srv.resolve_query_bytes(q.pack(), "127.0.0.1")
     assert DNSRecord.parse(wire2).header.rcode == RCODE.NXDOMAIN
 
     # 3) Cache store on NOERROR+answers
-    srv.DNSUDPHandler.plugins = []
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+        plugins=[],
+        resolver_mode="forward",
+        forward_local=False,
+    )
     q3 = DNSRecord.question("cachehit.example", "A")
     r3 = q3.reply()
     r3.add_answer(RR("cachehit.example", rdata=A("1.2.3.4"), ttl=5))
 
-    def fake_forward(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+    def fake_forward(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+    ):
         return r3.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
 
     monkeypatch.setattr(srv, "send_query_with_failover", fake_forward)
-    srv.DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
     out = srv.resolve_query_bytes(q3.pack(), "127.0.0.1")
     assert DNSRecord.parse(out).header.rcode == RCODE.NOERROR
     # Second call should be served from cache

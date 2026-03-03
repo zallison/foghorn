@@ -2,10 +2,10 @@
 Brief: Tests fatal behavior when DoH or webserver fail to start while enabled.
 
 Inputs:
-  - monkeypatch: to patch DNSServer, start_doh_server, start_webserver, init_logging
+  - monkeypatch: to patch UDP listener start, start_doh_server, start_webserver, init_logging.
 
 Outputs:
-  - None: asserts main() returns 1 and logs errors when startup fails
+  - None: asserts main() returns 1 and logs errors when startup fails.
 """
 
 from unittest.mock import mock_open, patch
@@ -44,25 +44,38 @@ def _basic_yaml_base() -> str:
 
 
 def _patch_minimal_server(monkeypatch):
-    """Brief: Patch DNSServer and init_logging so main() exits quickly.
+    """Brief: Patch UDP listener start and init_logging so main() does not bind sockets.
 
     Inputs:
-      - monkeypatch: pytest monkeypatch fixture
+      - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None
+      - None.
     """
 
-    class DummyServer:
-        def __init__(self, *a, **kw):
-            pass
+    from foghorn.servers import udp_asyncio_server as udp_asyncio_mod
 
-        def serve_forever(self):
-            # Exit main loop immediately
-            raise KeyboardInterrupt
+    class DummyThread:
+        def is_alive(self) -> bool:
+            return False
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+        def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
+            return None
+
+    class DummyHandle:
+        def __init__(self) -> None:
+            self.thread = DummyThread()
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        udp_asyncio_mod,
+        "start_udp_asyncio_threaded",
+        lambda *_a, **_kw: DummyHandle(),
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
 
 
 def test_doh_enabled_start_returns_none_is_fatal(monkeypatch, caplog):

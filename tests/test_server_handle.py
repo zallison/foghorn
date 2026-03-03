@@ -12,7 +12,7 @@ from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 from foghorn.plugins.resolve import base as plugin_base
 from foghorn.plugins.resolve.base import BasePlugin, PluginDecision
-from foghorn.servers.server import DNSUDPHandler
+from foghorn.servers.udp_server import DNSUDPHandler
 
 
 class FakeSock:
@@ -45,7 +45,7 @@ def _mk_handler(data, sock, client_ip="1.2.3.4"):
     return h
 
 
-def test_handle_pre_plugins_deny_sends_nxdomain(monkeypatch):
+def test_handle_pre_plugins_deny_sends_nxdomain(monkeypatch, set_runtime_snapshot):
     """
     Brief: Pre-resolve deny decision triggers NXDOMAIN and early return.
 
@@ -62,7 +62,7 @@ def test_handle_pre_plugins_deny_sends_nxdomain(monkeypatch):
         def pre_resolve(self, *a, **kw):
             return PluginDecision(action="deny")
 
-    DNSUDPHandler.plugins = [DenyPlugin()]
+    set_runtime_snapshot(plugins=[DenyPlugin()], upstream_addrs=[])
     h = _mk_handler(data, sock)
     h.handle()
 
@@ -71,7 +71,7 @@ def test_handle_pre_plugins_deny_sends_nxdomain(monkeypatch):
     assert resp.header.rcode == RCODE.NXDOMAIN
 
 
-def test_handle_pre_plugins_override_sends_response(monkeypatch):
+def test_handle_pre_plugins_override_sends_response(monkeypatch, set_runtime_snapshot):
     """
     Brief: Pre-resolve override returns custom response with matching ID.
 
@@ -91,7 +91,7 @@ def test_handle_pre_plugins_override_sends_response(monkeypatch):
         def pre_resolve(self, *a, **kw):
             return PluginDecision(action="override", response=reply.pack())
 
-    DNSUDPHandler.plugins = [OverridePlugin()]
+    set_runtime_snapshot(plugins=[OverridePlugin()], upstream_addrs=[])
     h = _mk_handler(data, sock)
     h.handle()
 
@@ -101,7 +101,7 @@ def test_handle_pre_plugins_override_sends_response(monkeypatch):
     assert sent[:2] == data[:2]
 
 
-def test_handle_cache_hit_short_circuits_response(monkeypatch):
+def test_handle_cache_hit_short_circuits_response(monkeypatch, set_runtime_snapshot):
     """
     Brief: Cached response is returned without contacting upstreams.
 
@@ -114,8 +114,7 @@ def test_handle_cache_hit_short_circuits_response(monkeypatch):
     q, data = _mk_query("cached.com")
     sock = FakeSock()
 
-    monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **kw: None)
-    DNSUDPHandler.plugins = []
+    set_runtime_snapshot(plugins=[], upstream_addrs=[])
 
     # Pre-populate cache
     cache_key = ("cached.com", QTYPE.A)
@@ -129,7 +128,7 @@ def test_handle_cache_hit_short_circuits_response(monkeypatch):
     assert sent[:2] == data[:2]
 
 
-def test_handle_no_upstreams_sends_servfail(monkeypatch):
+def test_handle_no_upstreams_sends_servfail(monkeypatch, set_runtime_snapshot):
     """
     Brief: No upstreams configured triggers SERVFAIL.
 
@@ -142,10 +141,7 @@ def test_handle_no_upstreams_sends_servfail(monkeypatch):
     q, data = _mk_query("noup.com")
     sock = FakeSock()
 
-    monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **kw: None)
-    DNSUDPHandler.plugins = []
-    DNSUDPHandler.upstream_addrs = []
-    monkeypatch.setattr(DNSUDPHandler, "_choose_upstreams", lambda *a, **kw: [])
+    set_runtime_snapshot(plugins=[], upstream_addrs=[])
 
     h = _mk_handler(data, sock)
     h.handle()
@@ -155,7 +151,7 @@ def test_handle_no_upstreams_sends_servfail(monkeypatch):
     assert resp.header.rcode == RCODE.SERVFAIL
 
 
-def test_handle_upstream_all_failed_sends_single_servfail(monkeypatch):
+def test_handle_upstream_all_failed_sends_single_servfail(monkeypatch, set_runtime_snapshot):
     """
     Brief: When forwarding fails, handler sends a single SERVFAIL response.
 
@@ -168,9 +164,7 @@ def test_handle_upstream_all_failed_sends_single_servfail(monkeypatch):
     q, data = _mk_query("fail.com")
     sock = FakeSock()
 
-    monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **kw: None)
-    DNSUDPHandler.plugins = []
-    DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
+    set_runtime_snapshot(plugins=[], upstream_addrs=[{"host": "1.1.1.1", "port": 53}])
 
     # Force the shared resolver path (used by UDP and othefoghorn.servers.transports) to
     # behave as if all upstreams failed.
@@ -189,7 +183,7 @@ def test_handle_upstream_all_failed_sends_single_servfail(monkeypatch):
     assert DNSRecord.parse(sock.calls[0][0]).header.rcode == RCODE.SERVFAIL
 
 
-def test_handle_success_with_post_override(monkeypatch):
+def test_handle_success_with_post_override(monkeypatch, set_runtime_snapshot):
     """
     Brief: Success path applies post-resolve override and sends once.
 
@@ -214,9 +208,10 @@ def test_handle_success_with_post_override(monkeypatch):
         def post_resolve(self, *a, **kw):
             return PluginDecision(action="override", response=override.pack())
 
-    monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **kw: None)
-    DNSUDPHandler.plugins = [OverridePostPlugin()]
-    DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
+    set_runtime_snapshot(
+        plugins=[OverridePostPlugin()],
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+    )
 
     # Force the shared resolver to return the upstream_reply bytes so the
     # post-resolve override plugin can replace them.
@@ -271,7 +266,7 @@ def test_handle_exception_path_sends_servfail(monkeypatch):
     assert DNSRecord.parse(sock.calls[0][0]).header.rcode == RCODE.SERVFAIL
 
 
-def test_handle_allow_plugin_path(monkeypatch):
+def test_handle_allow_plugin_path(monkeypatch, set_runtime_snapshot):
     """
     Brief: Allow decision continues processing and logs debug path.
 
@@ -288,9 +283,7 @@ def test_handle_allow_plugin_path(monkeypatch):
         def pre_resolve(self, *a, **kw):
             return PluginDecision(action="allow")
 
-    monkeypatch.setattr(DNSUDPHandler, "_apply_pre_plugins", lambda *a, **kw: None)
-    DNSUDPHandler.plugins = [AllowPlugin()]
-    DNSUDPHandler.upstream_addrs = []
+    set_runtime_snapshot(plugins=[AllowPlugin()], upstream_addrs=[])
 
     h = _mk_handler(data, sock)
     h.handle()

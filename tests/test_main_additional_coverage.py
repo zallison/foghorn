@@ -194,17 +194,17 @@ def test_main_returns_one_when_run_setup_plugins_fails(monkeypatch, caplog):
         "plugins: []\n"
     )
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:  # pragma: no cover
-            raise AssertionError("DNSServer should not be constructed when setup fails")
+    import socketserver
 
-        def serve_forever(self) -> None:  # pragma: no cover
-            raise KeyboardInterrupt
+    def forbidden_udp_server(*_a: Any, **_kw: Any) -> None:  # pragma: no cover
+        raise AssertionError(
+            "ThreadingUDPServer should not be constructed when setup fails"
+        )
 
     def boom_run_setup(_plugins: list[Any]) -> None:
         raise RuntimeError("setup failed")
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", forbidden_udp_server)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "run_setup_plugins", boom_run_setup)
 
@@ -304,8 +304,12 @@ def test_sigusr1_skip_reset_and_coalescing(monkeypatch, caplog):
 
     Outputs:
       - None: asserts reset is skipped and that when the pending flag is set,
-        the handler returns early without invoking reload logic.
+        the handler returns early.
     """
+
+    import socketserver
+    import threading
+    import time
 
     yaml_data = (
         "server:\n"
@@ -329,85 +333,85 @@ def test_sigusr1_skip_reset_and_coalescing(monkeypatch, caplog):
         "  sigusr2_resets_stats: false\n"
     )
 
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
+
+        def serve_forever(self) -> None:
+            self._stop.wait()
+
+        def shutdown(self) -> None:
+            self._stop.set()
+
+        def server_close(self) -> None:
+            return None
+
+    # First run: invoke SIGUSR1 once and ensure the reset-skipped log is emitted.
     handler_info = _capture_sig_handlers()
     captured = handler_info["captured"]
     fake_signal = handler_info["fake_signal"]
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            pass
+    def _sleep_first(_seconds: float) -> None:
+        handler = captured.get("sigusr1")
+        assert handler is not None
+        handler(None, None)
+        raise KeyboardInterrupt
 
-        def serve_forever(self) -> None:
-            # Trigger handler normally once.
-            if captured["sigusr1"] is not None:
-                captured["sigusr1"](None, None)
-            raise KeyboardInterrupt
-
-    # First run: normal SIGUSR1 to exercise skip-reset logging.
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
     )
+    monkeypatch.setattr(time, "sleep", _sleep_first)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
-        caplog.set_level(logging.INFO)
+        caplog.set_level(logging.INFO, logger="foghorn.main")
         rc = main_mod.main(["--config", "cfg.yaml"])
 
     assert rc == 0
-    assert any("statistics reset skipped" in r.message for r in caplog.records)
+    assert any(
+        "SIGUSR1: statistics reset skipped" in r.message for r in caplog.records
+    )
 
-    # Second run: ensure coalescing early-exit path is exercised by setting
-    # the pending Event in the handler closure before calling it.
+    # Second run: set the coalescing flag (pending event) and ensure SIGUSR1
+    # returns early without running the handler body.
+    caplog.clear()
+
     handler_info = _capture_sig_handlers()
     captured = handler_info["captured"]
     fake_signal = handler_info["fake_signal"]
 
-    call_counter = {"count": 0}
+    def _sleep_second(_seconds: float) -> None:
+        handler = captured.get("sigusr1")
+        assert handler is not None
 
-    class DummyServer2:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            pass
+        pending_event = None
+        for cell in handler.__closure__ or ():
+            obj = cell.cell_contents
+            if hasattr(obj, "is_set") and hasattr(obj, "set") and hasattr(obj, "clear"):
+                pending_event = obj
+                break
+        assert pending_event is not None
+        pending_event.set()
 
-        def serve_forever(self) -> None:
-            handler = captured["sigusr1"]
-            # Locate the pending Event in the closure and set it.
-            pending_event = None
-            for cell in handler.__closure__ or ():
-                if hasattr(cell.cell_contents, "is_set") and hasattr(
-                    cell.cell_contents, "set"
-                ):
-                    pending_event = cell.cell_contents
-                    break
-            assert pending_event is not None
-            pending_event.set()
+        handler(None, None)
+        raise KeyboardInterrupt
 
-            # Monkeypatch internal _process_sigusr1 via attribute on closure
-            # cell to count invocations.
-            def proxy_process(*_a: Any, **_k: Any) -> None:
-                call_counter["count"] += 1
-
-            # Replace _process_sigusr1 in the handler's globals so that if the
-            # body executes, our proxy increments the counter.
-            handler.__globals__["_process_sigusr1"] = proxy_process
-
-            handler(None, None)
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer2)
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
     )
+    monkeypatch.setattr(time, "sleep", _sleep_second)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main_mod.main(["--config", "cfg2.yaml"])
 
     assert rc == 0
-    # Because the pending flag was set, proxy_process should not have been called.
-    assert call_counter["count"] == 0
+    assert not any(r.message.startswith("SIGUSR1:") for r in caplog.records)
 
 
 def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
@@ -419,6 +423,10 @@ def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
     Outputs:
       - None: asserts warning log is emitted and main() still returns cleanly.
     """
+
+    import socketserver
+    import threading
+    import time
 
     yaml_data = (
         "server:\n"
@@ -439,19 +447,27 @@ def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
         "      port: 53\n"
     )
 
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
+
+        def serve_forever(self) -> None:
+            self._stop.wait()
+
+        def shutdown(self) -> None:
+            self._stop.set()
+
+        def server_close(self) -> None:
+            return None
+
     def fake_signal(sig, handler):
         if sig == _signal.SIGUSR1:
             raise RuntimeError("no SIGUSR1")
         return None
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            pass
-
-        def serve_forever(self) -> None:
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt))
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
@@ -467,15 +483,19 @@ def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
 
 
 def test_sigusr2_error_paths_more(monkeypatch, caplog):
-    """Brief: SIGUSR2 covers stats reset error, no-collector branch, plugin error, and coalescing.
+    """Brief: SIGUSR2 covers stats reset error, plugin error, and coalescing.
 
     Inputs:
       - monkeypatch/caplog fixtures; customized stats collector and plugins.
 
     Outputs:
-      - None: asserts appropriate logs for error/no-collector paths and that
-        when the pending Event is set, the handler exits early.
+      - None: asserts appropriate logs for error paths and that when the pending
+        Event is set, the handler exits early.
     """
+
+    import socketserver
+    import threading
+    import time
 
     yaml_data = (
         "server:\n"
@@ -499,6 +519,20 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
         "  sigusr2_resets_stats: true\n"
     )
 
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
+
+        def serve_forever(self) -> None:
+            self._stop.wait()
+
+        def shutdown(self) -> None:
+            self._stop.set()
+
+        def server_close(self) -> None:
+            return None
+
     handler_info = _capture_sig_handlers()
     captured = handler_info["captured"]
     fake_signal = handler_info["fake_signal"]
@@ -507,10 +541,10 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
         """Brief: Collector whose snapshot(reset=True) raises to test error branch.
 
         Inputs:
-          - reset flag (ignored).
+          - reset flag.
 
         Outputs:
-          - None: always raises on reset; otherwise returns dummy snapshot.
+          - SimpleNamespace snapshot when reset is False; raises when reset is True.
         """
 
         def snapshot(self, reset: bool = False):  # type: ignore[override]
@@ -519,66 +553,41 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
             return SimpleNamespace(totals={})
 
     class DummyPlugin:
-        def __init__(self, **kw: Any) -> None:
-            self.called = False
-
         def handle_sigusr2(self) -> None:
-            self.called = True
+            return None
 
     class ErrorPlugin(DummyPlugin):
         def handle_sigusr2(self) -> None:  # type: ignore[override]
             raise RuntimeError("plugin boom")
 
-    plugins = [DummyPlugin(), ErrorPlugin()]
-
     def fake_load_plugins(_specs):
-        return plugins
+        return [DummyPlugin(), ErrorPlugin()]
 
-    call_counter = {"count": 0}
+    def _sleep_once(_seconds: float) -> None:
+        handler = captured.get("sigusr2")
+        assert handler is not None
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            pass
+        # First call: exercise stats reset error + plugin error.
+        handler(None, None)
 
-        def serve_forever(self) -> None:
-            handler = captured["sigusr2"]
-            # First call: normal path with collector and plugins to cover
-            # reset error and plugin error branches.
-            handler(None, None)
-            # Second call: set cfg to a non-dict so statistics inspection
-            # path raises when accessing get(), triggering the outer defensive
-            # except around configuration handling.
-            for cell in handler.__closure__ or ():
-                if (
-                    isinstance(cell.cell_contents, dict)
-                    and "statistics" in cell.cell_contents
-                ):
-                    cell.cell_contents = None  # type: ignore[assignment]
-                    break
-            handler(None, None)
-            # Third call: set pending flag for coalescing and ensure inner
-            # logic does not re-run.
-            pending_event = None
-            for cell in handler.__closure__ or ():
-                if hasattr(cell.cell_contents, "is_set") and hasattr(
-                    cell.cell_contents, "set"
-                ):
-                    pending_event = cell.cell_contents
-                    break
-            assert pending_event is not None
-            pending_event.set()
+        # Second call: set the coalescing/pending event and ensure handler
+        # returns early (no additional SIGUSR2 logs).
+        pending_event = None
+        for cell in handler.__closure__ or ():
+            obj = cell.cell_contents
+            if hasattr(obj, "is_set") and hasattr(obj, "set") and hasattr(obj, "clear"):
+                pending_event = obj
+                break
+        assert pending_event is not None
+        pending_event.set()
 
-            def proxy_process_sigusr2():
-                call_counter["count"] += 1
+        handler(None, None)
+        raise KeyboardInterrupt
 
-            handler.__globals__["_process_sigusr2"] = proxy_process_sigusr2
-            handler(None, None)
-            raise KeyboardInterrupt
-
-    # Attach ErrorCollector as StatsCollector so SIGUSR2 reset path errors.
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", _sleep_once)
     monkeypatch.setattr(main_mod, "StatsCollector", lambda **kw: ErrorCollector())
     monkeypatch.setattr(main_mod, "load_plugins", fake_load_plugins)
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
@@ -586,16 +595,15 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
     )
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
-        caplog.set_level(logging.INFO)
-        rc = main_mod.main(["--config", "cfg.yaml"])
+        with caplog.at_level(logging.INFO, logger="foghorn.main"):
+            rc = main_mod.main(["--config", "cfg.yaml"])
 
     assert rc == 0
-    # Ensure error during statistics reset logged.
-    assert any(
-        "SIGUSR2: error during statistics reset" in r.message for r in caplog.records
-    )
-    # Coalescing: proxy_process_sigusr2 should not have been called.
-    assert call_counter["count"] == 0
+
+    msgs = [r.message for r in caplog.records]
+    assert any("SIGUSR2: error during statistics reset" in m for m in msgs)
+    # The coalesced second call should not emit a second 'invoked handle_sigusr2' line.
+    assert sum("SIGUSR2: invoked handle_sigusr2" in m for m in msgs) == 1
 
 
 def test_sigusr2_logs_no_collector_active(monkeypatch, caplog):
@@ -608,6 +616,10 @@ def test_sigusr2_logs_no_collector_active(monkeypatch, caplog):
       - None: asserts informational log about skipping reset when no collector exists.
     """
 
+    import socketserver
+    import threading
+    import time
+
     yaml_data = (
         "server:\n"
         "  listen:\n"
@@ -630,22 +642,34 @@ def test_sigusr2_logs_no_collector_active(monkeypatch, caplog):
         "  sigusr2_resets_stats: true\n"
     )
 
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
+
+        def serve_forever(self) -> None:
+            self._stop.wait()
+
+        def shutdown(self) -> None:
+            self._stop.set()
+
+        def server_close(self) -> None:
+            return None
+
     handler_info = _capture_sig_handlers()
     captured = handler_info["captured"]
     fake_signal = handler_info["fake_signal"]
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            pass
-
-        def serve_forever(self) -> None:
-            handler = captured["sigusr2"]
-            handler(None, None)
-            raise KeyboardInterrupt
+    def _sleep_once(_seconds: float) -> None:
+        handler = captured.get("sigusr2")
+        assert handler is not None
+        handler(None, None)
+        raise KeyboardInterrupt
 
     # StatsCollector returns None so the SIGUSR2 handler sees no active collector.
     monkeypatch.setattr(main_mod, "StatsCollector", lambda **kw: None)
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", _sleep_once)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
@@ -673,6 +697,10 @@ def test_sigusr2_registration_failure_logs_warning(monkeypatch, caplog):
       - None: asserts warning log is emitted and main() still returns cleanly.
     """
 
+    import socketserver
+    import threading
+    import time
+
     yaml_data = (
         "server:\n"
         "  listen:\n"
@@ -692,19 +720,27 @@ def test_sigusr2_registration_failure_logs_warning(monkeypatch, caplog):
         "      port: 53\n"
     )
 
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
+
+        def serve_forever(self) -> None:
+            self._stop.wait()
+
+        def shutdown(self) -> None:
+            self._stop.set()
+
+        def server_close(self) -> None:
+            return None
+
     def fake_signal(sig, handler):
         if sig == _signal.SIGUSR2:
             raise RuntimeError("no SIGUSR2")
         return None
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            pass
-
-        def serve_forever(self) -> None:
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt))
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
@@ -759,31 +795,32 @@ def test_sighup_with_udp_enabled_exits_cleanly(monkeypatch, caplog):
             captured["sighup"] = handler
         return None
 
-    class DummyServer:
-        """Brief: UDP server stub that invokes SIGHUP handler then exits.
+    import socketserver
+    import threading
+    import time
 
-        Inputs:
-          - Same signature as DNSServer; extra kwargs are ignored.
-
-        Outputs:
-          - serve_forever calls the captured SIGHUP handler once and returns.
-        """
-
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            self.stop_calls = 0
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
 
         def serve_forever(self) -> None:
-            handler = captured["sighup"]
-            assert handler is not None
-            # Invoke the handler to trigger coordinated shutdown; do not
-            # raise so that udp_error remains None and exit_code stays 0.
-            handler(None, None)
+            self._stop.wait()
 
-        def stop(self) -> None:
-            # Track that stop() was invoked without affecting control flow.
-            self.stop_calls += 1
+        def shutdown(self) -> None:
+            self._stop.set()
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+        def server_close(self) -> None:
+            return None
+
+    def _sleep_once(_seconds: float) -> None:
+        handler = captured.get("sighup")
+        assert handler is not None
+        handler(None, None)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", _sleep_once)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
@@ -829,26 +866,15 @@ def test_start_without_udp_uses_keepalive_loop(monkeypatch, caplog):
         "      port: 53\n"
     )
 
-    # Ensure DNSServer is never constructed because UDP is disabled.
-    def forbidden_dnserver(*a: Any, **kw: Any) -> None:  # pragma: no cover - defensive
-        raise AssertionError(
-            "DNSServer should not be constructed when udp.enabled=false"
-        )
-
     class DummyHandle:
         def stop(self) -> None:
             pass
 
-    def fake_sleep(_sec: int) -> None:
-        raise KeyboardInterrupt
+    import time
 
-    import sys as _sys
-
-    monkeypatch.setattr(main_mod, "DNSServer", forbidden_dnserver)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: DummyHandle())
-    # Patch the _time module alias imported inside main for the keepalive loop.
-    monkeypatch.setitem(_sys.modules, "time", SimpleNamespace(sleep=fake_sleep))
+    monkeypatch.setattr(time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt))
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         with caplog.at_level(logging.INFO, logger="foghorn.main"):
@@ -925,7 +951,6 @@ def test_tcp_permission_error_falls_back_to_threaded(monkeypatch, caplog):
 
     fake_threading = _FakeThreadingModule(_threading, DummyThread)
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
@@ -1010,7 +1035,6 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
 
     fake_threading = _FakeThreadingModule(_threading, DummyThread)
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
@@ -1091,7 +1115,6 @@ def test_dot_start_logs_info(monkeypatch, caplog):
 
     fake_threading = _FakeThreadingModule(_threading, DummyThread)
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
@@ -1190,7 +1213,6 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
 
     fake_threading = _FakeThreadingModule(_threading, DummyThread)
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
@@ -1255,7 +1277,6 @@ def test_doh_start_failure_returns_one(monkeypatch, caplog):
     def boom_start_doh(*a: Any, **kw: Any):
         raise RuntimeError("broken")
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
@@ -1301,12 +1322,23 @@ def test_webserver_stop_called_on_shutdown(monkeypatch, caplog):
         "      port: 53\n"
     )
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:
-            pass
+    import socketserver
+    import threading
+    import time
+
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
 
         def serve_forever(self) -> None:
-            raise KeyboardInterrupt
+            self._stop.wait()
+
+        def shutdown(self) -> None:
+            self._stop.set()
+
+        def server_close(self) -> None:
+            return None
 
     class DummyWebHandle:
         def __init__(self) -> None:
@@ -1320,7 +1352,8 @@ def test_webserver_stop_called_on_shutdown(monkeypatch, caplog):
     def fake_start_webserver(*a: Any, **k: Any) -> DummyWebHandle:
         return handle
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt))
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", fake_start_webserver)
 
@@ -1434,44 +1467,23 @@ def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):
             # Do not invoke the callback automatically; tests call it explicitly.
             return None
 
-    class DummyServer:
-        """Brief: UDP server stub that drives SIGTERM/SIGINT handlers and exits.
+    import socketserver
+    import threading
+    import time
 
-        Inputs:
-          - Same signature as DNSServer; extra args are ignored.
-
-        Outputs:
-          - serve_forever orchestrates signal handlers and then raises KeyboardInterrupt
-            so main() can proceed to its shutdown sequence.
-        """
-
-        def __init__(self, *a: Any, **kw: Any) -> None:  # noqa: ARG002
-            self.server = SimpleNamespace(
-                shutdown=lambda: None,
-                server_close=lambda: None,
-            )
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
 
         def serve_forever(self) -> None:
-            # First call: normal SIGTERM path to request shutdown and arm timer.
-            sigterm = captured["sigterm"]
-            assert sigterm is not None
-            sigterm(None, None)
+            self._stop.wait()
 
-            # Second call: exercise early-return path when shutdown already requested.
-            sigterm(None, None)
+        def shutdown(self) -> None:
+            self._stop.set()
 
-            # Also ensure SIGINT handler delegates correctly to _request_shutdown.
-            sigint = captured["sigint"]
-            assert sigint is not None
-            sigint(None, None)
-
-            # Invoke hard-kill callback while shutdown_complete is still False to
-            # exercise the error/logging path inside _force_exit.
-            force_exit = captured["force_exit"]
-            assert force_exit is not None
-            force_exit()
-
-            raise KeyboardInterrupt
+        def server_close(self) -> None:
+            return None
 
     kills: Dict[str, Any] = {"calls": []}
     exits: Dict[str, Any] = {"code": None}
@@ -1486,7 +1498,25 @@ def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):
         # Do not actually exit the process in tests.
         return None
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    def _sleep_once(_seconds: float) -> None:
+        sigterm = captured.get("sigterm")
+        assert sigterm is not None
+        sigterm(None, None)
+        # Early-return path when shutdown already requested.
+        sigterm(None, None)
+
+        sigint = captured.get("sigint")
+        assert sigint is not None
+        sigint(None, None)
+
+        force_exit = captured.get("force_exit")
+        assert force_exit is not None
+        force_exit()
+
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", _sleep_once)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(main_mod.threading, "Timer", DummyTimer)
@@ -1521,7 +1551,7 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
     """Brief: main() logs errors when UDP server shutdown/close/join raise during teardown.
 
     Inputs:
-      - monkeypatch/caplog fixtures; DNSServer and threading.Thread patched.
+      - monkeypatch/caplog fixtures; socketserver.ThreadingUDPServer and threading.Thread patched.
 
     Outputs:
       - None: asserts that shutdown, close, and join error messages are logged.
@@ -1546,21 +1576,17 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
         "      port: 53\n"
     )
 
-    class FailingSocketServer:
+    import socketserver
+
+    class DummyFailingUDPServer:
+        def serve_forever(self) -> None:
+            return None
+
         def shutdown(self) -> None:
             raise RuntimeError("shutdown-fail")
 
         def server_close(self) -> None:
             raise RuntimeError("close-fail")
-
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:  # noqa: ARG002
-            self.server = FailingSocketServer()
-
-        def serve_forever(self) -> None:
-            # UDP loop is never actually started; keepalive loop exits because
-            # the thread reports not alive.
-            return None
 
     class DummyThread:
         def __init__(self, target=None, name=None, daemon=None) -> None:  # noqa: D401
@@ -1580,7 +1606,11 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
         def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
             raise RuntimeError("join-fail")
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(
+        socketserver,
+        "ThreadingUDPServer",
+        lambda *_a, **_kw: DummyFailingUDPServer(),
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
     monkeypatch.setattr(
@@ -1603,10 +1633,11 @@ def test_udp_teardown_logs_shutdown_close_and_join_errors(monkeypatch, caplog):
 
 
 def test_udp_teardown_outer_exception_logs_unexpected_error(monkeypatch, caplog):
-    """Brief: main() logs an unexpected error when UDP server.server attribute access fails.
+    """Brief: main() logs an unexpected error when UDP server teardown handler raises.
 
     Inputs:
-      - monkeypatch/caplog fixtures; DNSServer.server property patched to raise.
+      - monkeypatch/caplog fixtures; socketserver.ThreadingUDPServer patched to return a stub
+        whose stop() raises.
 
     Outputs:
       - None: asserts outer teardown except block logs the unexpected error message.
@@ -1631,22 +1662,14 @@ def test_udp_teardown_outer_exception_logs_unexpected_error(monkeypatch, caplog)
         "      port: 53\n"
     )
 
-    class BrokenServerAttr:
-        @property
-        def server(self):  # type: ignore[override]
-            raise RuntimeError("broken-server-attr")
+    import socketserver
 
-    class DummyServer:
-        def __init__(self, *a: Any, **kw: Any) -> None:  # noqa: ARG002
-            self._inner = BrokenServerAttr()
-
-        @property
-        def server(self):  # type: ignore[override]
-            # Delegate to inner property which raises during getattr in teardown.
-            return self._inner.server
-
+    class DummyBrokenUDPServer:
         def serve_forever(self) -> None:
             return None
+
+        def stop(self) -> None:
+            raise RuntimeError("broken-server-attr")
 
     class DummyThread:
         def __init__(self, target=None, name=None, daemon=None) -> None:  # noqa: D401
@@ -1665,7 +1688,11 @@ def test_udp_teardown_outer_exception_logs_unexpected_error(monkeypatch, caplog)
         def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
             return None
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(
+        socketserver,
+        "ThreadingUDPServer",
+        lambda *_a, **_kw: DummyBrokenUDPServer(),
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
     monkeypatch.setattr(

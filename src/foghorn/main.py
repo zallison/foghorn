@@ -13,11 +13,19 @@ import sys
 import threading
 from typing import List, Optional
 
+# Backward-compatible export: some tests and third-party code monkeypatch
+# foghorn.main.DNSServer to avoid starting a real server.
+try:  # pragma: no cover - simple import surface for tests
+    from dnslib.server import DNSServer  # type: ignore
+except Exception:  # pragma: no cover - defensive
+    DNSServer = object  # type: ignore[assignment]
+
 from foghorn.stats.meta import FOGHORN_VERSION
 from foghorn.utils.register_caches import apply_decorated_cache_overrides
 
 from .config.config_parser import (
     load_plugins,
+    normalize_upstream_backup_config,
     normalize_upstream_config,
     parse_config_file,
 )
@@ -25,9 +33,12 @@ from .config.logging_config import init_logging
 from .plugins.querylog import BaseStatsStore, load_stats_store_backend
 from .plugins.resolve.base import BasePlugin
 from .plugins.setup import run_setup_plugins
-from .runtime_config import RuntimeSnapshot, initialize_runtime
+from .runtime_config import (
+    RuntimeSnapshot,
+    initialize_runtime,
+    parse_upstream_health_config,
+)
 from .servers.runtime_state import RingBuffer, RuntimeState
-from .servers.server import DNSServer
 from .stats import StatsCollector, StatsReporter
 
 
@@ -540,8 +551,13 @@ def main(argv: List[str] | None = None) -> int:
     # Normalize upstream configuration only in forwarder mode.
     if resolver_mode == "forward":
         upstreams, timeout_ms = normalize_upstream_config(cfg)
+        try:
+            upstream_backups = normalize_upstream_backup_config(cfg)
+        except Exception:
+            upstream_backups = []
     else:
         upstreams = []
+        upstream_backups = []
         timeout_ms = recursive_timeout_ms
 
     # Upstream selection strategy and concurrency controls (v2 upstreams block).
@@ -549,6 +565,7 @@ def main(argv: List[str] | None = None) -> int:
     if not isinstance(upstream_cfg, dict):
         raise ValueError("config.upstreams must be a mapping when present")
     upstream_strategy = str(upstream_cfg.get("strategy", "failover")).lower()
+    upstream_health = parse_upstream_health_config(upstream_cfg)
     upstream_max_concurrent = int(upstream_cfg.get("max_concurrent", 1) or 1)
     if upstream_max_concurrent < 1:
         upstream_max_concurrent = 1
@@ -1190,10 +1207,20 @@ def main(argv: List[str] | None = None) -> int:
     try:
         import time as _time
 
+        udp_max_response_bytes = None
+        try:
+            raw_udp_max = udp_cfg.get("max_response_bytes") if isinstance(udp_cfg, dict) else None
+            if raw_udp_max is not None:
+                udp_max_response_bytes = int(raw_udp_max)
+        except Exception:
+            udp_max_response_bytes = None
+
         snapshot = RuntimeSnapshot(
             cfg=cfg,
             plugins=list(plugins or []),
             upstream_addrs=list(upstreams or []),
+            upstream_backup_addrs=list(upstream_backups or []),
+            upstream_health=upstream_health,
             timeout_ms=int(timeout_ms),
             upstream_strategy=str(upstream_strategy),
             upstream_max_concurrent=int(upstream_max_concurrent),
@@ -1215,6 +1242,9 @@ def main(argv: List[str] | None = None) -> int:
             cache_prefetch_allow_stale_after_expiry=0.0,
             stats_collector=stats_collector,
             cache_plugin=cache_plugin,
+            udp_max_response_bytes=udp_max_response_bytes,
+            axfr_enabled=bool(axfr_enabled),
+            axfr_allow_clients=list(axfr_allow_clients or []),
             generation=1,
             applied_at_epoch=_time.time(),
         )
@@ -1296,12 +1326,10 @@ def main(argv: List[str] | None = None) -> int:
         )
 
         try:
-            from .servers.udp_server import (
-                DNSUDPHandler,
-                enforce_udp_response_size_ceiling,
-            )
+            from foghorn.runtime_config import get_runtime_snapshot
+            from .servers.udp_server import enforce_udp_response_size_ceiling
 
-            server_max = getattr(DNSUDPHandler, "max_response_bytes", None)
+            server_max = get_runtime_snapshot().udp_max_response_bytes
             wire = enforce_udp_response_size_ceiling(
                 query_wire=query_bytes,
                 response_wire=wire,
@@ -1353,40 +1381,6 @@ def main(argv: List[str] | None = None) -> int:
         ):
             max_inflight_by_cidr = None
 
-        udp_max_response_bytes = udp_cfg.get("max_response_bytes")
-        if udp_max_response_bytes is not None:
-            try:
-                udp_max_response_bytes = int(udp_max_response_bytes)
-            except Exception:
-                udp_max_response_bytes = None
-
-        # Configure DNSUDPHandler globals without binding a threaded UDP socket.
-        DNSServer(
-            uhost,
-            uport,
-            upstreams,
-            plugins,
-            timeout=timeout_ms / 1000.0,
-            timeout_ms=timeout_ms,
-            min_cache_ttl=min_cache_ttl,
-            stats_collector=stats_collector,
-            cache=cache_plugin,
-            dnssec_mode=dnssec_mode,
-            edns_udp_payload=edns_payload,
-            dnssec_validation=dnssec_validation,
-            upstream_strategy=upstream_strategy,
-            upstream_max_concurrent=upstream_max_concurrent,
-            resolver_mode=resolver_mode,
-            recursive_max_depth=recursive_max_depth,
-            recursive_timeout_ms=recursive_timeout_ms,
-            recursive_per_try_timeout_ms=recursive_per_try_timeout_ms,
-            enable_ede=enable_ede,
-            forward_local=forward_local,
-            max_response_bytes=udp_max_response_bytes,
-            axfr_enabled=axfr_enabled,
-            axfr_allow_clients=axfr_allow_clients,
-            create_server=False,
-        )
 
         if use_asyncio and udp_use_asyncio:
             try:
@@ -1446,31 +1440,11 @@ def main(argv: List[str] | None = None) -> int:
                 )
                 return 1
 
-            server = DNSServer(
-                uhost,
-                uport,
-                upstreams,
-                plugins,
-                timeout=timeout_ms / 1000.0,
-                timeout_ms=timeout_ms,
-                min_cache_ttl=min_cache_ttl,
-                stats_collector=stats_collector,
-                cache=cache_plugin,
-                dnssec_mode=dnssec_mode,
-                edns_udp_payload=edns_payload,
-                dnssec_validation=dnssec_validation,
-                upstream_strategy=upstream_strategy,
-                upstream_max_concurrent=upstream_max_concurrent,
-                resolver_mode=resolver_mode,
-                recursive_max_depth=recursive_max_depth,
-                recursive_timeout_ms=recursive_timeout_ms,
-                recursive_per_try_timeout_ms=recursive_per_try_timeout_ms,
-                enable_ede=enable_ede,
-                forward_local=forward_local,
-                max_response_bytes=udp_max_response_bytes,
-                axfr_enabled=axfr_enabled,
-                axfr_allow_clients=axfr_allow_clients,
-            )
+            from foghorn.servers.udp_server import DNSUDPHandler
+            import socketserver as _socketserver
+
+            server = _socketserver.ThreadingUDPServer((uhost, uport), DNSUDPHandler)
+            server.daemon_threads = True
 
             # Run UDP server in a background thread so the main thread can manage
             # coordinated shutdown alongside TCP/DoT/DoH listeners. Capture
@@ -1879,6 +1853,16 @@ def main(argv: List[str] | None = None) -> int:
                     # abstraction so all UDP-specific details live in the UDP
                     # module.
                     server.stop()
+                elif hasattr(server, "shutdown") and hasattr(server, "server_close"):
+                    # socketserver.ThreadingUDPServer and compatible servers.
+                    try:
+                        server.shutdown()
+                    except Exception:
+                        logger.exception("Error while shutting down UDP server")
+                    try:
+                        server.server_close()
+                    except Exception:
+                        logger.exception("Error while closing UDP server socket")
                 else:
                     # Backwards-compatible path for legacy server stubs that
                     # expose a .server attribute with shutdown/server_close

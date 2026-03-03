@@ -38,15 +38,43 @@ def test_main_dot_missing_cert_logs_error(monkeypatch, caplog):
         "    use_asyncio: false\n"
     )
 
-    class DummyServer:
-        def __init__(self, *a, **kw):
-            pass
+    import socketserver
 
-        def serve_forever(self):
-            raise KeyboardInterrupt
+    class DummyUDPServer:
+        def __init__(self, *_a, **_kw):
+            self.daemon_threads = True
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+        def serve_forever(self) -> None:
+            return None
+
+        def shutdown(self) -> None:
+            return None
+
+        def server_close(self) -> None:
+            return None
+
+    class DummyThread:
+        def __init__(self, target=None, name=None, daemon=None) -> None:  # noqa: D401
+            """Thread stub that avoids starting real background threads."""
+
+            self._target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self) -> None:
+            # Do not execute target (which would run UDP serve_forever()).
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout=None) -> None:  # noqa: ARG002
+            return None
+
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         with caplog.at_level(logging.ERROR, logger="foghorn.main"):
