@@ -3426,55 +3426,44 @@ def test_rate_limit_endpoint_wraps_collect_rate_limit_stats(monkeypatch) -> None
     assert called["config"] is cfg
 
 
-def test_upstream_status_endpoint_returns_configured_and_health_only_entries(
-    monkeypatch,
+def test_upstream_status_endpoint_returns_configured_entries(
+    set_runtime_snapshot,
 ) -> None:
-    """Brief: /api/v1/upstream_status includes configured upstreams and health-only items.
+    """Brief: /api/v1/upstream_status reflects the active RuntimeSnapshot.
 
     Inputs:
-      - App config with a configured upstream.
-      - Monkeypatched DNSUDPHandler upstream_* attributes with extra health-only entry.
+      - set_runtime_snapshot: Fixture helper to set upstreams/strategy/max_concurrent.
 
     Outputs:
-      - Response contains both configured upstream entry (with config subset)
-        and the extra health-only entry.
+      - Response contains the configured upstream entry and reflects strategy/max_concurrent.
     """
 
     import asyncio
 
-    import foghorn.servers.webserver as web_mod
+    import foghorn.servers.server as server_mod
 
     # One configured upstream.
     up = {"host": "1.1.1.1", "port": 53, "transport": "udp"}
+
+    # The endpoint reads from foghorn.runtime_config.get_runtime_snapshot().
+    set_runtime_snapshot(
+        upstream_addrs=[up],
+        upstream_backup_addrs=[],
+        upstream_strategy="failover",
+        # Intentional non-int to exercise defensive coercion.
+        upstream_max_concurrent="bad",
+    )
+
     cfg = {"webserver": {"enabled": True}, "upstreams": [up]}
-
     app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
-
-    # Inject handler state for the endpoint to read.
-    up_id = web_mod.DNSUDPHandler._upstream_id(up)
-    other_id = "health-only"
-
-    monkeypatch.setattr(
-        web_mod.DNSUDPHandler, "upstream_strategy", "failover", raising=False
-    )
-    monkeypatch.setattr(
-        web_mod.DNSUDPHandler, "upstream_max_concurrent", "bad", raising=False
-    )
-    monkeypatch.setattr(
-        web_mod.DNSUDPHandler,
-        "upstream_health",
-        {
-            up_id: {"fail_count": "bad", "down_until": "bad"},
-            other_id: {"fail_count": 2, "down_until": 0.0},
-        },
-        raising=False,
-    )
 
     route = next(
         r
         for r in app.router.routes
         if getattr(r, "path", None) == "/api/v1/upstream_status"
     )
+
+    expected_id = server_mod._UPSTREAM_HEALTH.upstream_id(up)
 
     async def run() -> None:
         body = await route.endpoint()  # type: ignore[func-returns-value]
@@ -3484,14 +3473,10 @@ def test_upstream_status_endpoint_returns_configured_and_health_only_entries(
 
         items = body["items"]
         ids = {it["id"] for it in items}
-        assert up_id in ids
-        assert other_id in ids
+        assert expected_id in ids
 
-        configured = next(it for it in items if it["id"] == up_id)
+        configured = next(it for it in items if it["id"] == expected_id)
         assert configured["config"]["host"] == "1.1.1.1"
-
-        health_only = next(it for it in items if it["id"] == other_id)
-        assert health_only["config"] == {}
 
     asyncio.run(run())
 
