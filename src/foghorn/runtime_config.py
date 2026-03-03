@@ -76,9 +76,6 @@ class UpstreamHealthConfig:
     probe_increase: float
     probe_decrease: float
 
-    success_recovery: int
-    failure_cap: int
-
 
 def parse_upstream_health_config(upstream_cfg: Dict[str, Any]) -> UpstreamHealthConfig:
     """Brief: Parse upstream health configuration with defensive defaults.
@@ -90,6 +87,9 @@ def parse_upstream_health_config(upstream_cfg: Dict[str, Any]) -> UpstreamHealth
       - UpstreamHealthConfig.
 
     Notes:
+      - Supports optional presets via upstreams.health.profile.
+      - When profile is set, values from upstreams_health_profiles.yaml are
+        merged first, then explicit keys under upstreams.health override them.
       - Missing/invalid values are clamped to conservative defaults.
       - This helper is used by both startup (foghorn.main) and reload snapshots.
     """
@@ -97,6 +97,39 @@ def parse_upstream_health_config(upstream_cfg: Dict[str, Any]) -> UpstreamHealth
     health_cfg = upstream_cfg.get("health") if isinstance(upstream_cfg, dict) else None
     if not isinstance(health_cfg, dict):
         health_cfg = {}
+
+    profile_name = str(health_cfg.get("profile") or "").strip()
+    if profile_name:
+        try:
+            from foghorn.config.plugin_profiles import load_builtin_profiles
+
+            profiles = load_builtin_profiles("upstreams_health")
+        except Exception as exc:  # pragma: no cover - defensive
+            raise ValueError(
+                "Failed to load upstream health profiles (upstreams_health_profiles.yaml)"
+            ) from exc
+
+        if not isinstance(profiles, dict):
+            raise ValueError(
+                "upstreams_health_profiles.yaml did not parse to a mapping"
+            )
+
+        base = profiles.get(profile_name)
+        if base is None:
+            raise ValueError(
+                f"Unknown upstreams.health.profile {profile_name!r}; see upstreams_health_profiles.yaml"
+            )
+        if not isinstance(base, dict):
+            raise ValueError(
+                f"upstreams_health profile {profile_name!r} must be a mapping of knobs"
+            )
+
+        merged: Dict[str, Any] = dict(base)
+        for k, v in health_cfg.items():
+            if k == "profile":
+                continue
+            merged[k] = v
+        health_cfg = merged
 
     def _clamp_float(key: str, default: float, *, lo: float, hi: float) -> float:
         raw = health_cfg.get(key, default)
@@ -117,19 +150,27 @@ def parse_upstream_health_config(upstream_cfg: Dict[str, Any]) -> UpstreamHealth
         return max(lo, val)
 
     max_serv_fail = _clamp_int("max_serv_fail", 3, lo=0)
-    unknown_after_seconds = _clamp_float("unknown_after_seconds", 300.0, lo=0.0, hi=86400.0)
+    unknown_after_seconds = _clamp_float(
+        "unknown_after_seconds", 300.0, lo=0.0, hi=86400.0
+    )
 
-    probe_min = _clamp_float("probe_min_percent", 0.0, lo=0.0, hi=100.0)
+    # probe_min_percent must never be 0.0; if probe_percent ever hits 0 we may
+    # stop probing unhealthy upstreams entirely and never observe them recover.
+    probe_floor = 0.5
+
+    probe_min = _clamp_float("probe_min_percent", probe_floor, lo=0.0, hi=100.0)
     probe_max = _clamp_float("probe_max_percent", 50.0, lo=0.0, hi=100.0)
-    # Ensure min <= max.
-    probe_min, probe_max = (probe_min, probe_max) if probe_min <= probe_max else (probe_max, probe_min)
+
+    # Ensure min <= max and enforce the floor.
+    probe_min, probe_max = (
+        (probe_min, probe_max) if probe_min <= probe_max else (probe_max, probe_min)
+    )
+    probe_min = max(float(probe_floor), float(probe_min))
+    probe_max = max(float(probe_min), float(probe_max))
 
     probe_percent = _clamp_float("probe_percent", 1.0, lo=probe_min, hi=probe_max)
     probe_increase = _clamp_float("probe_increase", 1.0, lo=0.0, hi=100.0)
     probe_decrease = _clamp_float("probe_decrease", 1.0, lo=0.0, hi=100.0)
-
-    success_recovery = _clamp_int("success_recovery", 1, lo=1)
-    failure_cap = _clamp_int("failure_cap", 100, lo=1)
 
     return UpstreamHealthConfig(
         max_serv_fail=int(max_serv_fail),
@@ -139,8 +180,6 @@ def parse_upstream_health_config(upstream_cfg: Dict[str, Any]) -> UpstreamHealth
         probe_max_percent=float(probe_max),
         probe_increase=float(probe_increase),
         probe_decrease=float(probe_decrease),
-        success_recovery=int(success_recovery),
-        failure_cap=int(failure_cap),
     )
 
 
@@ -664,6 +703,7 @@ def _build_snapshot(
     # Warn if exposed listeners lack rate limiting
     try:
         from .config.rate_limit_check import check_rate_limit_plugin_config
+
         check_rate_limit_plugin_config(plugins=plugins, cfg=cfg)
     except Exception:
         pass
@@ -680,27 +720,27 @@ def _build_snapshot(
     except Exception:
         edns_udp_payload = 1232
 
-    enable_ede = bool(server_cfg.get('enable_ede', False))
-    forward_local = bool(server_cfg.get('forward_local', False))
+    enable_ede = bool(server_cfg.get("enable_ede", False))
+    forward_local = bool(server_cfg.get("forward_local", False))
 
     # UDP listener-adjacent knobs.
     udp_max_response_bytes = None
     try:
-        listen_cfg = server_cfg.get('listen') or {}
-        udp_cfg = listen_cfg.get('udp') or {}
+        listen_cfg = server_cfg.get("listen") or {}
+        udp_cfg = listen_cfg.get("udp") or {}
         if isinstance(udp_cfg, dict):
-            raw_max = udp_cfg.get('max_response_bytes')
+            raw_max = udp_cfg.get("max_response_bytes")
             if raw_max is not None:
                 udp_max_response_bytes = int(raw_max)
     except Exception:
         udp_max_response_bytes = None
 
     # AXFR/IXFR transfer policy (applies to TCP/DoT listeners).
-    axfr_cfg = server_cfg.get('axfr') or {}
+    axfr_cfg = server_cfg.get("axfr") or {}
     if not isinstance(axfr_cfg, dict):
         axfr_cfg = {}
-    axfr_enabled = bool(axfr_cfg.get('enabled', False))
-    axfr_allow_clients = axfr_cfg.get('allow_clients') or []
+    axfr_enabled = bool(axfr_cfg.get("enabled", False))
+    axfr_allow_clients = axfr_cfg.get("allow_clients") or []
     if not isinstance(axfr_allow_clients, list):
         axfr_allow_clients = []
     axfr_allow_clients = [str(x) for x in axfr_allow_clients if x]
@@ -881,7 +921,7 @@ def _default_snapshot() -> RuntimeSnapshot:
     try:
         from foghorn.plugins.resolve import base as plugin_base
 
-        cache_plugin = getattr(plugin_base, 'DNS_CACHE', None)
+        cache_plugin = getattr(plugin_base, "DNS_CACHE", None)
     except Exception:
         cache_plugin = None
 
@@ -892,14 +932,14 @@ def _default_snapshot() -> RuntimeSnapshot:
         upstream_backup_addrs=[],
         upstream_health=parse_upstream_health_config({}),
         timeout_ms=2000,
-        upstream_strategy='failover',
+        upstream_strategy="failover",
         upstream_max_concurrent=1,
-        resolver_mode='forward',
+        resolver_mode="forward",
         recursive_max_depth=16,
         recursive_timeout_ms=2000,
         recursive_per_try_timeout_ms=2000,
-        dnssec_mode='ignore',
-        dnssec_validation='upstream_ad',
+        dnssec_mode="ignore",
+        dnssec_validation="upstream_ad",
         edns_udp_payload=1232,
         enable_ede=False,
         forward_local=False,
