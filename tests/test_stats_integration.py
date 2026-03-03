@@ -6,20 +6,23 @@ from dnslib import QTYPE, DNSRecord
 
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.plugins.resolve import base as plugin_base
-from foghorn.servers.server import DNSUDPHandler
+from foghorn.servers.udp_server import DNSUDPHandler
 from foghorn.stats import StatsCollector
 
 
-def test_stats_collected_on_query():
+def test_stats_collected_on_query(set_runtime_snapshot):
     """Verify stats are collected when handling a query."""
     # Create a stats collector
     collector = StatsCollector(track_latency=True)
 
-    # Attach to handler
-    DNSUDPHandler.stats_collector = collector
     plugin_base.DNS_CACHE = InMemoryTTLCache()  # Clear cache
-    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
-    DNSUDPHandler.plugins = []
+    set_runtime_snapshot(
+        stats_collector=collector,
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        plugins=[],
+        resolver_mode="forward",
+        forward_local=False,
+    )
 
     # Create a DNS query
     query = DNSRecord.question("example.com", "A")
@@ -67,12 +70,17 @@ def test_stats_collected_on_query():
     assert snapshot.upstream_rcodes["8.8.8.8:53"]["NOERROR"] >= 1
 
 
-def test_stats_cache_hit():
+def test_stats_cache_hit(set_runtime_snapshot):
     """Verify cache hits are recorded."""
     collector = StatsCollector()
-    DNSUDPHandler.stats_collector = collector
-    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
-    DNSUDPHandler.plugins = []
+    plugin_base.DNS_CACHE = InMemoryTTLCache()  # Clear cache
+    set_runtime_snapshot(
+        stats_collector=collector,
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        plugins=[],
+        resolver_mode="forward",
+        forward_local=False,
+    )
 
     # Pre-populate cache
     query = DNSRecord.question("cached.example.com", "A")
@@ -98,11 +106,16 @@ def test_stats_cache_hit():
     assert snapshot.totals.get("cache_hits", 0) >= 1, "Should have recorded cache hit"
 
 
-def test_stats_disabled_no_overhead():
+def test_stats_disabled_no_overhead(set_runtime_snapshot):
     """Verify no errors when stats collector is None."""
-    DNSUDPHandler.stats_collector = None
-    DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
-    DNSUDPHandler.plugins = []
+    plugin_base.DNS_CACHE = InMemoryTTLCache()  # Clear cache
+    set_runtime_snapshot(
+        stats_collector=None,
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        plugins=[],
+        resolver_mode="forward",
+        forward_local=False,
+    )
 
     handler = DNSUDPHandler.__new__(DNSUDPHandler)
     query = DNSRecord.question("example.com", "A")

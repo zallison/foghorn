@@ -3,7 +3,6 @@ from __future__ import annotations
 from dnslib import QTYPE, RCODE, RR, DNSRecord
 
 from foghorn.servers.server import iter_axfr_messages
-from foghorn.servers.udp_server import DNSUDPHandler
 
 
 class _ZoneExportPlugin:
@@ -23,10 +22,12 @@ def _make_axfr_query(zone: str) -> DNSRecord:
     return DNSRecord.question((zone.rstrip(".") + "."), qtype="AXFR")
 
 
-def test_axfr_refused_when_not_enabled(monkeypatch):
-    DNSUDPHandler.plugins = [_ZoneExportPlugin("example.com")]
-    DNSUDPHandler.axfr_enabled = False
-    DNSUDPHandler.axfr_allow_clients = ["127.0.0.1/32"]
+def test_axfr_refused_when_not_enabled(set_runtime_snapshot):
+    set_runtime_snapshot(
+        plugins=[_ZoneExportPlugin("example.com")],
+        axfr_enabled=False,
+        axfr_allow_clients=["127.0.0.1/32"],
+    )
 
     req = _make_axfr_query("example.com")
     messages = iter_axfr_messages(req, client_ip="127.0.0.1")
@@ -35,10 +36,12 @@ def test_axfr_refused_when_not_enabled(monkeypatch):
     assert resp.header.rcode == RCODE.REFUSED
 
 
-def test_axfr_refused_when_client_not_allowlisted(monkeypatch):
-    DNSUDPHandler.plugins = [_ZoneExportPlugin("example.com")]
-    DNSUDPHandler.axfr_enabled = True
-    DNSUDPHandler.axfr_allow_clients = ["192.0.2.0/24"]
+def test_axfr_refused_when_client_not_allowlisted(set_runtime_snapshot):
+    set_runtime_snapshot(
+        plugins=[_ZoneExportPlugin("example.com")],
+        axfr_enabled=True,
+        axfr_allow_clients=["192.0.2.0/24"],
+    )
 
     req = _make_axfr_query("example.com")
     messages = iter_axfr_messages(req, client_ip="127.0.0.1")
@@ -47,10 +50,12 @@ def test_axfr_refused_when_client_not_allowlisted(monkeypatch):
     assert resp.header.rcode == RCODE.REFUSED
 
 
-def test_axfr_allows_allowlisted_client(monkeypatch):
-    DNSUDPHandler.plugins = [_ZoneExportPlugin("example.com")]
-    DNSUDPHandler.axfr_enabled = True
-    DNSUDPHandler.axfr_allow_clients = ["127.0.0.0/8"]
+def test_axfr_allows_allowlisted_client(set_runtime_snapshot):
+    set_runtime_snapshot(
+        plugins=[_ZoneExportPlugin("example.com")],
+        axfr_enabled=True,
+        axfr_allow_clients=["127.0.0.0/8"],
+    )
 
     req = _make_axfr_query("example.com")
     messages = iter_axfr_messages(req, client_ip="127.0.0.1")

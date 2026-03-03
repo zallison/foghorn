@@ -11,11 +11,12 @@ Outputs:
 from dnslib import RCODE, DNSRecord
 
 import foghorn.servers.server as srv
+from foghorn.servers.udp_server import DNSUDPHandler
 
 
 def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
     # Build a handler instance without BaseRequestHandler.__init__
-    h = srv.DNSUDPHandler.__new__(srv.DNSUDPHandler)
+    h = DNSUDPHandler.__new__(DNSUDPHandler)
 
     class _Sock:
         def __init__(self):
@@ -30,14 +31,17 @@ def _mk_handler(query_wire: bytes, client_ip: str = "127.0.0.1"):
     return h, sock
 
 
-def test_handle_no_upstreams_returns_servfail_and_caches():
+def test_handle_no_upstreams_returns_servfail_and_caches(set_runtime_snapshot):
     # No upstreams configured -> SERVFAIL response
     q = DNSRecord.question("no-upstreams.example", "A")
-    srv.DNSUDPHandler.upstream_addrs = []
-    srv.DNSUDPHandler.plugins = []
+    set_runtime_snapshot(
+        upstream_addrs=[],
+        plugins=[],
+        stats_collector=None,
+        resolver_mode="forward",
+        forward_local=False,
+    )
     h, sock = _mk_handler(q.pack())
-    # attach a minimal stats collector to avoid attribute errors
-    srv.DNSUDPHandler.stats_collector = None
 
     h.handle()
     assert len(sock.sent) >= 1
@@ -46,7 +50,9 @@ def test_handle_no_upstreams_returns_servfail_and_caches():
     assert resp.header.rcode == RCODE.SERVFAIL
 
 
-def test_handle_upstreams_all_failed_path_records_servfail_and_caches(monkeypatch):
+def test_handle_upstreams_all_failed_path_records_servfail_and_caches(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: When all upstreams fail in the core resolver, UDP handle returns SERVFAIL.
 
     Inputs:
@@ -56,10 +62,17 @@ def test_handle_upstreams_all_failed_path_records_servfail_and_caches(monkeypatc
       - None; asserts SERVFAIL synthesized by resolve_query_bytes is sent over UDP.
     """
     q = DNSRecord.question("all-failed.example", "A")
-    srv.DNSUDPHandler.upstream_addrs = [{"host": "1.1.1.1", "port": 53}]
-    srv.DNSUDPHandler.plugins = []
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
+        plugins=[],
+        stats_collector=None,
+        resolver_mode="forward",
+        forward_local=False,
+    )
 
-    def fake_send(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+    def fake_send(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+    ):
         # Simulate complete upstream failure; core resolver should synthesize SERVFAIL.
         return None, {"host": "1.1.1.1", "port": 53}, "all_failed"
 
@@ -71,7 +84,9 @@ def test_handle_upstreams_all_failed_path_records_servfail_and_caches(monkeypatc
     assert DNSRecord.parse(wire).header.rcode == RCODE.SERVFAIL
 
 
-def test_handle_post_resolve_deny_turns_into_nxdomain(monkeypatch):
+def test_handle_post_resolve_deny_turns_into_nxdomain(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: Post-resolve deny from core resolver is surfaced as NXDOMAIN on UDP.
 
     Inputs:
@@ -81,13 +96,13 @@ def test_handle_post_resolve_deny_turns_into_nxdomain(monkeypatch):
       - None; asserts post plugin deny overrides upstream NOERROR to NXDOMAIN.
     """
     q = DNSRecord.question("deny-post.example", "A")
-    srv.DNSUDPHandler.upstream_addrs = [{"host": "8.8.8.8", "port": 53}]
-    srv.DNSUDPHandler.plugins = []
 
     # Make upstream return NOERROR; then post hook denies
     ok = q.reply().pack()
 
-    def fake_send(req, upstreams, timeout_ms, qname, qtype, max_concurrent=None):
+    def fake_send(
+        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+    ):
         return ok, upstreams[0], "ok"
 
     class _PostDeny:
@@ -101,7 +116,14 @@ def test_handle_post_resolve_deny_turns_into_nxdomain(monkeypatch):
 
     monkeypatch.setattr(srv, "send_query_with_failover", fake_send)
 
-    srv.DNSUDPHandler.plugins = [_PostDeny()]
+    set_runtime_snapshot(
+        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        plugins=[_PostDeny()],
+        stats_collector=None,
+        resolver_mode="forward",
+        forward_local=False,
+    )
+
     h, sock = _mk_handler(q.pack())
     h.handle()
     wire = sock.sent[-1][0]

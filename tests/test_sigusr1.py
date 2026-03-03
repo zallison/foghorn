@@ -45,14 +45,6 @@ def test_sigusr1_resets_stats_and_notifies_plugins(monkeypatch, caplog):
         "stats:\n  enabled: true\n  sigusr2_resets_stats: true\n"
     )
 
-    class DummyServer:
-        def __init__(self, *a, **kw):
-            pass
-
-        def serve_forever(self):
-            if captured["handler"] is not None:
-                captured["handler"](None, None)
-            raise KeyboardInterrupt
 
     class DummyCollector:
         def __init__(self, *a, **kw):
@@ -84,12 +76,40 @@ def test_sigusr1_resets_stats_and_notifies_plugins(monkeypatch, caplog):
             captured["handler"] = handler
         return None
 
+    from foghorn.servers import udp_asyncio_server as udp_asyncio_mod
+    import time
+
+    class DummyAliveThread:
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout=None) -> None:  # noqa: ARG002
+            return None
+
+    class DummyUDPHandle:
+        def __init__(self) -> None:
+            self.thread = DummyAliveThread()
+
+        def stop(self) -> None:
+            return None
+
+    def _sleep_once(_sec: float) -> None:
+        assert captured["handler"] is not None
+        captured["handler"](None, None)
+        raise KeyboardInterrupt
+
     plugins = [DummyPlugin(), DummyPlugin()]
     monkeypatch.setattr(main_mod, "load_plugins", lambda specs: plugins)
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(
+        udp_asyncio_mod,
+        "start_udp_asyncio_threaded",
+        lambda *_a, **_kw: DummyUDPHandle(),
+    )
     monkeypatch.setattr(main_mod, "StatsCollector", DummyCollector)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
+    monkeypatch.setattr(time, "sleep", _sleep_once)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         caplog.set_level(logging.INFO)
