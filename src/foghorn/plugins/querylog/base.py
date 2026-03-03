@@ -301,7 +301,7 @@ class BaseStatsStore:
             drops = 0
 
         msg = (
-            "StatsStore async queue pressure: %d/%d (%.1f%%), bucket=%d%%, drops=%d"
+            "Querylog async queue pressure: %d/%d (%.1f%%), bucket=%d%%, drops=%d"
             % (size, cap, pct_full, bucket, drops)
         )
 
