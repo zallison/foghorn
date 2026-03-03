@@ -23,7 +23,7 @@ def test_main_tcp_listener_uses_legacy_host_and_starts(monkeypatch):
     Outputs:
       - None: Asserts main() returns 0 without NameError and serve_tcp was invoked once
     """
-    # Config: UDP enabled (so main exits via KeyboardInterrupt), TCP enabled
+    # Config: UDP disabled (avoid starting a real UDP listener), TCP enabled
     # using v2 server/upstreams layout.
     yaml_data = (
         "upstreams:\n"
@@ -35,7 +35,7 @@ def test_main_tcp_listener_uses_legacy_host_and_starts(monkeypatch):
         "server:\n"
         "  listen:\n"
         "    udp:\n"
-        "      enabled: true\n"
+        "      enabled: false\n"
         "      host: 127.0.0.1\n"
         "      port: 5354\n"
         "    tcp:\n"
@@ -147,23 +147,23 @@ def test_listen_dns_populates_udp_and_tcp(monkeypatch):
 
     udp_info = {"host": None, "port": None}
 
-    class DummyServer:
-        def __init__(
-            self,
-            host,
-            port,
-            upstreams,
-            plugins,
-            timeout,
-            timeout_ms,
-            min_cache_ttl,
-            stats_collector=None,
-            **_extra,
-        ):
+    # main() uses socketserver.ThreadingUDPServer for threaded UDP listeners,
+    # not dnslib.server.DNSServer.
+    class DummyUDPServer:
+        def __init__(self, addr, handler_cls):  # type: ignore[no-untyped-def]
+            host, port = addr
             udp_info["host"] = host
             udp_info["port"] = port
+            self._handler_cls = handler_cls
+            self.daemon_threads = False
 
         def serve_forever(self):  # pragma: no cover - exercised via thread wrapper
+            return
+
+        def shutdown(self):  # pragma: no cover - no-op for tests
+            return
+
+        def server_close(self):  # pragma: no cover - no-op for tests
             return
 
     tcp_calls = {"count": 0, "host": None, "port": None}
@@ -208,7 +208,10 @@ def test_listen_dns_populates_udp_and_tcp(monkeypatch):
 
     from foghorn.servers import tcp_server as tcp_server_mod
 
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    import socketserver as real_socketserver
+
+    monkeypatch.setattr(real_socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(main_mod, "DNSServer", object)
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
     monkeypatch.setattr(tcp_server_mod, "serve_tcp_threaded", fake_serve_tcp_threaded)

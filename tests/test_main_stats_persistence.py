@@ -91,13 +91,21 @@ stats:
         def stop(self) -> None:  # pragma: no cover - not exercised here
             pass
 
-    class DummyServer:
-        def __init__(self, *a, **kw) -> None:
-            pass
+    from foghorn.servers import udp_asyncio_server as udp_asyncio_mod
 
-        def serve_forever(self) -> None:
-            # Exit main loop quickly
-            raise KeyboardInterrupt
+    class DummyThread:
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
+            return None
+
+    class DummyUDPHandle:
+        def __init__(self) -> None:
+            self.thread = DummyThread()
+
+        def stop(self) -> None:
+            return None
 
     # Patch dependencies in foghorn.main
     monkeypatch.setattr(main_mod, "StatsCollector", DummyCollector)
@@ -111,8 +119,13 @@ stats:
         return DummyStore()
 
     monkeypatch.setattr(main_mod, "load_stats_store_backend", _fake_loader)
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(
+        udp_asyncio_mod,
+        "start_udp_asyncio_threaded",
+        lambda *_a, **_kw: DummyUDPHandle(),
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main_mod.main(["--config", "stats_persist.yaml"])
@@ -192,12 +205,21 @@ def test_main_persistence_unconfigured_skips_store(monkeypatch, tmp_path: Path) 
         def stop(self) -> None:  # pragma: no cover - not exercised
             pass
 
-    class DummyServer:
-        def __init__(self, *a, **kw) -> None:
-            pass
+    from foghorn.servers import udp_asyncio_server as udp_asyncio_mod
 
-        def serve_forever(self) -> None:
-            raise KeyboardInterrupt
+    class DummyThread:
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:  # noqa: ARG002
+            return None
+
+    class DummyUDPHandle:
+        def __init__(self) -> None:
+            self.thread = DummyThread()
+
+        def stop(self) -> None:
+            return None
 
     def _fake_loader_disabled(
         persistence_cfg: dict[str, object] | None,
@@ -212,8 +234,13 @@ def test_main_persistence_unconfigured_skips_store(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(main_mod, "StatsCollector", DummyCollector)
     monkeypatch.setattr(main_mod, "StatsReporter", DummyReporter)
     monkeypatch.setattr(main_mod, "load_stats_store_backend", _fake_loader_disabled)
-    monkeypatch.setattr(main_mod, "DNSServer", DummyServer)
+    monkeypatch.setattr(
+        udp_asyncio_mod,
+        "start_udp_asyncio_threaded",
+        lambda *_a, **_kw: DummyUDPHandle(),
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main_mod.main(["--config", "stats_persist_disabled.yaml"])

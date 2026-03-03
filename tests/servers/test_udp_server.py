@@ -597,7 +597,9 @@ def _extract_ede_from_wire(wire: bytes):
     return out
 
 
-def test_make_nxdomain_response_includes_ede_when_enabled(monkeypatch):
+def test_make_nxdomain_response_includes_ede_when_enabled(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: _make_nxdomain_response attaches a generic Blocked EDE for EDNS clients.
 
     Inputs:
@@ -609,8 +611,7 @@ def test_make_nxdomain_response_includes_ede_when_enabled(monkeypatch):
 
     from dnslib import EDNS0 as _EDNS0
 
-    # Ensure EDE is enabled on the handler class.
-    DNSUDPHandler.enable_ede = True
+    set_runtime_snapshot(enable_ede=True)
 
     handler = _make_handler()
     req = DNSRecord.question("ede-nxdomain.example")
@@ -627,7 +628,9 @@ def test_make_nxdomain_response_includes_ede_when_enabled(monkeypatch):
     assert "blocked" in text.lower()
 
 
-def test_make_servfail_response_includes_ede_when_enabled(monkeypatch):
+def test_make_servfail_response_includes_ede_when_enabled(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: _make_servfail_response attaches a generic Other EDE for EDNS clients.
 
     Inputs:
@@ -639,7 +642,7 @@ def test_make_servfail_response_includes_ede_when_enabled(monkeypatch):
 
     from dnslib import EDNS0 as _EDNS0
 
-    DNSUDPHandler.enable_ede = True
+    set_runtime_snapshot(enable_ede=True)
 
     handler = _make_handler()
     req = DNSRecord.question("ede-servfail.example")
@@ -656,7 +659,9 @@ def test_make_servfail_response_includes_ede_when_enabled(monkeypatch):
     assert "internal" in text.lower() or "error" in text.lower()
 
 
-def test_udp_handle_outer_exception_attaches_other_ede(monkeypatch):
+def test_udp_handle_outer_exception_attaches_other_ede(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: UDP handler outer exception path attaches a generic Other EDE.
 
     Inputs:
@@ -670,7 +675,7 @@ def test_udp_handle_outer_exception_attaches_other_ede(monkeypatch):
 
     import foghorn.servers.server as srv_mod
 
-    DNSUDPHandler.enable_ede = True
+    set_runtime_snapshot(enable_ede=True)
 
     # Force resolve_query_bytes to raise so DNSUDPHandler.handle() exercises its
     # outer exception path.

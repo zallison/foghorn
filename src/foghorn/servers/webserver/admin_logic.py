@@ -17,7 +17,6 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from ...plugins.resolve.base import AdminPageSpec
 from ...stats import StatsCollector
-from ..udp_server import DNSUDPHandler
 from .config_helpers import _ts_to_utc_iso
 
 
@@ -339,97 +338,72 @@ def build_table_page_payload(
 def build_upstream_status_payload(
     config: Dict[str, Any] | None, *, now_ts: float | None = None
 ) -> Dict[str, Any]:
-    """Brief: Build upstream status payload using DNSUDPHandler state.
+    """Brief: Build upstream status payload using shared resolver health state.
 
     Inputs:
-      - config: Full configuration mapping, used to read config['upstreams'].
-      - now_ts: Optional unix timestamp (seconds) used for determining up/down.
+      - config: Full configuration mapping (currently unused; kept for API
+        compatibility).
+      - now_ts: Optional unix timestamp (seconds) used for determining health.
 
     Outputs:
       - Dict with keys: strategy, max_concurrent, items.
-        Items include configured upstreams plus health-only entries.
+
+    Notes:
+      - The shared resolver (foghorn.servers.server) owns upstream health state.
+      - Items include both primary and backup upstreams.
     """
-
-    cfg = config or {}
-    upstream_cfg = cfg.get("upstreams") or []
-    if not isinstance(upstream_cfg, list):
-        upstream_cfg = []
-
-    health = getattr(DNSUDPHandler, "upstream_health", {}) or {}
-    strategy = str(getattr(DNSUDPHandler, "upstream_strategy", "failover"))
-    try:
-        max_concurrent = int(getattr(DNSUDPHandler, "upstream_max_concurrent", 1) or 1)
-    except Exception:  # pragma: nocover - defensive: runtime may provide invalid config
-        max_concurrent = 1  # pragma: nocover - safe fallback
-    if max_concurrent < 1:
-        max_concurrent = 1
 
     import time as _time
 
     now = float(now_ts) if now_ts is not None else _time.time()
-    items: list[Dict[str, Any]] = []
-    seen_ids: set[str] = set()
 
-    for up in upstream_cfg:
-        if not isinstance(up, dict):
-            continue
-        up_id = DNSUDPHandler._upstream_id(up)
-        if not up_id:
-            continue
-        seen_ids.add(up_id)
-        entry = health.get(up_id) or {}
+    try:
+        from foghorn.runtime_config import get_runtime_snapshot
+
+        snap = get_runtime_snapshot()
+        primary = list(getattr(snap, 'upstream_addrs', []) or [])
+        backup = list(getattr(snap, 'upstream_backup_addrs', []) or [])
+        strategy = str(getattr(snap, 'upstream_strategy', 'failover') or 'failover')
         try:
-            fail_count = int(entry.get("fail_count", 0))
-        except Exception:  # pragma: nocover - defensive: should already be int-ish
-            fail_count = 0  # pragma: nocover - safe fallback
-        try:
-            down_until = float(entry.get("down_until", 0.0) or 0.0)
-        except Exception:  # pragma: nocover - defensive: should already be float-ish
-            down_until = 0.0  # pragma: nocover - safe fallback
-        state = "down" if entry and down_until > now else "up"
+            max_concurrent = int(getattr(snap, 'upstream_max_concurrent', 1) or 1)
+        except Exception:
+            max_concurrent = 1
+        if max_concurrent < 1:
+            max_concurrent = 1
+        from foghorn.runtime_config import UpstreamHealthConfig, parse_upstream_health_config
 
-        cfg_view: Dict[str, Any] = {}
-        for key in ("host", "port", "transport", "url"):
-            if key in up:
-                cfg_view[key] = up[key]
+        health_cfg = getattr(snap, 'upstream_health', None)
+        if not isinstance(health_cfg, UpstreamHealthConfig):
+            health_cfg = parse_upstream_health_config({})
 
-        items.append(
-            {
-                "id": up_id,
-                "config": cfg_view,
-                "state": state,
-                "fail_count": fail_count,
-                "down_until": down_until if down_until else None,
-            }
-        )
+        import foghorn.servers.server as server_mod
 
-    for up_id, entry in (health or {}).items():
-        if up_id in seen_ids or not up_id:
-            continue
-        try:
-            fail_count = int(entry.get("fail_count", 0))
-        except Exception:  # pragma: nocover - defensive: should already be int-ish
-            fail_count = 0  # pragma: nocover - safe fallback
-        try:
-            down_until = float(entry.get("down_until", 0.0) or 0.0)
-        except Exception:  # pragma: nocover - defensive: should already be float-ish
-            down_until = 0.0  # pragma: nocover - safe fallback
-        state = "down" if down_until > now else "up"
-        items.append(
-            {
-                "id": up_id,
-                "config": {},
-                "state": state,
-                "fail_count": fail_count,
-                "down_until": down_until if down_until else None,
-            }
-        )
+        items: list[Dict[str, Any]] = []
+        for up in primary:
+            if not isinstance(up, dict):
+                continue
+            rec = server_mod._UPSTREAM_HEALTH.describe_upstream(
+                role='primary', upstream=up, now=now, cfg=health_cfg
+            )
+            if rec:
+                items.append(rec)
+        for up in backup:
+            if not isinstance(up, dict):
+                continue
+            rec = server_mod._UPSTREAM_HEALTH.describe_upstream(
+                role='backup', upstream=up, now=now, cfg=health_cfg
+            )
+            if rec:
+                items.append(rec)
 
-    return {
-        "strategy": strategy,
-        "max_concurrent": max_concurrent,
-        "items": items,
-    }
+        return {
+            'strategy': strategy,
+            'max_concurrent': max_concurrent,
+            'items': items,
+        }
+    except Exception:
+        # Best-effort fallback when runtime snapshot is unavailable.
+        return {'strategy': 'failover', 'max_concurrent': 1, 'items': []}
 
 
 def collect_admin_pages_for_response(plugins: Iterable[object]) -> list[dict[str, Any]]:

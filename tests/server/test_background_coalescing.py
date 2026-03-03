@@ -49,7 +49,7 @@ def test_schedule_cache_refresh_coalesces(monkeypatch) -> None:
     assert len(submitted) == 1
 
 
-def test_schedule_notify_axfr_refresh_coalesces(monkeypatch) -> None:
+def test_schedule_notify_axfr_refresh_coalesces(monkeypatch, set_runtime_snapshot) -> None:
     """Brief: _schedule_notify_axfr_refresh submits at most one task per zone.
 
     Inputs:
@@ -60,7 +60,7 @@ def test_schedule_notify_axfr_refresh_coalesces(monkeypatch) -> None:
     """
 
     plugin = _AxfrBackedPlugin(["example.com"])
-    srv.DNSUDPHandler.plugins = [plugin]
+    set_runtime_snapshot(plugins=[plugin])
 
     submitted: list[object] = []
 

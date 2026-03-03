@@ -111,6 +111,65 @@ def clear_dns_cache_between_tests():
 
 
 @pytest.fixture(autouse=True)
+def clear_runtime_between_tests():
+    """Brief: Clear the in-process runtime snapshot between tests.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - None.
+
+    Notes:
+      - Many resolver components consult foghorn.runtime_config.get_runtime_snapshot().
+        Clearing between tests avoids cross-test contamination.
+    """
+
+    try:
+        from foghorn.runtime_config import clear_runtime
+
+        clear_runtime()
+    except Exception:  # pragma: no cover
+        pass
+
+    yield
+
+    try:
+        from foghorn.runtime_config import clear_runtime
+
+        clear_runtime()
+    except Exception:  # pragma: no cover
+        pass
+
+
+@pytest.fixture
+def set_runtime_snapshot():
+    """Brief: Initialize the active RuntimeSnapshot for a test with overrides.
+
+    Inputs:
+      - **overrides: Fields to override on the default RuntimeSnapshot.
+
+    Outputs:
+      - callable: Function that applies overrides and returns the new snapshot.
+
+    Example:
+      >>> snap = set_runtime_snapshot(plugins=[MyPlugin()], upstream_addrs=[{'host': '1.1.1.1', 'port': 53}])
+    """
+
+    def _set(**overrides):
+        from dataclasses import replace
+
+        from foghorn.runtime_config import get_runtime_snapshot, initialize_runtime
+
+        base = get_runtime_snapshot()
+        snap = replace(base, **overrides)
+        initialize_runtime(snapshot=snap, config_path="test.yaml")
+        return snap
+
+    return _set
+
+
+@pytest.fixture(autouse=True)
 def enforce_test_timeout():
     """
     Brief: Enforce a hard 10-second timeout for each test.
