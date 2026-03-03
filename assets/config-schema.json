@@ -1321,6 +1321,276 @@
               "title": "BindZoneFileConfig",
               "type": "object"
             },
+            "DnsUpdateConfig": {
+              "additionalProperties": false,
+              "description": "Brief: DNS UPDATE configuration for ZoneRecords.\n\nInputs:\n  - enabled: Whether DNS UPDATE is enabled.\n  - zones: Per-zone UPDATE configuration.\n\nOutputs:\n  - DnsUpdateConfig instance.",
+              "properties": {
+                "enabled": {
+                  "default": false,
+                  "description": "Enable DNS UPDATE support. Default: false.",
+                  "title": "Enabled",
+                  "type": "boolean"
+                },
+                "zones": {
+                  "anyOf": [
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "$ref": "#/$defs/UpdateZoneApexConfig"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Per-zone DNS UPDATE configuration.",
+                  "title": "Zones"
+                }
+              },
+              "title": "DnsUpdateConfig",
+              "type": "object"
+            },
+            "UpdateZoneApexConfig": {
+              "additionalProperties": false,
+              "description": "Brief: DNS UPDATE configuration for a specific zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - tsig: TSIG configuration.\n  - psk: PSK configuration.\n  - allow_names: List of allowed name patterns (wildcards supported).\n  - allow_names_files: File paths containing allowed names.\n  - block_names: List of blocked names.\n  - block_names_files: File paths containing blocked names.\n  - allow_clients: CIDR list of clients allowed to send UPDATE.\n  - allow_clients_files: File paths containing allowed client CIDRs.\n  - allow_update_ips: CIDR list of IPs allowed in A/AAAA record values.\n  - allow_update_ips_files: File paths containing allowed update IPs.\n  - block_update_ips: CIDR list of IPs blocked from A/AAAA record values.\n  - block_update_ips_files: File paths containing blocked update IPs.\n\nOutputs:\n  - UpdateZoneApexConfig instance.",
+              "properties": {
+                "allow_clients": {
+                  "anyOf": [
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "CIDR list of clients allowed to send UPDATE.",
+                  "title": "Allow Clients"
+                },
+                "allow_clients_files": {
+                  "anyOf": [
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "File paths containing allowed client CIDRs.",
+                  "title": "Allow Clients Files"
+                },
+                "allow_names": {
+                  "anyOf": [
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Allowed name patterns (wildcards supported).",
+                  "title": "Allow Names"
+                },
+                "allow_names_files": {
+                  "anyOf": [
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "File paths containing allowed names.",
+                  "title": "Allow Names Files"
+                },
+                "allow_update_ips": {
+                  "anyOf": [
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "CIDR list of IPs allowed in A/AAAA record values.",
+                  "title": "Allow Update Ips"
+                },
+                "allow_update_ips_files": {
+                  "anyOf": [
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "File paths containing allowed update IPs.",
+                  "title": "Allow Update Ips Files"
+                },
+                "block_names": {
+                  "anyOf": [
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Blocked names.",
+                  "title": "Block Names"
+                },
+                "block_names_files": {
+                  "anyOf": [
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "File paths containing blocked names.",
+                  "title": "Block Names Files"
+                },
+                "block_update_ips": {
+                  "anyOf": [
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "CIDR list of IPs blocked from A/AAAA record values.",
+                  "title": "Block Update Ips"
+                },
+                "block_update_ips_files": {
+                  "anyOf": [
+                    {
+                      "description": "Type: array.",
+                      "items": {
+                        "description": "Type: string.",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "File paths containing blocked update IPs.",
+                  "title": "Block Update Ips Files"
+                },
+                "psk": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "PSK authentication configuration.",
+                  "title": "Psk"
+                },
+                "tsig": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "description": "Type: object.",
+                      "type": "object"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "TSIG authentication configuration.",
+                  "title": "Tsig"
+                },
+                "zone": {
+                  "description": "Zone apex (e.g. 'example.com').",
+                  "title": "Zone",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "zone"
+              ],
+              "title": "UpdateZoneApexConfig",
+              "type": "object"
+            },
             "ZoneDnssecNsec3Config": {
               "additionalProperties": false,
               "description": "Brief: NSEC3 parameters for DNSSEC negative proofs in ZoneRecords.\n\nInputs:\n  - salt: Salt in zonefile presentation format (\"-\" for empty, otherwise hex).\n  - iterations: NSEC3 iterations parameter (RFC 5155).\n\nOutputs:\n  - ZoneDnssecNsec3Config instance.",
@@ -1503,6 +1773,18 @@
               ],
               "default": null,
               "title": "Bind Paths"
+            },
+            "dns_update": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DnsUpdateConfig"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null
             },
             "dnssec_signing": {
               "anyOf": [
@@ -3551,12 +3833,6 @@
           "additionalProperties": false,
           "description": "Upstream health tracking and failover probing knobs.",
           "properties": {
-            "failure_cap": {
-              "default": 100,
-              "description": "Maximum value for an upstream failure counter (prevents unbounded growth).",
-              "minimum": 1,
-              "type": "integer"
-            },
             "max_serv_fail": {
               "default": 3,
               "description": "Mark an upstream unhealthy when its failure counter exceeds this threshold.",
@@ -3585,10 +3861,10 @@
               "type": "number"
             },
             "probe_min_percent": {
-              "default": 0.0,
-              "description": "Lower bound for the dynamic probe percent.",
+              "default": 0.5,
+              "description": "Lower bound for the dynamic probe percent. Must be > 0 so unhealthy upstreams are eventually retried.",
               "maximum": 100,
-              "minimum": 0,
+              "minimum": 0.5,
               "type": "number"
             },
             "probe_percent": {
@@ -3598,11 +3874,9 @@
               "minimum": 0,
               "type": "number"
             },
-            "success_recovery": {
-              "default": 1,
-              "description": "How much to decrement an upstream's failure counter after a successful response.",
-              "minimum": 1,
-              "type": "integer"
+            "profile": {
+              "description": "Optional name of a built-in health profile loaded from upstreams_health_profiles.yaml. Explicit keys under upstreams.health override profile values.",
+              "type": "string"
             },
             "unknown_after_seconds": {
               "default": 300,
