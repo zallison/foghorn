@@ -29,6 +29,10 @@ All notable changes to this project will be documented in this file.
 - Plugins/config: include built-in `*_profiles.yaml` in installed distributions so presets can be loaded via package resources.
 
 - ZoneRecords plugin: Added `dns_update` configuration scaffolding for DNS UPDATE (RFC 2136) authorization and parsing (currently returns Not Implemented).
+  - Per-key (TSIG) and per-token (PSK) scopes: allow/block updated names and allow/block A/AAAA values.
+  - Tooling: `make gen-tsig-key` and `make gen-psk-token` to generate secrets and config snippets.
+  - Documentation: added DNS UPDATE docs and an example plugin config.
+- Config validation: strip top-level `templates` after variable expansion so YAML authoring helpers don’t trip schema validation.
 - ZoneRecords plugin: Added `minimum_reload_time` field to `axfr_zones` entries to control when AXFR zones can be reloaded, allowing load balancing between staying current and avoiding excessive upstream transfer load while still honoring NOTIFY events.
 - DoS hardening:
   - Added a shared, bounded resolver executor for asyncio servers (`server.limits.resolver_executor_workers`).
