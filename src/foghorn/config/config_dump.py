@@ -446,12 +446,10 @@ def _expand_upstreams_defaults(out: Dict[str, Any]) -> None:
     health_cfg.setdefault("max_serv_fail", 3)
     health_cfg.setdefault("unknown_after_seconds", 300)
     health_cfg.setdefault("probe_percent", 1.0)
-    health_cfg.setdefault("probe_min_percent", 0.0)
+    health_cfg.setdefault("probe_min_percent", 0.5)
     health_cfg.setdefault("probe_max_percent", 50.0)
     health_cfg.setdefault("probe_increase", 1.0)
     health_cfg.setdefault("probe_decrease", 1.0)
-    health_cfg.setdefault("success_recovery", 1)
-    health_cfg.setdefault("failure_cap", 100)
 
     # Optional backup upstream endpoints.
     backup_cfg = upstream_cfg.get("backup")
