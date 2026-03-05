@@ -71,11 +71,15 @@ def clamp_positive_int(value: object, *, default: int, minimum: int = 1) -> int:
 
     Inputs:
       - value: Raw object from config.
-      - default: Default integer when parsing fails.
-      - minimum: Inclusive minimum value.
+      - default: Fallback integer when parsing *value* fails (must be int-castable).
+      - minimum: Inclusive minimum value (must be int-castable).
 
     Outputs:
       - int: Parsed integer clamped to >= minimum.
+
+    Notes:
+      - If *default* or *minimum* are not int-castable, conversion exceptions
+        propagate to the caller.
     """
 
     try:
@@ -94,7 +98,8 @@ def maybe_parse_content_length(value: Optional[str]) -> int:
       - value: Raw header string or None.
 
     Outputs:
-      - int: Parsed non-negative integer length; returns 0 for missing/invalid.
+      - int: Parsed positive integer length; returns 0 for missing, invalid, or
+        non-positive values.
     """
 
     if value is None:

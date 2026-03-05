@@ -46,6 +46,7 @@ def build_effective_config_for_display(cfg: Dict[str, Any]) -> Dict[str, Any]:
       - dict: Deep-copied configuration mapping with core runtime defaults
         inserted. Only keys already used by foghorn.main / admin webserver are
         filled; unknown keys are preserved.
+      - When cfg is not a mapping, returns an empty dict.
 
     Example:
       >>> out = build_effective_config_for_display({'server': {'resolver': {'mode': 'forward'}}})
@@ -232,6 +233,10 @@ def _expand_server_resolver_defaults(server_cfg: Dict[str, Any]) -> None:
 
     Outputs:
       - None.
+
+    Notes:
+      - Values are normalized to the runtime representation used by foghorn.main
+        (e.g. lowercased mode strings and integer timeout/max_depth fields).
     """
 
     resolver_cfg = server_cfg.get("resolver")
@@ -242,28 +247,29 @@ def _expand_server_resolver_defaults(server_cfg: Dict[str, Any]) -> None:
     mode = str(resolver_cfg.get("mode", "forward") or "forward").lower()
     if mode == "none":
         mode = "master"
-    resolver_cfg.setdefault("mode", mode)
+    # Overwrite so that legacy/invalid values (e.g. mode: NONE) are normalized.
+    resolver_cfg["mode"] = mode
 
     # Defaults aligned with foghorn.main.
     try:
         timeout_ms = int(resolver_cfg.get("timeout_ms", 2000))
     except (TypeError, ValueError):
         timeout_ms = 2000
-    resolver_cfg.setdefault("timeout_ms", timeout_ms)
+    resolver_cfg["timeout_ms"] = timeout_ms
 
     try:
         per_try = int(resolver_cfg.get("per_try_timeout_ms", timeout_ms))
     except (TypeError, ValueError):
         per_try = timeout_ms
-    resolver_cfg.setdefault("per_try_timeout_ms", per_try)
+    resolver_cfg["per_try_timeout_ms"] = per_try
 
     try:
         max_depth = int(resolver_cfg.get("max_depth", 12))
     except (TypeError, ValueError):
         max_depth = 12
-    resolver_cfg.setdefault("max_depth", max_depth)
+    resolver_cfg["max_depth"] = max_depth
 
-    resolver_cfg.setdefault("use_asyncio", bool(resolver_cfg.get("use_asyncio", True)))
+    resolver_cfg["use_asyncio"] = bool(resolver_cfg.get("use_asyncio", True))
 
 
 def _expand_server_dnssec_defaults(server_cfg: Dict[str, Any]) -> None:
@@ -274,6 +280,10 @@ def _expand_server_dnssec_defaults(server_cfg: Dict[str, Any]) -> None:
 
     Outputs:
       - None.
+
+    Notes:
+      - Values are normalized to the runtime representation used by foghorn.main
+        (lowercased strings and integer udp_payload_size).
     """
 
     dnssec_cfg = server_cfg.get("dnssec")
@@ -281,19 +291,16 @@ def _expand_server_dnssec_defaults(server_cfg: Dict[str, Any]) -> None:
         dnssec_cfg = {}
         server_cfg["dnssec"] = dnssec_cfg
 
-    dnssec_cfg.setdefault(
-        "mode", str(dnssec_cfg.get("mode", "ignore") or "ignore").lower()
-    )
-    dnssec_cfg.setdefault(
-        "validation",
-        str(dnssec_cfg.get("validation", "upstream_ad") or "upstream_ad").lower(),
-    )
+    dnssec_cfg["mode"] = str(dnssec_cfg.get("mode", "ignore") or "ignore").lower()
+    dnssec_cfg["validation"] = str(
+        dnssec_cfg.get("validation", "upstream_ad") or "upstream_ad"
+    ).lower()
 
     try:
         payload = int(dnssec_cfg.get("udp_payload_size", 1232))
     except (TypeError, ValueError):
         payload = 1232
-    dnssec_cfg.setdefault("udp_payload_size", payload)
+    dnssec_cfg["udp_payload_size"] = payload
 
 
 def _expand_server_limits_defaults(server_cfg: Dict[str, Any]) -> None:
@@ -325,7 +332,7 @@ def _expand_server_http_defaults(server_cfg: Dict[str, Any]) -> None:
       - None.
 
     Notes:
-      - Enabled behavior matches foghorn.main/start_webserver: presence of the
+      - Enabled behavior matches foghorn.main/start_webserver: a non-empty
         server.http mapping implies enabled unless explicitly set.
     """
 
@@ -338,7 +345,8 @@ def _expand_server_http_defaults(server_cfg: Dict[str, Any]) -> None:
     raw_enabled = http_cfg.get("enabled")
     enabled = bool(raw_enabled) if raw_enabled is not None else has_http_cfg
 
-    http_cfg.setdefault("enabled", enabled)
+    # Overwrite so that falsey values like 0 are normalized to a bool.
+    http_cfg["enabled"] = enabled
 
     # Bind defaults used by the threaded fallback and typical uvicorn configs.
     http_cfg.setdefault("host", "127.0.0.1")
@@ -434,9 +442,9 @@ def _expand_upstreams_defaults(out: Dict[str, Any]) -> None:
     if not isinstance(upstream_cfg, dict):
         return
 
-    upstream_cfg.setdefault(
-        "strategy", str(upstream_cfg.get("strategy", "failover") or "failover")
-    )
+    upstream_cfg["strategy"] = str(
+        upstream_cfg.get("strategy", "failover") or "failover"
+    ).lower()
 
     # Optional upstream health tuning defaults (used by server.py).
     health_cfg = upstream_cfg.get("health")
@@ -466,7 +474,7 @@ def _expand_upstreams_defaults(out: Dict[str, Any]) -> None:
         max_conc = 1
     if max_conc < 1:
         max_conc = 1
-    upstream_cfg.setdefault("max_concurrent", max_conc)
+    upstream_cfg["max_concurrent"] = max_conc
 
     # Best-effort endpoint normalization; forward mode only.
     resolver_cfg = (out.get("server") or {}).get("resolver")
