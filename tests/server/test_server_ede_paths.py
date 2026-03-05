@@ -145,7 +145,9 @@ def _setup_shared(
         (_PreDenyOverrideEde, (0, "custom pre failure")),
     ],
 )
-def test_pre_deny_nxdomain_attaches_expected_ede(plugin_cls, expected, set_runtime_snapshot):
+def test_pre_deny_nxdomain_attaches_expected_ede(
+    plugin_cls, expected, set_runtime_snapshot
+):
     """Brief: Pre-resolve deny decisions attach appropriate EDE options.
 
     Inputs:
@@ -427,7 +429,19 @@ def test_notify_over_udp_is_refused_with_ede(set_runtime_snapshot) -> None:
       - Asserts REFUSED and EDE code 22 for EDNS clients on UDP listener.
     """
 
-    _setup_shared(set_runtime_snapshot, enable_ede=True)
+    # Instantiate ZoneRecords plugin to handle NOTIFY opcode.
+    import foghorn.plugins.resolve.zone_records as mod
+    import tempfile
+
+    ZoneRecords = mod.ZoneRecords
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write("test.example|A|300|192.0.2.1\n")
+        records_file = f.name
+    plugin = ZoneRecords(file_paths=[records_file])
+    plugin.setup()
+
+    _setup_shared(set_runtime_snapshot, enable_ede=True, plugins=[plugin])
     q = _make_notify_query("notify-udp.example")
 
     result = srv._resolve_core(q.pack(), "192.0.2.10", listener="udp")
@@ -442,7 +456,9 @@ def test_notify_over_udp_is_refused_with_ede(set_runtime_snapshot) -> None:
     assert text is not None
 
 
-def test_notify_unknown_sender_over_tcp_is_refused_with_ede(set_runtime_snapshot) -> None:
+def test_notify_unknown_sender_over_tcp_is_refused_with_ede(
+    set_runtime_snapshot,
+) -> None:
     """Brief: Non-UDP NOTIFY from an unknown sender is refused with a Blocked EDE.
 
     Inputs:
@@ -485,7 +501,9 @@ def test_notify_unknown_sender_over_tcp_is_refused_with_ede(set_runtime_snapshot
     # EDE text may indicate Blocked or other description; just verify code is correct
 
 
-def test_notify_known_sender_logs_and_acks_noerror(caplog, set_runtime_snapshot) -> None:
+def test_notify_known_sender_logs_and_acks_noerror(
+    caplog, set_runtime_snapshot
+) -> None:
     """Brief: Non-UDP NOTIFY from a configured upstream is logged and acknowledged.
 
     Inputs:
