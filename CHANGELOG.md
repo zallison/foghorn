@@ -45,6 +45,7 @@ All notable changes to this project will be documented in this file.
   - Added DoH parameter size validation before base64 decoding to prevent processing oversized payloads.
   - Added automated upstream health cleanup to prevent unbounded memory growth in `upstream_health` dict.
   - Reduced default recursive `max_depth` from 16 to 12 for better DoS resistance (fully configurable via `server.resolver.max_depth`).
+- Resolver pipeline: non-QUERY opcodes (excluding NOTIFY) can now be handled by resolve plugins via `handle_opcode()` so plugins can explicitly drop, deny, or override those requests.
 - Caching:
   - InMemoryTTLCache and SQLite3Cache can reserve capacity for NXDOMAIN responses (`max_size`, `pct_nxdomain`) to avoid NXDOMAIN floods evicting positive entries.
 - Stats/query log:
@@ -70,6 +71,8 @@ All notable changes to this project will be documented in this file.
 - RateLimit: UDP keying can be made spoofing-robust via `udp_keying` (default `cidr`) and `udp_client_prefix_v4`/`udp_client_prefix_v6` bucketing.
 - UpstreamRouter: `_forward_with_failover` now delegates to the hardened core `send_query_with_failover` implementation (TXID/question validation, transport support), avoiding inconsistent forwarding behavior.
 - Stats/query log: async queue is now bounded; under sustained overload some stats operations may be dropped with DEBUG/INFO visibility via queue metrics.
+- Config dump tooling now normalizes key resolver/dnssec/http/upstream values to match runtime interpretation in effective-config output.
+- Admin config reload APIs now return HTTP 409 for restart-required changes on reload-only paths rather than scheduling restart behavior.
 - Performance: added LRU caches to hot-path helpers used during resolution and admin polling (ZoneRecords wildcard parsing, RateLimit base-domain extraction, AccessControl IP parsing, DoH/DoT SSL context creation, stats ignore-filter IP parsing, and webserver UTC datetime parsing).
 - Admin UI: diagram rendering now prefers a light/dark PNG that matches the selected UI theme.
 - Admin UI: when the config diagram PNG is unavailable, the UI now preserves the normal two-pane layout and shows Graphviz dot source in the diagram pane.
@@ -93,6 +96,7 @@ All notable changes to this project will be documented in this file.
 ### Tests
 
 - Updated upstream failover coverage to assert DEBUG-level (de-duplicated) skip logs for malformed upstream responses.
+- Added branch-coverage tests for ZoneRecords UPDATE/TSIG branches, asyncio UDP CIDR inflight limits, web admin config/diagram edge paths, and config/security helper normalization behavior.
 
 ### Documentation
 - Updated README and plugin docs/examples to reflect the nested `targets` config and hook priority shorthands.
