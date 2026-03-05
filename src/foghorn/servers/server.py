@@ -1,3 +1,5 @@
+"""Core DNS server orchestration and transport/failover helper utilities."""
+
 import ipaddress
 import logging
 import socketserver
@@ -176,107 +178,12 @@ def _bg_submit(key: object, fn) -> None:
 
 
 def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
-    """Brief: Best-effort AXFR reload for AXFR-backed plugins on NOTIFY.
+    """Backward-compat wrapper for ZoneRecords-owned NOTIFY refresh scheduling."""
+    from foghorn.plugins.resolve.zone_records import (
+        _schedule_notify_axfr_refresh as _impl,
+    )
 
-    Inputs:
-      - zone_name: QNAME from the NOTIFY question (typically the zone apex).
-      - upstream: Mapping describing the matched upstream host entry that sent
-        the NOTIFY (for example ``{"host": "192.0.2.10", "port": 53}``).
-
-    Outputs:
-      - None; may spawn background threads that refresh AXFR-backed zones based
-        on existing ZoneRecords-style configuration. Errors are logged and do
-        not affect the NOTIFY acknowledgement.
-
-    Notes:
-      - Only plugins that expose an ``_axfr_zones`` attribute and have at least
-        one configured zone matching *zone_name* participate.
-      - Reloads run in background threads so that NOTIFY responses are not
-        delayed by potentially long-running AXFR transfers.
-    """
-
-    try:
-        zone_norm = str(zone_name).rstrip(".").lower()
-    except Exception:
-        zone_norm = str(zone_name).lower()
-    if not zone_norm:
-        return
-
-    try:
-        from foghorn.runtime_config import get_runtime_snapshot
-
-        plugins = list(get_runtime_snapshot().plugins or [])
-    except Exception:
-        plugins = []
-    if not plugins:
-        return
-
-    for plugin in plugins:
-        cfg = getattr(plugin, "_axfr_zones", None)
-        if not cfg:
-            continue
-
-        try:
-            zones = [
-                str(entry.get("zone", "")).rstrip(".").lower()
-                for entry in cfg
-                if isinstance(entry, dict)
-            ]
-        except Exception:
-            continue
-
-        if zone_norm not in zones:
-            continue
-
-        def _worker(p: BasePlugin = plugin) -> None:
-            """Brief: Background worker that re-runs AXFR-backed loads.
-
-            Inputs:
-              - p: Plugin instance whose AXFR-backed zones should be refreshed.
-
-            Outputs:
-              - None; logs and suppresses any exceptions.
-            """
-
-            try:
-                # Allow AXFR-backed zones to be reloaded by clearing the
-                # one-shot guard before invoking the internal loader.
-                setattr(p, "_axfr_loaded_once", False)
-                loader = getattr(p, "_load_records", None)
-                if callable(loader):
-                    loader()
-            except Exception:  # pragma: no cover - defensive logging only
-                logger.warning(
-                    "Error refreshing AXFR-backed zones for NOTIFY %s via upstream %r",
-                    zone_norm,
-                    upstream,
-                    exc_info=True,
-                )
-
-        # Coalesce refreshes per zone to avoid unbounded work under repeated NOTIFY.
-        with _BG_LOCK:
-            if zone_norm in _BG_NOTIFY_INFLIGHT:
-                continue
-            _BG_NOTIFY_INFLIGHT.add(zone_norm)
-
-        def _wrapped() -> None:
-            try:
-                _worker()
-            finally:
-                with _BG_LOCK:
-                    _BG_NOTIFY_INFLIGHT.discard(zone_norm)
-
-        try:
-            _bg_submit(zone_norm, _wrapped)
-        except Exception:  # pragma: no cover - defensive logging only
-            with _BG_LOCK:
-                _BG_NOTIFY_INFLIGHT.discard(zone_norm)
-            logger.warning(
-                "Failed to schedule AXFR refresh for NOTIFY %s via upstream %r",
-                zone_norm,
-                upstream,
-                exc_info=True,
-            )
+    _impl(zone_name, upstream)
 
 
 def _schedule_cache_refresh(data: bytes, client_ip: str) -> None:
@@ -476,118 +383,12 @@ _UPSTREAM_HEALTH = _UpstreamHealth()
 
 @registered_lru_cached(maxsize=1024)
 def _resolve_notify_sender_upstream(sender_ip: str) -> Optional[Dict]:
-    """Brief: Map a NOTIFY sender IP address to a configured upstream.
+    """Backward-compat wrapper for ZoneRecords-owned NOTIFY sender lookup."""
+    from foghorn.plugins.resolve.zone_records import (
+        _resolve_notify_sender_upstream as _impl,
+    )
 
-    Inputs:
-      - sender_ip: String IPv4/IPv6 address of the NOTIFY sender.
-
-    Outputs:
-      - dict | None: Matching upstream configuration mapping when the sender is
-        recognized as one of the configured upstreams, otherwise None.
-
-    Notes:
-      - Fast path compares sender_ip directly against upstream host addresses.
-      - Slow path performs a PTR lookup for sender_ip via configured upstreams
-        and matches the resulting hostnames against upstream host fields.
-    """
-
-    if not sender_ip:
-        return None
-
-    try:
-        ip_text = str(sender_ip).strip()
-    except Exception:
-        ip_text = str(sender_ip)
-    if not ip_text:
-        return None
-
-    try:
-        from foghorn.runtime_config import get_runtime_snapshot
-
-        snap = get_runtime_snapshot()
-        upstreams = list(snap.upstream_addrs or [])
-        timeout_ms = int(snap.timeout_ms)
-    except Exception:
-        upstreams = []
-        timeout_ms = 2000
-    if not upstreams:
-        return None
-
-    lowered_ip = ip_text.lower()
-
-    # Fast path: direct IP match against upstream host values.
-    for up in upstreams:
-        if not isinstance(up, dict):
-            continue
-        host = up.get("host")
-        if not isinstance(host, str):
-            continue
-        if host.strip().lower() == lowered_ip:
-            return up
-
-    # Slow path: perform a PTR lookup on the sender IP and try to match the
-    # resulting hostnames against upstream host fields.
-    try:
-        addr = ipaddress.ip_address(ip_text)
-        rev_name = addr.reverse_pointer.rstrip(".")
-    except Exception:
-        return None
-
-    try:
-        query = DNSRecord.question(rev_name, qtype=QTYPE.PTR)
-    except Exception:
-        return None
-
-    try:
-        resp_wire, _used_up, _reason = send_query_with_failover(
-            query,
-            upstreams,
-            timeout_ms,
-            rev_name,
-            QTYPE.PTR,
-        )
-    except Exception:
-        return None
-
-    if resp_wire is None:
-        return None
-
-    try:
-        resp = DNSRecord.parse(resp_wire)
-    except Exception:
-        return None
-
-    ptr_names: List[str] = []
-    try:
-        for rr in getattr(resp, "rr", []) or []:
-            if getattr(rr, "rtype", None) != QTYPE.PTR:
-                continue
-            try:
-                target = str(getattr(rr, "rdata", "")).rstrip(".").lower()
-            except Exception:
-                target = str(getattr(rr, "rdata", "")).lower()
-            if target:
-                ptr_names.append(target)
-    except Exception:
-        ptr_names = []
-
-    if not ptr_names:
-        return None
-
-    for up in upstreams:
-        if not isinstance(up, dict):
-            continue
-        host = up.get("host")
-        if not isinstance(host, str):
-            continue
-        try:
-            host_norm = host.rstrip(".").lower()
-        except Exception:
-            host_norm = str(host).lower()
-        if host_norm and host_norm in ptr_names:
-            return up
-
-    return None
+    return _impl(sender_ip)
 
 
 @registered_cached(
@@ -1236,90 +1037,90 @@ def send_query_with_failover(
     if max_c < 1:  # pragma: no cover - defensive/metrics path excluded from coverage
         max_c = 1
 
-    def _try_single(upstream: Dict) -> Tuple[Optional[bytes], Optional[Dict], str]:
-        """Send query to a single upstream and classify the result.
+    def _response_matches_query(parsed: DNSRecord) -> bool:
+        """Brief: Validate response TXID and question match the original query.
 
         Inputs:
-          - upstream: Mapping describing host/port/transport configuration.
+          - parsed: Parsed DNSRecord response.
 
         Outputs:
-          - (response_wire, used_upstream, reason) where response_wire is
-            None when this upstream failed and reason is 'ok' on success or
-            'all_failed' on per-upstream failure.
+          - bool: True when TXID matches query.header.id and the first question
+            matches (qname, qtype). False otherwise.
+
+        Notes:
+          - This is a hardening check to reduce risk of accepting injected or
+            mismatched packets during upstream failover.
         """
 
-        nonlocal last_exception
+        # TXID validation when the caller passed a dnslib-style DNSRecord.
+        try:
+            expected_id = getattr(getattr(query, "header", None), "id", None)
+            if expected_id is not None and int(getattr(parsed.header, "id", -1)) != int(
+                expected_id
+            ):
+                return False
+        except Exception:
+            # If we cannot determine the expected ID (legacy objects), skip
+            # TXID validation.
+            pass
 
-        def _response_matches_query(parsed: DNSRecord) -> bool:
-            """Brief: Validate response TXID and question match the original query.
+        try:
+            qs = getattr(parsed, "questions", None) or []
+            if not qs:
+                # Best-effort: if we cannot recover the response question
+                # section, skip question validation rather than rejecting
+                # the response outright (helps tests/mocks and unusual
+                # upstreams).
+                return True
+            q0 = qs[0]
 
-            Inputs:
-              - parsed: Parsed DNSRecord response.
+            # Prefer the original DNSRecord question when present; otherwise
+            # fall back to qname/qtype arguments (which some tests use
+            # purely for logging).
+            expected_qname = None
+            expected_qtype = None
 
-            Outputs:
-              - bool: True when TXID matches query.header.id and the first question
-                matches (qname, qtype). False otherwise.
-
-            Notes:
-              - This is a hardening check to reduce risk of accepting injected or
-                mismatched packets during upstream failover.
-            """
-
-            # TXID validation when the caller passed a dnslib-style DNSRecord.
             try:
-                expected_id = getattr(getattr(query, "header", None), "id", None)
-                if expected_id is not None and int(
-                    getattr(parsed.header, "id", -1)
-                ) != int(expected_id):
-                    return False
+                req_qs = getattr(query, "questions", None) or []
+                if req_qs:
+                    req0 = req_qs[0]
+                    expected_qname = str(getattr(req0, "qname", ""))
+                    expected_qtype = getattr(req0, "qtype", None)
             except Exception:
-                # If we cannot determine the expected ID (legacy objects), skip
-                # TXID validation.
-                pass
-
-            try:
-                qs = getattr(parsed, "questions", None) or []
-                if not qs:
-                    # Best-effort: if we cannot recover the response question
-                    # section, skip question validation rather than rejecting
-                    # the response outright (helps tests/mocks and unusual
-                    # upstreams).
-                    return True
-                q0 = qs[0]
-
-                # Prefer the original DNSRecord question when present; otherwise
-                # fall back to qname/qtype arguments (which some tests use
-                # purely for logging).
                 expected_qname = None
                 expected_qtype = None
 
-                try:
-                    req_qs = getattr(query, "questions", None) or []
-                    if req_qs:
-                        req0 = req_qs[0]
-                        expected_qname = str(getattr(req0, "qname", ""))
-                        expected_qtype = getattr(req0, "qtype", None)
-                except Exception:
-                    expected_qname = None
-                    expected_qtype = None
+            if expected_qname is None:
+                expected_qname = str(qname)
+            if expected_qtype is None:
+                expected_qtype = qtype
 
-                if expected_qname is None:
-                    expected_qname = str(qname)
-                if expected_qtype is None:
-                    expected_qtype = qtype
-
-                resp_qname = str(getattr(q0, "qname", "")).rstrip(".").lower()
-                exp_qname_norm = str(expected_qname).rstrip(".").lower()
-                if resp_qname != exp_qname_norm:
-                    return False
-
-                if int(getattr(q0, "qtype", -1)) != int(expected_qtype):
-                    return False
-            except Exception:
+            resp_qname = str(getattr(q0, "qname", "")).rstrip(".").lower()
+            exp_qname_norm = str(expected_qname).rstrip(".").lower()
+            if resp_qname != exp_qname_norm:
                 return False
 
-            return True
+            if int(getattr(q0, "qtype", -1)) != int(expected_qtype):
+                return False
+        except Exception:
+            return False
 
+        return True
+
+    def _upstream_attempt_context(
+        upstream: Dict,
+    ) -> Tuple[str, int, str, str, Optional[str]]:
+        """Brief: Build immutable context used by a single upstream attempt.
+
+        Inputs:
+          - upstream: Mapping describing host/port/transport/TLS configuration.
+
+        Outputs:
+          - (host, port, transport, upstream_key, tls_ca_file_hint).
+            host/port/transport are normalized for logging and transport
+            selection, upstream_key is used for warning de-duplication, and
+            tls_ca_file_hint is used for exception context formatting.
+        """
         # For DoH we may not have host/port; use safe defaults for logging
         host = str(upstream.get("host", ""))
         try:
@@ -1340,6 +1141,367 @@ def send_query_with_failover(
             tls_ca_file_hint = tls_cfg.get("ca_file")
         except Exception:  # pragma: no cover - defensive
             tls_ca_file_hint = None
+        return host, port, transport, upstream_key, tls_ca_file_hint
+
+    def _send_transport_query(
+        upstream: Dict,
+        host: str,
+        port: int,
+        transport: str,
+    ) -> bytes:
+        """Brief: Send a DNS query through the selected transport.
+
+        Inputs:
+          - upstream: Mapping describing transport-specific options.
+          - host: Upstream host used by UDP/TCP/DoT transports.
+          - port: Upstream port used by UDP/TCP/DoT transports.
+          - transport: One of udp/tcp/dot/doh.
+
+        Outputs:
+          - bytes: Wire-format DNS response payload from the selected upstream.
+
+        Notes:
+          - Raises transport exceptions for the caller to classify/log.
+          - Preserves the legacy UDP fallback path used by tests/mocks where
+            query.pack is absent and query.send is available.
+        """
+        if transport == "dot":
+            tls = (
+                upstream.get("tls", {}) if isinstance(upstream.get("tls"), dict) else {}
+            )
+            server_name = tls.get("server_name")
+            verify = bool(tls.get("verify", True))
+            ca_file = tls.get("ca_file")
+            pool_cfg = (
+                upstream.get("pool", {})
+                if isinstance(upstream.get("pool"), dict)
+                else {}
+            )
+            pool = get_dot_pool(host, int(port), server_name, verify, ca_file)
+            try:
+                pool.set_limits(
+                    max_connections=pool_cfg.get("max_connections"),
+                    idle_timeout_s=(
+                        (int(pool_cfg.get("idle_timeout_ms")) // 1000)
+                        if pool_cfg.get("idle_timeout_ms")
+                        else None
+                    ),
+                )
+            except Exception:  # pragma: no cover - defensive: pool tuning only
+                pass
+            return pool.send(query.pack(), timeout_ms, timeout_ms)
+
+        if transport == "tcp":
+            pool_cfg = (
+                upstream.get("pool", {})
+                if isinstance(upstream.get("pool"), dict)
+                else {}
+            )
+            pool = get_tcp_pool(host, int(port))
+            try:
+                pool.set_limits(
+                    max_connections=pool_cfg.get("max_connections"),
+                    idle_timeout_s=(
+                        (int(pool_cfg.get("idle_timeout_ms")) // 1000)
+                        if pool_cfg.get("idle_timeout_ms")
+                        else None
+                    ),
+                )
+            except Exception:  # pragma: no cover - defensive: pool tuning only
+                pass
+            return pool.send(query.pack(), timeout_ms, timeout_ms)
+
+        if transport == "doh":
+            doh_url = str(upstream.get("url") or upstream.get("endpoint") or "").strip()
+            if not doh_url:
+                raise Exception("missing DoH url in upstream config")
+            doh_method = str(upstream.get("method", "POST"))
+            doh_headers = (
+                upstream.get("headers")
+                if isinstance(upstream.get("headers"), dict)
+                else {}
+            )
+            tls_cfg = (
+                upstream.get("tls", {}) if isinstance(upstream.get("tls"), dict) else {}
+            )
+            verify = bool(tls_cfg.get("verify", True))
+            ca_file = tls_cfg.get("ca_file")
+            from foghorn.servers.transports.doh import (  # local import to avoid overhead
+                doh_query,
+            )
+
+            body, resp_headers = doh_query(
+                doh_url,
+                query.pack(),
+                method=doh_method,
+                headers=doh_headers,
+                timeout_ms=timeout_ms,
+                verify=verify,
+                ca_file=ca_file,
+            )
+            return body
+
+        # udp (default)
+        # Use transport impl for consistency, but preserve legacy path for tests/mocks
+        try:
+            pack = getattr(query, "pack")
+        except Exception:
+            pack = None
+        if callable(pack):
+            from foghorn.servers.transports.udp import udp_query
+
+            return udp_query(host, int(port), query.pack(), timeout_ms=timeout_ms)
+        # Fallback to dnslib's convenience API (used in unit tests)
+        return query.send(host, int(port), timeout=timeout_sec)
+
+    def _classify_response(
+        response_wire: bytes,
+        upstream: Dict,
+        host: str,
+        port: int,
+        transport: str,
+        upstream_key: str,
+    ) -> Tuple[Optional[bytes], Optional[Dict], str]:
+        """Brief: Parse and classify a transport response with fallback behavior.
+
+        Inputs:
+          - response_wire: DNS response bytes returned by transport.
+          - upstream: Original upstream mapping used for this attempt.
+          - host/port/transport: Normalized transport context for logging and
+            retries.
+          - upstream_key: Key used by warning de-duplication bookkeeping.
+
+        Outputs:
+          - (response_wire, used_upstream, reason) where response_wire is None
+            and reason is 'all_failed' for failures, or response bytes with
+            reason 'ok' on success.
+        """
+        nonlocal last_exception
+
+        # Check for SERVFAIL, EDNS compatibility issues, or truncation to
+        # trigger appropriate fallbacks.
+        try:
+            parsed_response = DNSRecord.parse(response_wire)
+
+            # Hardening: ensure response TXID and question match the original.
+            if not _response_matches_query(parsed_response):
+                _warn_upstream_skip_once(
+                    upstream_key,
+                    "Skipping upstream %s:%d via %s for %s (mismatched response)",
+                    host,
+                    port,
+                    transport,
+                    qname,
+                )
+                last_exception = Exception(
+                    f"mismatched response from {host}:{port} via {transport}"
+                )
+                return None, None, "all_failed"
+
+            # EDNS(0) compatibility shim: if an upstream returns FORMERR in
+            # response to an EDNS-enabled UDP query, retry once without
+            # EDNS. This covers servers that mishandle OPT records.
+            if (
+                transport == "udp"
+                and _query_has_opt
+                and parsed_response.header.rcode == RCODE.FORMERR
+            ):
+                logger.debug(
+                    "Upstream %s:%d returned FORMERR for EDNS query %s; retrying without EDNS",
+                    host,
+                    port,
+                    qname,
+                )
+                try:
+                    from foghorn.servers.transports.udp import (
+                        udp_query as _udp_query,
+                    )
+
+                    no_edns_query = DNSRecord.parse(query.pack())
+                    no_edns_query.ar = [
+                        rr
+                        for rr in (getattr(no_edns_query, "ar", None) or [])
+                        if getattr(rr, "rtype", None) != QTYPE.OPT
+                    ]
+                    response_wire = _udp_query(
+                        host,
+                        int(port),
+                        no_edns_query.pack(),
+                        timeout_ms=timeout_ms,
+                    )
+                    parsed_response = DNSRecord.parse(response_wire)
+
+                    if not _response_matches_query(parsed_response):
+                        _warn_upstream_skip_once(
+                            upstream_key,
+                            "Skipping upstream %s:%d via %s for %s (mismatched response after EDNS fallback)",
+                            host,
+                            port,
+                            transport,
+                            qname,
+                        )
+                        last_exception = Exception(
+                            f"mismatched response from {host}:{port} without EDNS"
+                        )
+                        return None, None, "all_failed"
+                except Exception as e2:  # pragma: no cover - defensive
+                    _warn_upstream_skip_once(
+                        upstream_key,
+                        "Skipping upstream %s:%d via %s for %s (EDNS fallback failed): %s",
+                        host,
+                        port,
+                        transport,
+                        qname,
+                        e2,
+                    )
+                    last_exception = e2
+                    return None, None, "all_failed"
+
+                # After fallback, treat SERVFAIL as failure as usual.
+                if parsed_response.header.rcode == RCODE.SERVFAIL:
+                    _warn_upstream_skip_once(
+                        upstream_key,
+                        "Skipping upstream %s:%d via %s for %s (SERVFAIL after EDNS fallback)",
+                        host,
+                        port,
+                        transport,
+                        qname,
+                    )
+                    last_exception = Exception(
+                        f"FORMERR/SERVFAIL from {host}:{port} without EDNS"
+                    )
+                    return None, None, "all_failed"
+
+                # Successful non-SERVFAIL response after EDNS fallback.
+                _reset_upstream_skip_warning(upstream_key)
+                return response_wire, upstream, "ok"
+
+            if parsed_response.header.rcode == RCODE.SERVFAIL:
+                _warn_upstream_skip_once(
+                    upstream_key,
+                    "Skipping upstream %s:%d via %s for %s (returned SERVFAIL)",
+                    host,
+                    port,
+                    transport,
+                    qname,
+                )
+                last_exception = Exception(f"SERVFAIL from {host}:{port}")
+                return None, None, "all_failed"
+
+            # If UDP and TC=1, fallback to TCP for full response
+            tc_flag = getattr(parsed_response.header, "tc", 0)
+            if transport == "udp" and tc_flag == 1:
+                logger.debug("Truncated UDP response for %s; retrying over TCP", qname)
+                try:
+                    response_wire = tcp_query(
+                        host,
+                        int(port),
+                        query.pack(),
+                        connect_timeout_ms=timeout_ms,
+                        read_timeout_ms=timeout_ms,
+                    )
+                    try:
+                        parsed_tcp = DNSRecord.parse(response_wire)
+                        if not _response_matches_query(parsed_tcp):
+                            raise ValueError("mismatched TCP response")
+                    except Exception as e3:
+                        _warn_upstream_skip_once(
+                            upstream_key,
+                            "Skipping upstream %s:%d via tcp for %s (mismatched TCP response after truncation): %s",
+                            host,
+                            port,
+                            qname,
+                            e3,
+                        )
+                        last_exception = e3
+                        return None, None, "all_failed"
+
+                    _reset_upstream_skip_warning(upstream_key)
+                    return response_wire, {**upstream, "transport": "tcp"}, "ok"
+                except Exception as e2:  # pragma: no cover - defensive
+                    _warn_upstream_skip_once(
+                        upstream_key,
+                        "Skipping upstream %s:%d via %s for %s (TCP retry after truncation failed): %s",
+                        host,
+                        port,
+                        transport,
+                        qname,
+                        e2,
+                    )
+                    last_exception = e2
+                    return None, None, "all_failed"
+        except Exception as e:  # pragma: no cover - defensive
+            # If parsing fails, treat as a server failure
+            _warn_upstream_skip_once(
+                upstream_key,
+                "Skipping upstream %s:%d via %s for %s (failed to parse response): %s",
+                host,
+                port,
+                transport,
+                qname,
+                e,
+            )
+            last_exception = e
+            return None, None, "all_failed"
+
+        # Success (NOERROR, NXDOMAIN, etc.)
+        _reset_upstream_skip_warning(upstream_key)
+        return response_wire, upstream, "ok"
+
+    def _format_transport_error_file_info(
+        exc: Exception, tls_ca_file_hint: Optional[str]
+    ) -> str:
+        """Brief: Build optional filename context for transport exceptions.
+
+        Inputs:
+          - exc: Transport exception raised by upstream attempt.
+          - tls_ca_file_hint: Optional upstream tls.ca_file path captured from
+            config.
+
+        Outputs:
+          - str: Formatted file context suffix (possibly empty).
+        """
+        # Some exceptions (notably FileNotFoundError/OSError) carry an
+        # associated filename that is not always present in str(exc).
+        filename = getattr(exc, "filename", None)
+        filename2 = getattr(exc, "filename2", None)
+        if filename and filename2:
+            file_info = f" (files: {filename!r}, {filename2!r})"
+        elif filename:
+            file_info = f" (file: {filename!r})"
+        elif filename2:
+            file_info = f" (file: {filename2!r})"
+        else:
+            file_info = ""
+
+        # Fallback: if we didn't get a filename from the exception itself,
+        # try to include the configured tls.ca_file for DoT/DoH upstreams.
+        if not file_info and tls_ca_file_hint and isinstance(exc, OSError):
+            try:
+                if getattr(exc, "errno", None) == 2:
+                    file_info = f" (file: {str(tls_ca_file_hint)!r})"
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        return file_info
+
+    def _try_single(upstream: Dict) -> Tuple[Optional[bytes], Optional[Dict], str]:
+        """Send query to a single upstream and classify the result.
+
+        Inputs:
+          - upstream: Mapping describing host/port/transport configuration.
+
+        Outputs:
+          - (response_wire, used_upstream, reason) where response_wire is
+            None when this upstream failed and reason is 'ok' on success or
+            'all_failed' on per-upstream failure.
+        """
+
+        nonlocal last_exception
+
+        host, port, transport, upstream_key, tls_ca_file_hint = (
+            _upstream_attempt_context(upstream)
+        )
 
         try:
             logger.debug(
@@ -1350,303 +1512,17 @@ def send_query_with_failover(
                 host,
                 port,
             )
-            # Send based on transport
-            if transport == "dot":
-                tls = (
-                    upstream.get("tls", {})
-                    if isinstance(upstream.get("tls"), dict)
-                    else {}
-                )
-                server_name = tls.get("server_name")
-                verify = bool(tls.get("verify", True))
-                ca_file = tls.get("ca_file")
-                pool_cfg = (
-                    upstream.get("pool", {})
-                    if isinstance(upstream.get("pool"), dict)
-                    else {}
-                )
-                pool = get_dot_pool(host, int(port), server_name, verify, ca_file)
-                try:
-                    pool.set_limits(
-                        max_connections=pool_cfg.get("max_connections"),
-                        idle_timeout_s=(
-                            (int(pool_cfg.get("idle_timeout_ms")) // 1000)
-                            if pool_cfg.get("idle_timeout_ms")
-                            else None
-                        ),
-                    )
-                except Exception:  # pragma: no cover - defensive: pool tuning only
-                    pass
-                response_wire = pool.send(query.pack(), timeout_ms, timeout_ms)
-            elif transport == "tcp":
-                pool_cfg = (
-                    upstream.get("pool", {})
-                    if isinstance(upstream.get("pool"), dict)
-                    else {}
-                )
-                pool = get_tcp_pool(host, int(port))
-                try:
-                    pool.set_limits(
-                        max_connections=pool_cfg.get("max_connections"),
-                        idle_timeout_s=(
-                            (int(pool_cfg.get("idle_timeout_ms")) // 1000)
-                            if pool_cfg.get("idle_timeout_ms")
-                            else None
-                        ),
-                    )
-                except Exception:  # pragma: no cover - defensive: pool tuning only
-                    pass
-                response_wire = pool.send(query.pack(), timeout_ms, timeout_ms)
-            elif transport == "doh":
-                doh_url = str(
-                    upstream.get("url") or upstream.get("endpoint") or ""
-                ).strip()
-                if not doh_url:
-                    raise Exception("missing DoH url in upstream config")
-                doh_method = str(upstream.get("method", "POST"))
-                doh_headers = (
-                    upstream.get("headers")
-                    if isinstance(upstream.get("headers"), dict)
-                    else {}
-                )
-                tls_cfg = (
-                    upstream.get("tls", {})
-                    if isinstance(upstream.get("tls"), dict)
-                    else {}
-                )
-                verify = bool(tls_cfg.get("verify", True))
-                ca_file = tls_cfg.get("ca_file")
-                from foghorn.servers.transports.doh import (  # local import to avoid overhead
-                    doh_query,
-                )
-
-                body, resp_headers = doh_query(
-                    doh_url,
-                    query.pack(),
-                    method=doh_method,
-                    headers=doh_headers,
-                    timeout_ms=timeout_ms,
-                    verify=verify,
-                    ca_file=ca_file,
-                )
-                response_wire = body
-            else:  # udp (default)
-                # Use transport impl for consistency, but preserve legacy path for tests/mocks
-                try:
-                    pack = getattr(query, "pack")
-                except Exception:
-                    pack = None
-                if callable(pack):
-                    from foghorn.servers.transports.udp import udp_query
-
-                    response_wire = udp_query(
-                        host, int(port), query.pack(), timeout_ms=timeout_ms
-                    )
-                else:
-                    # Fallback to dnslib's convenience API (used in unit tests)
-                    response_wire = query.send(host, int(port), timeout=timeout_sec)
-
-            # Check for SERVFAIL, EDNS compatibility issues, or truncation to
-            # trigger appropriate fallbacks.
-            try:
-                parsed_response = DNSRecord.parse(response_wire)
-
-                # Hardening: ensure response TXID and question match the original.
-                if not _response_matches_query(parsed_response):
-                    _warn_upstream_skip_once(
-                        upstream_key,
-                        "Skipping upstream %s:%d via %s for %s (mismatched response)",
-                        host,
-                        port,
-                        transport,
-                        qname,
-                    )
-                    last_exception = Exception(
-                        f"mismatched response from {host}:{port} via {transport}"
-                    )
-                    return None, None, "all_failed"
-
-                # EDNS(0) compatibility shim: if an upstream returns FORMERR in
-                # response to an EDNS-enabled UDP query, retry once without
-                # EDNS. This covers servers that mishandle OPT records.
-                if (
-                    transport == "udp"
-                    and _query_has_opt
-                    and parsed_response.header.rcode == RCODE.FORMERR
-                ):
-                    logger.debug(
-                        "Upstream %s:%d returned FORMERR for EDNS query %s; retrying without EDNS",
-                        host,
-                        port,
-                        qname,
-                    )
-                    try:
-                        from foghorn.servers.transports.udp import (
-                            udp_query as _udp_query,
-                        )
-
-                        no_edns_query = DNSRecord.parse(query.pack())
-                        no_edns_query.ar = [
-                            rr
-                            for rr in (getattr(no_edns_query, "ar", None) or [])
-                            if getattr(rr, "rtype", None) != QTYPE.OPT
-                        ]
-                        response_wire = _udp_query(
-                            host,
-                            int(port),
-                            no_edns_query.pack(),
-                            timeout_ms=timeout_ms,
-                        )
-                        parsed_response = DNSRecord.parse(response_wire)
-
-                        if not _response_matches_query(parsed_response):
-                            _warn_upstream_skip_once(
-                                upstream_key,
-                                "Skipping upstream %s:%d via %s for %s (mismatched response after EDNS fallback)",
-                                host,
-                                port,
-                                transport,
-                                qname,
-                            )
-                            last_exception = Exception(
-                                f"mismatched response from {host}:{port} without EDNS"
-                            )
-                            return None, None, "all_failed"
-                    except Exception as e2:  # pragma: no cover - defensive
-                        _warn_upstream_skip_once(
-                            upstream_key,
-                            "Skipping upstream %s:%d via %s for %s (EDNS fallback failed): %s",
-                            host,
-                            port,
-                            transport,
-                            qname,
-                            e2,
-                        )
-                        last_exception = e2
-                        return None, None, "all_failed"
-
-                    # After fallback, treat SERVFAIL as failure as usual.
-                    if parsed_response.header.rcode == RCODE.SERVFAIL:
-                        _warn_upstream_skip_once(
-                            upstream_key,
-                            "Skipping upstream %s:%d via %s for %s (SERVFAIL after EDNS fallback)",
-                            host,
-                            port,
-                            transport,
-                            qname,
-                        )
-                        last_exception = Exception(
-                            f"FORMERR/SERVFAIL from {host}:{port} without EDNS"
-                        )
-                        return None, None, "all_failed"
-
-                    # Successful non-SERVFAIL response after EDNS fallback.
-                    _reset_upstream_skip_warning(upstream_key)
-                    return response_wire, upstream, "ok"
-
-                if parsed_response.header.rcode == RCODE.SERVFAIL:
-                    _warn_upstream_skip_once(
-                        upstream_key,
-                        "Skipping upstream %s:%d via %s for %s (returned SERVFAIL)",
-                        host,
-                        port,
-                        transport,
-                        qname,
-                    )
-                    last_exception = Exception(f"SERVFAIL from {host}:{port}")
-                    return None, None, "all_failed"
-                # If UDP and TC=1, fallback to TCP for full response
-                tc_flag = getattr(parsed_response.header, "tc", 0)
-                if transport == "udp" and tc_flag == 1:
-                    logger.debug(
-                        "Truncated UDP response for %s; retrying over TCP", qname
-                    )
-                    try:
-                        response_wire = tcp_query(
-                            host,
-                            int(port),
-                            query.pack(),
-                            connect_timeout_ms=timeout_ms,
-                            read_timeout_ms=timeout_ms,
-                        )
-                        try:
-                            parsed_tcp = DNSRecord.parse(response_wire)
-                            if not _response_matches_query(parsed_tcp):
-                                raise ValueError("mismatched TCP response")
-                        except Exception as e3:
-                            _warn_upstream_skip_once(
-                                upstream_key,
-                                "Skipping upstream %s:%d via tcp for %s (mismatched TCP response after truncation): %s",
-                                host,
-                                port,
-                                qname,
-                                e3,
-                            )
-                            last_exception = e3
-                            return None, None, "all_failed"
-
-                        _reset_upstream_skip_warning(upstream_key)
-                        return (
-                            response_wire,
-                            {**upstream, "transport": "tcp"},
-                            "ok",
-                        )
-                    except Exception as e2:  # pragma: no cover - defensive
-                        _warn_upstream_skip_once(
-                            upstream_key,
-                            "Skipping upstream %s:%d via %s for %s (TCP retry after truncation failed): %s",
-                            host,
-                            port,
-                            transport,
-                            qname,
-                            e2,
-                        )
-                        last_exception = e2
-                        return None, None, "all_failed"
-            except Exception as e:  # pragma: no cover - defensive
-                # If parsing fails, treat as a server failure
-                _warn_upstream_skip_once(
-                    upstream_key,
-                    "Skipping upstream %s:%d via %s for %s (failed to parse response): %s",
-                    host,
-                    port,
-                    transport,
-                    qname,
-                    e,
-                )
-                last_exception = e
-                return None, None, "all_failed"
-
-            # Success (NOERROR, NXDOMAIN, etc.)
-            _reset_upstream_skip_warning(upstream_key)
-            return response_wire, upstream, "ok"
+            response_wire = _send_transport_query(upstream, host, port, transport)
+            return _classify_response(
+                response_wire, upstream, host, port, transport, upstream_key
+            )
 
         except (
             DoTError,
             TCPError,
             Exception,
         ) as e:  # pragma: no cover - defensive: network/transport failure
-            # Some exceptions (notably FileNotFoundError/OSError) carry an
-            # associated filename that is not always present in str(e).
-            filename = getattr(e, "filename", None)
-            filename2 = getattr(e, "filename2", None)
-            if filename and filename2:
-                file_info = f" (files: {filename!r}, {filename2!r})"
-            elif filename:
-                file_info = f" (file: {filename!r})"
-            elif filename2:
-                file_info = f" (file: {filename2!r})"
-            else:
-                file_info = ""
-
-            # Fallback: if we didn't get a filename from the exception itself,
-            # try to include the configured tls.ca_file for DoT/DoH upstreams.
-            if not file_info and tls_ca_file_hint and isinstance(e, OSError):
-                try:
-                    if getattr(e, "errno", None) == 2:
-                        file_info = f" (file: {str(tls_ca_file_hint)!r})"
-                except Exception:  # pragma: no cover - defensive
-                    pass
+            file_info = _format_transport_error_file_info(e, tls_ca_file_hint)
 
             _warn_upstream_skip_once(
                 upstream_key,
@@ -1713,6 +1589,151 @@ class _ResolveCoreResult(NamedTuple):
     dnssec_status: Optional[str]
     upstream_id: Optional[str]
     rcode_name: str
+
+
+def _handle_non_query_opcode(
+    *,
+    opcode: int,
+    data: bytes,
+    client_ip: str,
+    listener: Optional[str],
+    secure: Optional[bool],
+    handler,
+) -> Optional[_ResolveCoreResult]:
+    """Brief: Handle non-QUERY opcodes via plugin.handle_opcode().
+
+    Inputs:
+      - opcode: DNS opcode parsed from the wire header.
+      - data: Original wire-format DNS message bytes.
+      - client_ip: Source client IP string for plugin context.
+      - listener: Optional listener label ("udp", "tcp", "dot", "doh").
+      - secure: Optional transport security flag for plugin context.
+      - handler: Runtime handler-like object exposing plugins.
+
+    Outputs:
+      - _ResolveCoreResult when handled (drop/override/deny/notimp), else None.
+    """
+
+    if opcode == 0:
+        return None
+
+    import dns.message
+    import dns.rcode
+
+    try:
+        msg = dns.message.from_wire(data)
+    except Exception:
+        msg = None
+
+    qname = ""
+    qtype = 0
+    if msg is not None and getattr(msg, "question", None):
+        try:
+            q0 = msg.question[0]
+            qname = str(getattr(q0, "name", "")).rstrip(".")
+            qtype = int(getattr(q0, "rdtype", 0))
+        except Exception:
+            qname = ""
+            qtype = 0
+
+    ctx = PluginContext(client_ip=client_ip, listener=listener, secure=secure)
+    try:
+        ctx.qname = qname
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    for p in sorted(handler.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
+        try:
+            if hasattr(p, "targets_opcode") and not p.targets_opcode(opcode):
+                continue
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+        try:
+            decision = p.handle_opcode(opcode, qname, qtype, data, ctx)
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("Plugin handle_opcode() raised", exc_info=True)
+            continue
+
+        if not isinstance(decision, PluginDecision):
+            continue
+
+        if decision.action == "drop":
+            return _ResolveCoreResult(
+                wire=b"",
+                dnssec_status=None,
+                upstream_id=None,
+                rcode_name="DROP",
+            )
+
+        if decision.action == "override" and decision.response is not None:
+            wire = decision.response
+            # Ensure the response ID matches the request ID.
+            try:
+                wire = _set_response_id(wire, int.from_bytes(data[0:2], "big"))
+            except Exception:
+                pass
+            try:
+                parsed = DNSRecord.parse(wire)
+                rcode_name = RCODE.get(parsed.header.rcode, str(parsed.header.rcode))
+            except Exception:
+                rcode_name = "OVERRIDE"
+            return _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=None,
+                rcode_name=str(rcode_name),
+            )
+
+        if decision.action == "deny":
+            if msg is not None:
+                resp = dns.message.make_response(msg)
+                resp.set_rcode(dns.rcode.REFUSED)
+                wire = resp.to_wire()
+            else:
+                # Worst-case: return a bare REFUSED header without parsing.
+                try:
+                    mid = int.from_bytes(data[0:2], "big")
+                except Exception:
+                    mid = 0
+                r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1))
+                r.header.rcode = RCODE.REFUSED
+                wire = r.pack()
+            try:
+                wire = _set_response_id(wire, int.from_bytes(data[0:2], "big"))
+            except Exception:
+                pass
+            return _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=None,
+                rcode_name="REFUSED",
+            )
+
+    # Default: no plugin handled this opcode.
+    if msg is not None:
+        resp = dns.message.make_response(msg)
+        resp.set_rcode(dns.rcode.NOTIMP)
+        wire = resp.to_wire()
+    else:
+        # Worst-case: return a bare NOTIMP header without parsing.
+        try:
+            mid = int.from_bytes(data[0:2], "big")
+        except Exception:
+            mid = 0
+        r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1))
+        r.header.rcode = RCODE.NOTIMP
+        wire = r.pack()
+    try:
+        wire = _set_response_id(wire, int.from_bytes(data[0:2], "big"))
+    except Exception:
+        pass
+    return _ResolveCoreResult(
+        wire=wire,
+        dnssec_status=None,
+        upstream_id=None,
+        rcode_name="NOTIMP",
+    )
 
 
 def _resolve_core(
@@ -1795,235 +1816,22 @@ def _resolve_core(
         except Exception:
             opcode = 0
 
-        # Handle non-QUERY opcodes (except NOTIFY, which has its own pipeline)
-        # via plugin.handle_opcode(). This bypasses the standard query pipeline
-        # (cache/upstreams) and avoids dnslib parsing failures for RFC 2136.
-        if opcode not in (0, getattr(OPCODE, "NOTIFY", 4)):
-            import dns.message
-            import dns.rcode
-
-            try:
-                msg = dns.message.from_wire(data)
-            except Exception:
-                msg = None
-
-            qname = ""
-            qtype = 0
-            if msg is not None and getattr(msg, "question", None):
-                try:
-                    q0 = msg.question[0]
-                    qname = str(getattr(q0, "name", "")).rstrip(".")
-                    qtype = int(getattr(q0, "rdtype", 0))
-                except Exception:
-                    qname = ""
-                    qtype = 0
-
-            ctx = PluginContext(client_ip=client_ip, listener=listener, secure=secure)
-            try:
-                ctx.qname = qname
-            except Exception:  # pragma: no cover - defensive
-                pass
-
-            for p in sorted(
-                handler.plugins, key=lambda p: getattr(p, "pre_priority", 50)
-            ):
-                try:
-                    if hasattr(p, "targets_opcode") and not p.targets_opcode(opcode):
-                        continue
-                except Exception:  # pragma: no cover - defensive
-                    pass
-
-                try:
-                    decision = p.handle_opcode(opcode, qname, qtype, data, ctx)
-                except Exception:  # pragma: no cover - defensive
-                    logger.warning("Plugin handle_opcode() raised", exc_info=True)
-                    continue
-
-                if not isinstance(decision, PluginDecision):
-                    continue
-
-                if decision.action == "drop":
-                    return _ResolveCoreResult(
-                        wire=b"",
-                        dnssec_status=None,
-                        upstream_id=None,
-                        rcode_name="DROP",
-                    )
-
-                if decision.action == "override" and decision.response is not None:
-                    wire = decision.response
-                    # Ensure the response ID matches the request ID.
-                    try:
-                        wire = _set_response_id(wire, int.from_bytes(data[0:2], "big"))
-                    except Exception:
-                        pass
-                    try:
-                        parsed = DNSRecord.parse(wire)
-                        rcode_name = RCODE.get(
-                            parsed.header.rcode, str(parsed.header.rcode)
-                        )
-                    except Exception:
-                        rcode_name = "OVERRIDE"
-                    return _ResolveCoreResult(
-                        wire=wire,
-                        dnssec_status=None,
-                        upstream_id=None,
-                        rcode_name=str(rcode_name),
-                    )
-
-                if decision.action == "deny":
-                    if msg is not None:
-                        resp = dns.message.make_response(msg)
-                        resp.set_rcode(dns.rcode.REFUSED)
-                        wire = resp.to_wire()
-                    else:
-                        # Worst-case: return a bare REFUSED header without parsing.
-                        try:
-                            mid = int.from_bytes(data[0:2], "big")
-                        except Exception:
-                            mid = 0
-                        r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1))
-                        r.header.rcode = RCODE.REFUSED
-                        wire = r.pack()
-                    try:
-                        wire = _set_response_id(wire, int.from_bytes(data[0:2], "big"))
-                    except Exception:
-                        pass
-                    return _ResolveCoreResult(
-                        wire=wire,
-                        dnssec_status=None,
-                        upstream_id=None,
-                        rcode_name="REFUSED",
-                    )
-
-            # Default: no plugin handled this opcode.
-            if msg is not None:
-                resp = dns.message.make_response(msg)
-                resp.set_rcode(dns.rcode.NOTIMP)
-                wire = resp.to_wire()
-            else:
-                # Worst-case: return a bare NOTIMP header without parsing.
-                try:
-                    mid = int.from_bytes(data[0:2], "big")
-                except Exception:
-                    mid = 0
-                r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1))
-                r.header.rcode = RCODE.NOTIMP
-                wire = r.pack()
-            try:
-                wire = _set_response_id(wire, int.from_bytes(data[0:2], "big"))
-            except Exception:
-                pass
-            return _ResolveCoreResult(
-                wire=wire,
-                dnssec_status=None,
-                upstream_id=None,
-                rcode_name="NOTIMP",
-            )
+        non_query_result = _handle_non_query_opcode(
+            opcode=opcode,
+            data=data,
+            client_ip=client_ip,
+            listener=listener,
+            secure=secure,
+            handler=handler,
+        )
+        if non_query_result is not None:
+            return non_query_result
 
         req = DNSRecord.parse(data)
         q = req.questions[0]
         qname = str(q.qname).rstrip(".")
         qtype = q.qtype
         cache_key = (qname.lower(), qtype)
-
-        # Special-case DNS NOTIFY opcodes so that upstream change notifications
-        # are handled consistently across listeners.
-        try:
-            opcode = getattr(getattr(req, "header", None), "opcode", 0)
-        except Exception:
-            opcode = 0
-        if opcode == getattr(OPCODE, "NOTIFY", 4):
-            # UDP listeners must refuse NOTIFY; other listeners perform an
-            # upstream membership check before accepting.
-            try:
-                listener_label = (
-                    str(listener or "").lower()
-                    if isinstance(listener, str)
-                    else str(listener or "").lower()
-                )
-            except Exception:
-                listener_label = ""
-
-            if listener_label == "udp":
-                r = req.reply()
-                r.header.rcode = RCODE.REFUSED
-                # Echo client EDNS(0) OPT and attach an EDE describing the
-                # unsupported transport when enabled.
-                _echo_client_edns(req, r)
-                _attach_ede_option(
-                    req,
-                    r,
-                    22,
-                    "NOTIFY not supported over UDP",
-                )  # Not Supported
-                wire = _set_response_id(r.pack(), req.header.id)
-                return _ResolveCoreResult(
-                    wire=wire,
-                    dnssec_status=None,
-                    upstream_id=None,
-                    rcode_name="REFUSED",
-                )
-
-            # Non-UDP: ensure sender is a configured upstream, optionally using
-            # reverse DNS when the raw IP is not configured directly.
-            upstream = _resolve_notify_sender_upstream(client_ip)
-            if upstream is None:
-                r = req.reply()
-                r.header.rcode = RCODE.REFUSED
-                _echo_client_edns(req, r)
-                _attach_ede_option(
-                    req,
-                    r,
-                    15,
-                    "NOTIFY sender not configured as upstream",
-                )  # Blocked
-                wire = _set_response_id(r.pack(), req.header.id)
-                return _ResolveCoreResult(
-                    wire=wire,
-                    dnssec_status=None,
-                    upstream_id=None,
-                    rcode_name="REFUSED",
-                )
-
-            # Authorized NOTIFY sender: log a critical event, schedule any
-            # AXFR refresh work, and acknowledge with a bare NOERROR response.
-            try:
-                upstream_id = handler._upstream_id(upstream)  # type: ignore[attr-defined]
-            except Exception:
-                upstream_id = None
-
-            logger.critical(
-                "Received DNS NOTIFY from %s (upstream=%s) for %s type %s via %s",
-                client_ip,
-                upstream_id or "unknown",
-                qname,
-                QTYPE.get(qtype, str(qtype)),
-                listener or "unknown",
-            )
-
-            # Best-effort AXFR refresh for any ZoneRecords-style plugins that
-            # are configured for this zone. Failures are logged but must not
-            # impact the NOTIFY acknowledgement.
-            try:
-                _schedule_notify_axfr_refresh(qname, upstream)
-            except Exception:  # pragma: no cover - defensive logging only
-                logger.warning(
-                    "Unexpected error while scheduling AXFR refresh for NOTIFY from %s",
-                    client_ip,
-                    exc_info=True,
-                )
-
-            r = req.reply()
-            r.header.rcode = RCODE.NOERROR
-            _echo_client_edns(req, r)
-            wire = _set_response_id(r.pack(), req.header.id)
-            return _ResolveCoreResult(
-                wire=wire,
-                dnssec_status=None,
-                upstream_id=upstream_id,
-                rcode_name="NOERROR",
-            )
 
         # Record query stats (mirrors DNSUDPHandler.handle)
         if stats is not None:

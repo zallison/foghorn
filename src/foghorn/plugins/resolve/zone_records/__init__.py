@@ -5,11 +5,13 @@ Main entry point that orchestrates record loading, query resolution, and file wa
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import threading
+import time
 from typing import Dict, List, Optional, Tuple
 
-from dnslib import QTYPE
+from dnslib import OPCODE, QTYPE, RCODE, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field
 
 from foghorn.plugins.resolve.base import (
@@ -18,21 +20,22 @@ from foghorn.plugins.resolve.base import (
     PluginDecision,
     plugin_aliases,
 )
+from foghorn.utils.register_caches import registered_lru_cached
 
 from . import (
     axfr_polling,
-    dnssec,
     helpers,
     loader,
-    notify,
     resolver,
     transfer,
-    update_processor,
     update_helpers,
     watchdog,
 )
 
 logger = logging.getLogger(__name__)
+_NOTIFY_LOGGER = logging.getLogger("foghorn.server")
+_NOTIFY_BG_LOCK = threading.Lock()
+_NOTIFY_REFRESH_INFLIGHT: set[str] = set()
 
 
 class UpdateTsigKeyConfig(BaseModel):
@@ -525,6 +528,387 @@ class ZoneRecordsConfig(BaseModel):
         extra = "allow"
 
 
+@registered_lru_cached(maxsize=1024)
+def _resolve_notify_sender_upstream(sender_ip: str) -> Optional[Dict]:
+    """Brief: Map a NOTIFY sender IP address to a configured upstream.
+
+    Inputs:
+      - sender_ip: String IPv4/IPv6 address of the NOTIFY sender.
+
+    Outputs:
+      - dict | None: Matching upstream configuration mapping when the sender is
+        recognized as one of the configured upstreams, otherwise None.
+    """
+    if not sender_ip:
+        return None
+
+    try:
+        ip_text = str(sender_ip).strip()
+    except Exception:
+        ip_text = str(sender_ip)
+    if not ip_text:
+        return None
+
+    try:
+        from foghorn.runtime_config import get_runtime_snapshot
+
+        snap = get_runtime_snapshot()
+        upstreams = list(snap.upstream_addrs or [])
+        timeout_ms = int(snap.timeout_ms)
+    except Exception:
+        upstreams = []
+        timeout_ms = 2000
+    if not upstreams:
+        return None
+
+    lowered_ip = ip_text.lower()
+
+    # Fast path: direct IP match against upstream host values.
+    for up in upstreams:
+        if not isinstance(up, dict):
+            continue
+        host = up.get("host")
+        if not isinstance(host, str):
+            continue
+        if host.strip().lower() == lowered_ip:
+            return up
+
+    # Slow path: perform a PTR lookup on the sender IP and try to match the
+    # resulting hostnames against upstream host fields.
+    try:
+        addr = ipaddress.ip_address(ip_text)
+        rev_name = addr.reverse_pointer.rstrip(".")
+    except Exception:
+        return None
+
+    try:
+        query = DNSRecord.question(rev_name, qtype=QTYPE.PTR)
+    except Exception:
+        return None
+
+    try:
+        from foghorn.servers.server import send_query_with_failover
+
+        resp_wire, _used_up, _reason = send_query_with_failover(
+            query,
+            upstreams,
+            timeout_ms,
+            rev_name,
+            QTYPE.PTR,
+        )
+    except Exception:
+        return None
+
+    if resp_wire is None:
+        return None
+
+    try:
+        resp = DNSRecord.parse(resp_wire)
+    except Exception:
+        return None
+
+    ptr_names: List[str] = []
+    try:
+        for rr in getattr(resp, "rr", []) or []:
+            if getattr(rr, "rtype", None) != QTYPE.PTR:
+                continue
+            try:
+                target = str(getattr(rr, "rdata", "")).rstrip(".").lower()
+            except Exception:
+                target = str(getattr(rr, "rdata", "")).lower()
+            if target:
+                ptr_names.append(target)
+    except Exception:
+        ptr_names = []
+
+    if not ptr_names:
+        return None
+
+    for up in upstreams:
+        if not isinstance(up, dict):
+            continue
+        host = up.get("host")
+        if not isinstance(host, str):
+            continue
+        try:
+            host_norm = host.rstrip(".").lower()
+        except Exception:
+            host_norm = str(host).lower()
+        if host_norm and host_norm in ptr_names:
+            return up
+    return None
+
+
+def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
+    """Brief: Best-effort AXFR reload for AXFR-backed plugins on NOTIFY.
+
+    Inputs:
+      - zone_name: QNAME from the NOTIFY question (typically the zone apex).
+      - upstream: Mapping describing the matched upstream host entry that sent
+        the NOTIFY.
+
+    Outputs:
+      - None; schedules background reloads for matching AXFR-backed ZoneRecords
+        plugins. Errors are logged and do not affect NOTIFY acknowledgement.
+    """
+    try:
+        zone_norm = str(zone_name).rstrip(".").lower()
+    except Exception:
+        zone_norm = str(zone_name).lower()
+    if not zone_norm:
+        return
+
+    try:
+        from foghorn.runtime_config import get_runtime_snapshot
+
+        plugins = list(get_runtime_snapshot().plugins or [])
+    except Exception:
+        plugins = []
+    if not plugins:
+        return
+
+    try:
+        from foghorn.servers import server as server_mod
+
+        submit_bg = getattr(server_mod, "_bg_submit", None)
+    except Exception:
+        submit_bg = None
+
+    if not callable(submit_bg):
+
+        def submit_bg(_key: object, fn) -> None:
+            t = threading.Thread(target=fn, daemon=True)
+            t.start()
+
+    for plugin in plugins:
+        cfg = getattr(plugin, "_axfr_zones", None)
+        if not cfg:
+            continue
+
+        try:
+            zones = [
+                str(entry.get("zone", "")).rstrip(".").lower()
+                for entry in cfg
+                if isinstance(entry, dict)
+            ]
+        except Exception:
+            continue
+
+        if zone_norm not in zones:
+            continue
+
+        def _worker(p=plugin) -> None:
+            """Brief: Background worker that re-runs AXFR-backed loads.
+
+            Inputs:
+              - p: Plugin instance whose AXFR-backed zones should be refreshed.
+
+            Outputs:
+              - None; logs and suppresses any exceptions.
+            """
+            try:
+                setattr(p, "_axfr_loaded_once", False)
+                loader_fn = getattr(p, "_load_records", None)
+                if callable(loader_fn):
+                    loader_fn()
+            except Exception:  # pragma: no cover - defensive logging only
+                logger.warning(
+                    "Error refreshing AXFR-backed zones for NOTIFY %s via upstream %r",
+                    zone_norm,
+                    upstream,
+                    exc_info=True,
+                )
+
+        with _NOTIFY_BG_LOCK:
+            if zone_norm in _NOTIFY_REFRESH_INFLIGHT:
+                continue
+            _NOTIFY_REFRESH_INFLIGHT.add(zone_norm)
+
+        def _wrapped() -> None:
+            try:
+                _worker()
+            finally:
+                with _NOTIFY_BG_LOCK:
+                    _NOTIFY_REFRESH_INFLIGHT.discard(zone_norm)
+
+        try:
+            submit_bg(zone_norm, _wrapped)
+        except Exception:  # pragma: no cover - defensive logging only
+            with _NOTIFY_BG_LOCK:
+                _NOTIFY_REFRESH_INFLIGHT.discard(zone_norm)
+            logger.warning(
+                "Failed to schedule AXFR refresh for NOTIFY %s via upstream %r",
+                zone_norm,
+                upstream,
+                exc_info=True,
+            )
+
+
+def _build_notify_response(
+    req_wire: bytes,
+    rcode: int,
+    *,
+    ede_code: Optional[int] = None,
+    ede_text: Optional[str] = None,
+) -> bytes:
+    """Brief: Build a NOTIFY response wire payload with optional EDE metadata.
+
+    Inputs:
+      - req_wire: Raw NOTIFY request wire bytes.
+      - rcode: DNS RCODE integer for the response.
+      - ede_code: Optional RFC 8914 EDE info-code.
+      - ede_text: Optional EDE text.
+
+    Outputs:
+      - bytes: Packed DNS response wire payload.
+    """
+    req = DNSRecord.parse(req_wire)
+    reply = req.reply()
+    reply.header.rcode = int(rcode)
+
+    try:
+        from foghorn.servers import server as server_mod
+
+        server_mod._echo_client_edns(req, reply)
+        if ede_code is not None:
+            server_mod._attach_ede_option(
+                req,
+                reply,
+                int(ede_code),
+                str(ede_text) if ede_text is not None else None,
+            )
+    except Exception:
+        pass
+
+    wire = reply.pack()
+    try:
+        from foghorn.servers import server as server_mod
+
+        wire = server_mod._set_response_id(wire, req.header.id)
+    except Exception:
+        pass
+    return wire
+
+
+def _handle_notify_opcode(
+    plugin: "ZoneRecords",
+    opcode: int,
+    qname: str,
+    qtype: int,
+    req: bytes,
+    ctx: PluginContext,
+) -> Optional[PluginDecision]:
+    """Brief: Handle inbound DNS NOTIFY requests for ZoneRecords.
+
+    Inputs:
+      - plugin: ZoneRecords plugin instance.
+      - opcode: Numeric DNS opcode from the request header.
+      - qname: Normalized qname from the opcode dispatch path.
+      - qtype: Numeric qtype from the opcode dispatch path.
+      - req: Raw DNS request wire bytes.
+      - ctx: PluginContext with client_ip/listener metadata.
+
+    Outputs:
+      - PluginDecision override containing the final NOTIFY response when
+        opcode is NOTIFY; None for non-NOTIFY opcodes.
+    """
+    if int(opcode) != int(getattr(OPCODE, "NOTIFY", 4)):
+        return None
+
+    req_parsed = DNSRecord.parse(req)
+    if req_parsed.questions:
+        q0 = req_parsed.questions[0]
+        notify_qname = str(q0.qname).rstrip(".")
+        notify_qtype = int(q0.qtype)
+    else:
+        notify_qname = str(qname).rstrip(".")
+        notify_qtype = int(qtype)
+
+    try:
+        listener_label = str(getattr(ctx, "listener", "") or "").lower()
+    except Exception:
+        listener_label = ""
+
+    # Preserve current server behavior: UDP listeners refuse NOTIFY.
+    if listener_label == "udp":
+        return PluginDecision(
+            action="override",
+            response=_build_notify_response(
+                req,
+                int(RCODE.REFUSED),
+                ede_code=22,
+                ede_text="NOTIFY not supported over UDP",
+            ),
+        )
+
+    try:
+        client_ip = str(getattr(ctx, "client_ip", "") or "")
+    except Exception:
+        client_ip = ""
+
+    try:
+        upstream = _resolve_notify_sender_upstream(client_ip)
+    except Exception:
+        upstream = None
+
+    if upstream is None:
+        return PluginDecision(
+            action="override",
+            response=_build_notify_response(
+                req,
+                int(RCODE.REFUSED),
+                ede_code=15,
+                ede_text="NOTIFY sender not configured as upstream",
+            ),
+        )
+
+    try:
+        from foghorn.servers.udp_server import DNSUDPHandler
+
+        upstream_id = DNSUDPHandler._upstream_id(upstream)
+    except Exception:
+        upstream_id = None
+
+    _NOTIFY_LOGGER.critical(
+        "Received DNS NOTIFY from %s (upstream=%s) for %s type %s via %s",
+        client_ip,
+        upstream_id or "unknown",
+        notify_qname,
+        QTYPE.get(notify_qtype, str(notify_qtype)),
+        listener_label or "unknown",
+    )
+
+    try:
+        _schedule_notify_axfr_refresh(notify_qname, upstream)
+    except Exception:  # pragma: no cover - defensive logging only
+        logger.warning(
+            "Unexpected error while scheduling AXFR refresh for NOTIFY from %s",
+            client_ip,
+            exc_info=True,
+        )
+
+    try:
+        zone_norm = str(notify_qname).rstrip(".").lower()
+    except Exception:
+        zone_norm = str(notify_qname).lower()
+    if zone_norm:
+        try:
+            zone_metadata = getattr(plugin, "_axfr_zone_metadata", None)
+            if not isinstance(zone_metadata, dict):
+                zone_metadata = {}
+                setattr(plugin, "_axfr_zone_metadata", zone_metadata)
+            if zone_norm not in zone_metadata:
+                zone_metadata[zone_norm] = {}
+            zone_metadata[zone_norm]["last_notify"] = time.time()
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    return PluginDecision(
+        action="override",
+        response=_build_notify_response(req, int(RCODE.NOERROR)),
+    )
+
+
 @plugin_aliases("zone", "zone_records", "custom", "records")
 class ZoneRecords(BasePlugin):
     """DNS zone records plugin with AXFR, DNSSEC, and DNS UPDATE support."""
@@ -534,19 +918,22 @@ class ZoneRecords(BasePlugin):
     def handle_opcode(
         self, opcode: int, qname: str, qtype: int, req: bytes, ctx: PluginContext
     ) -> Optional[PluginDecision]:
-        """Brief: Handle NOTIFY opcode by validating sender and triggering AXFR refresh.
+        """Brief: Handle NOTIFY and UPDATE opcodes for ZoneRecords.
 
         Inputs:
-          - opcode: Numeric opcode (expected to be NOTIFY = 4).
+          - opcode: Numeric opcode from the request header.
           - qname: Normalized zone name from the query.
-          - qtype: Query type (typically SOA for NOTIFY).
+          - qtype: Query type (SOA for NOTIFY, zone qtype for UPDATE).
           - req: Raw wire-format request bytes.
-          - ctx: PluginContext with client_ip, listener, etc.
+          - ctx: PluginContext with client_ip, listener, and transport metadata.
 
         Outputs:
-          - PluginDecision with override action and NOERROR response when NOTIFY is
-            valid and processed. Returns None to skip NOTIFY handling.
+          - PluginDecision for handled NOTIFY/UPDATE operations, or None to
+            skip opcode handling.
         """
+        notify_decision = _handle_notify_opcode(self, opcode, qname, qtype, req, ctx)
+        if notify_decision is not None:
+            return notify_decision
         return resolver.handle_opcode(self, opcode, qname, qtype, req, ctx)
 
     @classmethod
