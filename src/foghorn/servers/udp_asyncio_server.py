@@ -64,6 +64,7 @@ class _UDPProtocol(asyncio.DatagramProtocol):
       - executor: optional executor to run resolver in
       - max_inflight: global cap on in-flight resolver calls
       - max_inflight_per_ip: per-source-IP cap on in-flight resolver calls
+      - max_inflight_by_cidr: optional list of CIDR bucket limits.
 
     Outputs:
       - Async UDP handling via datagram_received.
@@ -78,6 +79,20 @@ class _UDPProtocol(asyncio.DatagramProtocol):
         max_inflight_per_ip: int,
         max_inflight_by_cidr: list[dict[str, object]] | None = None,
     ) -> None:
+        """Brief: Initialize protocol state.
+
+        Inputs:
+          - resolver: Callable (query_bytes, client_ip) -> response_bytes.
+          - executor: Optional executor for running the resolver.
+          - max_inflight: Global cap on concurrent resolver calls (min 1).
+          - max_inflight_per_ip: Per-client cap on concurrent resolver calls (min 1).
+          - max_inflight_by_cidr: Optional list of dicts with keys:
+              - cidr: CIDR string
+              - max_inflight: positive integer limit for this CIDR bucket
+
+        Outputs:
+          - None; initializes counters and optional CIDR bucket rules.
+        """
         self._resolver = resolver
         self._executor = executor
         self._max_inflight = max(1, int(max_inflight))
@@ -109,13 +124,27 @@ class _UDPProtocol(asyncio.DatagramProtocol):
         self._transport: asyncio.DatagramTransport | None = None
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:  # noqa: D401
-        """Record transport."""
+        """Brief: Record the datagram transport.
+
+        Inputs:
+          - transport: asyncio transport instance provided by the event loop.
+
+        Outputs:
+          - None; stores the transport when it is a DatagramTransport.
+        """
 
         if isinstance(transport, asyncio.DatagramTransport):
             self._transport = transport
 
     def connection_lost(self, exc: Exception | None) -> None:  # noqa: D401
-        """Drop transport reference."""
+        """Brief: Drop the transport reference.
+
+        Inputs:
+          - exc: Optional exception (unused).
+
+        Outputs:
+          - None; clears the stored transport reference.
+        """
 
         self._transport = None
 
@@ -175,7 +204,15 @@ class _UDPProtocol(asyncio.DatagramProtocol):
         return str(best_net), int(best_limit)
 
     def datagram_received(self, data: bytes, addr) -> None:  # noqa: D401
-        """Handle one UDP datagram."""
+        """Brief: Handle one UDP datagram.
+
+        Inputs:
+          - data: Raw UDP payload bytes (DNS message).
+          - addr: Address tuple provided by asyncio (ip, port).
+
+        Outputs:
+          - None; schedules background resolver work or sheds load with SERVFAIL.
+        """
 
         if not data:
             return
@@ -224,6 +261,21 @@ class _UDPProtocol(asyncio.DatagramProtocol):
     async def _handle_one(
         self, data: bytes, addr, client_ip: str, bucket_key: str | None
     ) -> None:
+        """Brief: Resolve a single datagram and reply (best-effort).
+
+        Inputs:
+          - data: DNS query wire bytes.
+          - addr: UDP client address tuple.
+          - client_ip: Normalized client IP string.
+          - bucket_key: Optional CIDR bucket key for inflight accounting.
+
+        Outputs:
+          - None; sends a UDP response when available.
+
+        Notes:
+          - Errors are swallowed to avoid killing the datagram protocol.
+          - Inflight counters are decremented in a finally block.
+        """
         try:
             loop = asyncio.get_running_loop()
             resp = await loop.run_in_executor(
@@ -256,7 +308,9 @@ class _UDPProtocol(asyncio.DatagramProtocol):
                         self._inflight_per_cidr.pop(bucket_key, None)
                     else:
                         self._inflight_per_cidr[bucket_key] = cur_b - 1
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: nocover - defensive: counter bookkeeping should not raise
                 # If counters drift due to an unexpected exception, keep going.
                 pass
 
@@ -282,6 +336,7 @@ async def serve_udp_asyncio(
       - resolver: Callable (query_bytes, client_ip) -> response_bytes.
       - max_inflight: Global cap on concurrent in-flight resolver calls.
       - max_inflight_per_ip: Per-client-IP cap on in-flight resolver calls.
+      - max_inflight_by_cidr: Optional list of CIDR bucket limits.
       - executor: Optional executor used to run the synchronous resolver.
       - stop_event: Optional asyncio.Event used to request shutdown.
       - started: Optional threading.Event set after the UDP socket is bound.
@@ -306,13 +361,17 @@ async def serve_udp_asyncio(
     if transport_out is not None:
         try:
             transport_out["transport"] = transport
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: transport_out may be a hostile mapping
             pass
 
     if started is not None:
         try:
             started.set()
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: threading.Event.set should not raise
             pass
 
     try:
@@ -323,7 +382,9 @@ async def serve_udp_asyncio(
     finally:
         try:
             transport.close()
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: nocover - defensive: transport.close() should not raise
             pass
 
 
@@ -392,6 +453,7 @@ def start_udp_asyncio_threaded(
       - resolver: Callable (query_bytes, client_ip) -> response_bytes.
       - max_inflight: Global cap on in-flight resolver calls.
       - max_inflight_per_ip: Per-client-IP cap on in-flight resolver calls.
+      - max_inflight_by_cidr: Optional list of CIDR bucket limits.
       - executor: Optional executor used to run resolver.
       - startup_timeout_s: Max seconds to wait for the socket bind to complete.
       - thread_name: Name assigned to the listener thread.
@@ -433,14 +495,18 @@ def start_udp_asyncio_threaded(
             state["exc"] = exc
             try:
                 started.set()
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: nocover - defensive: threading.Event.set should not raise
                 pass
         finally:
             try:
                 loop = state.get("loop")
                 if isinstance(loop, asyncio.AbstractEventLoop):
                     loop.close()
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: nocover - defensive: loop close may fail in unusual interpreter shutdown cases
                 pass
 
     t = threading.Thread(target=_runner, name=str(thread_name), daemon=True)
@@ -449,7 +515,9 @@ def start_udp_asyncio_threaded(
     # Wait for the bind to complete (or fail) so callers can decide on fallbacks.
     try:
         started.wait(timeout=float(startup_timeout_s))
-    except Exception:
+    except (
+        Exception
+    ):  # pragma: nocover - defensive: threading.Event.wait should not raise
         pass
 
     exc = state.get("exc")
