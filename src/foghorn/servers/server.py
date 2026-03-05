@@ -333,6 +333,7 @@ def _schedule_cache_refresh(data: bytes, client_ip: str) -> None:
 
     # Periodic upstream health cleanup can be called via DNSUDPHandler._cleanup_upstream_health
 
+
 class _UpstreamHealth:
     """Brief: Describe upstream health state for admin UI payloads.
 
@@ -342,6 +343,7 @@ class _UpstreamHealth:
     Outputs:
       - describe_upstream returns a dict of upstream status fields or None.
     """
+
     def upstream_id(self, upstream: Dict) -> str:
         """Brief: Compute a stable upstream identifier.
 
@@ -420,7 +422,9 @@ class _UpstreamHealth:
         except Exception:
             transport = None
         if not transport:
-            transport = "doh" if upstream.get("url") or upstream.get("endpoint") else "udp"
+            transport = (
+                "doh" if upstream.get("url") or upstream.get("endpoint") else "udp"
+            )
 
         url = None
         try:
@@ -533,7 +537,6 @@ def _resolve_notify_sender_upstream(sender_ip: str) -> Optional[Dict]:
         query = DNSRecord.question(rev_name, qtype=QTYPE.PTR)
     except Exception:
         return None
-
 
     try:
         resp_wire, _used_up, _reason = send_query_with_failover(
@@ -721,6 +724,7 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
         # Fall back to returning the original value when rewriting fails.
         return wire
 
+
 def _ensure_edns_request(
     req: DNSRecord, *, dnssec_mode: str, edns_udp_payload: int
 ) -> None:
@@ -749,11 +753,7 @@ def _ensure_edns_request(
             break
 
     # Decide DO flag based on dnssec_mode.
-    do_bit = (
-        0x8000
-        if str(dnssec_mode).lower() in ("passthrough", "validate")
-        else 0
-    )
+    do_bit = 0x8000 if str(dnssec_mode).lower() in ("passthrough", "validate") else 0
 
     try:
         server_max = int(edns_udp_payload)
@@ -770,7 +770,9 @@ def _ensure_edns_request(
         if client_payload <= 0:
             payload = server_max
         else:
-            payload = min(client_payload, server_max) if server_max > 0 else client_payload
+            payload = (
+                min(client_payload, server_max) if server_max > 0 else client_payload
+            )
 
         try:
             ttl_val = int(getattr(opt_rr, "ttl", 0) or 0)
@@ -1780,6 +1782,145 @@ def _resolve_core(
 
     try:
         rcode_name = "UNKNOWN"
+
+        # Compute opcode from header bits without parsing the full message. This
+        # allows us to handle UPDATE messages containing empty RRs (used for
+        # prerequisites/deletes) which dnslib cannot parse.
+        try:
+            if isinstance(data, (bytes, bytearray)) and len(data) >= 4:
+                flags = int.from_bytes(data[2:4], "big")
+                opcode = (flags >> 11) & 0x0F
+            else:
+                opcode = 0
+        except Exception:
+            opcode = 0
+
+        # Handle non-QUERY opcodes (except NOTIFY, which has its own pipeline)
+        # via plugin.handle_opcode(). This bypasses the standard query pipeline
+        # (cache/upstreams) and avoids dnslib parsing failures for RFC 2136.
+        if opcode not in (0, getattr(OPCODE, "NOTIFY", 4)):
+            import dns.message
+            import dns.rcode
+
+            try:
+                msg = dns.message.from_wire(data)
+            except Exception:
+                msg = None
+
+            qname = ""
+            qtype = 0
+            if msg is not None and getattr(msg, "question", None):
+                try:
+                    q0 = msg.question[0]
+                    qname = str(getattr(q0, "name", "")).rstrip(".")
+                    qtype = int(getattr(q0, "rdtype", 0))
+                except Exception:
+                    qname = ""
+                    qtype = 0
+
+            ctx = PluginContext(client_ip=client_ip, listener=listener, secure=secure)
+            try:
+                ctx.qname = qname
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+            for p in sorted(
+                handler.plugins, key=lambda p: getattr(p, "pre_priority", 50)
+            ):
+                try:
+                    if hasattr(p, "targets_opcode") and not p.targets_opcode(opcode):
+                        continue
+                except Exception:  # pragma: no cover - defensive
+                    pass
+
+                try:
+                    decision = p.handle_opcode(opcode, qname, qtype, data, ctx)
+                except Exception:  # pragma: no cover - defensive
+                    logger.warning("Plugin handle_opcode() raised", exc_info=True)
+                    continue
+
+                if not isinstance(decision, PluginDecision):
+                    continue
+
+                if decision.action == "drop":
+                    return _ResolveCoreResult(
+                        wire=b"",
+                        dnssec_status=None,
+                        upstream_id=None,
+                        rcode_name="DROP",
+                    )
+
+                if decision.action == "override" and decision.response is not None:
+                    wire = decision.response
+                    # Ensure the response ID matches the request ID.
+                    try:
+                        wire = _set_response_id(wire, int.from_bytes(data[0:2], "big"))
+                    except Exception:
+                        pass
+                    try:
+                        parsed = DNSRecord.parse(wire)
+                        rcode_name = RCODE.get(
+                            parsed.header.rcode, str(parsed.header.rcode)
+                        )
+                    except Exception:
+                        rcode_name = "OVERRIDE"
+                    return _ResolveCoreResult(
+                        wire=wire,
+                        dnssec_status=None,
+                        upstream_id=None,
+                        rcode_name=str(rcode_name),
+                    )
+
+                if decision.action == "deny":
+                    if msg is not None:
+                        resp = dns.message.make_response(msg)
+                        resp.set_rcode(dns.rcode.REFUSED)
+                        wire = resp.to_wire()
+                    else:
+                        # Worst-case: return a bare REFUSED header without parsing.
+                        try:
+                            mid = int.from_bytes(data[0:2], "big")
+                        except Exception:
+                            mid = 0
+                        r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1))
+                        r.header.rcode = RCODE.REFUSED
+                        wire = r.pack()
+                    try:
+                        wire = _set_response_id(wire, int.from_bytes(data[0:2], "big"))
+                    except Exception:
+                        pass
+                    return _ResolveCoreResult(
+                        wire=wire,
+                        dnssec_status=None,
+                        upstream_id=None,
+                        rcode_name="REFUSED",
+                    )
+
+            # Default: no plugin handled this opcode.
+            if msg is not None:
+                resp = dns.message.make_response(msg)
+                resp.set_rcode(dns.rcode.NOTIMP)
+                wire = resp.to_wire()
+            else:
+                # Worst-case: return a bare NOTIMP header without parsing.
+                try:
+                    mid = int.from_bytes(data[0:2], "big")
+                except Exception:
+                    mid = 0
+                r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1))
+                r.header.rcode = RCODE.NOTIMP
+                wire = r.pack()
+            try:
+                wire = _set_response_id(wire, int.from_bytes(data[0:2], "big"))
+            except Exception:
+                pass
+            return _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=None,
+                rcode_name="NOTIMP",
+            )
+
         req = DNSRecord.parse(data)
         q = req.questions[0]
         qname = str(q.qname).rstrip(".")
@@ -1901,9 +2042,7 @@ def _resolve_core(
             ctx.qname = qname
         except Exception:  # pragma: no cover - defensive
             pass
-        for p in sorted(
-            handler.plugins, key=lambda p: getattr(p, "pre_priority", 50)
-        ):
+        for p in sorted(handler.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
             try:
@@ -2312,9 +2451,7 @@ def _resolve_core(
                     pass
 
             # Decide whether to schedule a background refresh for this cache hit
-            prefetch_enabled = bool(
-                getattr(handler, "cache_prefetch_enabled", False)
-            )
+            prefetch_enabled = bool(getattr(handler, "cache_prefetch_enabled", False))
             min_ttl = int(getattr(handler, "cache_prefetch_min_ttl", 0) or 0)
             max_ttl = int(getattr(handler, "cache_prefetch_max_ttl", 0) or 0)
             window_before = float(
@@ -2466,9 +2603,7 @@ def _resolve_core(
                     or getattr(handler, "timeout_ms", 2000)
                 )
             except Exception:  # pragma: no cover - defensive
-                recursion_timeout_ms = int(
-                    getattr(handler, "timeout_ms", 2000) or 2000
-                )
+                recursion_timeout_ms = int(getattr(handler, "timeout_ms", 2000) or 2000)
             try:
                 per_try_ms = int(
                     getattr(
@@ -2663,9 +2798,7 @@ def _resolve_core(
         except Exception:  # pragma: no cover - defensive
             pass
         out = reply
-        for p in sorted(
-            handler.plugins, key=lambda p: getattr(p, "post_priority", 50)
-        ):
+        for p in sorted(handler.plugins, key=lambda p: getattr(p, "post_priority", 50)):
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
             try:
@@ -2825,15 +2958,11 @@ def _resolve_core(
                 if has_soa and (
                     rcode == RCODE.NXDOMAIN or (rcode == RCODE.NOERROR and not r.rr)
                 ):
-                    ttl = _compute_negative_ttl(
-                        r, getattr(handler, "min_cache_ttl", 0)
-                    )
+                    ttl = _compute_negative_ttl(r, getattr(handler, "min_cache_ttl", 0))
                 # Delegation / referral caching: NOERROR with no answers but NS
                 # in the authority section.
                 elif has_ns and rcode == RCODE.NOERROR and not r.rr:
-                    ttl = _compute_negative_ttl(
-                        r, getattr(handler, "min_cache_ttl", 0)
-                    )
+                    ttl = _compute_negative_ttl(r, getattr(handler, "min_cache_ttl", 0))
 
             if ttl is not None and ttl > 0:
                 cache = getattr(plugin_base, "DNS_CACHE", None)
