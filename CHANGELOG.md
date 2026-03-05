@@ -45,7 +45,7 @@ All notable changes to this project will be documented in this file.
   - Added DoH parameter size validation before base64 decoding to prevent processing oversized payloads.
   - Added automated upstream health cleanup to prevent unbounded memory growth in `upstream_health` dict.
   - Reduced default recursive `max_depth` from 16 to 12 for better DoS resistance (fully configurable via `server.resolver.max_depth`).
-- Resolver pipeline: non-QUERY opcodes (excluding NOTIFY) can now be handled by resolve plugins via `handle_opcode()` so plugins can explicitly drop, deny, or override those requests.
+- Resolver pipeline: non-QUERY opcodes can now be handled by resolve plugins via `handle_opcode()` so plugins can explicitly drop, deny, or override those requests.
 - Caching:
   - InMemoryTTLCache and SQLite3Cache can reserve capacity for NXDOMAIN responses (`max_size`, `pct_nxdomain`) to avoid NXDOMAIN floods evicting positive entries.
 - Stats/query log:
@@ -63,6 +63,8 @@ All notable changes to this project will be documented in this file.
   - Removed deprecated `success_recovery` / `failure_cap` keys from the schema.
 
 - AXFR-backed zones now respect `minimum_reload_time` and reload only when enough time has elapsed since initial load or last NOTIFY reception, or when `load_mode=replace` forces a full reload.
+- ZoneRecords now owns inbound DNS NOTIFY handling through plugin opcode dispatch; server-level NOTIFY branching was removed in favor of generic non-QUERY opcode routing.
+- Server NOTIFY helper names (`_resolve_notify_sender_upstream`, `_schedule_notify_axfr_refresh`) remain as compatibility wrappers and now delegate to ZoneRecords-owned implementations.
 - Upstreams: failover now validates upstream responses (TXID + question) and skips mismatched replies.
 - Transports: UDP upstream queries now ignore unexpected response peers (best-effort defense against off-path injection).
 - Cache: in-memory and SQLite caches can reserve separate capacity for NXDOMAIN responses to prevent cache pollution under NXDOMAIN floods.
@@ -97,6 +99,7 @@ All notable changes to this project will be documented in this file.
 
 - Updated upstream failover coverage to assert DEBUG-level (de-duplicated) skip logs for malformed upstream responses.
 - Added branch-coverage tests for ZoneRecords UPDATE/TSIG branches, asyncio UDP CIDR inflight limits, web admin config/diagram edge paths, and config/security helper normalization behavior.
+- Updated ZoneRecords resolver and server EDE-path tests to assert plugin-owned NOTIFY behavior and explicit ZoneRecords plugin loading for NOTIFY opcode coverage.
 
 ### Documentation
 - Updated README and plugin docs/examples to reflect the nested `targets` config and hook priority shorthands.
