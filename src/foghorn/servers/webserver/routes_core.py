@@ -672,8 +672,8 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
           - JSONResponse with save metadata and reload outcome.
 
         Notes:
-          - If the saved config implies restart_required, this schedules SIGHUP
-            instead of applying reload_only.
+          - If the saved config implies restart_required, reload is refused with
+            HTTP 409 and no restart is scheduled by this endpoint.
         """
 
         saved = _save_config_to_disk(body=body)
@@ -1300,7 +1300,7 @@ def _register_plugin_routes(app: FastAPI, auth_dep: Any) -> None:
             from ...plugins.resolve import base as plugin_base  # local to avoid cycles
 
             cache = getattr(plugin_base, "DNS_CACHE", None)
-        except Exception:
+        except Exception:  # pragma: no cover - import/env failure is runtime-dependent
             cache = None
 
         if cache is not None:
