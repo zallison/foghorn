@@ -235,16 +235,16 @@ def test_handle_opcode_update_dispatches_processor_with_ctx_fallbacks(
     assert captured["listener"] is None
 
 
-def test_handle_opcode_notify_returns_none_when_server_import_fails(
+def test_handle_opcode_notify_returns_override_when_server_import_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Brief: NOTIFY path falls through when server notify helpers cannot be imported.
+    """Brief: NOTIFY still returns REFUSED when optional server helper import fails.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None; asserts None when foghorn.servers.server import raises ImportError.
+      - None; asserts override decision with REFUSED response.
     """
     plugin = _Plugin()
     ctx = PluginContext(client_ip="192.0.2.1", listener="udp")
@@ -259,7 +259,7 @@ def test_handle_opcode_notify_returns_none_when_server_import_fails(
         fromlist: tuple[str, ...] = (),
         level: int = 0,
     ) -> object:
-        if name == "foghorn.servers.server":
+        if name == "foghorn.servers":
             raise ImportError("boom")
         return orig_import(name, globals, locals, fromlist, level)
 
@@ -273,20 +273,23 @@ def test_handle_opcode_notify_returns_none_when_server_import_fails(
         req,
         ctx,
     )
-    assert decision is None
+    assert decision is not None
+    assert decision.action == "override"
+    response = DNSRecord.parse(decision.response or b"")
+    assert response.header.rcode == RCODE.REFUSED
 
 
-def test_handle_opcode_notify_denies_non_udp_listener() -> None:
-    """Brief: NOTIFY requests on non-UDP listeners are denied with EDE 22.
+def test_handle_opcode_notify_refuses_udp_listener() -> None:
+    """Brief: NOTIFY requests on UDP listeners are refused.
 
     Inputs:
       - None.
 
     Outputs:
-      - None; asserts deny action and Not Supported EDE.
+      - None; asserts override action with REFUSED response.
     """
     plugin = _Plugin()
-    ctx = PluginContext(client_ip="192.0.2.1", listener="tcp")
+    ctx = PluginContext(client_ip="192.0.2.1", listener="udp")
     req = _make_query("example.com", int(QTYPE.SOA))
 
     decision = resolver.handle_opcode(
@@ -298,29 +301,30 @@ def test_handle_opcode_notify_denies_non_udp_listener() -> None:
         ctx,
     )
     assert decision is not None
-    assert decision.action == "deny"
-    assert int(decision.ede_code or -1) == 22
+    assert decision.action == "override"
+    response = DNSRecord.parse(decision.response or b"")
+    assert response.header.rcode == RCODE.REFUSED
 
 
 def test_handle_opcode_notify_denies_unknown_sender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Brief: NOTIFY requests from unknown upstreams are denied with EDE 15.
+    """Brief: NOTIFY requests from unknown upstreams are refused.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None; asserts deny action and Blocked EDE.
+      - None; asserts override action with REFUSED response.
     """
     plugin = _Plugin()
-    ctx = PluginContext(client_ip="192.0.2.1", listener="udp")
+    ctx = PluginContext(client_ip="192.0.2.1", listener="tcp")
     req = _make_query("example.com", int(QTYPE.SOA))
 
-    import foghorn.servers.server as server_mod
+    import foghorn.plugins.resolve.zone_records as zone_records_mod
 
     monkeypatch.setattr(
-        server_mod,
+        zone_records_mod,
         "_resolve_notify_sender_upstream",
         lambda _ip: None,
         raising=True,
@@ -335,8 +339,9 @@ def test_handle_opcode_notify_denies_unknown_sender(
         ctx,
     )
     assert decision is not None
-    assert decision.action == "deny"
-    assert int(decision.ede_code or -1) == 15
+    assert decision.action == "override"
+    response = DNSRecord.parse(decision.response or b"")
+    assert response.header.rcode == RCODE.REFUSED
 
 
 def test_handle_opcode_notify_valid_sender_returns_noerror_and_updates_metadata(
@@ -351,22 +356,22 @@ def test_handle_opcode_notify_valid_sender_returns_noerror_and_updates_metadata(
       - None; asserts schedule call, metadata update, and NOERROR response.
     """
     plugin = _Plugin()
-    ctx = PluginContext(client_ip="192.0.2.1", listener="udp")
+    ctx = PluginContext(client_ip="192.0.2.1", listener="tcp")
     req = _make_query("example.com", int(QTYPE.SOA))
 
-    import foghorn.servers.server as server_mod
+    import foghorn.plugins.resolve.zone_records as zone_records_mod
 
     calls: list[tuple[str, dict[str, object]]] = []
     upstream = {"host": "198.51.100.10", "port": 53, "transport": "tcp"}
 
     monkeypatch.setattr(
-        server_mod,
+        zone_records_mod,
         "_resolve_notify_sender_upstream",
         lambda _ip: upstream,
         raising=True,
     )
     monkeypatch.setattr(
-        server_mod,
+        zone_records_mod,
         "_schedule_notify_axfr_refresh",
         lambda zone, target: calls.append((str(zone), dict(target))),
         raising=True,
@@ -383,10 +388,11 @@ def test_handle_opcode_notify_valid_sender_returns_noerror_and_updates_metadata(
 
     assert decision is not None
     assert decision.action == "override"
-    assert calls == [("Example.COM.", upstream)]
+    assert calls == [("example.com", upstream)]
 
     reply = DNSRecord.parse(decision.response or b"")
     assert reply.header.rcode == RCODE.NOERROR
+    assert "last_notify" in plugin._axfr_zone_metadata["example.com"]
 
 
 def test_pre_resolve_returns_none_when_targets_do_not_match(
@@ -545,7 +551,7 @@ def test_handle_opcode_notify_tolerates_listener_getattr_errors(
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None; asserts Blocked deny response after listener access error.
+      - None; asserts REFUSED override response after listener access error.
     """
 
     class _Ctx:
@@ -558,10 +564,10 @@ def test_handle_opcode_notify_tolerates_listener_getattr_errors(
     plugin = _Plugin()
     req = _make_query("example.com", int(QTYPE.SOA))
 
-    import foghorn.servers.server as server_mod
+    import foghorn.plugins.resolve.zone_records as zone_records_mod
 
     monkeypatch.setattr(
-        server_mod,
+        zone_records_mod,
         "_resolve_notify_sender_upstream",
         lambda _ip: None,
         raising=True,
@@ -576,8 +582,9 @@ def test_handle_opcode_notify_tolerates_listener_getattr_errors(
         _Ctx(),  # type: ignore[arg-type]
     )
     assert decision is not None
-    assert decision.action == "deny"
-    assert int(decision.ede_code or -1) == 15
+    assert decision.action == "override"
+    response = DNSRecord.parse(decision.response or b"")
+    assert response.header.rcode == RCODE.REFUSED
 
 
 def test_handle_opcode_notify_handles_upstream_resolution_exceptions(
@@ -589,16 +596,16 @@ def test_handle_opcode_notify_handles_upstream_resolution_exceptions(
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None; asserts Blocked deny response.
+      - None; asserts REFUSED override response.
     """
     plugin = _Plugin()
-    ctx = PluginContext(client_ip="192.0.2.1", listener="udp")
+    ctx = PluginContext(client_ip="192.0.2.1", listener="tcp")
     req = _make_query("example.com", int(QTYPE.SOA))
 
-    import foghorn.servers.server as server_mod
+    import foghorn.plugins.resolve.zone_records as zone_records_mod
 
     monkeypatch.setattr(
-        server_mod,
+        zone_records_mod,
         "_resolve_notify_sender_upstream",
         lambda _ip: (_ for _ in ()).throw(RuntimeError("boom")),
         raising=True,
@@ -613,8 +620,9 @@ def test_handle_opcode_notify_handles_upstream_resolution_exceptions(
         ctx,
     )
     assert decision is not None
-    assert decision.action == "deny"
-    assert int(decision.ede_code or -1) == 15
+    assert decision.action == "override"
+    response = DNSRecord.parse(decision.response or b"")
+    assert response.header.rcode == RCODE.REFUSED
 
 
 def test_handle_opcode_notify_updates_existing_zone_metadata_entry(
@@ -630,19 +638,19 @@ def test_handle_opcode_notify_updates_existing_zone_metadata_entry(
     """
     plugin = _Plugin()
     plugin._axfr_zone_metadata = {"example.com": {"seed": 1}}
-    ctx = PluginContext(client_ip="192.0.2.1", listener="udp")
+    ctx = PluginContext(client_ip="192.0.2.1", listener="tcp")
     req = _make_query("example.com", int(QTYPE.SOA))
 
-    import foghorn.servers.server as server_mod
+    import foghorn.plugins.resolve.zone_records as zone_records_mod
 
     monkeypatch.setattr(
-        server_mod,
+        zone_records_mod,
         "_resolve_notify_sender_upstream",
         lambda _ip: {"host": "198.51.100.10", "port": 53},
         raising=True,
     )
     monkeypatch.setattr(
-        server_mod,
+        zone_records_mod,
         "_schedule_notify_axfr_refresh",
         lambda *_args, **_kwargs: None,
         raising=True,
