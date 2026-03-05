@@ -13,7 +13,7 @@ from dnslib import OPCODE, QTYPE, RCODE, DNSHeader, DNSRecord
 
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision
 
-from . import dnssec, helpers, notify, update_processor
+from . import dnssec, helpers, update_processor
 
 logger = logging.getLogger(__name__)
 
@@ -26,31 +26,34 @@ def handle_opcode(
     req: bytes,
     ctx: PluginContext,
 ) -> Optional[PluginDecision]:
-    """Brief: Handle NOTIFY and UPDATE opcodes for ZoneRecords.
+    """Brief: Handle DNS UPDATE opcode for ZoneRecords.
 
     Inputs:
       - plugin: ZoneRecords plugin instance.
-      - opcode: Numeric opcode (expected to be NOTIFY = 4).
+      - opcode: Numeric opcode from the DNS request header.
       - qname: Normalized zone name from the query.
-      - qtype: Query type (typically SOA for NOTIFY).
+      - qtype: Query type from the opcode dispatch path.
       - req: Raw wire-format request bytes.
       - ctx: PluginContext with client_ip, listener, etc.
 
     Outputs:
+      - For NOTIFY opcodes: Delegates to ZoneRecords module-level
+        _handle_notify_opcode() and returns its PluginDecision (or None).
       - For UPDATE opcodes: PluginDecision("override") with the wire response
         produced by update_processor.process_update_message(), when DNS UPDATE
         is enabled and the queried zone matches a configured update zone.
-      - For NOTIFY opcodes: PluginDecision("override") with a NOERROR response
-        when NOTIFY is valid and processed; deny (EDE 22) when listener is not
-        UDP; deny (EDE 15) when sender is not recognized as a configured
-        upstream; or None when NOTIFY handling should be skipped.
-
-    Notes:
-      - NOTIFY must come over UDP (RFC 1996). TCP NOTIFYs are refused with
-        EDE code 22 (Not Supported).
-      - Sender validation uses _resolve_notify_sender_upstream() to check if
-        the client IP matches a configured upstream server.
+      - For all other opcodes: None.
     """
+    if (
+        int(opcode)
+        == int(getattr(OPCODE, "NOTIFY", 4) if hasattr(OPCODE, "get") else 4)
+        or int(opcode) == 4
+    ):
+        try:
+            from foghorn.plugins.resolve.zone_records import _handle_notify_opcode
+        except Exception:
+            return None
+        return _handle_notify_opcode(plugin, opcode, qname, qtype, req, ctx)
     # DNS UPDATE (RFC 2136)
     if (
         int(opcode)
@@ -96,77 +99,7 @@ def handle_opcode(
         )
         return PluginDecision(action="override", response=response_wire)
 
-    # Import server-level NOTIFY helpers
-    try:
-        from foghorn.servers.server import (
-            _resolve_notify_sender_upstream,
-            _schedule_notify_axfr_refresh,
-        )
-    except ImportError:
-        # Fallback: NOTIFY handling not available
-        return None
-
-    # NOTIFY must come over UDP (RFC 1996). Refuse on other listeners.
-    try:
-        listener = getattr(ctx, "listener", None)
-        if listener is not None and str(listener).lower() != "udp":
-            return PluginDecision(
-                action="deny",
-                ede_code=22,
-                ede_text="Not Supported",
-            )
-    except Exception:
-        pass
-
-    # Validate that the sender is a configured upstream
-    try:
-        upstream = _resolve_notify_sender_upstream(ctx.client_ip)
-    except Exception:
-        upstream = None
-
-    if upstream is None:
-        # Unknown sender: refuse with EDE 15 (Blocked)
-        return PluginDecision(action="deny", ede_code=15, ede_text="Blocked")
-
-    # Valid NOTIFY from recognized upstream: schedule AXFR refresh and return NOERROR
-    try:
-        import time
-
-        _schedule_notify_axfr_refresh(qname, upstream)
-        # Update NOTIFY timestamp for AXFR reload timing logic
-        zone_metadata = getattr(plugin, "_axfr_zone_metadata", None) or {}
-        zone_norm = str(qname).rstrip(".").lower()
-        if zone_norm not in zone_metadata:
-            zone_metadata[zone_norm] = {}
-        zone_metadata[zone_norm]["last_notify"] = time.time()
-    except (
-        Exception
-    ):  # pragma: nocover - [defensive: AXFR refresh scheduling should not fail]
-        logger.warning(
-            "ZoneRecords: failed to schedule AXFR refresh for NOTIFY %s from %s",
-            qname,
-            ctx.client_ip,
-            exc_info=True,
-        )
-
-    # Return NOERROR response
-    try:
-        req_parsed = DNSRecord.parse(req)
-        reply = req_parsed.reply()
-        reply.header.rcode = RCODE.NOERROR
-        return PluginDecision(
-            action="override",
-            response=reply.pack(),
-        )
-    except (
-        Exception
-    ):  # pragma: nocover - [defensive: NOTIFY response construction should not fail]
-        logger.warning(
-            "ZoneRecords: failed to construct NOTIFY NOERROR response for %s",
-            qname,
-            exc_info=True,
-        )
-        return None
+    return None
 
 
 def pre_resolve(
