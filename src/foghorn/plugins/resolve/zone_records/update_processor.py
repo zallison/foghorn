@@ -2,208 +2,167 @@
 
 Inputs/Outputs:
   - Parse UPDATE message sections (Zone, Prerequisites, Update, Additional).
-  - Apply atomic updates with rollback support.
+  - Verify TSIG credentials and apply allow/block filters.
+
+Outputs:
+  - The top-level entry point returns a wire-format DNS response (bytes).
+
+Notes:
+  - Full RFC 2136 prerequisite checks and update operations are scaffolded.
+  - PSK authentication support is implemented but currently not used by
+    process_update_message() (TSIG-only for now).
 """
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import logging
-import time
 from typing import Dict, List, Optional, Tuple
 
+import dns.exception
+import dns.flags
+import dns.message
+import dns.name
+import dns.opcode
+import dns.rcode
+import dns.rdataclass
+import dns.rdatatype
+import dns.tsig
+import dns.tsigkeyring
 from dnslib import DNSRecord, QTYPE, RCODE, RR
 
 logger = logging.getLogger(__name__)
 
-# HMAC algorithms per RFC 2845
-TSIG_ALGORITHMS = {
-    "hmac-md5": hashlib.md5,
-    "hmac-sha1": hashlib.sha1,
-    "hmac-sha256": hashlib.sha256,
-    "hmac-sha384": hashlib.sha384,
-    "hmac-sha512": hashlib.sha512,
-}
-
-# Timestamp skew fudge (in seconds) - RFC 2845 suggests 5 minutes
+# Timestamp skew fudge (in seconds). BIND and dnspython default to 300.
 TSIG_TIMESTAMP_FUDGE = 300
 
 
-def parse_tsig_record(additional: List[RR]) -> Optional[Tuple[str, str, str, int]]:
-    """Brief: Parse a TSIG record from the additional section.
+def _normalize_dns_name(name: str) -> str:
+    """Brief: Normalize a DNS name for comparisons.
 
     Inputs:
-      - additional: Additional section RRs.
+      - name: DNS name, with or without trailing dot.
 
     Outputs:
-      - Tuple of (key_name, algorithm, signature, timestamp) or None.
-
-    Notes:
-      - dnslib does not currently decode TSIG RDATA into a rich structure.
-        This parser is best-effort and must be hardened before use in
-        production authentication.
+      - Lowercased name without trailing dot.
     """
-
-    for rr in additional:
-        if QTYPE[rr.rtype] != "TSIG":
-            continue
-
-        try:
-            data = rr.rdata
-            if not isinstance(data, (bytes, bytearray)):
-                logger.warning("TSIG RDATA is not raw bytes; cannot parse")
-                return None
-
-            if len(data) < 10:
-                return None
-
-            # Extract fields (simplified - RFC 2845 section 4.5.2)
-            key_data_start = 22
-            if len(data) < key_data_start:
-                return None
-
-            key_name_len = data[key_data_start]
-            key_name = data[
-                key_data_start + 1 : key_data_start + 1 + key_name_len
-            ].decode("utf-8")
-
-            sig_data_pos = key_data_start + 1 + key_name_len
-            if len(data) < sig_data_pos + 1:
-                return None
-
-            algorithm = data[sig_data_pos : sig_data_pos + 1].decode("utf-8")
-            signature_offset = sig_data_pos + 1
-
-            timestamp_bytes = data[4:10]
-            timestamp = int.from_bytes(timestamp_bytes, "big")
-
-            signature = base64.b64encode(data[signature_offset:]).decode("utf-8")
-
-            return key_name, algorithm, signature, timestamp
-        except Exception as exc:
-            logger.warning("Failed to parse TSIG record: %s", exc)
-            return None
-
-    return None
+    return str(name).rstrip(".").lower()
 
 
-def verify_tsig_signature(
-    request_data: bytes,
-    key_name: str,
-    algorithm: str,
-    secret: str,
-    signature: str,
-    timestamp: int,
-) -> bool:
-    """Brief: Verify TSIG signature.
+def _normalize_tsig_algorithm(alg: str) -> str:
+    """Brief: Normalize a TSIG algorithm name.
 
     Inputs:
-      - request_data: Original request bytes.
-      - key_name: TSIG key name.
-      - algorithm: HMAC algorithm (hmac-md5, hmac-sha256, hmac-sha512).
-      - secret: Base64-encoded secret.
-      - signature: Signature from TSIG record.
-      - timestamp: TSIG timestamp.
+      - alg: TSIG algorithm text (e.g. 'hmac-sha256.', 'hmac-md5.sig-alg.reg.int.').
 
     Outputs:
-      - bool: True if signature valid.
+      - Normalized algorithm identifier (e.g. 'hmac-sha256', 'hmac-md5').
     """
-    # Check timestamp skew
-    current_time = int(time.time())
-    if abs(current_time - timestamp) > TSIG_TIMESTAMP_FUDGE:
-        logger.warning(
-            "TSIG timestamp skew too large: %s seconds (fudge=%s)",
-            abs(current_time - timestamp),
-            TSIG_TIMESTAMP_FUDGE,
-        )
-        return False
-
-    # Get HMAC function
-    hash_func = TSIG_ALGORITHMS.get(algorithm.lower())
-    if not hash_func:
-        logger.warning("Unsupported TSIG algorithm: %s", algorithm)
-        return False
-
-    # Decode secret
-    try:
-        key_bytes = base64.b64decode(secret)
-    except Exception:
-        logger.warning("Failed to decode TSIG secret")
-        return False
-
-    # Recompute signature
-    try:
-        # Remove TSIG from data to recompute signature
-        # This is simplified - full RFC 2845 requires removing the TSIG RR itself
-        # For now, we'll verify the signature against a known format
-        computed_sig = hmac.new(key_bytes, request_data[:-16], hash_func).digest()
-        computed_sig_base64 = base64.b64encode(computed_sig).decode("utf-8")
-
-        # Constant-time comparison to avoid timing attacks
-        if len(signature) != len(computed_sig_base64):
-            return False
-
-        result = 0
-        for a, b in zip(signature, computed_sig_base64):
-            result |= ord(a) ^ ord(b)
-
-        return result == 0
-    except Exception as exc:
-        logger.warning("TSIG signature verification failed: %s", exc)
-        return False
+    a = str(alg).rstrip(".").lower()
+    if "hmac-sha512" in a:
+        return "hmac-sha512"
+    if "hmac-sha384" in a:
+        return "hmac-sha384"
+    if "hmac-sha256" in a:
+        return "hmac-sha256"
+    if "hmac-sha1" in a:
+        return "hmac-sha1"
+    if "hmac-md5" in a:
+        return "hmac-md5"
+    return a
 
 
 def verify_tsig_auth(
     request_data: bytes,
-    additional: List[RR],
-    zone_config: dict,
     key_configs: List[dict],
-) -> Tuple[bool, Optional[str]]:
-    """Brief: Verify TSIG authentication.
+) -> Tuple[bool, Optional[str], Optional[dict]]:
+    """Brief: Verify TSIG authentication (RFC 2845) using dnspython.
 
     Inputs:
-      - request_data: Raw DNS UPDATE request bytes.
-      - additional: Additional section RRs.
-      - zone_config: Zone configuration.
-      - key_configs: List of TSIG key configurations.
+      - request_data: Raw DNS message bytes.
+      - key_configs: List of configured TSIG keys.
+        Each dict should include:
+          * name: key name (DNS name)
+          * algorithm: 'hmac-md5' | 'hmac-sha256' | 'hmac-sha512'
+          * secret: base64-encoded secret
 
     Outputs:
-      - Tuple of (authorized, error_message) or (False, error).
+      - (authorized, error_message, key_config)
+        where key_config is the matching dict on success.
+
+    Notes:
+      - dnspython performs the full canonical TSIG MAC calculation per RFC 2845,
+        including correct treatment of the TSIG RR and message header counts.
+      - We additionally enforce a maximum allowed TSIG fudge (300s) to match the
+        project's security expectations.
     """
-    # Parse TSIG from additional section
-    tsig_data = parse_tsig_record(additional)
-    if not tsig_data:
-        return False, "No valid TSIG record found"
+    if not key_configs:
+        return False, "No TSIG keys configured", None
 
-    key_name, algorithm, signature, timestamp = tsig_data
-
-    # Find matching key configuration
-    key_config = None
+    textring: Dict[str, object] = {}
     for cfg in key_configs:
-        if isinstance(cfg, dict) and cfg.get("name", "") == key_name:
-            key_config = cfg
-            break
+        if not isinstance(cfg, dict):
+            continue
+        name = cfg.get("name")
+        secret = cfg.get("secret")
+        if not name or not secret:
+            continue
+        # dns.tsigkeyring.from_text supports mapping name -> base64_secret
+        # (we enforce algorithm separately after verification)
+        textring[str(name)] = str(secret)
 
-    if not key_config:
-        return False, f"Unknown TSIG key: {key_name}"
+    if not textring:
+        return False, "No usable TSIG keys configured", None
 
-    if algorithm != key_config.get("algorithm", "hmac-sha256"):
-        return False, f"TSIG algorithm mismatch: expected {key_config.get('algorithm')}"
+    try:
+        keyring = dns.tsigkeyring.from_text(textring)
+    except Exception as exc:
+        return False, f"Failed to build TSIG keyring: {exc}", None
 
-    # Verify signature
-    if not verify_tsig_signature(
-        request_data,
-        key_name,
-        algorithm,
-        key_config.get("secret", ""),
-        signature,
-        timestamp,
-    ):
-        return False, "TSIG signature verification failed"
+    try:
+        msg = dns.message.from_wire(request_data, keyring=keyring)
+    except dns.tsig.PeerBadKey as exc:
+        return False, f"Unknown TSIG key: {exc}", None
+    except dns.tsig.BadSignature:
+        return False, "TSIG signature verification failed", None
+    except dns.tsig.PeerBadTime:
+        return False, "TSIG time verification failed", None
+    except dns.exception.DNSException as exc:
+        return False, f"TSIG verification error: {exc}", None
 
-    return True, None
+    if not getattr(msg, "had_tsig", False):
+        return False, "No TSIG present", None
+
+    try:
+        tsig_rr = msg.tsig[0]
+        fudge = int(getattr(tsig_rr, "fudge", 0))
+    except Exception:
+        fudge = 0
+
+    if fudge and fudge > TSIG_TIMESTAMP_FUDGE:
+        return False, f"TSIG fudge too large ({fudge}s)", None
+
+    keyname = _normalize_dns_name(getattr(msg, "keyname", ""))
+    keyalgorithm = _normalize_tsig_algorithm(getattr(msg, "keyalgorithm", ""))
+
+    for cfg in key_configs:
+        if not isinstance(cfg, dict):
+            continue
+        if _normalize_dns_name(cfg.get("name", "")) != keyname:
+            continue
+        expected_alg = _normalize_tsig_algorithm(cfg.get("algorithm", "hmac-sha256"))
+        if expected_alg and expected_alg != keyalgorithm:
+            return (
+                False,
+                f"TSIG algorithm mismatch (expected {expected_alg}, got {keyalgorithm})",
+                None,
+            )
+        return True, None, cfg
+
+    return (
+        False,
+        "TSIG key not configured",
+        None,
+    )  # pragma: nocover - [unreachable: verified key must exist in key_configs]
 
 
 def verify_psk_auth(
@@ -281,30 +240,258 @@ def process_update_message(
     plugin: object,
     client_ip: str,
     listener: Optional[str] = None,
-) -> Tuple[int, Optional[str]]:
-    """Brief: Process a DNS UPDATE message.
+) -> bytes:
+    """Brief: Process a DNS UPDATE message (RFC 2136).
 
     Inputs:
       - request_data: Wire-format UPDATE request.
-      - zone_apex: Zone apex.
-      - zone_config: Zone configuration dict.
+      - zone_apex: Zone apex (no trailing dot preferred).
+      - zone_config: Zone configuration dict for the specific apex.
       - plugin: ZoneRecords plugin instance.
-      - client_ip: Client IP address (string).
+      - client_ip: Client IP address string.
       - listener: Listener type (dot/doh/udp/tcp).
 
     Outputs:
-      - Tuple of (rcode, error_message).
+      - Wire-format DNS response bytes.
 
     Notes:
-      - This function is currently a scaffold; prerequisite checks and update
-        operations are not yet implemented.
+      - Parsing is done with dnspython to support RFC 2136 messages which may
+        contain empty RRs in prereq/update sections.
+      - For now, this function performs basic validation and TSIG authentication
+        and returns NOTIMP after authorization succeeds.
     """
 
-    parsed = parse_update_message(request_data)
-    if not parsed:
-        return RCODE.FORMERR, "Failed to parse UPDATE message"
+    # 1) Parse the request using dnspython. If TSIG keys are configured, require
+    # TSIG and verify signature.
+    tsig_cfg = zone_config.get("tsig") if isinstance(zone_config, dict) else None
+    if isinstance(tsig_cfg, dict):
+        key_configs = list(tsig_cfg.get("keys") or [])
+    else:
+        key_configs = []
 
-    return RCODE.NOTIMP, "DNS UPDATE processing not implemented"
+    have_auth_config = bool(key_configs)
+
+    # Build keyring mapping for dnspython.
+    keyring_text: Dict[str, str] = {}
+    for cfg in key_configs:
+        if not isinstance(cfg, dict):
+            continue
+        name = cfg.get("name")
+        secret = cfg.get("secret")
+        if not name or not secret:
+            continue
+        keyring_text[str(name)] = str(secret)
+
+    try:
+        keyring = dns.tsigkeyring.from_text(keyring_text) if keyring_text else None
+    except Exception:
+        keyring = None
+
+    request_msg: dns.message.Message | None = None
+    matching_tsig_cfg: Optional[dict] = None
+
+    if keyring is not None:
+        try:
+            request_msg = dns.message.from_wire(request_data, keyring=keyring)
+        except dns.tsig.PeerBadKey:
+            request_msg = None
+        except dns.tsig.BadSignature:
+            request_msg = None
+        except dns.tsig.PeerBadTime:
+            request_msg = None
+        except dns.exception.DNSException:
+            request_msg = None
+    else:
+        # No keys configured; still parse so we can build a response.
+        try:
+            request_msg = dns.message.from_wire(request_data, ignore_trailing=True)
+        except Exception:
+            request_msg = None
+
+    if request_msg is None:
+        # Worst-case fallback: cannot parse; return a bare FORMERR response.
+        try:
+            import struct
+
+            mid = (
+                struct.unpack("!H", request_data[:2])[0]
+                if len(request_data) >= 2
+                else 0
+            )
+        except Exception:
+            mid = 0
+        resp = dns.message.Message(id=int(mid))
+        resp.flags |= dns.flags.QR
+        resp.set_rcode(dns.rcode.FORMERR)
+        return resp.to_wire()
+
+    # Enforce opcode=UPDATE.
+    try:
+        if int(request_msg.opcode()) != int(dns.opcode.UPDATE):
+            resp = dns.message.make_response(request_msg)
+            resp.set_rcode(dns.rcode.FORMERR)
+            return resp.to_wire()
+    except Exception:
+        resp = dns.message.make_response(request_msg)
+        resp.set_rcode(dns.rcode.FORMERR)
+        return resp.to_wire()
+
+    # 2) Zone section validation: must contain exactly one SOA RR, and the owner
+    # must match the configured zone apex.
+    try:
+        apex_norm = _normalize_dns_name(zone_apex)
+    except Exception:
+        apex_norm = str(zone_apex).rstrip(".").lower()
+
+    # Zone section must contain exactly one SOA RRset for the zone apex. In
+    # UPDATE messages the SOA RRset is often *empty* (no rdata); we validate the
+    # owner name and type/class rather than requiring any rdatas.
+    try:
+        zone_rrsets = list(getattr(request_msg, "zone", []) or [])
+    except Exception:
+        zone_rrsets = []
+
+    zone_rrset = zone_rrsets[0] if len(zone_rrsets) == 1 else None
+    if zone_rrset is None:
+        resp = dns.message.make_response(request_msg)
+        resp.set_rcode(dns.rcode.NOTZONE)
+        if getattr(request_msg, "had_tsig", False) and keyring is not None:
+            try:
+                resp.use_tsig(
+                    keyring=keyring,
+                    keyname=request_msg.keyname,
+                    algorithm=request_msg.keyalgorithm,
+                )
+            except Exception:
+                pass
+        return resp.to_wire()
+
+    try:
+        zone_owner_norm = _normalize_dns_name(getattr(zone_rrset, "name", ""))
+    except Exception:
+        zone_owner_norm = ""
+
+    try:
+        zone_class = int(getattr(zone_rrset, "rdclass", 0) or 0)
+    except Exception:
+        zone_class = 0
+
+    try:
+        zone_type = int(getattr(zone_rrset, "rdtype", 0) or 0)
+    except Exception:
+        zone_type = 0
+
+    if (
+        zone_owner_norm != apex_norm
+        or zone_class != int(dns.rdataclass.IN)
+        or zone_type != int(dns.rdatatype.SOA)
+    ):
+        resp = dns.message.make_response(request_msg)
+        resp.set_rcode(dns.rcode.NOTZONE)
+        if getattr(request_msg, "had_tsig", False) and keyring is not None:
+            try:
+                resp.use_tsig(
+                    keyring=keyring,
+                    keyname=request_msg.keyname,
+                    algorithm=request_msg.keyalgorithm,
+                )
+            except Exception:
+                pass
+        return resp.to_wire()
+
+    # 3) Authorization: client allowlist + TSIG requirement (TSIG-only for now).
+    ctx = UpdateContext(
+        zone_apex=apex_norm, client_ip=str(client_ip), listener=listener, plugin=plugin
+    )
+
+    ok, _err = verify_client_authorization(ctx, zone_config=zone_config)
+    if not ok:
+        resp = dns.message.make_response(request_msg)
+        resp.set_rcode(dns.rcode.REFUSED)
+        if getattr(request_msg, "had_tsig", False) and keyring is not None:
+            try:
+                resp.use_tsig(
+                    keyring=keyring,
+                    keyname=request_msg.keyname,
+                    algorithm=request_msg.keyalgorithm,
+                )
+            except Exception:
+                pass
+        return resp.to_wire()
+
+    # Require TSIG when keys are configured; otherwise refuse as "not authorized".
+    if have_auth_config:
+        if not getattr(request_msg, "had_tsig", False):
+            resp = dns.message.make_response(request_msg)
+            resp.set_rcode(dns.rcode.NOTAUTH)
+            return resp.to_wire()
+
+        # Enforce configured algorithm mapping for this key.
+        try:
+            keyname_norm = _normalize_dns_name(getattr(request_msg, "keyname", ""))
+            keyalg_norm = _normalize_tsig_algorithm(
+                getattr(request_msg, "keyalgorithm", "")
+            )
+        except Exception:
+            keyname_norm = ""
+            keyalg_norm = ""
+
+        for cfg in key_configs:
+            if not isinstance(cfg, dict):
+                continue
+            if _normalize_dns_name(cfg.get("name", "")) != keyname_norm:
+                continue
+            expected_alg = _normalize_tsig_algorithm(
+                cfg.get("algorithm", "hmac-sha256")
+            )
+            if expected_alg and expected_alg != keyalg_norm:
+                resp = dns.message.make_response(request_msg)
+                resp.set_rcode(dns.rcode.NOTAUTH)
+                return resp.to_wire()
+            matching_tsig_cfg = cfg
+            break
+
+        if matching_tsig_cfg is None:
+            resp = dns.message.make_response(request_msg)
+            resp.set_rcode(dns.rcode.NOTAUTH)
+            return resp.to_wire()
+
+        # Enforce max fudge.
+        try:
+            tsig_rr = request_msg.tsig[0]
+            fudge = int(getattr(tsig_rr, "fudge", 0) or 0)
+        except Exception:
+            fudge = 0
+        if fudge and fudge > TSIG_TIMESTAMP_FUDGE:
+            resp = dns.message.make_response(request_msg)
+            resp.set_rcode(dns.rcode.NOTAUTH)
+            return resp.to_wire()
+
+        ctx.is_authorized = True
+        ctx.auth_method = "tsig"
+        ctx.tsig_key_config = matching_tsig_cfg
+    else:
+        # No auth configured for this zone: refuse to avoid accidental open updates.
+        resp = dns.message.make_response(request_msg)
+        resp.set_rcode(dns.rcode.NOTAUTH)
+        return resp.to_wire()
+
+    # 4) Processing pipeline (not yet implemented).
+    resp = dns.message.make_response(request_msg)
+    resp.set_rcode(dns.rcode.NOTIMP)
+
+    # Sign the response when the request was TSIG-verified.
+    if getattr(request_msg, "had_tsig", False) and keyring is not None:
+        try:
+            resp.use_tsig(
+                keyring=keyring,
+                keyname=request_msg.keyname,
+                algorithm=request_msg.keyalgorithm,
+            )
+        except Exception:
+            pass
+
+    return resp.to_wire()
 
 
 def verify_client_authorization(
@@ -433,17 +620,21 @@ def verify_value_authorization(
     return True
 
 
-def parse_update_message(data: bytes) -> Optional[DNSRecord]:
-    """Brief: Parse UPDATE message.
+def parse_update_message(data: bytes) -> Optional[dns.message.Message]:
+    """Brief: Parse an UPDATE-like DNS message using dnspython.
 
     Inputs:
-      - data: Wire-format UPDATE message.
+      - data: Wire-format DNS message bytes.
 
     Outputs:
-      - DNSRecord or None on parse error.
+      - dnspython Message object, or None on parse error.
+
+    Notes:
+      - This uses dnspython (not dnslib) so that RFC 2136 UPDATE messages with
+        empty RRs in prerequisite/update sections can be parsed.
     """
     try:
-        return DNSRecord.parse(data)
+        return dns.message.from_wire(data, ignore_trailing=True)
     except Exception as exc:
         logger.warning("Failed to parse UPDATE message: %s", exc)
         return None
@@ -463,6 +654,9 @@ def check_prerequisites(
 
     Outputs:
       - Tuple of (rcode, error_message). RCODE=0 (NOERROR) if all pass.
+
+    Notes:
+      - Not yet implemented; this currently always returns NOERROR.
     """
     # TODO: Implement RFC 2136 prerequisite types:
     # - CLASS=ANY: RRSET existence
@@ -515,6 +709,10 @@ def apply_update_operations(
 
     Outputs:
       - Tuple of (rcode, error_message). RCODE=0 (NOERROR) on success.
+
+    Notes:
+      - Update semantics are not yet implemented; this currently does not mutate
+        plugin.records and always returns NOERROR.
     """
     from foghorn.plugins.resolve.zone_records.loader import load_records
 
@@ -535,15 +733,26 @@ def apply_update_operations(
         pass
 
         return 0, None
-    except Exception as exc:
+    except (
+        Exception
+    ) as exc:  # pragma: nocover - [rollback path requires real update operations]
         # Rollback
-        logger.warning("Update failed: %s", exc, exc_info=True)
-        if lock is None:
-            plugin.records = snapshot
-        else:
-            with lock:
-                plugin.records = snapshot
-        return 2, "SERVFAIL: Update operation failed"
+        logger.warning(
+            "Update failed: %s", exc, exc_info=True
+        )  # pragma: nocover - [rollback path requires real update operations]
+        if (
+            lock is None
+        ):  # pragma: nocover - [rollback path requires real update operations]
+            plugin.records = snapshot  # pragma: nocover - [rollback path requires real update operations]
+        else:  # pragma: nocover - [rollback path requires real update operations]
+            with (
+                lock
+            ):  # pragma: nocover - [rollback path requires real update operations]
+                plugin.records = snapshot  # pragma: nocover - [rollback path requires real update operations]
+        return (
+            2,
+            "SERVFAIL: Update operation failed",
+        )  # pragma: nocover - [rollback path requires real update operations]
 
 
 def build_update_response(
@@ -562,6 +771,9 @@ def build_update_response(
 
     Outputs:
       - Wire-format response bytes.
+
+    Notes:
+      - EDE option attachment is scaffolded and currently not implemented.
     """
     import struct
 
