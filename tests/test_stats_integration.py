@@ -40,7 +40,10 @@ def test_stats_collected_on_query(set_runtime_snapshot):
     handler.request = (query_wire, mock_sock)
     handler.client_address = ("192.0.2.1", 12345)
 
-    with patch.object(DNSRecord, "send", return_value=response_wire):
+    with patch(
+        "foghorn.servers.server.send_query_with_failover",
+        return_value=(response_wire, {"host": "8.8.8.8", "port": 53}, "ok"),
+    ):
         try:
             handler.handle()
         except Exception:  # pragma: no cover

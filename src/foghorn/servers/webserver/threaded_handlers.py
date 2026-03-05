@@ -847,7 +847,14 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
     def _handle_config_json(
         self,
     ) -> None:  # pragma: no cover - threaded /config.json mirrors FastAPI endpoint
-        """Brief: Handle GET /config.json (sanitized JSON config)."""
+        """Brief: Handle GET /config.json (sanitized JSON config).
+
+        Inputs:
+          - None (uses in-memory server config).
+
+        Outputs:
+          - JSON payload containing server_time and sanitized config mapping.
+        """
 
         if not self._require_auth():
             return
@@ -864,7 +871,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
     def _handle_config_raw(
         self,
     ) -> None:  # pragma: no cover - threaded /config_raw mirrors FastAPI /config/raw
-        """Brief: Handle GET /config_raw to return on-disk configuration as raw YAML.
+        """Brief: Handle GET /config/raw to return on-disk configuration as raw YAML.
 
         Inputs:
           - None (uses self.server.config_path to locate YAML file).
@@ -1857,7 +1864,7 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
           - JSON describing outcome (status, server_time, path, backed_up_to, reload).
 
         Notes:
-          - If restart_required is detected, schedules SIGHUP instead of reloading.
+          - If restart_required is detected, returns HTTP 409 and skips reload.
         """
 
         if not self._require_auth():
