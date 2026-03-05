@@ -448,7 +448,10 @@ class BasePlugin:
         # Legacy top-level keys (only used when the nested key is absent).
         if "ignore_ips" not in targets_cfg and config.get("targets_ignore") is not None:
             targets_cfg["ignore_ips"] = config.get("targets_ignore")
-        if "listeners" not in targets_cfg and config.get("targets_listener") is not None:
+        if (
+            "listeners" not in targets_cfg
+            and config.get("targets_listener") is not None
+        ):
             targets_cfg["listeners"] = config.get("targets_listener")
         if "domains" not in targets_cfg and config.get("targets_domains") is not None:
             targets_cfg["domains"] = config.get("targets_domains")
@@ -460,12 +463,8 @@ class BasePlugin:
 
         # Optional client targeting: normalize targets.ips into
         # ipaddress network lists for use by plugins.
-        self._target_networks = self._parse_network_list(
-            targets_cfg.get("ips")
-        )
-        self._ignore_networks = self._parse_network_list(
-            targets_cfg.get("ignore_ips")
-        )
+        self._target_networks = self._parse_network_list(targets_cfg.get("ips"))
+        self._ignore_networks = self._parse_network_list(targets_cfg.get("ignore_ips"))
 
         # Optional domain targeting: restrict this plugin to specific qname
         # patterns (exact or suffix-based) using normalized lower-case names.
@@ -496,9 +495,15 @@ class BasePlugin:
 
         # Optional opcode targeting: normalize configured opcodes into
         # uppercase mnemonic values or integer codes.
+        #
+        # Prefer explicit config (targets.opcodes or target_opcodes). When absent,
+        # fall back to the class-level target_opcodes so plugins can opt into
+        # handling non-QUERY opcodes without requiring per-instance config.
         raw_opcodes_cfg = targets_cfg.get("opcodes")
         if raw_opcodes_cfg is None:
             raw_opcodes_cfg = config.get("target_opcodes")
+        if raw_opcodes_cfg is None:
+            raw_opcodes_cfg = getattr(self.__class__, "target_opcodes", ("QUERY",))
         self._target_opcodes = self._normalize_opcode_list(raw_opcodes_cfg)
 
         # Optional rcode targeting for post-resolve plugins: normalize
@@ -1187,7 +1192,9 @@ class BasePlugin:
         else:
             # Check mnemonic string match
             rcode_str = str(rcode).upper()
-            return rcode_str in {str(rc).upper() for rc in rcodes if not isinstance(rc, int)}
+            return rcode_str in {
+                str(rc).upper() for rc in rcodes if not isinstance(rc, int)
+            }
 
     def handle_opcode(
         self,
@@ -1370,9 +1377,7 @@ class BasePlugin:
                 "opcodes": list(
                     getattr(self, "_target_opcodes", ["QUERY"]) or ["QUERY"]
                 ),
-                "rcodes": list(
-                    getattr(self, "_target_rcodes", ["*"]) or ["*"]
-                ),
+                "rcodes": list(getattr(self, "_target_rcodes", ["*"]) or ["*"]),
             },
         }
 
