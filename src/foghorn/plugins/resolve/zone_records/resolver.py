@@ -26,7 +26,7 @@ def handle_opcode(
     req: bytes,
     ctx: PluginContext,
 ) -> Optional[PluginDecision]:
-    """Brief: Handle NOTIFY opcode by validating sender and triggering AXFR refresh.
+    """Brief: Handle NOTIFY and UPDATE opcodes for ZoneRecords.
 
     Inputs:
       - plugin: ZoneRecords plugin instance.
@@ -37,10 +37,13 @@ def handle_opcode(
       - ctx: PluginContext with client_ip, listener, etc.
 
     Outputs:
-      - PluginDecision with override action and NOERROR response when NOTIFY is
-        valid and processed. Returns deny (EDE 22) when listener is not UDP, or
-        deny (EDE 15) when sender is not recognized as a configured upstream.
-        Returns None to skip NOTIFY handling (fallback to other plugins).
+      - For UPDATE opcodes: PluginDecision("override") with the wire response
+        produced by update_processor.process_update_message(), when DNS UPDATE
+        is enabled and the queried zone matches a configured update zone.
+      - For NOTIFY opcodes: PluginDecision("override") with a NOERROR response
+        when NOTIFY is valid and processed; deny (EDE 22) when listener is not
+        UDP; deny (EDE 15) when sender is not recognized as a configured
+        upstream; or None when NOTIFY handling should be skipped.
 
     Notes:
       - NOTIFY must come over UDP (RFC 1996). TCP NOTIFYs are refused with
@@ -48,6 +51,51 @@ def handle_opcode(
       - Sender validation uses _resolve_notify_sender_upstream() to check if
         the client IP matches a configured upstream server.
     """
+    # DNS UPDATE (RFC 2136)
+    if (
+        int(opcode)
+        == int(getattr(OPCODE, "UPDATE", 5) if hasattr(OPCODE, "get") else 5)
+        or int(opcode) == 5
+    ):
+        dns_update_cfg = getattr(plugin, "_dns_update_config", None)
+        if not isinstance(dns_update_cfg, dict) or not bool(
+            dns_update_cfg.get("enabled", False)
+        ):
+            return None
+
+        zone_norm = str(qname).rstrip(".").lower()
+        zone_cfg = None
+        for z in dns_update_cfg.get("zones", []) or []:
+            if not isinstance(z, dict):
+                continue
+            apex = str(z.get("zone", "")).rstrip(".").lower()
+            if apex and apex == zone_norm:
+                zone_cfg = z
+                break
+
+        if zone_cfg is None:
+            return None
+
+        try:
+            listener = getattr(ctx, "listener", None)
+        except Exception:
+            listener = None
+
+        try:
+            client_ip = getattr(ctx, "client_ip", "")
+        except Exception:
+            client_ip = ""
+
+        response_wire = update_processor.process_update_message(
+            req,
+            zone_apex=zone_norm,
+            zone_config=zone_cfg,
+            plugin=plugin,
+            client_ip=str(client_ip),
+            listener=str(listener) if listener is not None else None,
+        )
+        return PluginDecision(action="override", response=response_wire)
+
     # Import server-level NOTIFY helpers
     try:
         from foghorn.servers.server import (
@@ -148,8 +196,12 @@ def pre_resolve(
         correct CNAME and QTYPE.ANY semantics and synthesize NODATA and
         NXDOMAIN responses with SOA in the authority section.
       - For names outside any authoritative zone, preserve the historical
-        behaviour and only answer when there is an exact (name, qtype)
-        entry, falling through to upstreams otherwise.
+        behaviour by answering exact (name, qtype) entries and wildcard-owner
+        matches from the in-memory name index, falling through to upstreams
+        otherwise.
+      - When nxdomain_zones is configured, names under matching suffixes are
+        treated as authoritative even without an SOA, returning CNAME/positive
+        answers, NODATA, or NXDOMAIN based on available RRsets.
       - When the client advertises EDNS(0) with DO=1, include RRSIG and
         DNSKEY RRsets from the zone data in positive answers.
     """
