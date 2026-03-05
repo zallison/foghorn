@@ -71,12 +71,16 @@ def combine_lists(
     """Brief: Combine inline list with entries from files.
 
     Inputs:
-      - inline: Inline list.
-      - files: File paths.
-      - loader_func: Function to load from file.
+      - inline: Inline list (may be None).
+      - files: File paths to load and append (may be None).
+      - loader_func: Function used to load entries from each file.
 
     Outputs:
-      - Combined list (union of inline and file entries).
+      - Combined list (inline entries followed by file-loaded entries).
+
+    Notes:
+      - This function does not de-duplicate; callers should treat it as an
+        ordered concatenation helper.
     """
     combined = list(inline or [])
     if files:
@@ -113,17 +117,51 @@ def collect_update_file_paths(dns_update_config: dict) -> List[str]:
 
     Outputs:
       - List of unique file paths.
+
+    Notes:
+      - Includes both zone-level lists and per-TSIG-key / per-PSK-token scope files.
     """
     file_set = set()
     zones = dns_update_config.get("zones", []) or []
 
+    def _collect_scope_files(scope: dict) -> None:
+        """Collect allow/block scope file paths from a scope dict.
+
+        Inputs:
+          - scope: dict which may contain *_files entries.
+
+        Outputs:
+          - None; updates outer file_set.
+        """
+        if not isinstance(scope, dict):
+            return
+        file_set.update(scope.get("allow_names_files") or [])
+        file_set.update(scope.get("block_names_files") or [])
+        file_set.update(scope.get("allow_update_ips_files") or [])
+        file_set.update(scope.get("block_update_ips_files") or [])
+
     for zone in zones:
-        if isinstance(zone, dict):
-            file_set.update(zone.get("allow_names_files") or [])
-            file_set.update(zone.get("block_names_files") or [])
-            file_set.update(zone.get("allow_clients_files") or [])
-            file_set.update(zone.get("allow_update_ips_files") or [])
-            file_set.update(zone.get("block_update_ips_files") or [])
+        if not isinstance(zone, dict):
+            continue
+
+        # Zone-level lists
+        file_set.update(zone.get("allow_names_files") or [])
+        file_set.update(zone.get("block_names_files") or [])
+        file_set.update(zone.get("allow_clients_files") or [])
+        file_set.update(zone.get("allow_update_ips_files") or [])
+        file_set.update(zone.get("block_update_ips_files") or [])
+
+        # Per-TSIG key scopes
+        tsig = zone.get("tsig")
+        if isinstance(tsig, dict):
+            for key_cfg in tsig.get("keys", []) or []:
+                _collect_scope_files(key_cfg)
+
+        # Per-PSK token scopes
+        psk = zone.get("psk")
+        if isinstance(psk, dict):
+            for tok_cfg in psk.get("tokens", []) or []:
+                _collect_scope_files(tok_cfg)
 
     return list(file_set)
 
@@ -240,20 +278,27 @@ def tsig_hmac_verify(
     tsig_mac: bytes,
     msg_id: int,
 ) -> bool:
-    """Brief: Verify TSIG HMAC per RFC 2845.
+    """Brief: Verify a timestamped HMAC over msg.
 
     Inputs:
-      - key_name: TSIG key name.
+      - key_name: TSIG key name (currently unused; reserved for future RFC 2845
+        canonicalization).
       - secret_b64: Base64-encoded secret.
       - algorithm: Algorithm name (hmac-md5, hmac-sha256, hmac-sha512).
-      - msg: Wire-format message (with TSIG record RR set to zero RDLEN).
+      - msg: Bytes to MAC.
       - client_time: Client timestamp from TSIG.
-      - fudge: Time fudge value from TSIG.
-      - tsig_mac: MAC value from TSIG record.
-      - msg_id: Message ID.
+      - fudge: Max allowed timestamp skew.
+      - tsig_mac: Expected MAC bytes.
+      - msg_id: DNS message ID (currently unused; reserved for future RFC 2845
+        canonicalization).
 
     Outputs:
-      - bool: True if HMAC verifies and timestamp is within fudge.
+      - bool: True if timestamp is within fudge and MAC matches.
+
+    Notes:
+      - This helper currently computes HMAC(secret, msg) directly and does not
+        implement the full RFC 2845 TSIG canonical MAC input. For UPDATE request
+        verification, prefer update_processor.verify_tsig_auth (dnspython).
     """
     # Validate timestamp
     now = int(time.time())
@@ -281,14 +326,8 @@ def tsig_hmac_verify(
         logger.warning("Unknown HMAC algorithm: %s", algorithm)
         return False
 
-    # Reconstruct TSIG RR for signing (per RFC 2845)
-    # Format: key_name + TSIG_RR_SET (key_name, TSIG class, TTL=0, RDLEN + RDATA)
-    # For verification we use: message + key_name + class + TTL + RDATA_without_MAC
     try:
-        # Compute HMAC
         computed_mac = hmac.new(secret, msg, hash_func).digest()
-
-        # Compare (constant-time comparison)
         return hmac.compare_digest(computed_mac, tsig_mac)
     except Exception as exc:
         logger.warning("TSIG verification failed: %s", exc)
