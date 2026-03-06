@@ -1351,6 +1351,16 @@ class ZoneRecords(BasePlugin):
             self._reload_debounce_timer = None
 
 
+def _client_allowed_for_axfr(client_ip: Optional[str]) -> bool:
+    """Backward-compat wrapper for ZoneRecords-owned AXFR client policy checks."""
+    return transfer._client_allowed_for_axfr(client_ip)
+
+
+def iter_axfr_messages(req: DNSRecord, client_ip: Optional[str] = None) -> List[bytes]:
+    """Backward-compat wrapper for ZoneRecords-owned AXFR/IXFR message streaming."""
+    return transfer.iter_axfr_messages(req, client_ip=client_ip)
+
+
 # Re-export config models for public API
 __all__ = [
     "ZoneRecords",
