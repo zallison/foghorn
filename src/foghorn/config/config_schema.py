@@ -552,6 +552,3 @@ def validate_config(
 
     # unknown_keys == "error": treat these as fatal.
     raise ValueError(message)
-
-    # No validation errors; configuration is considered valid.
-    return None
