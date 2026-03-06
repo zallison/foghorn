@@ -66,6 +66,8 @@ All notable changes to this project will be documented in this file.
 - ZoneRecords now owns inbound DNS NOTIFY handling through plugin opcode dispatch; server-level NOTIFY branching was removed in favor of generic non-QUERY opcode routing.
 - Server NOTIFY helper names (`_resolve_notify_sender_upstream`, `_schedule_notify_axfr_refresh`) remain as compatibility wrappers and now delegate to ZoneRecords-owned implementations.
 - Resolver server internals are now split into focused modules: failover transport logic moved to `servers/server_failover.py` and response/EDNS/EDE helper logic moved to `servers/server_response_utils.py`, while `servers/server.py` keeps compatibility wrapper exports.
+- Resolver server internals now also extract opcode handling, upstream health payload shaping, and UDP runtime wiring into `servers/server_opcode.py`, `servers/server_upstream_health.py`, and `servers/server_runtime.py`, while preserving `servers/server.py` compatibility imports/exports.
+- Config validation cleanup: removed an unreachable trailing `return None` in `config.validate_config` with no functional behavior change.
 - AXFR/IXFR policy checks and transfer message construction now live in `resolve.zone_records.transfer`; server-level AXFR entry points remain as compatibility delegations to ZoneRecords-owned implementations.
 - Upstreams: failover now validates upstream responses (TXID + question) and skips mismatched replies.
 - Transports: UDP upstream queries now ignore unexpected response peers (best-effort defense against off-path injection).
