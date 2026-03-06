@@ -14,7 +14,7 @@ import pytest
 from dnslib import NS, QTYPE, RCODE, RR, SOA, A, DNSRecord
 
 from foghorn.plugins.cache.backends.foghorn_ttl import FoghornTTLCache
-from foghorn.recursive_resolver import RecursiveResolver
+from foghorn.servers.recursive_resolver import RecursiveResolver
 
 
 def _make_nxdomain_with_soa(qname: str) -> bytes:
@@ -60,7 +60,7 @@ def test_recursive_resolver_positive_referral_chain(
     # Synthetic authorities used in the referral chain. We patch the
     # initial server list to contain a single synthetic root so the test is
     # deterministic and does not depend on the baked-in root hints.
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     root_ip = "192.0.2.1"
     tld_ip = "203.0.113.10"
@@ -150,7 +150,7 @@ def test_recursive_resolver_nxdomain_terminates(
     # Use a fixed synthetic root for determinism.
     root_ip = "192.0.2.1"
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     def fake_choose_initial_servers(self):  # noqa: D401
         """Return a single synthetic root server for NXDOMAIN test."""
@@ -208,7 +208,7 @@ def test_recursive_resolver_qname_minimization(monkeypatch: pytest.MonkeyPatch) 
         "example.com." NS before the final full QNAME A lookup.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     root_ip = "192.0.2.1"
     tld_ip = "203.0.113.10"
@@ -315,7 +315,7 @@ def test_udp_and_tcp_query_wrappers_delegate(monkeypatch: pytest.MonkeyPatch) ->
         with the expected arguments and return values.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     udp_called = {}
 
@@ -385,7 +385,7 @@ def test_default_root_hints_and_choose_initial_servers() -> None:
       - Non-empty lists of _Server instances suitable as initial authorities.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     hints = rr_mod._default_root_hints()
     assert hints
@@ -404,8 +404,6 @@ def test_default_root_hints_and_choose_initial_servers() -> None:
     assert all(isinstance(s, rr_mod._Server) for s in servers)
 
 
-
-
 def test_query_single_udp_and_tcp_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     """Brief: _query_single performs UDP query with TCP fallback on TC=1.
 
@@ -417,7 +415,7 @@ def test_query_single_udp_and_tcp_flow(monkeypatch: pytest.MonkeyPatch) -> None:
         the TCP response bytes.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     udp_calls: list[tuple[str, int, bytes, int]] = []
     tcp_calls: list[tuple[str, int, bytes, int, int]] = []
@@ -608,7 +606,7 @@ def test_resolve_honours_overall_deadline(monkeypatch: pytest.MonkeyPatch) -> No
         already exceeds the computed deadline.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     root = rr_mod._Server("192.0.2.1", 53)
 
@@ -668,7 +666,7 @@ def test_resolve_visited_loop_guard_and_delegation_follow(
         the visited-set guard and final-stage delegation handling.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     root = rr_mod._Server("192.0.2.1", 53)
 
@@ -733,7 +731,7 @@ def test_resolve_tcp_fallback_on_tc_in_main_loop(
         at least once.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     root = rr_mod._Server("192.0.2.1", 53)
 
@@ -815,7 +813,7 @@ def test_resolve_noerror_nodata_with_soa_returns_directly(
       - Final response is the upstream NOERROR NODATA with SOA authority.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     root = rr_mod._Server("192.0.2.1", 53)
 
@@ -887,7 +885,7 @@ def test_resolve_final_fallthrough_without_delegation(
       - Upstream SERVFAIL with no NS-based delegation is returned as-is.
     """
 
-    import foghorn.recursive_resolver as rr_mod
+    import foghorn.servers.recursive_resolver as rr_mod
 
     root = rr_mod._Server("192.0.2.1", 53)
 
