@@ -17,6 +17,10 @@ from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
 )
 
 from foghorn.plugins.resolve import base as plugin_base
+from foghorn.plugins.resolve.zone_records import (
+    _client_allowed_for_axfr,  # noqa: F401
+    iter_axfr_messages,  # noqa: F401
+)
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
 from foghorn.servers.recursive_resolver import RecursiveResolver
 from foghorn.servers.transports.dot import DoTError, get_dot_pool  # noqa: F401
@@ -26,7 +30,6 @@ from foghorn.servers.transports.tcp import (
     tcp_query,
 )  # noqa: F401
 from foghorn.utils.register_caches import registered_lru_cached
-from .server_axfr import _client_allowed_for_axfr, iter_axfr_messages  # noqa: F401
 
 from .udp_server import DNSUDPHandler
 from .server_failover import (
