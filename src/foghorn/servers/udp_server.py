@@ -2,11 +2,12 @@ import logging
 import random
 import socketserver
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List
 
 from dnslib import QTYPE, RCODE, DNSRecord
 
-from ..plugins.resolve.base import BasePlugin, PluginDecision
+from ..plugins.resolve.base import PluginDecision
+from .dns_runtime_state import DNSRuntimeState
 
 logger = logging.getLogger("foghorn.server")
 
@@ -230,7 +231,7 @@ def _edns_flags_for_mode(dnssec_mode: str) -> int:
     return 0x8000 if mode in ("passthrough", "validate") else 0
 
 
-class DNSUDPHandler(socketserver.BaseRequestHandler):
+class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
     """
     Handles UDP DNS requests.
     This class is instantiated for each incoming DNS query.
@@ -239,185 +240,6 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         This handler is used internally by the DNSServer and is not
         typically instantiated directly by users.
     """
-
-    upstream_addrs: List[Dict] = []
-    plugins: List[BasePlugin] = []
-    timeout = 2.0
-    timeout_ms = 2000
-    min_cache_ttl = 60
-    stats_collector = None  # Optional StatsCollector instance
-    dnssec_mode = "ignore"  # ignore | passthrough | validate
-    dnssec_validation = "upstream_ad"  # upstream_ad | local | local_extended
-    edns_udp_payload = 1232
-
-    # Optional explicit UDP response size ceiling. When None, the effective
-    # ceiling is computed from the client EDNS payload size (or 512 for non-EDNS)
-    # and edns_udp_payload.
-    max_response_bytes: int | None = None
-
-    # Cache prefetch / stale-while-revalidate knobs controlled by DNSServer.
-    # When enabled, cache hits near expiry can trigger a background refresh via
-    # the shared resolver without delaying the client response.
-    cache_prefetch_enabled: bool = False
-    cache_prefetch_min_ttl: int = 0
-    cache_prefetch_max_ttl: int = 0  # 0 == no upper bound
-    cache_prefetch_refresh_before_expiry: float = 0.0
-    cache_prefetch_allow_stale_after_expiry: float = 0.0
-
-    # Resolver mode and recursion controls.
-    resolver_mode: str = "forward"  # forward | recursive
-    recursive_max_depth: int = 12
-    recursive_timeout_ms: int = 2000
-    recursive_per_try_timeout_ms: int = 2000
-    root_hints_path: Optional[str] = None
-
-    # Upstream selection strategy and concurrency controls (forward mode).
-    upstream_strategy: str = "failover"  # failover | round_robin | random
-    upstream_max_concurrent: int = 1
-    _upstream_rr_index: int = 0  # round-robin index shared across handler instances
-
-    # When False (default), queries for .local are never forwarded to upstreams
-    # and instead return NXDOMAIN unless a plugin (like MdnsBridge) answers them.
-    forward_local: bool = False
-
-    # Lazy health state for upstreams, keyed by a stable upstream identifier.
-    # Each entry contains:
-    #   - fail_count: consecutive failure count (for backoff growth).
-    #   - down_until: epoch timestamp until which this upstream is considered down.
-    upstream_health: Dict[str, Dict[str, float]] = {}
-
-    @staticmethod
-    def _upstream_id(up: Dict) -> str:
-        """Brief: Compute a stable identifier string for an upstream config.
-
-        Inputs:
-          - up: Upstream mapping (may contain 'url' for DoH or 'host'/'port').
-
-        Outputs:
-          - str: Identifier suitable for indexing upstream_health.
-        """
-
-        if not isinstance(up, dict):
-            return ""
-        url = up.get("url")
-        if url:
-            return str(url)
-        host = up.get("host")
-        port = up.get("port")
-        if host is None and port is None:
-            return ""
-        try:
-            return f"{host}:{int(port) if port is not None else 0}"
-        except Exception:
-            return str(host) if host is not None else ""
-
-    @classmethod
-    def _mark_upstreams_down(cls, upstreams: List[Dict], reason: Optional[str]) -> None:
-        """Brief: Mark a set of upstreams as temporarily down with backoff.
-
-        Inputs:
-          - upstreams: List of upstream config dicts.
-          - reason: Optional string reason (e.g. 'all_failed', 'timeout').
-
-        Outputs:
-          - None; updates cls.upstream_health in-place.
-        """
-
-        now = time.time()
-        # Base delay in seconds and maximum backoff cap.
-        base_delay = 5.0
-        max_delay = 300.0
-
-        for up in upstreams or []:
-            up_id = cls._upstream_id(up)
-            if not up_id:
-                continue
-            entry = cls.upstream_health.get(up_id) or {
-                "fail_count": 0,
-                "down_until": 0.0,
-            }
-            fail_count = int(entry.get("fail_count", 0)) + 1
-
-            # Simple Fibonacci-like growth: 1, 2, 3, 5, 8, ... scaled by base_delay.
-            a, b = 1, 1
-            for _ in range(max(0, fail_count - 1)):
-                a, b = b, a + b
-            delay = min(base_delay * float(a), max_delay)
-
-            cls.upstream_health[up_id] = {
-                "fail_count": float(fail_count),
-                "down_until": now + delay,
-            }
-
-    @classmethod
-    def _mark_upstream_ok(cls, upstream: Optional[Dict]) -> None:
-        """Brief: Reset health state for a single upstream on success.
-
-        Inputs:
-          - upstream: Upstream config dict or None.
-
-        Outputs:
-          - None; clears or resets the upstream's health entry.
-        """
-
-        if not upstream or not isinstance(upstream, dict):
-            return
-        up_id = cls._upstream_id(upstream)
-        if not up_id:
-            return
-        entry = cls.upstream_health.get(up_id)
-        if not entry:
-            return
-        # Mark as healthy immediately; keep a small fail_count history if desired.
-        cls.upstream_health[up_id] = {"fail_count": 0.0, "down_until": 0.0}
-
-    @classmethod
-    def _cleanup_upstream_health(cls, max_age_hours: float = 24.0) -> None:
-        """Brief: Remove stale upstream_health entries to prevent unbounded growth.
-
-        Inputs:
-          - max_age_hours: Maximum age in hours for healthy entries before cleanup.
-            Defaults to 24 hours.
-
-        Outputs:
-          - None; modifies cls.upstream_health in-place.
-
-        Notes:
-          - Removed entries can be recreated when needed without data loss.
-          - Healthy entries older than max_age_hours are removed.
-          - Unhealthy entries (down_until in future) are preserved.
-          - This should be called periodically, e.g., after reload or via a.
-            background maintenance task.
-        """
-
-        now = time.time()
-        max_age_seconds = float(max_age_hours) * 3600.0
-        entries_to_remove = []
-
-        for up_id, entry in list(cls.upstream_health.items()):
-            if not isinstance(entry, dict):
-                entries_to_remove.append(up_id)
-                continue
-
-            down_until = float(entry.get("down_until", 0.0) or 0.0)
-
-            # Keep unhealthy entries still in backoff window.
-            if down_until > now:
-                continue
-
-            # For healthy entries, check if they've been healthy for too long.
-            # We consider an entry eligible for removal if it has been healthy
-            # (fail_count=0, down_until <= now) for max_age_hours.
-            # Since we don't track when it became healthy, we conservatively use
-            # the last backoff completion time as a proxy.
-            fail_count = float(entry.get("fail_count", 0) or 0)
-            if fail_count == 0 and down_until <= now:
-                # Entry has been healthy; if down_until is very old, remove it.
-                if now - down_until > max_age_seconds:
-                    entries_to_remove.append(up_id)
-
-        for up_id in entries_to_remove:
-            cls.upstream_health.pop(up_id, None)
 
     def _cache_and_send_response(
         self,
@@ -853,108 +675,6 @@ class DNSUDPHandler(socketserver.BaseRequestHandler):
         except Exception:  # pragma: no cover - defensive: best-effort only
             pass
         return _set_response_id(r.pack(), request.header.id)
-
-    def _ensure_edns(self, req: DNSRecord) -> None:
-        """
-        Ensure the request carries an EDNS(0) OPT record with appropriate
-        payload size and DO bit based on dnssec_mode.
-
-        Inputs:
-          - req: DNSRecord to mutate in-place.
-
-        Outputs:
-          - None
-
-        Behaviour:
-          - If the client sent an OPT record, mirror its EDNS version and
-            advertised UDP payload size, clamped by this handler's
-            edns_udp_payload when non-zero.
-          - If no OPT was present, add one using edns_udp_payload as the
-            advertised UDP payload (with a minimum of 512 bytes).
-          - In both cases, the DO bit (DNSSEC OK) in the EDNS flags is set or
-            cleared according to dnssec_mode while preserving any other
-            existing EDNS flag bits.
-
-        Example:
-          >>> self._ensure_edns(req)
-        """
-        # Locate an existing OPT record, if any, in the additional section.
-        opt_idx = None
-        opt_rr = None
-        additional = getattr(req, "ar", []) or []
-        for idx, rr in enumerate(additional):
-            if rr.rtype == QTYPE.OPT:
-                opt_idx = idx
-                opt_rr = rr
-                break
-
-        # Decide DO flag based on dnssec_mode. For both passthrough and validate
-        # modes we must advertise DO=1 so that upstream resolvers return
-        # DNSSEC records (and, for upstream_ad, can set the AD bit).
-        do_bit = (
-            0x8000
-            if str(getattr(self, "dnssec_mode", "ignore")).lower()
-            in (
-                "passthrough",
-                "validate",
-            )
-            else 0
-        )
-
-        # Effective server-side maximum UDP payload we are willing to
-        # advertise. RFC 6891 requires at least 512 bytes when EDNS is used.
-        try:
-            server_max = int(getattr(self, "edns_udp_payload", 1232) or 1232)
-        except Exception:
-            server_max = 1232
-        if server_max < 512:
-            server_max = 512
-
-        # Case 1: client already sent an OPT; adjust its payload and DO bit
-        # while preserving EDNS version, extended RCODE, and other flags.
-        if opt_rr is not None:
-            try:
-                client_payload = int(getattr(opt_rr, "rclass", 0) or 0)
-            except Exception:
-                client_payload = 0
-            if client_payload <= 0:
-                payload = server_max
-            elif server_max > 0:
-                payload = min(client_payload, server_max)
-            else:
-                payload = client_payload
-
-            # Decode EDNS TTL into (ext_rcode, version, flags) so we can
-            # update only the DO bit in the flags field.
-            try:
-                ttl_val = int(getattr(opt_rr, "ttl", 0) or 0)
-            except Exception:
-                ttl_val = 0
-            ext_rcode = (ttl_val >> 24) & 0xFF
-            version = (ttl_val >> 16) & 0xFF
-            flags = ttl_val & 0xFFFF
-            # Clear existing DO bit and inject the desired value.
-            flags = (flags & ~0x8000) | do_bit
-            opt_rr.rclass = payload
-            opt_rr.ttl = (ext_rcode << 24) | (version << 16) | (flags & 0xFFFF)
-            return
-
-        # Case 2: no existing OPT; create one using the foghorn.servers.server
-        # EDNS0 helper so tests that monkeypatch EDNS0 continue to see calls.
-        from . import server as _server_mod
-
-        payload = server_max
-        flags_str = "do" if do_bit else ""
-
-        # EDNS0() constructs an OPT RR where the advertised UDP payload is
-        # encoded via udp_len/rclass and the DO bit is part of the TTL
-        # bitfield. We leave the EDNS version at its default (0).
-        opt_rr = _server_mod.EDNS0(udp_len=payload, flags=flags_str)
-
-        if opt_idx is None:
-            req.add_ar(opt_rr)
-        else:
-            req.ar[opt_idx] = opt_rr
 
     def handle(self):
         """Process a single UDP DNS query using the shared core resolver.

@@ -356,7 +356,7 @@ def _send_query_with_failover_impl(
                 doh_query,
             )
 
-            body, resp_headers = doh_query(
+            body, _ = doh_query(
                 doh_url,
                 query.pack(),
                 method=doh_method,
@@ -693,22 +693,3 @@ def _send_query_with_failover_impl(
         "All upstreams failed for %s %s. Last error: %s", qname, qtype, last_exception
     )
     return None, None, "all_failed"
-
-
-def send_query_with_failover(
-    query: DNSRecord,
-    upstreams: List[Dict],
-    timeout_ms: int,
-    qname: str,
-    qtype: int,
-    max_concurrent: int = 1,
-) -> Tuple[Optional[bytes], Optional[Dict], str]:
-    """Compatibility wrapper around the injectable failover implementation."""
-    return _send_query_with_failover_impl(
-        query,
-        upstreams,
-        timeout_ms,
-        qname,
-        qtype,
-        max_concurrent=max_concurrent,
-    )

@@ -242,9 +242,9 @@ def test_sqlite3_cache_targets_cache_summary(monkeypatch, tmp_path) -> None:
             self.name = "dummy"
             self._targets_cache = DummyCache()
 
-    from foghorn.servers import udp_server as udp_mod
+    from foghorn.servers import dns_runtime_state as runtime_mod
 
-    monkeypatch.setattr(udp_mod.DNSUDPHandler, "plugins", [DummyPlugin()])
+    monkeypatch.setattr(runtime_mod.DNSRuntimeState, "plugins", [DummyPlugin()])
 
     snap = plugin.get_http_snapshot()
     caches = snap["caches"]

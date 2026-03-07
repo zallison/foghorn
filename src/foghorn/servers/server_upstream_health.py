@@ -2,17 +2,18 @@
 
 from typing import Dict, Optional
 
-from .udp_server import DNSUDPHandler
+from .dns_runtime_state import DNSRuntimeState
 
 
 class _UpstreamHealth:
     """Brief: Describe upstream health state for admin UI payloads.
 
     Inputs:
-      - None (reads DNSUDPHandler.upstream_health state).
+      - None (reads DNSRuntimeState.upstream_health state).
 
     Outputs:
-      - describe_upstream returns a dict of upstream status fields or None.
+      - upstream_id returns a stable identifier string, or an empty string.
+      - describe_upstream returns a dict of upstream status fields, or None.
     """
 
     def upstream_id(self, upstream: Dict) -> str:
@@ -27,7 +28,7 @@ class _UpstreamHealth:
         if not isinstance(upstream, dict):
             return ""
         try:
-            upstream_id = DNSUDPHandler._upstream_id(upstream)
+            upstream_id = DNSRuntimeState._upstream_id(upstream)
         except Exception:
             upstream_id = ""
         if upstream_id:
@@ -71,9 +72,14 @@ class _UpstreamHealth:
 
         Outputs:
           - dict with keys suitable for /api/v1/upstream_status items, or None.
+          - state is one of: "up", "degraded", "down".
 
         Example:
           >>> rec = _UPSTREAM_HEALTH.describe_upstream(role="primary", upstream={"host": "1.1.1.1", "port": 53}, now=0.0, cfg=None)
+
+        Raises:
+          - ValueError/TypeError if upstream["port"] exists but cannot be
+            coerced to an int.
         """
         if not isinstance(upstream, dict):
             return None
@@ -105,7 +111,7 @@ class _UpstreamHealth:
 
         entry = None
         if upstream_id:
-            entry = DNSUDPHandler.upstream_health.get(upstream_id)
+            entry = DNSRuntimeState.upstream_health.get(upstream_id)
 
         fail_count = 0.0
         down_until = None
