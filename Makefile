@@ -7,7 +7,7 @@
 # (Keep YAML files, so we exclude *.yaml and *.yml from the delete patterns)
 IGNORE_EXTS :=  .yaml .yml .pem .key .cert .srl
 
-## Docker
+## :Docker:
 #########
 # prefix (default: username) and tag (default: latest).
 PREFIX ?= ${USER}
@@ -25,7 +25,7 @@ ADMINPORT ?= 5380
 UDPPORT ?= 53
 TCPPORT ?= 53
 
-## SSL
+## :SSL:
 ######
 # Common Name, aka server name
 CNAME ?= $(shell hostname)
@@ -39,17 +39,14 @@ CA_PEM ?=  ${KEYDIR}/foghorn_ca.pem
 SERVER :=  ${KEYDIR}/foghorn_${CNAME}
 SERVER_PEM ?= ${SERVER}.pem
 
-## Python
+## :Python:
 #########
 # Build the project: create a venv, install the package in editable mode
 # Name of the virtual-env directory
 VENV ?= ./venv
 
-## END VARIABLES
-################
 
-
-## Show Variables:
+## :Variables:Helpers:
 ##################
 # Print ALL make variables (debug / introspection only)
 .PHONY: vars-print-all-all
@@ -91,7 +88,7 @@ vars-python: vars-header-Python var-print-VENV
 	@echo
 
 
-## Local running
+## :python: running locally
 ################
 .PHONY: run
 run: $(VENV)/bin/foghorn
@@ -106,9 +103,10 @@ env:
 	$(VENV)/bin/pip install "."
 
 $(VENV)/bin/foghorn: pyproject.toml
+	${MAKE} clean
 	$(MAKE) env-dev
 
-# Ensure the schema is up to date
+# :Schema: Ensure the schema is up to date
 # Add newline to end of config to make linting happy.
 .PHONY: schema
 schema:
@@ -122,8 +120,8 @@ env-dev: env
 	$(VENV)/bin/pip install -e ".[dev]"
 
 
-## DNSSEC
-#########
+## :DNSSEC:
+#############
 
 # Sign a zonefile and write out a zonefile, with all DNSSEC records (RRSIG, NSSIG)
 .PHONY: dnssec-sign-zone
@@ -144,7 +142,7 @@ dnssec-sign-zone: $(VENV)/bin/foghorn
 	  --algorithm "$$ALGO" \
 	  --validity-days "$$VALIDITY_DAYS"
 
-## DNS UPDATE Keys
+## :DNS:Update:
 ##################
 
 # Generate a TSIG key for DNS UPDATE authentication
@@ -182,23 +180,21 @@ test: $(VENV)/bin/foghorn env-dev
 
 
 # ------------------------------------------------------------
-# Clean temporary artefacts
+# Clean temporary artifacts
 # ------------------------------------------------------------
 .PHONY: clean
 clean:
 	@echo "=== Removing virtual environment and var directory ==="
 	rm -rf $(VENV) var build docker-build coverage.json schema.json dist
 	@echo "=== Removing temporary files and byte‑code ==="
-# Delete __pycache__ directories
 	find . -type d -name "__pycache__" -exec rm -rf {} +;
-# Delete .pyc, .tmp, backup (~) and vim swap files
 	find . -type f \
 	\( -name '*.pyc' -o -name '*.tmp' -o -name '*~' -o -name '#*' -o -name '*.swp' \) -delete
 
 
 # ###############
 # ---------------
-# OpenSSL Keys
+# :OpenSSL|Keys:
 #  - Generates CA
 #  - make ssl-cert
 # ---------------
@@ -262,45 +258,18 @@ $(SERVER_PEM): ${SERVER}.crt ${SERVER}.key
 ssl-clean-keys:
 	rm -f ${KEYDIR}/*.key ${KEYDIR}/*.csr ${KEYDIR}/*.crt ${KEYDIR}/*.srl
 
-# ################
+
 # ----------------
-# End openssl keys
+# :End| openssl keys:
 # ----------------
-# ################
-
-
-# ---------------
-# Github Helpers
-# ---------------
-
-.PHONY: github-push
-github-push: clean tests
-	git add -A
-	git diff --quiet --cached && git diff --quiet --exit-code && git status --porcelain --ignore-submodules=all | grep -q . || { \
-		echo "ERROR: Repository has uncommitted changes or untracked files. Commit or stash them before pushing."; \
-		exit 1; \
-	}
-	git push origin $(shell git rev-parse --abbrev-ref HEAD)
-
-
-# GitHub PR creation target
-create-pr:
-	@echo "Creating GitHub PR for $(shell git rev-parse --abbrev-ref HEAD) branch..."
-	@PR_BODY="$(shell echo '## Changes\n\n$(shell git log --oneline $(shell git merge-base HEAD origin/$(shell git rev-parse --abbrev-ref HEAD))..HEAD)')"
-	@PR_TITLE="$(shell echo '$(shell git rev-parse --abbrev-ref HEAD): $(shell git log -1 --pretty=%s)')"
-	@curl -X POST \
-		-H "Authorization: token $(shell echo ${GITHUB_TOKEN} | base64)" \
-		-H "Accept: application/vnd.github.v3+json" \
-		-d "{\"title\": \"$(PR_TITLE)\", \"body\": \"$(PR_BODY)\", \"head\": \"$(shell git rev-parse --abbrev-ref HEAD)\", \"base\": \"main\"}" \
-		https://api.github.com/repos/PREFIX/Container_name/pulls
 
 
 
 # ---------------
-# Docker Helpers
+# :Docker|Helpers:
 # ---------------
 .PHONY: docker
-docker: clean docker-build docker-run docker-logs
+docker: docker-build docker-run docker-logs
 
 .PHONY: docker-build
 docker-build:
@@ -345,7 +314,7 @@ docker-ship: clean docker-build
 	docker push ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
 # ---------------
-# Packaging
+# :pypi|Packaging:
 # ---------------
 
 .PHONY: package-build
@@ -361,14 +330,9 @@ package-publish-dev: package-build
 	twine upload --repository testpypi dist/* --verbose
 
 
-# ----------------------
-# end of code, show help
-# ----------------------
-
-
-# ------------------------------------------------------------
-# Help
-# ------------------------------------------------------------
+# -------
+# :Help:
+# -------
 .PHONY: help
 help:
 	@echo "Building, testing, and running:"
