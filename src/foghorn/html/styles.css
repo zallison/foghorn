@@ -304,6 +304,15 @@ a:visited {
     white-space: pre-line;
     vertical-align: top;
 }
+.fh-rate-limit-config .fh-table td:nth-child(2),
+.fh-rate-limit-profiles .fh-table td:nth-child(2) {
+    word-break: break-word;
+}
+
+.fh-rate-limit-profiles {
+    max-height: 26rem;
+    overflow: auto;
+}
 
 table {
     border-collapse: collapse;
