@@ -94,15 +94,26 @@ async def _handle_conn(
     Handle a single DNS-over-TLS connection (RFC 7858).
 
     Inputs:
-      - reader: TLS-wrapped StreamReader
-      - writer: TLS-wrapped StreamWriter
-      - resolver: Callable that takes (query_bytes, client_ip) and returns response_bytes
-      - idle_timeout: Seconds before closing idle connection
+      - reader: TLS-wrapped StreamReader.
+      - writer: TLS-wrapped StreamWriter.
+      - resolver: Callable that takes (query_bytes, client_ip) and returns
+        response_bytes.
+      - idle_timeout: Seconds before closing an idle connection.
+      - max_queries: Maximum DNS frames to process before closing.
+      - limiter: Optional _ConnLimiter for global/per-IP concurrent limits.
+      - executor: Optional executor used for resolver calls.
     Outputs:
-      - None
+      - None; writes framed DNS responses and always closes the writer.
 
     Example:
       >>> await _handle_conn(reader, writer, resolver)
+
+    Notes:
+      - AXFR/IXFR requests stream multi-message responses from
+        server.iter_axfr_messages().
+      - Empty resolver responses are treated as intentional drops/timeouts and
+        no DNS response frame is sent.
+      - If peername is unavailable or malformed, client_ip defaults to 0.0.0.0.
     """
     peer = writer.get_extra_info("peername")
     client_ip = peer[0] if isinstance(peer, tuple) else "0.0.0.0"
@@ -220,7 +231,8 @@ async def serve_dot(
       - resolver: Callable mapping (query_bytes, client_ip) -> response_bytes.
       - cert_file: Path to PEM certificate.
       - key_file: Path to PEM private key.
-      - ca_file: Optional client-auth CA (unused by default).
+      - ca_file: Optional client-auth CA (accepted for API compatibility;
+        currently unused by this implementation).
       - min_version: Minimum TLS version (default TLS1.2).
       - max_connections / max_connections_per_ip: Connection limiting knobs.
       - max_queries_per_connection: Close after this many queries.
@@ -230,7 +242,7 @@ async def serve_dot(
         starts listening.
 
     Outputs:
-      - None (runs forever).
+      - None (runs until cancelled/stopped).
 
     Example:
       >>> asyncio.run(serve_dot('0.0.0.0', 8853, resolver, cert_file='cert.pem', key_file='key.pem'))
