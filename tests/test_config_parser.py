@@ -8,6 +8,7 @@ Outputs:
 """
 
 from __future__ import annotations
+import ssl
 
 from typing import Any, Dict, List
 
@@ -17,19 +18,21 @@ from foghorn.config import config_parser as cp
 from foghorn.plugins.resolve.base import BasePlugin
 
 
-def test_is_var_key_empty_and_uppercase() -> None:
-    """Brief: _is_var_key rejects empty and accepts ALL_UPPERCASE names.
+def test_is_var_key_empty_and_case_flexible_identifier() -> None:
+    """Brief: _is_var_key accepts identifier-style names with any letter case.
 
     Inputs:
       - None.
 
     Outputs:
-      - None; asserts behaviour for empty and valid keys.
+      - None; asserts behaviour for empty, valid, and invalid keys.
     """
 
     assert cp._is_var_key("") is False
     assert cp._is_var_key("TTL") is True
-    assert cp._is_var_key("ttl") is False
+    assert cp._is_var_key("ttl") is True
+    assert cp._is_var_key("MiXeD_123") is True
+    assert cp._is_var_key("bad-name") is False
 
 
 def test_parse_config_variables_non_mapping_raises() -> None:
@@ -48,20 +51,20 @@ def test_parse_config_variables_non_mapping_raises() -> None:
 
 
 def test_parse_config_variables_env_and_cli_validation() -> None:
-    """Brief: parse_config_variables filters env keys and validates CLI vars.
+    """Brief: parse_config_variables parses env/CLI vars and validates bad names.
 
     Inputs:
       - None.
 
     Outputs:
-      - None; asserts env lowercase keys are ignored and CLI validation errors.
+      - None; asserts env keys are parsed and CLI validation errors on bad keys.
     """
 
     cfg: Dict[str, Any] = {"variables": {"EXISTING": 1}}
     env = {"lower": "1", "UPPER": "2"}
     merged = cp.parse_config_variables(cfg, environ=env, cli_vars=["NEW=3"])
-    # lower should be ignored; UPPER and NEW merged as YAML scalars.
-    assert "lower" not in merged
+    # lowercase, uppercase, and CLI keys are merged as YAML scalars.
+    assert merged["lower"] == 1
     assert merged["UPPER"] == 2
     assert merged["NEW"] == 3
 
@@ -69,9 +72,9 @@ def test_parse_config_variables_env_and_cli_validation() -> None:
     with pytest.raises(ValueError):
         cp.parse_config_variables({"variables": {}}, cli_vars=["BAD"])
 
-    # Invalid variable name (not ALL_UPPERCASE).
+    # Invalid variable name (must match identifier pattern).
     with pytest.raises(ValueError):
-        cp.parse_config_variables({"variables": {}}, cli_vars=["bad=1"])
+        cp.parse_config_variables({"variables": {}}, cli_vars=["bad-name=1"])
 
 
 def test_parse_config_file_non_mapping_root_raises(tmp_path, monkeypatch) -> None:
@@ -104,6 +107,135 @@ def test_parse_config_file_non_mapping_root_raises(tmp_path, monkeypatch) -> Non
 
     with pytest.raises(ValueError, match="Configuration root must be a mapping"):
         cp.parse_config_file(str(p))
+
+
+def test_parse_config_file_tls_ca_missing_is_fatal(tmp_path) -> None:
+    """Brief: parse_config_file raises when upstream TLS ca_file does not exist.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - None; asserts missing TLS CA bundle is treated as fatal by default.
+    """
+
+    missing_ca = tmp_path / "missing-ca.pem"
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "server:",
+                "  resolver:",
+                "    mode: forward",
+                "upstreams:",
+                "  endpoints:",
+                "    - host: 1.1.1.1",
+                "      port: 853",
+                "      transport: dot",
+                "      tls:",
+                f"        ca_file: {missing_ca}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="does not exist"):
+        cp.parse_config_file(str(cfg_path))
+
+
+def test_parse_config_file_tls_ca_missing_nonfatal_when_abort_disabled(
+    tmp_path,
+    caplog,
+) -> None:
+    """Brief: parse_config_file warns (not raises) when abort_on_fail is disabled.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+      - caplog: pytest log-capture fixture.
+
+    Outputs:
+      - None; asserts missing CA file is logged and config still parses.
+    """
+
+    missing_ca = tmp_path / "missing-ca.pem"
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "server:",
+                "  resolver:",
+                "    mode: forward",
+                "upstreams:",
+                "  endpoints:",
+                "    - host: 1.1.1.1",
+                "      port: 853",
+                "      transport: dot",
+                "      abort_on_fail: false",
+                "      tls:",
+                f"        ca_file: {missing_ca}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("WARNING", logger="foghorn.config.config_parser"):
+        cfg = cp.parse_config_file(str(cfg_path))
+
+    assert isinstance(cfg, dict)
+    assert any(
+        "continuing because abort_on_fail/abort_on_failure is false" in r.message
+        for r in caplog.records
+    )
+
+
+def test_validate_tls_ca_file_reports_unreadable_path(tmp_path, monkeypatch) -> None:
+    """Brief: _validate_tls_ca_file raises clear errors for unreadable files.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts unreadable CA files are rejected.
+    """
+
+    ca_file = tmp_path / "ca.pem"
+    ca_file.write_text("dummy", encoding="utf-8")
+
+    def _raise_permission_error(*_args, **_kwargs) -> object:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(cp, "open", _raise_permission_error, raising=False)
+
+    with pytest.raises(ValueError, match="not readable"):
+        cp._validate_tls_ca_file(
+            str(ca_file), location="upstreams.endpoints[0].tls.ca_file"
+        )
+
+
+def test_validate_tls_ca_file_reports_invalid_format(tmp_path, monkeypatch) -> None:
+    """Brief: _validate_tls_ca_file raises clear errors for invalid CA formats.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts invalid PEM/CA content is rejected.
+    """
+
+    ca_file = tmp_path / "ca.pem"
+    ca_file.write_text("not a cert", encoding="utf-8")
+
+    def _raise_ssl_error(*_args, **_kwargs) -> object:
+        raise ssl.SSLError("bad cert")
+
+    monkeypatch.setattr(cp.ssl, "create_default_context", _raise_ssl_error)
+
+    with pytest.raises(ValueError, match="not a valid TLS CA bundle"):
+        cp._validate_tls_ca_file(
+            str(ca_file), location="upstreams.endpoints[0].tls.ca_file"
+        )
 
 
 def test_normalize_upstream_config_invalid_foghorn_and_timeout_fallback() -> None:

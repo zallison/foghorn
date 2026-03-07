@@ -836,7 +836,8 @@
                   "type": "null"
                 }
               ],
-              "default": null,
+              "default": 0.2,
+              "description": "Default: 0.2.",
               "title": "Alpha Down"
             },
             "burst_factor": {
@@ -3218,6 +3219,14 @@
       "additionalProperties": false,
       "description": "Type: object. Object with subkeys: headers, method, tls, transport, url.",
       "properties": {
+        "abort_on_fail": {
+          "description": "When true (default behavior), startup fails if this upstream's TLS CA file validation fails. When false, validation failures are logged and startup continues.",
+          "type": "boolean"
+        },
+        "abort_on_failure": {
+          "description": "Alias for abort_on_fail. When true, TLS CA validation errors for this upstream are fatal.",
+          "type": "boolean"
+        },
         "headers": {
           "additionalProperties": {
             "type": "string"
@@ -3269,6 +3278,14 @@
       "additionalProperties": false,
       "description": "Type: object. Object with subkeys: host, pool, port, tls, transport.",
       "properties": {
+        "abort_on_fail": {
+          "description": "When true (default behavior), startup fails if this upstream's TLS CA file validation fails. When false, validation failures are logged and startup continues.",
+          "type": "boolean"
+        },
+        "abort_on_failure": {
+          "description": "Alias for abort_on_fail. When true, TLS CA validation errors for this upstream are fatal.",
+          "type": "boolean"
+        },
         "host": {
           "description": "Type: string.",
           "minLength": 1,
@@ -3462,6 +3479,11 @@
         "python": {
           "additionalProperties": false,
           "properties": {
+            "color": {
+              "default": true,
+              "description": "Enable ANSI colorized stderr logging output for improved readability of levels and important tokens.",
+              "type": "boolean"
+            },
             "file": {
               "type": "string"
             },
@@ -3911,9 +3933,9 @@
     },
     "vars": {
       "additionalProperties": false,
-      "description": "Optional mapping of ALL_CAPS variable names to arbitrary values. These are expanded before validation and removed from the runtime config.",
+      "description": "Optional mapping of variable names to arbitrary values. These are expanded before validation and removed from the runtime config.",
       "patternProperties": {
-        "^[A-Z_][A-Z0-9_]*$": {}
+        "^[A-Za-z_][A-Za-z0-9_]*$": {}
       },
       "type": "object"
     }

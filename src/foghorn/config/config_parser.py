@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import ssl
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
@@ -38,17 +39,16 @@ def _is_var_key(key: str) -> bool:
       - key: Candidate variable name.
 
     Outputs:
-      - bool: True when the name is ALL_UPPERCASE and matches [A-Z_][A-Z0-9_]*.
+      - bool: True when the name matches [A-Za-z_][A-Za-z0-9_]*.
     """
 
     if not key:
-        return False
-    if key != key.upper():
         return False
 
     # Keep in sync with config_schema variable name rules.
     import re as _re
 
+    return bool(_re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key))
     return bool(_re.fullmatch(r"[A-Z_][A-Z0-9_]*", key))
 
 
@@ -91,7 +91,7 @@ def parse_config_variables(
     Notes:
       - Accepts both top-level 'variables' (preferred) and legacy 'vars'. When
         both are present, 'variables' wins.
-      - Only ALL_UPPERCASE keys matching [A-Z_][A-Z0-9_]* are considered.
+      - Keys must match [A-Za-z_][A-Za-z0-9_]*.
       - Values are parsed as YAML so list/dict/int/bool values can be provided.
 
     Example:
@@ -133,8 +133,7 @@ def parse_config_variables(
         k = str(k).strip()
         if not _is_var_key(k):
             raise ValueError(
-                "Invalid variable name %r (must be ALL_UPPERCASE and match [A-Z_][A-Z0-9_]*)"
-                % k
+                "Invalid variable name %r (must match [A-Za-z_][A-Za-z0-9_]*)" % k
             )
         merged[k] = _parse_yaml_value(raw)
 
@@ -143,6 +142,176 @@ def parse_config_variables(
     cfg["variables"] = merged
     cfg["vars"] = merged
     return merged
+
+
+def _coerce_bool_flag(value: object, *, default: bool) -> bool:
+    """Brief: Coerce a config value to bool with string-aware parsing.
+
+    Inputs:
+      - value: Candidate boolean-like value.
+      - default: Fallback boolean used when value is None or unrecognized.
+
+    Outputs:
+      - bool: Parsed boolean value.
+    """
+
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return bool(default)
+
+
+def _resolve_abort_on_fail_flag(container: Dict[str, Any], *, default: bool) -> bool:
+    """Brief: Resolve abort behavior from a config mapping.
+
+    Inputs:
+      - container: Mapping that may include abort_on_fail or abort_on_failure.
+      - default: Fallback when no explicit abort flag is present.
+
+    Outputs:
+      - bool: Effective abort behavior.
+
+    Notes:
+      - Supports both 'abort_on_fail' and 'abort_on_failure'; when both are
+        present, 'abort_on_fail' takes precedence.
+    """
+
+    if "abort_on_fail" in container:
+        return _coerce_bool_flag(container.get("abort_on_fail"), default=default)
+    if "abort_on_failure" in container:
+        return _coerce_bool_flag(container.get("abort_on_failure"), default=default)
+    return bool(default)
+
+
+def _iter_tls_ca_file_checks(
+    cfg: Dict[str, Any],
+) -> List[Tuple[str, str, bool]]:
+    """Brief: Collect TLS ca_file validation checks from upstream config.
+
+    Inputs:
+      - cfg: Parsed configuration mapping.
+
+    Outputs:
+      - list[tuple[str, str, bool]] where each item is:
+        - ca_file path string
+        - human-readable config location
+        - effective abort_on_fail behavior
+    """
+    checks: List[Tuple[str, str, bool]] = []
+    upstream_cfg = cfg.get("upstreams")
+    if not isinstance(upstream_cfg, dict):
+        return checks
+
+    def _collect_from_endpoints(raw: object, path_prefix: str) -> None:
+        if not isinstance(raw, list):
+            return
+        for idx, endpoint in enumerate(raw):
+            if not isinstance(endpoint, dict):
+                continue
+            tls_cfg = endpoint.get("tls")
+            if not isinstance(tls_cfg, dict):
+                continue
+            raw_ca_file = tls_cfg.get("ca_file")
+            if raw_ca_file is None:
+                continue
+            ca_file = str(raw_ca_file).strip()
+            if not ca_file:
+                continue
+
+            endpoint_abort = _resolve_abort_on_fail_flag(endpoint, default=True)
+            tls_abort = _resolve_abort_on_fail_flag(tls_cfg, default=endpoint_abort)
+            checks.append(
+                (
+                    ca_file,
+                    f"{path_prefix}[{idx}].tls.ca_file",
+                    tls_abort,
+                )
+            )
+
+    _collect_from_endpoints(upstream_cfg.get("endpoints"), "upstreams.endpoints")
+
+    backup_cfg = upstream_cfg.get("backup")
+    if isinstance(backup_cfg, dict):
+        _collect_from_endpoints(
+            backup_cfg.get("endpoints"),
+            "upstreams.backup.endpoints",
+        )
+
+    return checks
+
+
+def _validate_tls_ca_file(ca_file: str, *, location: str) -> None:
+    """Brief: Validate a TLS CA bundle path for existence, readability, and format.
+
+    Inputs:
+      - ca_file: Filesystem path to CA bundle file.
+      - location: Config key path used in error messages.
+
+    Outputs:
+      - None.
+
+    Raises:
+      - ValueError: When the CA bundle path is missing, unreadable, or invalid.
+    """
+    if not os.path.exists(ca_file):
+        raise ValueError(
+            f"{location}: CA file {ca_file!r} does not exist",
+        )
+    if not os.path.isfile(ca_file):
+        raise ValueError(
+            f"{location}: CA file {ca_file!r} is not a regular file",
+        )
+    try:
+        with open(ca_file, "rb"):
+            pass
+    except OSError as exc:
+        raise ValueError(
+            f"{location}: CA file {ca_file!r} is not readable: {exc}",
+        ) from exc
+
+    try:
+        ssl.create_default_context(cafile=ca_file)
+    except (ssl.SSLError, OSError, ValueError) as exc:
+        raise ValueError(
+            f"{location}: CA file {ca_file!r} is not a valid TLS CA bundle: {exc}",
+        ) from exc
+
+
+def _validate_tls_ca_files(cfg: Dict[str, Any]) -> None:
+    """Brief: Validate all configured TLS CA bundle paths.
+
+    Inputs:
+      - cfg: Parsed and schema-validated configuration mapping.
+
+    Outputs:
+      - None.
+
+    Notes:
+      - For each TLS ca_file, failures are fatal by default.
+      - When abort_on_fail/abort_on_failure is explicitly false on the endpoint
+        or tls block, failures are logged and startup continues.
+    """
+    logger = logging.getLogger("foghorn.config.config_parser")
+
+    for ca_file, location, abort_on_fail in _iter_tls_ca_file_checks(cfg):
+        try:
+            _validate_tls_ca_file(ca_file, location=location)
+        except ValueError as exc:
+            if abort_on_fail:
+                raise
+            logger.warning(
+                "%s (continuing because abort_on_fail/abort_on_failure is false)",
+                exc,
+            )
 
 
 def parse_config_file(
@@ -183,6 +352,7 @@ def parse_config_file(
     # Expand and validate variables, then run JSON Schema validation.
     parse_config_variables(cfg, cli_vars=list(cli_vars or []))
     validate_config(cfg, config_path=config_path, unknown_keys=unknown_keys)
+    _validate_tls_ca_files(cfg)
 
     return cfg
 
@@ -213,7 +383,7 @@ def _normalize_upstream_endpoints_list(
         if not isinstance(u, dict):
             raise ValueError("each upstream entry must be a mapping")
 
-        transport = str(u.get("transport", "udp")).lower()
+        transport = str(u.get("transport", "udp")).strip().lower()
 
         if transport == "doh":
             rec: Dict[str, Union[str, int, dict]] = {
@@ -233,9 +403,12 @@ def _normalize_upstream_endpoints_list(
             raise ValueError("each upstream entry must include 'host'")
 
         default_port = 853 if transport == "dot" else 53
+        raw_port = u.get("port")
+        if raw_port is None or (isinstance(raw_port, str) and not raw_port.strip()):
+            raw_port = default_port
         rec2: Dict[str, Union[str, int, dict]] = {
             "host": str(u["host"]),
-            "port": int(u.get("port", default_port)),
+            "port": int(raw_port),
         }
         if "transport" in u:
             rec2["transport"] = transport

@@ -76,19 +76,26 @@ def test_normalize_variables_rejects_non_mapping_legacy_variables() -> None:
         config_schema_mod._normalize_variables_for_validation(cfg)
 
 
-def test_normalize_variables_enforces_uppercase_and_pattern() -> None:
-    """Brief: _normalize_variables_for_validation enforces ALL_UPPERCASE keys.
+def test_normalize_variables_accepts_case_flexible_keys_and_enforces_pattern() -> None:
+    """Brief: _normalize_variables_for_validation accepts mixed case, rejects bad names.
 
     Inputs:
       - None.
 
     Outputs:
-      - None; asserts lowercase variable keys are rejected.
+      - None; asserts mixed/lower keys are expanded and invalid names are rejected.
     """
 
-    cfg: Dict[str, Any] = {"vars": {"lower": 1}}
+    cfg_ok: Dict[str, Any] = {
+        "vars": {"lower": 1, "MiXeD_2": "ok"},
+        "text": "prefix ${lower} ${MiXeD_2}",
+    }
+    config_schema_mod._normalize_variables_for_validation(cfg_ok)
+    assert cfg_ok["text"] == "prefix 1 ok"
+
+    cfg_bad: Dict[str, Any] = {"vars": {"bad-name": 1}}
     with pytest.raises(ValueError):
-        config_schema_mod._normalize_variables_for_validation(cfg)
+        config_schema_mod._normalize_variables_for_validation(cfg_bad)
 
 
 def test_normalize_variables_detects_cycles() -> None:
