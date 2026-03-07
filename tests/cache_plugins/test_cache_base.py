@@ -196,9 +196,9 @@ def test_in_memory_ttl_cache_snapshot_includes_plugin_targets_and_decorated(
         name = "fake_plugin"
         _targets_cache = targets_cache
 
-    from foghorn.servers import udp_server as udp_mod
+    from foghorn.servers import dns_runtime_state as runtime_mod
 
-    monkeypatch.setattr(udp_mod.DNSUDPHandler, "plugins", [FakePlugin()])
+    monkeypatch.setattr(runtime_mod.DNSRuntimeState, "plugins", [FakePlugin()])
 
     # Fake decorated registry entries.
     import foghorn.utils.register_caches as reg_mod

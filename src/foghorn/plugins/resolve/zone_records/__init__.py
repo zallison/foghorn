@@ -20,6 +20,7 @@ from foghorn.plugins.resolve.base import (
     PluginDecision,
     plugin_aliases,
 )
+from foghorn.servers.dns_runtime_state import DNSRuntimeState
 from foghorn.utils.register_caches import registered_lru_cached
 
 from . import (
@@ -863,9 +864,7 @@ def _handle_notify_opcode(
         )
 
     try:
-        from foghorn.servers.udp_server import DNSUDPHandler
-
-        upstream_id = DNSUDPHandler._upstream_id(upstream)
+        upstream_id = DNSRuntimeState._upstream_id(upstream)
     except Exception:
         upstream_id = None
 

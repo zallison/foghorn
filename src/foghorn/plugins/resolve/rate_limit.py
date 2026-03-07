@@ -101,7 +101,7 @@ class RateLimitConfig(BaseModel):
     window_seconds: int = Field(default=10, ge=1)
     warmup_windows: int = Field(default=6, ge=0)
     alpha: float = Field(default=0.2, ge=0.0, le=1.0)
-    alpha_down: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    alpha_down: Optional[float] = Field(default=0.2, ge=0.0, le=1.0)
     burst_factor: float = Field(default=3.0, ge=1.0)
     min_enforce_rps: float = Field(default=50.0, ge=0.0)
     global_max_rps: float = Field(default=5000.0, ge=0.0)
@@ -765,9 +765,9 @@ class RateLimit(BasePlugin):
                     _echo_client_edns,
                     _attach_ede_option,
                 )
-                from foghorn.servers.udp_server import DNSUDPHandler
+                from foghorn.servers.dns_runtime_state import DNSRuntimeState
 
-                if getattr(DNSUDPHandler, "enable_ede", False):
+                if getattr(DNSRuntimeState, "enable_ede", False):
                     _echo_client_edns(req, reply)
                     _attach_ede_option(
                         req,
