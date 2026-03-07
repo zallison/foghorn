@@ -198,7 +198,8 @@ def _detect_docker_container_id() -> str | None:
 
     Notes:
       - In Docker, HOSTNAME commonly equals the container id.
-      - cgroup parsing is best-effort and may fail in some environments.
+      - On modern Docker, cgroup entries may not include the container id;
+        mountinfo parsing is used as a fallback.
     """
 
     candidate = os.environ.get("HOSTNAME")
@@ -207,6 +208,14 @@ def _detect_docker_container_id() -> str | None:
 
     if not os.path.exists("/.dockerenv"):
         return None
+    try:
+        with open("/proc/self/mountinfo", "r", encoding="utf-8") as f:
+            for line in f:
+                m = re.search(r"/docker/containers/([0-9a-f]{12,64})/", line)
+                if m:
+                    return m.group(1)
+    except Exception:
+        pass
 
     try:
         with open("/proc/self/cgroup", "r", encoding="utf-8") as f:
@@ -215,7 +224,7 @@ def _detect_docker_container_id() -> str | None:
                 if m:
                     return m.group(1)
     except Exception:
-        return None
+        pass
 
     return None
 
@@ -254,6 +263,9 @@ def _log_startup_banner(logger: logging.Logger, *, config_path: str) -> None:
         "IMAGE_ID",
         "IMAGE_SHA",
         "DOCKER_IMAGE_SHA",
+        "OCI_IMAGE_DIGEST",
+        "IMAGE_DIGEST",
+        "CONTAINER_IMAGE",
     )
 
     logger.info("Starting Foghorn")
@@ -264,8 +276,13 @@ def _log_startup_banner(logger: logging.Logger, *, config_path: str) -> None:
     logger.info("  os=%s", os_id)
     logger.info("  python=%s", py_ver)
     logger.info("  pid=%d", pid)
-    logger.info("  container_id=%s", container_id or "not-detected")
-    logger.info("  image_or_build_id=%s", build_id or "unknown")
+    if container_id:
+        logger.info(
+            "  container_id=%s",
+            f"{container_id[:12]}[{container_id[12:]}]",
+        )
+    if build_id:
+        logger.info("  image_or_build_id=%s", build_id)
     if git_sha:
         logger.info("  git_sha=%s", git_sha)
 
@@ -1209,7 +1226,9 @@ def main(argv: List[str] | None = None) -> int:
 
         udp_max_response_bytes = None
         try:
-            raw_udp_max = udp_cfg.get("max_response_bytes") if isinstance(udp_cfg, dict) else None
+            raw_udp_max = (
+                udp_cfg.get("max_response_bytes") if isinstance(udp_cfg, dict) else None
+            )
             if raw_udp_max is not None:
                 udp_max_response_bytes = int(raw_udp_max)
         except Exception:
@@ -1380,7 +1399,6 @@ def main(argv: List[str] | None = None) -> int:
             max_inflight_by_cidr, list
         ):
             max_inflight_by_cidr = None
-
 
         if use_asyncio and udp_use_asyncio:
             try:

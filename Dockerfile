@@ -13,7 +13,9 @@ RUN DEBIAN_FRONTEND=noninteractive apt update \
 	&& DEBIAN_FRONTEND=noninteractive apt clean \
 	&& rm -rf /var/lib/apt/lists/* \
 	&& pip install --root-user-action=ignore --upgrade pip \
-	&& pip install --root-user-action=ignore  cachetools dnslib>=0.9.24 jsonschema>=4.17.3 pydantic pyyaml>=6.0.1 requests>=2.31.0 cryptography dnspython>=2.6.1 fastapi>=0.111.0 psutil python-multipart uvicorn>=0.30.0 paramiko docker>=7.0.0 watchdog zeroconf mariadb mysql-connector-python paho-mqtt psycopg2 pymemcache pymongo redis
+	&& pip install --root-user-action=ignore  cachetools dnslib>=0.9.24 jsonschema>=4.17.3 pydantic pyyaml>=6.0.1 requests>=2.31.0 \
+		cryptography dnspython>=2.6.1 fastapi>=0.111.0 psutil python-multipart uvicorn>=0.30.0 paramiko docker>=7.0.0 watchdog zeroconf \
+		mariadb mysql-connector-python paho-mqtt psycopg2 pymemcache pymongo redis publicsuffix2
 
 # Copy the current directory contents into the container
 COPY . /foghorn

@@ -267,6 +267,10 @@ class BaseStatsStore:
         bucket, pct_full, remind_s = self._queue_pressure_bucket(
             size=size, capacity=cap
         )
+        # Keep low-volume noise out of logs; only emit pressure logs once the
+        # queue is over 5% full.
+        if pct_full <= 5.0:
+            return
         now = time.time()
 
         try:
@@ -300,9 +304,12 @@ class BaseStatsStore:
         except Exception:
             drops = 0
 
-        msg = (
-            "Querylog async queue pressure: %d/%d (%.1f%%), bucket=%d%%, drops=%d"
-            % (size, cap, pct_full, bucket, drops)
+        msg = "Querylog async queue pressure: %d/%d (%.1f%%), bucket=%d%%, drops=%d" % (
+            size,
+            cap,
+            pct_full,
+            bucket,
+            drops,
         )
 
         log = logging.getLogger(__name__)
