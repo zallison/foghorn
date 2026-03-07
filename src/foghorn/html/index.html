@@ -1800,6 +1800,9 @@
 				var title = section && section.title ? section.title : 'Stats';
 				var group = document.createElement('section');
 				group.className = 'fh-stats-group';
+				if (section && section.className) {
+					group.classList.add(String(section.className));
+				}
 				var heading = document.createElement('h3');
 				heading.className = 'fh-stats-group-title';
 				heading.textContent = title;
@@ -2331,6 +2334,9 @@
 				}
 				var group = document.createElement('section');
 				group.className = 'fh-stats-group';
+				if (section && section.className) {
+					group.classList.add(String(section.className));
+				}
 				var heading = document.createElement('h3');
 				heading.className = 'fh-stats-group-title';
 				heading.textContent = title;
@@ -2541,6 +2547,9 @@
 
 				var group = document.createElement('section');
 				group.className = 'fh-stats-group';
+				if (section && section.className) {
+					group.classList.add(String(section.className));
+				}
 				var heading = document.createElement('h3');
 				heading.className = 'fh-stats-group-title';
 				heading.textContent = title;
@@ -2869,6 +2878,135 @@
 					clearPluginRefreshTimer(name);
 				});
 			}
+			function isRateLimitSnapshotDescriptor(desc) {
+				var endpoint = desc && desc.endpoints && desc.endpoints.snapshot
+					? String(desc.endpoints.snapshot)
+					: '';
+				if (!endpoint) {
+					return false;
+				}
+				return endpoint.indexOf('/rate_limit') !== -1;
+			}
+
+			function buildRateLimitProfileRows(payload) {
+				var rows = [];
+				var databases = payload && Array.isArray(payload.databases) ? payload.databases : [];
+
+				databases.forEach(function (db) {
+					if (!db || typeof db !== 'object') {
+						return;
+					}
+					var dbPath = db.db_path != null ? String(db.db_path) : '';
+					var profiles = Array.isArray(db.profiles) ? db.profiles : [];
+					profiles.forEach(function (item) {
+						if (!item || typeof item !== 'object') {
+							return;
+						}
+						var avg = Number(item.avg_rps);
+						var max = Number(item.max_rps);
+						var samples = Number(item.samples);
+						var lastRaw = item.last_update;
+						var lastText = '';
+						if (lastRaw != null) {
+							lastText = formatTimestamp(lastRaw) || String(lastRaw);
+						}
+						rows.push({
+							db_path: dbPath,
+							key: item.key != null ? String(item.key) : '',
+							avg_rps: isFinite(avg) ? avg : 0,
+							max_rps: isFinite(max) ? max : 0,
+							samples: isFinite(samples) ? samples : 0,
+							last_update: lastText,
+						});
+					});
+				});
+
+				rows.sort(function (a, b) {
+					if (b.avg_rps === a.avg_rps) {
+						if (a.key < b.key) return -1;
+						if (a.key > b.key) return 1;
+						if (a.db_path < b.db_path) return -1;
+						if (a.db_path > b.db_path) return 1;
+						return 0;
+					}
+					return b.avg_rps - a.avg_rps;
+				});
+
+				return rows;
+			}
+
+			function renderRateLimitPluginSections(body, desc, pluginName) {
+				if (!body) {
+					return;
+				}
+
+				var layout = desc && desc.layout ? desc.layout : {};
+				var sections = Array.isArray(layout.sections) ? layout.sections : [];
+				var configSection = null;
+				sections.forEach(function (section) {
+					if (configSection || !section || typeof section !== 'object') {
+						return;
+					}
+					if (section.type === 'table' && String(section.id || '') === 'config') {
+						configSection = Object.assign({}, section);
+					}
+				});
+				if (!configSection) {
+					configSection = {
+						id: 'config',
+						title: 'Configuration variables',
+						type: 'table',
+						columns: [
+							{ key: 'key', label: 'Key' },
+							{ key: 'value', label: 'Value' },
+						],
+					};
+				}
+				if (!configSection.title) {
+					configSection.title = 'Configuration variables';
+				}
+				configSection.className = 'fh-rate-limit-config';
+
+				var configRoot = document.createElement('div');
+				body.appendChild(configRoot);
+				renderTableSectionPaged(configRoot, configSection, desc, pluginName);
+
+				var profilesRoot = document.createElement('div');
+				body.appendChild(profilesRoot);
+				var profilesSection = {
+					id: 'profiles',
+					title: 'Profiles',
+					className: 'fh-rate-limit-profiles',
+					columns: [
+						{ key: 'db_path', label: 'Database' },
+						{ key: 'key', label: 'Key' },
+						{ key: 'avg_rps', label: 'Avg RPS', align: 'right', nowrap: true },
+						{ key: 'max_rps', label: 'Max RPS', align: 'right', nowrap: true },
+						{ key: 'samples', label: 'Samples', align: 'right', nowrap: true },
+						{ key: 'last_update', label: 'Last update', nowrap: true },
+					],
+				};
+
+				fetchJson('/api/v1/ratelimit')
+					.then(function (payload) {
+						var rows = buildRateLimitProfileRows(payload);
+						renderTableSection(profilesRoot, rows, profilesSection);
+					})
+					.catch(function (err) {
+						profilesRoot.textContent = '';
+						var group = document.createElement('section');
+						group.className = 'fh-stats-group fh-rate-limit-profiles';
+						var heading = document.createElement('h3');
+						heading.className = 'fh-stats-group-title';
+						heading.textContent = 'Profiles';
+						var pre = document.createElement('pre');
+						pre.className = 'fh-pre fh-pre-compact';
+						pre.textContent = 'Failed to load profiles: ' + err.message;
+						group.appendChild(heading);
+						group.appendChild(pre);
+						profilesRoot.appendChild(group);
+					});
+			}
 
 			function loadSnapshotPageV1(pageEl, desc) {
 				if (!pageEl) {
@@ -2894,6 +3032,9 @@
 						var layout = desc && desc.layout ? desc.layout : {};
 						var sections = Array.isArray(layout.sections) ? layout.sections : [];
 						var pluginName = desc && desc.name ? String(desc.name) : null;
+						if (isRateLimitSnapshotDescriptor(desc)) {
+							renderRateLimitPluginSections(body, desc, pluginName);
+						} else {
 						if (!sections.length) {
 							// Fallback: pretty-print the raw payload.
 							var group = document.createElement('section');
@@ -2930,6 +3071,7 @@
 							}
 						}
 						});
+						}
 
 						// After a successful render, configure optional auto-refresh
 						// when the plugin (or descriptor) advertises a refresh interval.
