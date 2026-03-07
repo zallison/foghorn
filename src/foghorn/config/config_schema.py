@@ -74,7 +74,7 @@ def _normalize_cache_config_for_validation(cfg: Dict[str, Any]) -> None:
         cache_cfg.pop("config", None)
 
 
-_VAR_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
+_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _normalize_variables_for_validation(cfg: Dict[str, Any]) -> None:
@@ -115,15 +115,13 @@ def _normalize_variables_for_validation(cfg: Dict[str, Any]) -> None:
     if not isinstance(variables, dict):
         raise ValueError("config.vars must be a mapping when present")
 
-    # Enforce uppercase variable keys to make substitutions visually distinct
-    # and avoid accidentally treating normal config fields as variables.
+    # Enforce identifier-style variable keys to avoid accidentally treating
+    # normal config fields or punctuation-heavy values as variables.
     for k in variables.keys():
         if not isinstance(k, str):
             raise ValueError("config.vars keys must be strings")
-        if k != k.upper():
-            raise ValueError(f"config.vars key {k!r} must be ALL_UPPERCASE")
-        if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", k):
-            raise ValueError(f"config.vars key {k!r} must match [A-Z_][A-Z0-9_]*")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
+            raise ValueError(f"config.vars key {k!r} must match [A-Za-z_][A-Za-z0-9_]*")
 
     resolved: Dict[str, Any] = {}
 

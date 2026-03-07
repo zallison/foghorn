@@ -301,7 +301,8 @@ def _augment_variables_schema(base: Dict[str, Any]) -> None:
         `variables` is a legal top-level key. This helper adds a minimal schema
         that matches the semantics enforced by _normalize_variables_for_validation:
 
-        - keys must be ALL_CAPS identifiers matching ``[A-Z_][A-Z0-9_]*``;
+        - keys must be identifier-style names matching
+          ``[A-Za-z_][A-Za-z0-9_]*``;
         - values are arbitrary YAML/JSON values (left intentionally untyped).
     """
 
@@ -309,23 +310,35 @@ def _augment_variables_schema(base: Dict[str, Any]) -> None:
         root_props = base.get("properties")
         if not isinstance(root_props, dict):
             return
+        key_pattern = r"^[A-Za-z_][A-Za-z0-9_]*$"
+        description = (
+            "Optional mapping of variable names to arbitrary values. "
+            "These are expanded before validation and removed from the "
+            "runtime config."
+        )
+
+        def _normalize_variables_shape(schema_obj: Dict[str, Any]) -> None:
+            schema_obj["type"] = "object"
+            schema_obj["description"] = description
+            schema_obj["patternProperties"] = {
+                key_pattern: {
+                    # Accept any JSON type for variable values; runtime code
+                    # performs the actual substitution and type handling.
+                }
+            }
+            schema_obj["additionalProperties"] = False
+
+        existing_vars = root_props.get("vars")
+        if isinstance(existing_vars, dict):
+            _normalize_variables_shape(existing_vars)
+
+        existing_variables = root_props.get("variables")
+        if isinstance(existing_variables, dict):
+            _normalize_variables_shape(existing_variables)
 
         if "variables" not in root_props:
-            root_props["variables"] = {
-                "type": "object",
-                "description": (
-                    "Optional mapping of ALL_CAPS variable names to arbitrary "
-                    "values. These are expanded before validation and removed "
-                    "from the runtime config."
-                ),
-                "patternProperties": {
-                    r"^[A-Z_][A-Z0-9_]*$": {
-                        # Accept any JSON type for variable values; runtime code
-                        # performs the actual substitution and type handling.
-                    }
-                },
-                "additionalProperties": False,
-            }
+            root_props["variables"] = {}
+            _normalize_variables_shape(root_props["variables"])
     except Exception:  # pragma: no cover - defensive logging only
         logger.exception("Failed to augment variables schema")
 
@@ -1050,6 +1063,14 @@ def _build_v2_root_schema(
                 },
             ),
             "stderr": legacy_props.get("stderr", {"type": "boolean"}),
+            "color": {
+                "type": "boolean",
+                "default": True,
+                "description": (
+                    "Enable ANSI colorized stderr logging output for improved "
+                    "readability of levels and important tokens."
+                ),
+            },
             "syslog": legacy_props.get(
                 "syslog",
                 {"oneOf": [{"type": "boolean"}, {"type": "object"}]},
@@ -1216,6 +1237,27 @@ def _build_v2_root_schema(
     if isinstance(upstream_host_def, dict):
         host_props = upstream_host_def.setdefault("properties", {})
         if isinstance(host_props, dict):
+            host_props.setdefault(
+                "abort_on_fail",
+                {
+                    "type": "boolean",
+                    "description": (
+                        "When true (default behavior), startup fails if this "
+                        "upstream's TLS CA file validation fails. When false, "
+                        "validation failures are logged and startup continues."
+                    ),
+                },
+            )
+            host_props.setdefault(
+                "abort_on_failure",
+                {
+                    "type": "boolean",
+                    "description": (
+                        "Alias for abort_on_fail. When true, TLS CA validation "
+                        "errors for this upstream are fatal."
+                    ),
+                },
+            )
             notify_schema = {
                 "type": "object",
                 "additionalProperties": False,
@@ -1270,6 +1312,32 @@ def _build_v2_root_schema(
             # Only inject notify when not already present so repeated schema
             # generation remains idempotent.
             host_props.setdefault("notify", notify_schema)
+
+    upstream_doh_def = defs.get("upstream_doh")
+    if isinstance(upstream_doh_def, dict):
+        doh_props = upstream_doh_def.setdefault("properties", {})
+        if isinstance(doh_props, dict):
+            doh_props.setdefault(
+                "abort_on_fail",
+                {
+                    "type": "boolean",
+                    "description": (
+                        "When true (default behavior), startup fails if this "
+                        "upstream's TLS CA file validation fails. When false, "
+                        "validation failures are logged and startup continues."
+                    ),
+                },
+            )
+            doh_props.setdefault(
+                "abort_on_failure",
+                {
+                    "type": "boolean",
+                    "description": (
+                        "Alias for abort_on_fail. When true, TLS CA validation "
+                        "errors for this upstream are fatal."
+                    ),
+                },
+            )
 
     # Decorated cache overrides are modelled via a dedicated definition so that
     # both tooling and runtime helpers share the same canonical module+name
