@@ -16,7 +16,7 @@ class _ResolveCoreResult(NamedTuple):
     """Internal result for the shared resolve pipeline.
 
     Inputs:
-      - None (constructed by _resolve_core).
+      - None (constructed by shared resolver helpers).
     Outputs:
       - wire: Final DNS response bytes with ID fixed.
       - dnssec_status: Optional DNSSEC status string.

@@ -368,12 +368,14 @@ class SQLite3Cache(CachePlugin):
                 primary_row[key] = summary[key]
         caches.append(primary_row)
 
-        # Per-plugin target caches (BasePlugin._targets_cache) when available via
-        # the UDP handler's plugin list.
+        # Per-plugin target caches (BasePlugin._targets_cache) from shared
+        # runtime plugin state.
         try:
-            from foghorn.servers.udp_server import DNSUDPHandler  # type: ignore[import]
+            from foghorn.servers.dns_runtime_state import (
+                DNSRuntimeState,
+            )  # type: ignore[import]
 
-            plugins_list = getattr(DNSUDPHandler, "plugins", []) or []
+            plugins_list = getattr(DNSRuntimeState, "plugins", []) or []
         except (
             Exception
         ):  # pragma: nocover - import/attribute errors leave plugins_list empty

@@ -11,7 +11,7 @@ Outputs:
 from dnslib import QTYPE, DNSRecord
 
 from foghorn.plugins.resolve import base as plugin_base
-from foghorn.servers.server import DNSUDPHandler
+from foghorn.servers.udp_server import DNSUDPHandler
 
 
 def test_handle_calls_ensure_edns_passthrough_no_crash(monkeypatch):
@@ -24,14 +24,11 @@ def test_handle_calls_ensure_edns_passthrough_no_crash(monkeypatch):
     q = DNSRecord.question("example.com", "A")
     ok = q.reply().pack()
 
-    # Patch failover to return our canned response and mark success
-    import foghorn.servers.server as srv
-
     def fake_forward(req, upstreams, qname, qtype):
         return ok, {"host": "1.1.1.1", "port": 53}, "ok"
 
     monkeypatch.setattr(
-        srv.DNSUDPHandler,
+        DNSUDPHandler,
         "_forward_with_failover_helper",
         lambda self, request, upstreams, qname, qtype: fake_forward(
             request, upstreams, qname, qtype

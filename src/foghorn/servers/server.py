@@ -29,8 +29,8 @@ from foghorn.servers.transports.tcp import (
     tcp_query,
 )  # noqa: F401
 from foghorn.utils.register_caches import registered_lru_cached
+from .dns_runtime_state import DNSRuntimeState
 
-from .udp_server import DNSUDPHandler
 from .server_opcode import _ResolveCoreResult, _handle_non_query_opcode
 from .server_runtime import DNSServer  # noqa: F401
 from .server_upstream_health import _UPSTREAM_HEALTH, _UpstreamHealth  # noqa: F401
@@ -239,7 +239,7 @@ def _resolve_core(
     import time as _time  # Local import to avoid impacting module import time
     from types import SimpleNamespace
 
-    handler = DNSUDPHandler
+    handler = DNSRuntimeState
     try:
         from foghorn.runtime_config import get_runtime_snapshot
 
@@ -274,8 +274,8 @@ def _resolve_core(
             cache_prefetch_allow_stale_after_expiry=max(
                 0.0, float(snap.cache_prefetch_allow_stale_after_expiry)
             ),
-            _upstream_id=DNSUDPHandler._upstream_id,
-            _ensure_edns=getattr(DNSUDPHandler, "_ensure_edns", None),
+            _upstream_id=DNSRuntimeState._upstream_id,
+            _ensure_edns=getattr(DNSRuntimeState, "_ensure_edns", None),
         )
 
     stats = getattr(handler, "stats_collector", None)
