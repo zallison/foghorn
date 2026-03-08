@@ -390,6 +390,8 @@ def _normalize_upstream_endpoints_list(
                 "transport": "doh",
                 "url": str(u["url"]),
             }
+            if "id" in u and str(u.get("id", "")).strip():
+                rec["id"] = str(u.get("id")).strip()
             if "method" in u:
                 rec["method"] = str(u.get("method"))
             if "headers" in u and isinstance(u["headers"], dict):
@@ -410,6 +412,8 @@ def _normalize_upstream_endpoints_list(
             "host": str(u["host"]),
             "port": int(raw_port),
         }
+        if "id" in u and str(u.get("id", "")).strip():
+            rec2["id"] = str(u.get("id")).strip()
         if "transport" in u:
             rec2["transport"] = transport
         if "tls" in u and isinstance(u["tls"], dict):

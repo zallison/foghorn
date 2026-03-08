@@ -3612,9 +3612,33 @@
           "type": "object"
         },
         "listen": {
-          "additionalProperties": true,
+          "additionalProperties": false,
           "description": "Type: object.",
           "properties": {
+            "dns": {
+              "additionalProperties": false,
+              "description": "Type: object. Object with subkeys: host, port, tcp, udp.",
+              "properties": {
+                "host": {
+                  "description": "Default host for UDP/TCP listeners when per-listener host is not set.",
+                  "type": "string"
+                },
+                "port": {
+                  "description": "Default port for UDP/TCP listeners when per-listener port is not set.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "tcp": {
+                  "description": "Legacy flag used only when listen.tcp block is absent.",
+                  "type": "boolean"
+                },
+                "udp": {
+                  "description": "Legacy flag used only when listen.udp block is absent.",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
             "doh": {
               "additionalProperties": true,
               "description": "Type: object. Object with subkeys: allow_threaded_fallback.",

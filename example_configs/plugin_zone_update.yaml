@@ -14,10 +14,8 @@ upstreams:
 server:
   listen:
     dns:
-      udp:
-        enabled: true
-        host: 127.0.0.1
-        port: 5353
+      host: 127.0.0.1
+      port: 5353
 plugins:
   - id: zone-with-dynamic-updates
     type: zone_records
