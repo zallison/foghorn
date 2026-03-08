@@ -414,5 +414,5 @@ def start_webserver(
     if runtime_state is not None:
         runtime_state.set_listener("webserver", enabled=True, thread=thread)
 
-    logger.info("Started Foghorn webserver on %s:%d", host, port)
+    logger.info("Started Foghorn admin ui/api on http://%s:%d", host, port)
     return WebServerHandle(thread)
