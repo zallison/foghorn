@@ -1,5 +1,5 @@
 """
-Brief: Ensure main() uses legacy_host for TCP/DoT listener defaults (no NameError) and starts TCP when enabled.
+Brief: Ensure main() applies listener defaults safely and starts TCP when enabled.
 
 Inputs:
   - None
@@ -13,7 +13,7 @@ from unittest.mock import mock_open, patch
 import foghorn.main as main_mod
 
 
-def test_main_tcp_listener_uses_legacy_host_and_starts(monkeypatch):
+def test_main_tcp_listener_uses_default_bind_host_and_starts(monkeypatch):
     """
     Brief: Enabling listen.tcp should not reference undefined 'host' and should call serve_tcp.
 
@@ -113,14 +113,14 @@ def test_main_tcp_listener_uses_legacy_host_and_starts(monkeypatch):
 
 
 def test_listen_dns_populates_udp_and_tcp(monkeypatch):
-    """Brief: server.listen.dns host/port and flags drive UDP/TCP defaults.
+    """Brief: server.listen.dns host/port default listener bind values.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
       - None; asserts DNSServer and TCP listener receive the dns.host/port
-        values when no explicit udp/tcp blocks are present.
+        values when listener blocks omit host/port overrides.
     """
 
     yaml_data = (
@@ -137,8 +137,8 @@ def test_listen_dns_populates_udp_and_tcp(monkeypatch):
         "    dns:\n"
         "      host: 0.0.0.0\n"
         "      port: 5300\n"
-        "      udp: true\n"
-        "      tcp: true\n"
+        "    tcp:\n"
+        "      enabled: true\n"
         "  resolver:\n"
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
