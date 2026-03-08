@@ -1,10 +1,17 @@
+import logging
+import os
 import socket
 import ssl
 import threading
+import tempfile
 import time
 from typing import Optional
 
 from foghorn.utils.register_caches import registered_lru_cached
+
+logger = logging.getLogger("foghorn.servers.transports.dot")
+
+_SSL_DETAILS_LOGGED_ATTR = "_foghorn_ssl_details_logged"
 
 
 class DoTError(Exception):
@@ -20,6 +27,342 @@ class DoTError(Exception):
     """
 
     pass
+
+
+def _format_subject(subject: object) -> str | None:
+    """
+    Format decoded certificate subject tuples into `key=value` components.
+
+    Inputs:
+      - subject: Subject object from decoded certificate metadata.
+    Outputs:
+      - str | None: Comma-separated subject string when available.
+    """
+
+    if not isinstance(subject, (list, tuple)):
+        return None
+    components: list[str] = []
+    for rdn in subject:
+        if not isinstance(rdn, (list, tuple)):
+            continue
+        for attribute in rdn:
+            if (
+                isinstance(attribute, (list, tuple))
+                and len(attribute) >= 2
+                and attribute[0]
+            ):
+                components.append(f"{attribute[0]}={attribute[1]}")
+    return ", ".join(components) if components else None
+
+
+def _decode_cert_subject_from_file(cert_file: str) -> str | None:
+    """
+    Decode a certificate file and return a formatted `Subject:` value.
+
+    Inputs:
+      - cert_file: Path to the certificate file.
+    Outputs:
+      - str | None: Formatted subject string, or None when unavailable.
+    """
+
+    try:
+        decoder = getattr(getattr(ssl, "_ssl", None), "_test_decode_cert", None)
+        if not callable(decoder):
+            return None
+        decoded = decoder(cert_file)
+        if not isinstance(decoded, dict):
+            return None
+        return _format_subject(decoded.get("subject"))
+    except Exception:
+        return None
+
+
+def _decode_cert_subject_from_der(der_cert: bytes) -> str | None:
+    """
+    Decode DER certificate bytes and return a formatted subject string.
+
+    Inputs:
+      - der_cert: DER-encoded certificate bytes.
+    Outputs:
+      - str | None: Formatted subject string, or None if decode fails.
+    """
+
+    tmp_path: str | None = None
+    try:
+        pem_text = ssl.DER_cert_to_PEM_cert(der_cert)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".pem", delete=False
+        ) as tmp:
+            tmp.write(pem_text)
+            tmp_path = tmp.name
+        return _decode_cert_subject_from_file(tmp_path)
+    except Exception:
+        return None
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _probe_remote_cert_subject(
+    host: str,
+    port: int,
+    *,
+    server_hostname: Optional[str] = None,
+    timeout_seconds: float = 1.2,
+) -> str | None:
+    """
+    Best-effort probe to fetch remote certificate subject without verification.
+
+    Inputs:
+      - host: Remote host.
+      - port: Remote TLS port.
+      - server_hostname: Optional SNI hostname.
+      - timeout_seconds: Probe timeout in seconds.
+    Outputs:
+      - str | None: Remote certificate subject string when obtainable.
+    """
+
+    raw_sock: Optional[socket.socket] = None
+    tls_sock: Optional[socket.socket] = None
+    try:
+        raw_sock = socket.create_connection((host, int(port)), timeout=timeout_seconds)
+        ctx = ssl._create_unverified_context()
+        tls_sock = ctx.wrap_socket(
+            raw_sock, server_hostname=server_hostname or host
+        )  # type: ignore[arg-type]
+        cert_dict = tls_sock.getpeercert()
+        subject = _format_subject(
+            cert_dict.get("subject") if isinstance(cert_dict, dict) else None
+        )
+        if subject:
+            return subject
+        der_cert = tls_sock.getpeercert(binary_form=True)
+        if der_cert:
+            return _decode_cert_subject_from_der(der_cert)
+    except Exception:
+        return None
+    finally:
+        try:
+            if tls_sock is not None:
+                tls_sock.close()
+        except Exception:
+            pass
+        try:
+            if raw_sock is not None:
+                raw_sock.close()
+        except Exception:
+            pass
+    return None
+
+
+def _describe_local_cert_file(cert_file: Optional[str]) -> str:
+    """
+    Describe local certificate file details including parsed subject if possible.
+
+    Inputs:
+      - cert_file: Optional certificate path.
+    Outputs:
+      - str: Human-readable description for warning logs.
+    """
+
+    if not cert_file:
+        return "not configured"
+    if not os.path.exists(cert_file):
+        return f"path={cert_file!r} (missing)"
+    if not os.path.isfile(cert_file):
+        return f"path={cert_file!r} (not a regular file)"
+    subject = _decode_cert_subject_from_file(cert_file)
+    if subject:
+        return f"path={cert_file!r}, Subject: {subject}"
+    return f"path={cert_file!r}, Subject: unavailable"
+
+
+def _describe_local_key_file(key_file: Optional[str]) -> str:
+    """
+    Describe local key file details for warning logs.
+
+    Inputs:
+      - key_file: Optional private-key path.
+    Outputs:
+      - str: Human-readable key-file description.
+    """
+
+    if not key_file:
+        return "not configured"
+    if not os.path.exists(key_file):
+        return f"path={key_file!r} (missing)"
+    if not os.path.isfile(key_file):
+        return f"path={key_file!r} (not a regular file)"
+    return f"path={key_file!r}"
+
+
+def _describe_ca_source(*, verify: bool | None, ca_file: Optional[str]) -> str:
+    """
+    Describe which CA trust source was used for TLS verification.
+
+    Inputs:
+      - verify: Whether certificate verification is enabled.
+      - ca_file: Optional CA bundle path.
+    Outputs:
+      - str: CA source description.
+    """
+
+    if verify is False:
+        return "verification disabled (verify=False)"
+    if ca_file:
+        return f"file ({ca_file})"
+    return "system trust store"
+
+
+def _infer_ssl_error_hints(
+    error: BaseException,
+    *,
+    server_hostname: Optional[str] = None,
+    ca_file: Optional[str] = None,
+) -> list[str]:
+    """
+    Infer likely causes for DoT SSL/TLS failures from exception content.
+
+    Inputs:
+      - error: Caught SSL/TLS-related exception.
+      - server_hostname: Optional TLS SNI/verification hostname.
+      - ca_file: Optional CA bundle path.
+    Outputs:
+      - list[str]: Human-readable probable causes for warning logs.
+    """
+
+    message = str(error)
+    lowered = message.lower()
+    hints: list[str] = []
+
+    if (
+        isinstance(error, FileNotFoundError)
+        or "no such file" in lowered
+        or "file not found" in lowered
+    ):
+        if ca_file:
+            hints.append(f"CA file not found: {ca_file}")
+        else:
+            hints.append("certificate/key/CA file not found")
+
+    if (
+        "pem" in lowered
+        or "asn1" in lowered
+        or "bad base64 decode" in lowered
+        or "no start line" in lowered
+        or "unable to load certificate" in lowered
+        or "unable to load private key" in lowered
+    ):
+        hints.append("certificate/key is not valid PEM/ASN.1 data")
+
+    if isinstance(error, ssl.SSLCertVerificationError):
+        if (
+            "hostname" in lowered
+            or "ip address mismatch" in lowered
+            or "doesn't match" in lowered
+            or "does not match" in lowered
+        ):
+            if server_hostname:
+                hints.append(
+                    f"certificate name mismatch for hostname {server_hostname!r}"
+                )
+            else:
+                hints.append(
+                    "certificate name mismatch (set server_name/server_hostname)"
+                )
+        if (
+            "certificate verify failed" in lowered
+            or "self signed" in lowered
+            or "unknown ca" in lowered
+            or "unable to get local issuer certificate" in lowered
+        ):
+            hints.append("certificate chain is not trusted by configured CA bundle")
+        if "expired" in lowered or "not yet valid" in lowered:
+            hints.append("certificate validity period is not currently valid")
+
+    if (
+        "wrong version number" in lowered
+        or "unsupported protocol" in lowered
+        or "protocol version" in lowered
+        or "handshake failure" in lowered
+    ):
+        hints.append("TLS protocol/cipher mismatch during handshake")
+
+    if not hints:
+        hints.append(
+            "verify CA bundle path, certificate format, and TLS server hostname/SNI"
+        )
+
+    return hints
+
+
+def _warn_ssl_error_details(
+    error: BaseException,
+    *,
+    phase: str,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    verify: bool | None = None,
+    server_hostname: Optional[str] = None,
+    cert_file: Optional[str] = None,
+    key_file: Optional[str] = None,
+    ca_file: Optional[str] = None,
+) -> None:
+    """
+    Emit one warning log with SSL/TLS likely-cause hints for DoT operations.
+
+    Inputs:
+      - error: Caught SSL/TLS-related exception.
+      - phase: Short operation stage label (e.g. "context setup", "handshake").
+      - host: Optional upstream host.
+      - port: Optional upstream port.
+      - verify: Optional TLS verification flag.
+      - server_hostname: Optional TLS SNI/verification hostname.
+      - cert_file: Optional local certificate path.
+      - key_file: Optional local private-key path.
+      - ca_file: Optional CA bundle path.
+    Outputs:
+      - None. Emits at most one warning per exception instance.
+    """
+
+    if getattr(error, _SSL_DETAILS_LOGGED_ATTR, False):
+        return
+
+    hints = _infer_ssl_error_hints(
+        error,
+        server_hostname=server_hostname,
+        ca_file=ca_file,
+    )
+    target = ""
+    if host is not None and port is not None:
+        target = f" for {host}:{int(port)}"
+
+    remote_subject = None
+    if host is not None and port is not None:
+        remote_subject = _probe_remote_cert_subject(
+            host,
+            int(port),
+            server_hostname=server_hostname,
+        )
+
+    logger.warning(
+        "DoT TLS %s warning%s: %s. Remote cert Subject: %s. Local cert: %s. Local key: %s. CA source: %s. Likely causes: %s",
+        phase,
+        target,
+        error,
+        remote_subject or "unavailable",
+        _describe_local_cert_file(cert_file),
+        _describe_local_key_file(key_file),
+        _describe_ca_source(verify=verify, ca_file=ca_file),
+        "; ".join(hints),
+    )
+    try:
+        setattr(error, _SSL_DETAILS_LOGGED_ATTR, True)
+    except Exception:
+        pass
 
 
 @registered_lru_cached(maxsize=64)
@@ -43,11 +386,21 @@ def _build_ssl_context(
     Example:
       >>> ctx = _build_ssl_context('cloudflare-dns.com', True, None)
     """
-    ctx = (
-        ssl.create_default_context(cafile=ca_file)
-        if verify
-        else ssl._create_unverified_context()
-    )
+    try:
+        ctx = (
+            ssl.create_default_context(cafile=ca_file)
+            if verify
+            else ssl._create_unverified_context()
+        )
+    except (ssl.SSLError, OSError, ValueError) as exc:
+        _warn_ssl_error_details(
+            exc,
+            phase="context setup",
+            verify=verify,
+            server_hostname=server_hostname,
+            ca_file=ca_file,
+        )
+        raise
     ctx.minimum_version = min_version
     # RFC7858 recommends TLS 1.2 or later; HTTP/2 ciphers are fine but not required here.
     return ctx
@@ -68,12 +421,20 @@ class _DotConn:
     """
 
     def __init__(
-        self, host: str, port: int, ctx: ssl.SSLContext, server_name: Optional[str]
+        self,
+        host: str,
+        port: int,
+        ctx: ssl.SSLContext,
+        server_name: Optional[str],
+        verify: bool,
+        ca_file: Optional[str],
     ):
         self._host = host
         self._port = int(port)
         self._ctx = ctx
         self._server_name = server_name
+        self._verify = bool(verify)
+        self._ca_file = ca_file
         self._sock = None  # type: Optional[socket.socket]
         self._tls = None  # type: Optional[socket.socket]
         self._last_used = time.time()
@@ -84,7 +445,23 @@ class _DotConn:
             (self._host, self._port), timeout=connect_timeout_ms / 1000.0
         )
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        t = self._ctx.wrap_socket(s, server_hostname=self._server_name)
+        try:
+            t = self._ctx.wrap_socket(s, server_hostname=self._server_name)
+        except ssl.SSLError as exc:
+            _warn_ssl_error_details(
+                exc,
+                phase="handshake",
+                host=self._host,
+                port=self._port,
+                verify=self._verify,
+                server_hostname=self._server_name,
+                ca_file=self._ca_file,
+            )
+            try:
+                s.close()
+            except Exception:
+                pass
+            raise
         self._sock = s
         self._tls = t
         self._last_used = time.time()
@@ -223,7 +600,14 @@ class DotConnectionPool:
                 conn = self._stack.pop()
         try:
             if conn is None:
-                conn = _DotConn(self._host, self._port, self._ctx, self._server_name)
+                conn = _DotConn(
+                    self._host,
+                    self._port,
+                    self._ctx,
+                    self._server_name,
+                    self._verify,
+                    self._ca_file,
+                )
                 conn.connect(connect_timeout_ms)
             resp = conn.send(query, read_timeout_ms)
             return resp
@@ -348,6 +732,15 @@ def dot_query(
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
     except ssl.SSLError as e:
+        _warn_ssl_error_details(
+            e,
+            phase="handshake",
+            host=host,
+            port=int(port),
+            verify=verify,
+            server_hostname=server_name,
+            ca_file=ca_file,
+        )
         raise DoTError(
             f"TLS error: {e}"
         )  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
