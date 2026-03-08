@@ -2482,6 +2482,184 @@
 				root.appendChild(group);
 			}
 
+			function renderTableSectionSearchable(root, rows, section) {
+				// Client-side searchable renderer for static row arrays.
+				if (!root) {
+					return;
+				}
+				root.textContent = '';
+				rows = Array.isArray(rows) ? rows : [];
+				var columns = Array.isArray(section && section.columns) ? section.columns : [];
+				var title = section && section.title ? section.title : 'Items';
+				if (!columns.length) {
+					return;
+				}
+
+				var group = document.createElement('section');
+				group.className = 'fh-stats-group';
+				if (section && section.className) {
+					group.classList.add(String(section.className));
+				}
+				var heading = document.createElement('h3');
+				heading.className = 'fh-stats-group-title';
+				heading.textContent = title;
+				group.appendChild(heading);
+
+				var controlsDiv = document.createElement('div');
+				controlsDiv.className = 'fh-table-controls';
+				group.appendChild(controlsDiv);
+
+				var searchWrap = document.createElement('div');
+				searchWrap.className = 'fh-table-controls-row';
+				var searchInput = document.createElement('input');
+				searchInput.type = 'search';
+				searchInput.className = 'fh-table-search';
+				searchInput.placeholder = 'Search...';
+				searchWrap.appendChild(searchInput);
+				controlsDiv.appendChild(searchWrap);
+
+				var table = document.createElement('table');
+				table.className = 'fh-table fh-table-upstreams';
+				group.appendChild(table);
+
+				function renderHeader() {
+					var thead = document.createElement('thead');
+					var hrow = document.createElement('tr');
+					columns.forEach(function (col) {
+						var th = document.createElement('th');
+						th.textContent = col.label || String(col.key || '');
+						if (col.align === 'right') {
+							th.style.textAlign = 'right';
+						}
+						hrow.appendChild(th);
+					});
+					thead.appendChild(hrow);
+					return thead;
+				}
+
+				function formatCellText(raw, key, rowData) {
+					if (key === 'last_seen') {
+						var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
+						var fmt = formatTimestamp(iso || raw);
+						return fmt != null ? String(fmt) : '';
+					}
+					if (raw == null) {
+						return '';
+					}
+					if (typeof raw === 'boolean') {
+						return raw ? 'yes' : '';
+					}
+					if (typeof raw === 'number') {
+						return formatNumber(raw);
+					}
+					if (Array.isArray(raw)) {
+						return raw.join(', ');
+					}
+					return String(raw);
+				}
+
+				function matchesSearch(rowData, queryLower) {
+					if (!queryLower) {
+						return true;
+					}
+					for (var i = 0; i < columns.length; i++) {
+						var col = columns[i];
+						if (!col || !col.key) {
+							continue;
+						}
+						var raw = resolvePath(rowData, col.key);
+						var text = formatCellText(raw, col.key, rowData).toLowerCase();
+						if (text.indexOf(queryLower) !== -1) {
+							return true;
+						}
+					}
+					return false;
+				}
+
+				function renderBody(items) {
+					var tbody = document.createElement('tbody');
+					items = Array.isArray(items) ? items : [];
+					items.forEach(function (rowData) {
+						if (!rowData || typeof rowData !== 'object') {
+							return;
+						}
+						var tr = document.createElement('tr');
+						columns.forEach(function (col) {
+							var key = col.key;
+							var joiner = col.join || null;
+							var raw = key ? resolvePath(rowData, key) : null;
+							var td = document.createElement('td');
+							if (col.align === 'right') {
+								td.style.textAlign = 'right';
+							}
+							if (col.nowrap) {
+								td.style.whiteSpace = 'nowrap';
+							}
+							var text = '';
+							if (key === 'last_seen') {
+								var iso = rowData && rowData._lastSeenRaw != null ? String(rowData._lastSeenRaw) : (raw != null ? String(raw) : '');
+								var fmt = formatTimestamp(iso || raw);
+								text = fmt != null ? String(fmt) : '';
+								if (iso) {
+									td.title = iso;
+								}
+							} else if (raw == null) {
+								text = '';
+							} else if (Array.isArray(raw) && joiner) {
+								text = raw.join(String(joiner));
+							} else if (typeof raw === 'boolean') {
+								text = raw ? 'yes' : '';
+							} else if (typeof raw === 'number') {
+								text = formatNumber(raw);
+							} else {
+								text = String(raw);
+							}
+							if (col.html) {
+								td.innerHTML = text;
+							} else {
+								td.textContent = text;
+							}
+							if (col.key === 'txt' && rowData && rowData._txtTooltip) {
+								td.title = String(rowData._txtTooltip);
+							}
+							tr.appendChild(td);
+						});
+						tbody.appendChild(tr);
+					});
+					if (!items.length) {
+						var trEmpty = document.createElement('tr');
+						var tdEmpty = document.createElement('td');
+						tdEmpty.colSpan = columns.length;
+						tdEmpty.className = 'fh-pane-help';
+						tdEmpty.textContent = 'No matching rows.';
+						trEmpty.appendChild(tdEmpty);
+						tbody.appendChild(trEmpty);
+					}
+					table.textContent = '';
+					table.appendChild(renderHeader());
+					table.appendChild(tbody);
+				}
+
+				function applySearch() {
+					var queryLower = String(searchInput.value || '').trim().toLowerCase();
+					var filtered = rows.filter(function (rowData) {
+						return matchesSearch(rowData, queryLower);
+					});
+					renderBody(filtered);
+				}
+
+				var searchTimer = null;
+				searchInput.addEventListener('input', function () {
+					if (searchTimer) {
+						clearTimeout(searchTimer);
+					}
+					searchTimer = setTimeout(applySearch, 200);
+				});
+
+				root.appendChild(group);
+				renderBody(rows);
+			}
+
 			function _getTableSectionUrl(desc, pluginName, sectionId) {
 				var endpoint = desc && desc.endpoints && desc.endpoints.snapshot ? String(desc.endpoints.snapshot) : '';
 				var sid = encodeURIComponent(String(sectionId || ''));
@@ -2935,10 +3113,11 @@
 				return rows;
 			}
 
-			function renderRateLimitPluginSections(body, desc, pluginName) {
+			function renderRateLimitPluginSections(body, desc, pluginName, snapshotData) {
 				if (!body) {
 					return;
 				}
+				var snapshot = snapshotData && typeof snapshotData === 'object' ? snapshotData : {};
 
 				var layout = desc && desc.layout ? desc.layout : {};
 				var sections = Array.isArray(layout.sections) ? layout.sections : [];
@@ -2969,7 +3148,11 @@
 
 				var configRoot = document.createElement('div');
 				body.appendChild(configRoot);
-				renderTableSectionPaged(configRoot, configSection, desc, pluginName);
+				var configRows = resolvePath(snapshot, configSection.path || 'config_items');
+				if (!Array.isArray(configRows)) {
+					configRows = [];
+				}
+				renderTableSection(configRoot, configRows, configSection);
 
 				var profilesRoot = document.createElement('div');
 				body.appendChild(profilesRoot);
@@ -2990,7 +3173,7 @@
 				fetchJson('/api/v1/ratelimit')
 					.then(function (payload) {
 						var rows = buildRateLimitProfileRows(payload);
-						renderTableSection(profilesRoot, rows, profilesSection);
+						renderTableSectionSearchable(profilesRoot, rows, profilesSection);
 					})
 					.catch(function (err) {
 						profilesRoot.textContent = '';
@@ -3033,7 +3216,7 @@
 						var sections = Array.isArray(layout.sections) ? layout.sections : [];
 						var pluginName = desc && desc.name ? String(desc.name) : null;
 						if (isRateLimitSnapshotDescriptor(desc)) {
-							renderRateLimitPluginSections(body, desc, pluginName);
+							renderRateLimitPluginSections(body, desc, pluginName, data);
 						} else {
 						if (!sections.length) {
 							// Fallback: pretty-print the raw payload.

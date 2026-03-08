@@ -413,6 +413,16 @@ table {
     border-color: #9ca3af;
 }
 
+:root:not([data-theme='light']) .fh-table-page-size {
+    background: var(--bg-card-inner);
+    color: #e5e7eb;
+}
+
+:root:not([data-theme='light']) .fh-table-page-size option {
+    background: var(--bg-card-inner);
+    color: #e5e7eb;
+}
+
 /* Upstreams tables: match System section fonts and split integer/decimal columns */
 .fh-table-upstreams td:first-child {
     font-size: 0.8rem; /* like .fh-kv-list dt */

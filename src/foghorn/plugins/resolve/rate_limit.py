@@ -10,6 +10,7 @@ from typing import Optional, Tuple
 
 from dnslib import QTYPE, RCODE, DNSRecord, EDNSOption
 from pydantic import BaseModel, Field
+from foghorn.plugins.resolve.admin_ui import config_to_items
 
 from foghorn.plugins.resolve.base import (
     AdminPageSpec,
@@ -972,6 +973,10 @@ class RateLimit(BasePlugin):
         """
 
         snapshot = super().get_http_snapshot()
+        try:
+            snapshot["config_items"] = config_to_items(dict(self.config or {}))
+        except Exception:  # pragma: no cover - defensive snapshot normalization
+            pass
 
         db_path = str(getattr(self, "db_path", self.config.get("db_path", "")) or "")
         snapshot["settings"] = {
