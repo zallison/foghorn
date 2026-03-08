@@ -1,6 +1,8 @@
 """Failover transport helpers and upstream skip-warning de-duplication."""
 
 from __future__ import annotations
+import errno
+import time
 
 import logging
 import threading
@@ -11,6 +13,7 @@ from dnslib import QTYPE, RCODE, DNSRecord
 
 from foghorn.servers.transports.dot import DoTError, get_dot_pool
 from foghorn.servers.transports.tcp import TCPError, get_tcp_pool, tcp_query
+from .dns_runtime_state import DNSRuntimeState
 
 logger = logging.getLogger("foghorn.server")
 
@@ -42,6 +45,12 @@ def _upstream_key_for_skip_warning(
         failures are distinguishable.
     """
     try:
+        explicit_id = str(upstream.get("id") or "").strip()
+    except Exception:
+        explicit_id = ""
+    if explicit_id:
+        return f"{transport}:id:{explicit_id}"
+    try:
         url = str(upstream.get("url") or upstream.get("endpoint") or "").strip()
     except Exception:
         url = ""
@@ -60,6 +69,154 @@ def _upstream_key_for_skip_warning(
     if server_name:
         return f"{transport}:{host}:{port}:{server_name}"
     return f"{transport}:{host}:{port}"
+
+
+def _upstream_identity_label(
+    upstream: Dict,
+    host: str,
+    port: int,
+    transport: str,
+) -> str:
+    """Brief: Build a human-readable upstream identity label for warning logs.
+
+    Inputs:
+      - upstream: Upstream configuration mapping.
+      - host: Normalized upstream host string.
+      - port: Normalized upstream port integer.
+      - transport: Normalized transport label.
+
+    Outputs:
+      - str: Label preferring upstream id, then DoH URL, then host:port.
+    """
+
+    try:
+        explicit_id = str(upstream.get("id") or "").strip()
+    except Exception:
+        explicit_id = ""
+    try:
+        url = str(upstream.get("url") or upstream.get("endpoint") or "").strip()
+    except Exception:
+        url = ""
+    host_port = f"{host}:{int(port)}" if host or port else ""
+
+    if explicit_id:
+        if url:
+            return f"id={explicit_id}, url={url}"
+        if host_port:
+            return f"id={explicit_id}, host={host_port}"
+        return f"id={explicit_id}"
+
+    if url:
+        return f"url={url}"
+    if host_port:
+        return f"host={host_port}"
+    return f"transport={transport}"
+
+
+def _is_connection_refused_error(exc: Exception) -> bool:
+    """Brief: Return True when an exception indicates connection refused.
+
+    Inputs:
+      - exc: Exception raised by a transport attempt.
+
+    Outputs:
+      - bool: True when errno/message indicate connection refused.
+    """
+
+    try:
+        if int(getattr(exc, "errno", 0) or 0) == int(errno.ECONNREFUSED):
+            return True
+    except Exception:
+        pass
+
+    return "connection refused" in str(exc).lower()
+
+
+def _upstream_health_context(upstream: Dict, now_ts: Optional[float] = None) -> str:
+    """Brief: Format best-effort health context for an upstream warning log.
+
+    Inputs:
+      - upstream: Upstream configuration mapping.
+      - now_ts: Optional current timestamp for deterministic callers/tests.
+
+    Outputs:
+      - str: Health context text including state/fail_count/down_until.
+
+    Notes:
+      - Reads DNSRuntimeState.upstream_health using DNSRuntimeState._upstream_id.
+      - State values mirror admin health semantics: up/degraded/down.
+    """
+
+    now = float(now_ts) if now_ts is not None else time.time()
+    fail_count = 0.0
+    down_until = 0.0
+    state = "up"
+    up_id = ""
+
+    try:
+        up_id = DNSRuntimeState._upstream_id(upstream)
+    except Exception:
+        up_id = ""
+
+    entry = None
+    if up_id:
+        try:
+            entry = DNSRuntimeState.upstream_health.get(up_id)
+        except Exception:
+            entry = None
+
+    if isinstance(entry, dict):
+        try:
+            fail_count = float(entry.get("fail_count", 0.0) or 0.0)
+        except Exception:
+            fail_count = 0.0
+        try:
+            down_until = float(entry.get("down_until", 0.0) or 0.0)
+        except Exception:
+            down_until = 0.0
+
+    if down_until > now:
+        state = "down"
+    elif fail_count > 0:
+        state = "degraded"
+
+    if down_until > now:
+        retry_in_s = max(0.0, down_until - now)
+        return (
+            f"state={state}, fail_count={fail_count:g}, "
+            f"down_until={down_until:.3f}, retry_in_s={retry_in_s:.1f}"
+        )
+
+    if down_until > 0:
+        return (
+            f"state={state}, fail_count={fail_count:g}, "
+            f"last_down_until={down_until:.3f}"
+        )
+
+    return f"state={state}, fail_count={fail_count:g}, down_until=none"
+
+
+def _warn_upstream_skip_once_with_health(
+    upstream_key: str,
+    upstream_health: str,
+    fmt: str,
+    *args,
+) -> None:
+    """Brief: Emit deduplicated upstream skip warning with health context.
+
+    Inputs:
+      - upstream_key: Identifier returned by _upstream_key_for_skip_warning.
+      - upstream_health: Pre-formatted health context for this upstream.
+      - fmt: Logger format string for skip warning body.
+      - *args: Logger formatting arguments for fmt.
+
+    Outputs:
+      - None. Delegates to _warn_upstream_skip_once.
+    """
+
+    _warn_upstream_skip_once(
+        upstream_key, f"{fmt} [health: %s]", *args, upstream_health
+    )
 
 
 def _warn_upstream_skip_once(upstream_key: str, fmt: str, *args) -> None:
@@ -145,6 +302,9 @@ def _send_query_with_failover_impl(
 
     timeout_sec = timeout_ms / 1000.0
     last_exception: Optional[Exception] = None
+    attempted_upstream_labels: list[str] = []
+    attempted_upstream_health: dict[str, str] = {}
+    attempted_upstreams_lock = threading.Lock()
 
     # Precompute whether the original query advertised EDNS(0) via an OPT RR in
     # the additional section. This is used by the EDNS fallback shim below.
@@ -235,17 +395,19 @@ def _send_query_with_failover_impl(
 
     def _upstream_attempt_context(
         upstream: Dict,
-    ) -> Tuple[str, int, str, str, Optional[str]]:
+    ) -> Tuple[str, int, str, str, Optional[str], str]:
         """Brief: Build immutable context used by a single upstream attempt.
 
         Inputs:
           - upstream: Mapping describing host/port/transport/TLS configuration.
 
         Outputs:
-          - (host, port, transport, upstream_key, tls_ca_file_hint).
+          - (host, port, transport, upstream_key, tls_ca_file_hint,
+            upstream_label).
             host/port/transport are normalized for logging and transport
             selection, upstream_key is used for warning de-duplication, and
             tls_ca_file_hint is used for exception context formatting.
+            upstream_label prefers upstream id, then url, then host:port.
         """
         # For DoH we may not have host/port; use safe defaults for logging
         host = str(upstream.get("host", ""))
@@ -255,6 +417,7 @@ def _send_query_with_failover_impl(
             port = 0
         transport = str(upstream.get("transport", "udp")).lower()
         upstream_key = _upstream_key_for_skip_warning(upstream, host, port, transport)
+        upstream_label = _upstream_identity_label(upstream, host, port, transport)
 
         # Capture any tls.ca_file path early so failures that lose their filename
         # (for example, exceptions wrapped/re-raised by libraries) still provide
@@ -267,7 +430,7 @@ def _send_query_with_failover_impl(
             tls_ca_file_hint = tls_cfg.get("ca_file")
         except Exception:  # pragma: no cover - defensive
             tls_ca_file_hint = None
-        return host, port, transport, upstream_key, tls_ca_file_hint
+        return host, port, transport, upstream_key, tls_ca_file_hint, upstream_label
 
     def _send_transport_query(
         upstream: Dict,
@@ -387,6 +550,7 @@ def _send_query_with_failover_impl(
         port: int,
         transport: str,
         upstream_key: str,
+        upstream_label: str,
     ) -> Tuple[Optional[bytes], Optional[Dict], str]:
         """Brief: Parse and classify a transport response with fallback behavior.
 
@@ -396,6 +560,7 @@ def _send_query_with_failover_impl(
           - host/port/transport: Normalized transport context for logging and
             retries.
           - upstream_key: Key used by warning de-duplication bookkeeping.
+          - upstream_label: Human-readable upstream identity (id/url/host).
 
         Outputs:
           - (response_wire, used_upstream, reason) where response_wire is None
@@ -403,6 +568,7 @@ def _send_query_with_failover_impl(
             reason 'ok' on success.
         """
         nonlocal last_exception
+        upstream_health = _upstream_health_context(upstream)
 
         # Check for SERVFAIL, EDNS compatibility issues, or truncation to
         # trigger appropriate fallbacks.
@@ -411,9 +577,11 @@ def _send_query_with_failover_impl(
 
             # Hardening: ensure response TXID and question match the original.
             if not _response_matches_query(parsed_response):
-                _warn_upstream_skip_once(
+                _warn_upstream_skip_once_with_health(
                     upstream_key,
-                    "Skipping upstream %s:%d via %s for %s (mismatched response)",
+                    upstream_health,
+                    "Skipping upstream %s (%s:%d via %s) for %s (mismatched response)",
+                    upstream_label,
                     host,
                     port,
                     transport,
@@ -458,9 +626,11 @@ def _send_query_with_failover_impl(
                     parsed_response = DNSRecord.parse(response_wire)
 
                     if not _response_matches_query(parsed_response):
-                        _warn_upstream_skip_once(
+                        _warn_upstream_skip_once_with_health(
                             upstream_key,
-                            "Skipping upstream %s:%d via %s for %s (mismatched response after EDNS fallback)",
+                            upstream_health,
+                            "Skipping upstream %s (%s:%d via %s) for %s (mismatched response after EDNS fallback)",
+                            upstream_label,
                             host,
                             port,
                             transport,
@@ -471,9 +641,11 @@ def _send_query_with_failover_impl(
                         )
                         return None, None, "all_failed"
                 except Exception as e2:  # pragma: no cover - defensive
-                    _warn_upstream_skip_once(
+                    _warn_upstream_skip_once_with_health(
                         upstream_key,
-                        "Skipping upstream %s:%d via %s for %s (EDNS fallback failed): %s",
+                        upstream_health,
+                        "Skipping upstream %s (%s:%d via %s) for %s (EDNS fallback failed): %s",
+                        upstream_label,
                         host,
                         port,
                         transport,
@@ -485,9 +657,11 @@ def _send_query_with_failover_impl(
 
                 # After fallback, treat SERVFAIL as failure as usual.
                 if parsed_response.header.rcode == RCODE.SERVFAIL:
-                    _warn_upstream_skip_once(
+                    _warn_upstream_skip_once_with_health(
                         upstream_key,
-                        "Skipping upstream %s:%d via %s for %s (SERVFAIL after EDNS fallback)",
+                        upstream_health,
+                        "Skipping upstream %s (%s:%d via %s) for %s (SERVFAIL after EDNS fallback)",
+                        upstream_label,
                         host,
                         port,
                         transport,
@@ -503,9 +677,11 @@ def _send_query_with_failover_impl(
                 return response_wire, upstream, "ok"
 
             if parsed_response.header.rcode == RCODE.SERVFAIL:
-                _warn_upstream_skip_once(
+                _warn_upstream_skip_once_with_health(
                     upstream_key,
-                    "Skipping upstream %s:%d via %s for %s (returned SERVFAIL)",
+                    upstream_health,
+                    "Skipping upstream %s (%s:%d via %s) for %s (returned SERVFAIL)",
+                    upstream_label,
                     host,
                     port,
                     transport,
@@ -531,9 +707,11 @@ def _send_query_with_failover_impl(
                         if not _response_matches_query(parsed_tcp):
                             raise ValueError("mismatched TCP response")
                     except Exception as e3:
-                        _warn_upstream_skip_once(
+                        _warn_upstream_skip_once_with_health(
                             upstream_key,
-                            "Skipping upstream %s:%d via tcp for %s (mismatched TCP response after truncation): %s",
+                            upstream_health,
+                            "Skipping upstream %s (%s:%d via tcp) for %s (mismatched TCP response after truncation): %s",
+                            upstream_label,
                             host,
                             port,
                             qname,
@@ -545,9 +723,11 @@ def _send_query_with_failover_impl(
                     _reset_upstream_skip_warning(upstream_key)
                     return response_wire, {**upstream, "transport": "tcp"}, "ok"
                 except Exception as e2:  # pragma: no cover - defensive
-                    _warn_upstream_skip_once(
+                    _warn_upstream_skip_once_with_health(
                         upstream_key,
-                        "Skipping upstream %s:%d via %s for %s (TCP retry after truncation failed): %s",
+                        upstream_health,
+                        "Skipping upstream %s (%s:%d via %s) for %s (TCP retry after truncation failed): %s",
+                        upstream_label,
                         host,
                         port,
                         transport,
@@ -558,9 +738,11 @@ def _send_query_with_failover_impl(
                     return None, None, "all_failed"
         except Exception as e:  # pragma: no cover - defensive
             # If parsing fails, treat as a server failure
-            _warn_upstream_skip_once(
+            _warn_upstream_skip_once_with_health(
                 upstream_key,
-                "Skipping upstream %s:%d via %s for %s (failed to parse response): %s",
+                upstream_health,
+                "Skipping upstream %s (%s:%d via %s) for %s (failed to parse response): %s",
+                upstream_label,
                 host,
                 port,
                 transport,
@@ -625,9 +807,17 @@ def _send_query_with_failover_impl(
 
         nonlocal last_exception
 
-        host, port, transport, upstream_key, tls_ca_file_hint = (
+        host, port, transport, upstream_key, tls_ca_file_hint, upstream_label = (
             _upstream_attempt_context(upstream)
         )
+        upstream_health = _upstream_health_context(upstream)
+        try:
+            with attempted_upstreams_lock:
+                if upstream_label not in attempted_upstream_labels:
+                    attempted_upstream_labels.append(upstream_label)
+                attempted_upstream_health[upstream_label] = upstream_health
+        except Exception:
+            pass
 
         try:
             logger.debug(
@@ -640,7 +830,13 @@ def _send_query_with_failover_impl(
             )
             response_wire = _send_transport_query(upstream, host, port, transport)
             return _classify_response(
-                response_wire, upstream, host, port, transport, upstream_key
+                response_wire,
+                upstream,
+                host,
+                port,
+                transport,
+                upstream_key,
+                upstream_label,
             )
 
         except (
@@ -649,18 +845,34 @@ def _send_query_with_failover_impl(
             Exception,
         ) as e:  # pragma: no cover - defensive: network/transport failure
             file_info = _format_transport_error_file_info(e, tls_ca_file_hint)
-
-            _warn_upstream_skip_once(
-                upstream_key,
-                "Skipping upstream %s:%d via %s for %s: %s: %s%s",
-                host,
-                port,
-                transport,
-                qname,
-                type(e).__name__,
-                str(e),
-                file_info,
-            )
+            if _is_connection_refused_error(e):
+                _warn_upstream_skip_once_with_health(
+                    upstream_key,
+                    upstream_health,
+                    "Skipping upstream %s (%s:%d via %s) for %s: connection refused (%s: %s%s)",
+                    upstream_label,
+                    host,
+                    port,
+                    transport,
+                    qname,
+                    type(e).__name__,
+                    str(e),
+                    file_info,
+                )
+            else:
+                _warn_upstream_skip_once_with_health(
+                    upstream_key,
+                    upstream_health,
+                    "Skipping upstream %s (%s:%d via %s) for %s: %s: %s%s",
+                    upstream_label,
+                    host,
+                    port,
+                    transport,
+                    qname,
+                    type(e).__name__,
+                    str(e),
+                    file_info,
+                )
             last_exception = e
             return None, None, "all_failed"
 
@@ -689,7 +901,32 @@ def _send_query_with_failover_impl(
         except Exception as e:  # pragma: no cover - defensive: executor failure
             last_exception = e
 
-    logger.warning(
-        "All upstreams failed for %s %s. Last error: %s", qname, qtype, last_exception
+    attempted_summary = ", ".join(attempted_upstream_labels) or "none"
+    health_summary = (
+        ", ".join(
+            f"{label} [{attempted_upstream_health.get(label, 'state=unknown')}]"
+            for label in attempted_upstream_labels
+        )
+        or "none"
     )
+    if isinstance(last_exception, Exception) and _is_connection_refused_error(
+        last_exception
+    ):
+        logger.warning(
+            "All upstreams failed for %s %s (connection refused). Upstreams: %s. Health: %s. Last error: %s",
+            qname,
+            qtype,
+            attempted_summary,
+            health_summary,
+            last_exception,
+        )
+    else:
+        logger.warning(
+            "All upstreams failed for %s %s. Upstreams: %s. Health: %s. Last error: %s",
+            qname,
+            qtype,
+            attempted_summary,
+            health_summary,
+            last_exception,
+        )
     return None, None, "all_failed"
