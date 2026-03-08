@@ -95,6 +95,11 @@ All notable changes to this project will be documented in this file.
 - Docker image: install `publicsuffix2` to support PSL-aware RateLimit base-domain extraction in container builds.
 - Config: variable names now allow mixed-case identifier keys (`[A-Za-z_][A-Za-z0-9_]*`) instead of only all-caps keys.
 - Config: upstream TLS `ca_file` paths are now validated at startup (existence/readability/CA bundle validity), with `abort_on_fail` / `abort_on_failure` controlling fatal vs warning behavior.
+- Config: `server.listen.host` / `server.listen.port` and `server.listen.dns.udp` / `server.listen.dns.tcp` are now rejected as obsolete; use `server.listen.dns.host` / `server.listen.dns.port` plus per-listener sections.
+- Runtime/config parity: listener default host/port handling is now aligned across startup, effective-config dump output, rate-limit exposure checks, and config-diagram extraction.
+- Logging/transport diagnostics: DoT and admin TLS failure warnings now include richer certificate/key/CA context with likely-cause hints.
+- Failover diagnostics: upstream skip/failure logging now includes stable upstream identity labels and health context summaries.
+- Admin UI: plugin table rendering now supports client-side searchable sections, and rate-limit snapshots include config item details.
 
 ### Fixed
 
@@ -106,6 +111,7 @@ All notable changes to this project will be documented in this file.
 - Diagrams: deny and override edge labels now use multi-line format (e.g., `deny\nIP`, `override\nwire reply`) with proper DOT escaping.
 - ZoneRecords DNSSEC negative-response helpers now handle source-aware RRset entries `(ttl, values, sources)` to avoid tuple-unpacking errors.
 - Server internals: migrated remaining shared runtime attribute access away from `DNSUDPHandler` class state to `DNSRuntimeState`, reducing transport coupling and improving helper/test isolation.
+- DNSSEC: `ensure_zone_keys` now searches fallback relative key directories (including `config/.config` cwd patterns) before concluding keys are missing when generation is disabled.
 
 ### Tests
 
@@ -113,6 +119,7 @@ All notable changes to this project will be documented in this file.
 - Added branch-coverage tests for ZoneRecords UPDATE/TSIG branches, asyncio UDP CIDR inflight limits, web admin config/diagram edge paths, and config/security helper normalization behavior.
 - Updated ZoneRecords resolver and server EDE-path tests to assert plugin-owned NOTIFY behavior and explicit ZoneRecords plugin loading for NOTIFY opcode coverage.
 - Added targeted branch tests for server opcode handling fallback paths, DNSServer runtime wiring/defensive defaults, upstream-health payload shaping, and expanded DoT server branch coverage.
+- Added regression coverage for obsolete listener-key validation, listener default normalization consistency, and relative DNSSEC key-dir fallback lookup behavior.
 
 ### Documentation
 - Updated README and plugin docs/examples to reflect the nested `targets` config and hook priority shorthands.
