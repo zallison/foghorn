@@ -1047,41 +1047,44 @@ def _escape_dot_label(text: str) -> str:
 def extract_listener_lines(cfg: dict[str, Any]) -> list[str]:
     """Brief: Extract human-friendly listener lines from config."""
 
-    server_cfg = cfg.get("server") or {}
+    server_cfg = cfg.get("server")
     if not isinstance(server_cfg, dict):
         return []
-
-    listen_cfg = server_cfg.get("listen") or {}
+    listen_cfg = server_cfg.get("listen")
     if not isinstance(listen_cfg, dict):
         return []
 
     found: dict[str, str] = {}
 
     dns_section = listen_cfg.get("dns")
-    if isinstance(dns_section, dict):
-        host = str(dns_section.get("host", "0.0.0.0"))
-        try:
-            port = int(dns_section.get("port", 53) or 53)
-        except Exception:
-            port = 53
-        if bool(dns_section.get("udp", True)):
-            found.setdefault("udp", f"udp: {host}:{port}")
-        if bool(dns_section.get("tcp", False)):
-            found.setdefault("tcp", f"tcp: {host}:{port}")
+    if not isinstance(dns_section, dict):
+        dns_section = {}
 
-    defaults = {"udp": 53, "tcp": 53, "dot": 853, "doh": 1443}
+    default_host = str(dns_section.get("host", "127.0.0.1"))
+    try:
+        default_port = int(dns_section.get("port", 5335) or 5335)
+    except Exception:
+        default_port = 5335
+
+    defaults = {"udp": default_port, "tcp": default_port, "dot": 853, "doh": 1443}
+    enabled_defaults = {"udp": True, "tcp": False, "dot": False, "doh": False}
+
     for name in ("udp", "tcp", "dot", "doh"):
         section = listen_cfg.get(name)
-        if not isinstance(section, dict):
-            continue
-        enabled = bool(section.get("enabled", True))
+        if isinstance(section, dict):
+            enabled = bool(section.get("enabled", enabled_defaults[name]))
+            host = str(section.get("host", default_host))
+            try:
+                port = int(section.get("port", defaults[name]) or defaults[name])
+            except Exception:
+                port = defaults[name]
+        else:
+            enabled = enabled_defaults[name]
+            host = default_host
+            port = defaults[name]
+
         if not enabled:
             continue
-        host = str(section.get("host", "0.0.0.0"))
-        try:
-            port = int(section.get("port", defaults[name]) or defaults[name])
-        except Exception:
-            port = defaults[name]
         found[name] = f"{name}: {host}:{port}"
 
     out: list[str] = []
