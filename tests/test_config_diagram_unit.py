@@ -481,11 +481,11 @@ def test_node_id_sanitizes_and_falls_back_to_plugin() -> None:
 
 
 def test_extract_listener_lines_handles_dns_and_named_sections() -> None:
-    """Brief: extract_listener_lines supports legacy dns section and explicit sections.
+    """Brief: extract_listener_lines applies dns host/port defaults plus explicit sections.
 
     Inputs:
-      - server.listen.dns with udp/tcp booleans.
-      - server.listen.udp section enabled=false.
+      - server.listen.dns with host/port defaults.
+      - server.listen.tcp section enabled=true.
       - server.listen.dot section using invalid port.
 
     Outputs:
@@ -495,16 +495,16 @@ def test_extract_listener_lines_handles_dns_and_named_sections() -> None:
     cfg = {
         "server": {
             "listen": {
-                "dns": {"host": "127.0.0.1", "port": "bad", "udp": True, "tcp": True},
-                "udp": {"enabled": False, "host": "0.0.0.0", "port": 5553},
+                "dns": {"host": "127.0.0.1", "port": "bad"},
+                "tcp": {"enabled": True},
                 "dot": {"enabled": True, "host": "0.0.0.0", "port": "bad"},
             }
         }
     }
 
     lines = cm.extract_listener_lines(cfg)
-    assert lines[0].startswith("udp: 127.0.0.1:53")
-    assert lines[1].startswith("tcp: 127.0.0.1:53")
+    assert lines[0].startswith("udp: 127.0.0.1:5335")
+    assert lines[1].startswith("tcp: 127.0.0.1:5335")
     assert "dot: 0.0.0.0:853" in lines
 
 

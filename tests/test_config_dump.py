@@ -35,8 +35,8 @@ def test_build_effective_config_for_display_deepcopies_and_fills_top_level_defau
 
     # Listen defaults should exist and be explicit.
     listen = out["server"]["listen"]
-    assert listen["host"] == "127.0.0.1"
-    assert listen["port"] == 5335
+    assert "host" not in listen
+    assert "port" not in listen
     assert listen["udp"]["enabled"] is True
     assert listen["tcp"]["enabled"] is False
 
@@ -73,8 +73,6 @@ def test_expand_server_listen_defaults_legacy_dns_and_invalid_subblocks() -> Non
             "dns": {
                 "host": "0.0.0.0",
                 "port": "not-an-int",
-                "udp": 0,
-                "tcp": 1,
             },
             # Invalid types to force the best-effort fallback path in _sub().
             "udp": True,
@@ -88,13 +86,14 @@ def test_expand_server_listen_defaults_legacy_dns_and_invalid_subblocks() -> Non
     config_dump._expand_server_listen_defaults(server_cfg)
 
     listen = server_cfg["listen"]
-    assert listen["host"] == "0.0.0.0"
-    assert listen["port"] == 5335
+    assert "host" not in listen
+    assert "port" not in listen
+    assert listen["udp"]["host"] == "0.0.0.0"
+    assert listen["udp"]["port"] == 5335
 
-    # Legacy enable flags from listen.dns.* are consulted when udp/tcp blocks are
-    # not dicts.
-    assert listen["udp"]["enabled"] is False
-    assert listen["tcp"]["enabled"] is True
+    # When listener blocks are not mappings, defaults are applied directly.
+    assert listen["udp"]["enabled"] is True
+    assert listen["tcp"]["enabled"] is False
 
     # DoT/DoH defaults become enabled when their sections are mappings.
     assert listen["dot"]["enabled"] is True
