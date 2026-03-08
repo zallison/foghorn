@@ -425,6 +425,45 @@ def test_ensure_zone_keys_policy_no_raises_and_policy_maybe_loads_existing(
     )
 
 
+def test_ensure_zone_keys_policy_no_falls_back_when_relative_path_contains_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Brief: ensure_zone_keys can find existing keys when cwd is config directory.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+      - monkeypatch: pytest fixture used to change the current working directory.
+
+    Outputs:
+      - Asserts generate_policy=no succeeds when configured keys_dir is
+        './config/keys' and existing keys are located in './keys' from cwd.
+    """
+
+    config_dir = tmp_path / "config"
+    keys_dir = config_dir / "keys"
+
+    zone_signer.ensure_zone_keys(
+        "fallback.test.",
+        keys_dir,
+        algorithm="ECDSAP256SHA256",
+        generate_policy="yes",
+    )
+
+    monkeypatch.chdir(config_dir)
+
+    ksk_private, zsk_private, ksk_dnskey, zsk_dnskey = zone_signer.ensure_zone_keys(
+        "fallback.test.",
+        Path("./config/keys"),
+        algorithm="ECDSAP256SHA256",
+        generate_policy="no",
+    )
+
+    assert ksk_private is not None
+    assert zsk_private is not None
+    assert ksk_dnskey is not None
+    assert zsk_dnskey is not None
+
+
 def test_sign_zone_object_signs_and_returns_zone(tmp_path: Path) -> None:
     """Brief: sign_zone_object signs an in-memory zone and returns it.
 
