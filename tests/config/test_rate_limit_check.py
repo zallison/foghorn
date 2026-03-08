@@ -28,7 +28,7 @@ def test_warn_on_exposed_without_rate_limit(caplog: logging.LogCaptureFixture) -
     """
     cfg = {
         "server": {
-            "listen": {"host": "0.0.0.0"},
+            "listen": {"dns": {"host": "0.0.0.0"}},
         }
     }
 
@@ -41,7 +41,9 @@ def test_warn_on_exposed_without_rate_limit(caplog: logging.LogCaptureFixture) -
     assert "REFUSED" in caplog.text
 
 
-def test_no_warn_on_loopback_without_rate_limit(caplog: logging.LogCaptureFixture) -> None:
+def test_no_warn_on_loopback_without_rate_limit(
+    caplog: logging.LogCaptureFixture,
+) -> None:
     """Brief: Don't warn when listeners are loopback-only.
 
     Inputs:
@@ -54,7 +56,7 @@ def test_no_warn_on_loopback_without_rate_limit(caplog: logging.LogCaptureFixtur
     """
     cfg = {
         "server": {
-            "listen": {"host": "127.0.0.1"},
+            "listen": {"dns": {"host": "127.0.0.1"}},
         }
     }
 
@@ -77,7 +79,7 @@ def test_no_warn_with_rate_limit_present(caplog: logging.LogCaptureFixture) -> N
     """
     cfg = {
         "server": {
-            "listen": {"host": "0.0.0.0"},
+            "listen": {"dns": {"host": "0.0.0.0"}},
         }
     }
     plugins = [MockRateLimitPlugin(name="rate_limit", enabled=True)]
@@ -105,7 +107,7 @@ def test_warn_on_specific_listener_exposure(
     cfg = {
         "server": {
             "listen": {
-                "host": "127.0.0.1",
+                "dns": {"host": "127.0.0.1"},
                 "udp": {"enabled": True, "host": "0.0.0.0"},
             }
         }
@@ -132,7 +134,7 @@ def test_ipv6_loopback_no_warning(
     """
     cfg = {
         "server": {
-            "listen": {"host": "::1"},
+            "listen": {"dns": {"host": "::1"}},
         }
     }
 
@@ -155,7 +157,7 @@ def test_localhost_no_warning(caplog: logging.LogCaptureFixture) -> None:
     """
     cfg = {
         "server": {
-            "listen": {"host": "localhost"},
+            "listen": {"dns": {"host": "localhost"}},
         }
     }
 

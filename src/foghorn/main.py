@@ -453,16 +453,10 @@ def main(argv: List[str] | None = None) -> int:
     if not isinstance(dns_cfg, dict):
         dns_cfg = {}
 
-    # Host/port precedence:
-    #   1) listen.dns.host/port when set
-    #   2) listen.host/port when set
-    #   3) hard-coded defaults 127.0.0.1:5335
-    raw_host = dns_cfg.get("host")
-    if raw_host is None:
-        raw_host = listen_cfg.get("host", "127.0.0.1")
-    raw_port = dns_cfg.get("port")
-    if raw_port is None:
-        raw_port = listen_cfg.get("port", 5335)
+    # Listener defaults are sourced from listen.dns when present; otherwise
+    # they fall back to hard-coded defaults.
+    raw_host = dns_cfg.get("host", "127.0.0.1")
+    raw_port = dns_cfg.get("port", 5335)
 
     default_host = str(raw_host)
     try:
@@ -484,12 +478,7 @@ def main(argv: List[str] | None = None) -> int:
     if isinstance(udp_section, dict):
         udp_default_enabled = bool(udp_section.get("enabled", True))
     else:
-        # No explicit UDP listener block; fall back to dns.udp when present,
-        # otherwise preserve the historical default of UDP enabled.
-        if "udp" in dns_cfg:
-            udp_default_enabled = bool(dns_cfg.get("udp"))
-        else:
-            udp_default_enabled = True
+        udp_default_enabled = True
 
     udp_cfg = _sub(
         "udp",
@@ -504,12 +493,7 @@ def main(argv: List[str] | None = None) -> int:
     if isinstance(tcp_section, dict):
         tcp_default_enabled = bool(tcp_section.get("enabled", True))
     else:
-        # No explicit TCP listener block; fall back to dns.tcp when present,
-        # otherwise preserve the historical default of TCP disabled.
-        if "tcp" in dns_cfg:
-            tcp_default_enabled = bool(dns_cfg.get("tcp"))
-        else:
-            tcp_default_enabled = False
+        tcp_default_enabled = False
 
     tcp_cfg = _sub(
         "tcp",
@@ -1400,6 +1384,23 @@ def main(argv: List[str] | None = None) -> int:
         ):
             max_inflight_by_cidr = None
 
+        # Log startup info
+        if resolver_mode == "forward":
+            upstream_info = ", ".join(
+                [
+                    f"{u['url']}" if "url" in u else f"{u['host']}:{u['port']}"
+                    for u in upstreams
+                ]
+            )
+        else:
+            upstream_info = "(recursive mode; no forward upstreams)"
+        logger.info(
+            "Resolver mode=%s, upstreams: [%s], timeout: %dms",
+            resolver_mode,
+            upstream_info,
+            timeout_ms,
+        )
+
         if use_asyncio and udp_use_asyncio:
             try:
                 from .servers.executors import get_resolver_executor
@@ -1489,23 +1490,6 @@ def main(argv: List[str] | None = None) -> int:
             udp_thread.start()
             loop_threads.append(udp_thread)
             runtime_state.set_listener("udp", enabled=True, thread=udp_thread)
-
-    # Log startup info
-    if resolver_mode == "forward":
-        upstream_info = ", ".join(
-            [
-                f"{u['url']}" if "url" in u else f"{u['host']}:{u['port']}"
-                for u in upstreams
-            ]
-        )
-    else:
-        upstream_info = "(recursive mode; no forward upstreams)"
-    logger.info(
-        "Resolver mode=%s, upstreams: [%s], timeout: %dms",
-        resolver_mode,
-        upstream_info,
-        timeout_ms,
-    )
 
     if not bool(udp_cfg.get("enabled", True)):
         # When no UDP listener is configured, the main thread still enters the

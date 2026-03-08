@@ -76,7 +76,10 @@ def check_rate_limit_plugin_config(
         return
 
     exposed = False
-    default_host = listen_cfg.get("host") or "127.0.0.1"
+    dns_cfg = listen_cfg.get("dns") or {}
+    if not isinstance(dns_cfg, dict):
+        dns_cfg = {}
+    default_host = dns_cfg.get("host") or "127.0.0.1"
 
     # Helper to check if a host is exposed
     def _is_exposed(host: str | None) -> bool:
