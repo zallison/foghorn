@@ -25,17 +25,11 @@ server:
 
   # ----- Listener configuration -----
   listen:
-    # Optional defaults (used as fallback for per-listener host/port when set)
-    host: 127.0.0.1
-    port: 5335
 
     # Legacy compatibility block. Prefer server.listen.{udp,tcp} instead.
     dns:
       host: 127.0.0.1
       port: 5335
-      # Legacy booleans (only used when the udp/tcp listener blocks are absent)
-      udp: true
-      tcp: false
 
     udp:
       enabled: true

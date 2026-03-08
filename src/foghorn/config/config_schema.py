@@ -26,6 +26,42 @@ except (
 logger = logging.getLogger(__name__)
 
 
+def _reject_obsolete_server_listen_keys(cfg: Dict[str, Any]) -> None:
+    """Brief: Reject obsolete server.listen and listen.dns legacy keys.
+
+    Inputs:
+      - cfg: Parsed YAML configuration mapping.
+
+    Outputs:
+      - None.
+
+    Raises:
+      - ValueError: When deprecated server.listen.host/port or
+        server.listen.dns.udp/tcp keys are present.
+    """
+
+    server_cfg = cfg.get("server")
+    if not isinstance(server_cfg, dict):
+        return
+
+    listen_cfg = server_cfg.get("listen")
+    if not isinstance(listen_cfg, dict):
+        return
+
+    obsolete_keys = [k for k in ("host", "port") if k in listen_cfg]
+    dns_cfg = listen_cfg.get("dns")
+    if isinstance(dns_cfg, dict):
+        obsolete_keys.extend(f"dns.{k}" for k in ("udp", "tcp") if k in dns_cfg)
+    if not obsolete_keys:
+        return
+
+    joined = ", ".join(f"server.listen.{k}" for k in obsolete_keys)
+    raise ValueError(
+        f"Invalid configuration: {joined} is obsolete and no longer supported. "
+        "Use server.listen.dns.host/port and per-listener server.listen.{udp,tcp,dot,doh}.enabled/host/port."
+    )
+
+
 def _normalize_cache_config_for_validation(cfg: Dict[str, Any]) -> None:
     """Brief: Normalize cache config for backward-compatible schema validation.
 
@@ -490,6 +526,7 @@ def validate_config(
     # Normalize config regardless of whether JSON Schema validation is
     # available. This keeps runtime behavior consistent even when assets are
     # missing or jsonschema is not installed.
+    _reject_obsolete_server_listen_keys(cfg)
     _normalize_variables_for_validation(cfg)
     _normalize_cache_config_for_validation(cfg)
     _normalize_dnssec_config_for_validation(cfg)
