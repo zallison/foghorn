@@ -377,7 +377,7 @@ class MdnsBridge(BasePlugin):
 
         # Prefer per-plugin logger when available.
         log = getattr(self, "logger", logger)
-        log.info(
+        log.debug(
             "MdnsBridge setup: dns_domain=%s mdns_domain=%s network_enabled=%s include_ipv4=%s include_ipv6=%s ttl=%s info_timeout_ms=%s",
             str(getattr(self._config_model, "domain", ".local")),
             ".local",
@@ -500,7 +500,7 @@ class MdnsBridge(BasePlugin):
                 unicast=bool(self._config_model.zeroconf_unicast),
                 ip_version=ip_version,
             )
-            log.info("MdnsBridge: Zeroconf initialized successfully")
+            log.debug("MdnsBridge: Zeroconf initialized successfully")
         except PermissionError as exc:
             log.error(
                 "MdnsBridge: Zeroconf failed to bind mDNS sockets (EPERM). interfaces=%r ip_version=%r unicast=%r",
