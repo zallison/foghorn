@@ -107,6 +107,70 @@ def test_invalid_config_raises_value_error(caplog) -> None:
     )
 
 
+def test_server_listen_host_port_are_rejected_as_obsolete() -> None:
+    """Brief: server.listen.host/port must be rejected as obsolete keys.
+
+    Inputs:
+      - None; builds a minimal v2-ish config mapping.
+
+    Outputs:
+      - None; asserts validate_config raises ValueError mentioning obsolete keys.
+    """
+
+    cfg = {
+        "server": {
+            "listen": {
+                "host": "127.0.0.1",
+                "port": 5335,
+                "udp": {"enabled": True},
+            },
+            "resolver": {"mode": "forward"},
+        },
+        "upstreams": {"endpoints": [{"host": "1.1.1.1", "port": 53}]},
+    }
+
+    with pytest.raises(ValueError) as excinfo:
+        validate_config(cfg, config_path="inline-config")
+
+    msg = str(excinfo.value)
+    assert "server.listen.host" in msg
+    assert "server.listen.port" in msg
+
+
+def test_server_listen_dns_udp_tcp_flags_are_rejected_as_obsolete() -> None:
+    """Brief: server.listen.dns.udp/tcp legacy flags must be rejected.
+
+    Inputs:
+      - None; builds a minimal v2-ish config mapping.
+
+    Outputs:
+      - None; asserts validate_config raises ValueError mentioning obsolete keys.
+    """
+
+    cfg = {
+        "server": {
+            "listen": {
+                "dns": {
+                    "host": "127.0.0.1",
+                    "port": 5335,
+                    "udp": True,
+                    "tcp": False,
+                },
+                "udp": {"enabled": True},
+            },
+            "resolver": {"mode": "forward"},
+        },
+        "upstreams": {"endpoints": [{"host": "1.1.1.1", "port": 53}]},
+    }
+
+    with pytest.raises(ValueError) as excinfo:
+        validate_config(cfg, config_path="inline-config")
+
+    msg = str(excinfo.value)
+    assert "server.listen.dns.udp" in msg
+    assert "server.listen.dns.tcp" in msg
+
+
 def test_get_default_schema_path_docker_fallback(monkeypatch) -> None:
     """Brief: get_default_schema_path uses the Docker fallback when image path exists.
 

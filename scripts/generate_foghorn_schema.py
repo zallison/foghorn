@@ -793,9 +793,38 @@ def _build_v2_root_schema(
     # when the base schema is permissive.
     if isinstance(listen_schema, dict):
         listen_schema.setdefault("type", "object")
-        listen_schema.setdefault("additionalProperties", True)
+        listen_schema["additionalProperties"] = False
         listen_props = listen_schema.setdefault("properties", {})
         if isinstance(listen_props, dict):
+            # Obsolete root-level defaults under server.listen are intentionally
+            # removed; listeners must now be configured under listen.dns and/or
+            # per-listener blocks (udp/tcp/dot/doh).
+            listen_props.pop("host", None)
+            listen_props.pop("port", None)
+
+            dns_child = listen_props.get("dns")
+            if not isinstance(dns_child, dict):
+                dns_child = {"type": "object", "additionalProperties": False}
+                listen_props["dns"] = dns_child
+            dns_child.setdefault("type", "object")
+            dns_child["additionalProperties"] = False
+            dns_props = dns_child.setdefault("properties", {})
+            if isinstance(dns_props, dict):
+                dns_props.setdefault(
+                    "host",
+                    {
+                        "type": "string",
+                        "description": "Default host for UDP/TCP listeners when per-listener host is not set.",
+                    },
+                )
+                dns_props.setdefault(
+                    "port",
+                    {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Default port for UDP/TCP listeners when per-listener port is not set.",
+                    },
+                )
 
             def _ensure_listener_child(key: str) -> Dict[str, Any]:
                 child = listen_props.get(key)
