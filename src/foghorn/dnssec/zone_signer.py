@@ -87,6 +87,42 @@ def _sanitize_zone_name(zone_name: str) -> str:
     return zone_str.replace(".", "_")
 
 
+def _candidate_key_lookup_dirs(keys_dir: Path) -> List[Path]:
+    """Brief: Build candidate directories for key-file existence checks.
+
+    Inputs:
+      - keys_dir: Configured key directory path.
+
+    Outputs:
+      - list[Path]: Candidate directories to probe for existing key files.
+
+    Notes:
+      - The configured path is always checked first.
+      - For relative paths that include a ``config`` (or ``.config``) segment,
+        an additional fallback candidate is included with one such segment
+        removed. This supports execution from within a ``config`` directory
+        while keeping persisted config values unchanged.
+    """
+
+    candidates: List[Path] = [keys_dir]
+
+    if keys_dir.is_absolute():
+        return candidates
+
+    parts = list(keys_dir.parts)
+    for idx, part in enumerate(parts):
+        if part not in {"config", ".config"}:
+            continue
+
+        stripped_parts = parts[:idx] + parts[idx + 1 :]
+        fallback = Path(*stripped_parts) if stripped_parts else Path(".")
+        if fallback not in candidates:
+            candidates.append(fallback)
+        break
+
+    return candidates
+
+
 def save_key(
     private_key: object, key_dir: Path, zone_name: str, key_type: str, algorithm: str
 ) -> Path:
@@ -333,16 +369,26 @@ def ensure_zone_keys(
 
     zone_name_str = zone_name if zone_name.endswith(".") else zone_name + "."
     alg_enum = ALGORITHM_MAP[algorithm][0]
+    configured_keys_dir = keys_dir.expanduser()
+    lookup_dirs = [
+        p.expanduser().resolve() for p in _candidate_key_lookup_dirs(keys_dir)
+    ]
 
-    keys_dir = keys_dir.resolve()
+    keys_dir = configured_keys_dir.resolve()
+    keys_dir.mkdir(parents=True, exist_ok=True)
     keys_dir.mkdir(parents=True, exist_ok=True)
 
     ksk_private = None
     zsk_private = None
 
     if generate_policy in {"no", "maybe"}:
-        ksk_private = load_key(keys_dir, zone_name_str, "ksk")
-        zsk_private = load_key(keys_dir, zone_name_str, "zsk")
+        for lookup_dir in lookup_dirs:
+            if ksk_private is None:
+                ksk_private = load_key(lookup_dir, zone_name_str, "ksk")
+            if zsk_private is None:
+                zsk_private = load_key(lookup_dir, zone_name_str, "zsk")
+            if ksk_private is not None and zsk_private is not None:
+                break
 
     if generate_policy == "no":
         if ksk_private is None or zsk_private is None:
