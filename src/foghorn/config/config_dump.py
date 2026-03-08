@@ -124,24 +124,16 @@ def _expand_server_listen_defaults(server_cfg: Dict[str, Any]) -> None:
     if not isinstance(dns_cfg, dict):
         dns_cfg = {}
 
-    # Host/port precedence is aligned with foghorn.main.
-    raw_host = dns_cfg.get("host")
-    if raw_host is None:
-        raw_host = listen_cfg.get("host", "127.0.0.1")
-
-    raw_port = dns_cfg.get("port")
-    if raw_port is None:
-        raw_port = listen_cfg.get("port", 5335)
+    # Listener defaults are sourced from listen.dns when present; otherwise
+    # they fall back to hard-coded defaults.
+    raw_host = dns_cfg.get("host", "127.0.0.1")
+    raw_port = dns_cfg.get("port", 5335)
 
     default_host = str(raw_host)
     try:
         default_port = int(raw_port)
     except (TypeError, ValueError):
         default_port = 5335
-
-    # Make the defaults explicit on the listen block.
-    listen_cfg.setdefault("host", default_host)
-    listen_cfg.setdefault("port", default_port)
 
     def _sub(key: str, defaults: Dict[str, Any]) -> Dict[str, Any]:
         block = listen_cfg.get(key, {}) or {}
@@ -153,20 +145,13 @@ def _expand_server_listen_defaults(server_cfg: Dict[str, Any]) -> None:
     if isinstance(udp_section, dict):
         udp_default_enabled = bool(udp_section.get("enabled", True))
     else:
-        # Legacy behaviour: consult listen.dns.udp when present.
-        if "udp" in dns_cfg:
-            udp_default_enabled = bool(dns_cfg.get("udp"))
-        else:
-            udp_default_enabled = True
+        udp_default_enabled = True
 
     tcp_section = listen_cfg.get("tcp")
     if isinstance(tcp_section, dict):
         tcp_default_enabled = bool(tcp_section.get("enabled", True))
     else:
-        if "tcp" in dns_cfg:
-            tcp_default_enabled = bool(dns_cfg.get("tcp"))
-        else:
-            tcp_default_enabled = False
+        tcp_default_enabled = False
 
     dot_section = listen_cfg.get("dot")
     dot_default_enabled = True if isinstance(dot_section, dict) else False
