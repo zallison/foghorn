@@ -96,6 +96,7 @@ All notable changes to this project will be documented in this file.
 - Config: variable names now allow mixed-case identifier keys (`[A-Za-z_][A-Za-z0-9_]*`) instead of only all-caps keys.
 - Config: upstream TLS `ca_file` paths are now validated at startup (existence/readability/CA bundle validity), with `abort_on_fail` / `abort_on_failure` controlling fatal vs warning behavior.
 - Config: `server.listen.host` / `server.listen.port` and `server.listen.dns.udp` / `server.listen.dns.tcp` are now rejected as obsolete; use `server.listen.dns.host` / `server.listen.dns.port` plus per-listener sections.
+- Runtime internals: refactored `foghorn.main` startup/shutdown flow into focused helper functions (argument parsing, listener normalization, resolver/upstream parsing, cache/stats initialization, runtime snapshot setup, DNSSEC resolver wiring, and signal-handler install) while preserving `main()` behavior and public wrappers.
 - Runtime/config parity: listener default host/port handling is now aligned across startup, effective-config dump output, rate-limit exposure checks, and config-diagram extraction.
 - Logging/transport diagnostics: DoT and admin TLS failure warnings now include richer certificate/key/CA context with likely-cause hints.
 - Failover diagnostics: upstream skip/failure logging now includes stable upstream identity labels and health context summaries.
@@ -120,6 +121,7 @@ All notable changes to this project will be documented in this file.
 - Updated ZoneRecords resolver and server EDE-path tests to assert plugin-owned NOTIFY behavior and explicit ZoneRecords plugin loading for NOTIFY opcode coverage.
 - Added targeted branch tests for server opcode handling fallback paths, DNSServer runtime wiring/defensive defaults, upstream-health payload shaping, and expanded DoT server branch coverage.
 - Added regression coverage for obsolete listener-key validation, listener default normalization consistency, and relative DNSSEC key-dir fallback lookup behavior.
+- Updated `tests/test_main_additional_coverage.py` fixtures to use `server.listen.dns.host` / `server.listen.dns.port` so startup-path tests no longer rely on obsolete `server.listen.host` / `server.listen.port` keys.
 
 ### Documentation
 - Updated README and plugin docs/examples to reflect the nested `targets` config and hook priority shorthands.
