@@ -371,9 +371,7 @@ def test_sigusr1_skip_reset_and_coalescing(monkeypatch, caplog):
         rc = main_mod.main(["--config", "cfg.yaml"])
 
     assert rc == 0
-    assert any(
-        "SIGUSR1: statistics reset skipped" in r.message for r in caplog.records
-    )
+    assert any("SIGUSR1: statistics reset skipped" in r.message for r in caplog.records)
 
     # Second run: set the coalescing flag (pending event) and ensure SIGUSR1
     # returns early without running the handler body.
@@ -467,7 +465,9 @@ def test_sigusr1_registration_failure_logs_warning(monkeypatch, caplog):
         return None
 
     monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
-    monkeypatch.setattr(time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt))
+    monkeypatch.setattr(
+        time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
@@ -740,7 +740,9 @@ def test_sigusr2_registration_failure_logs_warning(monkeypatch, caplog):
         return None
 
     monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
-    monkeypatch.setattr(time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt))
+    monkeypatch.setattr(
+        time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
     monkeypatch.setattr(
@@ -851,8 +853,9 @@ def test_start_without_udp_uses_keepalive_loop(monkeypatch, caplog):
     yaml_data = (
         "server:\n"
         "  listen:\n"
-        "    host: 127.0.0.1\n"
-        "    port: 5354\n"
+        "    dns:\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
         "    udp:\n"
         "      enabled: false\n"
         "  resolver:\n"
@@ -874,7 +877,9 @@ def test_start_without_udp_uses_keepalive_loop(monkeypatch, caplog):
 
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: DummyHandle())
-    monkeypatch.setattr(time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt))
+    monkeypatch.setattr(
+        time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         with caplog.at_level(logging.INFO, logger="foghorn.main"):
@@ -900,8 +905,9 @@ def test_tcp_permission_error_falls_back_to_threaded(monkeypatch, caplog):
     yaml_data = (
         "server:\n"
         "  listen:\n"
-        "    host: 127.0.0.1\n"
-        "    port: 5354\n"
+        "    dns:\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
         "    udp:\n"
         "      enabled: false\n"
         "    tcp:\n"
@@ -988,8 +994,9 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
     yaml_data = (
         "server:\n"
         "  listen:\n"
-        "    host: 127.0.0.1\n"
-        "    port: 5354\n"
+        "    dns:\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
         "    udp:\n"
         "      enabled: false\n"
         "    dot:\n"
@@ -1071,8 +1078,9 @@ def test_dot_start_logs_info(monkeypatch, caplog):
     yaml_data = (
         "server:\n"
         "  listen:\n"
-        "    host: 127.0.0.1\n"
-        "    port: 5354\n"
+        "    dns:\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
         "    udp:\n"
         "      enabled: false\n"
         "    dot:\n"
@@ -1142,8 +1150,9 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
     yaml_data = (
         "server:\n"
         "  listen:\n"
-        "    host: 127.0.0.1\n"
-        "    port: 5354\n"
+        "    dns:\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
         "    udp:\n"
         "      enabled: false\n"
         "    tcp:\n"
@@ -1248,8 +1257,9 @@ def test_doh_start_failure_returns_one(monkeypatch, caplog):
     yaml_data = (
         "server:\n"
         "  listen:\n"
-        "    host: 127.0.0.1\n"
-        "    port: 5354\n"
+        "    dns:\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
         "    udp:\n"
         "      enabled: false\n"
         "    doh:\n"
@@ -1353,7 +1363,9 @@ def test_webserver_stop_called_on_shutdown(monkeypatch, caplog):
         return handle
 
     monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
-    monkeypatch.setattr(time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt))
+    monkeypatch.setattr(
+        time, "sleep", lambda _s: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", fake_start_webserver)
 
