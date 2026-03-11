@@ -43,31 +43,18 @@ def _get_web_cfg(config: Dict[str, Any] | None) -> Dict[str, Any]:
       - dict: Effective web configuration mapping.
 
     Notes:
-      - Preferred v2 location: ``config['server']['http']``.
-      - Legacy fallback (tests/older configs): ``config['webserver']``.
-      - Centralising this avoids drift between FastAPI and threaded HTTP paths.
+      - Web config is read only from ``config['server']['http']``.
+      - Centralizing this avoids drift between FastAPI and threaded HTTP paths.
     """
 
     if not isinstance(config, dict):
         return {}
 
     server_cfg = config.get("server") or {}
-    legacy = config.get("webserver")
-
-    if isinstance(server_cfg, dict):
-        http_cfg = server_cfg.get("http")
-        if isinstance(http_cfg, dict):
-            # Backwards-compatibility: some older configs/tests still place
-            # fields such as auth under the legacy webserver block. Merge those
-            # keys as defaults when they are not present in server.http.
-            out: Dict[str, Any] = dict(http_cfg)
-            if isinstance(legacy, dict):
-                for k, v in legacy.items():
-                    if k not in out:
-                        out[k] = v
-            return out
-
-    return legacy if isinstance(legacy, dict) else {}
+    if not isinstance(server_cfg, dict):
+        return {}
+    http_cfg = server_cfg.get("http")
+    return http_cfg if isinstance(http_cfg, dict) else {}
 
 
 def _get_redact_keys(config: Dict[str, Any] | None) -> List[str]:
@@ -80,20 +67,13 @@ def _get_redact_keys(config: Dict[str, Any] | None) -> List[str]:
       - List of key names that should have their values redacted.
 
     Notes:
-      - Preferred: ``webserver.redact_keys``.
-      - Compatibility: also accepts ``server.http.redact_keys`` (v2-style config).
-      - If neither is configured, falls back to a small default list of sensitive
-        names ("token", "password", "secret").
+      - Reads keys from ``server.http.redact_keys``.
+      - If unset, falls back to a small default list of sensitive names
+        ("token", "password", "secret").
     """
 
     web_cfg = _get_web_cfg(config)
     keys = web_cfg.get("redact_keys")
-
-    if keys is None and isinstance(config, dict):
-        server_cfg = config.get("server") or {}
-        http_cfg = server_cfg.get("http") or {}
-        if isinstance(http_cfg, dict):
-            keys = http_cfg.get("redact_keys")
 
     if not keys:
         keys = ["token", "password", "secret"]
@@ -122,9 +102,9 @@ def sanitize_config(
 
     Example::
 
-      cfg = {"webserver": {"auth": {"token": "secret"}}}
+      cfg = {"server": {"http": {"auth": {"token": "secret"}}}}
       clean = sanitize_config(cfg, ["token"])
-      assert clean["webserver"]["auth"]["token"] == "***"
+      assert clean["server"]["http"]["auth"]["token"] == "***"
     """
 
     if not isinstance(cfg, dict):
