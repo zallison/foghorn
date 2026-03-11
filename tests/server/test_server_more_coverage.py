@@ -260,7 +260,9 @@ def test_handle_pre_deny_sends_nxdomain_and_returns(monkeypatch, set_runtime_sna
     assert DNSRecord.parse(sock.sent[0][0]).header.rcode == RCODE.NXDOMAIN
 
 
-def test_resolve_query_bytes_negative_caches_nxdomain_with_soa(monkeypatch, set_runtime_snapshot):
+def test_resolve_query_bytes_negative_caches_nxdomain_with_soa(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: resolve_query_bytes should cache NXDOMAIN with SOA authority.
 
     Inputs:
@@ -304,9 +306,21 @@ def test_resolve_query_bytes_negative_caches_nxdomain_with_soa(monkeypatch, set_
         calls["n"] += 1
         return wire, upstreams[0], "ok"
 
+    # Ensure clean state before applying monkeypatch
+    plugin_base.DNS_CACHE = InMemoryTTLCache()
+    # Reset any runtime health state that might affect this test
+    try:
+        from foghorn.servers.dns_runtime_state import DNSRuntimeState
+
+        for key in list(DNSRuntimeState.upstream_health.keys()):
+            DNSRuntimeState.upstream_health[key] = {}  # noqa: SLF001
+    except Exception:
+        pass
+    DNSRuntimeState.upstream_probe_percent = None  # noqa: SLF001
+    DNSRuntimeState._upstream_rr_index = 0  # noqa: SLF001
+
     monkeypatch.setattr(srv, "send_query_with_failover", fake_failover)
 
-    plugin_base.DNS_CACHE = InMemoryTTLCache()
     set_runtime_snapshot(
         upstream_addrs=[{"host": "1.1.1.1", "port": 53}],
         plugins=[],
@@ -324,7 +338,9 @@ def test_resolve_query_bytes_negative_caches_nxdomain_with_soa(monkeypatch, set_
     assert calls["n"] == 1
 
 
-def test_resolve_query_bytes_caches_delegation_with_ns(monkeypatch, set_runtime_snapshot):
+def test_resolve_query_bytes_caches_delegation_with_ns(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: resolve_query_bytes should cache referrals with NS in authority.
 
     Inputs:
@@ -395,7 +411,13 @@ def test_resolve_query_bytes_post_hooks(monkeypatch, set_runtime_snapshot):
     r_ok = q.reply()
 
     def fake_forward(
-        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
     ):
         return r_ok.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
 
