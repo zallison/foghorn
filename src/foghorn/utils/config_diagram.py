@@ -1095,7 +1095,16 @@ def extract_listener_lines(cfg: dict[str, Any]) -> list[str]:
 
 
 def extract_upstream_lines(cfg: dict[str, Any], *, resolver_mode: str) -> list[str]:
-    """Brief: Extract human-friendly upstream endpoint lines from config."""
+    """Brief: Extract human-friendly upstream endpoint lines from config.
+
+    Inputs:
+      - cfg: Parsed config mapping.
+      - resolver_mode: Resolver mode string.
+
+    Outputs:
+      - list[str]: Upstream summary lines for the diagram. Backup upstream
+        endpoints are included with a ``" (backup)"`` suffix.
+    """
 
     mode = str(resolver_mode or "forward").lower()
     if mode == "none":
@@ -1111,6 +1120,13 @@ def extract_upstream_lines(cfg: dict[str, Any], *, resolver_mode: str) -> list[s
     if not isinstance(endpoints, list):
         return []
 
+    backup_cfg = upstream_cfg.get("backup") or {}
+    backup_endpoints: list[Any] = []
+    if isinstance(backup_cfg, dict):
+        raw_backup_endpoints = backup_cfg.get("endpoints") or []
+        if isinstance(raw_backup_endpoints, list):
+            backup_endpoints = raw_backup_endpoints
+
     lines: list[str] = []
 
     strategy = str(upstream_cfg.get("strategy", "failover") or "failover")
@@ -1120,29 +1136,37 @@ def extract_upstream_lines(cfg: dict[str, Any], *, resolver_mode: str) -> list[s
         max_concurrent = 1
     lines.append(f"strategy={strategy}, max_concurrent={max_concurrent}")
 
-    for ep in endpoints:
-        if not isinstance(ep, dict):
-            continue
-        transport = str(ep.get("transport", "udp") or "udp")
-        url = ep.get("url")
-        if isinstance(url, str) and url.strip():
-            lines.append(f"{transport}: {url.strip()}")
-            continue
+    def _append_endpoint_lines(
+        endpoint_list: list[Any], *, is_backup: bool = False
+    ) -> None:
+        """Brief: Append upstream endpoint lines to the diagram payload."""
+        suffix = " (backup)" if is_backup else ""
+        for ep in endpoint_list:
+            if not isinstance(ep, dict):
+                continue
+            transport = str(ep.get("transport", "udp") or "udp")
+            url = ep.get("url")
+            if isinstance(url, str) and url.strip():
+                lines.append(f"{transport}: {url.strip()}{suffix}")
+                continue
 
-        host = ep.get("host")
-        if not isinstance(host, str) or not host.strip():
-            continue
-        host = host.strip()
-        port = ep.get("port")
-        if port is None:
-            lines.append(f"{transport}: {host}")
-        else:
-            try:
-                p = int(port)
-            except Exception:
-                lines.append(f"{transport}: {host}")
+            host = ep.get("host")
+            if not isinstance(host, str) or not host.strip():
+                continue
+            host = host.strip()
+            port = ep.get("port")
+            if port is None:
+                lines.append(f"{transport}: {host}{suffix}")
             else:
-                lines.append(f"{transport}: {host}:{p}")
+                try:
+                    p = int(port)
+                except Exception:
+                    lines.append(f"{transport}: {host}{suffix}")
+                else:
+                    lines.append(f"{transport}: {host}:{p}{suffix}")
+
+    _append_endpoint_lines(endpoints, is_backup=False)
+    _append_endpoint_lines(backup_endpoints, is_backup=True)
 
     return lines
 
@@ -1432,7 +1456,7 @@ def render_dot(
         for p in pre_chain:
             nid = _node_id("pre", p.name, p.idx)
             pre_node_ids[p.idx] = nid
-            label = f"{_escape_dot_label(p.name)}\\n{_escape_dot_label(p.type_key)}\\npre={p.pre_priority}"
+            label = f"{_escape_dot_label(p.name)}\\n{_escape_dot_label(p.type_key)}\\npriority={p.pre_priority}"
             if p.sets_upstreams:
                 label += "\\nroutes upstream"
             # Keep pre plugins aligned with the main pipeline.
