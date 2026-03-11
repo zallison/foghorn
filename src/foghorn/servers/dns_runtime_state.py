@@ -64,7 +64,7 @@ class DNSRuntimeState:
     forward_local: bool = False
 
     # Lazy health state for upstreams keyed by a stable upstream identifier.
-    upstream_health: Dict[str, Dict[str, float]] = {}
+    upstream_health: Dict[str, Dict[str, object]] = {}
     # Adaptive probe percentage used when deciding whether to include upstreams
     # currently in backoff/down state for health probing traffic.
     upstream_probe_percent: float | None = None
@@ -99,12 +99,11 @@ class DNSRuntimeState:
 
         Inputs:
           - upstreams: List of upstream config dicts.
-          - reason: Optional failure reason (unused, kept for compatibility).
+          - reason: Optional failure reason to track for diagnostics.
 
         Outputs:
           - None; updates cls.upstream_health in-place.
         """
-        _ = reason
         now = time.time()
         base_delay = 5.0
         max_delay = 300.0
@@ -123,11 +122,13 @@ class DNSRuntimeState:
             for _ in range(max(0, fail_count - 1)):
                 a, b = b, a + b
             delay = min(base_delay * float(a), max_delay)
-
-            cls.upstream_health[up_id] = {
-                "fail_count": float(fail_count),
-                "down_until": now + delay,
-            }
+            updated_entry = dict(entry)
+            updated_entry["fail_count"] = float(fail_count)
+            updated_entry["down_until"] = now + delay
+            updated_entry["last_error_ts"] = now
+            if reason:
+                updated_entry["last_error"] = str(reason)
+            cls.upstream_health[up_id] = updated_entry
 
     @classmethod
     def _mark_upstream_ok(cls, upstream: Optional[Dict]) -> None:
@@ -147,7 +148,10 @@ class DNSRuntimeState:
         entry = cls.upstream_health.get(up_id)
         if not entry:
             return
-        cls.upstream_health[up_id] = {"fail_count": 0.0, "down_until": 0.0}
+        updated_entry = dict(entry)
+        updated_entry["fail_count"] = 0.0
+        updated_entry["down_until"] = 0.0
+        cls.upstream_health[up_id] = updated_entry
 
     @classmethod
     def _cleanup_upstream_health(cls, max_age_hours: float = 24.0) -> None:
