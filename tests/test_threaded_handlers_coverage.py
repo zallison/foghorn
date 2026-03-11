@@ -53,11 +53,21 @@ def _one_shot_http_request(
       - (status_code, headers_lower, body_bytes)
     """
 
+    effective_config = dict(config or {})
+    legacy_web_cfg = effective_config.get("webserver")
+    server_cfg = effective_config.get("server")
+    if isinstance(legacy_web_cfg, dict):
+        if not isinstance(server_cfg, dict):
+            server_cfg = {}
+            effective_config["server"] = server_cfg
+        if not isinstance(server_cfg.get("http"), dict):
+            server_cfg["http"] = dict(legacy_web_cfg)
+
     httpd = web_mod._AdminHTTPServer(
         ("127.0.0.1", 0),
         web_mod._ThreadedAdminRequestHandler,
         stats=stats,
-        config=config,
+        config=effective_config,
         log_buffer=None,
         config_path=config_path,
         runtime_state=None,
