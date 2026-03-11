@@ -369,6 +369,8 @@ class SqliteStatsStore(BaseStatsStore):
         qtype: Optional[str] = None,
         qname: Optional[str] = None,
         rcode: Optional[str] = None,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -394,6 +396,8 @@ class SqliteStatsStore(BaseStatsStore):
         client_ip_s = str(client_ip).strip() if client_ip is not None else None
         qtype_s = str(qtype).strip().upper() if qtype is not None else None
         rcode_s = str(rcode).strip().upper() if rcode is not None else None
+        status_s = str(status).strip().lower() if status is not None else None
+        source_s = str(source).strip().lower() if source is not None else None
         qname_s = None
         if qname is not None:
             qname_s = str(qname).strip().rstrip(".").lower()
@@ -408,11 +412,19 @@ class SqliteStatsStore(BaseStatsStore):
             where.append("qtype = ?")
             params.append(qtype_s)
         if qname_s:
-            where.append("name = ?")
+            where.append("(name = ? OR name LIKE ?)")
             params.append(qname_s)
+            params.append(f"%.{qname_s}")
         if rcode_s:
             where.append("rcode = ?")
             params.append(rcode_s)
+        if status_s:
+            where.append("LOWER(COALESCE(status, '')) = ?")
+            params.append(status_s)
+        if source_s:
+            where.append("(LOWER(result_json) LIKE ? OR LOWER(result_json) LIKE ?)")
+            params.append(f'%"source":"{source_s}"%')
+            params.append(f'%"source": "{source_s}"%')
         if isinstance(start_ts, (int, float)):
             where.append("ts >= ?")
             params.append(float(start_ts))
@@ -560,8 +572,9 @@ class SqliteStatsStore(BaseStatsStore):
             where.append("qtype = ?")
             params.append(qtype_s)
         if qname_s:
-            where.append("name = ?")
+            where.append("(name = ? OR name LIKE ?)")
             params.append(qname_s)
+            params.append(f"%.{qname_s}")
         if rcode_s:
             where.append("rcode = ?")
             params.append(rcode_s)
