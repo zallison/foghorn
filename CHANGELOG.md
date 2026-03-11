@@ -28,8 +28,14 @@ All notable changes to this project will be documented in this file.
 - Plugins/config: added plugin profile preset loading helpers plus built-in RateLimit profile presets (default/single/lan/smb/enterprise) and an example configuration demonstrating profile selection and per-field overrides.
 - Plugins/config: include built-in `*_profiles.yaml` in installed distributions so presets can be loaded via package resources.
 
-- ZoneRecords plugin: Added `dns_update` configuration scaffolding for DNS UPDATE (RFC 2136) authorization and parsing (currently returns Not Implemented).
+- ZoneRecords plugin: Implemented DNS UPDATE (RFC 2136) with full RFC 2136 support:
+  - Prerequisite evaluation checks for RRset existence/nonexistence and name in use.
+  - Update operations: ADD/DELETE/REPLACE semantics for RRs and RRsets with atomic commits.
   - Per-key (TSIG) and per-token (PSK) scopes: allow/block updated names and allow/block A/AAAA values.
+  - TSIG authentication enforcement with algorithm and fudge validation.
+  - Name/value authorization checks against configured allow/block lists.
+  - Client IP authorization via `allow_clients` and `allow_clients_files`.
+  - Zone-boundary checks: all operations confined to configured zone apex.
   - Tooling: `make gen-tsig-key` and `make gen-psk-token` to generate secrets and config snippets.
   - Documentation: added DNS UPDATE docs and an example plugin config.
 - Config validation: strip top-level `templates` after variable expansion so YAML authoring helpers don’t trip schema validation.

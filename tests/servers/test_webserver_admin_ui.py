@@ -229,7 +229,7 @@ def test_start_webserver_threaded_fallback(
       - None; asserts fallback path is taken when initial call raises.
     """
 
-    from foghorn.servers import webserver as ws
+    from foghorn.servers.webserver import core as ws_core
 
     # Ensure webserver is enabled and use_asyncio is False so threaded path is used.
     cfg = dict(web_config)
@@ -245,7 +245,7 @@ def test_start_webserver_threaded_fallback(
             raise RuntimeError("boom")
         return DummyHandle()
 
-    monkeypatch.setattr(ws, "_start_admin_server_threaded", fake_start_threaded)
+    monkeypatch.setattr(ws_core, "_start_admin_server_threaded", fake_start_threaded)
 
     handle = start_webserver(
         stats=None,

@@ -315,21 +315,13 @@ def _normalize_plugin_entries_for_validation(cfg: Dict[str, Any]) -> None:
       - None.
 
     Behavior:
-      - Supports plugin entry meta keys that are not part of the JSON Schema by
-        translating or stripping them.
+      - Strips plugin entry meta fields not present in schema.
       - Removes disabled plugin entries (enabled: false) so they are not loaded.
 
     Supported meta fields:
-      - priority: Shorthand that sets pre_priority/post_priority/setup_priority.
       - enabled: When false (either at entry level or in entry.config), the
         plugin entry is removed.
       - comment: Optional human-only string; removed.
-
-    Notes:
-      - Explicit pre_priority/post_priority/setup_priority values win over the
-        shorthand when both are provided.
-      - JSON Schema disallows unknown keys on plugin entries
-        (additionalProperties: false).
     """
 
     plugins = cfg.get("plugins")
@@ -369,12 +361,6 @@ def _normalize_plugin_entries_for_validation(cfg: Dict[str, Any]) -> None:
         # Strip non-schema fields.
         entry.pop("enabled", None)
         entry.pop("comment", None)
-
-        if "priority" in entry:
-            prio = entry.pop("priority")
-            entry.setdefault("pre_priority", prio)
-            entry.setdefault("post_priority", prio)
-            entry.setdefault("setup_priority", prio)
 
         normalized.append(entry)
 

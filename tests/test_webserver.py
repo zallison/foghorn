@@ -47,6 +47,52 @@ from foghorn.servers.webserver import (
 from foghorn.stats import StatsCollector, StatsSQLiteStore
 
 
+def _normalize_web_cfg_layout(config: dict | None) -> dict | None:
+    """Brief: Translate legacy top-level webserver config into server.http for tests.
+
+    Inputs:
+      - config: Optional application config mapping used by webserver tests.
+
+    Outputs:
+      - dict | None: Config mapping with server.http populated from legacy
+        webserver when server.http is absent.
+    """
+
+    if not isinstance(config, dict):
+        return config
+
+    normalized = dict(config)
+    legacy_web_cfg = normalized.get("webserver")
+    server_cfg = normalized.get("server")
+    if isinstance(legacy_web_cfg, dict):
+        if not isinstance(server_cfg, dict):
+            server_cfg = {}
+            normalized["server"] = server_cfg
+        if not isinstance(server_cfg.get("http"), dict):
+            server_cfg["http"] = dict(legacy_web_cfg)
+    return normalized
+
+
+_create_app = create_app
+_start_webserver = start_webserver
+
+
+def create_app(*args, **kwargs):  # type: ignore[no-redef]
+    """Brief: Backward-compatible test wrapper for create_app config layout."""
+
+    if "config" in kwargs:
+        kwargs["config"] = _normalize_web_cfg_layout(kwargs.get("config"))
+    return _create_app(*args, **kwargs)
+
+
+def start_webserver(*args, **kwargs):  # type: ignore[no-redef]
+    """Brief: Backward-compatible test wrapper for start_webserver config layout."""
+
+    if "config" in kwargs:
+        kwargs["config"] = _normalize_web_cfg_layout(kwargs.get("config"))
+    return _start_webserver(*args, **kwargs)
+
+
 def test_sanitize_config_redacts_simple_keys() -> None:
     """Brief: sanitize_config() must redact matching keys at any nesting level.
 
@@ -367,12 +413,12 @@ def test_get_system_info_uses_meminfo_and_load(monkeypatch) -> None:
         process RSS keys present.
     """
 
-    import foghorn.servers.webserver as web_mod
+    import foghorn.servers.webserver.core as web_core
 
     # Ensure this test is deterministic even if earlier tests populated the
     # module-level system info cache.
-    web_mod._last_system_info = None
-    web_mod._last_system_info_ts = 0.0
+    web_core._last_system_info = None
+    web_core._last_system_info_ts = 0.0
 
     def fake_getloadavg() -> tuple[float, float, float]:
         return (1.0, 2.0, 3.0)
@@ -384,8 +430,8 @@ def test_get_system_info_uses_meminfo_and_load(monkeypatch) -> None:
             "MemAvailable": 512 * 1024 * 1024,
         }
 
-    monkeypatch.setattr(web_mod.os, "getloadavg", fake_getloadavg)
-    monkeypatch.setattr(web_mod, "_read_proc_meminfo", fake_meminfo)
+    monkeypatch.setattr(web_core.os, "getloadavg", fake_getloadavg)
+    monkeypatch.setattr(web_core, "_read_proc_meminfo", fake_meminfo)
 
     info = get_system_info()
     assert info["load_1m"] == 1.0
@@ -410,7 +456,7 @@ def test_stats_includes_system_section(monkeypatch) -> None:
       - JSON body of /stats contains a "system" key with stubbed values.
     """
 
-    import foghorn.servers.webserver as web_mod
+    import foghorn.servers.webserver.core as web_core
 
     collector = StatsCollector(
         track_uniques=True, include_qtype_breakdown=True, track_latency=True
@@ -421,7 +467,7 @@ def test_stats_includes_system_section(monkeypatch) -> None:
     def fake_sysinfo() -> dict[str, object]:
         return {"load_1m": 0.5, "memory_total_bytes": 1024}
 
-    monkeypatch.setattr(web_mod, "get_system_info", fake_sysinfo)
+    monkeypatch.setattr(web_core, "get_system_info", fake_sysinfo)
 
     app = create_app(
         stats=collector,
@@ -830,7 +876,7 @@ def test_stats_debug_timings_emit_log_when_enabled(caplog) -> None:
     """Brief: /stats should log timing breakdown when debug_timings is enabled.
 
     Inputs:
-      - FastAPI app created with webserver.debug_timings set to True.
+      - FastAPI app created with server.http.debug_timings set to True.
 
     Outputs:
       - A DEBUG log line from foghorn.servers.webserver containing the timings prefix.
@@ -841,7 +887,7 @@ def test_stats_debug_timings_emit_log_when_enabled(caplog) -> None:
     )
     collector.record_query("192.0.2.1", "example.com", "A")
 
-    cfg = {"webserver": {"enabled": True, "debug_timings": True}}
+    cfg = {"server": {"http": {"enabled": True, "debug_timings": True}}}
     app = create_app(stats=collector, config=cfg, log_buffer=RingBuffer())
     client = TestClient(app)
 
@@ -1552,7 +1598,7 @@ def test_token_auth_blocks_unauthorized_and_allows_with_token() -> None:
     """Brief: auth.mode=token enforces bearer or X-API-Key token on protected endpoints.
 
     Inputs:
-      - webserver config with auth.mode=token and a fixed token value.
+      - server.http config with auth.mode=token and a fixed token value.
 
     Outputs:
       - /stats returns 401 without token and includes WWW-Authenticate header.
@@ -1560,9 +1606,11 @@ def test_token_auth_blocks_unauthorized_and_allows_with_token() -> None:
     """
 
     cfg = {
-        "webserver": {
-            "enabled": True,
-            "auth": {"mode": "token", "token": "secret-token"},
+        "server": {
+            "http": {
+                "enabled": True,
+                "auth": {"mode": "token", "token": "secret-token"},
+            }
         }
     }
     collector = StatsCollector(track_uniques=False)
@@ -1829,6 +1877,8 @@ def test_config_json_fastapi_and_threaded_payloads_match() -> None:
             {"host": "1.1.1.1", "token": "upstream-token"},
         ],
     }
+    cfg = _normalize_web_cfg_layout(cfg)
+    assert isinstance(cfg, dict)
 
     # FastAPI /config.json
     app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
@@ -2167,8 +2217,10 @@ def test_save_config_persists_raw_yaml_and_returns_analysis(tmp_path) -> None:
     data = resp.json()
     assert data["status"] == "ok"
     analysis = data.get("analysis") or {}
-    assert analysis.get("restart_required") is False
-    assert analysis.get("reload_required") is True
+    assert analysis.get("restart_required") is True
+    assert analysis.get("reload_required") is False
+    reasons = analysis.get("restart_reasons") or []
+    assert any("server.http changed" in str(reason) for reason in reasons)
 
 
 def test_reload_fastapi_refuses_when_restart_required_but_reload_reloadable_applies(
@@ -2301,9 +2353,9 @@ def test_get_system_info_handles_missing_psutil(monkeypatch) -> None:
       - Returned dict still contains process_* keys but values may be None.
     """
 
-    import foghorn.servers.webserver as web_mod
+    import foghorn.servers.webserver.core as web_core
 
-    monkeypatch.setattr(web_mod, "psutil", None)
+    monkeypatch.setattr(web_core, "psutil", None)
 
     info = get_system_info()
     assert "process_rss_bytes" in info
@@ -2314,16 +2366,18 @@ def test_token_auth_500_when_token_missing() -> None:
     """Brief: auth.mode=token without a token yields HTTP 500 error on protected endpoints.
 
     Inputs:
-      - webserver config with auth.mode=token and no token value.
+      - server.http config with auth.mode=token and no token value.
 
     Outputs:
       - /stats responds with 500 and an explanatory error message.
     """
 
     cfg = {
-        "webserver": {
-            "enabled": True,
-            "auth": {"mode": "token"},
+        "server": {
+            "http": {
+                "enabled": True,
+                "auth": {"mode": "token"},
+            }
         }
     }
     collector = StatsCollector(track_uniques=False)
@@ -2341,16 +2395,18 @@ def test_fastapi_cors_headers_when_enabled(monkeypatch) -> None:
     """Brief: FastAPI admin app applies CORS headers when webserver.cors.enabled is true.
 
     Inputs:
-      - webserver config enabling CORS with a specific allowlist origin.
+      - server.http config enabling CORS with a specific allowlist origin.
 
     Outputs:
       - /health response includes Access-Control-Allow-Origin matching request Origin.
     """
 
     cfg = {
-        "webserver": {
-            "enabled": True,
-            "cors": {"enabled": True, "allowlist": ["https://example.com"]},
+        "server": {
+            "http": {
+                "enabled": True,
+                "cors": {"enabled": True, "allowlist": ["https://example.com"]},
+            }
         }
     }
 
@@ -2537,7 +2593,7 @@ def test_get_system_info_swallows_psutil_exceptions(monkeypatch) -> None:
 
     import types
 
-    import foghorn.servers.webserver as web_mod
+    import foghorn.servers.webserver.core as web_core
 
     class DummyMemInfo:
         def __init__(self) -> None:
@@ -2571,7 +2627,7 @@ def test_get_system_info_swallows_psutil_exceptions(monkeypatch) -> None:
             raise RuntimeError("connections boom")
 
     fake_psutil = types.SimpleNamespace(Process=lambda _pid: DummyProc())
-    monkeypatch.setattr(web_mod, "psutil", fake_psutil, raising=True)
+    monkeypatch.setattr(web_core, "psutil", fake_psutil, raising=True)
 
     info = get_system_info()
 
@@ -2933,7 +2989,7 @@ def test_start_webserver_permission_error_uses_threaded_fallback(monkeypatch) ->
     """Brief: PermissionError during asyncio loop creation forces threaded fallback.
 
     Inputs:
-      - monkeypatch replacing asyncio.new_event_loop and _start_admin_server_threaded.
+      - monkeypatch replacing asyncio.new_event_loop and core _start_admin_server_threaded.
 
     Outputs:
       - start_webserver returns handle from threaded fallback.
@@ -2943,6 +2999,7 @@ def test_start_webserver_permission_error_uses_threaded_fallback(monkeypatch) ->
     import threading
 
     import foghorn.servers.webserver as web_mod
+    import foghorn.servers.webserver.core as web_core
 
     def boom_new_loop() -> None:
         raise PermissionError("no self-pipe")
@@ -2960,11 +3017,11 @@ def test_start_webserver_permission_error_uses_threaded_fallback(monkeypatch) ->
         return WebServerHandle(threading.Thread())
 
     monkeypatch.setattr(
-        web_mod, "_start_admin_server_threaded", fake_threaded, raising=True
+        web_core, "_start_admin_server_threaded", fake_threaded, raising=True
     )
     monkeypatch.setattr(web_mod.os.path, "exists", lambda p: False, raising=False)
 
-    cfg2 = {"server": {"http": {"enabled": True}}}
+    cfg2 = {"server": {"http": {"enabled": True, "port": 0}}}
     handle = start_webserver(stats=None, config=cfg2, log_buffer=RingBuffer())
 
     assert isinstance(handle, WebServerHandle)
@@ -3349,17 +3406,22 @@ def test_config_cache_ttl_overridden_by_web_cfg(monkeypatch) -> None:
     """
 
     import foghorn.servers.webserver as web_mod
+    import foghorn.servers.webserver.core as web_core
 
-    original_ttl = getattr(web_mod, "_CONFIG_TEXT_CACHE_TTL_SECONDS")
+    original_ttl = getattr(web_core, "_CONFIG_TEXT_CACHE_TTL_SECONDS")
     try:
         monkeypatch.setattr(
             web_mod, "_CONFIG_TEXT_CACHE_TTL_SECONDS", 2.0, raising=False
         )
+        monkeypatch.setattr(
+            web_core, "_CONFIG_TEXT_CACHE_TTL_SECONDS", 2.0, raising=False
+        )
         cfg = {"webserver": {"enabled": True, "config_cache_ttl_seconds": 7.5}}
         create_app(stats=None, config=cfg, log_buffer=RingBuffer())
-        assert web_mod._CONFIG_TEXT_CACHE_TTL_SECONDS == 7.5
+        assert web_core._CONFIG_TEXT_CACHE_TTL_SECONDS == 7.5
     finally:
         web_mod._CONFIG_TEXT_CACHE_TTL_SECONDS = original_ttl
+        web_core._CONFIG_TEXT_CACHE_TTL_SECONDS = original_ttl
 
 
 def test_config_raw_json_500_when_config_path_missing() -> None:
@@ -3395,7 +3457,7 @@ def test_rate_limit_endpoint_wraps_collect_rate_limit_stats(monkeypatch) -> None
       - Endpoint returns JSON including server_time and the sentinel payload.
     """
 
-    import foghorn.servers.webserver as web_mod
+    import foghorn.servers.webserver.core as web_core
 
     called: dict[str, object] = {}
 
@@ -3403,7 +3465,7 @@ def test_rate_limit_endpoint_wraps_collect_rate_limit_stats(monkeypatch) -> None
         called["config"] = config
         return {"databases": []}
 
-    monkeypatch.setattr(web_mod, "_collect_rate_limit_stats", fake_collect)
+    monkeypatch.setattr(web_core, "_collect_rate_limit_stats", fake_collect)
 
     cfg = {"webserver": {"enabled": True}}
     app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
@@ -3423,7 +3485,10 @@ def test_rate_limit_endpoint_wraps_collect_rate_limit_stats(monkeypatch) -> None
         assert body["databases"] == []
 
     asyncio.run(run())
-    assert called["config"] is cfg
+    cfg_seen = called.get("config")
+    assert isinstance(cfg_seen, dict)
+    assert cfg_seen.get("webserver", {}).get("enabled") is True
+    assert cfg_seen.get("server", {}).get("http", {}).get("enabled") is True
 
 
 def test_upstream_status_endpoint_returns_configured_entries(
