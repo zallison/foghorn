@@ -256,6 +256,8 @@ For local development there is a `Makefile` with a few convenience targets:
 - `make env` / `make env-dev` – create the virtualenv in `./venv` and install dependencies (with dev extras for `env-dev`).
 - `make build` – prepare the development environment (keeps the JSON schema up to date).
 - `make schema` – regenerate `assets/config-schema.json` from the Python code.
+- `make ui-bundle` – build a single JavaScript admin UI bundle with embedded HTML/CSS/JS at `dist/foghorn-admin-ui.cdn.js`.
+- `make ui-bundle-runtime` – build a runtime-only JavaScript admin UI bundle at `dist/foghorn-admin-ui.cdn.js`.
 - `make test` – run the test suite with coverage.
 - `make dnssec-sign-zone` – sign a BIND-style zone file with DNSSEC using the bundled helper script, writing a signed zone that can be served by the ZoneRecords plugin.
 - `make clean` – remove the venv, build artefacts, and temporary files.

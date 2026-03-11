@@ -112,6 +112,13 @@ $(VENV)/bin/foghorn: pyproject.toml
 schema:
 	./scripts/generate_foghorn_schema.py -o assets/config-schema.json > /dev/null
 	echo >> assets/config-schema.json
+.PHONY: ui-bundle
+ui-bundle:
+	python ./scripts/build_admin_ui_bundle.py
+
+.PHONY: ui-bundle-runtime
+ui-bundle-runtime:
+	python ./scripts/build_admin_ui_bundle.py --runtime-only
 
 
 .PHONY: env-dev
@@ -341,6 +348,8 @@ help:
 	@echo "  env-dev          - Install project in editable mode with dev dependencies into $(VENV)"
 	@echo "  run              - Execute foghorn --config config/config.yaml using $(VENV)"
 	@echo "  schema           - Regenerate assets/config-schema.json"
+	@echo "  ui-bundle        - Build embedded single-file admin UI JS bundle for CDN use"
+	@echo "  ui-bundle-runtime - Build runtime-only admin UI JS bundle (no embedded HTML/CSS)"
 	@echo "  test             - Run pytest with coverage and update README coverage badge"
 	@echo "  dnssec-sign-zone - Sign a DNS zone file with DNSSEC records (see target for ZONE/INPUT/OUTPUT args)"
 	@echo "  gen-tsig-key     - Generate a TSIG key for DNS UPDATE (use NAME= and ALGO=)"
