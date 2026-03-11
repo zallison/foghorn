@@ -62,7 +62,14 @@ def _handle_non_query_opcode(
     try:
         msg = dns.message.from_wire(data)
     except Exception:
-        msg = None
+        # For signed messages (e.g. TSIG UPDATE) dnspython can raise when no
+        # keyring is supplied. Retry with continue_on_error so we can still
+        # recover opcode/question metadata for plugin dispatch and response
+        # shaping.
+        try:
+            msg = dns.message.from_wire(data, continue_on_error=True)
+        except Exception:
+            msg = None
 
     qname = ""
     qtype = 0
@@ -135,7 +142,7 @@ def _handle_non_query_opcode(
                     mid = int.from_bytes(data[0:2], "big")
                 except Exception:
                     mid = 0
-                r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1))
+                r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1, opcode=int(opcode)))
                 r.header.rcode = RCODE.REFUSED
                 wire = r.pack()
             try:
@@ -160,7 +167,7 @@ def _handle_non_query_opcode(
             mid = int.from_bytes(data[0:2], "big")
         except Exception:
             mid = 0
-        r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1))
+        r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1, opcode=int(opcode)))
         r.header.rcode = RCODE.NOTIMP
         wire = r.pack()
     try:

@@ -909,18 +909,11 @@ def _send_query_with_failover_impl(
         )
         or "none"
     )
-    if isinstance(last_exception, Exception) and _is_connection_refused_error(
-        last_exception
-    ):
-        logger.warning(
-            "All upstreams failed for %s %s (connection refused). Upstreams: %s. Health: %s. Last error: %s",
-            qname,
-            qtype,
-            attempted_summary,
-            health_summary,
-            last_exception,
-        )
-    else:
+    # Transient network errors to not log.
+    ignored_errors = [
+        "short read on length header",
+    ]
+    if str(last_exception) not in ignored_errors:
         logger.warning(
             "All upstreams failed for %s %s. Upstreams: %s. Health: %s. Last error: %s",
             qname,
@@ -929,4 +922,14 @@ def _send_query_with_failover_impl(
             health_summary,
             last_exception,
         )
+    else:
+        logger.debug(
+            "All upstreams failed for %s %s. Upstreams: %s. Health: %s. Last error: %s",
+            qname,
+            qtype,
+            attempted_summary,
+            health_summary,
+            last_exception,
+        )
+
     return None, None, "all_failed"

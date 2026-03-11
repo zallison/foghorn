@@ -9,6 +9,10 @@ Outputs:
 
 from types import SimpleNamespace
 import dns.message
+import dns.opcode
+import dns.rcode
+import dns.tsigkeyring
+import dns.update
 
 from dnslib import OPCODE, QTYPE, RCODE, DNSRecord
 
@@ -425,3 +429,33 @@ def test_default_notimp_with_non_bytes_input_uses_mid_zero_fallback() -> None:
     resp = DNSRecord.parse(result.wire)
     assert resp.header.id == 0
     assert resp.header.rcode == RCODE.NOTIMP
+
+
+def test_unhandled_tsig_update_preserves_update_opcode_in_response() -> None:
+    """Brief: Unhandled TSIG-signed UPDATE replies retain UPDATE opcode.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts fallback NOTIMP response uses opcode UPDATE.
+    """
+
+    key_name = "monkey.zaa."
+    key_secret = "ilMpyS6H5z9tvSNlW7BJsdYhEn+H3ZrQuuZmiT43EM0="
+    keyring = dns.tsigkeyring.from_text({key_name: key_secret})
+
+    update = dns.update.Update("zaa.")
+    update.id = 0xBACE
+    update.use_tsig(keyring=keyring, keyname=key_name, algorithm="hmac-sha256")
+    update.add("test.dyn.zaa.", 300, "A", "192.168.99.1")
+    wire = update.to_wire()
+
+    result = _call_non_query(OPCODE.UPDATE, wire, plugins=[])
+    assert result is not None
+    assert result.rcode_name == "NOTIMP"
+
+    response = dns.message.from_wire(result.wire, ignore_trailing=True)
+    assert response.id == 0xBACE
+    assert response.opcode() == dns.opcode.UPDATE
+    assert response.rcode() == dns.rcode.NOTIMP
