@@ -476,9 +476,100 @@ def process_update_message(
         resp.set_rcode(dns.rcode.NOTAUTH)
         return resp.to_wire()
 
-    # 4) Processing pipeline (not yet implemented).
+    # 4) Process prerequisites and updates
+    try:
+        prereqs = list(getattr(request_msg, "prerequisite", []) or [])
+        updates = list(getattr(request_msg, "update", []) or [])
+    except Exception:
+        prereqs = []
+        updates = []
+
+    # Get current records
+    current_records = dict(getattr(plugin, "records", {}))
+
+    # Check prerequisites
+    if prereqs:
+        prereq_rcode, prereq_err = check_prerequisites(
+            prereqs, current_records, apex_norm
+        )
+        if prereq_rcode != 0:
+            resp = dns.message.make_response(request_msg)
+            resp.set_rcode(prereq_rcode)
+            if getattr(request_msg, "had_tsig", False) and keyring is not None:
+                try:
+                    resp.use_tsig(
+                        keyring=keyring,
+                        keyname=request_msg.keyname,
+                        algorithm=request_msg.keyalgorithm,
+                    )
+                except Exception:
+                    pass
+            return resp.to_wire()
+
+    # Check name/value authorization for each update RRset
+    for update_rrset in updates:
+        # Get owner name from the RRset
+        try:
+            owner_norm = _normalize_dns_name(str(update_rrset.name))
+        except Exception:
+            owner_norm = ""
+
+        if not verify_name_authorization(owner_norm, zone_config):
+            resp = dns.message.make_response(request_msg)
+            resp.set_rcode(dns.rcode.NOTAUTH)
+            if getattr(request_msg, "had_tsig", False) and keyring is not None:
+                try:
+                    resp.use_tsig(
+                        keyring=keyring,
+                        keyname=request_msg.keyname,
+                        algorithm=request_msg.keyalgorithm,
+                    )
+                except Exception:
+                    pass
+            return resp.to_wire()
+
+        # For A/AAAA records, verify IP values (rrset contains rdata objects)
+        try:
+            qtype_int = int(getattr(update_rrset, "rdtype", 0))
+            # Convert rdata to string for value authorization
+            for rdata in update_rrset:
+                rdata_str = str(rdata)
+                if not verify_value_authorization(rdata_str, qtype_int, zone_config):
+                    resp = dns.message.make_response(request_msg)
+                    resp.set_rcode(dns.rcode.NOTAUTH)
+                    if getattr(request_msg, "had_tsig", False) and keyring is not None:
+                        try:
+                            resp.use_tsig(
+                                keyring=keyring,
+                                keyname=request_msg.keyname,
+                                algorithm=request_msg.keyalgorithm,
+                            )
+                        except Exception:
+                            pass
+                    return resp.to_wire()
+        except Exception:
+            pass
+
+    # Apply update operations
+    if updates:
+        update_rcode, update_err = apply_update_operations(updates, plugin, apex_norm)
+        if update_rcode != 0:
+            resp = dns.message.make_response(request_msg)
+            resp.set_rcode(update_rcode)
+            if getattr(request_msg, "had_tsig", False) and keyring is not None:
+                try:
+                    resp.use_tsig(
+                        keyring=keyring,
+                        keyname=request_msg.keyname,
+                        algorithm=request_msg.keyalgorithm,
+                    )
+                except Exception:
+                    pass
+            return resp.to_wire()
+
+    # All checks passed, Return NOERROR
     resp = dns.message.make_response(request_msg)
-    resp.set_rcode(dns.rcode.NOTIMP)
+    resp.set_rcode(dns.rcode.NOERROR)
 
     # Sign the response when the request was TSIG-verified.
     if getattr(request_msg, "had_tsig", False) and keyring is not None:
@@ -645,25 +736,118 @@ def check_prerequisites(
     records: Dict,
     zone_apex: str,
 ) -> Tuple[int, Optional[str]]:
-    """Brief: Check prerequisite conditions.
+    """Brief: Check prerequisite conditions per RFC 2136 Section 3.2.
 
     Inputs:
-      - prereqs: Prerequisite RRs.
-      - records: Current zone records.
+      - prereqs: Prerequisite RRs from dnspython Update.prerequisite.
+      - records: Current zone records (name_index not needed for prereqs).
       - zone_apex: Zone apex.
 
     Outputs:
       - Tuple of (rcode, error_message). RCODE=0 (NOERROR) if all pass.
 
     Notes:
-      - Not yet implemented; this currently always returns NOERROR.
+      - RFC 2136 prerequisite types:
+        * CLASS=ANY, TYPE!=ANY: RRset existence or specific RR existence
+        * CLASS=NONE, TYPE!=ANY: RRset nonexistence or name not in use
+        * TYPE=ANY, CLASS=NONE: Name must exist (any RRset at name)
+        * TYPE=ANY, CLASS=IN: Name must exist with at least one RRset
     """
-    # TODO: Implement RFC 2136 prerequisite types:
-    # - CLASS=ANY: RRSET existence
-    # - CLASS=NONE: RRSET nonexistence
-    # - TYPE=ANY with CLASS=NONE: Name must not be in use
-    for prereq in prereqs:
-        pass
+    try:
+        apex_norm = _normalize_dns_name(zone_apex)
+    except Exception:
+        apex_norm = str(zone_apex).rstrip(".").lower()
+
+    for prereq_rrset in prereqs:
+        try:
+            owner_norm = _normalize_dns_name(str(prereq_rrset.name))
+        except Exception:
+            owner_norm = ""
+
+        qtype_int = int(getattr(prereq_rrset, "rdtype", 0))
+        qclass = int(getattr(prereq_rrset, "rdclass", 0))
+        ttl = getattr(prereq_rrset, "ttl", 0)
+
+        # Ensure owner is within the zone
+        if not owner_norm.endswith(apex_norm) and owner_norm != apex_norm:
+            return 9, f"Prerequisite owner {owner_norm} not in zone {apex_norm}"
+
+        record_key = (owner_norm, qtype_int)
+        existing_rrset = records.get(record_key, None)
+
+        # RFC 2136 Section 3.2.4 Prerequisite Specification
+
+        # CLASS NONE: These are requirements that the RRset or name NOT exist
+        if qclass == dns.rdataclass.NONE:
+            # TYPE ANY, CLASS NONE: Name must not exist (no RRsets at this name)
+            if qtype_int == dns.rdatatype.ANY:
+                # Check if any RRset exists at this name
+                for (name, qtype), _ in records.items():
+                    if name == owner_norm:
+                        return 1, f"Name {owner_norm} already in use"
+            # Specific type, CLASS NONE: RRset must not exist
+            else:
+                if existing_rrset is not None:
+                    return (
+                        1,
+                        f"RRset {owner_norm}/{QTYPE.get(qtype_int, qtype_int)} already exists",
+                    )
+
+        # CLASS IN: These are requirements that the RRset or name DOES exist
+        elif qclass == dns.rdataclass.IN:
+            # TYPE ANY: Name must exist with at least one RRset
+            if qtype_int == dns.rdatatype.ANY:
+                has_any_rrset = False
+                for (name, _), _ in records.items():
+                    if name == owner_norm:
+                        has_any_rrset = True
+                        break
+                if not has_any_rrset:
+                    return 1, f"Name {owner_norm} does not exist"
+            # Specific type: RRset must exist (or exact RR if ttl > 0)
+            else:
+                if existing_rrset is None:
+                    return (
+                        1,
+                        f"RRset {owner_norm}/{QTYPE.get(qtype_int, qtype_int)} does not exist",
+                    )
+                # For exact RR matching with non-zero TTL, verify the specific RR exists
+                if ttl > 0:
+                    # Check if any rdata in the rrset matches
+                    found_match = False
+                    for rdata in prereq_rrset:
+                        rdata_str = str(rdata)
+                        existing_ttl, existing_values, _ = existing_rrset
+                        if rdata_str in existing_values:
+                            found_match = True
+                            break
+                    if not found_match:
+                        return (
+                            1,
+                            f"RR {owner_norm}/{QTYPE.get(qtype_int, qtype_int)} does not exist",
+                        )
+
+        # CLASS ANY: Specific RR or RRset must exist (RFC 2136 3.2.4.1)
+        elif qclass == dns.rdataclass.ANY:
+            if qtype_int == dns.rdatatype.ANY:
+                # Name must exist with at least one RRset
+                has_any_rrset = False
+                for (name, _), _ in records.items():
+                    if name == owner_norm:
+                        has_any_rrset = True
+                        break
+                if not has_any_rrset:
+                    return 1, f"Name {owner_norm} does not exist"
+            else:
+                if existing_rrset is None:
+                    return (
+                        1,
+                        f"RRset {owner_norm}/{QTYPE.get(qtype_int, qtype_int)} does not exist",
+                    )
+
+        # Unsupported or malformed prerequisite classes
+        else:
+            return 1, f"Unsupported prerequisite class {qclass}"
 
     return 0, None
 
@@ -700,10 +884,10 @@ def apply_update_operations(
     plugin: object,
     zone_apex: str,
 ) -> Tuple[int, Optional[str]]:
-    """Brief: Apply update operations atomically.
+    """Brief: Apply update operations atomically per RFC 2136 Section 3.4.
 
     Inputs:
-      - updates: Update RRs.
+      - updates: Update RRs from dnspython Update.update.
       - plugin: ZoneRecords plugin instance.
       - zone_apex: Zone apex.
 
@@ -711,10 +895,16 @@ def apply_update_operations(
       - Tuple of (rcode, error_message). RCODE=0 (NOERROR) on success.
 
     Notes:
-      - Update semantics are not yet implemented; this currently does not mutate
-        plugin.records and always returns NOERROR.
+      - Update semantics per RFC 2136:
+        * CLASS NONE, TYPE!=ANY: Add RR to RRset (create if needed)
+        * CLASS ANY, TYPE!=ANY: Delete RR from RRset (delete entire RRset if rdata empty)
+        * CLASS ANY, TYPE=ANY: Delete all RRsets at an owner
+        * CLASS IN, TYPE!=ANY: Replace entire RRset with provided RR(s)
     """
-    from foghorn.plugins.resolve.zone_records.loader import load_records
+    try:
+        apex_norm = _normalize_dns_name(zone_apex)
+    except Exception:
+        apex_norm = str(zone_apex).rstrip(".").lower()
 
     # Snapshot current records
     lock = getattr(plugin, "_records_lock", None)
@@ -724,35 +914,87 @@ def apply_update_operations(
         with lock:
             snapshot = dict(getattr(plugin, "records", {}))
 
-    # Apply updates
-    try:
-        # TODO: Implement update operations:
-        # - ADD: Class NONE, empty TTL
-        # - DELETE: Class ANY, TTL 0
-        # - REPLACE: Full RRset replacement
-        pass
+    new_records = dict(snapshot)
+    default_ttl = 300  # Default TTL for updates without explicit TTL
 
-        return 0, None
-    except (
-        Exception
-    ) as exc:  # pragma: nocover - [rollback path requires real update operations]
-        # Rollback
-        logger.warning(
-            "Update failed: %s", exc, exc_info=True
-        )  # pragma: nocover - [rollback path requires real update operations]
-        if (
-            lock is None
-        ):  # pragma: nocover - [rollback path requires real update operations]
-            plugin.records = snapshot  # pragma: nocover - [rollback path requires real update operations]
-        else:  # pragma: nocover - [rollback path requires real update operations]
-            with (
-                lock
-            ):  # pragma: nocover - [rollback path requires real update operations]
-                plugin.records = snapshot  # pragma: nocover - [rollback path requires real update operations]
-        return (
-            2,
-            "SERVFAIL: Update operation failed",
-        )  # pragma: nocover - [rollback path requires real update operations]
+    for update_rrset in updates:
+        # Get owner name from the RRset
+        try:
+            owner_norm = _normalize_dns_name(str(update_rrset.name))
+        except Exception:
+            return 1, "Invalid owner name in update RRset"
+
+        qtype_int = int(getattr(update_rrset, "rdtype", 0))
+        qclass = int(getattr(update_rrset, "rdclass", 0))
+        ttl = int(getattr(update_rrset, "ttl", default_ttl))
+
+        # Ensure owner is within the zone
+        if not owner_norm.endswith(apex_norm) and owner_norm != apex_norm:
+            return 9, f"Update owner {owner_norm} not in zone {apex_norm}"
+
+        record_key = (owner_norm, qtype_int)
+
+        # Collect rdata strings from the RRset
+        rdata_values = [str(rdata) for rdata in update_rrset]
+
+        # RFC 2136 Section 3.4 Update Operations
+
+        # CLASS NONE: Add RRs to RRset (or create RRset if needed)
+        if qclass == dns.rdataclass.NONE:
+            if qtype_int == dns.rdatatype.ANY:
+                return 1, "TYPE ANY with CLASS NONE is invalid"
+            for rdata_str in rdata_values:
+                if record_key not in new_records:
+                    new_records[record_key] = (ttl, [rdata_str], ["update"])
+                else:
+                    existing_ttl, existing_values, sources = new_records[record_key]
+                    if rdata_str not in existing_values:
+                        new_values = existing_values + [rdata_str]
+                        new_records[record_key] = (ttl, new_values, sources)
+
+        # CLASS ANY: Delete RR or RRset
+        elif qclass == dns.rdataclass.ANY:
+            if qtype_int == dns.rdatatype.ANY:
+                # Delete all RRsets at this owner
+                keys_to_delete = [k for k in new_records if k[0] == owner_norm]
+                for k in keys_to_delete:
+                    del new_records[k]
+            else:
+                # Delete specific RRs from RRset, or delete RRset if empty/optional
+                if record_key in new_records:
+                    existing_ttl, existing_values, sources = new_records[record_key]
+                    for rdata_str in rdata_values:
+                        if rdata_str in existing_values:
+                            if len(existing_values) > 1:
+                                existing_values.remove(rdata_str)
+                                new_records[record_key] = (
+                                    ttl,
+                                    existing_values,
+                                    sources,
+                                )
+                            else:
+                                del new_records[record_key]
+                                break
+
+        # CLASS IN: Replace entire RRset
+        elif qclass == dns.rdataclass.IN:
+            if qtype_int == dns.rdatatype.ANY:
+                return 1, "TYPE ANY with CLASS IN is invalid"
+            # Replace entire RRset with all RRs from this update_rrset
+            if rdata_values:
+                new_records[record_key] = (ttl, rdata_values, ["update"])
+
+        else:
+            return 1, f"Unsupported update class {qclass}"
+
+    # Commit under lock
+    if lock is None:
+        plugin.records = new_records
+    else:
+        with lock:
+            plugin.records = new_records
+
+    return 0, None
 
 
 def build_update_response(

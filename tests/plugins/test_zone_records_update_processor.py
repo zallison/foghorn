@@ -17,7 +17,7 @@ import dns.message
 import dns.tsigkeyring
 import dns.update
 import pytest
-from dnslib import A, DNSRecord, QTYPE, RCODE, RR
+from dnslib import QTYPE, RCODE, DNSRecord
 
 from foghorn.plugins.resolve.zone_records import update_processor as up
 
@@ -219,7 +219,12 @@ def test_process_update_message_returns_notauth_when_no_auth_configured() -> Non
     assert resp.rcode() == dns.rcode.NOTAUTH
 
 
-def test_process_update_message_returns_notimp_for_valid_tsig_update() -> None:
+def test_process_update_message_returns_noerror_for_valid_tsig_update() -> None:
+    """ "Brief: Verify a valid TSIG-signed update succeeds and returns NOERROR.
+
+    The test creates a TSIG authenticatored UPDATE request for a valid DNS UPDATE operation
+    and verifies the response is signed with NOERROR (not NOTIMP like the old scaffolding).
+    """
     key_name = "key.example.com."
     secret_b64 = "dGVzdHNlY3JldA=="
     keyring = dns.tsigkeyring.from_text({key_name: secret_b64})
@@ -232,6 +237,7 @@ def test_process_update_message_returns_notimp_for_valid_tsig_update() -> None:
     # Parse request with keyring so we can validate response TSIG chaining.
     parsed_req = dns.message.from_wire(req_wire, keyring=keyring)
 
+    plugin = SimpleNamespace(records={})
     resp_wire = up.process_update_message(
         req_wire,
         zone_apex="example.com",
@@ -242,26 +248,44 @@ def test_process_update_message_returns_notimp_for_valid_tsig_update() -> None:
                         "name": key_name,
                         "algorithm": "hmac-sha256",
                         "secret": secret_b64,
+                        "allow_names": ["host.example.com"],
                     }
                 ]
             }
         },
-        plugin=object(),
+        plugin=plugin,
         client_ip="192.0.2.1",
         listener="udp",
     )
 
-    # Verify the response TSIG.
+    # Verify the response has NOERROR and valid TSIG signing.
     parsed_resp = dns.message.from_wire(
         resp_wire,
         keyring=keyring,
         request_mac=parsed_req.mac,
     )
-    assert parsed_resp.rcode() == dns.rcode.NOTIMP
+    assert parsed_resp.rcode() == dns.rcode.NOERROR
 
 
-def test_check_prerequisites_returns_noerror_even_when_nonempty() -> None:
-    prereq = RR("example.com", QTYPE.A, rdata=A("192.0.2.1"))
+def test_check_prerequisites_with_none_class_prereq_succeeds_with_empty_records() -> (
+    None
+):
+    # Create a mock RRset as dnspython would parse from UPDATE message
+    # Testing CLASS NONE: record must NOT exist (succeeds with empty records)
+    import dns.rdataclass
+    import dns.rdatatype
+
+    class MockRRset:
+        def __init__(self, name: str, rdtype: int, rdclass: int):
+            self.name = name
+            self.rdtype = rdtype
+            self.rdclass = rdclass
+            self.ttl = 0
+
+        def __iter__(self):
+            return iter([])
+
+    prereq = MockRRset("example.com", dns.rdatatype.A, dns.rdataclass.NONE)
     rcode, err = up.check_prerequisites([prereq], records={}, zone_apex="example.com")
     assert rcode == 0
     assert err is None
