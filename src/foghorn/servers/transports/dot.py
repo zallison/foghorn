@@ -151,7 +151,7 @@ def _probe_remote_cert_subject(
         except Exception:
             pass
         try:
-            if raw_sock is not None:
+            if raw_sock is not None:  # pragma: nocover - defensive finalizer branch
                 raw_sock.close()
         except Exception:
             pass
@@ -414,6 +414,8 @@ class _DotConn:
       - host, port: Upstream target.
       - ctx: SSLContext.
       - server_name: SNI value.
+      - verify: Whether certificate verification is enabled.
+      - ca_file: Optional CA bundle path used for diagnostics.
     Outputs:
       - Instance capable of send(query_bytes)->response_bytes.
 
@@ -517,11 +519,15 @@ class DotConnectionPool:
     Simple LIFO pool of DoT connections with one in-flight query per connection.
 
     Inputs:
-      - key: tuple identifying upstream (host, port, server_name, verify, ca_file)
-      - max_connections: pool cap
-      - idle_timeout_s: close connections idle longer than this
+      - host, port: Upstream target.
+      - server_name: Optional SNI/verification hostname.
+      - verify: Whether certificate verification is enabled.
+      - ca_file: Optional CA bundle path.
+      - max_connections: Pool cap.
+      - idle_timeout_s: Close connections idle longer than this.
+      - min_version: Minimum TLS version for new TLS contexts.
     Outputs:
-      - send(query, timeouts): response bytes
+      - Pool instance exposing send(query, connect_timeout_ms, read_timeout_ms).
 
     Example:
       >>> pool = get_dot_pool('1.1.1.1', 853, 'cloudflare-dns.com', True, None)

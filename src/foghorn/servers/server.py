@@ -1,6 +1,7 @@
 """Core DNS server orchestration and transport/failover helper utilities."""
 
 import logging
+import random
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
@@ -252,6 +253,8 @@ def _resolve_core(
             stats_collector=snap.stats_collector,
             plugins=list(snap.plugins or []),
             upstream_addrs=list(snap.upstream_addrs or []),
+            upstream_backup_addrs=list(snap.upstream_backup_addrs or []),
+            upstream_health=snap.upstream_health,
             timeout_ms=int(snap.timeout_ms),
             upstream_strategy=str(snap.upstream_strategy or "failover").lower(),
             upstream_max_concurrent=max(1, int(snap.upstream_max_concurrent or 1)),
@@ -943,7 +946,120 @@ def _resolve_core(
             # When no upstreams are configured we skip EDNS normalization so that
             # synthesized SERVFAIL responses can echo the client's original OPT
             # record unchanged.
-            upstreams = list(getattr(handler, "upstream_addrs", []) or [])
+            primary_upstreams = list(getattr(handler, "upstream_addrs", []) or [])
+            backup_upstreams = list(getattr(handler, "upstream_backup_addrs", []) or [])
+            probe_percent = 1.0
+            probe_min_percent = 1.0
+            probe_max_percent = 50.0
+            probe_increase = 1.0
+            probe_decrease = 2.0
+            try:
+                health_cfg = getattr(handler, "upstream_health", None)
+                probe_percent = float(getattr(health_cfg, "probe_percent", 1.0) or 1.0)
+                probe_min_percent = float(
+                    getattr(health_cfg, "probe_min_percent", 1.0) or 1.0
+                )
+                probe_max_percent = float(
+                    getattr(health_cfg, "probe_max_percent", 50.0) or 50.0
+                )
+                probe_increase = float(
+                    getattr(health_cfg, "probe_increase", 1.0) or 1.0
+                )
+                probe_decrease = float(
+                    getattr(health_cfg, "probe_decrease", 2.0) or 2.0
+                )
+            except Exception:
+                probe_percent = 1.0
+                probe_min_percent = 1.0
+                probe_max_percent = 50.0
+                probe_increase = 1.0
+                probe_decrease = 2.0
+            if probe_min_percent > probe_max_percent:
+                probe_min_percent, probe_max_percent = (
+                    probe_max_percent,
+                    probe_min_percent,
+                )
+            probe_min_percent = max(0.0, min(100.0, probe_min_percent))
+            probe_max_percent = max(probe_min_percent, min(100.0, probe_max_percent))
+            probe_increase = max(0.0, probe_increase)
+            probe_decrease = max(0.0, probe_decrease)
+            probe_percent = max(
+                probe_min_percent, min(probe_max_percent, probe_percent)
+            )
+            current_probe_percent = DNSRuntimeState.upstream_probe_percent
+            if current_probe_percent is None:
+                current_probe_percent = probe_percent
+            current_probe_percent = max(
+                probe_min_percent,
+                min(probe_max_percent, float(current_probe_percent)),
+            )
+
+            def _select_upstreams_with_probe(
+                candidates: List[Dict],
+            ) -> tuple[List[Dict], int]:
+                now = _time.time()
+                selected: List[Dict] = []
+                healthy_count = 0
+                for upstream in candidates or []:
+                    if not isinstance(upstream, dict):
+                        continue
+                    up_id = DNSRuntimeState._upstream_id(upstream)
+                    if not up_id:
+                        selected.append(upstream)
+                        healthy_count += 1
+                        continue
+                    entry = DNSRuntimeState.upstream_health.get(up_id)
+                    down_until = (
+                        float(entry.get("down_until", 0.0))
+                        if isinstance(entry, dict)
+                        else 0.0
+                    )
+                    if down_until > now:
+                        if current_probe_percent > 0.0:
+                            try:
+                                if random.random() * 100.0 < current_probe_percent:
+                                    selected.append(upstream)
+                            except Exception:
+                                pass
+                        continue
+                    selected.append(upstream)
+                    healthy_count += 1
+                return selected, healthy_count
+
+            primary_selected, primary_healthy_count = _select_upstreams_with_probe(
+                primary_upstreams
+            )
+            backup_selected, _backup_healthy_count = _select_upstreams_with_probe(
+                backup_upstreams
+            )
+            # Backup upstreams are only considered when all primaries are
+            # unhealthy. Otherwise failover stays within the primary list order.
+            if primary_healthy_count > 0 and primary_selected:
+                upstreams = primary_selected
+            elif backup_selected:
+                upstreams = backup_selected
+            else:
+                upstreams = primary_selected
+            try:
+                strategy = str(
+                    getattr(handler, "upstream_strategy", "failover")
+                ).lower()
+            except Exception:
+                strategy = "failover"
+            if strategy == "round_robin" and upstreams:
+                try:
+                    idx = int(getattr(DNSRuntimeState, "_upstream_rr_index", 0) or 0)
+                except Exception:
+                    idx = 0
+                offset = idx % len(upstreams)
+                upstreams = upstreams[offset:] + upstreams[:offset]
+                DNSRuntimeState._upstream_rr_index = (idx + 1) % len(upstreams)
+            elif strategy == "random" and len(upstreams) > 1:
+                upstreams = list(upstreams)
+                try:
+                    random.shuffle(upstreams)
+                except Exception:
+                    pass
             try:
                 mode = str(getattr(handler, "dnssec_mode", "ignore")).lower()
                 if mode in ("ignore", "passthrough", "validate") and upstreams:
@@ -985,6 +1101,27 @@ def _resolve_core(
                 qtype,
                 max_concurrent=max_concurrent,
             )
+            # Keep upstream health state in sync for admin/status payloads.
+            # The UDP handler delegates to this shared resolver path, so health
+            # updates must happen here as well.
+            if reply is None:
+                DNSRuntimeState._mark_upstreams_down(upstreams, reason)
+                DNSRuntimeState.upstream_probe_percent = min(
+                    probe_max_percent,
+                    max(
+                        probe_min_percent,
+                        float(current_probe_percent) + float(probe_increase),
+                    ),
+                )
+            else:
+                DNSRuntimeState._mark_upstream_ok(used_upstream)
+                DNSRuntimeState.upstream_probe_percent = min(
+                    probe_max_percent,
+                    max(
+                        probe_min_percent,
+                        float(current_probe_percent) - float(probe_decrease),
+                    ),
+                )
 
         # Record upstream result, even when all upstreams ultimately fail.
         if stats is not None and used_upstream:

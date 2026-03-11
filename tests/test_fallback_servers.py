@@ -636,12 +636,8 @@ def test_admin_fallback_query_log_validation_errors(monkeypatch: Any) -> None:
                 "enabled": True,
                 "host": "127.0.0.1",
                 "port": 0,
+                "auth": {"mode": "token", "token": "secret-token"},
             }
-        },
-        # Auth configuration for the threaded admin handlers still lives under
-        # the legacy webserver block; start_webserver now only reads server.http.
-        "webserver": {
-            "auth": {"mode": "token", "token": "secret-token"},
         },
     }
 
@@ -1081,12 +1077,8 @@ def test_admin_webserver_fallback_health_and_auth(monkeypatch: Any) -> None:
                 "enabled": True,
                 "host": "127.0.0.1",
                 "port": 0,
+                "auth": {"mode": "token", "token": "secret-token"},
             }
-        },
-        # Auth configuration for threaded handlers continues to live under the
-        # legacy webserver block; start_webserver now only reads server.http.
-        "webserver": {
-            "auth": {"mode": "token", "token": "secret-token"},
         },
     }
 
