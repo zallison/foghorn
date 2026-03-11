@@ -12,7 +12,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from dnslib import OPCODE, QTYPE, RCODE, DNSHeader, DNSRecord
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from foghorn.plugins.resolve.base import (
     BasePlugin,
@@ -157,6 +157,9 @@ class UpdateZoneApexConfig(BaseModel):
 
     Outputs:
       - UpdateZoneApexConfig instance.
+
+    Notes:
+      - Zone names are normalized by removing leading dots (e.g., ".zaa" becomes "zaa").
     """
 
     zone: str = Field(..., description="Zone apex (e.g. 'example.com').")
@@ -208,6 +211,19 @@ class UpdateZoneApexConfig(BaseModel):
         default=None,
         description="File paths containing blocked update IPs.",
     )
+
+    @field_validator("zone")
+    @classmethod
+    def normalize_zone(cls, v: str) -> str:
+        """Brief: Normalize zone name by removing leading dots.
+
+        Inputs:
+          - v: Raw zone name from config.
+
+        Outputs:
+          - str: Zone name without leading dots.
+        """
+        return str(v).lstrip(".")
 
     class Config:
         extra = "forbid"
