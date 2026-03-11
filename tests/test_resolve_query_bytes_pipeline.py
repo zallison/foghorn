@@ -15,6 +15,8 @@ import foghorn.servers.server as server_mod
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 from foghorn.plugins.resolve import base as plugin_base
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
+from foghorn.runtime_config import parse_upstream_health_config
+from foghorn.servers.dns_runtime_state import DNSRuntimeState
 from foghorn.servers.server import resolve_query_bytes
 
 
@@ -92,6 +94,321 @@ def test_resolve_query_bytes_stats_pre_deny_and_override(set_runtime_snapshot):
     assert "record_latency" in kinds
 
 
+def test_resolve_query_bytes_marks_upstream_health_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: resolve_query_bytes increments upstream fail_count on forward failure.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts DNSRuntimeState.upstream_health fail_count increments.
+    """
+
+    q = DNSRecord.question("health-fail.example", "A")
+    up = {"host": "2.2.2.2", "port": 53}
+    up_id = DNSRuntimeState._upstream_id(up)
+
+    def _forward_fail(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        return None, None, "all_failed"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_fail)
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[up],
+    )
+
+    DNSRuntimeState.upstream_health.clear()
+    try:
+        wire = resolve_query_bytes(q.pack(), "127.0.0.1")
+        resp = DNSRecord.parse(wire)
+        assert resp.header.rcode == RCODE.SERVFAIL
+
+        entry = DNSRuntimeState.upstream_health.get(up_id)
+        assert isinstance(entry, dict)
+        assert float(entry.get("fail_count", 0.0) or 0.0) >= 1.0
+        assert float(entry.get("down_until", 0.0) or 0.0) > 0.0
+    finally:
+        DNSRuntimeState.upstream_health.clear()
+
+
+def test_resolve_query_bytes_uses_backup_when_primary_unhealthy(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: resolve_query_bytes forwards to backup upstreams when primaries are unhealthy.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts backup upstream is selected when primary is in backoff.
+    """
+
+    q = DNSRecord.question("backup-failover.example", "A")
+    primary = {"host": "1.1.1.1", "port": 53}
+    backup = {"host": "9.9.9.9", "port": 53}
+    chosen = {"host": None}
+
+    r_ok = q.reply()
+
+    def _forward_capture(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        assert upstreams, "expected at least one upstream candidate"
+        chosen["host"] = upstreams[0].get("host")
+        return r_ok.pack(), upstreams[0], "ok"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_capture)
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[primary],
+        upstream_backup_addrs=[backup],
+    )
+
+    primary_id = DNSRuntimeState._upstream_id(primary)
+    DNSRuntimeState.upstream_health.clear()
+    try:
+        import time as _time
+
+        DNSRuntimeState.upstream_health[primary_id] = {
+            "fail_count": 2.0,
+            "down_until": _time.time() + 60.0,
+        }
+
+        wire = resolve_query_bytes(q.pack(), "127.0.0.1")
+        resp = DNSRecord.parse(wire)
+        assert resp.header.rcode == RCODE.NOERROR
+        assert chosen["host"] == "9.9.9.9"
+    finally:
+        DNSRuntimeState.upstream_health.clear()
+
+
+def test_resolve_query_bytes_probes_unhealthy_primary_by_probe_percent(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: Probe traffic can target unhealthy primaries when probe_percent allows it.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts unhealthy primary can be included for probing in primary list order.
+    """
+
+    q = DNSRecord.question("probe-primary.example", "A")
+    primary_unhealthy = {"host": "1.1.1.1", "port": 53}
+    primary_healthy = {"host": "1.0.0.1", "port": 53}
+    chosen = {"host": None}
+    r_ok = q.reply()
+
+    monkeypatch.setattr(server_mod.random, "random", lambda: 0.0)
+
+    def _forward_capture(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        assert upstreams, "expected at least one upstream candidate"
+        chosen["host"] = upstreams[0].get("host")
+        return r_ok.pack(), upstreams[0], "ok"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_capture)
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[primary_unhealthy, primary_healthy],
+        upstream_health=parse_upstream_health_config(
+            {"health": {"probe_percent": 100.0, "probe_max_percent": 100.0}}
+        ),
+    )
+    primary_id = DNSRuntimeState._upstream_id(primary_unhealthy)
+    DNSRuntimeState.upstream_health.clear()
+    try:
+        import time as _time
+
+        DNSRuntimeState.upstream_health[primary_id] = {
+            "fail_count": 3.0,
+            "down_until": _time.time() + 60.0,
+        }
+
+        wire = resolve_query_bytes(q.pack(), "127.0.0.1")
+        resp = DNSRecord.parse(wire)
+        assert resp.header.rcode == RCODE.NOERROR
+        assert chosen["host"] == "1.1.1.1"
+    finally:
+        DNSRuntimeState.upstream_health.clear()
+
+
+def test_resolve_query_bytes_adapts_probe_percent_on_failure_and_success(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: Probe percent adapts using probe_increase/probe_decrease knobs.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts adaptive probe percentage is increased on failure and decreased on success.
+    """
+
+    q = DNSRecord.question("probe-adapt.example", "A")
+    upstream = {"host": "2.2.2.2", "port": 53}
+    r_ok = q.reply()
+    DNSRuntimeState.upstream_probe_percent = None
+
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[upstream],
+        upstream_health=parse_upstream_health_config(
+            {
+                "health": {
+                    "probe_percent": 10.0,
+                    "probe_min_percent": 1.0,
+                    "probe_max_percent": 50.0,
+                    "probe_increase": 1.0,
+                    "probe_decrease": 2.0,
+                }
+            }
+        ),
+    )
+
+    try:
+        monkeypatch.setattr(
+            server_mod,
+            "send_query_with_failover",
+            lambda *a, **k: (None, None, "all_failed"),
+        )
+        resolve_query_bytes(q.pack(), "127.0.0.1")
+        assert DNSRuntimeState.upstream_probe_percent == 11.0
+
+        monkeypatch.setattr(
+            server_mod,
+            "send_query_with_failover",
+            lambda *a, **k: (r_ok.pack(), upstream, "ok"),
+        )
+        resolve_query_bytes(q.pack(), "127.0.0.1")
+        assert DNSRuntimeState.upstream_probe_percent == 9.0
+    finally:
+        DNSRuntimeState.upstream_probe_percent = None
+
+
+def test_resolve_query_bytes_round_robin_rotates_upstream_order(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: round_robin strategy rotates upstream ordering between queries.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts first candidate rotates according to _upstream_rr_index.
+    """
+
+    q = DNSRecord.question("rr-order.example", "A")
+    upstreams = [
+        {"host": "1.1.1.1", "port": 53},
+        {"host": "2.2.2.2", "port": 53},
+        {"host": "3.3.3.3", "port": 53},
+    ]
+    seen: list[str] = []
+
+    def _forward_capture(
+        req,
+        candidates,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        seen.append(str(candidates[0].get("host")))
+        r = q.reply()
+        return r.pack(), candidates[0], "ok"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_capture)
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=upstreams,
+        upstream_strategy="round_robin",
+    )
+
+    DNSRuntimeState._upstream_rr_index = 0
+    resolve_query_bytes(q.pack(), "127.0.0.1")
+    resolve_query_bytes(q.pack(), "127.0.0.1")
+    assert seen[:2] == ["1.1.1.1", "2.2.2.2"]
+
+
+def test_resolve_query_bytes_random_strategy_shuffles_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: random strategy shuffles upstream list before forwarding.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts shuffled ordering is used for forwarding attempts.
+    """
+
+    q = DNSRecord.question("rnd-order.example", "A")
+    upstreams = [
+        {"host": "1.1.1.1", "port": 53},
+        {"host": "2.2.2.2", "port": 53},
+    ]
+    chosen = {"host": None}
+
+    def _shuffle_reverse(seq):  # noqa: ANN001
+        seq[:] = list(reversed(seq))
+
+    def _forward_capture(
+        req,
+        candidates,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        chosen["host"] = candidates[0].get("host")
+        r = q.reply()
+        return r.pack(), candidates[0], "ok"
+
+    monkeypatch.setattr(server_mod.random, "shuffle", _shuffle_reverse)
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_capture)
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=upstreams,
+        upstream_strategy="random",
+    )
+
+    resolve_query_bytes(q.pack(), "127.0.0.1")
+    assert chosen["host"] == "2.2.2.2"
+
+
 def test_resolve_query_bytes_stats_cache_and_no_upstreams(set_runtime_snapshot):
     """Brief: resolve_query_bytes records stats for cache hit and no upstreams paths.
 
@@ -144,12 +461,24 @@ def test_resolve_query_bytes_stats_upstream_success_and_failure(
     r_ok = q.reply()
 
     def _forward_ok(
-        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
     ):
         return r_ok.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
 
     def _forward_fail(
-        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
     ):
         return None, {"host": "2.2.2.2", "port": 53}, "all_failed"
 
@@ -201,7 +530,13 @@ def test_resolve_query_bytes_stats_outer_exception(
     )
 
     def _boom_send(
-        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
     ):
         raise RuntimeError("boom")
 
@@ -209,7 +544,6 @@ def test_resolve_query_bytes_stats_outer_exception(
 
     q = DNSRecord.question("outer-stats.example", "A")
     wire = resolve_query_bytes(q.pack(), "127.0.0.1")
-
 
     # Response should be SERVFAIL synthesized by the outer exception handler
     resp = DNSRecord.parse(wire)
@@ -243,7 +577,13 @@ def test_resolve_query_bytes_query_context_includes_listener_secure(
     r_ok = q.reply()
 
     def _forward_ok(
-        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
     ):
         return r_ok.pack(), {"host": "1.1.1.1", "port": 53}, "ok"
 
@@ -255,7 +595,6 @@ def test_resolve_query_bytes_query_context_includes_listener_secure(
     )
 
     resolve_query_bytes(q.pack(), "127.0.0.1", listener="udp", secure=False)
-
 
     # Extract the result payloads from record_query_result calls.
     results = [
@@ -347,7 +686,6 @@ def test_resolve_query_bytes_recursive_mode_uses_recursive_resolver(
     assert calls["n"] == 1
 
 
-
 def test_resolve_query_bytes_master_mode_refuses_without_forwarding(
     monkeypatch: pytest.MonkeyPatch,
     set_runtime_snapshot,
@@ -379,7 +717,6 @@ def test_resolve_query_bytes_master_mode_refuses_without_forwarding(
     assert out.header.rcode == RCODE.REFUSED
 
 
-
 def test_resolve_query_bytes_none_alias_behaves_like_master(
     monkeypatch: pytest.MonkeyPatch,
     set_runtime_snapshot,
@@ -409,7 +746,6 @@ def test_resolve_query_bytes_none_alias_behaves_like_master(
     resp = resolve_query_bytes(q.pack(), "127.0.0.1")
     out = DNSRecord.parse(resp)
     assert out.header.rcode == RCODE.REFUSED
-
 
 
 def test_forward_local_false_blocks_local_queries(
@@ -479,7 +815,13 @@ def test_forward_local_true_allows_local_queries(
     upstream_calls = {"n": 0}
 
     def _forward_ok(
-        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
     ):
         upstream_calls["n"] += 1
         return r_ok.pack(), {"host": "8.8.8.8", "port": 53}, "ok"
@@ -521,7 +863,13 @@ def test_forward_local_blocking_does_not_affect_non_local_queries(
     upstream_calls = {"n": 0}
 
     def _forward_ok(
-        req, upstreams, timeout_ms, qname, qtype, max_concurrent=None, on_attempt_result=None
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
     ):
         upstream_calls["n"] += 1
         return r_ok.pack(), {"host": "8.8.8.8", "port": 53}, "ok"
