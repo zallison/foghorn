@@ -31,7 +31,8 @@ class StatsStoreBackendConfig(BaseModel):
     Inputs (constructor fields):
       - name: Optional logical instance name used to distinguish multiple
         backends of the same type (for example, "primary", "analytics"). When
-        omitted, a default name is derived from the backend alias.
+        omitted, this field remains None (any default selection behavior is
+        handled by higher-level loader logic).
       - backend: String identifier for the backend implementation. This may be
         a short alias (for example, "sqlite", "mysql", "redis", "mongo") or a
         fully-qualified dotted import path to a concrete backend class.

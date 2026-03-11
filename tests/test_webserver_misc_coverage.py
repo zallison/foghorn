@@ -91,7 +91,7 @@ def test_get_web_cfg_and_redact_keys_defensive_paths() -> None:
 
     assert web_mod._get_web_cfg(None) == {}
     keys = web_mod._get_redact_keys({"webserver": {"redact_keys": "token"}})
-    assert keys == ["token"]
+    assert set(keys) == {"token", "password", "secret"}
 
 
 def test_trim_top_fields_limit_default_and_scalar_dict_values() -> None:

@@ -66,3 +66,18 @@ def test_parse_upstream_health_config_unknown_profile_raises() -> None:
 
     with pytest.raises(ValueError, match="Unknown upstreams\\.health\\.profile"):
         parse_upstream_health_config({"health": {"profile": "nope"}})
+
+
+def test_parse_upstream_health_config_probe_pct_alias() -> None:
+    """Brief: probe_pct alias maps to probe_percent when explicit probe_percent is absent.
+
+    Inputs:
+      - upstream_cfg with health.probe_pct.
+
+    Outputs:
+      - probe_percent uses probe_pct value.
+    """
+
+    cfg = {"health": {"probe_pct": 12.5}}
+    out = parse_upstream_health_config(cfg)
+    assert out.probe_percent == 12.5
