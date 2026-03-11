@@ -7,7 +7,7 @@ import sys as _sys
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from ...stats import StatsCollector
@@ -1037,6 +1037,8 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
         qtype: str | None = None,
         qname: str | None = None,
         rcode: str | None = None,
+        query_status: str | None = Query(default=None, alias="status"),
+        source: str | None = None,
         start: str | None = None,
         end: str | None = None,
         page: int = 1,
@@ -1082,6 +1084,7 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
             ps = 100
         if ps > 1000:
             ps = 1000
+        status_filter = query_status if isinstance(query_status, str) else None
 
         payload = _admin_logic.build_query_log_payload(
             store,
@@ -1089,6 +1092,8 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
             qtype=qtype,
             qname=qname,
             rcode=rcode,
+            status=status_filter,
+            source=source,
             start_ts=start_ts,
             end_ts=end_ts,
             page=int(page) if isinstance(page, int) else 1,
