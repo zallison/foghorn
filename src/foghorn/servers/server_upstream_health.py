@@ -115,6 +115,8 @@ class _UpstreamHealth:
 
         fail_count = 0.0
         down_until = None
+        last_error = None
+        last_error_ts = None
         state = "up"
         if isinstance(entry, dict):
             try:
@@ -125,11 +127,23 @@ class _UpstreamHealth:
                 raw_down_until = float(entry.get("down_until", 0.0) or 0.0)
             except Exception:
                 raw_down_until = 0.0
+            try:
+                raw_last_error_ts = float(entry.get("last_error_ts", 0.0) or 0.0)
+            except Exception:
+                raw_last_error_ts = 0.0
+            try:
+                raw_last_error = entry.get("last_error")
+            except Exception:
+                raw_last_error = None
             if raw_down_until and raw_down_until > float(now):
                 down_until = raw_down_until
                 state = "down"
             elif fail_count > 0:
                 state = "degraded"
+            if raw_last_error_ts > 0:
+                last_error_ts = raw_last_error_ts
+            if raw_last_error is not None:
+                last_error = str(raw_last_error)
 
         if not upstream_id:
             upstream_id = self.upstream_id(upstream)
@@ -144,6 +158,8 @@ class _UpstreamHealth:
             "port": int(port) if port is not None else None,
             "transport": str(transport) if transport is not None else None,
             "url": str(url) if url is not None else None,
+            "last_error": last_error,
+            "last_error_ts": last_error_ts,
             "config": dict(upstream),
         }
 
