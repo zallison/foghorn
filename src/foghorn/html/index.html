@@ -52,6 +52,9 @@
 			aria-selected="true">
 			Stats
 		</button>
+		<button id="btn-tab-query-log" class="fh-theme-btn" type="button" role="tab" aria-selected="false">
+			Query Log
+		</button>
 		<button id="btn-tab-edit" class="fh-theme-btn" type="button" role="tab" aria-selected="false">
 			Config
 		</button>
@@ -138,6 +141,91 @@
 			</div>
 		</section>
 	</main>
+	<main class="fh-main" id="page-query-log" style="display: none;">
+		<section class="fh-pane fh-pane-full">
+			<div class="fh-pane-header">
+				<h2 class="fh-pane-title">Query Log</h2>
+				<p class="fh-pane-help">Filters and records from <code>/api/v1/query_log</code>.</p>
+			</div>
+			<div class="fh-query-log-controls">
+				<div class="fh-query-log-row">
+					<label class="fh-query-log-field">
+						<span>qname</span>
+						<input id="query-log-filter-qname" class="fh-query-log-input" type="text" />
+					</label>
+					<label class="fh-query-log-field">
+						<span>qtype</span>
+						<input id="query-log-filter-qtype" class="fh-query-log-input" type="text" />
+					</label>
+					<label class="fh-query-log-field">
+						<span>rcode</span>
+						<input id="query-log-filter-rcode" class="fh-query-log-input" type="text" />
+					</label>
+					<label class="fh-query-log-field">
+						<span>client_ip</span>
+						<input id="query-log-filter-client-ip" class="fh-query-log-input" type="text" />
+					</label>
+				</div>
+				<div class="fh-query-log-row">
+					<label class="fh-query-log-field">
+						<span>status</span>
+						<input id="query-log-filter-status" class="fh-query-log-input" type="text" />
+					</label>
+					<label class="fh-query-log-field">
+						<span>source</span>
+						<input id="query-log-filter-source" class="fh-query-log-input" type="text" />
+					</label>
+					<label class="fh-query-log-field">
+						<span>start (UTC)</span>
+						<input id="query-log-filter-start" class="fh-query-log-input" type="datetime-local" />
+					</label>
+					<label class="fh-query-log-field">
+						<span>end (UTC)</span>
+						<input id="query-log-filter-end" class="fh-query-log-input" type="datetime-local" />
+					</label>
+				</div>
+				<div class="fh-query-log-actions">
+					<button id="btn-query-log-apply" class="fh-btn fh-btn-primary" type="button">Apply filters</button>
+					<button id="btn-query-log-clear" class="fh-btn fh-btn-secondary" type="button">Clear filters</button>
+				</div>
+			</div>
+			<div id="query-log-filter-chips" class="fh-query-log-chips"></div>
+			<p id="query-log-summary" class="fh-pane-help"></p>
+			<div id="query-log-error" class="fh-messages"></div>
+			<div class="fh-query-log-table-wrap">
+				<table class="fh-table" id="query-log-table">
+					<thead>
+						<tr>
+							<th>Timestamp</th>
+							<th>qname</th>
+							<th>qtype</th>
+							<th>client_ip</th>
+							<th>rcode</th>
+							<th>status</th>
+							<th>source</th>
+							<th>First Record</th>
+							<th>error</th>
+						</tr>
+					</thead>
+					<tbody id="query-log-table-body"></tbody>
+				</table>
+			</div>
+			<div class="fh-query-log-pager">
+				<label class="fh-query-log-field fh-query-log-page-size">
+					<span>Page size</span>
+					<select id="query-log-page-size" class="fh-query-log-input">
+						<option value="25">25</option>
+						<option value="50" selected>50</option>
+						<option value="100">100</option>
+						<option value="250">250</option>
+					</select>
+				</label>
+				<button id="btn-query-log-prev" class="fh-btn fh-btn-secondary" type="button">Previous</button>
+				<span id="query-log-page-info" class="fh-pane-help"></span>
+				<button id="btn-query-log-next" class="fh-btn fh-btn-secondary" type="button">Next</button>
+			</div>
+		</section>
+	</main>
 
 	<footer class="fh-footer">
 		Foghorn&copy; 2025-2026 Zack Allison. GitHub:
@@ -192,12 +280,67 @@
 			var btnThemeLight = document.getElementById('btn-theme-light');
 			var page1 = document.getElementById('page1');
 			var page2 = document.getElementById('page2');
+			var pageQueryLog = document.getElementById('page-query-log');
 			var btnTabStats = document.getElementById('btn-tab-stats');
+			var btnTabQueryLog = document.getElementById('btn-tab-query-log');
 			var btnTabEdit = document.getElementById('btn-tab-edit');
 			var pluginTabsRoot = document.getElementById('plugin-tabs-root');
 			var pluginUiPages = {};
 			var pluginRefreshTimers = {};
 			var activePluginName = null;
+			var queryLogFilters = {
+				qname: '',
+				qtype: '',
+				rcode: '',
+				client_ip: '',
+				status: '',
+				source: '',
+				start: '',
+				end: '',
+			};
+			var queryLogPage = 1;
+			var queryLogPageSize = 50;
+			var queryLogLastPayload = null;
+			var queryLogSummaryEl = document.getElementById('query-log-summary');
+			var queryLogErrorEl = document.getElementById('query-log-error');
+			var queryLogChipsEl = document.getElementById('query-log-filter-chips');
+			var queryLogTableBodyEl = document.getElementById('query-log-table-body');
+			var queryLogPageInfoEl = document.getElementById('query-log-page-info');
+			var queryLogFilterQnameEl = document.getElementById('query-log-filter-qname');
+			var queryLogFilterQtypeEl = document.getElementById('query-log-filter-qtype');
+			var queryLogFilterRcodeEl = document.getElementById('query-log-filter-rcode');
+			var queryLogFilterClientIpEl = document.getElementById('query-log-filter-client-ip');
+			var queryLogFilterStatusEl = document.getElementById('query-log-filter-status');
+			var queryLogFilterSourceEl = document.getElementById('query-log-filter-source');
+			var queryLogFilterStartEl = document.getElementById('query-log-filter-start');
+			var queryLogFilterEndEl = document.getElementById('query-log-filter-end');
+			var btnQueryLogApply = document.getElementById('btn-query-log-apply');
+			var btnQueryLogClear = document.getElementById('btn-query-log-clear');
+			var btnQueryLogPrev = document.getElementById('btn-query-log-prev');
+			var btnQueryLogNext = document.getElementById('btn-query-log-next');
+			var queryLogPageSizeEl = document.getElementById('query-log-page-size');
+			var latestStatsPayload = null;
+			var UI_QUERY_TAB_PARAM = 'tab';
+			var QUERY_LOG_FILTER_KEYS = [
+				'qname',
+				'qtype',
+				'rcode',
+				'client_ip',
+				'status',
+				'source',
+				'start',
+				'end',
+			];
+			var QUERY_LOG_FILTER_META = {
+				qname: { label: 'qname' },
+				qtype: { label: 'qtype' },
+				rcode: { label: 'rcode' },
+				client_ip: { label: 'client_ip' },
+				status: { label: 'status' },
+				source: { label: 'source' },
+				start: { label: 'start' },
+				end: { label: 'end' },
+			};
 
 			var currentSource = 'disk'; // 'disk' only
 			var lastDiskConfigObj = null;
@@ -237,39 +380,6 @@
 				ede_14: 'Extended DNS Error code 14 (Not Ready); commonly used for policy or rate-limit style denies.',
 				ede_15: 'Extended DNS Error code 15 (Blocked); query was blocked by policy.',
 				ede_23: 'Extended DNS Error code 23 (Network Error); all configured upstreams failed.',
-			};
-			var lastDiskConfigObj = null;
-			var lastDiskRawYaml = null;
-			var isEditing = false;
-
-			// Client-side JSON Schema validation (Ajv from CDN). We prefer window.ajv7.Ajv
-			// when available, falling back to window.Ajv when present. When Ajv is
-			// missing, validation becomes a no-op and server-side validation still
-			// enforces correctness on save/startup.
-			var AjvCtor = (window.ajv7 && window.ajv7.Ajv) || window.Ajv || null;
-			var configSchemaValidator = null;
-
-			var STATS_TOOLTIPS = {
-				total_queries: 'Total DNS queries handled since the collector started or was last reset.',
-				cache_hits: 'Queries answered directly from the cache.',
-				cache_misses: 'Queries that required contacting upstream servers.',
-				cache_null: 'Responses generated directly by plugins before cache or upstream lookup.',
-				cache_deny_pre: 'Pre-plugin deny decisions that bypassed cache (e.g., filtering plugins).',
-				cache_override_pre: 'Pre-plugin overrides that bypassed cache (e.g., synthetic responses from plugins).',
-				min_ms: 'Fastest observed query latency in milliseconds.',
-				max_ms: 'Slowest observed query latency in milliseconds.',
-				avg_ms: 'Average (mean) query latency in milliseconds.',
-				p50_ms: 'Median (50th percentile) query latency in milliseconds.',
-				p90_ms: '90th percentile query latency in milliseconds.',
-				p99_ms: '99th percentile query latency in milliseconds.',
-				load_1m: 'System load average over the last 1 minute.',
-				load_5m: 'System load average over the last 5 minutes.',
-				load_15m: 'System load average over the last 15 minutes.',
-				dnssec_secure: 'Responses that validated successfully against DNSSEC trust anchors (secure).',
-				dnssec_zone_secure: 'Responses treated as DNSSEC-secure based on extended upstream signals (for example, AD bit).',
-				dnssec_unsigned: 'Responses from zones that are not signed with DNSSEC (unsigned but not an error).',
-				dnssec_bogus: 'Responses that failed DNSSEC validation (bogus).',
-				dnssec_indeterminate: 'Responses where DNSSEC status could not be determined (indeterminate).',
 			};
 
 			function setMessage(text, level) {
@@ -427,6 +537,219 @@
 				return y + '-' + m + '-' + d + ' ' + hh + ':' + mm + ':' + ss;
 			}
 
+			function parseQueryLogTimestamp(value) {
+				if (value == null || value === '') {
+					return null;
+				}
+				if (typeof value === 'number') {
+					return new Date(value > 1e11 ? value : value * 1000);
+				}
+				var text = String(value).trim();
+				var n = Number(text);
+				if (text && isFinite(n)) {
+					return new Date(n > 1e11 ? n : n * 1000);
+				}
+				return new Date(text);
+			}
+
+			function formatQueryLogTimestamp(value) {
+				if (value == null || value === '') {
+					return { text: '', title: '' };
+				}
+				var date = parseQueryLogTimestamp(value);
+				if (!date || isNaN(date.getTime())) {
+					return { text: String(value), title: '' };
+				}
+				var rounded = new Date(Math.round(date.getTime() / 1000) * 1000);
+				var iso = rounded.toISOString().replace('.000Z', 'Z');
+				var datePart = iso.slice(0, 10);
+				var timePart = iso.slice(11, 19);
+				return { text: timePart, title: datePart + ' UTC' };
+			}
+
+			function normalizeQueryLogToken(value) {
+				if (value == null) {
+					return '';
+				}
+				return String(value).trim().toUpperCase();
+			}
+
+			function classifyQueryLogQtype(value) {
+				var token = normalizeQueryLogToken(value);
+				if (!token) {
+					return '';
+				}
+				if (token === 'ANY' || token === 'AXFR' || token === 'IXFR' || token === '*') {
+					return 'anomaly';
+				}
+				var commonQtypes = {
+					A: true,
+					AAAA: true,
+					CNAME: true,
+					MX: true,
+					TXT: false,
+					NS: false,
+					SOA: false,
+					PTR: true,
+					SRV: true,
+					CAA: false,
+					NAPTR: false,
+					HTTPS: true,
+					SVCB: false,
+					DS: false,
+					DNSKEY: false,
+					RRSIG: false,
+					NSEC: false,
+					NSEC3: false,
+					TLSA: false,
+					SSHFP: false,
+					SPF: false,
+					URI: false,
+				};
+				if (commonQtypes[token]) {
+					return 'good';
+				}
+				if (/^\d+$/.test(token)) {
+					return 'warn';
+				}
+				return 'anomaly';
+			}
+
+			function normalizeQueryLogSourceDisplay(sourceValue, resultObj) {
+				var sourceText = sourceValue != null ? String(sourceValue) : '';
+				if (sourceText !== 'pre_plugin_override') {
+					return sourceText;
+				}
+				var pluginName = '';
+				if (resultObj && typeof resultObj === 'object') {
+					pluginName =
+						resultObj.plugin_label ||
+						resultObj.plugin ||
+						resultObj.source_plugin ||
+						'';
+				}
+				pluginName = pluginName != null ? String(pluginName).trim() : '';
+				if (pluginName) {
+					return pluginName;
+				}
+				return sourceText;
+			}
+
+			function isOverridePreDeniedWithIp(statusToken, firstValue) {
+				if (statusToken !== 'OVERRIDE_PRE') {
+					return false;
+				}
+				var firstText = firstValue != null ? String(firstValue).trim().toLowerCase() : '';
+				return firstText === '0.0.0.0' || firstText === '::1';
+			}
+
+			function truncateQueryLogValue(value, maxLength) {
+				var text = value != null ? String(value) : '';
+				if (!text) {
+					return { text: '', full: '' };
+				}
+				var limit = parseInt(maxLength, 10);
+				if (!isFinite(limit) || limit < 2 || text.length <= limit) {
+					return { text: text, full: text };
+				}
+				return {
+					text: text.slice(0, limit - 1) + '…',
+					full: text,
+				};
+			}
+
+			function classifyQueryLogRcode(value) {
+				var token = normalizeQueryLogToken(value);
+				if (!token) {
+					return '';
+				}
+				if (token === 'NOERROR' || token === '0') {
+					return 'good';
+				}
+				if (token === 'NXDOMAIN' || token === '3') {
+					return 'warn';
+				}
+				if (
+					token === 'SERVFAIL' ||
+					token === 'REFUSED' ||
+					token === 'FORMERR' ||
+					token === 'NOTIMP' ||
+					token === 'YXDOMAIN' ||
+					token === 'YXRRSET' ||
+					token === 'NXRRSET' ||
+					token === 'NOTAUTH' ||
+					token === 'NOTZONE' ||
+					token === 'BADVERS' ||
+					token === 'BADCOOKIE' ||
+					token === '1' ||
+					token === '2' ||
+					token === '4' ||
+					token === '5' ||
+					token.indexOf('BAD') === 0
+				) {
+					return 'error';
+				}
+				if (/^\d+$/.test(token)) {
+					return 'anomaly';
+				}
+				return 'anomaly';
+			}
+
+			function classifyQueryLogStatus(value) {
+				var token = normalizeQueryLogToken(value);
+				if (!token) {
+					return '';
+				}
+				if (token === 'CACHE_HIT') {
+					return 'info';
+				}
+				if (token === 'OK' || token === 'SUCCESS') {
+					return 'good';
+				}
+				if (
+					token === 'CACHE_MISS' ||
+					token === 'DENY_PRE' ||
+					token === 'OVERRIDE_PRE' ||
+					token === 'LOCAL_BLOCKED' ||
+					token.indexOf('CACHE_') === 0
+				) {
+					return 'warn';
+				}
+				if (
+					token === 'ERROR' ||
+					token.indexOf('FAIL') !== -1 ||
+					token.indexOf('TIMEOUT') !== -1 ||
+					token.indexOf('NO_UPSTREAM') !== -1 ||
+					token.indexOf('EXCEPTION') !== -1 ||
+					token.indexOf('DROP') !== -1
+				) {
+					return 'error';
+				}
+				return 'anomaly';
+			}
+
+			function appendQueryLogCell(row, value, className, severity, titleText) {
+				var td = document.createElement('td');
+				td.textContent = value != null ? String(value) : '';
+				if (Array.isArray(className)) {
+					className.forEach(function (name) {
+						if (name) {
+							td.classList.add(name);
+						}
+					});
+				} else if (className) {
+					td.classList.add(className);
+				}
+				if (severity) {
+					td.classList.add('fh-query-log-severity');
+					td.classList.add('fh-query-log-severity-' + severity);
+				}
+				if (titleText) {
+					td.title = String(titleText);
+				}
+				row.appendChild(td);
+			}
+
 			function formatDurationSeconds(value) {
 				if (value == null) {
 					return null;
@@ -450,6 +773,526 @@
 					return days + 'd ' + hms;
 				}
 				return hms;
+			}
+
+			function normalizeQueryLogFilterValue(value) {
+				if (value == null) {
+					return '';
+				}
+				return String(value).trim();
+			}
+
+			function parsePositiveInt(value, fallback) {
+				var n = parseInt(value, 10);
+				if (!isFinite(n) || n <= 0) {
+					return fallback;
+				}
+				return n;
+			}
+
+			function queryLogFilterInputMap() {
+				return {
+					qname: queryLogFilterQnameEl,
+					qtype: queryLogFilterQtypeEl,
+					rcode: queryLogFilterRcodeEl,
+					client_ip: queryLogFilterClientIpEl,
+					status: queryLogFilterStatusEl,
+					source: queryLogFilterSourceEl,
+					start: queryLogFilterStartEl,
+					end: queryLogFilterEndEl,
+				};
+			}
+
+			function syncQueryLogInputsFromState() {
+				var inputMap = queryLogFilterInputMap();
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					var el = inputMap[key];
+					if (!el) {
+						return;
+					}
+					var value = queryLogFilters[key];
+					el.value = value != null ? String(value) : '';
+				});
+				if (queryLogPageSizeEl) {
+					queryLogPageSizeEl.value = String(queryLogPageSize);
+				}
+			}
+
+			function syncQueryLogStateFromInputs() {
+				var inputMap = queryLogFilterInputMap();
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					var el = inputMap[key];
+					var value = el && typeof el.value === 'string' ? el.value : '';
+					queryLogFilters[key] = normalizeQueryLogFilterValue(value);
+				});
+				if (queryLogPageSizeEl) {
+					queryLogPageSize = parsePositiveInt(
+						queryLogPageSizeEl.value,
+						queryLogPageSize
+					);
+				}
+			}
+
+			function setQueryLogError(text) {
+				if (!queryLogErrorEl) {
+					return;
+				}
+				queryLogErrorEl.textContent = text || '';
+				queryLogErrorEl.className = 'fh-messages';
+				if (!text) {
+					return;
+				}
+				queryLogErrorEl.classList.add('fh-messages-error');
+			}
+
+			function readUiStateFromUrl() {
+				var params = null;
+				try {
+					params = new URLSearchParams(window.location.search || '');
+				} catch (e) {
+					params = null;
+				}
+				if (!params) {
+					return null;
+				}
+				return params;
+			}
+
+			function applyQueryLogStateFromUrl(params) {
+				if (!params) {
+					return;
+				}
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					var paramKey = 'ql_' + key;
+					var value = params.get(paramKey);
+					if (value == null) {
+						return;
+					}
+					queryLogFilters[key] = normalizeQueryLogFilterValue(value);
+				});
+				var page = params.get('ql_page');
+				var pageSize = params.get('ql_page_size');
+				if (page != null) {
+					queryLogPage = parsePositiveInt(page, 1);
+				}
+				if (pageSize != null) {
+					queryLogPageSize = parsePositiveInt(pageSize, queryLogPageSize);
+				}
+			}
+
+			function writeUiStateToUrl(activeTab) {
+				var params = readUiStateFromUrl();
+				if (!params) {
+					return;
+				}
+				if (activeTab) {
+					params.set(UI_QUERY_TAB_PARAM, activeTab);
+				} else {
+					params.delete(UI_QUERY_TAB_PARAM);
+				}
+				if (activeTab === 'query-log') {
+					QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+						var paramKey = 'ql_' + key;
+						var value = normalizeQueryLogFilterValue(queryLogFilters[key]);
+						if (value) {
+							params.set(paramKey, value);
+						} else {
+							params.delete(paramKey);
+						}
+					});
+					params.set('ql_page', String(queryLogPage));
+					params.set('ql_page_size', String(queryLogPageSize));
+				} else {
+					QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+						params.delete('ql_' + key);
+					});
+					params.delete('ql_page');
+					params.delete('ql_page_size');
+				}
+				var nextQuery = params.toString();
+				var nextUrl = window.location.pathname + (nextQuery ? '?' + nextQuery : '');
+				if (window.location.hash) {
+					nextUrl += window.location.hash;
+				}
+				try {
+					window.history.replaceState(null, '', nextUrl);
+				} catch (e) {}
+			}
+
+			function renderQueryLogFilterChips() {
+				if (!queryLogChipsEl) {
+					return;
+				}
+				queryLogChipsEl.textContent = '';
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					var value = normalizeQueryLogFilterValue(queryLogFilters[key]);
+					if (!value) {
+						return;
+					}
+					var chip = document.createElement('span');
+					chip.className = 'fh-query-log-chip';
+					var meta = QUERY_LOG_FILTER_META[key] || { label: key };
+					var valueText = value;
+					if ((key === 'start' || key === 'end') && value) {
+						valueText = formatTimestamp(value) || value;
+					}
+					chip.appendChild(
+						document.createTextNode(String(meta.label || key) + ': ' + valueText)
+					);
+					var removeBtn = document.createElement('button');
+					removeBtn.type = 'button';
+					removeBtn.title = 'Remove ' + String(meta.label || key) + ' filter';
+					removeBtn.textContent = '×';
+					removeBtn.addEventListener('click', function () {
+						queryLogFilters[key] = '';
+						queryLogPage = 1;
+						syncQueryLogInputsFromState();
+						loadQueryLog();
+					});
+					chip.appendChild(removeBtn);
+					queryLogChipsEl.appendChild(chip);
+				});
+			}
+
+			function renderQueryLogRows(items) {
+				if (!queryLogTableBodyEl) {
+					return;
+				}
+				queryLogTableBodyEl.textContent = '';
+				items = Array.isArray(items) ? items : [];
+				if (!items.length) {
+					var emptyTr = document.createElement('tr');
+					var emptyTd = document.createElement('td');
+					emptyTd.colSpan = 9;
+					emptyTd.className = 'fh-pane-help';
+					emptyTd.textContent = 'No query-log rows matched the current filters.';
+					emptyTr.appendChild(emptyTd);
+					queryLogTableBodyEl.appendChild(emptyTr);
+					return;
+				}
+				items.forEach(function (item) {
+					if (!item || typeof item !== 'object') {
+						return;
+					}
+					var row = document.createElement('tr');
+					var result = item.result && typeof item.result === 'object' ? item.result : {};
+					var sourceRaw = result.source != null ? String(result.source) : '';
+					var timestampRaw =
+						item.timestamp != null && item.timestamp !== '' ? item.timestamp : item.ts;
+					var timestampMeta = formatQueryLogTimestamp(timestampRaw);
+					var qnameValue = item.qname != null ? String(item.qname) : '';
+					var qtypeValue = item.qtype != null ? String(item.qtype) : '';
+					var clientIpValue = item.client_ip != null ? String(item.client_ip) : '';
+					var rcodeValue = item.rcode != null ? String(item.rcode) : '';
+					var statusValue = item.status != null ? String(item.status) : '';
+					var upstreamValue = item.upstream_id != null ? String(item.upstream_id) : '';
+					var firstRawValue = item.first != null ? String(item.first) : '';
+					var errorValue =
+						item.error != null
+							? String(item.error)
+							: (result.error != null ? String(result.error) : '');
+					var statusSeverity = classifyQueryLogStatus(statusValue);
+					var statusToken = normalizeQueryLogToken(statusValue);
+					var useStatusSeverityForQnameAndQtype =
+						statusToken &&
+						statusToken !== 'OK' &&
+						statusToken !== 'CACHE_HIT'
+							? true
+							: false;
+					var overrideDeniedWithIp = isOverridePreDeniedWithIp(statusToken, firstRawValue);
+					var firstDisplayValue = overrideDeniedWithIp
+						? 'Denied-with-IP'
+						: firstRawValue;
+					var firstTrimmed = truncateQueryLogValue(firstDisplayValue, 30);
+					var firstTitleValue = firstRawValue || firstTrimmed.full;
+					var overrideAllowedHighlight =
+						statusToken === 'OVERRIDE_PRE' &&
+						!overrideDeniedWithIp &&
+						Boolean(firstRawValue);
+					var overrideHighlightClass = overrideAllowedHighlight
+						? 'fh-query-log-override-allowed'
+						: '';
+					var qnameSeverity = useStatusSeverityForQnameAndQtype ? statusSeverity : '';
+					var sourceSeverity = qnameSeverity;
+					var firstSeverity = qnameSeverity;
+					var qtypeSeverity = useStatusSeverityForQnameAndQtype
+						? statusSeverity
+						: classifyQueryLogQtype(qtypeValue);
+					var sourceTooltipParts = [];
+					var sourceDisplay = normalizeQueryLogSourceDisplay(sourceRaw, result);
+					if (sourceDisplay) {
+						sourceTooltipParts.push('source: ' + sourceDisplay);
+					}
+					if (sourceRaw && sourceRaw !== sourceDisplay) {
+						sourceTooltipParts.push('raw_source: ' + sourceRaw);
+					}
+					if (upstreamValue) {
+						sourceTooltipParts.push('upstream: ' + upstreamValue);
+					}
+					var sourceTooltip = sourceTooltipParts.join('\n');
+
+					appendQueryLogCell(
+						row,
+						timestampMeta.text,
+						'fh-query-log-timestamp',
+						'',
+						timestampMeta.title
+					);
+					appendQueryLogCell(
+						row,
+						qnameValue,
+						overrideHighlightClass ? [overrideHighlightClass] : '',
+						qnameSeverity,
+						''
+					);
+					appendQueryLogCell(
+						row,
+						qtypeValue,
+						overrideHighlightClass
+							? ['fh-query-log-qtype', overrideHighlightClass]
+							: 'fh-query-log-qtype',
+						qtypeSeverity,
+						''
+					);
+					appendQueryLogCell(row, clientIpValue, '', '', '');
+					appendQueryLogCell(
+						row,
+						rcodeValue,
+						'fh-query-log-rcode',
+						classifyQueryLogRcode(rcodeValue),
+						''
+					);
+					appendQueryLogCell(
+						row,
+						statusValue,
+						overrideHighlightClass
+							? ['fh-query-log-status', overrideHighlightClass]
+							: 'fh-query-log-status',
+						statusSeverity,
+						''
+					);
+					appendQueryLogCell(
+						row,
+						sourceDisplay,
+						overrideHighlightClass
+							? ['fh-query-log-source', overrideHighlightClass]
+							: 'fh-query-log-source',
+						sourceSeverity,
+						sourceTooltip
+					);
+					appendQueryLogCell(
+						row,
+						firstTrimmed.text,
+						overrideHighlightClass ? [overrideHighlightClass] : '',
+						firstSeverity,
+						firstTitleValue
+					);
+					appendQueryLogCell(row, errorValue, '', '', '');
+					queryLogTableBodyEl.appendChild(row);
+				});
+			}
+
+			function updateQueryLogPager(payload) {
+				var page = parsePositiveInt(payload && payload.page, queryLogPage);
+				var pageSize = parsePositiveInt(payload && payload.page_size, queryLogPageSize);
+				var total = payload && payload.total != null ? Number(payload.total) : 0;
+				var totalPages =
+					payload && payload.total_pages != null
+						? Number(payload.total_pages)
+						: (pageSize > 0 ? Math.ceil(total / pageSize) : 0);
+				queryLogPage = page;
+				queryLogPageSize = pageSize;
+				if (queryLogPageSizeEl) {
+					queryLogPageSizeEl.value = String(queryLogPageSize);
+				}
+				if (btnQueryLogPrev) {
+					btnQueryLogPrev.disabled = page <= 1;
+				}
+				if (btnQueryLogNext) {
+					btnQueryLogNext.disabled = totalPages > 0 ? page >= totalPages : true;
+				}
+				if (queryLogPageInfoEl) {
+					queryLogPageInfoEl.textContent =
+						'Page ' +
+						page +
+						(totalPages > 0 ? ' / ' + totalPages : '') +
+						' (' +
+						formatNumber(total) +
+						' rows)';
+				}
+				if (queryLogSummaryEl) {
+					queryLogSummaryEl.textContent =
+						'Showing query-log rows from /api/v1/query_log with server-side paging.';
+				}
+			}
+
+			function buildQueryLogApiUrl() {
+				var query = {
+					page: queryLogPage,
+					page_size: queryLogPageSize,
+				};
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					var value = normalizeQueryLogFilterValue(queryLogFilters[key]);
+					if (!value) {
+						return;
+					}
+					query[key] = value;
+				});
+				return '/api/v1/query_log' + _buildQuery(query);
+			}
+
+			function loadQueryLog() {
+				if (!pageQueryLog) {
+					return;
+				}
+				renderQueryLogFilterChips();
+				renderQueryLogRows([]);
+				setQueryLogError('');
+				if (queryLogSummaryEl) {
+					queryLogSummaryEl.textContent = 'Loading query-log rows...';
+				}
+				var url = buildQueryLogApiUrl();
+				return fetchJson(url)
+					.then(function (payload) {
+						queryLogLastPayload = payload || null;
+						if (payload && payload.status === 'disabled') {
+							renderQueryLogRows([]);
+							if (queryLogSummaryEl) {
+								queryLogSummaryEl.textContent =
+									'Query logging is disabled for this server instance.';
+							}
+							if (queryLogPageInfoEl) {
+								queryLogPageInfoEl.textContent = '';
+							}
+							if (btnQueryLogPrev) {
+								btnQueryLogPrev.disabled = true;
+							}
+							if (btnQueryLogNext) {
+								btnQueryLogNext.disabled = true;
+							}
+							writeUiStateToUrl('query-log');
+							return;
+						}
+						renderQueryLogRows(payload && payload.items ? payload.items : []);
+						updateQueryLogPager(payload || {});
+						writeUiStateToUrl('query-log');
+					})
+					.catch(function (err) {
+						queryLogLastPayload = null;
+						renderQueryLogRows([]);
+						setQueryLogError(
+							'Failed to load query-log rows: ' +
+								(err && err.message ? err.message : String(err))
+						);
+						if (queryLogSummaryEl) {
+							queryLogSummaryEl.textContent = '';
+						}
+						if (queryLogPageInfoEl) {
+							queryLogPageInfoEl.textContent = '';
+						}
+					});
+			}
+
+			function applyQueryLogFilters() {
+				syncQueryLogStateFromInputs();
+				queryLogPage = 1;
+				loadQueryLog();
+			}
+
+			function clearQueryLogFilters() {
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					queryLogFilters[key] = '';
+				});
+				queryLogPage = 1;
+				syncQueryLogInputsFromState();
+				loadQueryLog();
+			}
+
+			function openQueryLogWithFilters(filters) {
+				filters = filters && typeof filters === 'object' ? filters : {};
+				QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+					if (!Object.prototype.hasOwnProperty.call(filters, key)) {
+						return;
+					}
+					queryLogFilters[key] = normalizeQueryLogFilterValue(filters[key]);
+				});
+				queryLogPage = 1;
+				if (Object.prototype.hasOwnProperty.call(filters, 'page_size')) {
+					queryLogPageSize = parsePositiveInt(filters.page_size, queryLogPageSize);
+				}
+				syncQueryLogInputsFromState();
+				applyTab('query-log');
+			}
+
+			function getTopListDrilldownFilters(title, key) {
+				if (!title || key == null) {
+					return null;
+				}
+				var titleText = String(title);
+				var value = normalizeQueryLogFilterValue(key);
+				if (!value) {
+					return null;
+				}
+				if (titleText === 'Top Client') {
+					return { client_ip: value };
+				}
+				if (
+					titleText === 'Top Cache Hit Domains' ||
+					titleText === 'Top Cache Hit Subdomains'
+				) {
+					return { qname: value, status: 'cache_hit', source: 'cache' };
+				}
+				if (
+					titleText === 'Top Cache Miss Domains' ||
+					titleText === 'Top Cache Miss Subdomains'
+				) {
+					return { qname: value, source: 'upstream' };
+				}
+				if (titleText === 'Top Domains' || titleText === 'Top Sub Domains') {
+					return { qname: value };
+				}
+				if (
+					titleText.indexOf('Top ') === 0 &&
+					titleText.lastIndexOf(' Requests') ===
+						titleText.length - ' Requests'.length
+				) {
+					return {
+						qname: value,
+						qtype: titleText.slice(
+							'Top '.length,
+							titleText.length - ' Requests'.length
+						),
+					};
+				}
+				if (
+					titleText.indexOf('Top ') === 0 &&
+					titleText.lastIndexOf(' Domains') ===
+						titleText.length - ' Domains'.length &&
+					titleText.indexOf('Top Cache ') !== 0
+				) {
+					return {
+						qname: value,
+						rcode: titleText.slice(
+							'Top '.length,
+							titleText.length - ' Domains'.length
+						),
+					};
+				}
+				if (
+					titleText.indexOf('Top ') === 0 &&
+					titleText.lastIndexOf(' Subdomains') ===
+						titleText.length - ' Subdomains'.length &&
+					titleText.indexOf('Top Cache ') !== 0
+				) {
+					return {
+						qname: value,
+						rcode: titleText.slice(
+							'Top '.length,
+							titleText.length - ' Subdomains'.length
+						),
+					};
+				}
+				return { qname: value };
 			}
 
 			function _ensureStatsPaneRefs() {
@@ -772,9 +1615,19 @@
 					}
 					var key = pair[0];
 					var count = pair[1];
+					var drilldownFilters = getTopListDrilldownFilters(title, key);
 
 					var dt = document.createElement('dt');
-					dt.textContent = key;
+					if (drilldownFilters) {
+						dt.classList.add('fh-stats-group-title-link');
+						dt.title = 'Open related query-log rows';
+						dt.textContent = String(key);
+						dt.addEventListener('click', function () {
+							openQueryLogWithFilters(drilldownFilters);
+						});
+					} else {
+						dt.textContent = key;
+					}
 
 					var dd = document.createElement('dd');
 					dd.textContent = formatNumber(count);
@@ -1305,7 +2158,18 @@
 				table.className = 'fh-table fh-table-upstreams';
 				var thead = document.createElement('thead');
 				var headRow = document.createElement('tr');
-				['Upstream', 'State', 'Failures', 'Backoff (s)'].forEach(function (label) {
+				[
+					'Upstream',
+					'Role',
+					'Endpoint',
+					'State',
+					'Failures',
+					'Run queries',
+					'Run failed',
+					'Last error',
+					'Last error at',
+					'Backoff',
+				].forEach(function (label) {
 					var th = document.createElement('th');
 					th.textContent = label;
 					th.style.textAlign = 'left';
@@ -1319,30 +2183,100 @@
 					if (!item || typeof item !== 'object') {
 						return;
 					}
-					var id = item.id || '';
-					var state = item.state || 'up';
+					var id = item.id != null ? String(item.id) : '';
+					var role = item.role != null ? String(item.role) : '';
+					var state = item.state != null ? String(item.state) : 'up';
 					var failCount = item.fail_count != null ? item.fail_count : 0;
-					var backoffText = '';
+					var host = item.host != null ? String(item.host) : '';
+					var port = item.port != null ? String(item.port) : '';
+					var transport = item.transport != null ? String(item.transport) : '';
+					var url = item.url != null ? String(item.url) : '';
+					var endpoint = url;
+					if (!endpoint && (host || port)) {
+						endpoint = host + (port ? ':' + port : '');
+					}
+					if (transport && endpoint && endpoint.indexOf('://') === -1) {
+						endpoint = transport + '://' + endpoint;
+					}
+					var runQueries = item.run_query_count;
+					if (runQueries == null) {
+						runQueries = item.query_count;
+					}
+					if (runQueries == null) {
+						runQueries = item.total_queries;
+					}
+					var runFailed = item.run_failed_count;
+					if (runFailed == null) {
+						runFailed = item.failed_query_count;
+					}
+					if (runFailed == null) {
+						runFailed = item.failed_count;
+					}
+					var lastError = item.last_error != null ? String(item.last_error) : '';
+					var lastErrorTsRaw = item.last_error_ts;
+					if (lastErrorTsRaw == null) {
+						lastErrorTsRaw = item.last_failure_ts;
+					}
+					var lastErrorTs = lastErrorTsRaw != null ? (formatTimestamp(lastErrorTsRaw) || String(lastErrorTsRaw)) : '';
+					var backoffText = 'none';
 					if (item.down_until) {
 						var nowMs = Date.now();
 						var untilMs = Number(item.down_until) * 1000;
 						var remainingMs = untilMs - nowMs;
 						if (remainingMs > 0) {
-							backoffText = (remainingMs / 1000).toFixed(1);
+							backoffText = (remainingMs / 1000).toFixed(1) + 's';
 						}
 					}
+					var hoverDetails = [];
+					if (host) {
+						hoverDetails.push('host=' + host);
+					}
+					if (port) {
+						hoverDetails.push('port=' + port);
+					}
+					if (transport) {
+						hoverDetails.push('transport=' + transport);
+					}
+					if (item.config && typeof item.config === 'object') {
+						try {
+							hoverDetails.push('config=' + JSON.stringify(item.config));
+						} catch (e) {}
+					}
 					var tr = document.createElement('tr');
+					if (hoverDetails.length) {
+						tr.title = hoverDetails.join('\n');
+					}
 					var tdId = document.createElement('td');
 					tdId.textContent = id;
+					var tdRole = document.createElement('td');
+					tdRole.textContent = role;
+					var tdEndpoint = document.createElement('td');
+					tdEndpoint.textContent = endpoint;
 					var tdState = document.createElement('td');
 					tdState.textContent = state;
 					var tdFail = document.createElement('td');
-					tdFail.textContent = String(failCount);
+					tdFail.textContent = formatNumber(failCount);
+					var tdRunQueries = document.createElement('td');
+					tdRunQueries.textContent =
+						runQueries == null ? '' : formatNumber(runQueries);
+					var tdRunFailed = document.createElement('td');
+					tdRunFailed.textContent =
+						runFailed == null ? '' : formatNumber(runFailed);
+					var tdLastError = document.createElement('td');
+					tdLastError.textContent = lastError;
+					var tdLastErrorTs = document.createElement('td');
+					tdLastErrorTs.textContent = lastErrorTs;
 					var tdBackoff = document.createElement('td');
 					tdBackoff.textContent = backoffText;
 					tr.appendChild(tdId);
+					tr.appendChild(tdRole);
+					tr.appendChild(tdEndpoint);
 					tr.appendChild(tdState);
 					tr.appendChild(tdFail);
+					tr.appendChild(tdRunQueries);
+					tr.appendChild(tdRunFailed);
+					tr.appendChild(tdLastError);
+					tr.appendChild(tdLastErrorTs);
 					tr.appendChild(tdBackoff);
 					tbody.appendChild(tr);
 				});
@@ -3635,6 +4569,7 @@
 				if (!isStats) {
 					hideStatsDetails();
 				}
+				var isQueryLog = tab === 'query-log';
 				var isEdit = tab === 'edit';
 				var pluginName = null;
 				if (tab && tab.indexOf('plugin:') === 0) {
@@ -3658,6 +4593,9 @@
 				}
 				if (page2) {
 					page2.style.display = isStats ? '' : 'none';
+				}
+				if (pageQueryLog) {
+					pageQueryLog.style.display = isQueryLog ? '' : 'none';
 				}
 				if (pluginUiPages && typeof pluginUiPages === 'object') {
 					Object.keys(pluginUiPages).forEach(function (name) {
@@ -3690,6 +4628,15 @@
 						btnTabStats.setAttribute('aria-selected', 'false');
 					}
 				}
+				if (btnTabQueryLog) {
+					if (isQueryLog) {
+						btnTabQueryLog.classList.add('fh-theme-btn-active');
+						btnTabQueryLog.setAttribute('aria-selected', 'true');
+					} else {
+						btnTabQueryLog.classList.remove('fh-theme-btn-active');
+						btnTabQueryLog.setAttribute('aria-selected', 'false');
+					}
+				}
 				if (btnTabEdit) {
 					if (isEdit) {
 						btnTabEdit.classList.add('fh-theme-btn-active');
@@ -3698,6 +4645,11 @@
 						btnTabEdit.classList.remove('fh-theme-btn-active');
 						btnTabEdit.setAttribute('aria-selected', 'false');
 					}
+				}
+				writeUiStateToUrl(tab || '');
+				if (isQueryLog) {
+					syncQueryLogInputsFromState();
+					loadQueryLog();
 				}
 			}
 
@@ -3740,20 +4692,92 @@
 					applyTab('stats');
 				});
 			}
+			if (btnTabQueryLog) {
+				btnTabQueryLog.addEventListener('click', function () {
+					applyTab('query-log');
+				});
+			}
 			if (btnTabEdit) {
 				btnTabEdit.addEventListener('click', function () {
 					applyTab('edit');
 				});
 			}
+			if (btnQueryLogApply) {
+				btnQueryLogApply.addEventListener('click', function () {
+					applyQueryLogFilters();
+				});
+			}
+			if (btnQueryLogClear) {
+				btnQueryLogClear.addEventListener('click', function () {
+					clearQueryLogFilters();
+				});
+			}
+			if (btnQueryLogPrev) {
+				btnQueryLogPrev.addEventListener('click', function () {
+					if (queryLogPage > 1) {
+						queryLogPage -= 1;
+						loadQueryLog();
+					}
+				});
+			}
+			if (btnQueryLogNext) {
+				btnQueryLogNext.addEventListener('click', function () {
+					queryLogPage += 1;
+					loadQueryLog();
+				});
+			}
+			if (queryLogPageSizeEl) {
+				queryLogPageSizeEl.addEventListener('change', function () {
+					queryLogPageSize = parsePositiveInt(
+						queryLogPageSizeEl.value,
+						queryLogPageSize
+					);
+					queryLogPage = 1;
+					loadQueryLog();
+				});
+			}
+			QUERY_LOG_FILTER_KEYS.forEach(function (key) {
+				var inputMap = queryLogFilterInputMap();
+				var el = inputMap[key];
+				if (!el) {
+					return;
+				}
+				el.addEventListener('keydown', function (ev) {
+					if (ev && ev.key === 'Enter') {
+						ev.preventDefault();
+						applyQueryLogFilters();
+					}
+				});
+			});
 
 			// Initial load
 			var initialTheme = root.getAttribute('data-theme') || 'dark';
 			applyTheme(initialTheme);
+			var urlState = readUiStateFromUrl();
+			applyQueryLogStateFromUrl(urlState);
+			syncQueryLogInputsFromState();
 			var initialTab = 'stats';
+			var urlTab = '';
+			if (urlState) {
+				urlTab = normalizeQueryLogFilterValue(urlState.get(UI_QUERY_TAB_PARAM));
+			}
+			if (
+				urlTab === 'stats' ||
+				urlTab === 'edit' ||
+				urlTab === 'query-log' ||
+				(urlTab && urlTab.indexOf('plugin:') === 0)
+			) {
+				initialTab = urlTab;
+			}
 			try {
-				if (window.localStorage) {
+				if (window.localStorage && !urlTab) {
 					var storedTab = localStorage.getItem('foghorn-last-tab');
-					if (storedTab === 'stats' || storedTab === 'edit' || (storedTab && storedTab.indexOf('plugin:') === 0)) {
+					if (
+						storedTab === 'stats' ||
+						storedTab === 'edit' ||
+						storedTab === 'query-log' ||
+						(storedTab && storedTab.indexOf('plugin:') === 0)
+					) {
 						initialTab = storedTab;
 					}
 				}
