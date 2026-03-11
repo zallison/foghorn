@@ -65,6 +65,9 @@ class DNSRuntimeState:
 
     # Lazy health state for upstreams keyed by a stable upstream identifier.
     upstream_health: Dict[str, Dict[str, float]] = {}
+    # Adaptive probe percentage used when deciding whether to include upstreams
+    # currently in backoff/down state for health probing traffic.
+    upstream_probe_percent: float | None = None
 
     @staticmethod
     def _upstream_id(up: Dict) -> str:
