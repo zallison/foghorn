@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from foghorn.plugins.resolve.zone_records import update_helpers as uh
+from foghorn.plugins.resolve.zone_records import UpdateZoneApexConfig
 
 
 def test_load_list_helpers_strip_comments_and_normalize(tmp_path) -> None:
@@ -104,6 +105,20 @@ def test_matches_name_pattern_normalizes_case_and_trailing_dot() -> None:
     assert uh.matches_name_pattern("WWW.Example.COM.", ["www.example.com"]) is True
     assert uh.matches_name_pattern("a.example.com", ["*.example.com"]) is True
     assert uh.matches_name_pattern("a.example.com", ["b.example.com"]) is False
+
+
+def test_update_zone_apex_config_normalize_removes_leading_dots() -> None:
+    """Verify that zone names with leading dots are normalized correctly."""
+    # Test that leading dots are stripped
+    cfg1 = UpdateZoneApexConfig(zone=".zaa")
+    assert cfg1.zone == "zaa"
+
+    cfg2 = UpdateZoneApexConfig(zone=".example.com")
+    assert cfg2.zone == "example.com"
+
+    # Test that normal zone names work as expected
+    cfg3 = UpdateZoneApexConfig(zone="example.com")
+    assert cfg3.zone == "example.com"
 
 
 def test_collect_update_file_paths_skips_non_zone_dicts_and_dedups(tmp_path) -> None:
