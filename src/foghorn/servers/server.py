@@ -579,6 +579,7 @@ def _resolve_core(
                             # stats.totals exposes pre_override_<name>. Prefer
                             # the originating plugin instance label when
                             # available, falling back to alias/class naming.
+                            override_source = "pre_plugin_override"
                             try:
                                 label_suffix = getattr(decision, "plugin_label", None)
                                 if not label_suffix:
@@ -609,6 +610,7 @@ def _resolve_core(
                                 short = str(label_suffix).strip()
                                 if short:
                                     label = f"pre_override_{short}"
+                                    override_source = short
                                 else:  # pragma: no cover - defensive/metrics path excluded from coverage
                                     label = "pre_override_plugin"
                                 stats.record_cache_pre_plugin(label)
@@ -629,9 +631,11 @@ def _resolve_core(
                             ]
                             first = answers[0]["rdata"] if answers else None
                             result_ctx = {
-                                "source": "pre_plugin_override",
+                                "source": override_source,
                                 "answers": answers,
                             }
+                            if override_source != "pre_plugin_override":
+                                result_ctx["plugin"] = override_source
                             if listener is not None:
                                 result_ctx["listener"] = listener
                             if secure is not None:
