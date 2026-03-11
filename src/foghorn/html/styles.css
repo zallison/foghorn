@@ -422,6 +422,160 @@ table {
     background: var(--bg-card-inner);
     color: #e5e7eb;
 }
+.fh-query-log-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin: 0.5rem 0 0.75rem 0;
+}
+
+.fh-query-log-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 0.5rem 0.75rem;
+}
+
+.fh-query-log-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    font-size: 0.78rem;
+    color: var(--fg-muted);
+}
+
+.fh-query-log-input {
+    padding: 0.25rem 0.45rem;
+    border-radius: 0.375rem;
+    border: 1px solid var(--accent-soft);
+    background: transparent;
+    color: var(--fg-text);
+    font-size: 0.82rem;
+}
+
+:root[data-theme='light'] .fh-query-log-input {
+    background: #e5e7eb;
+    color: #111827;
+    border-color: #9ca3af;
+}
+
+.fh-query-log-actions {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.fh-query-log-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-bottom: 0.5rem;
+}
+
+.fh-query-log-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border-radius: 999px;
+    border: 1px solid var(--accent-soft);
+    background: var(--bg-card-inner);
+    padding: 0.15rem 0.55rem;
+    font-size: 0.75rem;
+    color: var(--fg-muted);
+}
+
+.fh-query-log-chip button {
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    padding: 0;
+    font-size: 0.75rem;
+}
+
+.fh-query-log-table-wrap {
+    overflow-x: auto;
+}
+
+.fh-query-log-pager {
+    margin-top: 0.65rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.fh-query-log-page-size {
+    min-width: 120px;
+}
+
+.fh-query-log-entry-link {
+    cursor: pointer;
+    color: var(--accent);
+    text-decoration: underline;
+}
+
+.fh-query-log-entry-link:hover {
+    opacity: 0.9;
+}
+.fh-query-log-timestamp {
+    white-space: nowrap;
+    line-height: 1.2;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+    font-variant-numeric: tabular-nums;
+}
+
+.fh-query-log-source {
+    cursor: help;
+}
+
+.fh-query-log-severity {
+    font-weight: 600;
+}
+
+.fh-query-log-severity-good {
+    color: var(--fg-muted);
+    font-weight: 500;
+}
+
+.fh-query-log-severity-warn {
+    color: #f59e0b;
+}
+.fh-query-log-severity-info {
+    color: #6495ed;
+}
+
+.fh-query-log-severity-error {
+    color: #f87171;
+}
+
+.fh-query-log-severity-anomaly {
+    color: #fb923c;
+}
+.fh-query-log-override-allowed {
+    color: #86efac;
+}
+
+:root[data-theme='light'] .fh-query-log-severity-good {
+    color: #4b5563;
+}
+
+:root[data-theme='light'] .fh-query-log-severity-warn {
+    color: #92400e;
+}
+:root[data-theme='light'] .fh-query-log-severity-info {
+    color: #4169e1;
+}
+
+:root[data-theme='light'] .fh-query-log-severity-error {
+    color: #b91c1c;
+}
+
+:root[data-theme='light'] .fh-query-log-severity-anomaly {
+    color: #9a3412;
+}
+:root[data-theme='light'] .fh-query-log-override-allowed {
+    color: #15803d;
+}
 
 /* Upstreams tables: match System section fonts and split integer/decimal columns */
 .fh-table-upstreams td:first-child {
