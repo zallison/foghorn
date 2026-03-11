@@ -238,20 +238,22 @@ def test_validate_tls_ca_file_reports_invalid_format(tmp_path, monkeypatch) -> N
         )
 
 
-def test_normalize_upstream_config_invalid_foghorn_and_timeout_fallback() -> None:
-    """Brief: normalize_upstream_config validates foghorn section and timeout.
+def test_normalize_upstream_config_invalid_layout_and_timeout_fallback() -> None:
+    """Brief: normalize_upstream_config validates layout and timeout fallback.
 
     Inputs:
       - None.
 
     Outputs:
-      - None; asserts foghorn must be mapping and timeout_ms fallback on error.
+      - None; asserts v2 layout validation and timeout_ms fallback on error.
     """
 
-    # foghorn present but not a mapping.
-    cfg_bad_foghorn = {"upstreams": [{"host": "1.1.1.1"}], "foghorn": [1, 2]}
-    with pytest.raises(ValueError, match="config.foghorn must be a mapping"):
-        cp.normalize_upstream_config(cfg_bad_foghorn)
+    # Upstreams must use the v2 mapping layout with an endpoints list.
+    cfg_bad_upstreams = {"upstreams": [{"host": "1.1.1.1"}]}
+    with pytest.raises(
+        ValueError, match="config.upstreams must be a mapping with an 'endpoints' list"
+    ):
+        cp.normalize_upstream_config(cfg_bad_upstreams)
 
     # Invalid timeout_ms that cannot be converted to int falls back to default.
     class Bad:
@@ -261,8 +263,8 @@ def test_normalize_upstream_config_invalid_foghorn_and_timeout_fallback() -> Non
             raise TypeError("no int")
 
     cfg_timeout = {
-        "upstreams": [{"host": "1.1.1.1"}],
-        "foghorn": {"timeout_ms": Bad()},
+        "upstreams": {"endpoints": [{"host": "1.1.1.1"}]},
+        "server": {"resolver": {"timeout_ms": Bad()}},
     }
     upstreams, timeout_ms = cp.normalize_upstream_config(cfg_timeout)
     assert upstreams and timeout_ms == 2000
@@ -432,7 +434,7 @@ def test_load_plugins_rejects_uppercase_comment_keys(monkeypatch) -> None:
     with pytest.raises(ValueError, match="use 'comment' \(lowercase\)"):
         cp.load_plugins(
             [
-                {"module": "dummy", "Comment": "oops"},
+                {"type": "dummy", "Comment": "oops"},
             ]
         )
 
@@ -440,7 +442,7 @@ def test_load_plugins_rejects_uppercase_comment_keys(monkeypatch) -> None:
     with pytest.raises(ValueError, match="plugins\[\]\.config: use 'comment'"):
         cp.load_plugins(
             [
-                {"module": "dummy", "config": {"Comment": "oops"}},
+                {"type": "dummy", "config": {"Comment": "oops"}},
             ]
         )
 
@@ -471,16 +473,15 @@ def test_load_plugins_enabled_and_priority_propagation_and_cache_error(
 
     # First spec: disabled via config.enabled -> skipped.
     disabled_spec = {
-        "module": "dummy",
+        "type": "dummy",
         "config": {"enabled": False},
     }
 
     # Second spec: enabled with generic priority and cache config that errors.
     bad_cache_spec = {
-        "module": "dummy",
-        "priority": 5,
+        "type": "dummy",
+        "hooks": {"priority": 5},
         "config": {
-            "priority": 7,
             "cache": {"module": "sqlite3", "config": {}},
         },
     }
@@ -499,8 +500,8 @@ def test_load_plugins_enabled_and_priority_propagation_and_cache_error(
 
     specs = [
         {
-            "module": "dummy",
-            "priority": 9,
+            "type": "dummy",
+            "hooks": {"priority": 9},
             "config": {
                 "cache": {"module": "none"},
             },
@@ -527,8 +528,8 @@ def test_load_plugins_hooks_priority_shorthands_and_precedence(monkeypatch) -> N
 
     Outputs:
       - None; asserts hooks.pre_resolve/hooks.post_resolve accept int or
-        {priority: int}, hooks.priority sets all three, and hooks take
-        precedence over deprecated *_priority/priority fields.
+        {priority: int}, hooks.priority sets all three, and deprecated
+        *_priority/priority fields are rejected.
     """
 
     monkeypatch.setattr(cp, "discover_plugins", lambda: {})
@@ -539,7 +540,7 @@ def test_load_plugins_hooks_priority_shorthands_and_precedence(monkeypatch) -> N
     plugins = cp.load_plugins(
         [
             {
-                "module": "dummy",
+                "type": "dummy",
                 "hooks": {"pre_resolve": 11, "post_resolve": {"priority": 22}},
             }
         ]
@@ -556,7 +557,7 @@ def test_load_plugins_hooks_priority_shorthands_and_precedence(monkeypatch) -> N
     plugins2 = cp.load_plugins(
         [
             {
-                "module": "dummy",
+                "type": "dummy",
                 "hooks": {"priority": 7},
             }
         ]
@@ -572,7 +573,7 @@ def test_load_plugins_hooks_priority_shorthands_and_precedence(monkeypatch) -> N
     plugins2b = cp.load_plugins(
         [
             {
-                "module": "dummy",
+                "type": "dummy",
                 "hooks": {"priority": 7, "setup": 9},
             }
         ]
@@ -588,7 +589,7 @@ def test_load_plugins_hooks_priority_shorthands_and_precedence(monkeypatch) -> N
     plugins2c = cp.load_plugins(
         [
             {
-                "module": "dummy",
+                "type": "dummy",
                 "hooks": {"setup": {"priority": 12}},
             }
         ]
@@ -602,7 +603,7 @@ def test_load_plugins_hooks_priority_shorthands_and_precedence(monkeypatch) -> N
     plugins3 = cp.load_plugins(
         [
             {
-                "module": "dummy",
+                "type": "dummy",
                 "hooks": {"priority": 3, "pre_resolve": 9},
             }
         ]
@@ -613,23 +614,32 @@ def test_load_plugins_hooks_priority_shorthands_and_precedence(monkeypatch) -> N
     assert init_cfg3.get("post_priority") == 3
     assert init_cfg3.get("setup_priority") == 3
 
-    # Hooks take precedence over deprecated *_priority and priority.
-    DummyPlugin.last_init = None
-    plugins4 = cp.load_plugins(
-        [
-            {
-                "module": "dummy",
-                "hooks": {"priority": 1},
-                "pre_priority": 99,
-                "post_priority": 98,
-                "setup_priority": 97,
-                "priority": 96,
-                "config": {"pre_priority": 95, "priority": 94},
-            }
-        ]
-    )
-    assert len(plugins4) == 1
-    init_cfg4 = DummyPlugin.last_init or {}
-    assert init_cfg4.get("pre_priority") == 1
-    assert init_cfg4.get("post_priority") == 1
-    assert init_cfg4.get("setup_priority") == 1
+    # Deprecated spec-level priorities are rejected.
+    with pytest.raises(
+        ValueError,
+        match="plugins\\[\\]: 'priority' is no longer supported; use hooks\\.\\* priorities",
+    ):
+        cp.load_plugins(
+            [
+                {
+                    "type": "dummy",
+                    "hooks": {"priority": 1},
+                    "priority": 96,
+                }
+            ]
+        )
+
+    # Deprecated config-level priorities are also rejected.
+    with pytest.raises(
+        ValueError,
+        match="plugins\\[\\]\\.config: 'priority' is no longer supported; use hooks\\.\\* priorities",
+    ):
+        cp.load_plugins(
+            [
+                {
+                    "type": "dummy",
+                    "hooks": {"priority": 1},
+                    "config": {"priority": 94},
+                }
+            ]
+        )
