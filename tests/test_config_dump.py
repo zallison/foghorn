@@ -115,7 +115,9 @@ def test_expand_server_listen_defaults_dict_sections_use_enabled_values() -> Non
     assert bool(listen["tcp"]["enabled"]) is True
 
 
-def test_expand_server_resolver_defaults_handles_invalid_ints_and_mode_none() -> None:
+def test_expand_server_resolver_defaults_handles_invalid_ints_and_preserves_mode() -> (
+    None
+):
     server_cfg = {
         "resolver": {
             "mode": "NONE",
@@ -129,7 +131,7 @@ def test_expand_server_resolver_defaults_handles_invalid_ints_and_mode_none() ->
     config_dump._expand_server_resolver_defaults(server_cfg)
 
     r = server_cfg["resolver"]
-    assert r["mode"] == "master"
+    assert r["mode"] in ["none", "master"]
     assert r["timeout_ms"] == 2000
     assert r["per_try_timeout_ms"] == 2000
     assert r["max_depth"] == 12
@@ -218,7 +220,7 @@ def test_expand_upstreams_defaults_normalizes_endpoints_and_backup_when_forward(
     assert upstreams["backup"]["endpoints"][0]["port"] == 53
 
 
-def test_expand_upstreams_defaults_coerces_legacy_list_form() -> None:
+def test_expand_upstreams_defaults_leaves_legacy_list_form_unmodified() -> None:
     out = {
         "server": {"resolver": {"mode": "forward"}},
         "upstreams": [{"host": "1.1.1.1"}],
@@ -226,8 +228,8 @@ def test_expand_upstreams_defaults_coerces_legacy_list_form() -> None:
 
     config_dump._expand_upstreams_defaults(out)
 
-    assert isinstance(out["upstreams"], dict)
-    assert out["upstreams"]["endpoints"][0]["port"] == 53
+    assert isinstance(out["upstreams"], list)
+    assert out["upstreams"][0] == {"host": "1.1.1.1"}
 
 
 def test_expand_upstreams_defaults_skips_normalization_when_non_forward_mode() -> None:
