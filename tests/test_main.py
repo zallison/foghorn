@@ -20,10 +20,10 @@ from foghorn.main import main
 
 def test_normalize_upstream_config_list_only_and_timeout_default():
     """
-    Brief: normalize_upstream_config accepts list-only upstreams and top-level timeout.
+    Brief: normalize_upstream_config accepts v2 upstream layout and resolver timeout.
 
     Inputs:
-      - cfg: with list upstreams and optional top-level timeout.
+      - cfg: with upstreams.endpoints and optional server.resolver timeout_ms.
 
     Outputs:
       - None: Asserts upstreams parsed and timeout default/override behavior.
@@ -31,11 +31,13 @@ def test_normalize_upstream_config_list_only_and_timeout_default():
     # List form with explicit timeout
     ups, to = normalize_upstream_config(
         {
-            "upstreams": [
-                {"host": "1.1.1.1", "port": 53},
-                {"host": "1.0.0.1", "port": 53},
-            ],
-            "foghorn": {"timeout_ms": 1500},
+            "upstreams": {
+                "endpoints": [
+                    {"host": "1.1.1.1", "port": 53},
+                    {"host": "1.0.0.1", "port": 53},
+                ]
+            },
+            "server": {"resolver": {"timeout_ms": 1500}},
         }
     )
     assert ups == [{"host": "1.1.1.1", "port": 53}, {"host": "1.0.0.1", "port": 53}]
@@ -44,9 +46,11 @@ def test_normalize_upstream_config_list_only_and_timeout_default():
     # Default timeout when not provided
     ups2, to2 = normalize_upstream_config(
         {
-            "upstreams": [
-                {"host": "8.8.8.8", "port": 53},
-            ]
+            "upstreams": {
+                "endpoints": [
+                    {"host": "8.8.8.8", "port": 53},
+                ]
+            }
         }
     )
     assert ups2 == [{"host": "8.8.8.8", "port": 53}]
@@ -107,7 +111,7 @@ def test_load_plugins_uses_registry(monkeypatch):
     plugins = load_plugins(
         [
             "a",
-            {"module": "pkg.P2", "config": {"x": 1, "cache": {"module": "none"}}},
+            {"type": "pkg.P2", "config": {"x": 1, "cache": {"module": "none"}}},
         ]
     )
     assert type(plugins[0]).__name__ == "P1"

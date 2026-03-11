@@ -88,21 +88,23 @@ def test_normalize_upstream_config_missing_host_and_optional_fields():
 
     # Missing host should raise and cover the validation branch.
     with pytest.raises(ValueError):
-        normalize_upstream_config({"upstreams": [{}]})
+        normalize_upstream_config({"upstreams": {"endpoints": [{}]}})
 
     # Optional fields transport/tls/pool should be preserved and timeout_ms is
-    # read from the foghorn header section with a default when omitted.
+    # read from server.resolver with a default when omitted.
     cfg: Dict[str, Any] = {
-        "upstreams": [
-            {
-                "host": "1.2.3.4",
-                "port": 853,
-                "transport": "dot",
-                "tls": {"verify": True},
-                "pool": {"size": 4},
-            }
-        ],
-        "foghorn": {"timeout_ms": 2000},
+        "upstreams": {
+            "endpoints": [
+                {
+                    "host": "1.2.3.4",
+                    "port": 853,
+                    "transport": "dot",
+                    "tls": {"verify": True},
+                    "pool": {"size": 4},
+                }
+            ]
+        },
+        "server": {"resolver": {"timeout_ms": 2000}},
     }
     ups, timeout_ms = normalize_upstream_config(cfg)
     assert timeout_ms == 2000
@@ -1064,6 +1066,79 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
     )
 
 
+def test_dot_startup_exception_logs_unhandled_listener_error(monkeypatch, caplog):
+    """Brief: DoT listener logs unhandled startup exceptions from asyncio runner.
+
+    Inputs:
+      - monkeypatch/caplog fixtures; listen.dot.enabled is true, serve_dot raises
+        RuntimeError, and threading.Thread runs runner synchronously.
+
+    Outputs:
+      - None: asserts the generic asyncio listener exception log is emitted for DoT.
+    """
+
+    yaml_data = (
+        "server:\n"
+        "  listen:\n"
+        "    dns:\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "    udp:\n"
+        "      enabled: false\n"
+        "    dot:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 8853\n"
+        "      cert_file: cert.pem\n"
+        "      key_file: key.pem\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+    )
+
+    async def boom_serve_dot(*a: Any, **kw: Any) -> None:  # noqa: ARG001
+        raise RuntimeError("dot boom")
+
+    class DummyThread:
+        def __init__(self, target=None, name=None, daemon=None) -> None:
+            self._target = target
+            self.name = name
+            self.daemon = daemon
+
+        def start(self) -> None:
+            if self._target is not None:
+                self._target()
+
+    import sys as _sys
+    import threading as _threading
+
+    fake_threading = _FakeThreadingModule(_threading, DummyThread)
+
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(
+        main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
+    )
+    monkeypatch.setattr("foghorn.servers.dot_server.serve_dot", boom_serve_dot)
+    monkeypatch.setitem(_sys.modules, "threading", fake_threading)
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        with caplog.at_level(logging.ERROR, logger="foghorn.main"):
+            rc = main_mod.main(["--config", "cfg.yaml"])
+
+    assert rc == 0
+    assert any(
+        "Asyncio listener foghorn-dot failed to start or exited with an unhandled exception"
+        in r.message
+        for r in caplog.records
+    )
+
+
 def test_dot_start_logs_info(monkeypatch, caplog):
     """Brief: main() logs informational message when starting DoT listener.
 
@@ -1135,6 +1210,10 @@ def test_dot_start_logs_info(monkeypatch, caplog):
 
     assert rc == 0
     assert any("Starting DoT listener on" in r.message for r in caplog.records)
+    assert any(
+        "DoT TLS files: cert_file=cert.pem key_file=key.pem" in r.message
+        for r in caplog.records
+    )
 
 
 def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
