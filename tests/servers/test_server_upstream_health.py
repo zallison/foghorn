@@ -258,6 +258,37 @@ def test_describe_upstream_health_state_transitions(
     assert record["down_until"] == expected_down_until
 
 
+def test_describe_upstream_includes_last_error_fields() -> None:
+    """Brief: describe_upstream() exposes last error metadata from health entry.
+
+    Inputs:
+      - Health entry containing last_error and last_error_ts values.
+
+    Outputs:
+      - Payload includes last_error and last_error_ts with expected values.
+    """
+
+    upstream = {"host": "9.9.9.9", "port": 53}
+    up_id = _UPSTREAM_HEALTH.upstream_id(upstream)
+    DNSRuntimeState.upstream_health[up_id] = {
+        "fail_count": 1.0,
+        "down_until": 1010.0,
+        "last_error": "upstream timeout",
+        "last_error_ts": 1005.5,
+    }
+
+    record = _UPSTREAM_HEALTH.describe_upstream(
+        role="primary",
+        upstream=upstream,
+        now=1000.0,
+        cfg=None,
+    )
+    assert record is not None
+    assert record["state"] == "down"
+    assert record["last_error"] == "upstream timeout"
+    assert record["last_error_ts"] == 1005.5
+
+
 def test_describe_upstream_handles_non_dict_or_corrupt_health_entry() -> None:
     """Brief: describe_upstream() ignores malformed health values defensively.
 

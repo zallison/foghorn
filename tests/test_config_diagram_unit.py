@@ -542,6 +542,36 @@ def test_extract_upstream_lines_forward_only_and_endpoint_formats() -> None:
     assert cm.extract_upstream_lines(cfg, resolver_mode="recursive") == []
 
 
+def test_extract_upstream_lines_includes_backup_endpoints() -> None:
+    """Brief: extract_upstream_lines includes backup upstream endpoints.
+
+    Inputs:
+      - forward mode config with primary and backup endpoints.
+
+    Outputs:
+      - None; asserts backup endpoints are rendered with a backup suffix.
+    """
+
+    cfg = {
+        "upstreams": {
+            "strategy": "failover",
+            "max_concurrent": 1,
+            "endpoints": [{"transport": "udp", "host": "1.1.1.1", "port": 53}],
+            "backup": {
+                "endpoints": [
+                    {"transport": "tcp", "host": "8.8.8.8", "port": 53},
+                    {"transport": "doh", "url": "https://backup.example/dns-query"},
+                ]
+            },
+        }
+    }
+
+    lines = cm.extract_upstream_lines(cfg, resolver_mode="forward")
+    assert "udp: 1.1.1.1:53" in lines
+    assert "tcp: 8.8.8.8:53 (backup)" in lines
+    assert "doh: https://backup.example/dns-query (backup)" in lines
+
+
 def test_render_dot_includes_expected_branches() -> None:
     """Brief: render_dot includes merge/drop/pre/post branches.
 
@@ -606,6 +636,8 @@ def test_render_dot_includes_expected_branches() -> None:
     assert "cluster_pre" in out
     assert "cluster_post" in out
     assert "routes upstream" in out
+    assert "priority=10" in out
+    assert "pre=10" not in out
 
     # Listener and upstream details should show up as separate nodes.
     assert "Listener_udp" in out
