@@ -419,11 +419,6 @@ def _expand_upstreams_defaults(out: Dict[str, Any]) -> None:
         upstream_cfg = {}
         out["upstreams"] = upstream_cfg
 
-    # Coerce legacy list form to v2 mapping shape for display.
-    if isinstance(upstream_cfg, list):
-        upstream_cfg = {"endpoints": list(upstream_cfg)}
-        out["upstreams"] = upstream_cfg
-
     if not isinstance(upstream_cfg, dict):
         return
 

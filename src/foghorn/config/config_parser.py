@@ -49,7 +49,6 @@ def _is_var_key(key: str) -> bool:
     import re as _re
 
     return bool(_re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key))
-    return bool(_re.fullmatch(r"[A-Z_][A-Z0-9_]*", key))
 
 
 def _parse_yaml_value(text: str) -> Any:
@@ -431,8 +430,7 @@ def normalize_upstream_config(
     """Brief: Normalize upstream configuration to endpoints + timeout.
 
     Inputs:
-      - cfg: dict containing parsed YAML. Supports both:
-        - v2 layout (preferred):
+      - cfg: dict containing parsed YAML with v2 layout:
 
             upstreams:
               strategy: failover|round_robin|random
@@ -442,12 +440,6 @@ def normalize_upstream_config(
             server:
               resolver:
                 timeout_ms: int
-
-        - legacy layout (still accepted for direct helper usage/tests):
-
-            upstreams: [...]
-            foghorn:
-              timeout_ms: int
 
     Outputs:
       - (upstreams, timeout_ms):
@@ -460,47 +452,27 @@ def normalize_upstream_config(
     """
 
     upstream_block = cfg.get("upstreams")
+    if not isinstance(upstream_block, dict):
+        raise ValueError("config.upstreams must be a mapping with an 'endpoints' list")
 
-    # Accept either the v2 object-with-endpoints or the legacy list form so that
-    # callers outside main() (for example unit tests) can continue to exercise
-    # the helper without constructing a full v2 root.
-    if isinstance(upstream_block, dict) and "endpoints" in upstream_block:
-        upstream_raw = upstream_block.get("endpoints")
-    else:
-        upstream_raw = upstream_block
-
+    upstream_raw = upstream_block.get("endpoints")
     if not isinstance(upstream_raw, list):
-        raise ValueError(
-            "config.upstreams must be a list or an object with an 'endpoints' list",
-        )
+        raise ValueError("config.upstreams.endpoints must be a list")
 
     upstreams = _normalize_upstream_endpoints_list(upstream_raw)
 
-    # Timeout source: prefer v2 server.resolver.timeout_ms when present, falling
-    # back to legacy foghorn.timeout_ms for older callers/tests.
     timeout_ms = 2000
+    server_cfg = cfg.get("server") or {}
+    if not isinstance(server_cfg, dict):
+        raise ValueError("config.server must be a mapping when present")
 
-    server_cfg = cfg.get("server")
-    if isinstance(server_cfg, dict):
-        resolver_cfg = server_cfg.get("resolver") or {}
-        if not isinstance(resolver_cfg, dict) and resolver_cfg is not None:
-            raise ValueError("config.server.resolver must be a mapping when present")
-        if isinstance(resolver_cfg, dict):
-            try:
-                timeout_ms = int(resolver_cfg.get("timeout_ms", timeout_ms))
-            except (TypeError, ValueError):
-                timeout_ms = 2000
-    # Legacy foghorn-based timeout support (used only when server.resolver is
-    # absent) to keep tests and direct helper calls working.
-    else:
-        foghorn_cfg = cfg.get("foghorn") or {}
-        if not isinstance(foghorn_cfg, dict) and foghorn_cfg is not None:
-            raise ValueError("config.foghorn must be a mapping when present")
-        if isinstance(foghorn_cfg, dict):
-            try:
-                timeout_ms = int(foghorn_cfg.get("timeout_ms", timeout_ms))
-            except (TypeError, ValueError):
-                timeout_ms = 2000
+    resolver_cfg = server_cfg.get("resolver") or {}
+    if not isinstance(resolver_cfg, dict):
+        raise ValueError("config.server.resolver must be a mapping when present")
+    try:
+        timeout_ms = int(resolver_cfg.get("timeout_ms", timeout_ms))
+    except (TypeError, ValueError):
+        timeout_ms = 2000
 
     return upstreams, timeout_ms
 
@@ -721,31 +693,20 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
     Inputs:
       - plugin_specs: List of plugin specs. Each item is either:
         - str: a dotted module path or short alias, or
-        - dict: plugin entry mapping supporting either legacy or v2 shapes:
-          Legacy keys (still accepted):
-            - module: dotted module path or alias
-            - name: optional friendly plugin label
-          v2 keys (preferred):
-            - type: plugin type/alias (maps to the same aliases used by
-              discover_plugins/get_plugin_class)
-            - id: optional stable identifier for this plugin instance; when
-              present and non-empty, it is treated as the effective plugin
-              instance name for logging/statistics.
-          Common keys (both layouts):
+        - dict: plugin entry mapping with v2 keys:
+            - type: plugin type/alias (maps to discover_plugins/get_plugin_class)
+            - id/name: optional identifier for the plugin instance
             - config: plugin-specific configuration mapping
             - enabled: bool (default True). When false, the plugin is skipped.
             - comment: optional human-only string (ignored)
-            - pre_priority/post_priority/setup_priority: BasePlugin hook priorities
-            - priority: shorthand that sets all three priority fields above
+            - hooks.pre_resolve / hooks.post_resolve / hooks.setup:
+              per-hook priorities as int or {priority: int}
+            - hooks.priority: shorthand setting all three hook priorities
 
     Outputs:
       - list[BasePlugin]: Initialized plugin instances.
 
     Notes:
-      - Priority keys are treated as BasePlugin options and are not passed into
-        per-plugin config model/schema validation.
-      - When both explicit priority keys and `priority` are present, explicit
-        keys win.
       - `Comment` is rejected; use `comment`.
       - Each plugin instance must have a unique name. When a config entry omits
         `name` and `id`, a name derived from the plugin's primary alias (or
@@ -762,10 +723,6 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         plugin_name: Optional[object]
         raw_config: Dict[str, Any]
 
-        spec_priority: object | None = None
-        spec_pre: object | None = None
-        spec_post: object | None = None
-        spec_setup: object | None = None
         spec_enabled: object | None = None
 
         # Hooks shorthands (preferred):
@@ -782,11 +739,12 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
             plugin_name = None
             raw_config = {}
         elif isinstance(spec, dict):
-            # Prefer the v2 "type" field (plugin alias) when present, but retain
-            # support for the legacy "module" key so existing configs continue
-            # to work. The effective identifier is passed to get_plugin_class(),
-            # which accepts either aliases or dotted import paths.
-            module_path = spec.get("module") or spec.get("type")
+            if "module" in spec:
+                raise ValueError(
+                    "plugins[]: 'module' is no longer supported; use 'type'"
+                )
+
+            module_path = spec.get("type")
             # Prefer explicit "name" when provided; otherwise fall back to the
             # v2 "id" field so operator-assigned instance IDs become the
             # human-visible plugin names.
@@ -815,11 +773,16 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
                 elif setup_obj is not None:
                     hooks_setup = setup_obj
 
-            # Deprecated (to be removed next major release): *_priority and priority
-            spec_priority = spec.get("priority")
-            spec_pre = spec.get("pre_priority")
-            spec_post = spec.get("post_priority")
-            spec_setup = spec.get("setup_priority")
+            for legacy_key in (
+                "priority",
+                "pre_priority",
+                "post_priority",
+                "setup_priority",
+            ):
+                if legacy_key in spec:
+                    raise ValueError(
+                        f"plugins[]: '{legacy_key}' is no longer supported; use hooks.* priorities"
+                    )
             spec_enabled = spec.get("enabled")
 
             if "Comment" in spec:
@@ -837,6 +800,16 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
             continue
 
         cfg_enabled = raw_config.get("enabled")
+        for legacy_key in (
+            "priority",
+            "pre_priority",
+            "post_priority",
+            "setup_priority",
+        ):
+            if legacy_key in raw_config:
+                raise ValueError(
+                    f"plugins[].config: '{legacy_key}' is no longer supported; use hooks.* priorities"
+                )
         if "Comment" in raw_config:
             raise ValueError(
                 "plugins[].config: use 'comment' (lowercase) rather than 'Comment'"
@@ -848,11 +821,6 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
             enabled_obj = True
         if not bool(enabled_obj):
             continue
-
-        cfg_priority = raw_config.get("priority")
-        cfg_pre = raw_config.get("pre_priority")
-        cfg_post = raw_config.get("post_priority")
-        cfg_setup = raw_config.get("setup_priority")
 
         # Hooks are encouraged as the default priority mechanism.
         pre_priority: object | None = None
@@ -870,24 +838,6 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
             post_priority = hooks_post
         if hooks_setup is not None:
             setup_priority = hooks_setup
-
-        # 2) Deprecated legacy keys (to be removed next major release):
-        #    *_priority (spec or config) and priority.
-        if pre_priority is None:
-            pre_priority = cfg_pre if cfg_pre is not None else spec_pre
-        if post_priority is None:
-            post_priority = cfg_post if cfg_post is not None else spec_post
-        if setup_priority is None:
-            setup_priority = cfg_setup if cfg_setup is not None else spec_setup
-
-        # 3) Deprecated generic priority fallback.
-        generic_priority = spec_priority if spec_priority is not None else cfg_priority
-        if pre_priority is None and generic_priority is not None:
-            pre_priority = generic_priority
-        if post_priority is None and generic_priority is not None:
-            post_priority = generic_priority
-        if setup_priority is None and generic_priority is not None:
-            setup_priority = generic_priority
 
         plugin_specific_config = dict(raw_config)
 
@@ -928,10 +878,6 @@ def load_plugins(plugin_specs: List[dict]) -> List[BasePlugin]:
         for k in (
             "enabled",
             "comment",
-            "priority",
-            "pre_priority",
-            "post_priority",
-            "setup_priority",
         ):
             plugin_specific_config.pop(k, None)
 
