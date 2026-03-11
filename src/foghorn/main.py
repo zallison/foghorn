@@ -913,7 +913,7 @@ def main(argv: List[str] | None = None) -> int:
             )
         else:
             logger.info("Starting DoT listener on %s:%d", dhost, dport)
-            logger.info(
+            logger.debug(
                 "DoT TLS files: cert_file=%s key_file=%s",
                 cert_file,
                 key_file,
