@@ -79,6 +79,145 @@ def test_select_query_log_normalizes_params_and_handles_empty(monkeypatch) -> No
     assert res2["page_size"] == 1
 
 
+def test_select_query_log_filters_status_and_source() -> None:
+    """Brief: select_query_log filters by status and result source.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts status/source filters match expected rows.
+    """
+
+    store = StatsSQLiteStore(":memory:")
+    store.insert_query_log(
+        ts=1.0,
+        client_ip="192.0.2.1",
+        name="cache-hit.example",
+        qtype="A",
+        upstream_id="up-cache",
+        rcode="NOERROR",
+        status="cache_hit",
+        error=None,
+        first="192.0.2.1",
+        result_json='{"source":"cache"}',
+    )
+    store.insert_query_log(
+        ts=2.0,
+        client_ip="192.0.2.2",
+        name="cache-miss.example",
+        qtype="A",
+        upstream_id="up-upstream",
+        rcode="NOERROR",
+        status="cache_miss",
+        error=None,
+        first="192.0.2.2",
+        result_json='{"source":"upstream"}',
+    )
+    store.insert_query_log(
+        ts=3.0,
+        client_ip="192.0.2.3",
+        name="server-error.example",
+        qtype="AAAA",
+        upstream_id="up-server",
+        rcode="SERVFAIL",
+        status="error",
+        error="boom",
+        first="192.0.2.3",
+        result_json='{"source": "server"}',
+    )
+
+    by_status = store.select_query_log(status=" CACHE_HIT ")
+    assert by_status["total"] == 1
+    assert by_status["items"][0]["qname"] == "cache-hit.example"
+
+    by_source_compact = store.select_query_log(source=" UpStReAm ")
+    assert by_source_compact["total"] == 1
+    assert by_source_compact["items"][0]["qname"] == "cache-miss.example"
+
+    by_source_spaced = store.select_query_log(source="server")
+    assert by_source_spaced["total"] == 1
+    assert by_source_spaced["items"][0]["qname"] == "server-error.example"
+
+    combined = store.select_query_log(status="cache_miss", source="upstream")
+    assert combined["total"] == 1
+    assert combined["items"][0]["qname"] == "cache-miss.example"
+
+    no_match = store.select_query_log(status="cache_hit", source="upstream")
+    assert no_match["total"] == 0
+    assert no_match["items"] == []
+
+
+def test_select_query_log_qname_matches_subdomains() -> None:
+    """Brief: qname filtering includes exact domain rows and subdomains.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts qname=example.com returns both example.com and *.example.com.
+    """
+
+    store = StatsSQLiteStore(":memory:")
+    store.insert_query_log(
+        ts=1.0,
+        client_ip="198.51.100.1",
+        name="example.com",
+        qtype="A",
+        upstream_id="up-1",
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first="198.51.100.10",
+        result_json='{"source":"upstream"}',
+    )
+    store.insert_query_log(
+        ts=2.0,
+        client_ip="198.51.100.2",
+        name="www.example.com",
+        qtype="A",
+        upstream_id="up-2",
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first="198.51.100.11",
+        result_json='{"source":"upstream"}',
+    )
+    store.insert_query_log(
+        ts=3.0,
+        client_ip="198.51.100.3",
+        name="api.dev.example.com",
+        qtype="A",
+        upstream_id="up-3",
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first="198.51.100.12",
+        result_json='{"source":"upstream"}',
+    )
+    store.insert_query_log(
+        ts=4.0,
+        client_ip="198.51.100.4",
+        name="other.com",
+        qtype="A",
+        upstream_id="up-4",
+        rcode="NOERROR",
+        status="ok",
+        error=None,
+        first="198.51.100.13",
+        result_json='{"source":"upstream"}',
+    )
+
+    by_root = store.select_query_log(qname="Example.COM.")
+    matched = {row["qname"] for row in by_root["items"]}
+    assert by_root["total"] == 3
+    assert matched == {"example.com", "www.example.com", "api.dev.example.com"}
+
+    by_other = store.select_query_log(qname="other.com")
+    assert by_other["total"] == 1
+    assert by_other["items"][0]["qname"] == "other.com"
+
+
 def test_aggregate_query_log_counts_bad_inputs_and_dense_buckets() -> None:
     """Brief: aggregate_query_log_counts normalizes inputs and fills dense buckets.
 
@@ -287,6 +426,75 @@ def test_sqlite_backend_insert_and_select_query_log_json_decoding() -> None:
     res2 = backend.select_query_log(page=-5, page_size=0)
     assert res2["page"] == 1
     assert res2["page_size"] == 1
+
+
+def test_sqlite_backend_select_query_log_filters_status_and_source() -> None:
+    """Brief: SqliteStatsStore supports status and source query-log filters.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts status/source filters match expected rows.
+    """
+
+    backend = SqliteStatsStore(":memory:")
+    backend._insert_query_log(
+        ts=1.0,
+        client_ip="192.0.2.1",
+        name="cache-hit.example",
+        qtype="A",
+        upstream_id="up-cache",
+        rcode="NOERROR",
+        status="cache_hit",
+        error=None,
+        first="192.0.2.1",
+        result_json='{"source":"cache"}',
+    )
+    backend._insert_query_log(
+        ts=2.0,
+        client_ip="192.0.2.2",
+        name="cache-miss.example",
+        qtype="A",
+        upstream_id="up-upstream",
+        rcode="NOERROR",
+        status="cache_miss",
+        error=None,
+        first="192.0.2.2",
+        result_json='{"source":"upstream"}',
+    )
+    backend._insert_query_log(
+        ts=3.0,
+        client_ip="192.0.2.3",
+        name="server-error.example",
+        qtype="AAAA",
+        upstream_id="up-server",
+        rcode="SERVFAIL",
+        status="error",
+        error="boom",
+        first="192.0.2.3",
+        result_json='{"source": "server"}',
+    )
+
+    by_status = backend.select_query_log(status=" CACHE_HIT ")
+    assert by_status["total"] == 1
+    assert by_status["items"][0]["qname"] == "cache-hit.example"
+
+    by_source_compact = backend.select_query_log(source=" UpStReAm ")
+    assert by_source_compact["total"] == 1
+    assert by_source_compact["items"][0]["qname"] == "cache-miss.example"
+
+    by_source_spaced = backend.select_query_log(source="server")
+    assert by_source_spaced["total"] == 1
+    assert by_source_spaced["items"][0]["qname"] == "server-error.example"
+
+    combined = backend.select_query_log(status="cache_miss", source="upstream")
+    assert combined["total"] == 1
+    assert combined["items"][0]["qname"] == "cache-miss.example"
+
+    no_match = backend.select_query_log(status="cache_hit", source="upstream")
+    assert no_match["total"] == 0
+    assert no_match["items"] == []
 
 
 def test_sqlite_backend_aggregate_counts_bad_inputs_and_dense() -> None:
