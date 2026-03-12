@@ -29,7 +29,7 @@ from .config.config_parser import (
 from .config.logging_config import init_logging
 from .plugins.querylog import BaseStatsStore, load_stats_store_backend
 from .plugins.resolve.base import BasePlugin
-from .plugins.setup import run_setup_plugins
+from .plugins.setup import run_setup_plugins, run_shutdown_plugins
 from .main_config_helpers import (
     _apply_cache_overrides_from_config,
     _build_listener_configs,
@@ -1146,6 +1146,11 @@ def main(argv: List[str] | None = None) -> int:
         if web_handle is not None:
             logger.info("Stopping webserver")
             web_handle.stop()
+
+        # Best-effort lifecycle teardown for loaded resolver plugins, optional
+        # query-log backend, and cache plugin. Errors are logged inside the
+        # helper and must not abort process shutdown.
+        run_shutdown_plugins([cache_plugin, stats_persistence_store, *plugins])
 
         # Clear in-process runtime snapshot state. This is mostly relevant for
         # unit tests that call main() multiple times in one Python process.

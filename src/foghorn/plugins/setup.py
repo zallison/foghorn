@@ -1,15 +1,17 @@
-"""Plugin lifecycle helpers used during startup and reload.
+"""Plugin lifecycle helpers used during startup, reload, and shutdown.
 
 Brief:
-  Foghorn supports optional plugin setup hooks. Plugins that override
-  ``BasePlugin.setup`` are treated as "setup-aware" and are executed in
-  ascending ``setup_priority`` order.
+  Foghorn supports optional plugin lifecycle hooks.
+  - ``setup``: Plugins that override ``BasePlugin.setup`` are treated as
+    setup-aware and executed in ascending ``setup_priority`` order.
+  - ``shutdown``: Objects with a callable ``shutdown()`` method can be
+    invoked best-effort during process teardown.
 
 Inputs:
-  - list[BasePlugin]: plugin instances
+  - list[object]: lifecycle objects (resolver plugins, cache plugins, stats backends)
 
 Outputs:
-  - None (may raise RuntimeError for aborting setup failures)
+  - None
 
 Notes:
   - This module exists so startup logic and config reload logic can share the
@@ -102,3 +104,43 @@ def run_setup_plugins(plugins: List[BasePlugin]) -> None:
                 "Continuing startup despite setup failure in plugin %s because abort_on_failure is False",
                 name,
             )
+
+
+def run_shutdown_plugins(plugins: List[object]) -> None:
+    """Brief: Run shutdown() on lifecycle objects that expose a callable hook.
+
+    Inputs:
+      - plugins: List of objects. Any item with a callable shutdown() is invoked
+        once in input order. Duplicate object references are ignored.
+
+    Outputs:
+      - None. Errors are logged and processing continues (best effort).
+
+    Notes:
+      - This helper is intentionally generic so it can be used for resolver
+        plugins, cache plugins, and query-log/statistics backends.
+      - shutdown() failures must never abort process teardown.
+    """
+
+    logger = logging.getLogger("foghorn.main.shutdown")
+    seen: set[int] = set()
+
+    for plugin in plugins or []:
+        if plugin is None:
+            continue
+
+        obj_id = id(plugin)
+        if obj_id in seen:
+            continue
+        seen.add(obj_id)
+
+        shutdown = getattr(plugin, "shutdown", None)
+        if not callable(shutdown):
+            continue
+
+        name = getattr(plugin, "name", None) or plugin.__class__.__name__
+        logger.info("Running shutdown for plugin %s", name)
+        try:
+            shutdown()
+        except Exception as e:  # pragma: no cover
+            logger.error("Shutdown for plugin %s failed: %s", name, e, exc_info=True)
