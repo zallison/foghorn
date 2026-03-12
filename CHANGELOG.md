@@ -61,6 +61,11 @@ All notable changes to this project will be documented in this file.
   - Added `axfr_enabled` and `axfr_allow_clients` policy gates for zone transfers.
 
 ### Changed
+- ZoneRecords resolver now prioritizes UPDATE-managed RRsets over static source RRsets for the same owner, so dynamic DNS UPDATE answers win during query resolution.
+- DNS UPDATE internals now track source metadata in committed RRsets and rebuild the name index after atomic update commits to keep resolver lookups in sync.
+- Upstream failover concurrency now uses a rolling bounded in-flight window (`max_concurrent`) and stops scheduling additional upstream attempts after the first successful response.
+- RateLimit profile presets were retuned and expanded (`home`, `lan`, `smb`, `enterprise`, `localhost`), with `default` now pointing at the `lan` preset.
+- Admin UI dark-theme form controls now use higher-contrast input/select/textarea backgrounds for search and query-log panes.
 - Plugin priorities: `hooks.priority` and per-hook priorities now accept either an integer or `{priority: <int>}` shorthand; legacy `*_priority` fields remain supported.
 - Plugin targeting: configuration now prefers a nested `targets` object with `ips`, `ignore_ips`, `listeners`, `domains`, `domains_mode`, `qtypes`, `opcodes`, and `rcodes` (legacy flat keys still accepted).
 - Admin upstream status now reads from runtime snapshots, including backup upstreams when present.
@@ -109,6 +114,8 @@ All notable changes to this project will be documented in this file.
 - Admin UI: plugin table rendering now supports client-side searchable sections, and rate-limit snapshots include config item details.
 
 ### Fixed
+- DNS UPDATE TSIG parse/verification failures now return protocol-correct UPDATE responses with `NOTAUTH` (instead of malformed opcode handling), including improved TSIG failure diagnostics.
+- DNS UPDATE authorization now enforces per-key/per-token `allow_names` and `allow_update_ips` scope (combined with zone-level policy), preventing out-of-scope updates from being accepted.
 
 - ZoneRecords DNSSEC: improved NSEC3 denial-of-existence handling so NODATA responses only include relevant NSEC3 proofs.
 - Diagrams: upstream routes now handle template variable hosts (e.g., `${host}`) by showing placeholder when host is a template variable and transport/port are present.
@@ -121,6 +128,8 @@ All notable changes to this project will be documented in this file.
 - DNSSEC: `ensure_zone_keys` now searches fallback relative key directories (including `config/.config` cwd patterns) before concluding keys are missing when generation is disabled.
 
 ### Tests
+- Added DNS UPDATE regression tests for TSIG bad-key handling, TSIG algorithm mismatch responses, and key-scoped `allow_names` enforcement (including wildcard scope matches).
+- Added failover concurrency regression coverage to verify bounded in-flight scheduling and no unnecessary later-upstream attempts after early success.
 
 - Updated upstream failover coverage to assert DEBUG-level (de-duplicated) skip logs for malformed upstream responses.
 - Added branch-coverage tests for ZoneRecords UPDATE/TSIG branches, asyncio UDP CIDR inflight limits, web admin config/diagram edge paths, and config/security helper normalization behavior.
