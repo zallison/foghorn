@@ -14,6 +14,9 @@ import threading
 from types import SimpleNamespace
 
 import dns.message
+import dns.rdataclass
+import dns.rdatatype
+import dns.rrset
 import dns.tsigkeyring
 import dns.update
 import pytest
@@ -477,6 +480,50 @@ def test_apply_update_operations_returns_noerror_and_does_not_mutate_records() -
     )
     assert rcode2 == 0
     assert err2 is None
+
+
+def test_apply_update_operations_refreshes_wildcard_owner_index() -> None:
+    """Brief: Wildcard UPDATE owners are immediately used for wildcard matching.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts wildcard owner index is rebuilt and wildcard matches resolve.
+    """
+    from foghorn.plugins.resolve.zone_records import helpers as zone_helpers
+
+    plugin = SimpleNamespace(
+        records={},
+        _name_index={},
+        _wildcard_owners=[],
+    )
+
+    update_rrset = dns.rrset.from_text(
+        "*.foo.dyn.zaa.",
+        60,
+        dns.rdataclass.IN,
+        dns.rdatatype.A,
+        "198.51.100.77",
+    )
+    rcode, err = up.apply_update_operations(
+        [update_rrset],
+        plugin=plugin,
+        zone_apex="dyn.zaa",
+    )
+    assert rcode == 0
+    assert err is None
+    assert "*.foo.dyn.zaa" in plugin._wildcard_owners
+
+    for qname in ("a.foo.dyn.zaa", "bar.foo.dyn.zaa"):
+        matched_owner, rrsets = zone_helpers.find_best_rrsets_for_name(
+            qname,
+            plugin._name_index,
+            wildcard_patterns=plugin._wildcard_owners,
+        )
+        assert matched_owner == "*.foo.dyn.zaa"
+        assert int(QTYPE.A) in rrsets
+        assert rrsets[int(QTYPE.A)][1] == ["198.51.100.77"]
 
 
 def test_build_update_response_sets_rcode() -> None:
