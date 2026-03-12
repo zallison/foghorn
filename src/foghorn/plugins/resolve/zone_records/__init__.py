@@ -9,7 +9,7 @@ import ipaddress
 import logging
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from dnslib import OPCODE, QTYPE, RCODE, DNSHeader, DNSRecord
 from pydantic import BaseModel, Field, field_validator
@@ -1042,10 +1042,12 @@ class ZoneRecords(BasePlugin):
         self._dns_update_timestamps: Dict[str, float] = {}
         self._dns_update_lists_cache: Dict[str, List[str]] = {}
         self._dns_update_cache_lock = threading.RLock()
+        # Track owners managed by DNS UPDATE (for source tracking)
+        self._update_managed_owners: Set[str] = set()
 
         # Initialize state and locks
         self._records_lock = threading.RLock()
-        self.records: Dict[Tuple[str, int], Tuple[int, List[str]]] = {}
+        self.records: Dict[Tuple[str, int], Tuple[int, List[str], List[str]]] = {}
         self._observer = None
         self._axfr_poll_stop = None
         self._axfr_poll_thread = None

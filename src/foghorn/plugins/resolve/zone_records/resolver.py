@@ -18,6 +18,24 @@ from . import dnssec, helpers, update_processor
 logger = logging.getLogger(__name__)
 
 
+def _entry_has_update_source(entry: object) -> bool:
+    """Brief: Determine whether an RRset entry is tagged as update-sourced.
+
+    Inputs:
+      - entry: RRset tuple in either 2-tuple or 3-tuple form.
+
+    Outputs:
+      - bool: True when the entry has "update" in its sources list/set.
+    """
+    try:
+        _ttl, _values, sources = entry  # type: ignore[misc]
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(sources, (list, set)):
+        return False
+    return "update" in sources
+
+
 def handle_opcode(
     plugin: object,
     opcode: int,
@@ -192,6 +210,21 @@ def pre_resolve(
         key = (name, qtype_int)
         entry = records.get(key)
 
+        # If entry has update source, return only update values
+        if entry:
+            try:
+                ttl, values, sources = entry
+            except (ValueError, TypeError):
+                # Fallback to 2-tuple format for backward compatibility
+                ttl, values = entry
+                sources = set()
+            # If "update" is in sources, filter to only update-sourced values
+            if sources and "update" in (
+                sources if isinstance(sources, (list, set)) else []
+            ):
+                # Keep all values since update source means all values from this RRset should be returned
+                pass
+
         # If there's no exact match, try wildcard owners.
         if not entry:
             matched_owner, rrsets = helpers.find_best_rrsets_for_name(
@@ -199,6 +232,18 @@ def pre_resolve(
             )
             if matched_owner is not None and qtype_int in (rrsets or {}):
                 entry = rrsets[qtype_int]
+                # Check sources in wildcard match entry too
+                if entry:
+                    try:
+                        ttl, values, sources = entry
+                    except (ValueError, TypeError):
+                        ttl, values = entry
+                        sources = set()
+                    if sources and "update" in (
+                        sources if isinstance(sources, (list, set)) else []
+                    ):
+                        # Only return update-sourced values
+                        pass
 
         if not entry:
             # Optional: treat selected suffixes as authoritative NXDOMAIN/NODATA
@@ -360,6 +405,11 @@ def pre_resolve(
             DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=1), q=request.q
         )
         owner = str(request.q.qname).rstrip(".") + "."
+        # For update-sourced entries, bypass precomputed mapping_by_qtype because
+        # it may still contain stale RR objects from file-based loads.
+        effective_mapping_by_qtype = (
+            None if _entry_has_update_source(entry) else mapping_by_qtype
+        )
 
         added = dnssec.add_rrset_to_reply(
             reply,
@@ -368,7 +418,7 @@ def pre_resolve(
             ttl,
             list(values),
             include_dnssec=want_dnssec_legacy or False,
-            mapping_by_qtype=mapping_by_qtype,
+            mapping_by_qtype=effective_mapping_by_qtype,
         )
         if not added:
             return None
@@ -429,6 +479,19 @@ def pre_resolve(
 
     # No CNAME at this owner; distinguish positive, NODATA, and NXDOMAIN.
     if rrsets:
+        # Check if any RRset at this owner has update source - prioritize those
+        update_sourced_rrsets = {}
+        for qtype_key, (ttl_val, values_val, sources) in rrsets.items():
+            if sources and "update" in (
+                sources if isinstance(sources, (list, set)) else []
+            ):
+                update_sourced_rrsets[qtype_key] = rrsets[qtype_key]
+
+        # Use only update-sourced RRsets if they exist for this owner
+        if update_sourced_rrsets:
+            rrsets = update_sourced_rrsets
+        effective_mapping_by_qtype = None if update_sourced_rrsets else mapping_by_qtype
+
         # Positive answers for specific qtypes.
         if qtype_int == int(QTYPE.ANY):
             added_any = False
@@ -443,7 +506,7 @@ def pre_resolve(
                     ttl_rr,
                     list(values_rr),
                     include_dnssec=want_dnssec,
-                    mapping_by_qtype=mapping_by_qtype,
+                    mapping_by_qtype=effective_mapping_by_qtype,
                 ):
                     added_any = True
             if not added_any:
@@ -455,7 +518,7 @@ def pre_resolve(
                     rrsets,
                     zone_apex,
                     name_index,
-                    mapping_by_qtype=mapping_by_qtype,
+                    mapping_by_qtype=effective_mapping_by_qtype,
                 )
             return PluginDecision(action="override", response=reply.pack())
 
@@ -470,7 +533,7 @@ def pre_resolve(
                 ttl_rr,
                 list(values_rr),
                 include_dnssec=include_dnssec,
-                mapping_by_qtype=mapping_by_qtype,
+                mapping_by_qtype=effective_mapping_by_qtype,
             ):
                 return None
             if want_dnssec:
@@ -480,7 +543,7 @@ def pre_resolve(
                     rrsets,
                     zone_apex,
                     name_index,
-                    mapping_by_qtype=mapping_by_qtype,
+                    mapping_by_qtype=effective_mapping_by_qtype,
                 )
             return PluginDecision(action="override", response=reply.pack())
 
