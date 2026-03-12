@@ -1,27 +1,41 @@
 # RateLimit plugin profiles
 # These profiles provide preset configuration bundles for different deployment sizes
 
-default:
-  min_enforce_rps: 50
-  global_max_rps: 5000
-  burst_factor: 3.0
-
-single:
-  min_enforce_rps: 10
-  global_max_rps: 100
+# With many consumer devices such as TVs, tablets, and phone
+# coming online and flooding DHCP queries we have a high burst
+# factor and a high alpha and lower alpha_down.
+home: &home
+  min_enforce_rps: 5
+  global_max_rps: 200
   burst_factor: 5.0
+  alpha: .5
+  alpha_down: .1
+  window_seconds: 5
+  warmup_windows: 12 # Still 1 minute.
 
-lan:
-  min_enforce_rps: 50
-  global_max_rps: 1000
+# For our lan we tamp down the burst factor slightly
+lan: &lan
+  min_enforce_rps: 5
+  global_max_rps: 500
   burst_factor: 4.0
+  alpha: .2
+  alpha_down: .05
 
-smb:
-  min_enforce_rps: 100
-  global_max_rps: 5000
+smb: &smb
+  min_enforce_rps: 10
+  global_max_rps: 1500
   burst_factor: 3.0
 
-enterprise:
-  min_enforce_rps: 200
-  global_max_rps: 15000
+enterprise: &enterprise
+  min_enforce_rps: 10
+  global_max_rps: 2000
   burst_factor: 2.0
+
+localhost: &localhost
+  min_enforce_rps: 20
+  global_max_rps: 5000
+  burst_factor: 5.0
+  alpha: .5
+  alpha_down: .2
+
+default: *lan
