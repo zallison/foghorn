@@ -287,9 +287,8 @@ def main(argv: List[str] | None = None) -> int:
             # backwards-compatibility, also accept sigusr1_resets_stats as a
             # deprecated alias.
             reset_flag = bool(
-                s_cfg.get("sigusr2_resets_stats", False)
-                or s_cfg.get("sigusr1_resets_stats", False)
-            )
+                sig_label="SIGUSR1" and s_cfg.get("sigusr1_resets_stats", False)
+            ) or bool(sig_label="SIGUSR2" and s_cfg.get("sigusr2_resets_stats", False))
 
             if enabled and reset_flag:
                 if stats_collector is not None:
@@ -540,6 +539,11 @@ def main(argv: List[str] | None = None) -> int:
     # Shared resolver adapter for UDP listener.
     from .servers.server import resolve_query_bytes as _resolve_query_bytes
 
+    # Optionally start TCP/DoT listeners based on listen config
+
+    # Resolver adapter for TCP/DoT servers
+    import asyncio
+
     def _resolve_udp(query_bytes: bytes, client_ip: str) -> bytes:
         """Brief: Resolve a DNS query received via UDP listener.
 
@@ -577,6 +581,105 @@ def main(argv: List[str] | None = None) -> int:
             pass
 
         return wire
+
+    def _resolve_tcp(query_bytes: bytes, client_ip: str) -> bytes:
+        """Brief: Resolve a DNS query received via TCP listener.
+
+        Inputs:
+          - query_bytes: Wire-format DNS query bytes.
+          - client_ip: Client IP address string.
+
+        Outputs:
+          - bytes: Wire-format DNS response produced by the shared resolver.
+        """
+
+        return _resolve_query_bytes(
+            query_bytes,
+            client_ip,
+            listener="tcp",
+            secure=False,
+        )
+
+    def _resolve_dot(query_bytes: bytes, client_ip: str) -> bytes:
+        """Brief: Resolve a DNS query received via DoT (TLS) listener.
+
+        Inputs:
+          - query_bytes: Wire-format DNS query bytes.
+          - client_ip: Client IP address string.
+
+        Outputs:
+          - bytes: Wire-format DNS response produced by the shared resolver.
+        """
+
+        return _resolve_query_bytes(
+            query_bytes,
+            client_ip,
+            listener="dot",
+            secure=True,
+        )
+
+    def _resolve_doh(query_bytes: bytes, client_ip: str) -> bytes:
+        """Brief: Resolve a DNS query received via DoH (HTTPS) listener.
+
+        Inputs:
+          - query_bytes: Wire-format DNS query bytes.
+          - client_ip: Client IP address string.
+
+        Outputs:
+          - bytes: Wire-format DNS response produced by the shared resolver.
+        """
+
+        return _resolve_query_bytes(
+            query_bytes,
+            client_ip,
+            listener="doh",
+            secure=True,
+        )
+
+    def _start_asyncio_server(
+        coro_factory,
+        name: str,
+        *,
+        listener_key: str,
+        on_permission_error=None,
+    ):
+        def runner():
+            try:
+                asyncio.set_event_loop(asyncio.new_event_loop())
+                loop = asyncio.get_event_loop()
+                try:
+                    loop.run_until_complete(coro_factory())
+                finally:
+                    loop.close()
+            except PermissionError as e:
+                # Environment forbids creating asyncio self-pipe/socketpair (e.g., restricted seccomp).
+                # When a fallback is provided, treat it as a successful start and
+                # do not mark the listener as failed.
+                if callable(on_permission_error):
+                    on_permission_error()
+                else:
+                    runtime_state.set_listener_error(listener_key, e)
+                    logging.getLogger("foghorn.main").error(
+                        "Asyncio loop creation failed with PermissionError for %s; no fallback provided",
+                        name,
+                    )
+            except Exception as e:  # pragma: no cover - best-effort readiness tracking
+                runtime_state.set_listener_error(listener_key, e)
+                logging.getLogger("foghorn.main").exception(
+                    "Asyncio listener %s failed to start or exited with an unhandled exception: %s",
+                    name,
+                    e,
+                )
+
+        # Import threading dynamically so tests can monkeypatch via sys.modules
+        import importlib as _importlib
+
+        _threading = _importlib.import_module("threading")
+        t = _threading.Thread(target=runner, name=name, daemon=True)
+        t.start()
+        loop_threads.append(t)
+        runtime_state.set_listener(listener_key, enabled=True, thread=t)
+        return t
 
     if bool(udp_cfg.get("enabled", True)):
         uhost = str(udp_cfg.get("host", default_host))
@@ -725,118 +828,13 @@ def main(argv: List[str] | None = None) -> int:
             udp_thread.start()
             loop_threads.append(udp_thread)
             runtime_state.set_listener("udp", enabled=True, thread=udp_thread)
-
-    if not bool(udp_cfg.get("enabled", True)):
+    else:
         # When no UDP listener is configured, the main thread still enters the
         # keepalive loop below so that TCP/DoT/DoH listeners (or tests that
         # disable UDP entirely) can drive shutdown via signals or KeyboardInterrupt.
         logger.info(
             "Starting Foghorn without UDP listener; main thread will use keepalive loop",
         )
-
-    # Optionally start TCP/DoT listeners based on listen config
-
-    # Resolver adapter for TCP/DoT servers
-    import asyncio
-
-    def _resolve_tcp(query_bytes: bytes, client_ip: str) -> bytes:
-        """Brief: Resolve a DNS query received via TCP listener.
-
-        Inputs:
-          - query_bytes: Wire-format DNS query bytes.
-          - client_ip: Client IP address string.
-
-        Outputs:
-          - bytes: Wire-format DNS response produced by the shared resolver.
-        """
-
-        return _resolve_query_bytes(
-            query_bytes,
-            client_ip,
-            listener="tcp",
-            secure=False,
-        )
-
-    def _resolve_dot(query_bytes: bytes, client_ip: str) -> bytes:
-        """Brief: Resolve a DNS query received via DoT (TLS) listener.
-
-        Inputs:
-          - query_bytes: Wire-format DNS query bytes.
-          - client_ip: Client IP address string.
-
-        Outputs:
-          - bytes: Wire-format DNS response produced by the shared resolver.
-        """
-
-        return _resolve_query_bytes(
-            query_bytes,
-            client_ip,
-            listener="dot",
-            secure=True,
-        )
-
-    def _resolve_doh(query_bytes: bytes, client_ip: str) -> bytes:
-        """Brief: Resolve a DNS query received via DoH (HTTPS) listener.
-
-        Inputs:
-          - query_bytes: Wire-format DNS query bytes.
-          - client_ip: Client IP address string.
-
-        Outputs:
-          - bytes: Wire-format DNS response produced by the shared resolver.
-        """
-
-        return _resolve_query_bytes(
-            query_bytes,
-            client_ip,
-            listener="doh",
-            secure=True,
-        )
-
-    def _start_asyncio_server(
-        coro_factory,
-        name: str,
-        *,
-        listener_key: str,
-        on_permission_error=None,
-    ):
-        def runner():
-            try:
-                asyncio.set_event_loop(asyncio.new_event_loop())
-                loop = asyncio.get_event_loop()
-                try:
-                    loop.run_until_complete(coro_factory())
-                finally:
-                    loop.close()
-            except PermissionError as e:
-                # Environment forbids creating asyncio self-pipe/socketpair (e.g., restricted seccomp).
-                # When a fallback is provided, treat it as a successful start and
-                # do not mark the listener as failed.
-                if callable(on_permission_error):
-                    on_permission_error()
-                else:
-                    runtime_state.set_listener_error(listener_key, e)
-                    logging.getLogger("foghorn.main").error(
-                        "Asyncio loop creation failed with PermissionError for %s; no fallback provided",
-                        name,
-                    )
-            except Exception as e:  # pragma: no cover - best-effort readiness tracking
-                runtime_state.set_listener_error(listener_key, e)
-                logging.getLogger("foghorn.main").exception(
-                    "Asyncio listener %s failed to start or exited with an unhandled exception: %s",
-                    name,
-                    e,
-                )
-
-        # Import threading dynamically so tests can monkeypatch via sys.modules
-        import importlib as _importlib
-
-        _threading = _importlib.import_module("threading")
-        t = _threading.Thread(target=runner, name=name, daemon=True)
-        t.start()
-        loop_threads.append(t)
-        runtime_state.set_listener(listener_key, enabled=True, thread=t)
-        return t
 
     if bool(tcp_cfg.get("enabled", False)):
         from foghorn.security_limits import is_loopback_host
@@ -912,7 +910,7 @@ def main(argv: List[str] | None = None) -> int:
                 "listen.dot.enabled=true but cert_file/key_file not provided; skipping DoT"
             )
         else:
-            logger.info("Starting DoT listener on %s:%d", dhost, dport)
+            logger.info("Starting DoT listener on %s:%d (asyncio)", dhost, dport)
             logger.debug(
                 "DoT TLS files: cert_file=%s key_file=%s",
                 cert_file,
