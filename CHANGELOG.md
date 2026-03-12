@@ -63,6 +63,8 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - ZoneRecords resolver now prioritizes UPDATE-managed RRsets over static source RRsets for the same owner, so dynamic DNS UPDATE answers win during query resolution.
 - DNS UPDATE internals now track source metadata in committed RRsets and rebuild the name index after atomic update commits to keep resolver lookups in sync.
+- Runtime lifecycle: `main()` now runs best-effort shutdown hooks for loaded resolver plugins, cache backends, and query-log/statistics backends via `run_shutdown_plugins`.
+- Resolver forwarding: when `forward_local` is disabled, RFC1918 IPv4 reverse PTR (`in-addr.arpa`) queries are now treated like `.local` and are not forwarded upstream.
 - Upstream failover concurrency now uses a rolling bounded in-flight window (`max_concurrent`) and stops scheduling additional upstream attempts after the first successful response.
 - RateLimit profile presets were retuned and expanded (`home`, `lan`, `smb`, `enterprise`, `localhost`), with `default` now pointing at the `lan` preset.
 - Admin UI dark-theme form controls now use higher-contrast input/select/textarea backgrounds for search and query-log panes.
@@ -116,6 +118,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - DNS UPDATE TSIG parse/verification failures now return protocol-correct UPDATE responses with `NOTAUTH` (instead of malformed opcode handling), including improved TSIG failure diagnostics.
 - DNS UPDATE authorization now enforces per-key/per-token `allow_names` and `allow_update_ips` scope (combined with zone-level policy), preventing out-of-scope updates from being accepted.
+- ZoneRecords DNS UPDATE now rebuilds wildcard-owner indexes after update commits, so wildcard UPDATE owners (for example `*.foo.dyn.zaa`) are immediately used during resolution.
 
 - ZoneRecords DNSSEC: improved NSEC3 denial-of-existence handling so NODATA responses only include relevant NSEC3 proofs.
 - Diagrams: upstream routes now handle template variable hosts (e.g., `${host}`) by showing placeholder when host is a template variable and transport/port are present.
@@ -129,6 +132,8 @@ All notable changes to this project will be documented in this file.
 
 ### Tests
 - Added DNS UPDATE regression tests for TSIG bad-key handling, TSIG algorithm mismatch responses, and key-scoped `allow_names` enforcement (including wildcard scope matches).
+- Added DNS UPDATE regression coverage for wildcard-owner index rebuilds after update commits.
+- Added lifecycle tests for `run_shutdown_plugins()` and main-loop shutdown hook invocation.
 - Added failover concurrency regression coverage to verify bounded in-flight scheduling and no unnecessary later-upstream attempts after early success.
 
 - Updated upstream failover coverage to assert DEBUG-level (de-duplicated) skip logs for malformed upstream responses.
