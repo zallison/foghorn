@@ -288,19 +288,27 @@ def process_update_message(
         keyring = None
 
     request_msg: dns.message.Message | None = None
+    tsig_parse_error: Optional[str] = None
     matching_tsig_cfg: Optional[dict] = None
 
     if keyring is not None:
         try:
             request_msg = dns.message.from_wire(request_data, keyring=keyring)
+        except dns.message.UnknownTSIGKey:
+            request_msg = None
+            tsig_parse_error = "badkey"
         except dns.tsig.PeerBadKey:
             request_msg = None
+            tsig_parse_error = "badkey"
         except dns.tsig.BadSignature:
             request_msg = None
+            tsig_parse_error = "badsig"
         except dns.tsig.PeerBadTime:
             request_msg = None
+            tsig_parse_error = "badtime"
         except dns.exception.DNSException:
             request_msg = None
+            tsig_parse_error = "dns"
     else:
         # No keys configured; still parse so we can build a response.
         try:
@@ -309,7 +317,43 @@ def process_update_message(
             request_msg = None
 
     if request_msg is None:
-        # Worst-case fallback: cannot parse; return a bare FORMERR response.
+        if tsig_parse_error is not None:
+            try:
+                configured_key_names = [
+                    str(cfg.get("name", ""))
+                    for cfg in key_configs
+                    if isinstance(cfg, dict) and cfg.get("name")
+                ]
+            except Exception:
+                configured_key_names = []
+            logger.warning(
+                "DNS UPDATE TSIG verification failed: reason=%s zone=%s configured_keys=%s client_ip=%s",
+                tsig_parse_error,
+                str(zone_apex),
+                configured_key_names,
+                str(client_ip),
+            )
+        # Try to recover enough structure (opcode/id/question) to return a
+        # protocol-correct response even when TSIG verification fails.
+        recovered_msg: Optional[dns.message.Message] = None
+        try:
+            recovered_msg = dns.message.from_wire(request_data, continue_on_error=True)
+        except Exception:
+            recovered_msg = None
+
+        if recovered_msg is not None:
+            resp = dns.message.make_response(recovered_msg)
+            try:
+                resp.set_opcode(recovered_msg.opcode())
+            except Exception:
+                pass
+            if tsig_parse_error is not None:
+                resp.set_rcode(dns.rcode.NOTAUTH)
+            else:
+                resp.set_rcode(dns.rcode.FORMERR)
+            return resp.to_wire()
+
+        # Worst-case fallback: cannot parse any structure from the request.
         try:
             import struct
 
@@ -318,11 +362,25 @@ def process_update_message(
                 if len(request_data) >= 2
                 else 0
             )
+            flags = (
+                struct.unpack("!H", request_data[2:4])[0]
+                if len(request_data) >= 4
+                else 0
+            )
+            opcode = int((flags >> 11) & 0xF)
         except Exception:
             mid = 0
+            opcode = int(dns.opcode.UPDATE)
         resp = dns.message.Message(id=int(mid))
         resp.flags |= dns.flags.QR
-        resp.set_rcode(dns.rcode.FORMERR)
+        try:
+            resp.set_opcode(opcode)
+        except Exception:
+            pass
+        if tsig_parse_error is not None:
+            resp.set_rcode(dns.rcode.NOTAUTH)
+        else:
+            resp.set_rcode(dns.rcode.FORMERR)
         return resp.to_wire()
 
     # Enforce opcode=UPDATE.
@@ -447,6 +505,15 @@ def process_update_message(
             if expected_alg and expected_alg != keyalg_norm:
                 resp = dns.message.make_response(request_msg)
                 resp.set_rcode(dns.rcode.NOTAUTH)
+                if getattr(request_msg, "had_tsig", False) and keyring is not None:
+                    try:
+                        resp.use_tsig(
+                            keyring=keyring,
+                            keyname=request_msg.keyname,
+                            algorithm=request_msg.keyalgorithm,
+                        )
+                    except Exception:
+                        pass
                 return resp.to_wire()
             matching_tsig_cfg = cfg
             break
@@ -454,6 +521,15 @@ def process_update_message(
         if matching_tsig_cfg is None:
             resp = dns.message.make_response(request_msg)
             resp.set_rcode(dns.rcode.NOTAUTH)
+            if getattr(request_msg, "had_tsig", False) and keyring is not None:
+                try:
+                    resp.use_tsig(
+                        keyring=keyring,
+                        keyname=request_msg.keyname,
+                        algorithm=request_msg.keyalgorithm,
+                    )
+                except Exception:
+                    pass
             return resp.to_wire()
 
         # Enforce max fudge.
@@ -465,6 +541,15 @@ def process_update_message(
         if fudge and fudge > TSIG_TIMESTAMP_FUDGE:
             resp = dns.message.make_response(request_msg)
             resp.set_rcode(dns.rcode.NOTAUTH)
+            if getattr(request_msg, "had_tsig", False) and keyring is not None:
+                try:
+                    resp.use_tsig(
+                        keyring=keyring,
+                        keyname=request_msg.keyname,
+                        algorithm=request_msg.keyalgorithm,
+                    )
+                except Exception:
+                    pass
             return resp.to_wire()
 
         ctx.is_authorized = True
@@ -506,6 +591,13 @@ def process_update_message(
                     pass
             return resp.to_wire()
 
+    # Enforce auth scope from the authenticated principal (TSIG key or PSK token).
+    auth_scope_config: Optional[dict] = None
+    if isinstance(ctx.tsig_key_config, dict):
+        auth_scope_config = ctx.tsig_key_config
+    elif isinstance(ctx.psk_token_config, dict):
+        auth_scope_config = ctx.psk_token_config
+
     # Check name/value authorization for each update RRset
     for update_rrset in updates:
         # Get owner name from the RRset
@@ -514,7 +606,11 @@ def process_update_message(
         except Exception:
             owner_norm = ""
 
-        if not verify_name_authorization(owner_norm, zone_config):
+        if not verify_name_authorization(
+            owner_norm,
+            zone_config,
+            auth_scope_config=auth_scope_config,
+        ):
             resp = dns.message.make_response(request_msg)
             resp.set_rcode(dns.rcode.NOTAUTH)
             if getattr(request_msg, "had_tsig", False) and keyring is not None:
@@ -534,7 +630,12 @@ def process_update_message(
             # Convert rdata to string for value authorization
             for rdata in update_rrset:
                 rdata_str = str(rdata)
-                if not verify_value_authorization(rdata_str, qtype_int, zone_config):
+                if not verify_value_authorization(
+                    rdata_str,
+                    qtype_int,
+                    zone_config,
+                    auth_scope_config=auth_scope_config,
+                ):
                     resp = dns.message.make_response(request_msg)
                     resp.set_rcode(dns.rcode.NOTAUTH)
                     if getattr(request_msg, "had_tsig", False) and keyring is not None:
@@ -624,41 +725,45 @@ def verify_client_authorization(
 def verify_name_authorization(
     name: str,
     zone_config: dict,
+    auth_scope_config: Optional[dict] = None,
 ) -> bool:
     """Brief: Verify name is allowed for updates.
 
     Inputs:
       - name: Domain name to update.
       - zone_config: Zone configuration.
+      - auth_scope_config: Optional per-principal scope config (TSIG key or PSK token).
 
     Outputs:
       - bool: True if name is allowed.
     """
     from foghorn.plugins.resolve.zone_records import update_helpers as uh
 
-    block_names = zone_config.get("block_names", [])
-    block_names_files = zone_config.get("block_names_files", [])
-    allow_names = zone_config.get("allow_names", [])
-    allow_names_files = zone_config.get("allow_names_files", [])
+    scopes = [s for s in (zone_config, auth_scope_config) if isinstance(s, dict)]
 
-    # Check blocked names first
-    blocked_list = uh.combine_lists(
-        block_names,
-        block_names_files,
-        uh.load_names_list_from_file,
-    )
-    if blocked_list and uh.matches_name_pattern(name, blocked_list):
-        return False
-
-    # Check allowed names
-    if allow_names or allow_names_files:
-        allowed_list = uh.combine_lists(
-            allow_names,
-            allow_names_files,
+    # Any matching block list from any scope denies the update.
+    for scope in scopes:
+        blocked_list = uh.combine_lists(
+            scope.get("block_names", []),
+            scope.get("block_names_files", []),
             uh.load_names_list_from_file,
         )
-        if allowed_list and not uh.matches_name_pattern(name, allowed_list):
+        if blocked_list and uh.matches_name_pattern(name, blocked_list):
             return False
+
+    # If a scope defines allow names, this name must match that scope.
+    # Multiple allow scopes therefore behave as intersection.
+    for scope in scopes:
+        allow_names = scope.get("allow_names", [])
+        allow_names_files = scope.get("allow_names_files", [])
+        if allow_names or allow_names_files:
+            allowed_list = uh.combine_lists(
+                allow_names,
+                allow_names_files,
+                uh.load_names_list_from_file,
+            )
+            if allowed_list and not uh.matches_name_pattern(name, allowed_list):
+                return False
 
     return True
 
@@ -667,6 +772,7 @@ def verify_value_authorization(
     value: str,
     qtype: int,
     zone_config: dict,
+    auth_scope_config: Optional[dict] = None,
 ) -> bool:
     """Brief: Verify A/AAAA record value is allowed.
 
@@ -674,6 +780,7 @@ def verify_value_authorization(
       - value: IP address value.
       - qtype: Record type (A=1, AAAA=28).
       - zone_config: Zone configuration.
+      - auth_scope_config: Optional per-principal scope config (TSIG key or PSK token).
 
     Outputs:
       - bool: True if value is allowed.
@@ -684,29 +791,30 @@ def verify_value_authorization(
 
     from foghorn.plugins.resolve.zone_records import update_helpers as uh
 
-    block_ips = zone_config.get("block_update_ips", [])
-    block_ips_files = zone_config.get("block_update_ips_files", [])
-    allow_ips = zone_config.get("allow_update_ips", [])
-    allow_ips_files = zone_config.get("allow_update_ips_files", [])
+    scopes = [s for s in (zone_config, auth_scope_config) if isinstance(s, dict)]
 
-    # Check blocked IPs first
-    blocked_list = uh.combine_lists(
-        block_ips,
-        block_ips_files,
-        uh.load_cidr_list_from_file,
-    )
-    if blocked_list and uh.is_ip_in_cidr_list(value, blocked_list):
-        return False
-
-    # Check allowed IPs
-    if allow_ips or allow_ips_files:
-        allowed_list = uh.combine_lists(
-            allow_ips,
-            allow_ips_files,
+    # Any matching block list from any scope denies the update.
+    for scope in scopes:
+        blocked_list = uh.combine_lists(
+            scope.get("block_update_ips", []),
+            scope.get("block_update_ips_files", []),
             uh.load_cidr_list_from_file,
         )
-        if allowed_list and not uh.is_ip_in_cidr_list(value, allowed_list):
+        if blocked_list and uh.is_ip_in_cidr_list(value, blocked_list):
             return False
+
+    # If a scope defines allow_update_ips, the value must match that scope.
+    for scope in scopes:
+        allow_ips = scope.get("allow_update_ips", [])
+        allow_ips_files = scope.get("allow_update_ips_files", [])
+        if allow_ips or allow_ips_files:
+            allowed_list = uh.combine_lists(
+                allow_ips,
+                allow_ips_files,
+                uh.load_cidr_list_from_file,
+            )
+            if allowed_list and not uh.is_ip_in_cidr_list(value, allowed_list):
+                return False
 
     return True
 
@@ -948,8 +1056,19 @@ def apply_update_operations(
                     new_records[record_key] = (ttl, [rdata_str], ["update"])
                 else:
                     existing_ttl, existing_values, sources = new_records[record_key]
+                    # Check if this RRset has update source
+                    has_update_source = (
+                        isinstance(sources, (list, set)) and "update" in sources
+                    )
                     if rdata_str not in existing_values:
                         new_values = existing_values + [rdata_str]
+                        # Ensure update source is tracked
+                        if not has_update_source:
+                            sources = (
+                                sources + ["update"]
+                                if isinstance(sources, list)
+                                else list(sources) + ["update"]
+                            )
                         new_records[record_key] = (ttl, new_values, sources)
 
         # CLASS ANY: Delete RR or RRset
@@ -959,6 +1078,10 @@ def apply_update_operations(
                 keys_to_delete = [k for k in new_records if k[0] == owner_norm]
                 for k in keys_to_delete:
                     del new_records[k]
+                # Mark this owner as update-managed
+                update_managed_owners = getattr(plugin, "_update_managed_owners", None)
+                if isinstance(update_managed_owners, set):
+                    update_managed_owners.add(owner_norm)
             else:
                 # Delete specific RRs from RRset, or delete RRset if empty/optional
                 if record_key in new_records:
@@ -968,7 +1091,7 @@ def apply_update_operations(
                             if len(existing_values) > 1:
                                 existing_values.remove(rdata_str)
                                 new_records[record_key] = (
-                                    ttl,
+                                    existing_ttl,
                                     existing_values,
                                     sources,
                                 )
@@ -988,11 +1111,60 @@ def apply_update_operations(
             return 1, f"Unsupported update class {qclass}"
 
     # Commit under lock
+    def _rebuild_name_index_from_records(
+        records: Dict[Tuple[str, int], Tuple[int, List[str], List[str]]],
+    ) -> Dict[str, Dict[int, Tuple[int, List[str], List[str]]]]:
+        """Brief: Rebuild name index from records mapping.
+
+        Inputs:
+          - records: Mapping of (owner, qtype) -> (ttl, values, sources).
+
+        Outputs:
+          - owner -> qtype -> (ttl, values, sources) mapping.
+        """
+        name_index: Dict[str, Dict[int, Tuple[int, List[str], List[str]]]] = {}
+        for (owner, qtype), entry in (records or {}).items():
+            try:
+                ttl, values, sources = entry
+            except (ValueError, TypeError):
+                try:
+                    ttl, values = entry
+                    sources = []
+                except (ValueError, TypeError):
+                    continue
+
+            owner_norm = _normalize_dns_name(owner)
+            qtype_int = int(qtype)
+            ttl_int = int(ttl)
+            values_list = list(values or [])
+            if isinstance(sources, set):
+                sources_list = list(sources)
+            else:
+                sources_list = list(sources or [])
+
+            per_name = name_index.setdefault(owner_norm, {})
+            per_name[qtype_int] = (ttl_int, values_list, sources_list)
+        return name_index
+
     if lock is None:
         plugin.records = new_records
+        try:
+            plugin._name_index = _rebuild_name_index_from_records(new_records)
+        except Exception:  # pragma: no cover - defensive
+            logger.warning(
+                "Failed to rebuild _name_index after DNS UPDATE commit",
+                exc_info=True,
+            )
     else:
         with lock:
             plugin.records = new_records
+            try:
+                plugin._name_index = _rebuild_name_index_from_records(new_records)
+            except Exception:  # pragma: no cover - defensive
+                logger.warning(
+                    "Failed to rebuild _name_index after DNS UPDATE commit",
+                    exc_info=True,
+                )
 
     return 0, None
 
