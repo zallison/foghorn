@@ -1,5 +1,7 @@
 """Core DNS server orchestration and transport/failover helper utilities."""
 
+import ipaddress
+
 import logging
 import random
 import threading
@@ -69,6 +71,44 @@ _BG_SEM = threading.Semaphore(128)
 _BG_LOCK = threading.Lock()
 _BG_NOTIFY_INFLIGHT: set[str] = set()
 _BG_CACHE_INFLIGHT: set[tuple[bytes, str]] = set()
+_RFC1918_V4_NETWORKS: tuple[ipaddress.IPv4Network, ...] = (
+    ipaddress.IPv4Network("10.0.0.0/8"),
+    ipaddress.IPv4Network("172.16.0.0/12"),
+    ipaddress.IPv4Network("192.168.0.0/16"),
+)
+
+
+@registered_lru_cached(maxsize=2048)
+def _is_rfc1918_ptr_query_name(qname: str) -> bool:
+    """Brief: Determine whether qname is an IPv4 PTR under RFC1918 space.
+
+    Inputs:
+      - qname: Lowercase owner name with no trailing dot.
+
+    Outputs:
+      - bool: True when qname is a full IPv4 in-addr.arpa PTR owner for
+        10/8, 172.16/12, or 192.168/16.
+    """
+
+    labels = str(qname or "").split(".")
+    if len(labels) != 6:
+        return False
+    if labels[-2:] != ["in-addr", "arpa"]:
+        return False
+
+    octets = labels[:-2]
+    try:
+        if not all(0 <= int(part) <= 255 for part in octets):
+            return False
+    except Exception:
+        return False
+
+    try:
+        addr = ipaddress.IPv4Address(".".join(reversed(octets)))
+    except ValueError:
+        return False
+
+    return any(addr in network for network in _RFC1918_V4_NETWORKS)
 
 
 def _bg_submit(key: object, fn) -> None:
@@ -829,20 +869,25 @@ def _resolve_core(
             ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
                 pass
 
-        # Block forwarding of .local queries unless forward_local is True.
+        # Block forwarding of .local queries and RFC1918 reverse PTRs unless
+        # forward_local is True.
         # RFC 6762 reserves .local for mDNS; forwarding to upstream resolvers
-        # can cause delays and incorrect answers.
+        # can cause delays and incorrect answers. RFC1918 reverse PTRs are
+        # often locally-served and should follow the same gate.
         forward_local = bool(getattr(handler, "forward_local", False))
         qname_lower = qname.lower()
-        if not forward_local and (
-            qname_lower.endswith(".local") or qname_lower == "local"
-        ):
+        is_local_query = qname_lower.endswith(".local") or qname_lower == "local"
+        is_rfc1918_ptr_query = qtype == QTYPE.PTR and _is_rfc1918_ptr_query_name(
+            qname_lower
+        )
+        if not forward_local and (is_local_query or is_rfc1918_ptr_query):
             r = req.reply()
             r.header.rcode = RCODE.NXDOMAIN
             _echo_client_edns(req, r)
-            _attach_ede_option(
-                req, r, 21, ".local not forwarded (RFC 6762)"
-            )  # Not Authoritative
+            ede_text = ".local not forwarded (RFC 6762)"
+            if is_rfc1918_ptr_query:
+                ede_text = "RFC1918 PTR not forwarded"
+            _attach_ede_option(req, r, 21, ede_text)  # Not Authoritative
             wire = _set_response_id(r.pack(), req.header.id)
             if stats is not None:
                 try:
