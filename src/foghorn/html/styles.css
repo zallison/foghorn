@@ -371,6 +371,14 @@ table {
     border-color: rgba(229, 231, 235, 0.35);
 }
 
+:root:not([data-theme='light']) .fh-table-search,
+:root:not([data-theme='light']) .fh-table-page-size,
+:root:not([data-theme='light']) .fh-query-log-input,
+:root:not([data-theme='light']) .fh-textarea {
+    background: #000;
+    color: #e5e7eb;
+}
+
 :root:not([data-theme='light']) .fh-table-pager {
     border: 1px solid rgba(229, 231, 235, 0.25);
     border-radius: 0.5rem;
@@ -419,8 +427,11 @@ table {
 }
 
 :root:not([data-theme='light']) .fh-table-page-size option {
-    background: var(--bg-card-inner);
+    background: #000;
     color: #e5e7eb;
+}
+:root:not([data-theme='light']) #page-query-log .fh-pane {
+    background: var(--bg-card-inner);
 }
 .fh-query-log-controls {
     display: flex;
