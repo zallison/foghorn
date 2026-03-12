@@ -43,7 +43,7 @@ class _FakeThreadingModule:
 
 
 from foghorn.config.config_parser import normalize_upstream_config
-from foghorn.main import _clear_lru_caches, run_setup_plugins
+from foghorn.main import _clear_lru_caches, run_setup_plugins, run_shutdown_plugins
 from foghorn.plugins.cache.none import NullCache
 from foghorn.plugins.resolve.base import BasePlugin
 
@@ -165,6 +165,149 @@ def test_run_setup_plugins_priority_and_fallback(monkeypatch, caplog):
     # An info log should have been emitted for each plugin.
     messages = [r.message for r in caplog.records]
     assert any("Running setup for plugin" in m for m in messages)
+
+
+def test_run_shutdown_plugins_calls_shutdown_and_continues_on_error(caplog):
+    """Brief: run_shutdown_plugins invokes hooks once and continues on errors.
+
+    Inputs:
+      - caplog fixture; objects with shutdown() including one that raises and
+        one duplicate object reference.
+
+    Outputs:
+      - None: asserts callable shutdown hooks run once per object and errors
+        are logged without raising.
+    """
+
+    class CacheLike:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.name = "cache_like"
+
+        def shutdown(self) -> None:
+            self.calls += 1
+
+    class QueryLogLike:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.name = "query_log_like"
+
+        def shutdown(self) -> None:
+            self.calls += 1
+            raise RuntimeError("boom")
+
+    class ResolverLike:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.name = "resolver_like"
+
+        def shutdown(self) -> None:
+            self.calls += 1
+
+    cache_obj = CacheLike()
+    query_log_obj = QueryLogLike()
+    resolver_obj = ResolverLike()
+
+    caplog.set_level(logging.INFO, logger="foghorn.main.shutdown")
+    run_shutdown_plugins(
+        [cache_obj, query_log_obj, resolver_obj, None, query_log_obj, object()]
+    )
+
+    assert cache_obj.calls == 1
+    assert query_log_obj.calls == 1
+    assert resolver_obj.calls == 1
+    assert any(
+        "Running shutdown for plugin cache_like" in r.message for r in caplog.records
+    )
+    assert any(
+        "Shutdown for plugin query_log_like failed" in r.message for r in caplog.records
+    )
+
+
+def test_main_runs_shutdown_hooks_for_cache_querylog_and_resolve(monkeypatch):
+    """Brief: main() passes cache/query-log/resolve objects to shutdown helper.
+
+    Inputs:
+      - monkeypatch fixture; cache plugin, query-log backend, and resolver plugin
+        test doubles injected into main() dependencies.
+
+    Outputs:
+      - None: asserts run_shutdown_plugins receives all three lifecycle objects.
+    """
+
+    import time as _time
+
+    yaml_data = (
+        "server:\n"
+        "  http:\n"
+        "    enabled: false\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: false\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+    )
+
+    class CacheLike:
+        def shutdown(self) -> None:
+            return None
+
+    class QueryLogLike:
+        def shutdown(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class ResolverLike:
+        def shutdown(self) -> None:
+            return None
+
+    cache_obj = CacheLike()
+    query_log_obj = QueryLogLike()
+    resolver_obj = ResolverLike()
+
+    captured: dict[str, list[Any]] = {"plugins": []}
+
+    def fake_run_shutdown_plugins(items: list[Any]) -> None:
+        captured["plugins"] = list(items)
+
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **kw: None)
+    monkeypatch.setattr(main_mod, "run_setup_plugins", lambda _plugins: None)
+    monkeypatch.setattr(main_mod, "run_shutdown_plugins", fake_run_shutdown_plugins)
+    monkeypatch.setattr(main_mod, "load_plugins", lambda _specs: [resolver_obj])
+    monkeypatch.setattr(
+        main_mod, "_load_cache_plugin_from_cfg", lambda **_kw: cache_obj
+    )
+    monkeypatch.setattr(main_mod, "_install_cache_plugin_global", lambda _cache: None)
+    monkeypatch.setattr(
+        main_mod,
+        "_initialize_statistics_subsystem",
+        lambda **_kw: (None, None, query_log_obj),
+    )
+
+    def _raise_keyboardinterrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_time, "sleep", _raise_keyboardinterrupt)
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        rc = main_mod.main(["--config", "cfg.yaml"])
+
+    assert rc == 0
+    assert cache_obj in captured["plugins"]
+    assert query_log_obj in captured["plugins"]
+    assert resolver_obj in captured["plugins"]
 
 
 def test_main_returns_one_when_run_setup_plugins_fails(monkeypatch, caplog):
