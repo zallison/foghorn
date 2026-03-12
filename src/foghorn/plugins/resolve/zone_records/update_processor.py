@@ -1146,25 +1146,54 @@ def apply_update_operations(
             per_name[qtype_int] = (ttl_int, values_list, sources_list)
         return name_index
 
+    def _rebuild_wildcard_owners_from_name_index(
+        name_index: Dict[str, Dict[int, Tuple[int, List[str], List[str]]]],
+    ) -> List[str]:
+        """Brief: Rebuild sorted wildcard owner patterns from name index.
+
+        Inputs:
+          - name_index: owner -> qtype -> (ttl, values, sources) mapping.
+
+        Outputs:
+          - Sorted list of wildcard owner patterns for query matching.
+        """
+        from . import helpers as zone_helpers
+
+        wildcard_patterns = [
+            owner
+            for owner in (name_index or {}).keys()
+            if zone_helpers.is_wildcard_domain_pattern(str(owner))
+        ]
+        return zone_helpers.sort_wildcard_patterns(wildcard_patterns)
+
+    rebuilt_name_index: Optional[
+        Dict[str, Dict[int, Tuple[int, List[str], List[str]]]]
+    ] = None
+    rebuilt_wildcard_owners: Optional[List[str]] = None
+    try:
+        rebuilt_name_index = _rebuild_name_index_from_records(new_records)
+        rebuilt_wildcard_owners = _rebuild_wildcard_owners_from_name_index(
+            rebuilt_name_index
+        )
+    except Exception:  # pragma: no cover - defensive
+        logger.warning(
+            "Failed to rebuild _name_index/_wildcard_owners after DNS UPDATE commit",
+            exc_info=True,
+        )
+
     if lock is None:
         plugin.records = new_records
-        try:
-            plugin._name_index = _rebuild_name_index_from_records(new_records)
-        except Exception:  # pragma: no cover - defensive
-            logger.warning(
-                "Failed to rebuild _name_index after DNS UPDATE commit",
-                exc_info=True,
-            )
+        if rebuilt_name_index is not None:
+            plugin._name_index = rebuilt_name_index
+        if rebuilt_wildcard_owners is not None:
+            plugin._wildcard_owners = rebuilt_wildcard_owners
     else:
         with lock:
             plugin.records = new_records
-            try:
-                plugin._name_index = _rebuild_name_index_from_records(new_records)
-            except Exception:  # pragma: no cover - defensive
-                logger.warning(
-                    "Failed to rebuild _name_index after DNS UPDATE commit",
-                    exc_info=True,
-                )
+            if rebuilt_name_index is not None:
+                plugin._name_index = rebuilt_name_index
+            if rebuilt_wildcard_owners is not None:
+                plugin._wildcard_owners = rebuilt_wildcard_owners
 
     return 0, None
 
