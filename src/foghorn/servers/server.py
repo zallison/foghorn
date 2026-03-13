@@ -111,6 +111,23 @@ def _is_rfc1918_ptr_query_name(qname: str) -> bool:
     return any(addr in network for network in _RFC1918_V4_NETWORKS)
 
 
+@registered_lru_cached(maxsize=4096)
+def _is_forward_local_blocked_query(qname: str, qtype: int) -> bool:
+    """Brief: Determine whether forward_local gate should block this query.
+
+    Inputs:
+      - qname: Lowercase owner name with no trailing dot.
+      - qtype: Numeric DNS QTYPE value.
+
+    Outputs:
+      - bool: True when qname is `.local`/`local` or a PTR in RFC1918 space.
+    """
+
+    if qname.endswith(".local") or qname == "local":
+        return True
+    return qtype == QTYPE.PTR and _is_rfc1918_ptr_query_name(qname)
+
+
 def _bg_submit(key: object, fn) -> None:
     """Brief: Submit a bounded background task with best-effort coalescing.
 
@@ -876,11 +893,10 @@ def _resolve_core(
         # often locally-served and should follow the same gate.
         forward_local = bool(getattr(handler, "forward_local", False))
         qname_lower = qname.lower()
-        is_local_query = qname_lower.endswith(".local") or qname_lower == "local"
         is_rfc1918_ptr_query = qtype == QTYPE.PTR and _is_rfc1918_ptr_query_name(
             qname_lower
         )
-        if not forward_local and (is_local_query or is_rfc1918_ptr_query):
+        if not forward_local and _is_forward_local_blocked_query(qname_lower, qtype):
             r = req.reply()
             r.header.rcode = RCODE.NXDOMAIN
             _echo_client_edns(req, r)
