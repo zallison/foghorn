@@ -270,6 +270,51 @@ def test_process_update_message_returns_noerror_for_valid_tsig_update() -> None:
     assert parsed_resp.rcode() == dns.rcode.NOERROR
 
 
+def test_process_update_message_accepts_tsig_keys_loaded_from_file(
+    tmp_path,
+) -> None:
+    """Brief: Valid TSIG updates succeed when TSIG keys are loaded from file.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts NOERROR response for a TSIG-signed UPDATE with keys_files config.
+    """
+    key_name = "file-key.example.com."
+    secret_b64 = "dGVzdHNlY3JldA=="
+    key_file = tmp_path / "tsig-keys.yaml"
+    key_file.write_text(
+        "- name: file-key.example.com.\n"
+        "  algorithm: hmac-sha256\n"
+        "  secret: dGVzdHNlY3JldA==\n",
+        encoding="utf-8",
+    )
+
+    keyring = dns.tsigkeyring.from_text({key_name: secret_b64})
+    msg = dns.update.Update("example.com.")
+    msg.use_tsig(keyring=keyring, keyname=key_name, algorithm="hmac-sha256")
+    msg.add("host", 60, "A", "192.0.2.124")
+    req_wire = msg.to_wire()
+    parsed_req = dns.message.from_wire(req_wire, keyring=keyring)
+
+    plugin = SimpleNamespace(records={})
+    resp_wire = up.process_update_message(
+        req_wire,
+        zone_apex="example.com",
+        zone_config={"tsig": {"keys_files": [str(key_file)]}},
+        plugin=plugin,
+        client_ip="192.0.2.1",
+        listener="udp",
+    )
+    parsed_resp = dns.message.from_wire(
+        resp_wire,
+        keyring=keyring,
+        request_mac=parsed_req.mac,
+    )
+    assert parsed_resp.rcode() == dns.rcode.NOERROR
+
+
 def test_process_update_message_bad_tsig_key_returns_notauth_with_update_opcode() -> (
     None
 ):
@@ -459,6 +504,40 @@ def test_resolve_tsig_key_by_name() -> None:
         up.resolve_tsig_key_by_name("missing.", zone_cfg, dns_update_config={}) is None
     )
     assert up.resolve_tsig_key_by_name("k1.", {}, dns_update_config={}) is None
+
+
+def test_resolve_tsig_key_by_name_uses_pluggable_source_loaders() -> None:
+    """Brief: TSIG key lookup can resolve keys from pluggable external sources.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts resolve_tsig_key_by_name returns key loaded from custom loader.
+    """
+
+    def _api_loader(source: dict) -> list[dict]:
+        _ = source
+        return [
+            {
+                "name": "api-key.example.",
+                "algorithm": "hmac-sha256",
+                "secret": "YXBp",
+            }
+        ]
+
+    zone_cfg = {
+        "tsig": {
+            "key_sources": [{"type": "api", "endpoint": "https://example.invalid/keys"}]
+        }
+    }
+    resolved = up.resolve_tsig_key_by_name(
+        "api-key.example.",
+        zone_cfg,
+        dns_update_config={"tsig_key_source_loaders": {"api": _api_loader}},
+    )
+    assert resolved is not None
+    assert resolved["name"] == "api-key.example."
 
 
 def test_apply_update_operations_returns_noerror_and_does_not_mutate_records() -> None:
