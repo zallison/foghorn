@@ -16,9 +16,10 @@ import os
 import struct
 import threading
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
+TsigKeySourceLoader = Callable[[dict], List[dict]]
 
 
 def load_cidr_list_from_file(path: str) -> List[str]:
@@ -89,6 +90,171 @@ def combine_lists(
     return combined
 
 
+def load_tsig_keys_from_file(path: str) -> List[dict]:
+    """Brief: Load TSIG key definitions from a YAML/JSON file.
+
+    Inputs:
+      - path: File path containing either:
+          * a top-level list of TSIG key dicts, or
+          * a mapping with a `keys` list.
+
+    Outputs:
+      - List of TSIG key configuration dicts.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw_text = f.read()
+    except Exception as exc:
+        logger.warning("Failed to load TSIG keys from %s: %s", path, exc)
+        return []
+
+    try:
+        import yaml
+    except Exception as exc:  # pragma: no cover - yaml is a core dependency
+        logger.warning("Failed to import yaml for TSIG key loading: %s", exc)
+        return []
+
+    try:
+        parsed = yaml.safe_load(raw_text)
+    except Exception as exc:
+        logger.warning("Failed to parse TSIG key file %s: %s", path, exc)
+        return []
+
+    if parsed is None:
+        return []
+
+    if isinstance(parsed, dict):
+        keys_obj = parsed.get("keys", [])
+    elif isinstance(parsed, list):
+        keys_obj = parsed
+    else:
+        logger.warning(
+            "Invalid TSIG key file structure in %s: expected list or mapping",
+            path,
+        )
+        return []
+
+    keys: List[dict] = []
+    for idx, item in enumerate(keys_obj or []):
+        if isinstance(item, dict):
+            keys.append(dict(item))
+        else:
+            logger.warning(
+                "Ignoring non-dict TSIG key entry at %s[%d]: %r",
+                path,
+                idx,
+                item,
+            )
+    return keys
+
+
+def load_tsig_keys_from_source_file(source: dict) -> List[dict]:
+    """Brief: Load TSIG keys from a file-based source definition.
+
+    Inputs:
+      - source: Source mapping with at least:
+          * type: "file"
+          * path: Filesystem path to YAML/JSON TSIG key definitions.
+
+    Outputs:
+      - List of TSIG key dicts.
+    """
+    path = source.get("path") if isinstance(source, dict) else None
+    if not path:
+        logger.warning("TSIG key source type=file missing required 'path'")
+        return []
+    return load_tsig_keys_from_file(str(path))
+
+
+def get_default_tsig_key_source_loaders() -> Dict[str, TsigKeySourceLoader]:
+    """Brief: Return default TSIG key-source loader registry.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Mapping of source type -> loader callable.
+    """
+    return {"file": load_tsig_keys_from_source_file}
+
+
+def resolve_tsig_key_configs(
+    zone_config: dict,
+    source_loaders: Optional[Dict[str, TsigKeySourceLoader]] = None,
+) -> List[dict]:
+    """Brief: Resolve TSIG key configs from inline and external sources.
+
+    Inputs:
+      - zone_config: DNS UPDATE zone config that may contain:
+          * tsig.keys (inline list of key dicts)
+          * tsig.keys_files (list of file paths)
+          * tsig.key_sources (list of source mappings with a type field)
+      - source_loaders: Optional loader registry to extend/override source
+        types (e.g. "database", "api").
+
+    Outputs:
+      - Ordered list of resolved TSIG key dicts.
+
+    Notes:
+      - Resolution order is inline keys first, then keys_files, then key_sources.
+      - This function provides a single extensibility seam for future UPDATE
+        key/config loading backends.
+    """
+    if not isinstance(zone_config, dict):
+        return []
+
+    tsig_cfg = zone_config.get("tsig")
+    if not isinstance(tsig_cfg, dict):
+        return []
+
+    resolved: List[dict] = []
+
+    for item in tsig_cfg.get("keys", []) or []:
+        if isinstance(item, dict):
+            resolved.append(dict(item))
+
+    for path in tsig_cfg.get("keys_files", []) or []:
+        resolved.extend(load_tsig_keys_from_file(str(path)))
+
+    loaders = get_default_tsig_key_source_loaders()
+    if isinstance(source_loaders, dict):
+        loaders.update(source_loaders)
+
+    for source in tsig_cfg.get("key_sources", []) or []:
+        if not isinstance(source, dict):
+            logger.warning("Ignoring non-dict TSIG key source: %r", source)
+            continue
+        source_type = str(source.get("type", "")).strip().lower()
+        if not source_type:
+            logger.warning("Ignoring TSIG key source without type: %r", source)
+            continue
+        loader = loaders.get(source_type)
+        if loader is None:
+            logger.warning("No TSIG key source loader for type=%s", source_type)
+            continue
+        try:
+            loaded = loader(source)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "TSIG key source loader failed for type=%s: %s",
+                source_type,
+                exc,
+                exc_info=True,
+            )
+            continue
+        for item in loaded or []:
+            if isinstance(item, dict):
+                resolved.append(dict(item))
+            else:
+                logger.warning(
+                    "Ignoring non-dict TSIG key from source type=%s: %r",
+                    source_type,
+                    item,
+                )
+
+    return resolved
+
+
 def normalize_cidr(
     cidr: str,
 ) -> Optional[ipaddress.IPv4Network | ipaddress.IPv6Network]:
@@ -156,6 +322,22 @@ def collect_update_file_paths(dns_update_config: dict) -> List[str]:
         if isinstance(tsig, dict):
             for key_cfg in tsig.get("keys", []) or []:
                 _collect_scope_files(key_cfg)
+            for keys_file in tsig.get("keys_files", []) or []:
+                file_set.add(str(keys_file))
+                for key_cfg in load_tsig_keys_from_file(str(keys_file)):
+                    _collect_scope_files(key_cfg)
+            for source in tsig.get("key_sources", []) or []:
+                if not isinstance(source, dict):
+                    continue
+                source_type = str(source.get("type", "")).strip().lower()
+                if source_type != "file":
+                    continue
+                source_path = source.get("path")
+                if not source_path:
+                    continue
+                file_set.add(str(source_path))
+                for key_cfg in load_tsig_keys_from_source_file(source):
+                    _collect_scope_files(key_cfg)
 
         # Per-PSK token scopes
         psk = zone.get("psk")

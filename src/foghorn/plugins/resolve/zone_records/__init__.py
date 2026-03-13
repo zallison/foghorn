@@ -1033,6 +1033,9 @@ class ZoneRecords(BasePlugin):
         # Normalize DNS UPDATE configuration
         dns_update_cfg = self.config.get("dns_update")
         self._dns_update_config = dns_update_cfg
+        self._dns_update_tsig_key_source_loaders = (
+            update_helpers.get_default_tsig_key_source_loaders()
+        )
         if dns_update_cfg:
             self._dns_update_file_paths = update_helpers.collect_update_file_paths(
                 dns_update_cfg
