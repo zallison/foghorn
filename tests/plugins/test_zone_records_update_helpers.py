@@ -143,6 +143,104 @@ def test_collect_update_file_paths_skips_non_zone_dicts_and_dedups(tmp_path) -> 
     assert paths == {str(a), str(b)}
 
 
+def test_collect_update_file_paths_includes_tsig_keys_files_and_file_sources(
+    tmp_path,
+) -> None:
+    key_file = tmp_path / "tsig-keys.yaml"
+    key_file.write_text(
+        "- name: key1.example.\n" "  algorithm: hmac-sha256\n" "  secret: dGVzdA==\n",
+        encoding="utf-8",
+    )
+    source_file = tmp_path / "tsig-source.yaml"
+    source_file.write_text(
+        "keys:\n"
+        "  - name: key2.example.\n"
+        "    algorithm: hmac-sha256\n"
+        "    secret: dGVzdDI=\n",
+        encoding="utf-8",
+    )
+
+    cfg = {
+        "zones": [
+            {
+                "zone": "example.com",
+                "tsig": {
+                    "keys_files": [str(key_file)],
+                    "key_sources": [{"type": "file", "path": str(source_file)}],
+                },
+            }
+        ]
+    }
+
+    paths = set(uh.collect_update_file_paths(cfg))
+    assert str(key_file) in paths
+    assert str(source_file) in paths
+
+
+def test_load_tsig_keys_from_file_supports_list_and_mapping(tmp_path) -> None:
+    list_file = tmp_path / "keys-list.yaml"
+    list_file.write_text(
+        "- name: list.example.\n" "  algorithm: hmac-sha256\n" "  secret: dGVzdA==\n",
+        encoding="utf-8",
+    )
+    map_file = tmp_path / "keys-map.yaml"
+    map_file.write_text(
+        "keys:\n"
+        "  - name: map.example.\n"
+        "    algorithm: hmac-sha256\n"
+        "    secret: Zm9v\n",
+        encoding="utf-8",
+    )
+
+    list_keys = uh.load_tsig_keys_from_file(str(list_file))
+    map_keys = uh.load_tsig_keys_from_file(str(map_file))
+
+    assert list_keys == [
+        {"name": "list.example.", "algorithm": "hmac-sha256", "secret": "dGVzdA=="}
+    ]
+    assert map_keys == [
+        {"name": "map.example.", "algorithm": "hmac-sha256", "secret": "Zm9v"}
+    ]
+
+
+def test_resolve_tsig_key_configs_combines_inline_files_and_custom_source(
+    tmp_path,
+) -> None:
+    key_file = tmp_path / "keys-file.yaml"
+    key_file.write_text(
+        "- name: file.example.\n" "  algorithm: hmac-sha256\n" "  secret: ZmlsZQ==\n",
+        encoding="utf-8",
+    )
+
+    def _api_loader(source: dict) -> list[dict]:
+        _ = source
+        return [
+            {
+                "name": "api.example.",
+                "algorithm": "hmac-sha256",
+                "secret": "YXBp",
+            }
+        ]
+
+    zone_cfg = {
+        "tsig": {
+            "keys": [
+                {
+                    "name": "inline.example.",
+                    "algorithm": "hmac-sha256",
+                    "secret": "aW5saW5l",
+                }
+            ],
+            "keys_files": [str(key_file)],
+            "key_sources": [{"type": "api", "endpoint": "https://example.invalid"}],
+        }
+    }
+
+    keys = uh.resolve_tsig_key_configs(zone_cfg, source_loaders={"api": _api_loader})
+    key_names = [k.get("name") for k in keys]
+    assert key_names == ["inline.example.", "file.example.", "api.example."]
+
+
 def test_reload_update_lists_loads_when_mtime_changes_and_caches(
     tmp_path, monkeypatch
 ) -> None:
