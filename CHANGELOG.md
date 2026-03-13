@@ -17,6 +17,8 @@ All notable changes to this project will be documented in this file.
 - Rate limit plugin now adds EDE messages (code 17 "Rate-Limited") when rate limiting, providing better visibility into why queries were rejected.
 
 ### Added
+- Admin API: added `/api/v1/config/schema` and `/config/schema` endpoints (FastAPI and threaded admin server) to return the active JSON config schema document.
+- ZoneRecords DNS UPDATE TSIG config now supports loading keys from `tsig.keys_files` and pluggable `tsig.key_sources` (default `type: file` loader).
 - Upstreams: support backup upstream endpoints via `upstreams.backup.endpoints` (normalized alongside primary endpoints).
 - Upstreams: added `upstreams.health` tuning config (health thresholds/probes) and surfaced it in admin upstream status payloads.
 - Upstreams: added `upstreams.health.profile` to apply built-in upstream health preset bundles from `upstreams_health_profiles.yaml`.
@@ -114,6 +116,8 @@ All notable changes to this project will be documented in this file.
 - Logging/transport diagnostics: DoT and admin TLS failure warnings now include richer certificate/key/CA context with likely-cause hints.
 - Failover diagnostics: upstream skip/failure logging now includes stable upstream identity labels and health context summaries.
 - Admin UI: plugin table rendering now supports client-side searchable sections, and rate-limit snapshots include config item details.
+- Resolver forward-local gating now uses a cached helper for `.local` and RFC1918 PTR block checks in the hot path.
+- Config interpolation now ignores non-ALL_CAPS keys defined in top-level `variables`/`vars` (allowing mixed-case entries to be used as YAML anchors without interpolation effects).
 
 ### Fixed
 - DNS UPDATE TSIG parse/verification failures now return protocol-correct UPDATE responses with `NOTAUTH` (instead of malformed opcode handling), including improved TSIG failure diagnostics.
@@ -131,6 +135,8 @@ All notable changes to this project will be documented in this file.
 - DNSSEC: `ensure_zone_keys` now searches fallback relative key directories (including `config/.config` cwd patterns) before concluding keys are missing when generation is disabled.
 
 ### Tests
+- Added ZoneRecords TSIG update tests covering `keys_files` loading and pluggable `key_sources` resolution paths.
+- Added web/admin route coverage asserting `/api/v1/config/schema` and `/config/schema` return matching schema payloads in both FastAPI and threaded modes.
 - Added DNS UPDATE regression tests for TSIG bad-key handling, TSIG algorithm mismatch responses, and key-scoped `allow_names` enforcement (including wildcard scope matches).
 - Added DNS UPDATE regression coverage for wildcard-owner index rebuilds after update commits.
 - Added lifecycle tests for `run_shutdown_plugins()` and main-loop shutdown hook invocation.
