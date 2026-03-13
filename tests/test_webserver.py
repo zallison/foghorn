@@ -359,6 +359,38 @@ def test_config_raw_paths_match(tmp_path) -> None:
         assert data["config"]["initial"] == 1
 
 
+def test_config_schema_paths_match() -> None:
+    """Brief: /api/v1/config/schema matches /config/schema in FastAPI mode.
+
+    Inputs:
+      - App created with minimal config and webserver enabled.
+
+    Outputs:
+      - None: Asserts both URLs return the same schema document/path metadata.
+    """
+
+    cfg = {
+        "webserver": {"enabled": True},
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    canonical = client.get("/api/v1/config/schema")
+    alias = client.get("/config/schema")
+
+    assert canonical.status_code == 200
+    assert alias.status_code == 200
+
+    canonical_data = canonical.json()
+    alias_data = alias.json()
+    assert canonical_data["schema_path"] == alias_data["schema_path"]
+    assert canonical_data["schema"] == alias_data["schema"]
+    assert canonical_data["schema_path"].endswith("config-schema.json")
+    assert "$schema" in canonical_data["schema"]
+
+
 def test_health_endpoint_returns_ok() -> None:
     """Brief: /health must respond with HTTP 200 and status "ok".
 
