@@ -263,11 +263,15 @@ def process_update_message(
 
     # 1) Parse the request using dnspython. If TSIG keys are configured, require
     # TSIG and verify signature.
-    tsig_cfg = zone_config.get("tsig") if isinstance(zone_config, dict) else None
-    if isinstance(tsig_cfg, dict):
-        key_configs = list(tsig_cfg.get("keys") or [])
-    else:
-        key_configs = []
+    from foghorn.plugins.resolve.zone_records import update_helpers as uh
+
+    source_loaders = getattr(plugin, "_dns_update_tsig_key_source_loaders", None)
+    if not isinstance(source_loaders, dict):
+        source_loaders = None
+    key_configs = uh.resolve_tsig_key_configs(
+        zone_config,
+        source_loaders=source_loaders,
+    )
 
     have_auth_config = bool(key_configs)
 
@@ -975,11 +979,15 @@ def resolve_tsig_key_by_name(
     Outputs:
       - TSIG key configuration dict, or None if not found.
     """
-    tsig_cfg = zone.get("tsig")
-    if not tsig_cfg:
-        return None
+    from foghorn.plugins.resolve.zone_records import update_helpers as uh
 
-    keys = tsig_cfg.get("keys", []) or []
+    source_loaders = None
+    if isinstance(dns_update_config, dict):
+        maybe_loaders = dns_update_config.get("tsig_key_source_loaders")
+        if isinstance(maybe_loaders, dict):
+            source_loaders = maybe_loaders
+
+    keys = uh.resolve_tsig_key_configs(zone, source_loaders=source_loaders)
     for key in keys:
         if isinstance(key, dict) and key.get("name", "") == key_name:
             return key
