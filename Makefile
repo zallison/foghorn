@@ -295,6 +295,8 @@ docker-run: docker-build
         --privileged \
 		--label "com.foghorn.priority=${FH_PRIORITY}" \
 		-v /etc/hosts:/etc/hosts:ro \
+		-e LISTEN=${LISTEN} \
+		-e LISTEN_PORT=${LISTEN} \
         --restart unless-stopped \
         ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
