@@ -265,3 +265,96 @@ def test_validate_config_schema_loading_errors_are_best_effort(
     assert "Failed to load or parse configuration schema" in joined
     assert "skipping JSON Schema validation" in joined
     assert "disk failure" in joined
+
+
+def _minimal_forward_config() -> dict:
+    """Brief: Build a minimal forward-mode config mapping for validation tests.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - dict: Minimal configuration satisfying v2 schema requirements.
+    """
+
+    return {
+        "server": {
+            "resolver": {"mode": "forward"},
+            "listen": {"udp": {"enabled": True}},
+        },
+        "upstreams": {"endpoints": [{"host": "1.1.1.1", "port": 53}]},
+    }
+
+
+def test_comment_and_id_fields_accept_short_strings() -> None:
+    """Brief: comment/id fields are accepted on any mapping when strings <= 254 chars.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts validate_config does not raise for valid comment/id usage.
+    """
+
+    cfg = _minimal_forward_config()
+    cfg["comment"] = "root comment"
+    cfg["id"] = "root-id"
+    cfg["upstreams"]["comment"] = "upstreams comment"
+    cfg["upstreams"]["endpoints"][0]["comment"] = "endpoint comment"
+    cfg["upstreams"]["endpoints"][0]["id"] = "endpoint-id"
+    cfg["plugins"] = [
+        {
+            "type": "dummy",
+            "comment": "plugin entry comment",
+            "id": "plugin-entry-id",
+            "config": {"comment": "plugin config comment", "id": "plugin-config-id"},
+        }
+    ]
+
+    validate_config(cfg, config_path="inline-config")
+
+
+def test_comment_and_id_fields_reject_non_string_values() -> None:
+    """Brief: comment/id fields must be strings; non-strings raise ValueError.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts ValueError for invalid comment/id types.
+    """
+
+    cfg = _minimal_forward_config()
+    cfg["comment"] = 123
+
+    with pytest.raises(ValueError, match=r"comment must be a string"):
+        validate_config(cfg, config_path="inline-config")
+
+    cfg2 = _minimal_forward_config()
+    cfg2["id"] = {"not": "a string"}
+
+    with pytest.raises(ValueError, match=r"id must be a string"):
+        validate_config(cfg2, config_path="inline-config")
+
+
+def test_comment_and_id_fields_reject_overlong_values() -> None:
+    """Brief: comment/id fields over 254 chars raise ValueError.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts ValueError for overly long comment/id values.
+    """
+
+    cfg = _minimal_forward_config()
+    cfg["comment"] = "a" * 255
+
+    with pytest.raises(ValueError, match=r"comment exceeds 254 characters"):
+        validate_config(cfg, config_path="inline-config")
+
+    cfg2 = _minimal_forward_config()
+    cfg2["id"] = "b" * 255
+
+    with pytest.raises(ValueError, match=r"id exceeds 254 characters"):
+        validate_config(cfg2, config_path="inline-config")
