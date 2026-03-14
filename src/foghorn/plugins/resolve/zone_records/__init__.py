@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
 import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple
@@ -229,12 +230,178 @@ class UpdateZoneApexConfig(BaseModel):
         extra = "forbid"
 
 
+class PersistenceConfig(BaseModel):
+    """Brief: Persistence configuration for DNS UPDATE journaling.
+
+    Inputs:
+      - enabled: Whether persistence is enabled.
+      - state_dir: Directory for journal files.
+      - fsync_mode: Durability mode (always/interval).
+      - fsync_interval_ms: Interval fsync mode threshold.
+      - max_journal_bytes: Maximum journal size before compaction.
+      - max_journal_entries: Maximum entry count before compaction.
+      - compact_interval_seconds: Minimum time between compactions.
+      - compact_tombstone_ratio: Tombstone ratio threshold.
+
+    Outputs:
+      - PersistenceConfig instance.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable persistence for DNS UPDATE journaling.",
+    )
+    state_dir: Optional[str] = Field(
+        default=None,
+        description="Directory for journal files. Defaults to runtime state directory.",
+    )
+    fsync_mode: str = Field(
+        default="interval",
+        description="Durability mode: 'always' (fsync every write) or 'interval' (periodic fsync).",
+    )
+    fsync_interval_ms: int = Field(
+        default=5000,
+        ge=0,
+        description="Interval in ms for fsync when mode='interval'.",
+    )
+    max_journal_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        ge=0,
+        description="Maximum journal size in bytes before compaction.",
+    )
+    max_journal_entries: int = Field(
+        default=10000,
+        ge=0,
+        description="Maximum number of entries before compaction.",
+    )
+    compact_interval_seconds: int = Field(
+        default=3600,
+        ge=0,
+        description="Minimum seconds between compactions.",
+    )
+    compact_tombstone_ratio: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Tombstone ratio threshold for compaction.",
+    )
+
+    class Config:
+        extra = "forbid"
+
+
+class ReplicationConfig(BaseModel):
+    """Brief: Replication configuration for DNS UPDATE.
+
+    Inputs:
+      - role: Node role for updates.
+      - zone_owner_node_id: Owner node ID for zones.
+      - notify_on_update: Send NOTIFY after successful UPDATE.
+      - reject_direct_update_on_replica: Reject client updates on replicas.
+
+    Outputs:
+      - ReplicationConfig instance.
+    """
+
+    role: str = Field(
+        default="primary",
+        description="Node role: 'primary', 'replica', or 'peer'.",
+    )
+    zone_owner_node_id: Optional[str] = Field(
+        default=None,
+        description="Node ID that owns zones in peer mode.",
+    )
+    notify_on_update: bool = Field(
+        default=True,
+        description="Send NOTIFY after successful UPDATE commit.",
+    )
+    node_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Stable node identity used in dynamic update journal origin metadata. "
+            "Defaults to FOGHORN_NODE_ID when omitted."
+        ),
+    )
+    reject_direct_update_on_replica: bool = Field(
+        default=False,
+        description="Reject client UPDATE on replica nodes (false=forward to owner).",
+    )
+
+    class Config:
+        extra = "forbid"
+
+
+class SecurityConfig(BaseModel):
+    """Brief: Security limits for DNS UPDATE.
+
+    Inputs:
+      - max_updates_per_message: Max updates per DNS message.
+      - max_rr_values_per_rrset: Max values per RRset.
+      - max_owner_length: Max owner name length.
+      - max_rdata_length: Max rdata string length.
+      - max_ttl_range: Max TTL value.
+      - max_transaction_bytes: Max journal transaction size.
+      - rate_limit_per_client: Token bucket rate per client IP.
+      - rate_limit_per_key: Token bucket rate per TSIG key.
+
+    Outputs:
+      - SecurityConfig instance.
+    """
+
+    max_updates_per_message: int = Field(
+        default=100,
+        ge=0,
+        description="Maximum updates per DNS message.",
+    )
+    max_rr_values_per_rrset: int = Field(
+        default=100,
+        ge=0,
+        description="Maximum RR values per RRset mutation.",
+    )
+    max_owner_length: int = Field(
+        default=255,
+        ge=0,
+        description="Maximum owner name length.",
+    )
+    max_rdata_length: int = Field(
+        default=65535,
+        ge=0,
+        description="Maximum rdata string length.",
+    )
+    max_ttl_range: int = Field(
+        default=86400,
+        ge=0,
+        description="Maximum TTL value in seconds.",
+    )
+    max_transaction_bytes: int = Field(
+        default=1024 * 1024,
+        ge=0,
+        description="Maximum journal transaction size in bytes.",
+    )
+    rate_limit_per_client: int = Field(
+        default=10,
+        ge=0,
+        description="Token bucket rate limit per client IP (requests per minute).",
+    )
+    rate_limit_per_key: int = Field(
+        default=100,
+        ge=0,
+        description="Token bucket rate limit per TSIG key (requests per minute).",
+    )
+
+    class Config:
+        extra = "forbid"
+
+
 class DnsUpdateConfig(BaseModel):
     """Brief: DNS UPDATE configuration for ZoneRecords.
 
     Inputs:
       - enabled: Whether DNS UPDATE is enabled.
       - zones: Per-zone UPDATE configuration.
+      - persistence: Persistence and journaling configuration.
+      - replication: Replication and clustering configuration.
+      - security: Security limits and rate limiting.
 
     Outputs:
       - DnsUpdateConfig instance.
@@ -247,6 +414,18 @@ class DnsUpdateConfig(BaseModel):
     zones: Optional[List[UpdateZoneApexConfig]] = Field(
         default=None,
         description="Per-zone DNS UPDATE configuration.",
+    )
+    persistence: Optional[PersistenceConfig] = Field(
+        default=None,
+        description="Persistence and journaling configuration.",
+    )
+    replication: Optional[ReplicationConfig] = Field(
+        default=None,
+        description="Replication and clustering configuration.",
+    )
+    security: Optional[SecurityConfig] = Field(
+        default=None,
+        description="Security limits and rate limiting.",
     )
 
     class Config:
@@ -381,8 +560,12 @@ class ZoneDnssecSigningConfig(BaseModel):
     """
 
     enabled: bool = Field(
-        default=False,
-        description="Enable automatic DNSSEC signing for authoritative zones.",
+        default=True,
+        description=(
+            "Enable automatic DNSSEC signing for authoritative zones. "
+            "Defaults to true when dnssec_signing is configured; set false "
+            "to explicitly disable."
+        ),
     )
     keys_dir: Optional[str] = Field(
         default=None,
@@ -1033,6 +1216,25 @@ class ZoneRecords(BasePlugin):
         # Normalize DNS UPDATE configuration
         dns_update_cfg = self.config.get("dns_update")
         self._dns_update_config = dns_update_cfg
+        self._dns_update_persistence_config = {}
+        self._dns_update_journal_state_dir = None
+        self._dns_update_node_id = str(os.getenv("FOGHORN_NODE_ID", "unknown"))
+        self._dynamic_last_seq_by_zone: Dict[str, int] = {}
+        self._dns_update_replay_duration_seconds: float = 0.0
+        self._dns_update_replay_entries: int = 0
+        self._dns_update_compact_count: int = 0
+        self._dns_update_rate_limit_hits: int = 0
+        self._dns_update_notify_sent: int = 0
+        self._dns_update_notify_failed: int = 0
+        if isinstance(dns_update_cfg, dict):
+            persistence_cfg = dns_update_cfg.get("persistence")
+            if isinstance(persistence_cfg, dict):
+                self._dns_update_persistence_config = dict(persistence_cfg)
+            replication_cfg = dns_update_cfg.get("replication")
+            if isinstance(replication_cfg, dict):
+                node_id = replication_cfg.get("node_id")
+                if node_id:
+                    self._dns_update_node_id = str(node_id)
         self._dns_update_tsig_key_source_loaders = (
             update_helpers.get_default_tsig_key_source_loaders()
         )
@@ -1074,6 +1276,7 @@ class ZoneRecords(BasePlugin):
 
         # Initial load
         loader.load_records(self)
+        self._apply_dns_update_journal_replay()
         self._ttl = self.config.get("ttl", 300)
 
         # Start watchdog if enabled
@@ -1267,6 +1470,67 @@ class ZoneRecords(BasePlugin):
             ),
             "owners": int(len(name_index)),
         }
+        dns_update_cfg = getattr(self, "_dns_update_config", None)
+        if isinstance(dns_update_cfg, dict):
+            persistence_cfg = dns_update_cfg.get("persistence")
+            if isinstance(persistence_cfg, dict) and bool(
+                persistence_cfg.get("enabled", False)
+            ):
+                journal_state_dir = getattr(self, "_dns_update_journal_state_dir", None)
+                per_zone_state: Dict[str, Dict[str, object]] = {}
+                zones_raw = dns_update_cfg.get("zones")
+                configured_zones: List[str] = []
+                if isinstance(zones_raw, list):
+                    configured_zones = [
+                        str(z.get("zone", "")).rstrip(".").lower()
+                        for z in zones_raw
+                        if isinstance(z, dict) and z.get("zone")
+                    ]
+                try:
+                    from .journal import load_manifest
+                except Exception:
+                    load_manifest = None
+                for zone in configured_zones:
+                    seq = int(
+                        getattr(self, "_dynamic_last_seq_by_zone", {}).get(zone, 0) or 0
+                    )
+                    zone_state: Dict[str, object] = {"last_seq": seq}
+                    if journal_state_dir and callable(load_manifest):
+                        try:
+                            manifest = load_manifest(
+                                zone_apex=zone,
+                                base_dir=str(journal_state_dir),
+                            )
+                            zone_state["journal_bytes"] = int(
+                                getattr(manifest, "journal_bytes", 0) or 0
+                            )
+                            zone_state["snapshot_seq"] = int(
+                                getattr(manifest, "snapshot_seq", 0) or 0
+                            )
+                        except Exception:
+                            pass
+                    per_zone_state[zone] = zone_state
+                summary["dns_update"] = {
+                    "replay_duration_seconds": float(
+                        getattr(self, "_dns_update_replay_duration_seconds", 0.0) or 0.0
+                    ),
+                    "replay_entries": int(
+                        getattr(self, "_dns_update_replay_entries", 0) or 0
+                    ),
+                    "compactions": int(
+                        getattr(self, "_dns_update_compact_count", 0) or 0
+                    ),
+                    "rate_limit_hits": int(
+                        getattr(self, "_dns_update_rate_limit_hits", 0) or 0
+                    ),
+                    "notify_sent": int(
+                        getattr(self, "_dns_update_notify_sent", 0) or 0
+                    ),
+                    "notify_failed": int(
+                        getattr(self, "_dns_update_notify_failed", 0) or 0
+                    ),
+                    "zones": per_zone_state,
+                }
 
         return {
             "summary": summary,
@@ -1299,6 +1563,171 @@ class ZoneRecords(BasePlugin):
           - None
         """
         loader.load_records(self)
+        self._apply_dns_update_journal_replay()
+
+    def _rebuild_indexes_from_records(self) -> None:
+        """Brief: Rebuild internal name and wildcard indexes from records.
+
+        Inputs:
+          - None (uses current ``self.records`` mapping).
+
+        Outputs:
+          - None; mutates ``self._name_index`` and ``self._wildcard_owners``.
+        """
+        name_index: Dict[str, Dict[int, Tuple[int, List[str], List[str]]]] = {}
+        for (owner, qtype), entry in (self.records or {}).items():
+            try:
+                ttl, values, sources = entry
+            except (TypeError, ValueError):
+                try:
+                    ttl, values = entry
+                    sources = []
+                except (TypeError, ValueError):
+                    continue
+            owner_norm = str(owner).rstrip(".").lower()
+            qtype_int = int(qtype)
+            per_owner = name_index.setdefault(owner_norm, {})
+            per_owner[qtype_int] = (
+                int(ttl),
+                list(values or []),
+                list(sources or []),
+            )
+        self._name_index = name_index
+        wildcard_owners = [
+            owner
+            for owner in name_index.keys()
+            if helpers.is_wildcard_domain_pattern(str(owner))
+        ]
+        self._wildcard_owners = helpers.sort_wildcard_patterns(wildcard_owners)
+
+    def _apply_dns_update_journal_replay(self) -> None:
+        """Brief: Replay persisted DNS UPDATE journals onto loaded records.
+
+        Inputs:
+          - None (uses current plugin config and in-memory records).
+
+        Outputs:
+          - None; mutates ``self.records`` and replay bookkeeping fields.
+        """
+        try:
+            dns_update_cfg = getattr(self, "_dns_update_config", None)
+            if not isinstance(dns_update_cfg, dict):
+                return
+            persistence_cfg = dns_update_cfg.get("persistence", {})
+            if not isinstance(persistence_cfg, dict):
+                return
+            if not bool(persistence_cfg.get("enabled", False)):
+                return
+            from .journal import replay_journal_to_records
+        except Exception:
+            return
+
+        state_dir = persistence_cfg.get("state_dir")
+        if not state_dir:
+            try:
+                from foghorn.runtime_config import get_runtime_state_dir
+
+                runtime_state_dir = get_runtime_state_dir()
+                if runtime_state_dir:
+                    state_dir = f"{runtime_state_dir}/zone_records"
+            except Exception:
+                state_dir = None
+        if not state_dir:
+            return
+
+        self._dns_update_journal_state_dir = str(state_dir)
+
+        zones = []
+        if isinstance(dns_update_cfg.get("zones"), list):
+            zones = [
+                str(z.get("zone", "")).rstrip(".").lower()
+                for z in dns_update_cfg["zones"]
+                if isinstance(z, dict) and z.get("zone")
+            ]
+        if not zones:
+            return
+
+        replay_started_at = time.time()
+        replay_entries = 0
+        with self._records_lock:
+            merged_records = dict(self.records or {})
+            for zone in zones:
+                replayed_records, last_seq = replay_journal_to_records(
+                    zone_apex=zone,
+                    base_dir=str(state_dir),
+                    records=merged_records,
+                    start_seq=0,
+                )
+                merged_records = replayed_records
+                self._dynamic_last_seq_by_zone[zone] = int(last_seq)
+                replay_entries += max(0, int(last_seq))
+            self.records = merged_records
+            self._rebuild_indexes_from_records()
+        self._dns_update_replay_duration_seconds = max(
+            0.0, float(time.time() - replay_started_at)
+        )
+        self._dns_update_replay_entries = int(replay_entries)
+
+    def compact_dns_update_journals(
+        self, zone_apex: Optional[str] = None
+    ) -> Dict[str, bool]:
+        """Brief: Manually compact DNS UPDATE journals for one or all configured zones.
+
+        Inputs:
+          - zone_apex: Optional single zone apex to compact; when omitted all
+            configured UPDATE zones are compacted.
+
+        Outputs:
+          - Mapping of zone apex to compaction success boolean.
+        """
+        result: Dict[str, bool] = {}
+        dns_update_cfg = getattr(self, "_dns_update_config", None)
+        if not isinstance(dns_update_cfg, dict):
+            return result
+        persistence_cfg = dns_update_cfg.get("persistence", {})
+        if not isinstance(persistence_cfg, dict) or not bool(
+            persistence_cfg.get("enabled", False)
+        ):
+            return result
+        state_dir = getattr(self, "_dns_update_journal_state_dir", None)
+        if not state_dir:
+            return result
+
+        configured_zones: List[str] = []
+        zones_raw = dns_update_cfg.get("zones")
+        if isinstance(zones_raw, list):
+            configured_zones = [
+                str(z.get("zone", "")).rstrip(".").lower()
+                for z in zones_raw
+                if isinstance(z, dict) and z.get("zone")
+            ]
+        if zone_apex is not None:
+            target = str(zone_apex).rstrip(".").lower()
+            configured_zones = [z for z in configured_zones if z == target]
+        if not configured_zones:
+            return result
+
+        from .journal import compact_zone_journal
+
+        with self._records_lock:
+            records_snapshot = dict(getattr(self, "records", {}) or {})
+        for zone in configured_zones:
+            seq = int(getattr(self, "_dynamic_last_seq_by_zone", {}).get(zone, 0) or 0)
+            try:
+                ok = compact_zone_journal(
+                    zone_apex=zone,
+                    base_dir=str(state_dir),
+                    records=records_snapshot,
+                    seq=seq,
+                )
+            except Exception:
+                ok = False
+            if ok:
+                self._dns_update_compact_count = int(
+                    getattr(self, "_dns_update_compact_count", 0) + 1
+                )
+            result[zone] = bool(ok)
+        return result
 
     def _reload_records_from_watchdog(self) -> None:
         """Brief: Internal wrapper for watchdog reload (called by watchdog handlers).
