@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import functools
 import gc
+from hashlib import sha1
 import logging
 import os
 import platform
@@ -1365,9 +1366,9 @@ def _log_startup_banner(logger: logging.Logger, *, config_path: str) -> None:
     Outputs:
       - None.
     """
-
     abs_cfg = os.path.abspath(config_path)
     cfg_size = _get_file_size_bytes(abs_cfg)
+    sha1_hash = sha1(abs_cfg.encode()).hexdigest()
     cfg_size_str = (
         f"{cfg_size} bytes ({_format_bytes(cfg_size)})"
         if cfg_size is not None
@@ -1397,6 +1398,7 @@ def _log_startup_banner(logger: logging.Logger, *, config_path: str) -> None:
     logger.info("Starting Foghorn")
     logger.info("  version=%s", FOGHORN_VERSION)
     logger.info("  config=%s (size=%s)", abs_cfg, cfg_size_str)
+    logger.info("  config_sha1=%s", sha1_hash)
     logger.info("  hostname=%s", hostname)
     logger.info("  arch=%s", arch)
     logger.info("  os=%s", os_id)
