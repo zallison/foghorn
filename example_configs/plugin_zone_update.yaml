@@ -33,6 +33,7 @@ plugins:
           - zone: example.com
             # TSIG authentication (works on UDP/TCP/DoT/DoH)
             tsig:
+              # Inline keys still work (existing behavior)
               keys:
                 # Key 1: Single hostname authorization (e.g., for home.homelab.net)
                 - name: "dynamic-key-1"
@@ -73,6 +74,14 @@ plugins:
                     - "172.16.0.0/12"
                     - "192.168.0.0/16"
                     - "fc00::/7"
+
+
+              # Pluggable key sources; default supports `type: file`.
+              # Additional source types (database/api/etc.) can be registered
+              # in the TSIG key source loader registry.
+              key_sources:
+                - type: file
+                  path: ./example_configs/zone_update_tsig_key_source_file.yaml
 
             # PSK authentication (restricted to DoT/DoH only)
             psk:
