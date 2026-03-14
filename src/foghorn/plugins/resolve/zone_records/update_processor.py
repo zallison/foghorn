@@ -16,7 +16,9 @@ Notes:
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+import os
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 import dns.exception
 import dns.flags
@@ -466,6 +468,31 @@ def process_update_message(
         zone_apex=apex_norm, client_ip=str(client_ip), listener=listener, plugin=plugin
     )
 
+    # 3a) Replication role policy gate for UPDATE writes.
+    try:
+        dns_update_cfg = getattr(plugin, "_dns_update_config", None)
+        replication_cfg = {}
+        if isinstance(dns_update_cfg, dict):
+            rcfg = dns_update_cfg.get("replication")
+            if isinstance(rcfg, dict):
+                replication_cfg = rcfg
+        role = str(replication_cfg.get("role", "primary")).strip().lower()
+        if role == "replica":
+            reject_direct = bool(
+                replication_cfg.get("reject_direct_update_on_replica", False)
+            )
+            if reject_direct:
+                resp = dns.message.make_response(request_msg)
+                resp.set_rcode(dns.rcode.REFUSED)
+                return resp.to_wire()
+            # Forward-to-owner mode is configured but explicit forwarding is
+            # not yet wired in this path; fail closed for now.
+            resp = dns.message.make_response(request_msg)
+            resp.set_rcode(dns.rcode.REFUSED)
+            return resp.to_wire()
+    except Exception:
+        pass
+
     ok, _err = verify_client_authorization(ctx, zone_config=zone_config)
     if not ok:
         resp = dns.message.make_response(request_msg)
@@ -573,6 +600,108 @@ def process_update_message(
         prereqs = []
         updates = []
 
+    # 4a) Security limits and basic rate limiting.
+    try:
+        dns_update_cfg = getattr(plugin, "_dns_update_config", None)
+        security_cfg = {}
+        if isinstance(dns_update_cfg, dict):
+            scfg = dns_update_cfg.get("security")
+            if isinstance(scfg, dict):
+                security_cfg = scfg
+
+        max_updates_per_message = int(
+            security_cfg.get("max_updates_per_message", 0) or 0
+        )
+        max_rr_values_per_rrset = int(
+            security_cfg.get("max_rr_values_per_rrset", 0) or 0
+        )
+        max_owner_length = int(security_cfg.get("max_owner_length", 0) or 0)
+        max_rdata_length = int(security_cfg.get("max_rdata_length", 0) or 0)
+        max_ttl_range = int(security_cfg.get("max_ttl_range", 0) or 0)
+
+        if max_updates_per_message > 0 and len(updates) > max_updates_per_message:
+            resp = dns.message.make_response(request_msg)
+            resp.set_rcode(dns.rcode.REFUSED)
+            return resp.to_wire()
+
+        for rrset in updates:
+            owner_text = str(getattr(rrset, "name", "")).rstrip(".")
+            if max_owner_length > 0 and len(owner_text) > max_owner_length:
+                resp = dns.message.make_response(request_msg)
+                resp.set_rcode(dns.rcode.REFUSED)
+                return resp.to_wire()
+            ttl_val = int(getattr(rrset, "ttl", 0) or 0)
+            if max_ttl_range > 0 and ttl_val > max_ttl_range:
+                resp = dns.message.make_response(request_msg)
+                resp.set_rcode(dns.rcode.REFUSED)
+                return resp.to_wire()
+            rr_values = [str(rdata) for rdata in rrset]
+            if max_rr_values_per_rrset > 0 and len(rr_values) > max_rr_values_per_rrset:
+                resp = dns.message.make_response(request_msg)
+                resp.set_rcode(dns.rcode.REFUSED)
+                return resp.to_wire()
+            if max_rdata_length > 0:
+                for value in rr_values:
+                    if len(value) > max_rdata_length:
+                        resp = dns.message.make_response(request_msg)
+                        resp.set_rcode(dns.rcode.REFUSED)
+                        return resp.to_wire()
+
+        # Token bucket style (minute window) per-client and per-key.
+        now = float(time.time())
+        buckets = getattr(plugin, "_dns_update_rate_buckets", None)
+        if not isinstance(buckets, dict):
+            buckets = {}
+            setattr(plugin, "_dns_update_rate_buckets", buckets)
+
+        limit_client = int(security_cfg.get("rate_limit_per_client", 0) or 0)
+        if limit_client > 0:
+            key = f"client:{ctx.client_ip}"
+            ts_count = buckets.get(key, {"start": now, "count": 0})
+            start = float(ts_count.get("start", now))
+            count = int(ts_count.get("count", 0))
+            if now - start >= 60.0:
+                start = now
+                count = 0
+            count += 1
+            buckets[key] = {"start": start, "count": count}
+            if count > limit_client:
+                try:
+                    plugin._dns_update_rate_limit_hits = int(
+                        getattr(plugin, "_dns_update_rate_limit_hits", 0) + 1
+                    )
+                except Exception:
+                    pass
+                resp = dns.message.make_response(request_msg)
+                resp.set_rcode(dns.rcode.REFUSED)
+                return resp.to_wire()
+
+        limit_key = int(security_cfg.get("rate_limit_per_key", 0) or 0)
+        if limit_key > 0 and isinstance(ctx.tsig_key_config, dict):
+            key_name = str(ctx.tsig_key_config.get("name", ""))
+            if key_name:
+                key = f"tsig:{key_name}"
+                ts_count = buckets.get(key, {"start": now, "count": 0})
+                start = float(ts_count.get("start", now))
+                count = int(ts_count.get("count", 0))
+                if now - start >= 60.0:
+                    start = now
+                    count = 0
+                count += 1
+                buckets[key] = {"start": start, "count": count}
+                if count > limit_key:
+                    try:
+                        plugin._dns_update_rate_limit_hits = int(
+                            getattr(plugin, "_dns_update_rate_limit_hits", 0) + 1
+                        )
+                    except Exception:
+                        pass
+                    resp = dns.message.make_response(request_msg)
+                    resp.set_rcode(dns.rcode.REFUSED)
+                    return resp.to_wire()
+    except Exception:
+        pass
+
     # Get current records
     current_records = dict(getattr(plugin, "records", {}))
 
@@ -657,7 +786,68 @@ def process_update_message(
 
     # Apply update operations
     if updates:
-        update_rcode, update_err = apply_update_operations(updates, plugin, apex_norm)
+        # Prepare for journaling if persistence is configured
+        journal_writer = None
+        actor = None
+        dns_update_cfg = getattr(plugin, "_dns_update_config", None)
+        persistence_enabled = False
+        if isinstance(dns_update_cfg, dict):
+            persistence_enabled = dns_update_cfg.get("persistence", {}).get(
+                "enabled", False
+            )
+
+        if persistence_enabled:
+            from .journal import JournalWriter
+
+            state_dir = dns_update_cfg.get("persistence", {}).get("state_dir")
+            if state_dir is None:
+                try:
+                    from foghorn.runtime_config import get_runtime_state_dir
+
+                    state_dir = get_runtime_state_dir()
+                    if state_dir:
+                        state_dir = os.path.join(state_dir, "zone_records")
+                except Exception:
+                    pass
+
+            if state_dir:
+                try:
+                    journal_writer = JournalWriter(
+                        zone_apex=apex_norm, base_dir=state_dir
+                    )
+                    if journal_writer.acquire_lock():
+                        actor = {
+                            "client_ip": str(ctx.client_ip),
+                            "auth_method": (
+                                ctx.auth_method or "tsig"
+                                if ctx.is_authorized
+                                else "none"
+                            ),
+                            "tsig_key_name": (
+                                ctx.tsig_key_config.get("name")
+                                if ctx.tsig_key_config
+                                else None
+                            ),
+                        }
+                    else:
+                        journal_writer = None
+                except Exception:
+                    journal_writer = None
+
+        try:
+            update_rcode, update_err = apply_update_operations(
+                updates, plugin, apex_norm, journal_writer=journal_writer, actor=actor
+            )
+        finally:
+            if journal_writer is not None:
+                try:
+                    journal_writer.release_lock()
+                except Exception:
+                    pass
+                try:
+                    journal_writer.close()
+                except Exception:
+                    pass
         if update_rcode != 0:
             resp = dns.message.make_response(request_msg)
             resp.set_rcode(update_rcode)
@@ -999,6 +1189,9 @@ def apply_update_operations(
     updates: List[RR],
     plugin: object,
     zone_apex: str,
+    *,
+    journal_writer: Optional[object] = None,
+    actor: Optional[Dict] = None,
 ) -> Tuple[int, Optional[str]]:
     """Brief: Apply update operations atomically per RFC 2136 Section 3.4.
 
@@ -1006,6 +1199,8 @@ def apply_update_operations(
       - updates: Update RRs from dnspython Update.update.
       - plugin: ZoneRecords plugin instance.
       - zone_apex: Zone apex.
+      - journal_writer: Optional JournalWriter for persistence.
+      - actor: Optional actor metadata for journal entries.
 
     Outputs:
       - Tuple of (rcode, error_message). RCODE=0 (NOERROR) on success.
@@ -1016,6 +1211,7 @@ def apply_update_operations(
         * CLASS ANY, TYPE!=ANY: Delete RR from RRset (delete entire RRset if rdata empty)
         * CLASS ANY, TYPE=ANY: Delete all RRsets at an owner
         * CLASS IN, TYPE!=ANY: Replace entire RRset with provided RR(s)
+      - If journal_writer is provided and journaling fails, memory is not mutated (fail-closed).
     """
     try:
         apex_norm = _normalize_dns_name(zone_apex)
@@ -1032,6 +1228,47 @@ def apply_update_operations(
 
     new_records = dict(snapshot)
     default_ttl = 300  # Default TTL for updates without explicit TTL
+
+    def _bump_soa_serial_for_zone(
+        records_map: Dict[Tuple[str, int], Tuple[int, List[str], List[str]]],
+        zone_name: str,
+    ) -> None:
+        """Brief: Bump SOA serial for zone apex in a records mapping.
+
+        Inputs:
+          - records_map: Mutable records mapping.
+          - zone_name: Zone apex (normalized).
+
+        Outputs:
+          - None; mutates records_map in-place when SOA exists.
+        """
+        try:
+            soa_code = int(QTYPE.SOA)
+        except Exception:
+            soa_code = 6
+        key = (str(zone_name).rstrip(".").lower(), int(soa_code))
+        if key not in records_map:
+            return
+        try:
+            ttl, values, sources = records_map[key]
+        except (TypeError, ValueError):
+            return
+        if not values:
+            return
+        first = str(values[0])
+        parts = first.split()
+        if len(parts) < 7:
+            return
+        try:
+            serial = int(parts[2])
+        except Exception:
+            return
+        parts[2] = str(max(1, serial + 1))
+        new_values = [" ".join(parts)] + [str(v) for v in list(values[1:])]
+        records_map[key] = (int(ttl), new_values, list(sources or []))
+
+    # Build normalized actions for journaling
+    actions: List[Dict[str, Any]] = []
 
     for update_rrset in updates:
         # Get owner name from the RRset
@@ -1078,6 +1315,16 @@ def apply_update_operations(
                                 else list(sources) + ["update"]
                             )
                         new_records[record_key] = (ttl, new_values, sources)
+                # Record normalized action
+                actions.append(
+                    {
+                        "type": "rr_add",
+                        "owner": owner_norm,
+                        "qtype": qtype_int,
+                        "ttl": ttl,
+                        "value": rdata_str,
+                    }
+                )
 
         # CLASS ANY: Delete RR or RRset
         elif qclass == dns.rdataclass.ANY:
@@ -1090,6 +1337,12 @@ def apply_update_operations(
                 update_managed_owners = getattr(plugin, "_update_managed_owners", None)
                 if isinstance(update_managed_owners, set):
                     update_managed_owners.add(owner_norm)
+                actions.append(
+                    {
+                        "type": "name_delete_all",
+                        "owner": owner_norm,
+                    }
+                )
             else:
                 # Delete specific RRs from RRset, or delete RRset if empty/optional
                 if record_key in new_records:
@@ -1103,8 +1356,23 @@ def apply_update_operations(
                                     existing_values,
                                     sources,
                                 )
+                                actions.append(
+                                    {
+                                        "type": "rr_delete_values",
+                                        "owner": owner_norm,
+                                        "qtype": qtype_int,
+                                        "value": rdata_str,
+                                    }
+                                )
                             else:
                                 del new_records[record_key]
+                                actions.append(
+                                    {
+                                        "type": "rr_delete_rrset",
+                                        "owner": owner_norm,
+                                        "qtype": qtype_int,
+                                    }
+                                )
                                 break
 
         # CLASS IN: Replace entire RRset
@@ -1114,9 +1382,39 @@ def apply_update_operations(
             # Replace entire RRset with all RRs from this update_rrset
             if rdata_values:
                 new_records[record_key] = (ttl, rdata_values, ["update"])
+                actions.append(
+                    {
+                        "type": "rr_replace",
+                        "owner": owner_norm,
+                        "qtype": qtype_int,
+                        "ttl": ttl,
+                        "values": rdata_values,
+                    }
+                )
 
         else:
             return 1, f"Unsupported update class {qclass}"
+
+    journal_entry = None
+
+    # Write journal entry if enabled (fail-closed: if journal write fails, don't commit)
+    if journal_writer is not None and actor is not None:
+        persistence_cfg = getattr(plugin, "_dns_update_persistence_config", None)
+        fsync_mode = "interval"
+        fsync_interval = 5000
+        if isinstance(persistence_cfg, dict):
+            fsync_mode = persistence_cfg.get("fsync_mode", "interval")
+            fsync_interval = persistence_cfg.get("fsync_interval_ms", 5000)
+
+        journal_entry = journal_writer.append_entry(
+            actions=actions,
+            actor=actor,
+            origin_node_id=str(getattr(plugin, "_dns_update_node_id", "unknown")),
+            fsync_mode=fsync_mode,
+            fsync_interval_ms=fsync_interval,
+        )
+        if journal_entry is None:
+            return 2, "Journal write failed"
 
     # Commit under lock
     def _rebuild_name_index_from_records(
@@ -1202,6 +1500,97 @@ def apply_update_operations(
                 plugin._name_index = rebuilt_name_index
             if rebuilt_wildcard_owners is not None:
                 plugin._wildcard_owners = rebuilt_wildcard_owners
+
+    if journal_writer is not None and journal_entry is not None:
+        try:
+            from .journal import JournalReader, compact_zone_journal
+
+            persistence_cfg = (
+                getattr(plugin, "_dns_update_persistence_config", {}) or {}
+            )
+            max_journal_bytes = int(persistence_cfg.get("max_journal_bytes", 0) or 0)
+            max_journal_entries = int(
+                persistence_cfg.get("max_journal_entries", 0) or 0
+            )
+            should_compact = False
+            reader = JournalReader(
+                zone_apex=apex_norm, base_dir=journal_writer.base_dir
+            )
+            if max_journal_bytes > 0 and reader.get_size_bytes() > max_journal_bytes:
+                should_compact = True
+            if (
+                not should_compact
+                and max_journal_entries > 0
+                and reader.get_entry_count() > max_journal_entries
+            ):
+                should_compact = True
+            if should_compact:
+                compacted = compact_zone_journal(
+                    zone_apex=apex_norm,
+                    base_dir=journal_writer.base_dir,
+                    records=new_records,
+                    seq=int(getattr(journal_entry, "seq", 0) or 0),
+                )
+                if compacted:
+                    try:
+                        plugin._dns_update_compact_count = int(
+                            getattr(plugin, "_dns_update_compact_count", 0) + 1
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            logger.warning(
+                "DNS UPDATE journal compaction check failed for zone %s",
+                apex_norm,
+                exc_info=True,
+            )
+
+    # Bump SOA serial for dynamic mutation commits.
+    try:
+        if updates:
+            if lock is None:
+                _bump_soa_serial_for_zone(plugin.records, apex_norm)
+            else:
+                with lock:
+                    _bump_soa_serial_for_zone(plugin.records, apex_norm)
+    except Exception:
+        logger.warning(
+            "Failed to bump SOA serial after DNS UPDATE commit for zone %s",
+            apex_norm,
+            exc_info=True,
+        )
+
+    # Send NOTIFY after successful commit if enabled.
+    try:
+        dns_update_cfg = getattr(plugin, "_dns_update_config", None)
+        replication_cfg = {}
+        if isinstance(dns_update_cfg, dict):
+            rcfg = dns_update_cfg.get("replication")
+            if isinstance(rcfg, dict):
+                replication_cfg = rcfg
+        notify_on_update = bool(replication_cfg.get("notify_on_update", True))
+        if notify_on_update:
+            from . import notify as notify_mod
+
+            notify_mod.send_notify_for_zones(plugin, [apex_norm])
+            try:
+                plugin._dns_update_notify_sent = int(
+                    getattr(plugin, "_dns_update_notify_sent", 0) + 1
+                )
+            except Exception:
+                pass
+    except Exception:
+        try:
+            plugin._dns_update_notify_failed = int(
+                getattr(plugin, "_dns_update_notify_failed", 0) + 1
+            )
+        except Exception:
+            pass
+        logger.warning(
+            "Failed sending NOTIFY after DNS UPDATE for zone %s",
+            apex_norm,
+            exc_info=True,
+        )
 
     return 0, None
 
