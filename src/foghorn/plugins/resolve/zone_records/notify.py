@@ -5,8 +5,10 @@ Inputs/Outputs:
 """
 
 from __future__ import annotations
+import ipaddress
 
 import logging
+import socket
 import threading
 from typing import Dict, List
 
@@ -16,6 +18,109 @@ from foghorn.servers.transports.dot import dot_query
 from foghorn.servers.transports.tcp import tcp_query
 
 logger = logging.getLogger(__name__)
+
+
+def _get_local_dns_listener_endpoints() -> set[tuple[str, int]]:
+    """Brief: Return local DNS listener endpoints as (ip, port) tuples.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - set[(ip, port)] derived from runtime server.listen config.
+    """
+    endpoints: set[tuple[str, int]] = set()
+    try:
+        from foghorn.runtime_config import get_runtime_snapshot
+
+        cfg = get_runtime_snapshot().cfg
+    except Exception:
+        cfg = {}
+    server = cfg.get("server") if isinstance(cfg, dict) else {}
+    listen = server.get("listen") if isinstance(server, dict) else {}
+    if not isinstance(listen, dict):
+        return endpoints
+
+    for proto in ("udp", "tcp", "dot"):
+        node = listen.get(proto)
+        if not isinstance(node, dict):
+            continue
+        if not bool(node.get("enabled", False)):
+            continue
+        try:
+            port = int(node.get("port", 53))
+        except Exception:
+            port = 53
+        bind_ip = str(node.get("bind_ip", "0.0.0.0") or "0.0.0.0").strip()
+        if bind_ip in ("0.0.0.0", "::"):
+            endpoints.add(("0.0.0.0", port))
+            endpoints.add(("::", port))
+        else:
+            endpoints.add((bind_ip, port))
+    return endpoints
+
+
+def _resolve_target_ips(host: str) -> set[str]:
+    """Brief: Resolve a notify target host into IP addresses.
+
+    Inputs:
+      - host: Target host (IP literal or DNS name).
+
+    Outputs:
+      - set[str] of resolved IP addresses.
+    """
+    out: set[str] = set()
+    text = str(host or "").strip()
+    if not text:
+        return out
+    try:
+        out.add(str(ipaddress.ip_address(text)))
+        return out
+    except Exception:
+        pass
+    try:
+        infos = socket.getaddrinfo(text, None, 0, socket.SOCK_STREAM)
+    except Exception:
+        return out
+    for info in infos:
+        try:
+            addr = info[4][0]
+            out.add(str(ipaddress.ip_address(addr)))
+        except Exception:
+            continue
+    return out
+
+
+def _is_local_notify_target(target: Dict[str, object]) -> bool:
+    """Brief: Determine whether a NOTIFY target points to this local node.
+
+    Inputs:
+      - target: Notify target mapping with host/port.
+
+    Outputs:
+      - bool: True when target maps to local listener endpoint(s).
+    """
+    try:
+        port = int(target.get("port", 53))
+    except Exception:
+        port = 53
+    host = str(target.get("host", "") or "").strip()
+    if not host:
+        return False
+
+    local_eps = _get_local_dns_listener_endpoints()
+    if not local_eps:
+        return False
+
+    for ip_text in _resolve_target_ips(host):
+        if (ip_text, port) in local_eps:
+            return True
+        if any(
+            lep_port == port and lep_ip in ("0.0.0.0", "::")
+            for (lep_ip, lep_port) in local_eps
+        ):
+            return True
+    return False
 
 
 def record_axfr_client(
@@ -232,6 +337,13 @@ def send_notify_for_zones(
             continue
 
         for t in per_zone_targets:
+            if _is_local_notify_target(t):
+                logger.info(
+                    "ZoneRecords: skipping NOTIFY self-loop target for zone %s: %r",
+                    zone_norm,
+                    t,
+                )
+                continue
             try:
                 send_notify_to_target(zone_norm, t)
             except Exception:  # pragma: no cover - defensive logging only
