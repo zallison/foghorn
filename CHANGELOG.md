@@ -18,7 +18,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 - Admin API: added `/api/v1/config/schema` and `/config/schema` endpoints (FastAPI and threaded admin server) to return the active JSON config schema document.
-- ZoneRecords DNS UPDATE TSIG config now supports loading keys from `tsig.keys_files` and pluggable `tsig.key_sources` (default `type: file` loader).
+- ZoneRecords DNS UPDATE TSIG config now supports pluggable external key loading via `tsig.key_sources` (default `type: file` loader).
+- ZoneRecords DNS UPDATE now supports optional persistence, replication, and security config blocks under `dns_update`:
+  - `dns_update.persistence` (journal fsync/size/compaction controls),
+  - `dns_update.replication` (role/node/NOTIFY routing controls),
+  - `dns_update.security` (message/rrset/owner/rdata/ttl limits and update rate limits).
+- ZoneRecords DNS UPDATE persistence now includes durable per-zone journal files, startup replay, and journal compaction primitives.
 - Upstreams: support backup upstream endpoints via `upstreams.backup.endpoints` (normalized alongside primary endpoints).
 - Upstreams: added `upstreams.health` tuning config (health thresholds/probes) and surfaced it in admin upstream status payloads.
 - Upstreams: added `upstreams.health.profile` to apply built-in upstream health preset bundles from `upstreams_health_profiles.yaml`.
@@ -65,6 +70,11 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - ZoneRecords resolver now prioritizes UPDATE-managed RRsets over static source RRsets for the same owner, so dynamic DNS UPDATE answers win during query resolution.
 - DNS UPDATE internals now track source metadata in committed RRsets and rebuild the name index after atomic update commits to keep resolver lookups in sync.
+- DNS UPDATE processing now supports persisted journal replay during ZoneRecords load/reload cycles, with per-zone sequence tracking and replay metrics in plugin snapshots.
+- DNS UPDATE post-commit behavior now bumps zone SOA serials and can emit NOTIFY according to replication settings.
+- DNS UPDATE request handling now enforces replication role policy gates (including optional direct-update rejection on replicas) and bounded security/rate-limit controls.
+- ZoneRecords NOTIFY fanout now skips local listener endpoints to prevent self-loop NOTIFY storms.
+- ZoneRecords DNSSEC auto-signing now defaults to enabled when a `dnssec_signing` block is present (unless `dnssec_signing.enabled: false` is set).
 - Runtime lifecycle: `main()` now runs best-effort shutdown hooks for loaded resolver plugins, cache backends, and query-log/statistics backends via `run_shutdown_plugins`.
 - Resolver forwarding: when `forward_local` is disabled, RFC1918 IPv4 reverse PTR (`in-addr.arpa`) queries are now treated like `.local` and are not forwarded upstream.
 - Upstream failover concurrency now uses a rolling bounded in-flight window (`max_concurrent`) and stops scheduling additional upstream attempts after the first successful response.
@@ -115,9 +125,11 @@ All notable changes to this project will be documented in this file.
 - Runtime/config parity: listener default host/port handling is now aligned across startup, effective-config dump output, rate-limit exposure checks, and config-diagram extraction.
 - Logging/transport diagnostics: DoT and admin TLS failure warnings now include richer certificate/key/CA context with likely-cause hints.
 - Failover diagnostics: upstream skip/failure logging now includes stable upstream identity labels and health context summaries.
+- Upstream failover connection-refused warnings are now throttled under sustained failures to reduce repetitive log noise.
 - Admin UI: plugin table rendering now supports client-side searchable sections, and rate-limit snapshots include config item details.
 - Resolver forward-local gating now uses a cached helper for `.local` and RFC1918 PTR block checks in the hot path.
 - Config interpolation now ignores non-ALL_CAPS keys defined in top-level `variables`/`vars` (allowing mixed-case entries to be used as YAML anchors without interpolation effects).
+- Startup banner logging now includes a stable config-path fingerprint (`config_sha1`) in addition to absolute config path/size metadata.
 
 ### Fixed
 - DNS UPDATE TSIG parse/verification failures now return protocol-correct UPDATE responses with `NOTAUTH` (instead of malformed opcode handling), including improved TSIG failure diagnostics.
@@ -135,7 +147,9 @@ All notable changes to this project will be documented in this file.
 - DNSSEC: `ensure_zone_keys` now searches fallback relative key directories (including `config/.config` cwd patterns) before concluding keys are missing when generation is disabled.
 
 ### Tests
-- Added ZoneRecords TSIG update tests covering `keys_files` loading and pluggable `key_sources` resolution paths.
+- Added ZoneRecords TSIG update tests covering pluggable `key_sources` resolution paths.
+- Added ZoneRecords DNS UPDATE persistence tests for journal append/replay/compaction and restart replay behavior.
+- Added Docker-marked cluster-oriented tests for single-writer shared journal convergence and replica direct-write refusal.
 - Added web/admin route coverage asserting `/api/v1/config/schema` and `/config/schema` return matching schema payloads in both FastAPI and threaded modes.
 - Added DNS UPDATE regression tests for TSIG bad-key handling, TSIG algorithm mismatch responses, and key-scoped `allow_names` enforcement (including wildcard scope matches).
 - Added DNS UPDATE regression coverage for wildcard-owner index rebuilds after update commits.
@@ -143,6 +157,8 @@ All notable changes to this project will be documented in this file.
 - Added failover concurrency regression coverage to verify bounded in-flight scheduling and no unnecessary later-upstream attempts after early success.
 
 - Updated upstream failover coverage to assert DEBUG-level (de-duplicated) skip logs for malformed upstream responses.
+- Added NOTIFY regression coverage to ensure local self-loop targets are skipped.
+- Added DNSSEC regression coverage to assert NXDOMAIN authority output when auto-signing is explicitly disabled.
 - Added branch-coverage tests for ZoneRecords UPDATE/TSIG branches, asyncio UDP CIDR inflight limits, web admin config/diagram edge paths, and config/security helper normalization behavior.
 - Updated ZoneRecords resolver and server EDE-path tests to assert plugin-owned NOTIFY behavior and explicit ZoneRecords plugin loading for NOTIFY opcode coverage.
 - Added targeted branch tests for server opcode handling fallback paths, DNSServer runtime wiring/defensive defaults, upstream-health payload shaping, and expanded DoT server branch coverage.
