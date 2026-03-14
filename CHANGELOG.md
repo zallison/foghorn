@@ -79,6 +79,7 @@ All notable changes to this project will be documented in this file.
 - Resolver forwarding: when `forward_local` is disabled, RFC1918 IPv4 reverse PTR (`in-addr.arpa`) queries are now treated like `.local` and are not forwarded upstream.
 - Upstream failover concurrency now uses a rolling bounded in-flight window (`max_concurrent`) and stops scheduling additional upstream attempts after the first successful response.
 - RateLimit profile presets were retuned and expanded (`home`, `lan`, `smb`, `enterprise`, `localhost`), with `default` now pointing at the `lan` preset.
+- RateLimit built-in profile defaults were further retuned in `rate_limit_profiles.yaml` (including `home`, `smb`, and `enterprise` thresholds), and profile resolution tests were updated to match the active defaults.
 - Admin UI dark-theme form controls now use higher-contrast input/select/textarea backgrounds for search and query-log panes.
 - Plugin priorities: `hooks.priority` and per-hook priorities now accept either an integer or `{priority: <int>}` shorthand; legacy `*_priority` fields remain supported.
 - Plugin targeting: configuration now prefers a nested `targets` object with `ips`, `ignore_ips`, `listeners`, `domains`, `domains_mode`, `qtypes`, `opcodes`, and `rcodes` (legacy flat keys still accepted).
@@ -113,6 +114,7 @@ All notable changes to this project will be documented in this file.
 - Admin UI: plugin snapshot groups can now include optional `className` styling, and RateLimit snapshots render dedicated configuration and profile tables (including scroll handling for larger profile sets).
 - Logging: upstream skip de-duplication messages are now logged at DEBUG (was WARNING).
 - Logging: added ANSI-highlighted console rendering (timestamps, levels, key/value tokens, IP/port, plugin markers, quoted/path-like values) with a top-level `color` toggle while file/syslog output remains non-colored.
+- Logging: BracketLevelFormatter now highlights bracketed SHA1-style values (short+long forms) alongside existing bracketed container-id rendering.
 - Diagrams: config diagram source and PNG rendering now use Graphviz (`dot`) (replacing Mermaid/mmdc).
 - Diagrams: added a dark-theme diagram PNG endpoint.
 - Diagrams: dot output styling now defaults to a sans font, uses a Graphviz colorscheme, and applies light/dark-aware shading for resolver/upstream/plugin clusters.
@@ -129,7 +131,8 @@ All notable changes to this project will be documented in this file.
 - Admin UI: plugin table rendering now supports client-side searchable sections, and rate-limit snapshots include config item details.
 - Resolver forward-local gating now uses a cached helper for `.local` and RFC1918 PTR block checks in the hot path.
 - Config interpolation now ignores non-ALL_CAPS keys defined in top-level `variables`/`vars` (allowing mixed-case entries to be used as YAML anchors without interpolation effects).
-- Startup banner logging now includes a stable config-path fingerprint (`config_sha1`) in addition to absolute config path/size metadata.
+- Startup banner logging now includes a stable config-file fingerprint (`config_sha1`) derived from config file contents, with a safe fallback to `unknown` when file hashing fails.
+- Makefile `docker-run` now exports `LISTEN` and `LISTEN_PORT` environment variables into the runtime container.
 
 ### Fixed
 - DNS UPDATE TSIG parse/verification failures now return protocol-correct UPDATE responses with `NOTAUTH` (instead of malformed opcode handling), including improved TSIG failure diagnostics.
@@ -145,6 +148,7 @@ All notable changes to this project will be documented in this file.
 - ZoneRecords DNSSEC negative-response helpers now handle source-aware RRset entries `(ttl, values, sources)` to avoid tuple-unpacking errors.
 - Server internals: migrated remaining shared runtime attribute access away from `DNSUDPHandler` class state to `DNSRuntimeState`, reducing transport coupling and improving helper/test isolation.
 - DNSSEC: `ensure_zone_keys` now searches fallback relative key directories (including `config/.config` cwd patterns) before concluding keys are missing when generation is disabled.
+- Main signal handling: fixed SIGUSR reset-flag comparisons so `sigusr1_resets_stats` / `sigusr2_resets_stats` gating is evaluated correctly.
 
 ### Tests
 - Added ZoneRecords TSIG update tests covering pluggable `key_sources` resolution paths.
