@@ -187,7 +187,6 @@ def resolve_tsig_key_configs(
     Inputs:
       - zone_config: DNS UPDATE zone config that may contain:
           * tsig.keys (inline list of key dicts)
-          * tsig.keys_files (list of file paths)
           * tsig.key_sources (list of source mappings with a type field)
       - source_loaders: Optional loader registry to extend/override source
         types (e.g. "database", "api").
@@ -196,7 +195,7 @@ def resolve_tsig_key_configs(
       - Ordered list of resolved TSIG key dicts.
 
     Notes:
-      - Resolution order is inline keys first, then keys_files, then key_sources.
+      - Resolution order is inline keys first, then key_sources.
       - This function provides a single extensibility seam for future UPDATE
         key/config loading backends.
     """
@@ -212,9 +211,6 @@ def resolve_tsig_key_configs(
     for item in tsig_cfg.get("keys", []) or []:
         if isinstance(item, dict):
             resolved.append(dict(item))
-
-    for path in tsig_cfg.get("keys_files", []) or []:
-        resolved.extend(load_tsig_keys_from_file(str(path)))
 
     loaders = get_default_tsig_key_source_loaders()
     if isinstance(source_loaders, dict):
@@ -322,10 +318,6 @@ def collect_update_file_paths(dns_update_config: dict) -> List[str]:
         if isinstance(tsig, dict):
             for key_cfg in tsig.get("keys", []) or []:
                 _collect_scope_files(key_cfg)
-            for keys_file in tsig.get("keys_files", []) or []:
-                file_set.add(str(keys_file))
-                for key_cfg in load_tsig_keys_from_file(str(keys_file)):
-                    _collect_scope_files(key_cfg)
             for source in tsig.get("key_sources", []) or []:
                 if not isinstance(source, dict):
                     continue
