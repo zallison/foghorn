@@ -288,8 +288,10 @@ def main(argv: List[str] | None = None) -> int:
             # backwards-compatibility, also accept sigusr1_resets_stats as a
             # deprecated alias.
             reset_flag = bool(
-                sig_label="SIGUSR1" and s_cfg.get("sigusr1_resets_stats", False)
-            ) or bool(sig_label="SIGUSR2" and s_cfg.get("sigusr2_resets_stats", False))
+                sig_label == "SIGUSR1" and s_cfg.get("sigusr1_resets_stats", False)
+            ) or bool(
+                sig_label == "SIGUSR2" and s_cfg.get("sigusr2_resets_stats", False)
+            )
 
             if enabled and reset_flag:
                 if stats_collector is not None:
