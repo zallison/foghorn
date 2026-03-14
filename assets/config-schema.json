@@ -15,6 +15,16 @@
           ],
           "type": "string"
         },
+        "comment": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
+        "id": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
         "maxsize": {
           "description": "Optional maxsize override for the underlying cache (>= 0).",
           "minimum": 0,
@@ -813,7 +823,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /udp_client_prefix_v4 or\n        /udp_client_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - udp_client_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - udp_client_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /udp_client_prefix_v4 or\n        /udp_client_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - udp_client_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - udp_client_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
           "properties": {
             "alpha": {
               "default": 0.2,
@@ -847,9 +857,16 @@
               "title": "Burst Factor",
               "type": "number"
             },
+            "burst_windows": {
+              "default": 6,
+              "description": "Type: integer. Default: 6.",
+              "minimum": 0,
+              "title": "Burst Windows",
+              "type": "integer"
+            },
             "db_path": {
-              "default": "./config/var/rate_limit.db",
-              "description": "Type: string. Default: \"./config/var/rate_limit.db\".",
+              "default": "./config/var/dbs/rate_limit.db",
+              "description": "Type: string. Default: \"./config/var/dbs/rate_limit.db\".",
               "title": "Db Path",
               "type": "string"
             },
@@ -926,6 +943,13 @@
               "description": "Type: integer. Default: 60.",
               "minimum": 0,
               "title": "Prune Interval Seconds",
+              "type": "integer"
+            },
+            "stats_log_interval_seconds": {
+              "default": 900,
+              "description": "Type: integer. Default: 900.",
+              "minimum": 0,
+              "title": "Stats Log Interval Seconds",
               "type": "integer"
             },
             "ttl": {
@@ -2141,9 +2165,26 @@
     "PluginInstance": {
       "additionalProperties": false,
       "properties": {
+        "comment": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
         "config": {
           "additionalProperties": true,
           "description": "Plugin-specific configuration mapping.",
+          "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            }
+          },
           "type": "object"
         },
         "enabled": {
@@ -2153,6 +2194,18 @@
         "hooks": {
           "additionalProperties": true,
           "description": "Per-hook enablement/priorities (pre_resolve/post_resolve).",
+          "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            }
+          },
           "type": "object"
         },
         "id": {
@@ -2162,11 +2215,35 @@
         "logging": {
           "additionalProperties": true,
           "description": "Per-plugin logging overrides.",
+          "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            }
+          },
           "type": "object"
         },
         "setup": {
           "additionalProperties": true,
           "description": "Setup-phase behaviour (enabled/priority/abort_on_failure).",
+          "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            }
+          },
           "type": "object"
         },
         "type": {
@@ -2187,12 +2264,22 @@
           "description": "Type: string.",
           "type": "string"
         },
+        "comment": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
         "enabled": {
           "description": "Type: boolean.",
           "type": "boolean"
         },
         "host": {
           "description": "Type: string.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
           "type": "string"
         },
         "key_file": {
@@ -2216,12 +2303,22 @@
           "description": "Type: string.",
           "type": "string"
         },
+        "comment": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
         "enabled": {
           "description": "Type: boolean.",
           "type": "boolean"
         },
         "host": {
           "description": "Type: string.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
           "type": "string"
         },
         "key_file": {
@@ -2241,12 +2338,22 @@
       "additionalProperties": false,
       "description": "Type: object. Object with subkeys: enabled, host, port.",
       "properties": {
+        "comment": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
         "enabled": {
           "description": "Type: boolean.",
           "type": "boolean"
         },
         "host": {
           "description": "Type: string.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
           "type": "string"
         },
         "port": {
@@ -2262,12 +2369,22 @@
       "additionalProperties": false,
       "description": "Type: object. Object with subkeys: enabled, host, port.",
       "properties": {
+        "comment": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
         "enabled": {
           "description": "Type: boolean.",
           "type": "boolean"
         },
         "host": {
           "description": "Type: string.",
+          "type": "string"
+        },
+        "id": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
           "type": "string"
         },
         "port": {
@@ -3405,11 +3522,28 @@
             },
             "config": {
               "description": "Type: object.",
+              "properties": {
+                "comment": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
+                "id": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                }
+              },
               "type": "object"
             },
             "enabled": {
               "description": "Type: boolean.",
               "type": "boolean"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
             },
             "module": {
               "description": "Type: string.",
@@ -3457,12 +3591,34 @@
           "description": "Alias for abort_on_fail. When true, TLS CA validation errors for this upstream are fatal.",
           "type": "boolean"
         },
+        "comment": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
         "headers": {
           "additionalProperties": {
             "type": "string"
           },
           "description": "Type: object.",
+          "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            }
+          },
           "type": "object"
+        },
+        "id": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
         },
         "method": {
           "description": "Type: string. Valid values: \"GET\", \"POST\".",
@@ -3478,6 +3634,16 @@
           "properties": {
             "ca_file": {
               "description": "Type: string.",
+              "type": "string"
+            },
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
               "type": "string"
             },
             "verify": {
@@ -3516,9 +3682,19 @@
           "description": "Alias for abort_on_fail. When true, TLS CA validation errors for this upstream are fatal.",
           "type": "boolean"
         },
+        "comment": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
         "host": {
           "description": "Type: string.",
           "minLength": 1,
+          "type": "string"
+        },
+        "id": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
           "type": "string"
         },
         "notify": {
@@ -3563,6 +3739,16 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
             }
           },
           "type": "object"
@@ -3571,6 +3757,16 @@
           "additionalProperties": false,
           "description": "Type: object. Object with subkeys: idle_timeout_ms, max_connections.",
           "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
             "idle_timeout_ms": {
               "description": "Type: integer.",
               "minimum": 0,
@@ -3596,6 +3792,16 @@
           "properties": {
             "ca_file": {
               "description": "Type: string.",
+              "type": "string"
+            },
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
               "type": "string"
             },
             "server_name": {
@@ -3672,6 +3878,16 @@
       "description": "Optional URI or identifier for the JSON Schema associated with this configuration file.",
       "type": "string"
     },
+    "comment": {
+      "description": "Optional human metadata string (max 254 characters).",
+      "maxLength": 254,
+      "type": "string"
+    },
+    "id": {
+      "description": "Optional human metadata string (max 254 characters).",
+      "maxLength": 254,
+      "type": "string"
+    },
     "logging": {
       "additionalProperties": false,
       "description": "Global logging configuration. Python logging lives under logging.python and statistics/query-log backends live under logging.backends.",
@@ -3689,9 +3905,26 @@
                 "description": "Backend identifier or dotted import path (for example 'sqlite', 'mysql', 'mqtt_logging').",
                 "type": "string"
               },
+              "comment": {
+                "description": "Optional human metadata string (max 254 characters).",
+                "maxLength": 254,
+                "type": "string"
+              },
               "config": {
                 "additionalProperties": true,
                 "description": "Backend-specific configuration mapping passed verbatim to the selected BaseStatsStore implementation.",
+                "properties": {
+                  "comment": {
+                    "description": "Optional human metadata string (max 254 characters).",
+                    "maxLength": 254,
+                    "type": "string"
+                  },
+                  "id": {
+                    "description": "Optional human metadata string (max 254 characters).",
+                    "maxLength": 254,
+                    "type": "string"
+                  }
+                },
                 "type": "object"
               },
               "id": {
@@ -3706,6 +3939,16 @@
           },
           "type": "array"
         },
+        "comment": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
+        "id": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
         "python": {
           "additionalProperties": false,
           "properties": {
@@ -3714,7 +3957,17 @@
               "description": "Enable ANSI colorized stderr logging output for improved readability of levels and important tokens.",
               "type": "boolean"
             },
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
             "file": {
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
               "type": "string"
             },
             "level": {
@@ -3738,6 +3991,18 @@
                   "type": "boolean"
                 },
                 {
+                  "properties": {
+                    "comment": {
+                      "description": "Optional human metadata string (max 254 characters).",
+                      "maxLength": 254,
+                      "type": "string"
+                    },
+                    "id": {
+                      "description": "Optional human metadata string (max 254 characters).",
+                      "maxLength": 254,
+                      "type": "string"
+                    }
+                  },
                   "type": "object"
                 }
               ]
@@ -3765,12 +4030,22 @@
         "cache": {
           "description": "Types: object, null. Object with subkeys: decorated_overrides, modify.",
           "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
             "decorated_overrides": {
               "description": "Optional list of overrides for decorated caches (functions wrapped by registered_cached/registered_lru_cached). Each entry may target a specific module+name pair and override backend-specific settings such as maxsize or TTL.",
               "items": {
                 "$ref": "#/$defs/DecoratedCacheOverride"
               },
               "type": "array"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
             },
             "modify": {
               "description": "Optional list of overrides for decorated caches (functions wrapped by registered_cached/registered_lru_cached). Each entry may target a specific module+name pair and override backend-specific settings such as maxsize or TTL.",
@@ -3785,8 +4060,25 @@
             "null"
           ]
         },
+        "comment": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
         "dnssec": {
           "description": "Type: object.",
+          "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            }
+          },
           "type": "object"
         },
         "enable_ede": {
@@ -3808,6 +4100,11 @@
               "description": "When false, refuse to start the threaded stdlib admin HTTP fallback when FastAPI/uvicorn or asyncio is unavailable. Default: true.",
               "type": "boolean"
             },
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
             "enable_api": {
               "default": true,
               "description": "When false, do not serve the admin API endpoints (e.g. /api/v1/stats, /config, /logs). Default: true.",
@@ -3822,13 +4119,33 @@
               "default": true,
               "description": "When false, disable OpenAPI schema generation and /openapi.json. Default: true.",
               "type": "boolean"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
             }
           },
           "type": "object"
         },
+        "id": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
         "limits": {
           "additionalProperties": true,
           "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
             "resolver_executor_workers": {
               "default": null,
               "description": "Max workers for the shared resolver ThreadPoolExecutor used by asyncio listeners (TCP/DoT). Null uses a conservative default.",
@@ -3845,12 +4162,27 @@
           "additionalProperties": false,
           "description": "Type: object.",
           "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
             "dns": {
               "additionalProperties": false,
               "description": "Type: object. Object with subkeys: host, port, tcp, udp.",
               "properties": {
+                "comment": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
                 "host": {
                   "description": "Default host for UDP/TCP listeners when per-listener host is not set.",
+                  "type": "string"
+                },
+                "id": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
                   "type": "string"
                 },
                 "port": {
@@ -3877,6 +4209,16 @@
                   "default": true,
                   "description": "When false, refuse to start the threaded stdlib DoH fallback when FastAPI/uvicorn or asyncio is unavailable. Default: true.",
                   "type": "boolean"
+                },
+                "comment": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
+                "id": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
                 }
               },
               "type": "object"
@@ -3885,6 +4227,16 @@
               "additionalProperties": true,
               "description": "Type: object. Object with subkeys: idle_timeout_seconds, max_connections, max_connections_per_ip, max_queries_per_connection.",
               "properties": {
+                "comment": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
+                "id": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
                 "idle_timeout_seconds": {
                   "default": 15.0,
                   "description": "Idle timeout (seconds) before closing an inactive connection. Default: 15.0.",
@@ -3912,10 +4264,25 @@
               },
               "type": "object"
             },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
             "tcp": {
               "additionalProperties": true,
               "description": "Type: object. Object with subkeys: idle_timeout_seconds, max_connections, max_connections_per_ip, max_queries_per_connection.",
               "properties": {
+                "comment": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
+                "id": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
                 "idle_timeout_seconds": {
                   "default": 15.0,
                   "description": "Idle timeout (seconds) before closing an inactive connection. Default: 15.0.",
@@ -3952,10 +4319,20 @@
                   "description": "When false, refuse to fall back to the threaded ThreadingUDPServer when asyncio UDP cannot start. Default: true.",
                   "type": "boolean"
                 },
+                "comment": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
                 "exit_on_asyncio_failure": {
                   "default": false,
                   "description": "When true, exit non-zero if the asyncio UDP listener fails to start, instead of falling back to a threaded UDP server. Default: false.",
                   "type": "boolean"
+                },
+                "id": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
                 },
                 "max_inflight": {
                   "default": 1024,
@@ -3971,6 +4348,16 @@
                     "properties": {
                       "cidr": {
                         "description": "CIDR block (e.g. '10.0.0.0/8' or '2001:db8::/32').",
+                        "type": "string"
+                      },
+                      "comment": {
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "maxLength": 254,
+                        "type": "string"
+                      },
+                      "id": {
+                        "description": "Optional human metadata string (max 254 characters).",
+                        "maxLength": 254,
                         "type": "string"
                       },
                       "max_inflight": {
@@ -4017,6 +4404,16 @@
           "additionalProperties": true,
           "description": "Resolver configuration. mode selects how unanswered queries are handled: forward (default), recursive (walk from root), or master (authoritative-only; no forwarding). 'none' is an alias for 'master'.",
           "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
             "max_depth": {
               "default": 16,
               "description": "Maximum delegation hops for recursive mode.",
@@ -4058,6 +4455,18 @@
       "type": "object"
     },
     "stats": {
+      "properties": {
+        "comment": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
+        "id": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        }
+      },
       "type": "object"
     },
     "upstreams": {
@@ -4068,6 +4477,11 @@
             {
               "additionalProperties": false,
               "properties": {
+                "comment": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
+                },
                 "endpoints": {
                   "items": {
                     "oneOf": [
@@ -4081,6 +4495,11 @@
                   },
                   "minItems": 1,
                   "type": "array"
+                },
+                "id": {
+                  "description": "Optional human metadata string (max 254 characters).",
+                  "maxLength": 254,
+                  "type": "string"
                 }
               },
               "required": [
@@ -4090,6 +4509,11 @@
             }
           ],
           "description": "Optional backup upstream endpoints used only when no eligible primary upstreams are available."
+        },
+        "comment": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
         },
         "endpoints": {
           "items": {
@@ -4109,6 +4533,16 @@
           "additionalProperties": false,
           "description": "Upstream health tracking and failover probing knobs.",
           "properties": {
+            "comment": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
+            "id": {
+              "description": "Optional human metadata string (max 254 characters).",
+              "maxLength": 254,
+              "type": "string"
+            },
             "max_serv_fail": {
               "default": 3,
               "description": "Mark an upstream unhealthy when its failure counter exceeds this threshold.",
@@ -4163,6 +4597,11 @@
           },
           "type": "object"
         },
+        "id": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
         "max_concurrent": {
           "default": 1,
           "description": "Maximum concurrent upstream queries.",
@@ -4190,6 +4629,18 @@
       "description": "Optional mapping of variable names to arbitrary values. These are expanded before validation and removed from the runtime config.",
       "patternProperties": {
         "^[A-Za-z_][A-Za-z0-9_]*$": {}
+      },
+      "properties": {
+        "comment": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        },
+        "id": {
+          "description": "Optional human metadata string (max 254 characters).",
+          "maxLength": 254,
+          "type": "string"
+        }
       },
       "type": "object"
     }
