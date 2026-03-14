@@ -845,7 +845,12 @@ def _send_query_with_failover_impl(
             Exception,
         ) as e:  # pragma: no cover - defensive: network/transport failure
             file_info = _format_transport_error_file_info(e, tls_ca_file_hint)
-            if _is_connection_refused_error(e):
+
+            # Limit warnings to not flood log.
+            if _is_connection_refused_error(e) and (
+                upstream_health["fail_count"] <= 25
+                or (upstream_health["fail_count"] % 25) == 0
+            ):
                 _warn_upstream_skip_once_with_health(
                     upstream_key,
                     upstream_health,
@@ -943,6 +948,7 @@ def _send_query_with_failover_impl(
         )
         or "none"
     )
+
     # Transient network errors to not log.
     ignored_errors = [
         "short read on length header",
