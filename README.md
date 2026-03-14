@@ -851,10 +851,12 @@ plugins:
 	  window_seconds: 10
 	  warmup_windows: 6
 	  burst_factor: 3.0
+	  burst_windows: 6
+	  stats_log_interval_seconds: 900
 	  min_enforce_rps: 50.0
 	  deny_response: nxdomain  # nxdomain | refused | servfail | noerror_empty | ip
 	  deny_response_ip4: 0.0.0.0
-	  db_path: ./config/var/rate_limit.db
+	  db_path: ./config/var/dbs/rate_limit.db
 ```
 
 ### 4.9 Per-domain upstream routing (`router`)
