@@ -94,6 +94,9 @@ class BracketLevelFormatter(logging.Formatter):
     _DOCKER_CONTAINER_ID_PATTERN = re.compile(
         r"^(?P<short>[0-9a-fA-F]{12})\[(?P<long>[0-9a-fA-F]{12,})\]$"
     )
+    _SHA1_PATTERN = re.compile(
+        r"^(?P<short>[0-9a-fA-F]{6})\[(?P<long>[0-9a-fA-F]{12,})\]$"
+    )
     _HIGHLIGHT_PATTERN = re.compile(
         r"(?P<kv>\b[A-Za-z_][\w.-]*=[^\s,;]+)"
         r"|(?P<date>\b\d{4}-\d{2}-\d{2}\b)"
@@ -206,7 +209,18 @@ class BracketLevelFormatter(logging.Formatter):
             long_id = docker_match.group("long")
             return (
                 f"{self._KV_VALUE_COLOR}{short_id}{self._RESET}"
-                f"{self._BRACKET_GRAY_COLOR}[{self._RESET}"
+                f"{self._BRACKET_GRAY_COLOR} [{self._RESET}"
+                f"{self._DOCKER_LONG_ID_COLOR}{long_id}{self._RESET}"
+                f"{self._BRACKET_GRAY_COLOR}]{self._RESET}"
+            )
+
+        sha1_match = self._SHA1_PATTERN.match(value)
+        if sha1_match:
+            short_id = sha1_match.group("short")
+            long_id = sha1_match.group("long")
+            return (
+                f"{self._KV_VALUE_COLOR}{short_id}{self._RESET}"
+                f"{self._BRACKET_GRAY_COLOR} [{self._RESET}"
                 f"{self._DOCKER_LONG_ID_COLOR}{long_id}{self._RESET}"
                 f"{self._BRACKET_GRAY_COLOR}]{self._RESET}"
             )
