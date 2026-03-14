@@ -390,6 +390,7 @@ def _classify_local_zones_dnssec(
     name_index: Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]],
     zone_soa: Dict[str, Tuple[int, List[str], Set[str]]],
     dnssec_classified_axfr: Set[str],
+    autosign_enabled: bool = False,
 ) -> None:
     """Brief: Classify DNSSEC state for zones built from local sources.
 
@@ -397,6 +398,8 @@ def _classify_local_zones_dnssec(
       - name_index: owner -> qtype -> (ttl, [values], {sources}) index.
       - zone_soa: zone apex -> (ttl, [soa_values], {sources}) mapping.
       - dnssec_classified_axfr: Set of apexes already classified via AXFR.
+      - autosign_enabled: True when dnssec_signing auto-signing is enabled
+        for local zones in this load cycle.
 
     Outputs:
       - None; logs dnssec_state for each local zone apex and updates no other
@@ -420,15 +423,23 @@ def _classify_local_zones_dnssec(
             has_dnskey = int(dnskey_code_all) in owner_rrsets
             has_rrsig = int(rrsig_code_all) in owner_rrsets
             if has_dnskey and has_rrsig:
-                dnssec_state = "present"
+                dnssec_state = "autosign" if autosign_enabled else "present"
             elif has_dnskey or has_rrsig:
                 dnssec_state = "partial"
             else:
                 dnssec_state = "none"
             logger.info(
-                "ZoneRecords zone %s has dnssec_state=%s (file/bind/inline)",
+                (
+                    "ZoneRecords local zone %s dnssec_state=%s "
+                    "(autosign_enabled=%s, sources=file/bind/inline, "
+                    "apex_has_dnskey=%s, "
+                    "apex_has_rrsig=%s)"
+                ),
                 apex_owner,
                 dnssec_state,
+                autosign_enabled,
+                has_dnskey,
+                has_rrsig,
             )
     except Exception:  # pragma: no cover - defensive logging only
         logger.warning(
@@ -444,7 +455,7 @@ def dnssec_postprocess_zones(
     dnssec_classified_axfr: Set[str],
     dnssec_cfg_raw: Optional[dict],
 ) -> Dict[int, Dict[str, List[RR]]]:
-    # Brief: Classify and optionally auto-sign zones, then build DNSSEC helpers.
+    # Brief: Optionally auto-sign zones, classify DNSSEC state, then build helpers.
     #
     # Inputs:
     #   - mapping: (owner, qtype) -> (ttl, [values], {sources}) mapping.
@@ -457,11 +468,11 @@ def dnssec_postprocess_zones(
     #   - mapping_by_qtype: qtype -> owner -> list[RR] helper mapping including
     #     attached RRSIGs, suitable for use at query time.
 
-    _classify_local_zones_dnssec(name_index, zone_soa, dnssec_classified_axfr)
-
     enabled = False
     if isinstance(dnssec_cfg_raw, dict):
-        enabled = bool(dnssec_cfg_raw.get("enabled", False))
+        # Presence of a dnssec_signing block implies enabled by default.
+        # Operators can explicitly disable with enabled: false.
+        enabled = bool(dnssec_cfg_raw.get("enabled", True))
     if enabled and isinstance(dnssec_cfg_raw, dict):
         _zone_helpers.auto_sign_zones(
             mapping,
@@ -470,5 +481,11 @@ def dnssec_postprocess_zones(
             dnssec_cfg_raw,
             log=logger,
         )
+    _classify_local_zones_dnssec(
+        name_index,
+        zone_soa,
+        dnssec_classified_axfr,
+        autosign_enabled=enabled,
+    )
 
     return _zone_helpers.build_dnssec_helper_mapping(mapping, log=logger)
