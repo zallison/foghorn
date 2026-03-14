@@ -18,6 +18,7 @@ CONTAINER_NAME ?= foghorn
 CONTAINER_DATA ?= ./.docker
 # Only used if your config.yaml uses LISTEN as a variable
 LISTEN ?= 0.0.0.0
+LISTEN_PORT ?= 53
 # Label for docker_hosts.py
 FH_PRIORITY ?= 100
 # Default ports
@@ -74,7 +75,7 @@ vars-make: vars-header-Make var-print-IGNORE_EXTS
 
 # Variables for Docker
 .PHONY: vars-docker
-vars-docker: vars-header-Docker var-print-PREFIX var-print-TAG var-print-CONTAINER_DATA var-print-CONTAINER_NAME var-print-LISTEN var-print-FH_PRIORITY var-print-ADMINPORT var-print-TCPPORT var-print-UDPPORT
+vars-docker: vars-header-Docker var-print-PREFIX var-print-TAG var-print-CONTAINER_DATA var-print-CONTAINER_NAME var-print-LISTEN var-print-LISTEN_PORT var-print-FH_PRIORITY var-print-ADMINPORT var-print-TCPPORT var-print-UDPPORT
 	@echo
 
 # Variables for openssl
@@ -94,7 +95,7 @@ vars-python: vars-header-Python var-print-VENV
 run: $(VENV)/bin/foghorn
 	. ${VENV}/bin/activate
 	mkdir var 2>/dev/null || true
-	LISTEN=${LISTEN} ${VENV}/bin/foghorn --config config/config.yaml
+	LISTEN=${LISTEN} LISTEN_PORT=${LISTEN_PORT} ${VENV}/bin/foghorn --config config/config.yaml
 
 .PHONY: env
 env:
@@ -296,7 +297,7 @@ docker-run: docker-build
 		--label "com.foghorn.priority=${FH_PRIORITY}" \
 		-v /etc/hosts:/etc/hosts:ro \
 		-e LISTEN=${LISTEN} \
-		-e LISTEN_PORT=${LISTEN} \
+		-e LISTEN_PORT=${LISTEN_PORT} \
         --restart unless-stopped \
         ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
