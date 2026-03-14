@@ -1,0 +1,156 @@
+# DNS UPDATE All-Options Example Configuration (ZoneRecords)
+#
+# This example is intended to show every currently available dns_update option:
+# - zone-level auth and authorization scopes
+# - persistence controls
+# - replication controls
+# - security/rate-limit controls
+#
+# It is an example config, not a production recommendation.
+
+upstreams:
+  endpoints:
+    - host: 1.1.1.1
+      port: 53
+      transport: udp
+  strategy: round_robin
+
+server:
+  listen:
+    dns:
+      host: 127.0.0.1
+      port: 5353
+
+plugins:
+  - id: zone-records-dns-update-all-options
+    type: zone_records
+    config:
+      # Static bootstrap records for the zone.
+      records:
+        - "example.com|SOA|300|ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300"
+        - "example.com|NS|300|ns1.example.com."
+        - "example.com|A|300|192.0.2.10"
+      ttl: 300
+
+      dns_update:
+        enabled: true
+        zones:
+          - zone: example.com
+
+            # TSIG auth (works on UDP/TCP/DoT/DoH)
+            tsig:
+              keys:
+                - name: "tsig-key-primary"
+                  algorithm: "hmac-sha256"
+                  secret: "bXktYmFzZTY0LXNlY3JldA=="
+                  # Per-key authorization scopes:
+                  allow_names:
+                    - "home.example.com"
+                    - "*.dyn.example.com"
+                  allow_names_files:
+                    - "/etc/foghorn/update-allow-names.txt"
+                  block_names:
+                    - "example.com"
+                  block_names_files:
+                    - "/etc/foghorn/update-block-names.txt"
+                  allow_update_ips:
+                    - "192.0.2.0/24"
+                    - "2001:db8::/32"
+                  allow_update_ips_files:
+                    - "/etc/foghorn/update-allow-ips.txt"
+                  block_update_ips:
+                    - "10.0.0.0/8"
+                    - "172.16.0.0/12"
+                    - "192.168.0.0/16"
+                    - "fc00::/7"
+                  block_update_ips_files:
+                    - "/etc/foghorn/update-block-ips.txt"
+
+
+              # Optional pluggable key sources (default source type: file)
+              key_sources:
+                - type: file
+                  path: "./example_configs/zone_update_tsig_key_source_file.yaml"
+
+            # PSK auth (restricted to DoT/DoH listeners by implementation)
+            psk:
+              tokens:
+                - token: "$2b$10$replace.with.real.bcrypt.hash"
+                  allow_names:
+                    - "device1.example.com"
+                  allow_names_files:
+                    - "/etc/foghorn/psk-allow-names.txt"
+                  block_names:
+                    - "admin.example.com"
+                  block_names_files:
+                    - "/etc/foghorn/psk-block-names.txt"
+                  allow_update_ips:
+                    - "198.51.100.0/24"
+                  allow_update_ips_files:
+                    - "/etc/foghorn/psk-allow-ips.txt"
+                  block_update_ips:
+                    - "203.0.113.0/24"
+                  block_update_ips_files:
+                    - "/etc/foghorn/psk-block-ips.txt"
+
+            # Zone-level client/network and name/value constraints:
+            allow_clients:
+              - "192.0.2.0/24"
+              - "2001:db8:1::/48"
+            allow_clients_files:
+              - "/etc/foghorn/update-allow-clients.txt"
+
+            allow_names:
+              - "*.dyn.example.com"
+            allow_names_files:
+              - "/etc/foghorn/update-zone-allow-names.txt"
+            block_names:
+              - "example.com"
+            block_names_files:
+              - "/etc/foghorn/update-zone-block-names.txt"
+
+            allow_update_ips:
+              - "192.0.2.0/24"
+            allow_update_ips_files:
+              - "/etc/foghorn/update-zone-allow-ips.txt"
+            block_update_ips:
+              - "10.0.0.0/8"
+            block_update_ips_files:
+              - "/etc/foghorn/update-zone-block-ips.txt"
+
+        # Persistence and journaling controls:
+        persistence:
+          enabled: true
+          # If omitted, runtime state dir is used.
+          state_dir: "/var/lib/foghorn/zone_records"
+          # always | interval
+          fsync_mode: "interval"
+          fsync_interval_ms: 5000
+          max_journal_bytes: 10485760
+          max_journal_entries: 10000
+          compact_interval_seconds: 3600
+          compact_tombstone_ratio: 0.5
+
+        # Replication/routing controls:
+        replication:
+          # primary | replica | peer
+          role: "primary"
+          # Stable node identity in journal metadata.
+          node_id: "node-a"
+          # Owner node identifier (used by peer-mode policy/routing logic).
+          zone_owner_node_id: "node-a"
+          # Emit NOTIFY after successful UPDATE commit.
+          notify_on_update: true
+          # If role=replica, reject direct client updates when true.
+          reject_direct_update_on_replica: true
+
+        # Security limits and rate controls:
+        security:
+          max_updates_per_message: 100
+          max_rr_values_per_rrset: 100
+          max_owner_length: 255
+          max_rdata_length: 65535
+          max_ttl_range: 86400
+          max_transaction_bytes: 1048576
+          rate_limit_per_client: 10
+          rate_limit_per_key: 100

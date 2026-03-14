@@ -1324,13 +1324,52 @@
             },
             "DnsUpdateConfig": {
               "additionalProperties": false,
-              "description": "Brief: DNS UPDATE configuration for ZoneRecords.\n\nInputs:\n  - enabled: Whether DNS UPDATE is enabled.\n  - zones: Per-zone UPDATE configuration.\n\nOutputs:\n  - DnsUpdateConfig instance.",
+              "description": "Brief: DNS UPDATE configuration for ZoneRecords.\n\nInputs:\n  - enabled: Whether DNS UPDATE is enabled.\n  - zones: Per-zone UPDATE configuration.\n  - persistence: Persistence and journaling configuration.\n  - replication: Replication and clustering configuration.\n  - security: Security limits and rate limiting.\n\nOutputs:\n  - DnsUpdateConfig instance.",
               "properties": {
                 "enabled": {
                   "default": false,
                   "description": "Enable DNS UPDATE support. Default: false.",
                   "title": "Enabled",
                   "type": "boolean"
+                },
+                "persistence": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/PersistenceConfig"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Persistence and journaling configuration."
+                },
+                "replication": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/ReplicationConfig"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Replication and clustering configuration."
+                },
+                "security": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/SecurityConfig"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Security limits and rate limiting."
                 },
                 "zones": {
                   "anyOf": [
@@ -1354,9 +1393,200 @@
               "title": "DnsUpdateConfig",
               "type": "object"
             },
+            "PersistenceConfig": {
+              "additionalProperties": false,
+              "description": "Brief: Persistence configuration for DNS UPDATE journaling.\n\nInputs:\n  - enabled: Whether persistence is enabled.\n  - state_dir: Directory for journal files.\n  - fsync_mode: Durability mode (always/interval).\n  - fsync_interval_ms: Interval fsync mode threshold.\n  - max_journal_bytes: Maximum journal size before compaction.\n  - max_journal_entries: Maximum entry count before compaction.\n  - compact_interval_seconds: Minimum time between compactions.\n  - compact_tombstone_ratio: Tombstone ratio threshold.\n\nOutputs:\n  - PersistenceConfig instance.",
+              "properties": {
+                "compact_interval_seconds": {
+                  "default": 3600,
+                  "description": "Minimum seconds between compactions. Default: 3600.",
+                  "minimum": 0,
+                  "title": "Compact Interval Seconds",
+                  "type": "integer"
+                },
+                "compact_tombstone_ratio": {
+                  "default": 0.5,
+                  "description": "Tombstone ratio threshold for compaction. Default: 0.5.",
+                  "maximum": 1.0,
+                  "minimum": 0.0,
+                  "title": "Compact Tombstone Ratio",
+                  "type": "number"
+                },
+                "enabled": {
+                  "default": true,
+                  "description": "Enable persistence for DNS UPDATE journaling. Default: true.",
+                  "title": "Enabled",
+                  "type": "boolean"
+                },
+                "fsync_interval_ms": {
+                  "default": 5000,
+                  "description": "Interval in ms for fsync when mode='interval'. Default: 5000.",
+                  "minimum": 0,
+                  "title": "Fsync Interval Ms",
+                  "type": "integer"
+                },
+                "fsync_mode": {
+                  "default": "interval",
+                  "description": "Durability mode: 'always' (fsync every write) or 'interval' (periodic fsync). Default: \"interval\".",
+                  "title": "Fsync Mode",
+                  "type": "string"
+                },
+                "max_journal_bytes": {
+                  "default": 10485760,
+                  "description": "Maximum journal size in bytes before compaction. Default: 10485760.",
+                  "minimum": 0,
+                  "title": "Max Journal Bytes",
+                  "type": "integer"
+                },
+                "max_journal_entries": {
+                  "default": 10000,
+                  "description": "Maximum number of entries before compaction. Default: 10000.",
+                  "minimum": 0,
+                  "title": "Max Journal Entries",
+                  "type": "integer"
+                },
+                "state_dir": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Directory for journal files. Defaults to runtime state directory.",
+                  "title": "State Dir"
+                }
+              },
+              "title": "PersistenceConfig",
+              "type": "object"
+            },
+            "ReplicationConfig": {
+              "additionalProperties": false,
+              "description": "Brief: Replication configuration for DNS UPDATE.\n\nInputs:\n  - role: Node role for updates.\n  - zone_owner_node_id: Owner node ID for zones.\n  - notify_on_update: Send NOTIFY after successful UPDATE.\n  - reject_direct_update_on_replica: Reject client updates on replicas.\n\nOutputs:\n  - ReplicationConfig instance.",
+              "properties": {
+                "node_id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Stable node identity used in dynamic update journal origin metadata. Defaults to FOGHORN_NODE_ID when omitted.",
+                  "title": "Node Id"
+                },
+                "notify_on_update": {
+                  "default": true,
+                  "description": "Send NOTIFY after successful UPDATE commit. Default: true.",
+                  "title": "Notify On Update",
+                  "type": "boolean"
+                },
+                "reject_direct_update_on_replica": {
+                  "default": false,
+                  "description": "Reject client UPDATE on replica nodes (false=forward to owner). Default: false.",
+                  "title": "Reject Direct Update On Replica",
+                  "type": "boolean"
+                },
+                "role": {
+                  "default": "primary",
+                  "description": "Node role: 'primary', 'replica', or 'peer'. Default: \"primary\".",
+                  "title": "Role",
+                  "type": "string"
+                },
+                "zone_owner_node_id": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Node ID that owns zones in peer mode.",
+                  "title": "Zone Owner Node Id"
+                }
+              },
+              "title": "ReplicationConfig",
+              "type": "object"
+            },
+            "SecurityConfig": {
+              "additionalProperties": false,
+              "description": "Brief: Security limits for DNS UPDATE.\n\nInputs:\n  - max_updates_per_message: Max updates per DNS message.\n  - max_rr_values_per_rrset: Max values per RRset.\n  - max_owner_length: Max owner name length.\n  - max_rdata_length: Max rdata string length.\n  - max_ttl_range: Max TTL value.\n  - max_transaction_bytes: Max journal transaction size.\n  - rate_limit_per_client: Token bucket rate per client IP.\n  - rate_limit_per_key: Token bucket rate per TSIG key.\n\nOutputs:\n  - SecurityConfig instance.",
+              "properties": {
+                "max_owner_length": {
+                  "default": 255,
+                  "description": "Maximum owner name length. Default: 255.",
+                  "minimum": 0,
+                  "title": "Max Owner Length",
+                  "type": "integer"
+                },
+                "max_rdata_length": {
+                  "default": 65535,
+                  "description": "Maximum rdata string length. Default: 65535.",
+                  "minimum": 0,
+                  "title": "Max Rdata Length",
+                  "type": "integer"
+                },
+                "max_rr_values_per_rrset": {
+                  "default": 100,
+                  "description": "Maximum RR values per RRset mutation. Default: 100.",
+                  "minimum": 0,
+                  "title": "Max Rr Values Per Rrset",
+                  "type": "integer"
+                },
+                "max_transaction_bytes": {
+                  "default": 1048576,
+                  "description": "Maximum journal transaction size in bytes. Default: 1048576.",
+                  "minimum": 0,
+                  "title": "Max Transaction Bytes",
+                  "type": "integer"
+                },
+                "max_ttl_range": {
+                  "default": 86400,
+                  "description": "Maximum TTL value in seconds. Default: 86400.",
+                  "minimum": 0,
+                  "title": "Max Ttl Range",
+                  "type": "integer"
+                },
+                "max_updates_per_message": {
+                  "default": 100,
+                  "description": "Maximum updates per DNS message. Default: 100.",
+                  "minimum": 0,
+                  "title": "Max Updates Per Message",
+                  "type": "integer"
+                },
+                "rate_limit_per_client": {
+                  "default": 10,
+                  "description": "Token bucket rate limit per client IP (requests per minute). Default: 10.",
+                  "minimum": 0,
+                  "title": "Rate Limit Per Client",
+                  "type": "integer"
+                },
+                "rate_limit_per_key": {
+                  "default": 100,
+                  "description": "Token bucket rate limit per TSIG key (requests per minute). Default: 100.",
+                  "minimum": 0,
+                  "title": "Rate Limit Per Key",
+                  "type": "integer"
+                }
+              },
+              "title": "SecurityConfig",
+              "type": "object"
+            },
             "UpdateZoneApexConfig": {
               "additionalProperties": false,
-              "description": "Brief: DNS UPDATE configuration for a specific zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - tsig: TSIG configuration.\n  - psk: PSK configuration.\n  - allow_names: List of allowed name patterns (wildcards supported).\n  - allow_names_files: File paths containing allowed names.\n  - block_names: List of blocked names.\n  - block_names_files: File paths containing blocked names.\n  - allow_clients: CIDR list of clients allowed to send UPDATE.\n  - allow_clients_files: File paths containing allowed client CIDRs.\n  - allow_update_ips: CIDR list of IPs allowed in A/AAAA record values.\n  - allow_update_ips_files: File paths containing allowed update IPs.\n  - block_update_ips: CIDR list of IPs blocked from A/AAAA record values.\n  - block_update_ips_files: File paths containing blocked update IPs.\n\nOutputs:\n  - UpdateZoneApexConfig instance.",
+              "description": "Brief: DNS UPDATE configuration for a specific zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - tsig: TSIG configuration.\n  - psk: PSK configuration.\n  - allow_names: List of allowed name patterns (wildcards supported).\n  - allow_names_files: File paths containing allowed names.\n  - block_names: List of blocked names.\n  - block_names_files: File paths containing blocked names.\n  - allow_clients: CIDR list of clients allowed to send UPDATE.\n  - allow_clients_files: File paths containing allowed client CIDRs.\n  - allow_update_ips: CIDR list of IPs allowed in A/AAAA record values.\n  - allow_update_ips_files: File paths containing allowed update IPs.\n  - block_update_ips: CIDR list of IPs blocked from A/AAAA record values.\n  - block_update_ips_files: File paths containing blocked update IPs.\n\nOutputs:\n  - UpdateZoneApexConfig instance.\n\nNotes:\n  - Zone names are normalized by removing leading dots (e.g., \".zaa\" becomes \"zaa\").",
               "properties": {
                 "allow_clients": {
                   "anyOf": [
@@ -1624,8 +1854,8 @@
                   "type": "string"
                 },
                 "enabled": {
-                  "default": false,
-                  "description": "Enable automatic DNSSEC signing for authoritative zones. Default: false.",
+                  "default": true,
+                  "description": "Enable automatic DNSSEC signing for authoritative zones. Defaults to true when dnssec_signing is configured; set false to explicitly disable. Default: true.",
                   "title": "Enabled",
                   "type": "boolean"
                 },
