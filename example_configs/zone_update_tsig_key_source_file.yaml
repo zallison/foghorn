@@ -1,0 +1,16 @@
+# Example source file for dns_update.zones[].tsig.key_sources with:
+#   - type: file
+#     path: ./example_configs/zone_update_tsig_key_source_file.yaml
+#
+# Supported shapes are either:
+#   1) top-level list of key objects
+#   2) mapping with `keys: [...]`
+
+keys:
+  - name: "source-file-key-1"
+    algorithm: "hmac-sha256"
+    secret: "c291cmNlIGZpbGUga2V5IDE="
+    allow_names:
+      - "api.dyn.example.com"
+    allow_update_ips:
+      - "203.0.113.0/24"
