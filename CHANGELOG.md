@@ -58,6 +58,8 @@ All notable changes to this project will be documented in this file.
   - Added DoH parameter size validation before base64 decoding to prevent processing oversized payloads.
   - Added automated upstream health cleanup to prevent unbounded memory growth in `upstream_health` dict.
   - Reduced default recursive `max_depth` from 16 to 12 for better DoS resistance (fully configurable via `server.resolver.max_depth`).
+- Config schema generation now allows optional `comment` and `id` metadata fields on object mappings, with runtime validation enforcing string type and max length (254).
+- RateLimit plugin now supports `burst_windows` to cap consecutive burst windows and `stats_log_interval_seconds` for periodic summary logs.
 - Resolver runtime: added `servers/dns_runtime_state.py` as a shared runtime/config state holder used across UDP handler and shared resolver/helper paths.
 - Resolver pipeline: non-QUERY opcodes can now be handled by resolve plugins via `handle_opcode()` so plugins can explicitly drop, deny, or override those requests.
 - Caching:
@@ -133,6 +135,7 @@ All notable changes to this project will be documented in this file.
 - Config interpolation now ignores non-ALL_CAPS keys defined in top-level `variables`/`vars` (allowing mixed-case entries to be used as YAML anchors without interpolation effects).
 - Startup banner logging now includes a stable config-file fingerprint (`config_sha1`) derived from config file contents, with a safe fallback to `unknown` when file hashing fails.
 - Makefile `docker-run` now exports `LISTEN` and `LISTEN_PORT` environment variables into the runtime container.
+- RateLimit defaults now use `./config/var/dbs/rate_limit.db` for profile storage across runtime helpers, examples, and API output.
 
 ### Fixed
 - DNS UPDATE TSIG parse/verification failures now return protocol-correct UPDATE responses with `NOTAUTH` (instead of malformed opcode handling), including improved TSIG failure diagnostics.
@@ -149,6 +152,8 @@ All notable changes to this project will be documented in this file.
 - Server internals: migrated remaining shared runtime attribute access away from `DNSUDPHandler` class state to `DNSRuntimeState`, reducing transport coupling and improving helper/test isolation.
 - DNSSEC: `ensure_zone_keys` now searches fallback relative key directories (including `config/.config` cwd patterns) before concluding keys are missing when generation is disabled.
 - Main signal handling: fixed SIGUSR reset-flag comparisons so `sigusr1_resets_stats` / `sigusr2_resets_stats` gating is evaluated correctly.
+- Makefile `run` and `docker-run` now pass `LISTEN_PORT` correctly (fixing `docker-run` mistakenly reusing `LISTEN`).
+- Logging formatter bracket-highlighting now more reliably identifies SHA1-style IDs and bracketed container IDs.
 
 ### Tests
 - Added ZoneRecords TSIG update tests covering pluggable `key_sources` resolution paths.
@@ -168,6 +173,7 @@ All notable changes to this project will be documented in this file.
 - Added targeted branch tests for server opcode handling fallback paths, DNSServer runtime wiring/defensive defaults, upstream-health payload shaping, and expanded DoT server branch coverage.
 - Added regression coverage for obsolete listener-key validation, listener default normalization consistency, and relative DNSSEC key-dir fallback lookup behavior.
 - Updated `tests/test_main_additional_coverage.py` fixtures to use `server.listen.dns.host` / `server.listen.dns.port` so startup-path tests no longer rely on obsolete `server.listen.host` / `server.listen.port` keys.
+- Added config schema validation tests covering accepted/rejected `comment` and `id` metadata values (type and length constraints).
 
 ### Documentation
 - Updated README and plugin docs/examples to reflect the nested `targets` config and hook priority shorthands.
@@ -175,6 +181,7 @@ All notable changes to this project will be documented in this file.
 - Updated ZoneRecords docs to clarify source precedence order and AXFR reload timing behavior.
 - Added Graphviz `dot` rendering instructions for config diagrams.
 - Documented DEBUG-level upstream skip/failover logs and de-duplication behavior in the README.
+- Updated rate-limit README/docs/examples/API references for `burst_windows`, `stats_log_interval_seconds`, and the new default DB path.
 
 ----
 
