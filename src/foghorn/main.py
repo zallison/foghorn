@@ -1370,7 +1370,15 @@ def _log_startup_banner(logger: logging.Logger, *, config_path: str) -> None:
     """
     abs_cfg = os.path.abspath(config_path)
     cfg_size = _get_file_size_bytes(abs_cfg)
-    sha1_hash = sha1(abs_cfg.encode()).hexdigest()
+    sha1_hash = "unknown"
+    try:
+        digest = sha1()
+        with open(abs_cfg, "rb") as f:
+            for byte_block in iter(lambda: f.read(4096), b""):
+                digest.update(byte_block)
+        sha1_hash = digest.hexdigest()
+    except Exception:
+        pass
     cfg_size_str = (
         f"{cfg_size} bytes ({_format_bytes(cfg_size)})"
         if cfg_size is not None
