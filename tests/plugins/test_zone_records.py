@@ -2839,7 +2839,6 @@ def test_dnssec_nxdomain_includes_nsec3_when_do_bit_set(tmp_path: pathlib.Path) 
     plugin = ZoneRecords(
         file_paths=[str(records_file)],
         dnssec_signing={
-            "enabled": True,
             "keys_dir": str(keys_dir),
             "algorithm": "ECDSAP256SHA256",
             "generate": "yes",
@@ -2863,6 +2862,81 @@ def test_dnssec_nxdomain_includes_nsec3_when_do_bit_set(tmp_path: pathlib.Path) 
     assert QTYPE.SOA in auth_types
     assert QTYPE.NSEC3 in auth_types
     assert QTYPE.RRSIG in auth_types
+
+
+def test_dnssec_nxdomain_omits_nsec3_when_autosign_explicitly_disabled(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Brief: NXDOMAIN answers omit NSEC3/RRSIG when dnssec_signing.enabled=false.
+
+    Inputs:
+      - tmp_path: pytest temporary directory.
+
+    Outputs:
+      - Asserts that an authoritative NXDOMAIN response contains SOA but no
+        NSEC3 or RRSIG records when auto-signing is explicitly disabled.
+    """
+    records_file = tmp_path / "zone.txt"
+    records_file.write_text(
+        "\n".join(
+            [
+                (
+                    "example.com|SOA|300|ns1.example.com. "
+                    "hostmaster.example.com. ( 1 3600 600 604800 300 )"
+                ),
+                "example.com|A|300|192.0.2.1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    keys_dir = tmp_path / "keys"
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+        dnssec_signing={
+            "enabled": False,
+            "keys_dir": str(keys_dir),
+            "algorithm": "ECDSAP256SHA256",
+            "generate": "yes",
+            "validity_days": 7,
+        },
+        watchdog_poll_interval_seconds=0.0,
+    )
+    plugin.setup()
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    req_with_do = _make_query_with_do_bit("missing.example.com", int(QTYPE.A))
+
+    decision = plugin.pre_resolve("missing.example.com", int(QTYPE.A), req_with_do, ctx)
+    assert decision is not None
+    assert decision.action == "override"
+
+    response = DNSRecord.parse(decision.response)
+    assert response.header.rcode == RCODE.NXDOMAIN
+
+    auth_types = {rr.rtype for rr in (response.auth or [])}
+    assert QTYPE.SOA in auth_types
+    assert QTYPE.NSEC3 not in auth_types
+    assert QTYPE.RRSIG not in auth_types
+
+
+def test_zone_dnssec_signing_config_defaults_enabled_when_defined() -> None:
+    """Brief: ZoneDnssecSigningConfig defaults enabled=true when block exists.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that constructing ZoneDnssecSigningConfig without an explicit
+        enabled field yields enabled=True.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    cfg = mod.ZoneDnssecSigningConfig()
+    assert cfg.enabled is True
 
 
 def test_dnssec_nsec3_params_configurable_via_dnssec_signing(
