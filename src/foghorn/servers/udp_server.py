@@ -734,9 +734,25 @@ class DNSUDPHandler(DNSRuntimeState, socketserver.BaseRequestHandler):
                     pass
                 wire = _set_response_id(r.pack(), req.header.id)
             except Exception:
-                # Worst-case: echo the original bytes so the socket still sends
-                # something back (useful for diagnosing corruption).
-                wire = data
+                # Worst-case: never reflect the original query bytes. Return a
+                # minimal header-only SERVFAIL so clients don't loop on a QR=0 packet.
+                try:
+                    rid = int.from_bytes(data[0:2], "big") if len(data) >= 2 else 0
+                except Exception:
+                    rid = 0
+                try:
+                    rd_flag = (
+                        bool(int.from_bytes(data[2:4], "big") & 0x0100)
+                        if len(data) >= 4
+                        else True
+                    )
+                except Exception:
+                    rd_flag = True
+                wire = _pack_minimal_tc_header(
+                    req_id=rid,
+                    rcode=int(RCODE.SERVFAIL),
+                    rd=rd_flag,
+                )
 
         # Enforce UDP response ceiling; synthesize TC=1 response when needed.
         try:

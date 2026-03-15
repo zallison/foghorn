@@ -64,6 +64,84 @@ def test_resolve_query_bytes_cache_hit(set_runtime_snapshot):
     assert out.header.rcode == RCODE.NOERROR
 
 
+def test_resolve_query_bytes_qdcount_zero_returns_formerr(set_runtime_snapshot) -> None:
+    """Brief: QDCOUNT=0 packets should not crash and should return FORMERR.
+
+    Inputs:
+      - Minimal DNS wire header with QDCOUNT=0.
+
+    Outputs:
+      - None; asserts QR=1 and RCODE=FORMERR.
+    """
+
+    set_runtime_snapshot(plugins=[])
+
+    # 12-byte DNS header only (QDCOUNT=0).
+    # ID=0xBEEF, RD=1.
+    query = (
+        b"\xbe\xef"  # ID
+        + b"\x01\x00"  # flags (RD=1)
+        + b"\x00\x00"  # QDCOUNT
+        + b"\x00\x00"  # ANCOUNT
+        + b"\x00\x00"  # NSCOUNT
+        + b"\x00\x00"  # ARCOUNT
+    )
+
+    resp = resolve_query_bytes(query, "127.0.0.1")
+
+    assert isinstance(resp, (bytes, bytearray))
+    assert len(resp) == 12
+    assert resp[:2] == b"\xbe\xef"
+
+    flags = int.from_bytes(resp[2:4], "big")
+    assert (flags & 0x8000) == 0x8000  # QR=1
+    assert (flags & 0x0100) == 0x0100  # RD mirrored
+    assert (flags & 0x000F) == int(RCODE.FORMERR)
+
+
+def test_resolve_query_bytes_worst_case_fallback_never_reflects_query(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: Worst-case fallback must never return the original query bytes.
+
+    Inputs:
+      - monkeypatch: Forces DNSRecord.parse to fail in both main and exception paths.
+
+    Outputs:
+      - None; asserts header-only SERVFAIL with preserved ID.
+    """
+
+    set_runtime_snapshot(plugins=[])
+
+    # Minimal header-only query; actual content doesn't matter because parse is patched.
+    query = (
+        b"\x12\x34"  # ID
+        + b"\x01\x00"  # flags (RD=1)
+        + b"\x00\x01"  # QDCOUNT=1 (nominal)
+        + b"\x00\x00"  # ANCOUNT
+        + b"\x00\x00"  # NSCOUNT
+        + b"\x00\x00"  # ARCOUNT
+    )
+
+    def _boom(_wire):
+        raise Exception("parse failed")
+
+    monkeypatch.setattr(server_mod.DNSRecord, "parse", _boom)
+
+    resp = resolve_query_bytes(query, "127.0.0.1")
+
+    assert isinstance(resp, (bytes, bytearray))
+    assert len(resp) == 12
+    assert resp[:2] == b"\x12\x34"
+    assert bytes(resp) != bytes(query)
+
+    flags = int.from_bytes(resp[2:4], "big")
+    assert (flags & 0x8000) == 0x8000  # QR=1
+    assert (flags & 0x0100) == 0x0100  # RD mirrored
+    assert (flags & 0x000F) == int(RCODE.SERVFAIL)
+
+
 def test_resolve_query_bytes_stats_pre_deny_and_override(set_runtime_snapshot):
     """Brief: resolve_query_bytes records stats for pre deny and override paths.
 
