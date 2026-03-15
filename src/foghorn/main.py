@@ -212,7 +212,14 @@ def main(argv: List[str] | None = None) -> int:
 
     # Run setup phase for setup-aware plugins before starting listeners
     try:
-        run_setup_plugins(plugins)
+        run_setup_plugins(
+            plugins,
+            upstreams=upstreams,
+            upstream_backups=upstream_backups,
+            timeout_ms=timeout_ms,
+            resolver_mode=resolver_mode,
+            upstream_max_concurrent=upstream_max_concurrent,
+        )
     except RuntimeError as e:
         logger.error("Plugin setup failed: %s", e)
         return 1
@@ -264,9 +271,8 @@ def main(argv: List[str] | None = None) -> int:
           - None
 
         Notes:
-          - Both SIGUSR1 and SIGUSR2 share the same behavior: when statistics
-            are enabled and the configuration flags sigusr[12]_resets_stats is
-            true, the in-memory statistics are reset.
+          - SIGUSR1 and SIGUSR2 each honor their own reset flag:
+            sigusr1_resets_stats for SIGUSR1, sigusr2_resets_stats for SIGUSR2.
         """
 
         nonlocal cfg, stats_collector
@@ -282,11 +288,6 @@ def main(argv: List[str] | None = None) -> int:
                 s_cfg = {}
 
             enabled = bool(s_cfg.get("enabled", False))
-            # Use sigusr2_resets_stats as the canonical configuration flag for
-            # both SIGUSR1 and SIGUSR2 so that user expectations are consistent
-            # regardless of which signal they choose to send. For
-            # backwards-compatibility, also accept sigusr1_resets_stats as a
-            # deprecated alias.
             reset_flag = bool(
                 sig_label == "SIGUSR1" and s_cfg.get("sigusr1_resets_stats", False)
             ) or bool(
@@ -307,9 +308,15 @@ def main(argv: List[str] | None = None) -> int:
                         "%s: no statistics collector active, skipping reset", sig_label
                     )
             else:
+                expected_flag = (
+                    "sigusr1_resets_stats"
+                    if sig_label == "SIGUSR1"
+                    else "sigusr2_resets_stats"
+                )
                 log.info(
-                    "%s: statistics reset skipped (disabled or sigusr2_resets_stats not set)",
+                    "%s: statistics reset skipped (disabled or %s not set)",
                     sig_label,
+                    expected_flag,
                 )
         except (
             Exception
@@ -727,16 +734,11 @@ def main(argv: List[str] | None = None) -> int:
 
         # Log startup info
         if resolver_mode == "forward":
-            upstream_info = ", ".join(
-                [
-                    f"{u['url']}" if "url" in u else f"{u['host']}:{u['port']}"
-                    for u in upstreams
-                ]
-            )
+            upstream_info = f"{len(upstreams)}"
         else:
             upstream_info = "(recursive mode; no forward upstreams)"
         logger.info(
-            "Resolver mode=%s, upstreams: [%s], timeout: %dms",
+            "Resolver mode=%s, upstream_count=%s, timeout=%dms",
             resolver_mode,
             upstream_info,
             timeout_ms,
@@ -1705,7 +1707,7 @@ def _initialize_statistics_subsystem(
         )
         stats_reporter.start()
         logger.info(
-            "Statistics collection enabled (interval: %ds)",
+            "Statistics collection enabled (interval=%ds)",
             stats_reporter.interval_seconds,
         )
 
