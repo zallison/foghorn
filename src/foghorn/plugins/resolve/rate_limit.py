@@ -85,11 +85,11 @@ class RateLimitConfig(BaseModel):
 
       - udp_keying: Keying override applied when ctx.listener == 'udp' and the
         request is not secure. Options:
-          - 'cidr' (default): bucket client IPs into /udp_client_prefix_v4 or
-            /udp_client_prefix_v6 to reduce spoofed-IP cardinality.
+          - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or
+            /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.
           - 'domain': ignore client identity and key only by base domain.
-      - udp_client_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.
-      - udp_client_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.
+      - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.
+      - bucket_network_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.
 
       - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',
         'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.
@@ -118,14 +118,14 @@ class RateLimitConfig(BaseModel):
     prune_interval_seconds: int = Field(default=60, ge=0)
 
     udp_keying: str = Field(default="cidr")
-    udp_client_prefix_v4: int = Field(default=24, ge=0, le=32)
-    udp_client_prefix_v6: int = Field(default=56, ge=0, le=128)
+    bucket_network_prefix_v4: int = Field(default=24, ge=0, le=32)
+    bucket_network_prefix_v6: int = Field(default=56, ge=0, le=128)
 
     deny_response: str = Field(default="refused")
     deny_response_ip4: Optional[str] = None
     deny_response_ip6: Optional[str] = None
     ttl: int = Field(default=60, ge=0)
-    stats_log_interval_seconds: int = Field(default=900, ge=0)
+    stats_log_interval_seconds: int = Field(default=3600, ge=0)
 
     class Config:
         extra = "allow"
@@ -216,19 +216,23 @@ class RateLimit(BasePlugin):
             raw_udp_keying = "cidr"
         self.udp_keying = raw_udp_keying
 
-        self.udp_client_prefix_v4 = self._parse_int_config(
-            "udp_client_prefix_v4",
+        self.bucket_network_prefix_v4 = self._parse_int_config(
+            "bucket_network_prefix_v4",
             24,
             minimum=0,
         )
-        self.udp_client_prefix_v6 = self._parse_int_config(
-            "udp_client_prefix_v6",
+        self.bucket_network_prefix_v6 = self._parse_int_config(
+            "bucket_network_prefix_v6",
             56,
             minimum=0,
         )
         # Clamp prefix bounds explicitly.
-        self.udp_client_prefix_v4 = max(0, min(32, int(self.udp_client_prefix_v4)))
-        self.udp_client_prefix_v6 = max(0, min(128, int(self.udp_client_prefix_v6)))
+        self.bucket_network_prefix_v4 = max(
+            0, min(32, int(self.bucket_network_prefix_v4))
+        )
+        self.bucket_network_prefix_v6 = max(
+            0, min(128, int(self.bucket_network_prefix_v6))
+        )
 
         # sqlite bounds / pruning knobs.
         self.max_profiles = self._parse_int_config("max_profiles", 10000, minimum=1)
@@ -262,7 +266,7 @@ class RateLimit(BasePlugin):
         )
         self.stats_log_interval_seconds = self._parse_int_config(
             "stats_log_interval_seconds",
-            900,
+            3600,
             minimum=0,
         )
         self._last_stats_log_ts: float = 0.0
@@ -617,9 +621,9 @@ class RateLimit(BasePlugin):
 
             ip_obj = ipaddress.ip_address(str(client_ip).strip())
             if ip_obj.version == 4:
-                prefix = int(getattr(self, "udp_client_prefix_v4", 24) or 24)
+                prefix = int(getattr(self, "bucket_network_prefix_v4", 24) or 24)
             else:
-                prefix = int(getattr(self, "udp_client_prefix_v6", 56) or 56)
+                prefix = int(getattr(self, "bucket_network_prefix_v6", 56) or 56)
             prefix = max(0, min(32 if ip_obj.version == 4 else 128, prefix))
             net = ipaddress.ip_network(f"{ip_obj}/{prefix}", strict=False)
             return str(net)
@@ -1199,19 +1203,19 @@ class RateLimit(BasePlugin):
             "udp_keying": str(
                 getattr(self, "udp_keying", self.config.get("udp_keying", "cidr"))
             ),
-            "udp_client_prefix_v4": int(
+            "bucket_network_prefix_v4": int(
                 getattr(
                     self,
-                    "udp_client_prefix_v4",
-                    self.config.get("udp_client_prefix_v4", 24),
+                    "bucket_network_prefix_v4",
+                    self.config.get("bucket_network_prefix_v4", 24),
                 )
                 or 0
             ),
-            "udp_client_prefix_v6": int(
+            "bucket_network_prefix_v6": int(
                 getattr(
                     self,
-                    "udp_client_prefix_v6",
-                    self.config.get("udp_client_prefix_v6", 56),
+                    "bucket_network_prefix_v6",
+                    self.config.get("bucket_network_prefix_v6", 56),
                 )
                 or 0
             ),
