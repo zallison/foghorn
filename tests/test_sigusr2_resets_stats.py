@@ -46,7 +46,6 @@ def test_sigusr2_resets_stats_when_configured(monkeypatch, caplog):
         "stats:\n  enabled: true\n  sigusr2_resets_stats: true\n"
     )
 
-
     class DummyPlugin:
         def __init__(self, **kw):
             self.called = False
@@ -58,7 +57,10 @@ def test_sigusr2_resets_stats_when_configured(monkeypatch, caplog):
         def __init__(self, *a, **kw):
             self.reset_called = False
 
-        def snapshot(self, reset=False):
+        def warm_load_from_store(self) -> None:
+            return None
+
+        def snapshot(self, reset: bool = False):
             if reset:
                 self.reset_called = True
 
@@ -94,9 +96,14 @@ def test_sigusr2_resets_stats_when_configured(monkeypatch, caplog):
         def stop(self) -> None:
             return None
 
+    called = {"sent": False}
+
     def _sleep_once(_sec: float) -> None:
         assert captured["handler"] is not None
-        captured["handler"](None, None)
+        if not called["sent"]:
+            called["sent"] = True
+            captured["handler"](None, None)
+            return None
         raise KeyboardInterrupt
 
     dummy_plugins = [DummyPlugin(), DummyPlugin()]
@@ -124,6 +131,6 @@ def test_sigusr2_resets_stats_when_configured(monkeypatch, caplog):
     )
     # Ensure plugin invocation count still logged
     assert any(
-        "SIGUSR2: invoked handle_sigusr2 on 2 plugins" in r.message
+        "SIGUSR2: invoked signal handler hook on 2 plugins" in r.message
         for r in caplog.records
     )

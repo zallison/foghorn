@@ -49,7 +49,10 @@ def test_sigusr1_resets_stats_and_notifies_plugins(monkeypatch, caplog):
         def __init__(self, *a, **kw):
             self.reset_called = False
 
-        def snapshot(self, reset=False):
+        def warm_load_from_store(self) -> None:
+            return None
+
+        def snapshot(self, reset: bool = False):
             if reset:
                 self.reset_called = True
 
@@ -61,10 +64,10 @@ def test_sigusr1_resets_stats_and_notifies_plugins(monkeypatch, caplog):
 
     class DummyPlugin:
         def __init__(self, **kw):
-            self.called = False
+            self.seen: list[str] = []
 
-        def handle_sigusr2(self):
-            self.called = True
+        def handle_sigusr(self, sig_label: str) -> None:
+            self.seen.append(str(sig_label))
 
     captured = {"handler": None}
 
@@ -92,9 +95,14 @@ def test_sigusr1_resets_stats_and_notifies_plugins(monkeypatch, caplog):
         def stop(self) -> None:
             return None
 
+    called = {"sent": False}
+
     def _sleep_once(_sec: float) -> None:
         assert captured["handler"] is not None
-        captured["handler"](None, None)
+        if not called["sent"]:
+            called["sent"] = True
+            captured["handler"](None, None)
+            return None
         raise KeyboardInterrupt
 
     plugins = [DummyPlugin(), DummyPlugin()]
@@ -119,5 +127,5 @@ def test_sigusr1_resets_stats_and_notifies_plugins(monkeypatch, caplog):
     assert any(
         "SIGUSR1: statistics reset completed" in r.message for r in caplog.records
     )
-    # Ensure plugins were invoked via SIGUSR1 path
-    assert all(p.called for p in plugins)
+    # Ensure plugins were invoked via SIGUSR1 path (unified hook)
+    assert all(p.seen == ["SIGUSR1"] for p in plugins)
