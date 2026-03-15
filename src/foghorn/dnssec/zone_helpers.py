@@ -9,6 +9,45 @@ from dnslib import QTYPE, RR
 logger = logging.getLogger(__name__)
 
 
+def _normalize_generate_policy(raw_policy: object, *, log: logging.Logger) -> str:
+    """Brief: Normalize DNSSEC key generation policy to yes/no/maybe.
+
+    Inputs:
+      - raw_policy: Raw value from dnssec_signing.generate.
+      - log: Logger used for warning messages when values are invalid.
+
+    Outputs:
+      - str: One of {'yes', 'no', 'maybe'} for ensure_zone_keys().
+    """
+    if raw_policy is None:
+        return "maybe"
+    if isinstance(raw_policy, bool):
+        return "yes" if raw_policy else "no"
+
+    normalized = str(raw_policy).strip().lower()
+    if not normalized:
+        return "maybe"
+
+    alias_map = {
+        "true": "yes",
+        "false": "no",
+        "on": "yes",
+        "off": "no",
+        "1": "yes",
+        "0": "no",
+    }
+    normalized = alias_map.get(normalized, normalized)
+
+    if normalized in {"yes", "no", "maybe"}:
+        return normalized
+
+    log.warning(
+        "ZoneRecords: unsupported dnssec_signing.generate=%r; defaulting to 'maybe'",
+        raw_policy,
+    )
+    return "maybe"
+
+
 def _add_nsec3_chain_to_zone(
     zone_obj: object,
     origin: object,
@@ -215,7 +254,10 @@ def auto_sign_zones(
 
         keys_dir_cfg = dnssec_cfg_raw.get("keys_dir")
         algorithm = dnssec_cfg_raw.get("algorithm") or "ECDSAP256SHA256"
-        generate_policy = dnssec_cfg_raw.get("generate") or "maybe"
+        generate_policy = _normalize_generate_policy(
+            dnssec_cfg_raw.get("generate"),
+            log=log,
+        )
         validity_days = int(dnssec_cfg_raw.get("validity_days") or 30)
 
         try:

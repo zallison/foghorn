@@ -2939,6 +2939,55 @@ def test_zone_dnssec_signing_config_defaults_enabled_when_defined() -> None:
     assert cfg.enabled is True
 
 
+def test_zone_dnssec_signing_config_normalizes_generate_maybe_and_false() -> None:
+    """Brief: ZoneDnssecSigningConfig normalizes maybe/false generate inputs.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that generate accepts maybe variants and false-like values and
+        normalizes them to the canonical yes/no/maybe policy strings.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+
+    cfg_maybe = mod.ZoneDnssecSigningConfig(generate=" maybe ")
+    assert cfg_maybe.generate == "maybe"
+
+    cfg_maybe_case = mod.ZoneDnssecSigningConfig(generate="MAYBE")
+    assert cfg_maybe_case.generate == "maybe"
+
+    cfg_false_str = mod.ZoneDnssecSigningConfig(generate="false")
+    assert cfg_false_str.generate == "no"
+
+    cfg_false_bool = mod.ZoneDnssecSigningConfig(generate=False)
+    assert cfg_false_bool.generate == "no"
+
+    cfg_false_alias = mod.ZoneDnssecSigningConfig(generate="off")
+    assert cfg_false_alias.generate == "no"
+
+
+def test_zone_records_config_normalizes_nested_dnssec_generate_policy() -> None:
+    """Brief: ZoneRecordsConfig applies generate normalization in dnssec_signing.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts that nested dnssec_signing.generate values are normalized when
+        parsed via ZoneRecordsConfig.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+
+    cfg_maybe = mod.ZoneRecordsConfig(dnssec_signing={"generate": "maybe"})
+    assert cfg_maybe.dnssec_signing is not None
+    assert cfg_maybe.dnssec_signing.generate == "maybe"
+
+    cfg_false = mod.ZoneRecordsConfig(dnssec_signing={"generate": "false"})
+    assert cfg_false.dnssec_signing is not None
+    assert cfg_false.dnssec_signing.generate == "no"
+
+
 def test_dnssec_nsec3_params_configurable_via_dnssec_signing(
     tmp_path: pathlib.Path,
 ) -> None:
