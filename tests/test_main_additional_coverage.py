@@ -167,6 +167,124 @@ def test_run_setup_plugins_priority_and_fallback(monkeypatch, caplog):
     assert any("Running setup for plugin" in m for m in messages)
 
 
+def test_run_setup_plugins_provider_phase_and_context(monkeypatch):
+    """Brief: Provider phase runs before consumers and context receives provider/upstream state.
+
+    Inputs:
+      - monkeypatch fixture; setup context manager patched with a recorder.
+
+    Outputs:
+      - None: asserts provider plugin setup executes before consumer setup and
+        context kwargs contain provider and upstream information.
+    """
+
+    from foghorn.plugins import setup as setup_mod
+
+    events: list[str] = []
+    context_calls: list[dict[str, Any]] = []
+
+    class Provider(BasePlugin):
+        setup_provides_dns = True
+        setup_priority = 50
+
+        def __init__(self) -> None:
+            super().__init__()
+
+        def setup(self) -> None:  # type: ignore[override]
+            events.append("provider")
+
+    class Consumer(BasePlugin):
+        setup_requires_dns = True
+        setup_priority = 1
+
+        def __init__(self) -> None:
+            super().__init__()
+
+        def setup(self) -> None:  # type: ignore[override]
+            events.append("consumer")
+
+    class FakeSetupDNSContext:
+        def __init__(self, **kwargs: Any) -> None:
+            context_calls.append(kwargs)
+
+        def __enter__(self) -> "FakeSetupDNSContext":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+    monkeypatch.setattr(setup_mod, "_SetupDNSResolverContext", FakeSetupDNSContext)
+
+    provider = Provider()
+    consumer = Consumer()
+    run_setup_plugins(
+        [consumer, provider],
+        upstreams=[{"host": "1.1.1.1", "port": 53}],
+        upstream_backups=[{"host": "9.9.9.9", "port": 53}],
+        timeout_ms=1234,
+        resolver_mode="forward",
+        upstream_max_concurrent=3,
+    )
+
+    assert events == ["provider", "consumer"]
+    assert len(context_calls) == 1
+    call = context_calls[0]
+    assert call["providers"] == [provider]
+    assert call["upstreams"] == [
+        {"host": "1.1.1.1", "port": 53},
+        {"host": "9.9.9.9", "port": 53},
+    ]
+    assert call["timeout_ms"] == 1234
+    assert call["resolver_mode"] == "forward"
+    assert call["upstream_max_concurrent"] == 3
+
+
+def test_run_setup_plugins_fallback_default_and_override(monkeypatch):
+    """Brief: setup_dns_fallback_to_system defaults to True and honors explicit False.
+
+    Inputs:
+      - monkeypatch fixture; setup context manager patched with a recorder.
+
+    Outputs:
+      - None: asserts fallback_to_system value passed to setup context for both
+        default and override plugin configurations.
+    """
+
+    from foghorn.plugins import setup as setup_mod
+
+    fallback_values: list[bool] = []
+
+    class NeedsDNS(BasePlugin):
+        setup_requires_dns = True
+
+        def __init__(self, **cfg: object) -> None:
+            super().__init__(**cfg)
+
+        def setup(self) -> None:  # type: ignore[override]
+            return None
+
+    class FakeSetupDNSContext:
+        def __init__(self, **kwargs: Any) -> None:
+            fallback_values.append(bool(kwargs["fallback_to_system"]))
+
+        def __enter__(self) -> "FakeSetupDNSContext":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+    monkeypatch.setattr(setup_mod, "_SetupDNSResolverContext", FakeSetupDNSContext)
+
+    run_setup_plugins(
+        [
+            NeedsDNS(),
+            NeedsDNS(setup_dns_fallback_to_system=False),
+        ]
+    )
+
+    assert fallback_values == [True, False]
+
+
 def test_run_shutdown_plugins_calls_shutdown_and_continues_on_error(caplog):
     """Brief: run_shutdown_plugins invokes hooks once and continues on errors.
 
@@ -283,7 +401,7 @@ def test_main_runs_shutdown_hooks_for_cache_querylog_and_resolve(monkeypatch):
 
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **kw: None)
-    monkeypatch.setattr(main_mod, "run_setup_plugins", lambda _plugins: None)
+    monkeypatch.setattr(main_mod, "run_setup_plugins", lambda _plugins, **_kw: None)
     monkeypatch.setattr(main_mod, "run_shutdown_plugins", fake_run_shutdown_plugins)
     monkeypatch.setattr(main_mod, "load_plugins", lambda _specs: [resolver_obj])
     monkeypatch.setattr(
@@ -346,7 +464,7 @@ def test_main_returns_one_when_run_setup_plugins_fails(monkeypatch, caplog):
             "ThreadingUDPServer should not be constructed when setup fails"
         )
 
-    def boom_run_setup(_plugins: list[Any]) -> None:
+    def boom_run_setup(_plugins: list[Any], **_kwargs: Any) -> None:
         raise RuntimeError("setup failed")
 
     monkeypatch.setattr(socketserver, "ThreadingUDPServer", forbidden_udp_server)
@@ -359,6 +477,68 @@ def test_main_returns_one_when_run_setup_plugins_fails(monkeypatch, caplog):
 
     assert rc == 1
     assert any("Plugin setup failed" in r.message for r in caplog.records)
+
+
+def test_main_passes_resolver_context_to_run_setup_plugins(monkeypatch) -> None:
+    """Brief: main() passes resolver/upstream context into run_setup_plugins().
+
+    Inputs:
+      - monkeypatch fixture; setup runner replaced with a recorder.
+
+    Outputs:
+      - None: asserts run_setup_plugins receives mode, timeout, upstreams,
+        backups, and max_concurrent from parsed config.
+    """
+
+    import time as _time
+
+    yaml_data = (
+        "server:\n"
+        "  http:\n"
+        "    enabled: false\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: false\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2500\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 4\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "plugins: []\n"
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _record_setup(_plugins: list[Any], **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    def _raise_keyboardinterrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **kw: None)
+    monkeypatch.setattr(main_mod, "load_plugins", lambda _specs: [])
+    monkeypatch.setattr(main_mod, "run_setup_plugins", _record_setup)
+    monkeypatch.setattr(
+        main_mod, "_initialize_statistics_subsystem", lambda **_kw: (None, None, None)
+    )
+    monkeypatch.setattr(_time, "sleep", _raise_keyboardinterrupt)
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        rc = main_mod.main(["--config", "cfg.yaml"])
+
+    assert rc == 0
+    assert captured["resolver_mode"] == "forward"
+    assert captured["timeout_ms"] == 2500
+    assert captured["upstream_max_concurrent"] == 4
+    assert captured["upstreams"] == [{"host": "1.1.1.1", "port": 53}]
+    assert captured["upstream_backups"] == []
 
 
 def test_main_installs_cache_plugin_without_udp_listener(monkeypatch) -> None:
@@ -1290,7 +1470,7 @@ def test_dot_start_logs_info(monkeypatch, caplog):
         is patched to a no-op.
 
     Outputs:
-      - None: asserts DoT startup info log is emitted.
+      - None: asserts DoT startup info log and TLS debug log are emitted.
     """
 
     yaml_data = (
@@ -1348,7 +1528,7 @@ def test_dot_start_logs_info(monkeypatch, caplog):
     monkeypatch.setitem(_sys.modules, "threading", fake_threading)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
-        with caplog.at_level(logging.INFO, logger="foghorn.main"):
+        with caplog.at_level(logging.DEBUG, logger="foghorn.main"):
             rc = main_mod.main(["--config", "cfg.yaml"])
 
     assert rc == 0

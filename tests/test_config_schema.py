@@ -21,6 +21,10 @@ import foghorn.config.config_schema as config_schema_mod
 from foghorn.config.config_schema import get_default_schema_path, validate_config
 
 EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "example_configs"
+SCHEMA_FRAGMENT_FILES = {
+    "zone_update_tsig_keys.yaml",
+    "zone_update_tsig_key_source_file.yaml",
+}
 
 
 def _example_yaml_paths() -> list[Path]:
@@ -36,12 +40,16 @@ def _example_yaml_paths() -> list[Path]:
       - Some editors create files like `.#+name.yaml` (Emacs lock) or `#name.yaml#`
         (Emacs autosave) or `name.yaml~` (backup). These should not be treated as
         real example configs.
+      - External TSIG key-source fixtures are intentionally partial YAML documents
+        and should not be validated as full root configurations.
     """
 
     paths: list[Path] = []
     for p in sorted(EXAMPLE_DIR.glob("*.yaml")):
         name = p.name
         if name.startswith(".") or name.startswith("#") or name.endswith("~"):
+            continue
+        if name in SCHEMA_FRAGMENT_FILES:
             continue
         if not p.is_file():
             continue

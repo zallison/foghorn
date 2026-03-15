@@ -263,8 +263,8 @@ def test_rate_limit_config_applies_defaults_for_new_fields():
     assert cfg.prune_interval_seconds == 60
 
     assert cfg.udp_keying == "cidr"
-    assert cfg.udp_client_prefix_v4 == 24
-    assert cfg.udp_client_prefix_v6 == 56
+    assert cfg.bucket_network_prefix_v4 == 24
+    assert cfg.bucket_network_prefix_v6 == 56
 
 
 def test_rate_limit_config_validates_max_profiles_ge_1():
@@ -302,8 +302,8 @@ def test_rate_limit_config_validates_ttls_and_prune_interval_ge_0():
         rate_limit_module.RateLimitConfig(prune_interval_seconds=-1)
 
 
-def test_rate_limit_config_validates_udp_client_prefix_ranges():
-    """Brief: udp_client_prefix_v4/v6 must be within CIDR prefix bounds.
+def test_rate_limit_config_validates_bucket_network_prefix_ranges():
+    """Brief: bucket_network_prefix_v4/v6 must be within CIDR prefix bounds.
 
     Inputs:
       - None
@@ -312,20 +312,24 @@ def test_rate_limit_config_validates_udp_client_prefix_ranges():
       - None: asserts v4 in [0,32] and v6 in [0,128].
     """
 
-    rate_limit_module.RateLimitConfig(udp_client_prefix_v4=0, udp_client_prefix_v6=0)
-    rate_limit_module.RateLimitConfig(udp_client_prefix_v4=32, udp_client_prefix_v6=128)
+    rate_limit_module.RateLimitConfig(
+        bucket_network_prefix_v4=0, bucket_network_prefix_v6=0
+    )
+    rate_limit_module.RateLimitConfig(
+        bucket_network_prefix_v4=32, bucket_network_prefix_v6=128
+    )
 
     with pytest.raises(ValidationError):
-        rate_limit_module.RateLimitConfig(udp_client_prefix_v4=-1)
+        rate_limit_module.RateLimitConfig(bucket_network_prefix_v4=-1)
 
     with pytest.raises(ValidationError):
-        rate_limit_module.RateLimitConfig(udp_client_prefix_v4=33)
+        rate_limit_module.RateLimitConfig(bucket_network_prefix_v4=33)
 
     with pytest.raises(ValidationError):
-        rate_limit_module.RateLimitConfig(udp_client_prefix_v6=-1)
+        rate_limit_module.RateLimitConfig(bucket_network_prefix_v6=-1)
 
     with pytest.raises(ValidationError):
-        rate_limit_module.RateLimitConfig(udp_client_prefix_v6=129)
+        rate_limit_module.RateLimitConfig(bucket_network_prefix_v6=129)
 
 
 def test_rate_limit_config_udp_keying_valid_and_invalid_values():

@@ -42,9 +42,8 @@ def test_sigusr1_resets_stats_and_notifies_plugins(monkeypatch, caplog):
         "    mode: forward\n"
         "    timeout_ms: 2000\n"
         "    use_asyncio: true\n"
-        "stats:\n  enabled: true\n  sigusr2_resets_stats: true\n"
+        "stats:\n  enabled: true\n  sigusr1_resets_stats: true\n"
     )
-
 
     class DummyCollector:
         def __init__(self, *a, **kw):
