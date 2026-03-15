@@ -32,6 +32,7 @@ All notable changes to this project will be documented in this file.
 
 - Rate limit configuration warning: Foghorn now warns at startup when listeners bind to non-loopback addresses without a rate_limit plugin configured. This provides operators guidance for DoS protection on exposed deployments.
 - Tooling: added `scripts/dump_effective_config.py` and `foghorn.config.config_dump` helpers to render an "effective" config (variables expanded + core runtime defaults made explicit) as YAML or JSON for debugging.
+- Runtime: added a dedicated bounded background executor controlled by `server.limits.bg_executor_workers` for non-resolver background tasks.
 - Plugins/config: added plugin profile preset loading helpers plus built-in RateLimit profile presets (default/single/lan/smb/enterprise) and an example configuration demonstrating profile selection and per-field overrides.
 - Plugins/config: include built-in `*_profiles.yaml` in installed distributions so presets can be loaded via package resources.
 
@@ -128,13 +129,16 @@ All notable changes to this project will be documented in this file.
 - Config: `server.listen.host` / `server.listen.port` and `server.listen.dns.udp` / `server.listen.dns.tcp` are now rejected as obsolete; use `server.listen.dns.host` / `server.listen.dns.port` plus per-listener sections.
 - Runtime internals: refactored `foghorn.main` startup/shutdown flow into focused helper functions (argument parsing, listener normalization, resolver/upstream parsing, cache/stats initialization, runtime snapshot setup, DNSSEC resolver wiring, and signal-handler install) while preserving `main()` behavior and public wrappers.
 - Runtime/config parity: listener default host/port handling is now aligned across startup, effective-config dump output, rate-limit exposure checks, and config-diagram extraction.
+- Config CLI/runtime: added `--skip-schema-validation` (unsafe) to allow explicit startup without JSON Schema checks while preserving config normalization.
+- Config validation: startup now fails closed when the JSON schema file cannot be found/parsed or `jsonschema` is unavailable (unless schema validation is explicitly skipped).
 - Logging/transport diagnostics: DoT and admin TLS failure warnings now include richer certificate/key/CA context with likely-cause hints.
 - Failover diagnostics: upstream skip/failure logging now includes stable upstream identity labels and health context summaries.
 - Upstream failover connection-refused warnings are now throttled under sustained failures to reduce repetitive log noise.
 - Admin UI: plugin table rendering now supports client-side searchable sections, and rate-limit snapshots include config item details.
 - Resolver forward-local gating now uses a cached helper for `.local` and RFC1918 PTR block checks in the hot path.
 - Config interpolation now ignores non-ALL_CAPS keys defined in top-level `variables`/`vars` (allowing mixed-case entries to be used as YAML anchors without interpolation effects).
-- Startup banner logging now includes a stable config-file fingerprint (`config_sha1`) derived from config file contents, with a safe fallback to `unknown` when file hashing fails.
+- Startup banner logging now includes a stable config-file fingerprint (`config_sha256`) derived from config file contents, with a safe fallback to `unknown` when file hashing fails.
+- Plugin signals: startup/runtime signal dispatch now prefers a unified `handle_sigusr(sig_label)` hook while retaining legacy compatibility paths.
 - Makefile `docker-run` now exports `LISTEN` and `LISTEN_PORT` environment variables into the runtime container.
 - RateLimit defaults now use `./config/var/dbs/rate_limit.db` for profile storage across runtime helpers, examples, and API output.
 
@@ -149,6 +153,7 @@ All notable changes to this project will be documented in this file.
 - Diagrams: config diagram endpoints now expose `.dot` source consistently.
 - Diagrams: routed upstreams now render as color-coded nodes inside the upstreams cluster based on security level (secure vs insecure), with dashed connections from plugins to their routed upstreams.
 - Diagrams: deny and override edge labels now use multi-line format (e.g., `deny\nIP`, `override\nwire reply`) with proper DOT escaping.
+- Diagrams: listener extraction now treats an explicitly present listener block (`udp`/`tcp`/`dot`/`doh`) as implicitly enabled unless `enabled: false` is set.
 - ZoneRecords DNSSEC negative-response helpers now handle source-aware RRset entries `(ttl, values, sources)` to avoid tuple-unpacking errors.
 - Server internals: migrated remaining shared runtime attribute access away from `DNSUDPHandler` class state to `DNSRuntimeState`, reducing transport coupling and improving helper/test isolation.
 - DNSSEC: `ensure_zone_keys` now searches fallback relative key directories (including `config/.config` cwd patterns) before concluding keys are missing when generation is disabled.
