@@ -57,20 +57,6 @@ from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
 #   - DNS_CACHE: CachePlugin instance
 DNS_CACHE: CachePlugin = InMemoryTTLCache()
 
-# Canonical DNS response cache used by the resolver.
-#
-# Brief:
-#   This is intentionally defined at module scope so the core resolver
-#   (foghorn.server.resolve_query_bytes) and all transports share a single
-#   cache object.
-#
-# Inputs:
-#   - None
-#
-# Outputs:
-#   - DNS_CACHE: CachePlugin instance
-DNS_CACHE: CachePlugin = InMemoryTTLCache()
-
 logger = logging.getLogger(__name__)
 
 _PLUGIN_LOG_LEVELS = {
@@ -276,6 +262,10 @@ class BasePlugin:
       - pre_priority (for pre_resolve hooks; lower runs first)
       - post_priority (for post_resolve hooks; lower runs first)
       - setup_priority (for setup() hooks; lower runs first)
+    Setup DNS orchestration metadata:
+      - setup_provides_dns: plugin can provide local DNS answers during setup.
+      - setup_requires_dns: plugin setup performs host resolution and should
+        run with setup-time DNS context enabled.
 
     Inputs:
       - name: Optional human-friendly identifier used when logging statistics
@@ -308,6 +298,8 @@ class BasePlugin:
     pre_priority: ClassVar[int] = 100
     post_priority: ClassVar[int] = 100
     setup_priority: ClassVar[int] = 100
+    setup_provides_dns: ClassVar[bool] = False
+    setup_requires_dns: ClassVar[bool] = False
     aliases: ClassVar[Sequence[str]] = ()
     # Query-type targeting: plugins may override this at the class level to
     # restrict which qtypes they apply to. By default, all qtypes are targeted

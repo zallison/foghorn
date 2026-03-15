@@ -1111,6 +1111,8 @@ def _handle_notify_opcode(
 class ZoneRecords(BasePlugin):
     """DNS zone records plugin with AXFR, DNSSEC, and DNS UPDATE support."""
 
+    setup_provides_dns = True
+
     target_opcodes = ("NOTIFY", "UPDATE")
 
     def handle_opcode(
@@ -1291,7 +1293,7 @@ class ZoneRecords(BasePlugin):
 
         # Optional polling fallback
         if self._poll_interval > 0.0:
-            logger.info(
+            logger.debug(
                 "ZoneRecords polling enabled (interval_seconds=%s)",
                 self._poll_interval,
             )
