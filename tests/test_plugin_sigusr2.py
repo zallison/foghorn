@@ -42,7 +42,6 @@ def test_sigusr2_calls_plugin_handlers(monkeypatch, caplog):
         "    use_asyncio: true\n"
     )
 
-
     class DummyPlugin:
         def __init__(self, **kw):
             self.called = False
@@ -76,9 +75,14 @@ def test_sigusr2_calls_plugin_handlers(monkeypatch, caplog):
         def stop(self) -> None:
             return None
 
+    called = {"sent": False}
+
     def _sleep_once(_sec: float) -> None:
         assert captured["handler"] is not None
-        captured["handler"](None, None)
+        if not called["sent"]:
+            called["sent"] = True
+            captured["handler"](None, None)
+            return None
         raise KeyboardInterrupt
 
     # load_plugins returns two plugins
@@ -103,6 +107,6 @@ def test_sigusr2_calls_plugin_handlers(monkeypatch, caplog):
     assert all(p.called for p in dummy_plugins)
     # Ensure log mentions invocation count
     assert any(
-        "SIGUSR2: invoked handle_sigusr2 on 2 plugins" in r.message
+        "SIGUSR2: invoked signal handler hook on 2 plugins" in r.message
         for r in caplog.records
     )
