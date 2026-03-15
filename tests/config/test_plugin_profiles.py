@@ -36,7 +36,7 @@ def test_load_builtin_profiles_rate_limit_returns_yaml_profiles() -> None:
     assert "smb" in profiles
     assert "enterprise" in profiles
     assert "localhost" in profiles
-    assert profiles["home"]["min_enforce_rps"] == 5
+    assert profiles["home"]["min_enforce_rps"] == 10
     assert profiles["lan"]["global_max_rps"] == 500
 
 
