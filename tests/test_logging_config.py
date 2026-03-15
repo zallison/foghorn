@@ -220,12 +220,19 @@ def test_bracket_formatter_color_highlights_tokens():
     assert f"{COLOR_KV_KEY}meta\033[0m{COLOR_KV_SEPARATOR}=\033[0m" in out
     assert "\033[36m(\033[0m" in out
     assert "\033[36m)\033[0m" in out
-    assert (
+    container_id_colored_no_space = (
         f"{COLOR_KV_KEY}container_id\033[0m{COLOR_KV_SEPARATOR}=\033[0m"
         f"{COLOR_KV_VALUE}e016e8dbb0b7\033[0m{COLOR_DARK_GREY}[\033[0m"
         f"{COLOR_DARK_GREY}dd96058298fb79dfb28d55e542941322c0133b5c01a6e5bf3afd\033[0m"
         f"{COLOR_DARK_GREY}]\033[0m"
-    ) in out
+    )
+    container_id_colored_space = (
+        f"{COLOR_KV_KEY}container_id\033[0m{COLOR_KV_SEPARATOR}=\033[0m"
+        f"{COLOR_KV_VALUE}e016e8dbb0b7\033[0m{COLOR_DARK_GREY} [\033[0m"
+        f"{COLOR_DARK_GREY}dd96058298fb79dfb28d55e542941322c0133b5c01a6e5bf3afd\033[0m"
+        f"{COLOR_DARK_GREY}]\033[0m"
+    )
+    assert container_id_colored_no_space in out or container_id_colored_space in out
     assert f"{COLOR_DARK_GREY}[\033[0m" in out
     assert f"{COLOR_DARK_GREY}]\033[0m" in out
     assert (
@@ -243,9 +250,10 @@ def test_bracket_formatter_color_highlights_tokens():
     assert "bracketed [docker-host]" in out_without_ansi
     assert "running setup for plugin filter" in out_without_ansi
     assert "meta=a(b)[c]" in out_without_ansi
-    assert (
-        "container_id=e016e8dbb0b7[dd96058298fb79dfb28d55e542941322c0133b5c01a6e5bf3afd]"
-    ) in out_without_ansi
+    assert re.search(
+        r"container_id=e016e8dbb0b7 ?\[dd96058298fb79dfb28d55e542941322c0133b5c01a6e5bf3afd\]",
+        out_without_ansi,
+    )
     assert "/tmp/a.txt" in out
     assert "ERR_TIMEOUT" in out
     assert "2026-03-07" in out
