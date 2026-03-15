@@ -57,8 +57,8 @@ plugins:
 
       # Spoofing-robust UDP keying
       udp_keying: cidr  # options: cidr | domain
-      udp_client_prefix_v4: 24
-      udp_client_prefix_v6: 56
+      bucket_network_prefix_v4: 24
+      bucket_network_prefix_v6: 56
 
       deny_response: ip  # options: nxdomain | refused | servfail
                          #     noerror_empty | nodata  | ip
