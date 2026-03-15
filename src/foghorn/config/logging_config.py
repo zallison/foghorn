@@ -92,12 +92,16 @@ class BracketLevelFormatter(logging.Formatter):
     _IP_COLOR = COLOR_IP_PORT
     _PORT_COLOR = COLOR_IP_PORT
     _DOCKER_CONTAINER_ID_PATTERN = re.compile(
-        r"^(?P<short>[0-9a-fA-F]{12})\[(?P<long>[0-9a-fA-F]{12,})\]$"
+        r"(?P<short>[0-9a-fA-F]{12})\[(?P<long>[0-9a-fA-F]{12,})\]$"
+    )
+    _SHA1_ID_PATTERN = re.compile(
+        r"(?P<short>[0-9a-fA-F]{6})(?P<long>[0-9a-fA-F]{12,})$"
     )
     _HIGHLIGHT_PATTERN = re.compile(
         r"(?P<kv>\b[A-Za-z_][\w.-]*=[^\s,;]+)"
         r"|(?P<date>\b\d{4}-\d{2}-\d{2}\b)"
-        r"|(?P<ip>\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?::\d{1,5})?\b)"
+        #        r"|(?P<ip>\b(https?://)?(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?::\d{1,5})?\b)"
+        r"|(?P<ip>(https?://)?(?:www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_+.~#?&//=]*))"
         r"|(?P<bracket>\[[^\[\]\n]*\])"
         r"|(?P<paren>\([^()\n]*\))"
         r"|(?P<plugin_context>\b(?:plugin|pkugin)\s+[A-Za-z0-9_.-]+)"
@@ -109,6 +113,7 @@ class BracketLevelFormatter(logging.Formatter):
         r"|(?P<error>\b(?:[A-Z_]+_[A-Z_]+|E\d{2,5}|ERR_[A-Z0-9_]+|[45]\d{2})\b)"
     )
     _TOKEN_COLORS = {
+        "url": COLOR_IP_PORT,
         "date": COLOR_BRIGHT_GREEN,
         "quoted_double": COLOR_QUOTED,
         "quoted_single": COLOR_QUOTED,
@@ -206,7 +211,18 @@ class BracketLevelFormatter(logging.Formatter):
             long_id = docker_match.group("long")
             return (
                 f"{self._KV_VALUE_COLOR}{short_id}{self._RESET}"
-                f"{self._BRACKET_GRAY_COLOR}[{self._RESET}"
+                f"{self._BRACKET_GRAY_COLOR} [{self._RESET}"
+                f"{self._DOCKER_LONG_ID_COLOR}{long_id}{self._RESET}"
+                f"{self._BRACKET_GRAY_COLOR}]{self._RESET}"
+            )
+
+        sha1_match = self._SHA1_ID_PATTERN.match(value)
+        if sha1_match:
+            short_id = sha1_match.group("short")
+            long_id = sha1_match.group("long")
+            return (
+                f"{self._KV_VALUE_COLOR}{short_id}{self._RESET}"
+                f"{self._BRACKET_GRAY_COLOR} [{self._RESET}"
                 f"{self._DOCKER_LONG_ID_COLOR}{long_id}{self._RESET}"
                 f"{self._BRACKET_GRAY_COLOR}]{self._RESET}"
             )

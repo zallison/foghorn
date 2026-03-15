@@ -29,8 +29,10 @@ plugins:
       window_seconds: 10
       warmup_windows: 6
       burst_factor: 3.0
+      burst_windows: 6
       min_enforce_rps: 50.0
-      db_path: ./config/var/rate_limit.db
+      stats_log_interval_seconds: 900
+      db_path: ./config/var/dbs/rate_limit.db
 ```
 
 ## Configuration profiles (presets)
@@ -73,17 +75,19 @@ plugins:
 
       # Enforcement thresholds
       burst_factor: 3.0              # allow up to 3x learned average
+      burst_windows: 6               # consecutive burst windows before disabling
       min_enforce_rps: 50.0          # do not enforce on low-traffic keys
       global_max_rps: 5000.0         # hard ceiling per key (0 => disabled)
 
       # Persistence
-      db_path: ./config/var/rate_limit.db
+      db_path: ./config/var/dbs/rate_limit.db
 
       # Deny behaviour
       deny_response: nxdomain        # nxdomain|refused|servfail|noerror_empty|ip
       deny_response_ip4: 0.0.0.0
       deny_response_ip6: ::1
       ttl: 60                        # TTL for synthetic IP answers when using 'ip'
+      stats_log_interval_seconds: 900  # periodic summary logging (0 disables)
 ```
 
 ## Options
@@ -108,6 +112,10 @@ plugins:
   - Multiplier over the learned average RPS that defines the soft ceiling. For
     example, with baseline 100 RPS and `burst_factor=3.0`, enforcement starts
     above ~300 RPS.
+- `burst_windows: int`
+  - Number of consecutive windows where the current RPS exceeds
+    `max(avg_rps * burst_factor, min_enforce_rps)` before the burst factor is
+    disabled. `0` keeps the existing unlimited burst behavior.
 - `min_enforce_rps: float`
   - Minimum baseline RPS required before enforcement is considered; protects
     low-traffic keys from being throttled by a few extra queries.
@@ -122,6 +130,9 @@ plugins:
   - Replacement IPs used when `deny_response == 'ip'`.
 - `ttl: int`
   - TTL for synthetic IP answers when `deny_response == 'ip'`.
+- `stats_log_interval_seconds: int`
+  - Periodic summary log interval in seconds. When `0`, summary logging is
+    disabled. Logs only when `avg_rps > 0`.
 
 ### Behaviour
 
@@ -131,6 +142,8 @@ plugins:
   above `min_enforce_rps`, new windows are evaluated against:
   - `burst_factor * baseline`, and
   - `global_max_rps` (if non-zero).
+- When `burst_windows > 0`, the burst factor is disabled after the configured
+  number of consecutive burst windows.
 - When the current window's RPS exceeds allowed thresholds, the plugin returns a
   deny decision according to `deny_response`; otherwise it returns `None` and
   allows normal processing.

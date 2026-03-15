@@ -21,6 +21,8 @@ _Local/dev_
 - `env-dev`
 - `run`
 - `schema`
+- `ui-bundle`
+- `ui-bundle-runtime`
 
 _Testing_
 - `test`
@@ -204,6 +206,12 @@ Below is a list of all `Makefile` targets, grouped roughly by purpose.
 - `schema`
   - Regenerates `assets/config-schema.json` from the Python schema generator.
   - Implementation detail: runs `./scripts/generate_foghorn_schema.py -o assets/config-schema.json` and then appends a trailing newline.
+- `ui-bundle`
+  - Builds `dist/foghorn-admin-ui.cdn.js` as a single embedded JavaScript artifact for CDN deployment.
+  - Implementation detail: runs `python ./scripts/build_admin_ui_bundle.py`.
+- `ui-bundle-runtime`
+  - Builds `dist/foghorn-admin-ui.cdn.js` containing runtime JavaScript only (without embedded HTML/CSS).
+  - Implementation detail: runs `python ./scripts/build_admin_ui_bundle.py --runtime-only`.
 
 ### DNSSEC
 

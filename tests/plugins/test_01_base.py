@@ -214,6 +214,20 @@ def test_base_plugin_priority_default():
     assert BasePlugin.post_priority == 100
 
 
+def test_base_plugin_setup_dns_flags_default_false() -> None:
+    """Brief: BasePlugin defaults setup-phase DNS metadata flags to False.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts setup_provides_dns and setup_requires_dns defaults.
+    """
+
+    assert BasePlugin.setup_provides_dns is False
+    assert BasePlugin.setup_requires_dns is False
+
+
 def test_base_plugin_subclass_inheritance():
     """
     Brief: Verify subclass inherits base behavior.
@@ -404,9 +418,7 @@ def test_base_plugin_targets_and_ignore_combined():
       - None; asserts clients in ignore range are skipped while others in
         targets are included.
     """
-    plugin = BasePlugin(
-        targets={"ips": ["10.0.0.0/8"], "ignore_ips": ["10.0.0.0/16"]}
-    )
+    plugin = BasePlugin(targets={"ips": ["10.0.0.0/8"], "ignore_ips": ["10.0.0.0/16"]})
     ctx_ignored = PluginContext(client_ip="10.0.1.1")
     ctx_allowed = PluginContext(client_ip="10.1.2.3")
     ctx_outside = PluginContext(client_ip="192.0.2.1")
@@ -426,9 +438,7 @@ def test_base_plugin_targets_uses_cache_for_repeated_client(monkeypatch):
         invoked once for repeated targets() calls with the same client_ip.
     """
     # Configure a simple targets-only plugin so explicit CIDRs are in effect.
-    plugin = BasePlugin(
-        targets={"ips": ["10.0.0.0/8"]}, targets_cache_ttl_seconds=300
-    )
+    plugin = BasePlugin(targets={"ips": ["10.0.0.0/8"]}, targets_cache_ttl_seconds=300)
     ctx = PluginContext(client_ip="10.1.2.3")
 
     # Wrap the module-level ipaddress.ip_address used inside BasePlugin so we

@@ -558,6 +558,36 @@ def test_threaded_ratelimit_and_upstream_status_endpoints() -> None:
     assert "items" in data2
 
 
+def test_threaded_config_schema_paths_match() -> None:
+    """Brief: Threaded /api/v1/config/schema matches /config/schema payload.
+
+    Inputs:
+      - Minimal webserver config with auth disabled.
+
+    Outputs:
+      - Both routes return 200 with the same schema document and schema_path.
+    """
+
+    cfg = {"webserver": {"auth": {"mode": "none"}}}
+
+    st1, _h1, b1 = _one_shot_http_request(
+        method="GET", path="/api/v1/config/schema", config=cfg
+    )
+    st2, _h2, b2 = _one_shot_http_request(
+        method="GET", path="/config/schema", config=cfg
+    )
+
+    assert st1 == 200
+    assert st2 == 200
+
+    d1 = json.loads(b1.decode("utf-8"))
+    d2 = json.loads(b2.decode("utf-8"))
+    assert d1["schema_path"] == d2["schema_path"]
+    assert d1["schema"] == d2["schema"]
+    assert d1["schema_path"].endswith("config-schema.json")
+    assert "$schema" in d1["schema"]
+
+
 def test_threaded_openapi_and_docs_oauth_edge_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

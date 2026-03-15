@@ -21,6 +21,7 @@ Notes:
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import BaseStatsStore
@@ -354,6 +355,8 @@ class MongoStatsStore(BaseStatsStore):
         qtype: Optional[str] = None,
         qname: Optional[str] = None,
         rcode: Optional[str] = None,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -366,6 +369,8 @@ class MongoStatsStore(BaseStatsStore):
             qtype: Optional qtype filter.
             qname: Optional qname filter.
             rcode: Optional rcode filter.
+            status: Optional status filter.
+            source: Optional result.source filter.
             start_ts: Optional inclusive start timestamp.
             end_ts: Optional exclusive end timestamp.
             page: 1-based page index.
@@ -386,6 +391,19 @@ class MongoStatsStore(BaseStatsStore):
             flt["name"] = qname.strip().rstrip(".").lower()
         if rcode:
             flt["rcode"] = rcode.strip().upper()
+        if status:
+            status_s = status.strip()
+            if status_s:
+                flt["status"] = {"$regex": f"^{re.escape(status_s)}$", "$options": "i"}
+        if source:
+            source_s = source.strip().lower()
+            if source_s:
+                compact = re.escape(f'"source":"{source_s}"')
+                spaced = re.escape(f'"source": "{source_s}"')
+                flt["$or"] = [
+                    {"result_json": {"$regex": compact, "$options": "i"}},
+                    {"result_json": {"$regex": spaced, "$options": "i"}},
+                ]
         if isinstance(start_ts, (int, float)) or isinstance(end_ts, (int, float)):
             ts_cond: Dict[str, Any] = {}
             if isinstance(start_ts, (int, float)):

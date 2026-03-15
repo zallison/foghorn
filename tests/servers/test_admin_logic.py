@@ -10,7 +10,6 @@ Outputs:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict
 from unittest.mock import Mock
 
 import pytest
@@ -145,6 +144,8 @@ class TestBuildQueryLogPayload:
             qtype=None,
             qname=None,
             rcode=None,
+            status=None,
+            source=None,
             start_ts=None,
             end_ts=None,
             page=1,
@@ -185,6 +186,8 @@ class TestBuildQueryLogPayload:
             qtype=None,
             qname=None,
             rcode=None,
+            status=None,
+            source=None,
             start_ts=None,
             end_ts=None,
             page=1,
@@ -215,6 +218,8 @@ class TestBuildQueryLogPayload:
             qtype="A",
             qname="example.com",
             rcode="NOERROR",
+            status="cache_hit",
+            source="cache",
             start_ts=1000.0,
             end_ts=2000.0,
             page=2,
@@ -226,6 +231,8 @@ class TestBuildQueryLogPayload:
             qtype="A",
             qname="example.com",
             rcode="NOERROR",
+            status="cache_hit",
+            source="cache",
             start_ts=1000.0,
             end_ts=2000.0,
             page=2,
@@ -257,6 +264,8 @@ class TestBuildQueryLogPayload:
             qtype=None,
             qname=None,
             rcode=None,
+            status=None,
+            source=None,
             start_ts=None,
             end_ts=None,
             page=1,
@@ -450,6 +459,45 @@ class TestBuildUpstreamStatusPayload:
         assert payload["max_concurrent"] == 5
         assert len(payload["items"]) == 2
         assert {it.get("role") for it in payload["items"]} == {"primary"}
+
+    def test_upstream_payload_includes_run_query_counts(
+        self, set_runtime_snapshot
+    ) -> None:
+        """Brief: Include run query/failure counts from StatsCollector snapshot.
+
+        Inputs:
+          - set_runtime_snapshot: Fixture helper.
+
+        Outputs:
+          - Assert each upstream item includes run_query_count/run_failed_count.
+        """
+
+        upstreams = [
+            {"host": "8.8.8.8", "port": 53},
+            {"host": "1.1.1.1", "port": 53},
+        ]
+        mock_snapshot = Mock()
+        mock_snapshot.upstreams = {
+            "8.8.8.8:53": {"success": 7, "timeout": 2, "servfail": 1},
+            "1.1.1.1:53": {"success": 3},
+        }
+        mock_collector = Mock()
+        mock_collector.snapshot.return_value = mock_snapshot
+
+        set_runtime_snapshot(
+            upstream_addrs=upstreams,
+            upstream_backup_addrs=[],
+            stats_collector=mock_collector,
+        )
+
+        payload = build_upstream_status_payload({}, now_ts=1707752400.0)
+        items_by_id = {str(item.get("id")): item for item in payload["items"]}
+
+        assert items_by_id["8.8.8.8:53"]["run_query_count"] == 10
+        assert items_by_id["8.8.8.8:53"]["run_failed_count"] == 3
+        assert items_by_id["1.1.1.1:53"]["run_query_count"] == 3
+        assert items_by_id["1.1.1.1:53"]["run_failed_count"] == 0
+        mock_collector.snapshot.assert_called_once_with(reset=False)
 
     def test_health_only_upstreams(self, set_runtime_snapshot) -> None:
         """Brief: Upstream status payload lists only configured upstreams.

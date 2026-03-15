@@ -89,6 +89,7 @@ class FileDownloader(BasePlugin):
     """
 
     aliases = ("file_downloader", "lists")
+    setup_requires_dns = True
 
     @classmethod
     def get_config_model(cls):

@@ -45,9 +45,10 @@ plugins:
       alpha: 0.4
       alpha_down: 0.1
       burst_factor: 5.0
+      burst_windows: 6
       min_enforce_rps: 4.0
       global_max_rps: 50.0
-      db_path: ./config/var/rate_limit.db # :memory:
+      db_path: ./config/var/dbs/rate_limit.db # :memory:
 
       # sqlite profile bounding/pruning
       max_profiles: 10000
@@ -56,14 +57,15 @@ plugins:
 
       # Spoofing-robust UDP keying
       udp_keying: cidr  # options: cidr | domain
-      udp_client_prefix_v4: 24
-      udp_client_prefix_v6: 56
+      bucket_network_prefix_v4: 24
+      bucket_network_prefix_v6: 56
 
       deny_response: ip  # options: nxdomain | refused | servfail
                          #     noerror_empty | nodata  | ip
       deny_response_ip4: 0.0.0.0
       deny_response_ip6: '::'
       ttl: 60
+      stats_log_interval_seconds: 900
 
 server:
   listen:

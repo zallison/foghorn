@@ -321,7 +321,7 @@ def _normalize_plugin_entries_for_validation(cfg: Dict[str, Any]) -> None:
     Supported meta fields:
       - enabled: When false (either at entry level or in entry.config), the
         plugin entry is removed.
-      - comment: Optional human-only string; removed.
+      - comment: Optional human-only string; preserved.
     """
 
     plugins = cfg.get("plugins")
@@ -360,11 +360,59 @@ def _normalize_plugin_entries_for_validation(cfg: Dict[str, Any]) -> None:
 
         # Strip non-schema fields.
         entry.pop("enabled", None)
-        entry.pop("comment", None)
 
         normalized.append(entry)
 
     cfg["plugins"] = normalized
+
+
+def _validate_comment_id_fields(cfg: Dict[str, Any]) -> None:
+    """Brief: Enforce that comment/id keys are short strings on all mappings.
+
+    Inputs:
+      - cfg: Parsed configuration mapping (mutated by earlier normalization).
+
+    Outputs:
+      - None. Raises ValueError when invalid comment/id fields are found.
+
+    Notes:
+      - This check runs even when JSON Schema validation is unavailable so
+        comment/id constraints remain consistent across environments.
+      - Only keys named exactly "comment" or "id" are validated. They are
+        optional; when present, they must be strings up to 254 characters.
+    """
+
+    max_len = 254
+
+    def _format_path(path: list[str]) -> str:
+        if not path:
+            return "<root>"
+        return ".".join(path)
+
+    def _validate_value(key: str, value: Any, *, path: list[str]) -> None:
+        if not isinstance(value, str):
+            raise ValueError(
+                f"{_format_path(path)}.{key} must be a string (max {max_len} chars)"
+            )
+        if len(value) > max_len:
+            raise ValueError(f"{_format_path(path)}.{key} exceeds {max_len} characters")
+
+    def _walk(obj: Any, path: list[str]) -> None:
+        if isinstance(obj, dict):
+            if "comment" in obj:
+                _validate_value("comment", obj.get("comment"), path=path)
+            if "id" in obj:
+                _validate_value("id", obj.get("id"), path=path)
+            for key, value in obj.items():
+                key_str = str(key)
+                _walk(value, path + [key_str])
+            return
+        if isinstance(obj, list):
+            for idx, value in enumerate(obj):
+                _walk(value, path + [f"[{idx}]"])
+            return
+
+    _walk(cfg, [])
 
 
 def get_default_schema_path() -> Path:
@@ -517,6 +565,7 @@ def validate_config(
     _normalize_cache_config_for_validation(cfg)
     _normalize_dnssec_config_for_validation(cfg)
     _normalize_plugin_entries_for_validation(cfg)
+    _validate_comment_id_fields(cfg)
 
     # If the base schema file cannot be found, log a warning and skip
     # validation rather than aborting startup. This keeps behaviour resilient

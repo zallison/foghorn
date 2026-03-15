@@ -95,6 +95,8 @@ class DummyBackend(BaseStatsStore):
         qtype: Optional[str] = None,
         qname: Optional[str] = None,
         rcode: Optional[str] = None,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,

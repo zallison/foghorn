@@ -464,6 +464,8 @@ class PostgresStatsStore(BaseStatsStore):
         qtype: Optional[str] = None,
         qname: Optional[str] = None,
         rcode: Optional[str] = None,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -476,6 +478,8 @@ class PostgresStatsStore(BaseStatsStore):
             qtype: Optional qtype filter.
             qname: Optional qname filter.
             rcode: Optional rcode filter.
+            status: Optional status filter.
+            source: Optional result.source filter.
             start_ts: Optional inclusive start timestamp.
             end_ts: Optional exclusive end timestamp.
             page: 1-based page index.
@@ -502,6 +506,14 @@ class PostgresStatsStore(BaseStatsStore):
         if rcode:
             where.append("rcode = %s")
             params.append(rcode.strip().upper())
+        if status:
+            where.append("LOWER(COALESCE(status, '')) = %s")
+            params.append(status.strip().lower())
+        if source:
+            source_s = source.strip().lower()
+            where.append("(LOWER(result_json) LIKE %s OR LOWER(result_json) LIKE %s)")
+            params.append(f'%"source":"{source_s}"%')
+            params.append(f'%"source": "{source_s}"%')
         if isinstance(start_ts, (int, float)):
             where.append("ts >= %s")
             params.append(float(start_ts))

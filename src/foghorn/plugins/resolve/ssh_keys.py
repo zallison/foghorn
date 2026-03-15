@@ -79,6 +79,7 @@ class SshKeys(BasePlugin):
 
     # Restrict this plugin to SSHFP by default.
     target_qtypes: Sequence[str] = ("SSHFP",)
+    setup_requires_dns = True
 
     @classmethod
     def get_config_model(cls):
