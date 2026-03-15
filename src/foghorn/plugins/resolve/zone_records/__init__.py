@@ -597,6 +597,43 @@ class ZoneDnssecSigningConfig(BaseModel):
         ),
     )
 
+    @field_validator("generate", mode="before")
+    @classmethod
+    def normalize_generate_policy(cls, value: object) -> str:
+        """Brief: Normalize dnssec_signing.generate into yes/no/maybe.
+
+        Inputs:
+          - value: Raw generate policy value from configuration.
+
+        Outputs:
+          - str: Normalized value in {'yes', 'no', 'maybe'}.
+        """
+        if value is None:
+            return "maybe"
+        if isinstance(value, bool):
+            return "yes" if value else "no"
+
+        normalized = str(value).strip().lower()
+        if not normalized:
+            return "maybe"
+
+        alias_map = {
+            "true": "yes",
+            "false": "no",
+            "on": "yes",
+            "off": "no",
+            "1": "yes",
+            "0": "no",
+        }
+        normalized = alias_map.get(normalized, normalized)
+
+        if normalized not in {"yes", "no", "maybe"}:
+            raise ValueError(
+                "dnssec_signing.generate must be one of: yes, no, maybe "
+                "(aliases: true/false, on/off, 1/0)"
+            )
+        return normalized
+
     class Config:
         extra = "forbid"
 
