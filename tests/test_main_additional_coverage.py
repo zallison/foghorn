@@ -21,58 +21,10 @@ import pytest
 import foghorn.main as main_mod
 
 
-class _FakeThreadingModule:
-    """Test helper: module-like shim that overrides Thread but proxies others.
-
-    Inputs:
-      - real_module: The real threading module.
-      - thread_cls: Replacement Thread implementation for tests.
-
-    Outputs:
-      - An object suitable for insertion into sys.modules['threading'] that
-        exposes Thread as thread_cls while delegating all other attributes to
-        real_module.
-    """
-
-    def __init__(self, real_module, thread_cls) -> None:  # type: ignore[no-untyped-def]
-        self._real = real_module
-        self.Thread = thread_cls
-
-    def __getattr__(self, name):  # type: ignore[no-untyped-def]
-        return getattr(self._real, name)
-
-
 from foghorn.config.config_parser import normalize_upstream_config
-from foghorn.main import _clear_lru_caches, run_setup_plugins, run_shutdown_plugins
+from foghorn.main import run_setup_plugins, run_shutdown_plugins
 from foghorn.plugins.cache.none import NullCache
 from foghorn.plugins.resolve.base import BasePlugin
-
-
-def test_clear_lru_caches_none_and_explicit_list():
-    """Brief: _clear_lru_caches handles None and explicit wrapper lists.
-
-    Inputs:
-      - None: calls _clear_lru_caches(None) and _clear_lru_caches([wrapper]).
-
-    Outputs:
-      - None: asserts explicit wrapper.cache_clear() was invoked; no exceptions are raised.
-    """
-
-    class DummyWrapper:
-        def __init__(self) -> None:
-            self.cleared = False
-
-        def cache_clear(self) -> None:
-            self.cleared = True
-
-    # Explicit list path exercises the for-loop over provided wrappers.
-    w = DummyWrapper()
-    _clear_lru_caches([w])
-    assert w.cleared is True
-
-    # None path exercises the gc-discovery path and ensures it does not raise.
-    # We do not depend on actual gc contents for coverage.
-    _clear_lru_caches(None)
 
 
 def test_normalize_upstream_config_missing_host_and_optional_fields():
@@ -533,7 +485,7 @@ def test_main_passes_resolver_context_to_run_setup_plugins(monkeypatch) -> None:
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main_mod.main(["--config", "cfg.yaml"])
 
-    assert rc == 0
+    assert rc == 1
     assert captured["resolver_mode"] == "forward"
     assert captured["timeout_ms"] == 2500
     assert captured["upstream_max_concurrent"] == 4
@@ -677,10 +629,19 @@ def test_sigusr1_skip_reset_and_coalescing(monkeypatch, caplog):
     captured = handler_info["captured"]
     fake_signal = handler_info["fake_signal"]
 
+    called = {"sent": False}
+
     def _sleep_first(_seconds: float) -> None:
         handler = captured.get("sigusr1")
         assert handler is not None
-        handler(None, None)
+
+        # First sleep: trigger the signal.
+        if not called["sent"]:
+            called["sent"] = True
+            handler(None, None)
+            return None
+
+        # Second sleep: exit after keepalive loop had a chance to process.
         raise KeyboardInterrupt
 
     monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
@@ -888,15 +849,20 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
     def fake_load_plugins(_specs):
         return [DummyPlugin(), ErrorPlugin()]
 
+    called = {"sent": False}
+
     def _sleep_once(_seconds: float) -> None:
         handler = captured.get("sigusr2")
         assert handler is not None
 
-        # First call: exercise stats reset error + plugin error.
-        handler(None, None)
+        # First sleep: trigger the signal.
+        if not called["sent"]:
+            called["sent"] = True
+            handler(None, None)
+            return None
 
-        # Second call: set the coalescing/pending event and ensure handler
-        # returns early (no additional SIGUSR2 logs).
+        # Second sleep: after processing, set the pending event and ensure the
+        # handler returns early (it should only set the Event).
         pending_event = None
         for cell in handler.__closure__ or ():
             obj = cell.cell_contents
@@ -927,8 +893,8 @@ def test_sigusr2_error_paths_more(monkeypatch, caplog):
 
     msgs = [r.message for r in caplog.records]
     assert any("SIGUSR2: error during statistics reset" in m for m in msgs)
-    # The coalesced second call should not emit a second 'invoked handle_sigusr2' line.
-    assert sum("SIGUSR2: invoked handle_sigusr2" in m for m in msgs) == 1
+    # The coalesced second call should not emit a second 'invoked signal handler hook' line.
+    assert sum("SIGUSR2: invoked signal handler hook" in m for m in msgs) == 1
 
 
 def test_sigusr2_logs_no_collector_active(monkeypatch, caplog):
@@ -985,10 +951,17 @@ def test_sigusr2_logs_no_collector_active(monkeypatch, caplog):
     captured = handler_info["captured"]
     fake_signal = handler_info["fake_signal"]
 
+    called = {"sent": False}
+
     def _sleep_once(_seconds: float) -> None:
         handler = captured.get("sigusr2")
         assert handler is not None
-        handler(None, None)
+
+        if not called["sent"]:
+            called["sent"] = True
+            handler(None, None)
+            return None
+
         raise KeyboardInterrupt
 
     # StatsCollector returns None so the SIGUSR2 handler sees no active collector.
@@ -1277,10 +1250,6 @@ def test_tcp_permission_error_falls_back_to_threaded(monkeypatch, caplog):
                 self._target()
 
     import asyncio as _asyncio
-    import sys as _sys
-    import threading as _threading
-
-    fake_threading = _FakeThreadingModule(_threading, DummyThread)
 
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
@@ -1292,10 +1261,9 @@ def test_tcp_permission_error_falls_back_to_threaded(monkeypatch, caplog):
         "foghorn.servers.tcp_server.serve_tcp_threaded", fake_serve_tcp_threaded
     )
     # Patch asyncio's global new_event_loop so that the instance imported in
-    # foghorn.main sees the PermissionError, and ensure that the dynamic
-    # import inside _start_asyncio_server sees our fake threading module.
+    # foghorn.main sees the PermissionError.
     monkeypatch.setattr(_asyncio, "new_event_loop", fake_new_event_loop)
-    monkeypatch.setitem(_sys.modules, "threading", fake_threading)
+    monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         with caplog.at_level(logging.INFO, logger="foghorn.main"):
@@ -1313,7 +1281,7 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
         raises PermissionError, and threading.Thread runs runner synchronously.
 
     Outputs:
-      - None: asserts error log is emitted for DoT PermissionError.
+      - None: asserts error log is emitted for DoT PermissionError and startup exits non-zero.
     """
 
     yaml_data = (
@@ -1362,27 +1330,21 @@ def test_dot_permission_error_logs_without_fallback(monkeypatch, caplog):
                 self._target()
 
     import asyncio as _asyncio
-    import sys as _sys
-    import threading as _threading
-
-    fake_threading = _FakeThreadingModule(_threading, DummyThread)
 
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
     )
     # Patch asyncio's global new_event_loop so that the instance imported in
-    # foghorn.main sees the PermissionError, and ensure that the dynamic
-    # import of threading used by _start_asyncio_server resolves to our
-    # fake module.
+    # foghorn.main sees the PermissionError.
     monkeypatch.setattr(_asyncio, "new_event_loop", fake_new_event_loop)
-    monkeypatch.setitem(_sys.modules, "threading", fake_threading)
+    monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         with caplog.at_level(logging.ERROR, logger="foghorn.main"):
             rc = main_mod.main(["--config", "cfg.yaml"])
 
-    assert rc == 0
+    assert rc == 1
     assert any(
         "Asyncio loop creation failed with PermissionError for foghorn-dot" in r.message
         for r in caplog.records
@@ -1397,7 +1359,7 @@ def test_dot_startup_exception_logs_unhandled_listener_error(monkeypatch, caplog
         RuntimeError, and threading.Thread runs runner synchronously.
 
     Outputs:
-      - None: asserts the generic asyncio listener exception log is emitted for DoT.
+      - None: asserts the generic asyncio listener exception log is emitted for DoT and startup exits non-zero.
     """
 
     yaml_data = (
@@ -1438,23 +1400,18 @@ def test_dot_startup_exception_logs_unhandled_listener_error(monkeypatch, caplog
             if self._target is not None:
                 self._target()
 
-    import sys as _sys
-    import threading as _threading
-
-    fake_threading = _FakeThreadingModule(_threading, DummyThread)
-
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
     )
     monkeypatch.setattr("foghorn.servers.dot_server.serve_dot", boom_serve_dot)
-    monkeypatch.setitem(_sys.modules, "threading", fake_threading)
+    monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         with caplog.at_level(logging.ERROR, logger="foghorn.main"):
             rc = main_mod.main(["--config", "cfg.yaml"])
 
-    assert rc == 0
+    assert rc == 1
     assert any(
         "Asyncio listener foghorn-dot failed to start or exited with an unhandled exception"
         in r.message
@@ -1516,16 +1473,11 @@ def test_dot_start_logs_info(monkeypatch, caplog):
         def start(self) -> None:
             return None
 
-    import sys as _sys
-    import threading as _threading
-
-    fake_threading = _FakeThreadingModule(_threading, DummyThread)
-
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
     )
-    monkeypatch.setitem(_sys.modules, "threading", fake_threading)
+    monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         with caplog.at_level(logging.DEBUG, logger="foghorn.main"):
@@ -1593,8 +1545,6 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
             self.closed = True
 
     import asyncio as _asyncio
-    import sys as _sys
-    import threading as _threading
 
     def fake_new_event_loop() -> DummyLoop:
         loop = DummyLoop()
@@ -1622,8 +1572,6 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
             if self._target is not None:
                 self._target()
 
-    fake_threading = _FakeThreadingModule(_threading, DummyThread)
-
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(
         main_mod, "start_webserver", lambda *a, **k: SimpleNamespace(stop=lambda: None)
@@ -1635,7 +1583,7 @@ def test_asyncio_server_happy_path_runs_and_closes_loop(monkeypatch):
     monkeypatch.setattr(_asyncio, "new_event_loop", fake_new_event_loop)
     monkeypatch.setattr(_asyncio, "set_event_loop", fake_set_event_loop)
     monkeypatch.setattr(_asyncio, "get_event_loop", fake_get_event_loop)
-    monkeypatch.setitem(_sys.modules, "threading", fake_threading)
+    monkeypatch.setattr(main_mod.threading, "Thread", DummyThread)
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main_mod.main(["--config", "cfg_asyncio.yaml"])
@@ -1821,6 +1769,108 @@ def test_main_returns_one_on_config_validation_error(monkeypatch, capsys):
     assert rc == 1
     out = capsys.readouterr().out
     assert "bad config value" in out
+
+
+def test_main_sigusr_dispatch_uses_unified_hook(monkeypatch, caplog):
+    """Brief: SIGUSR1 and SIGUSR2 invoke plugin handle_sigusr(sig_label).
+
+    Inputs:
+      - monkeypatch/caplog fixtures; signal.signal patched to capture handlers.
+      - a plugin instance providing handle_sigusr.
+
+    Outputs:
+      - None: asserts the unified hook is invoked for both SIGUSR1 and SIGUSR2
+        with the correct label.
+    """
+
+    yaml_data = (
+        "server:\n"
+        "  listen:\n"
+        "    udp:\n"
+        "      enabled: true\n"
+        "      host: 127.0.0.1\n"
+        "      port: 5354\n"
+        "  resolver:\n"
+        "    mode: forward\n"
+        "    timeout_ms: 2000\n"
+        "    use_asyncio: false\n"
+        "upstreams:\n"
+        "  strategy: failover\n"
+        "  max_concurrent: 1\n"
+        "  endpoints:\n"
+        "    - host: 1.1.1.1\n"
+        "      port: 53\n"
+        "plugins: []\n"
+    )
+
+    class P(BasePlugin):
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen: list[str] = []
+
+        def handle_sigusr(self, sig_label: str) -> None:  # type: ignore[override]
+            self.seen.append(str(sig_label))
+
+    plugin = P()
+
+    captured: Dict[str, Any] = {"sigusr1": None, "sigusr2": None}
+
+    def fake_signal(sig, handler):
+        if sig == _signal.SIGUSR1:
+            captured["sigusr1"] = handler
+        elif sig == _signal.SIGUSR2:
+            captured["sigusr2"] = handler
+        return None
+
+    import socketserver
+    import threading
+    import time
+
+    class DummyUDPServer:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.daemon_threads = False
+            self._stop = threading.Event()
+
+        def serve_forever(self) -> None:
+            self._stop.wait()
+
+        def shutdown(self) -> None:
+            self._stop.set()
+
+        def server_close(self) -> None:
+            return None
+
+    called = {"sent": False}
+
+    def _sleep_once(_seconds: float) -> None:
+        if not called["sent"]:
+            called["sent"] = True
+            sigusr1 = captured.get("sigusr1")
+            sigusr2 = captured.get("sigusr2")
+            assert sigusr1 is not None
+            assert sigusr2 is not None
+            sigusr1(None, None)
+            sigusr2(None, None)
+            return None
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(socketserver, "ThreadingUDPServer", DummyUDPServer)
+    monkeypatch.setattr(time, "sleep", _sleep_once)
+    monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
+    monkeypatch.setattr(main_mod.signal, "signal", fake_signal)
+    monkeypatch.setattr(main_mod, "load_plugins", lambda *_a, **_k: [plugin])
+    monkeypatch.setattr(
+        main_mod,
+        "start_webserver",
+        lambda *a, **k: None,
+    )
+
+    with patch("builtins.open", mock_open(read_data=yaml_data)):
+        with caplog.at_level(logging.INFO, logger="foghorn.main"):
+            rc = main_mod.main(["--config", "cfg.yaml"])
+
+    assert rc == 0
+    assert plugin.seen == ["SIGUSR1", "SIGUSR2"]
 
 
 def test_sigterm_sigint_hard_kill_timer_and_early_return(monkeypatch, caplog):

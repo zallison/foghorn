@@ -114,7 +114,11 @@ class DNSServer:
         DNSRuntimeState.dnssec_mode = str(dnssec_mode)
         DNSRuntimeState.dnssec_validation = str(dnssec_validation)
         DNSRuntimeState.upstream_strategy = str(upstream_strategy).lower()
-        DNSRuntimeState.resolver_mode = str(resolver_mode).lower()
+        rm = str(resolver_mode).lower()
+        # "none" and "master" behave the same way
+        if rm == "none":  # pragma: no cover - legacy alias
+            rm = "master"
+        DNSRuntimeState.resolver_mode = rm
         DNSRuntimeState.recursive_max_depth = int(recursive_max_depth)
         DNSRuntimeState.recursive_timeout_ms = int(recursive_timeout_ms)
         DNSRuntimeState.recursive_per_try_timeout_ms = int(recursive_per_try_timeout_ms)

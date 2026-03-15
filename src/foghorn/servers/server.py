@@ -5,7 +5,7 @@ import ipaddress
 import logging
 import random
 import threading
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from typing import Dict, List, Optional, Tuple
 from dnslib import (  # noqa: F401  (re-exported for udp_server._ensure_edns)
     EDNS0,
@@ -66,11 +66,12 @@ _CACHE_LOCAL = threading.local()
 # Bounded background executor used for best-effort work triggered by untrusted
 # network events (NOTIFY and cache refresh). This avoids spawning unbounded
 # threads under attack conditions.
-_BG_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="foghorn-bg")
 _BG_SEM = threading.Semaphore(128)
 _BG_LOCK = threading.Lock()
-_BG_NOTIFY_INFLIGHT: set[str] = set()
-_BG_CACHE_INFLIGHT: set[tuple[bytes, str]] = set()
+# Coalescing set for background cache refresh tasks (keyed by the original
+# query wire bytes). This prevents redundant upstream work when multiple clients
+# ask the same question around the same time.
+_BG_CACHE_INFLIGHT: set[bytes] = set()
 _RFC1918_V4_NETWORKS: tuple[ipaddress.IPv4Network, ...] = (
     ipaddress.IPv4Network("10.0.0.0/8"),
     ipaddress.IPv4Network("172.16.0.0/12"),
@@ -128,6 +129,49 @@ def _is_forward_local_blocked_query(qname: str, qtype: int) -> bool:
     return qtype == QTYPE.PTR and _is_rfc1918_ptr_query_name(qname)
 
 
+# Cache of pre/post plugin ordering to avoid sorting on every query.
+_PLUGIN_ORDER_LOCK = threading.Lock()
+# Keyed by (kind, token). kind is 'snap' (token=generation) or 'state'
+# (token=id(plugins_list)).
+_PLUGIN_ORDER_CACHE: dict[tuple[str, int], tuple[list[object], list[object]]] = {}
+
+
+def _get_ordered_plugins(
+    *,
+    plugins: list[object],
+    token_kind: str,
+    token: int,
+) -> tuple[list[object], list[object]]:
+    """Brief: Return pre/post plugin lists ordered by priority with caching.
+
+    Inputs:
+      - plugins: Current plugin instances.
+      - token_kind: 'snap' for runtime snapshots or 'state' for DNSRuntimeState.
+      - token: Generation number or a stable id() for the plugins list.
+
+    Outputs:
+      - (pre_plugins, post_plugins) ordered lists.
+
+    Notes:
+      - This is hot-path sensitive; it avoids O(n log n) sorting on every query.
+      - For snapshots we key by generation; for DNSRuntimeState by id(list).
+    """
+
+    cache_key = (str(token_kind), int(token))
+    with _PLUGIN_ORDER_LOCK:
+        cached = _PLUGIN_ORDER_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+    pre = sorted(plugins, key=lambda p: getattr(p, "pre_priority", 50))
+    post = sorted(plugins, key=lambda p: getattr(p, "post_priority", 50))
+
+    with _PLUGIN_ORDER_LOCK:
+        _PLUGIN_ORDER_CACHE[cache_key] = (pre, post)
+
+    return pre, post
+
+
 def _bg_submit(key: object, fn) -> None:
     """Brief: Submit a bounded background task with best-effort coalescing.
 
@@ -157,7 +201,9 @@ def _bg_submit(key: object, fn) -> None:
             pass
 
     try:
-        fut = _BG_EXECUTOR.submit(fn)
+        from .bg_executor import get_bg_executor
+
+        fut = get_bg_executor().submit(fn)
         fut.add_done_callback(_done)
     except Exception:
         try:
@@ -202,8 +248,8 @@ def _schedule_cache_refresh(data: bytes, client_ip: str) -> None:
             # at debug level only.
             logger.debug("Cache refresh failed", exc_info=True)
 
-    # Coalesce refreshes per (query, ip) tuple to prevent thread explosions.
-    key = (bytes(data), str(client_ip))
+    # Coalesce refreshes per query (not per client) to prevent redundant work.
+    key = bytes(data)
     with _BG_LOCK:
         if key in _BG_CACHE_INFLIGHT:
             return
@@ -280,6 +326,121 @@ def send_query_with_failover(
 # patch/import points used by tests and plugin code.
 
 
+def _pack_minimal_dns_response_header(query_wire: bytes, rcode: int) -> bytes:
+    """Brief: Construct a minimal DNS response header without parsing.
+
+    Inputs:
+      - query_wire: Original request bytes (may be malformed/short).
+      - rcode: Integer response code (0-15).
+
+    Outputs:
+      - bytes: 12-byte DNS response header with QR=1 and RCODE set.
+
+    Notes:
+      - Intended only as a last-resort safe fallback when dnslib parsing/packing
+        cannot be trusted.
+      - Preserves the request transaction ID when present.
+      - Mirrors the RD bit from the request header when present.
+    """
+
+    try:
+        rid = int.from_bytes(query_wire[0:2], "big") if len(query_wire) >= 2 else 0
+    except Exception:
+        rid = 0
+
+    try:
+        req_flags = (
+            int.from_bytes(query_wire[2:4], "big") if len(query_wire) >= 4 else 0
+        )
+    except Exception:
+        req_flags = 0
+
+    rd = bool(req_flags & 0x0100)
+
+    try:
+        rc = int(rcode) & 0xF
+    except Exception:
+        rc = int(RCODE.SERVFAIL) & 0xF
+
+    # QR=1, RA=1, RD mirrored.
+    flags = 0x8000
+    flags |= 0x0080
+    if rd:
+        flags |= 0x0100
+    flags |= rc
+
+    # QD/AN/NS/AR all zero.
+    return (
+        int(rid).to_bytes(2, "big")
+        + int(flags).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+        + (0).to_bytes(2, "big")
+    )
+
+
+def _sanitize_upstream_url(url: str) -> str:
+    """Brief: Remove credentials (userinfo) from a URL for safe logging.
+
+    Inputs:
+      - url: Upstream URL string (may include embedded credentials).
+
+    Outputs:
+      - str: URL with any username/password removed from netloc.
+
+    Example:
+      >>> _sanitize_upstream_url('https://u:p@example.com/dns-query')
+      'https://example.com/dns-query'
+    """
+
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+
+    try:
+        from urllib.parse import urlparse, urlunparse
+
+        p = urlparse(raw)
+        host = p.hostname or ""
+        port = p.port
+        if port is not None:
+            netloc = f"{host}:{int(port)}" if host else f":{int(port)}"
+        else:
+            netloc = host
+        return urlunparse(p._replace(netloc=netloc))
+    except Exception:
+        return raw
+
+
+def _resolve_plugin_label(decision: object, plugin: object) -> str:
+    """Brief: Resolve a short, stable label for per-plugin stats.
+
+    Inputs:
+      - decision: PluginDecision (or similar) that may carry plugin_label/plugin.
+      - plugin: Plugin instance that produced the decision.
+
+    Outputs:
+      - str: Lowercase label suffix (no prefix), or '' when unavailable.
+    """
+
+    label_suffix = getattr(decision, "plugin_label", None)
+    if not label_suffix:
+        plugin_cls = getattr(decision, "plugin", None) or type(plugin)
+        plugin_name = getattr(plugin_cls, "__name__", "plugin").lower()
+        aliases: list[str] = []
+        try:
+            aliases = list(getattr(plugin_cls, "get_aliases", lambda: [])())
+        except Exception:
+            aliases = []
+        if aliases:
+            label_suffix = str(aliases[0]).strip().lower()
+        else:
+            label_suffix = plugin_name
+
+    return str(label_suffix).strip().lower() if label_suffix else ""
+
+
 def _resolve_core(
     data: bytes,
     client_ip: str,
@@ -291,6 +452,9 @@ def _resolve_core(
     Inputs:
       - data: Wire-format DNS query bytes.
       - client_ip: Client IP string for plugin context and stats.
+      - listener: Optional logical inbound listener/transport identifier.
+      - secure: Optional transport security flag.
+
     Outputs:
       - _ResolveCoreResult with final wire bytes and metadata.
     """
@@ -374,6 +538,17 @@ def _resolve_core(
             return non_query_result
 
         req = DNSRecord.parse(data)
+        if not getattr(req, "questions", None):
+            # QDCOUNT=0 is syntactically valid. Treat it as a format error and
+            # reply with a minimal FORMERR without attempting additional parsing.
+            wire = _pack_minimal_dns_response_header(data, int(RCODE.FORMERR))
+            return _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=None,
+                rcode_name="FORMERR",
+            )
+
         q = req.questions[0]
         qname = str(q.qname).rstrip(".")
         qtype = q.qtype
@@ -396,7 +571,21 @@ def _resolve_core(
             ctx.qname = qname
         except Exception:  # pragma: no cover - defensive
             pass
-        for p in sorted(handler.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
+        plugins_list = list(getattr(handler, "plugins", []) or [])
+        if snap is not None and hasattr(snap, "generation"):
+            pre_plugins, post_plugins = _get_ordered_plugins(
+                plugins=plugins_list,
+                token_kind="snap",
+                token=int(getattr(snap, "generation", 0) or 0),
+            )
+        else:
+            pre_plugins, post_plugins = _get_ordered_plugins(
+                plugins=plugins_list,
+                token_kind="state",
+                token=int(id(getattr(handler, "plugins", plugins_list))),
+            )
+
+        for p in pre_plugins:
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
             try:
@@ -411,7 +600,13 @@ def _resolve_core(
                 # errors behind targeting decisions.
                 pass
 
-            decision = p.pre_resolve(qname, qtype, data, ctx)
+            try:
+                decision = p.pre_resolve(qname, qtype, data, ctx)
+            except Exception:
+                logger.error(
+                    "pre_resolve failed for plugin %s", type(p).__name__, exc_info=True
+                )
+                decision = None
             if isinstance(decision, PluginDecision):
                 if decision.action == "drop":
                     # Pre-plugin timeout/drop: return sentinel empty wire so UDP
@@ -517,41 +712,12 @@ def _resolve_core(
                             # the originating plugin instance label when
                             # available, falling back to alias/class naming.
                             try:
-                                label_suffix = getattr(decision, "plugin_label", None)
-                                if not label_suffix:
-                                    plugin_cls = getattr(
-                                        decision, "plugin", None
-                                    ) or type(p)
-                                    plugin_name = getattr(
-                                        plugin_cls, "__name__", "plugin"
-                                    ).lower()
-                                    aliases = []
-                                    try:
-                                        aliases = list(
-                                            getattr(
-                                                plugin_cls, "get_aliases", lambda: []
-                                            )()
-                                        )
-                                    except (
-                                        Exception
-                                    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                                        aliases = []
-                                    if (
-                                        aliases
-                                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                                        label_suffix = str(aliases[0]).strip().lower()
-                                    else:
-                                        label_suffix = plugin_name
-
-                                short = str(label_suffix).strip()
-                                if short:
-                                    label = f"pre_deny_{short}"
-                                else:  # pragma: no cover - defensive/metrics path excluded from coverage
-                                    label = "pre_deny_plugin"
+                                short = _resolve_plugin_label(decision, p)
+                                label = (
+                                    f"pre_deny_{short}" if short else "pre_deny_plugin"
+                                )
                                 stats.record_cache_pre_plugin(label)
-                            except (
-                                Exception
-                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                            except Exception:  # pragma: no cover - defensive
                                 pass
                             stats.record_response_rcode("NXDOMAIN", qname)
                             result_ctx = {
@@ -638,42 +804,14 @@ def _resolve_core(
                             # available, falling back to alias/class naming.
                             override_source = "pre_plugin_override"
                             try:
-                                label_suffix = getattr(decision, "plugin_label", None)
-                                if not label_suffix:
-                                    plugin_cls = getattr(
-                                        decision, "plugin", None
-                                    ) or type(p)
-                                    plugin_name = getattr(
-                                        plugin_cls, "__name__", "plugin"
-                                    ).lower()
-                                    aliases = []
-                                    try:
-                                        aliases = list(
-                                            getattr(
-                                                plugin_cls, "get_aliases", lambda: []
-                                            )()
-                                        )
-                                    except (
-                                        Exception
-                                    ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                                        aliases = []
-                                    if (
-                                        aliases
-                                    ):  # pragma: no cover - defensive/metrics path excluded from coverage
-                                        label_suffix = str(aliases[0]).strip().lower()
-                                    else:
-                                        label_suffix = plugin_name
-
-                                short = str(label_suffix).strip()
+                                short = _resolve_plugin_label(decision, p)
                                 if short:
                                     label = f"pre_override_{short}"
                                     override_source = short
-                                else:  # pragma: no cover - defensive/metrics path excluded from coverage
+                                else:
                                     label = "pre_override_plugin"
                                 stats.record_cache_pre_plugin(label)
-                            except (
-                                Exception
-                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                            except Exception:  # pragma: no cover - defensive
                                 pass
                             stats.record_response_rcode(rcode_name, qname)
 
@@ -942,8 +1080,6 @@ def _resolve_core(
         # Decide between forwarding, recursion, and authoritative-only (no
         # forwarding) based on resolver_mode.
         resolver_mode = str(getattr(handler, "resolver_mode", "forward")).lower()
-        if resolver_mode == "none":
-            resolver_mode = "master"
 
         if resolver_mode == "recursive":
             # In recursive mode we bypass configured upstreams and instead walk
@@ -1197,7 +1333,7 @@ def _resolve_core(
                 # upstream_id so stats can distinguish endpoints consistently.
                 url = str(used_upstream.get("url", "")).strip()
                 if url:
-                    upstream_id = url
+                    upstream_id = _sanitize_upstream_url(url)
                 else:
                     upstream_id = (
                         f"{host}:{port}" if host or port else host or "unknown"
@@ -1294,7 +1430,7 @@ def _resolve_core(
         except Exception:  # pragma: no cover - defensive
             pass
         out = reply
-        for p in sorted(handler.plugins, key=lambda p: getattr(p, "post_priority", 50)):
+        for p in post_plugins:
             # Skip plugins that do not target this qtype when they opt in via
             # BasePlugin.target_qtypes.
             try:
@@ -1307,7 +1443,13 @@ def _resolve_core(
             ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 pass
 
-            decision = p.post_resolve(qname, qtype, out, ctx2)
+            try:
+                decision = p.post_resolve(qname, qtype, out, ctx2)
+            except Exception:
+                logger.error(
+                    "post_resolve failed for plugin %s", type(p).__name__, exc_info=True
+                )
+                decision = None
             if isinstance(decision, PluginDecision):
                 if decision.action == "drop":
                     # Post-plugin timeout/drop: do not send a response.
@@ -1444,6 +1586,18 @@ def _resolve_core(
                     if isinstance(getattr(rr, "ttl", None), (int, float))
                 ]
                 ttl = min(ttls) if ttls else 300
+
+                # Apply cache TTL floor and cap.
+                min_cache_ttl = max(0, int(getattr(handler, "min_cache_ttl", 0) or 0))
+                ttl = max(int(ttl), int(min_cache_ttl))
+                try:
+                    cache_obj = getattr(plugin_base, "DNS_CACHE", None)
+                    raw_max = getattr(cache_obj, "max_cache_ttl", None)
+                    max_cache_ttl = int(raw_max) if raw_max is not None else 86400
+                except Exception:
+                    max_cache_ttl = 86400
+                if int(max_cache_ttl) > 0:
+                    ttl = min(int(ttl), int(max_cache_ttl))
             else:
                 auth_rrs = getattr(r, "auth", None) or []
                 has_soa = any(rr.rtype == QTYPE.SOA for rr in auth_rrs)
@@ -1593,11 +1747,15 @@ def _resolve_core(
                         except Exception:  # pragma: no cover - defensive metrics hook
                             pass
                     stats.record_response_rcode("SERVFAIL")
-                    # Attempt to recover qname/qtype for logging
-                    q = req.questions[0]
-                    qname = str(q.qname).rstrip(".")
-                    qtype = q.qtype
-                    qtype_name = QTYPE.get(qtype, str(qtype))
+                    # Attempt to recover qname/qtype for logging when present.
+                    if getattr(req, "questions", None):
+                        q = req.questions[0]
+                        qname = str(q.qname).rstrip(".")
+                        qtype = q.qtype
+                        qtype_name = QTYPE.get(qtype, str(qtype))
+                    else:
+                        qname = ""
+                        qtype_name = ""
                     result_ctx = {"source": "server", "error": "unhandled_exception"}
                     if (
                         listener is not None
@@ -1607,17 +1765,18 @@ def _resolve_core(
                         secure is not None
                     ):  # pragma: no cover - defensive/metrics path excluded from coverage
                         result_ctx["secure"] = bool(secure)
-                    stats.record_query_result(
-                        client_ip=client_ip,
-                        qname=qname,
-                        qtype=qtype_name,
-                        rcode="SERVFAIL",
-                        upstream_id=None,
-                        status="error",
-                        error=str(e),
-                        first=None,
-                        result=result_ctx,
-                    )
+                    if qtype_name:
+                        stats.record_query_result(
+                            client_ip=client_ip,
+                            qname=qname,
+                            qtype=qtype_name,
+                            rcode="SERVFAIL",
+                            upstream_id=None,
+                            status="error",
+                            error=str(e),
+                            first=None,
+                            result=result_ctx,
+                        )
                 except (
                     Exception
                 ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
@@ -1637,12 +1796,13 @@ def _resolve_core(
                 rcode_name="SERVFAIL",
             )
         except Exception:
-            # Worst-case fallback
+            # Worst-case fallback: never reflect the original query bytes.
+            wire = _pack_minimal_dns_response_header(data, int(RCODE.SERVFAIL))
             return _ResolveCoreResult(
-                wire=data,
+                wire=wire,
                 dnssec_status=None,
                 upstream_id=None,
-                rcode_name="UNKNOWN",
+                rcode_name="SERVFAIL",
             )
 
 

@@ -304,6 +304,7 @@ def _expand_server_limits_defaults(server_cfg: Dict[str, Any]) -> None:
         server_cfg["limits"] = limits_cfg
 
     limits_cfg.setdefault("resolver_executor_workers", None)
+    limits_cfg.setdefault("bg_executor_workers", 4)
     limits_cfg.setdefault("allow_unsafe_threaded_listeners", False)
 
 
