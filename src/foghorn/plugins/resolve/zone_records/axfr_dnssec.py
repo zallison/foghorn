@@ -430,8 +430,8 @@ def _classify_local_zones_dnssec(
                 dnssec_state = "none"
             logger.info(
                 (
-                    "ZoneRecords local zone %s dnssec_state=%s "
-                    "(autosign_enabled=%s, sources=file/bind/inline, "
+                    "ZoneRecords zone %s dnssec_state=%s "
+                    "(autosign_enabled=%s, "
                     "apex_has_dnskey=%s, "
                     "apex_has_rrsig=%s)"
                 ),

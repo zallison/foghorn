@@ -152,6 +152,9 @@ class DockerHosts(BasePlugin):
         addresses and PTR queries for matching reverse names.
     """
 
+    setup_provides_dns = True
+    setup_requires_dns = True
+
     @classmethod
     def get_config_model(cls):
         """Brief: Return the Pydantic model used to validate plugin configuration.
