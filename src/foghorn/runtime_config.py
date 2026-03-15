@@ -716,7 +716,14 @@ def _build_snapshot(
         check_rate_limit_plugin_config(plugins=plugins, cfg=cfg)
     except Exception:
         pass
-    run_setup_plugins(plugins)
+    run_setup_plugins(
+        plugins,
+        upstreams=upstream_addrs,
+        upstream_backups=upstream_backup_addrs,
+        timeout_ms=timeout_ms,
+        resolver_mode=resolver_mode,
+        upstream_max_concurrent=upstream_max_concurrent,
+    )
 
     # DNSSEC / EDNS
     dnssec_cfg = server_cfg.get("dnssec") or {}

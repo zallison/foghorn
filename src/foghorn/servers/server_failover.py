@@ -955,21 +955,21 @@ def _send_query_with_failover_impl(
     ]
     if str(last_exception) not in ignored_errors:
         logger.warning(
-            "All upstreams failed for %s %s. Upstreams: %s. Health: %s. Last error: %s",
+            "All upstreams failed for %s %s. Last error: %s (attempted=%s health=%s)",
             qname,
             qtype,
+            last_exception,
             attempted_summary,
             health_summary,
-            last_exception,
         )
     else:
         logger.debug(
-            "All upstreams failed for %s %s. Upstreams: %s. Health: %s. Last error: %s",
+            "All upstreams failed for %s %s. Last error: %s (attempted=%s health=%s)",
             qname,
             qtype,
+            last_exception,
             attempted_summary,
             health_summary,
-            last_exception,
         )
 
     return None, None, "all_failed"
