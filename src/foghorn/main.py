@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import functools
 import gc
+from hashlib import sha1
 import logging
 import os
 import platform
@@ -29,7 +30,7 @@ from .config.config_parser import (
 from .config.logging_config import init_logging
 from .plugins.querylog import BaseStatsStore, load_stats_store_backend
 from .plugins.resolve.base import BasePlugin
-from .plugins.setup import run_setup_plugins
+from .plugins.setup import run_setup_plugins, run_shutdown_plugins
 from .main_config_helpers import (
     _apply_cache_overrides_from_config,
     _build_listener_configs,
@@ -211,7 +212,14 @@ def main(argv: List[str] | None = None) -> int:
 
     # Run setup phase for setup-aware plugins before starting listeners
     try:
-        run_setup_plugins(plugins)
+        run_setup_plugins(
+            plugins,
+            upstreams=upstreams,
+            upstream_backups=upstream_backups,
+            timeout_ms=timeout_ms,
+            resolver_mode=resolver_mode,
+            upstream_max_concurrent=upstream_max_concurrent,
+        )
     except RuntimeError as e:
         logger.error("Plugin setup failed: %s", e)
         return 1
@@ -263,9 +271,8 @@ def main(argv: List[str] | None = None) -> int:
           - None
 
         Notes:
-          - Both SIGUSR1 and SIGUSR2 share the same behavior: when statistics
-            are enabled and the configuration flags sigusr[12]_resets_stats is
-            true, the in-memory statistics are reset.
+          - SIGUSR1 and SIGUSR2 each honor their own reset flag:
+            sigusr1_resets_stats for SIGUSR1, sigusr2_resets_stats for SIGUSR2.
         """
 
         nonlocal cfg, stats_collector
@@ -281,14 +288,10 @@ def main(argv: List[str] | None = None) -> int:
                 s_cfg = {}
 
             enabled = bool(s_cfg.get("enabled", False))
-            # Use sigusr2_resets_stats as the canonical configuration flag for
-            # both SIGUSR1 and SIGUSR2 so that user expectations are consistent
-            # regardless of which signal they choose to send. For
-            # backwards-compatibility, also accept sigusr1_resets_stats as a
-            # deprecated alias.
             reset_flag = bool(
-                s_cfg.get("sigusr2_resets_stats", False)
-                or s_cfg.get("sigusr1_resets_stats", False)
+                sig_label == "SIGUSR1" and s_cfg.get("sigusr1_resets_stats", False)
+            ) or bool(
+                sig_label == "SIGUSR2" and s_cfg.get("sigusr2_resets_stats", False)
             )
 
             if enabled and reset_flag:
@@ -305,9 +308,15 @@ def main(argv: List[str] | None = None) -> int:
                         "%s: no statistics collector active, skipping reset", sig_label
                     )
             else:
+                expected_flag = (
+                    "sigusr1_resets_stats"
+                    if sig_label == "SIGUSR1"
+                    else "sigusr2_resets_stats"
+                )
                 log.info(
-                    "%s: statistics reset skipped (disabled or sigusr2_resets_stats not set)",
+                    "%s: statistics reset skipped (disabled or %s not set)",
                     sig_label,
+                    expected_flag,
                 )
         except (
             Exception
@@ -540,6 +549,11 @@ def main(argv: List[str] | None = None) -> int:
     # Shared resolver adapter for UDP listener.
     from .servers.server import resolve_query_bytes as _resolve_query_bytes
 
+    # Optionally start TCP/DoT listeners based on listen config
+
+    # Resolver adapter for TCP/DoT servers
+    import asyncio
+
     def _resolve_udp(query_bytes: bytes, client_ip: str) -> bytes:
         """Brief: Resolve a DNS query received via UDP listener.
 
@@ -577,167 +591,6 @@ def main(argv: List[str] | None = None) -> int:
             pass
 
         return wire
-
-    if bool(udp_cfg.get("enabled", True)):
-        uhost = str(udp_cfg.get("host", default_host))
-        uport = int(udp_cfg.get("port", default_port))
-
-        # UDP listener defaults to asyncio. Threaded fallback is only allowed
-        # on localhost or when allow_unsafe_threaded_listeners is true.
-        allow_unsafe = bool(limits_cfg.get("allow_unsafe_threaded_listeners", False))
-        from foghorn.security_limits import is_loopback_host
-
-        is_loopback = is_loopback_host(uhost)
-        # Default to asyncio everywhere. Config can override with explicit
-        # use_asyncio setting.
-        udp_use_asyncio = bool(udp_cfg.get("use_asyncio", True))
-
-        # Allow threaded fallback only on localhost or when allow_unsafe is true.
-        # If neither is true and threaded is needed due to PermissionError,
-        # the server will refuse to start.
-        allow_threaded_default = is_loopback or allow_unsafe
-        allow_threaded_fallback = bool(
-            udp_cfg.get("allow_threaded_fallback", allow_threaded_default)
-        )
-        exit_on_asyncio_failure = bool(
-            udp_cfg.get("exit_on_asyncio_failure", False)
-            or udp_cfg.get("refuse_threaded_fallback", False)
-        )
-
-        try:
-            max_inflight = int(udp_cfg.get("max_inflight", 1024) or 1024)
-        except Exception:
-            max_inflight = 1024
-        try:
-            max_inflight_per_ip = int(udp_cfg.get("max_inflight_per_ip", 64) or 64)
-        except Exception:
-            max_inflight_per_ip = 64
-
-        max_inflight_by_cidr = udp_cfg.get("max_inflight_by_cidr")
-        if max_inflight_by_cidr is not None and not isinstance(
-            max_inflight_by_cidr, list
-        ):
-            max_inflight_by_cidr = None
-
-        # Log startup info
-        if resolver_mode == "forward":
-            upstream_info = ", ".join(
-                [
-                    f"{u['url']}" if "url" in u else f"{u['host']}:{u['port']}"
-                    for u in upstreams
-                ]
-            )
-        else:
-            upstream_info = "(recursive mode; no forward upstreams)"
-        logger.info(
-            "Resolver mode=%s, upstreams: [%s], timeout: %dms",
-            resolver_mode,
-            upstream_info,
-            timeout_ms,
-        )
-
-        if use_asyncio and udp_use_asyncio:
-            try:
-                from .servers.executors import get_resolver_executor
-                from .servers.udp_asyncio_server import start_udp_asyncio_threaded
-
-                logger.info(
-                    "Starting UDP listener on %s:%d (asyncio)",
-                    uhost,
-                    uport,
-                )
-
-                udp_handle = start_udp_asyncio_threaded(
-                    uhost,
-                    uport,
-                    _resolve_udp,
-                    max_inflight=max_inflight,
-                    max_inflight_per_ip=max_inflight_per_ip,
-                    max_inflight_by_cidr=max_inflight_by_cidr,
-                    executor=get_resolver_executor(),
-                    thread_name="foghorn-udp",
-                )
-                udp_thread = udp_handle.thread
-                loop_threads.append(udp_thread)
-                runtime_state.set_listener("udp", enabled=True, thread=udp_thread)
-            except PermissionError as exc:
-                runtime_state.set_listener_error("udp", exc)
-                if not allow_threaded_fallback or exit_on_asyncio_failure:
-                    logger.error(
-                        "Asyncio UDP listener failed with PermissionError and threaded fallback is disabled; exiting. Error: %s",
-                        exc,
-                    )
-                    return 1
-
-                logger.warning(
-                    "Asyncio UDP listener failed with PermissionError; falling back to ThreadingUDPServer (less robust under DDoS). "
-                    "Consider enabling asyncio UDP. Error: %s",
-                    exc,
-                )
-            except Exception as exc:
-                runtime_state.set_listener_error("udp", exc)
-                logger.error("Failed to start asyncio UDP listener: %s", exc)
-                return 1
-
-        if udp_thread is None:
-            # Threaded UDP (legacy fallback).
-            from foghorn.security_limits import is_loopback_host
-
-            allow_unsafe = bool(
-                limits_cfg.get("allow_unsafe_threaded_listeners", False)
-            )
-            if not is_loopback_host(uhost) and not allow_unsafe:
-                logger.error(
-                    "Refusing to start threaded UDP listener on non-loopback host %s. "
-                    "Enable UDP asyncio listener or set server.limits.allow_unsafe_threaded_listeners=true.",
-                    uhost,
-                )
-                return 1
-
-            from foghorn.servers.udp_server import DNSUDPHandler
-            import socketserver as _socketserver
-
-            server = _socketserver.ThreadingUDPServer((uhost, uport), DNSUDPHandler)
-            server.daemon_threads = True
-
-            # Run UDP server in a background thread so the main thread can manage
-            # coordinated shutdown alongside TCP/DoT/DoH listeners. Capture
-            # unexpected exceptions so main() can reflect them in its exit code.
-            def _run_udp() -> None:
-                nonlocal udp_error
-                try:
-                    server.serve_forever()
-                except Exception as e:  # pragma: no cover - propagated via udp_error
-                    udp_error = e
-                    runtime_state.set_listener_error("udp", e)
-
-            logger.info(
-                "Starting UDP listener on %s:%d (threaded)",
-                uhost,
-                uport,
-            )
-
-            udp_thread = threading.Thread(
-                target=_run_udp,
-                name="foghorn-udp-threaded",
-                daemon=True,
-            )
-            udp_thread.start()
-            loop_threads.append(udp_thread)
-            runtime_state.set_listener("udp", enabled=True, thread=udp_thread)
-
-    if not bool(udp_cfg.get("enabled", True)):
-        # When no UDP listener is configured, the main thread still enters the
-        # keepalive loop below so that TCP/DoT/DoH listeners (or tests that
-        # disable UDP entirely) can drive shutdown via signals or KeyboardInterrupt.
-        logger.info(
-            "Starting Foghorn without UDP listener; main thread will use keepalive loop",
-        )
-
-    # Optionally start TCP/DoT listeners based on listen config
-
-    # Resolver adapter for TCP/DoT servers
-    import asyncio
 
     def _resolve_tcp(query_bytes: bytes, client_ip: str) -> bytes:
         """Brief: Resolve a DNS query received via TCP listener.
@@ -838,6 +691,156 @@ def main(argv: List[str] | None = None) -> int:
         runtime_state.set_listener(listener_key, enabled=True, thread=t)
         return t
 
+    if bool(udp_cfg.get("enabled", True)):
+        uhost = str(udp_cfg.get("host", default_host))
+        uport = int(udp_cfg.get("port", default_port))
+
+        # UDP listener defaults to asyncio. Threaded fallback is only allowed
+        # on localhost or when allow_unsafe_threaded_listeners is true.
+        allow_unsafe = bool(limits_cfg.get("allow_unsafe_threaded_listeners", False))
+        from foghorn.security_limits import is_loopback_host
+
+        is_loopback = is_loopback_host(uhost)
+        # Default to asyncio everywhere. Config can override with explicit
+        # use_asyncio setting.
+        udp_use_asyncio = bool(udp_cfg.get("use_asyncio", True))
+
+        # Allow threaded fallback only on localhost or when allow_unsafe is true.
+        # If neither is true and threaded is needed due to PermissionError,
+        # the server will refuse to start.
+        allow_threaded_default = is_loopback or allow_unsafe
+        allow_threaded_fallback = bool(
+            udp_cfg.get("allow_threaded_fallback", allow_threaded_default)
+        )
+        exit_on_asyncio_failure = bool(
+            udp_cfg.get("exit_on_asyncio_failure", False)
+            or udp_cfg.get("refuse_threaded_fallback", False)
+        )
+
+        try:
+            max_inflight = int(udp_cfg.get("max_inflight", 1024) or 1024)
+        except Exception:
+            max_inflight = 1024
+        try:
+            max_inflight_per_ip = int(udp_cfg.get("max_inflight_per_ip", 64) or 64)
+        except Exception:
+            max_inflight_per_ip = 64
+
+        max_inflight_by_cidr = udp_cfg.get("max_inflight_by_cidr")
+        if max_inflight_by_cidr is not None and not isinstance(
+            max_inflight_by_cidr, list
+        ):
+            max_inflight_by_cidr = None
+
+        # Log startup info
+        if resolver_mode == "forward":
+            upstream_info = f"{len(upstreams)}"
+        else:
+            upstream_info = "(recursive mode; no forward upstreams)"
+        logger.info(
+            "Resolver mode=%s, upstream_count=%s, timeout=%dms",
+            resolver_mode,
+            upstream_info,
+            timeout_ms,
+        )
+
+        if use_asyncio and udp_use_asyncio:
+            try:
+                from .servers.executors import get_resolver_executor
+                from .servers.udp_asyncio_server import start_udp_asyncio_threaded
+
+                logger.info(
+                    "Starting UDP listener on %s:%d (asyncio)",
+                    uhost,
+                    uport,
+                )
+
+                udp_handle = start_udp_asyncio_threaded(
+                    uhost,
+                    uport,
+                    _resolve_udp,
+                    max_inflight=max_inflight,
+                    max_inflight_per_ip=max_inflight_per_ip,
+                    max_inflight_by_cidr=max_inflight_by_cidr,
+                    executor=get_resolver_executor(),
+                    thread_name="foghorn-udp",
+                )
+                udp_thread = udp_handle.thread
+                loop_threads.append(udp_thread)
+                runtime_state.set_listener("udp", enabled=True, thread=udp_thread)
+            except PermissionError as exc:
+                runtime_state.set_listener_error("udp", exc)
+                if not allow_threaded_fallback or exit_on_asyncio_failure:
+                    logger.error(
+                        "Asyncio UDP listener failed with PermissionError and threaded fallback is disabled; exiting. Error: %s",
+                        exc,
+                    )
+                    return 1
+
+                logger.warning(
+                    "Asyncio UDP listener failed with PermissionError; falling back to ThreadingUDPServer (less robust under DDoS). "
+                    "Consider enabling asyncio UDP. Error: %s",
+                    exc,
+                )
+            except Exception as exc:
+                runtime_state.set_listener_error("udp", exc)
+                logger.error("Failed to start asyncio UDP listener: %s", exc)
+                return 1
+
+        if udp_thread is None:
+            # Threaded UDP (legacy fallback).
+            from foghorn.security_limits import is_loopback_host
+
+            allow_unsafe = bool(
+                limits_cfg.get("allow_unsafe_threaded_listeners", False)
+            )
+            if not is_loopback_host(uhost) and not allow_unsafe:
+                logger.error(
+                    "Refusing to start threaded UDP listener on non-loopback host %s. "
+                    "Enable UDP asyncio listener or set server.limits.allow_unsafe_threaded_listeners=true.",
+                    uhost,
+                )
+                return 1
+
+            from foghorn.servers.udp_server import DNSUDPHandler
+            import socketserver as _socketserver
+
+            server = _socketserver.ThreadingUDPServer((uhost, uport), DNSUDPHandler)
+            server.daemon_threads = True
+
+            # Run UDP server in a background thread so the main thread can manage
+            # coordinated shutdown alongside TCP/DoT/DoH listeners. Capture
+            # unexpected exceptions so main() can reflect them in its exit code.
+            def _run_udp() -> None:
+                nonlocal udp_error
+                try:
+                    server.serve_forever()
+                except Exception as e:  # pragma: no cover - propagated via udp_error
+                    udp_error = e
+                    runtime_state.set_listener_error("udp", e)
+
+            logger.info(
+                "Starting UDP listener on %s:%d (threaded)",
+                uhost,
+                uport,
+            )
+
+            udp_thread = threading.Thread(
+                target=_run_udp,
+                name="foghorn-udp-threaded",
+                daemon=True,
+            )
+            udp_thread.start()
+            loop_threads.append(udp_thread)
+            runtime_state.set_listener("udp", enabled=True, thread=udp_thread)
+    else:
+        # When no UDP listener is configured, the main thread still enters the
+        # keepalive loop below so that TCP/DoT/DoH listeners (or tests that
+        # disable UDP entirely) can drive shutdown via signals or KeyboardInterrupt.
+        logger.info(
+            "Starting Foghorn without UDP listener; main thread will use keepalive loop",
+        )
+
     if bool(tcp_cfg.get("enabled", False)):
         from foghorn.security_limits import is_loopback_host
 
@@ -912,8 +915,8 @@ def main(argv: List[str] | None = None) -> int:
                 "listen.dot.enabled=true but cert_file/key_file not provided; skipping DoT"
             )
         else:
-            logger.info("Starting DoT listener on %s:%d", dhost, dport)
-            logger.info(
+            logger.info("Starting DoT listener on %s:%d (asyncio)", dhost, dport)
+            logger.debug(
                 "DoT TLS files: cert_file=%s key_file=%s",
                 cert_file,
                 key_file,
@@ -1149,6 +1152,11 @@ def main(argv: List[str] | None = None) -> int:
             logger.info("Stopping webserver")
             web_handle.stop()
 
+        # Best-effort lifecycle teardown for loaded resolver plugins, optional
+        # query-log backend, and cache plugin. Errors are logged inside the
+        # helper and must not abort process shutdown.
+        run_shutdown_plugins([cache_plugin, stats_persistence_store, *plugins])
+
         # Clear in-process runtime snapshot state. This is mostly relevant for
         # unit tests that call main() multiple times in one Python process.
         try:
@@ -1362,9 +1370,17 @@ def _log_startup_banner(logger: logging.Logger, *, config_path: str) -> None:
     Outputs:
       - None.
     """
-
     abs_cfg = os.path.abspath(config_path)
     cfg_size = _get_file_size_bytes(abs_cfg)
+    sha1_hash = "unknown"
+    try:
+        digest = sha1()
+        with open(abs_cfg, "rb") as f:
+            for byte_block in iter(lambda: f.read(4096), b""):
+                digest.update(byte_block)
+        sha1_hash = digest.hexdigest()
+    except Exception:
+        pass
     cfg_size_str = (
         f"{cfg_size} bytes ({_format_bytes(cfg_size)})"
         if cfg_size is not None
@@ -1394,6 +1410,7 @@ def _log_startup_banner(logger: logging.Logger, *, config_path: str) -> None:
     logger.info("Starting Foghorn")
     logger.info("  version=%s", FOGHORN_VERSION)
     logger.info("  config=%s (size=%s)", abs_cfg, cfg_size_str)
+    logger.info("  config_sha1=%s", sha1_hash)
     logger.info("  hostname=%s", hostname)
     logger.info("  arch=%s", arch)
     logger.info("  os=%s", os_id)
@@ -1690,7 +1707,7 @@ def _initialize_statistics_subsystem(
         )
         stats_reporter.start()
         logger.info(
-            "Statistics collection enabled (interval: %ds)",
+            "Statistics collection enabled (interval=%ds)",
             stats_reporter.interval_seconds,
         )
 

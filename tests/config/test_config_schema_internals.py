@@ -238,7 +238,7 @@ def test_normalize_dnssec_config_lowercases_validation_fields() -> None:
     assert cfg["foghorn"]["dnssec"]["validation"] == "local"
 
 
-def test_normalize_plugin_entries_strips_disabled_and_comment_only() -> None:
+def test_normalize_plugin_entries_strips_disabled_only() -> None:
     """Brief: _normalize_plugin_entries_for_validation normalizes plugin meta fields.
 
     Inputs:
@@ -270,7 +270,7 @@ def test_normalize_plugin_entries_strips_disabled_and_comment_only() -> None:
     # Entry "c" keeps explicit priority untouched; only comment is stripped.
     entry_c = next(p for p in plugins if isinstance(p, dict) and p.get("module") == "c")
     assert entry_c["priority"] == 5
-    assert "comment" not in entry_c
+    assert "comment" in entry_c
     assert "pre_priority" not in entry_c
     assert "post_priority" not in entry_c
     assert "setup_priority" not in entry_c

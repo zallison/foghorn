@@ -17,6 +17,47 @@ Typical use cases:
 - Serving ACME TXT challenges or other short-lived records alongside existing zones.
 - Overlaying custom records on top of external zones for testing or migration.
 
+## DNS UPDATE defaults quick reference
+
+ZoneRecords supports dynamic updates through `config.dns_update`. The full key
+map is documented in `docs/plugins/resolve/zone_update.md`. Key default blocks:
+
+- `dns_update.enabled`: `false`
+- `dns_update.zones`: `null`
+- `dns_update.persistence`: `null`
+- `dns_update.replication`: `null`
+- `dns_update.security`: `null`
+
+When the optional nested blocks are provided, defaults are:
+
+- `dns_update.persistence`
+  - `enabled: true`
+  - `state_dir: null`
+  - `fsync_mode: interval`
+  - `fsync_interval_ms: 5000`
+  - `max_journal_bytes: 10485760`
+  - `max_journal_entries: 10000`
+  - `compact_interval_seconds: 3600`
+  - `compact_tombstone_ratio: 0.5`
+- `dns_update.replication`
+  - `role: primary`
+  - `zone_owner_node_id: null`
+  - `notify_on_update: true`
+  - `node_id: null`
+  - `reject_direct_update_on_replica: false`
+- `dns_update.security`
+  - `max_updates_per_message: 100`
+  - `max_rr_values_per_rrset: 100`
+  - `max_owner_length: 255`
+  - `max_rdata_length: 65535`
+  - `max_ttl_range: 86400`
+  - `max_transaction_bytes: 1048576`
+  - `rate_limit_per_client: 10`
+  - `rate_limit_per_key: 100`
+
+Also see:
+- `example_configs/plugin_zone_update_all_options.yaml`
+
 ## Basic configuration
 
 ```yaml path=null start=null
@@ -111,9 +152,10 @@ automatically when clients request DNSSEC.
 
 ### Optional DNSSEC Auto-Signing
 
-When the `dnssec_signing.enabled` config flag is set to true, ZoneRecords will
-attempt to synthesize DNSKEY and RRSIG records for authoritative zones at
-load/reload time using the same primitives as the helper script. Example:
+When the `dnssec_signing` block is present, ZoneRecords treats auto-signing as
+enabled by default and will attempt to synthesize DNSKEY and RRSIG records for
+authoritative zones at load/reload time using the same primitives as the
+helper script. Set `dnssec_signing.enabled: false` to disable. Example:
 
 ```yaml path=null start=null
 plugins:
@@ -157,9 +199,10 @@ Clients without DO=1 receive only the base RRsets without signatures.
 
 ### Scope and Limitations
 
-- When `dnssec_signing.enabled` is true, ZoneRecords generates **NSEC3PARAM** and
-  **NSEC3** records for authoritative zones so that NXDOMAIN/NODATA responses can
-  include authenticated denial of existence when clients set DO=1.
+- When `dnssec_signing` is configured (or `dnssec_signing.enabled` is set to
+  `true`), ZoneRecords generates **NSEC3PARAM** and **NSEC3** records for
+  authoritative zones so that NXDOMAIN/NODATA responses can include
+  authenticated denial of existence when clients set DO=1.
 - NSEC (non-hashed) negative proofs are not generated.
 - Foghorn does not validate its own ZoneRecords responses.
 - DNSSEC is static – re-run the signing script when zone data changes.

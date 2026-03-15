@@ -14,6 +14,9 @@ import threading
 from types import SimpleNamespace
 
 import dns.message
+import dns.rdataclass
+import dns.rdatatype
+import dns.rrset
 import dns.tsigkeyring
 import dns.update
 import pytest
@@ -267,6 +270,199 @@ def test_process_update_message_returns_noerror_for_valid_tsig_update() -> None:
     assert parsed_resp.rcode() == dns.rcode.NOERROR
 
 
+def test_process_update_message_accepts_tsig_keys_loaded_from_key_sources_file(
+    tmp_path,
+) -> None:
+    """Brief: Valid TSIG updates succeed when TSIG keys come from key_sources file.
+
+    Inputs:
+      - tmp_path: pytest temporary directory fixture.
+
+    Outputs:
+      - Asserts NOERROR response for a TSIG-signed UPDATE with key_sources config.
+    """
+    key_name = "file-key.example.com."
+    secret_b64 = "dGVzdHNlY3JldA=="
+    key_file = tmp_path / "tsig-keys.yaml"
+    key_file.write_text(
+        "- name: file-key.example.com.\n"
+        "  algorithm: hmac-sha256\n"
+        "  secret: dGVzdHNlY3JldA==\n",
+        encoding="utf-8",
+    )
+
+    keyring = dns.tsigkeyring.from_text({key_name: secret_b64})
+    msg = dns.update.Update("example.com.")
+    msg.use_tsig(keyring=keyring, keyname=key_name, algorithm="hmac-sha256")
+    msg.add("host", 60, "A", "192.0.2.124")
+    req_wire = msg.to_wire()
+    parsed_req = dns.message.from_wire(req_wire, keyring=keyring)
+
+    plugin = SimpleNamespace(records={})
+    resp_wire = up.process_update_message(
+        req_wire,
+        zone_apex="example.com",
+        zone_config={
+            "tsig": {"key_sources": [{"type": "file", "path": str(key_file)}]}
+        },
+        plugin=plugin,
+        client_ip="192.0.2.1",
+        listener="udp",
+    )
+    parsed_resp = dns.message.from_wire(
+        resp_wire,
+        keyring=keyring,
+        request_mac=parsed_req.mac,
+    )
+    assert parsed_resp.rcode() == dns.rcode.NOERROR
+
+
+def test_process_update_message_bad_tsig_key_returns_notauth_with_update_opcode() -> (
+    None
+):
+    """Brief: Unknown TSIG key should return NOTAUTH with opcode UPDATE."""
+    req_key_name = "request-key.example.com."
+    req_secret_b64 = "dGVzdHNlY3JldA=="
+    req_keyring = dns.tsigkeyring.from_text({req_key_name: req_secret_b64})
+
+    msg = dns.update.Update("example.com.")
+    msg.use_tsig(keyring=req_keyring, keyname=req_key_name, algorithm="hmac-sha256")
+    msg.add("host", 60, "A", "192.0.2.123")
+    req_wire = msg.to_wire()
+
+    plugin = SimpleNamespace(records={})
+    resp_wire = up.process_update_message(
+        req_wire,
+        zone_apex="example.com",
+        zone_config={
+            "tsig": {
+                "keys": [
+                    {
+                        "name": "configured-key.example.com.",
+                        "algorithm": "hmac-sha256",
+                        "secret": req_secret_b64,
+                    }
+                ]
+            }
+        },
+        plugin=plugin,
+        client_ip="192.0.2.1",
+        listener="udp",
+    )
+
+    resp = dns.message.from_wire(resp_wire, ignore_trailing=True)
+    assert int(resp.opcode()) == int(dns.opcode.UPDATE)
+    assert int(resp.rcode()) == int(dns.rcode.NOTAUTH)
+
+
+def test_process_update_message_algorithm_mismatch_returns_signed_notauth() -> None:
+    """Brief: Algorithm mismatch should return TSIG-signed NOTAUTH."""
+    key_name = "key.example.com."
+    secret_b64 = "dGVzdHNlY3JldA=="
+    keyring = dns.tsigkeyring.from_text({key_name: secret_b64})
+
+    msg = dns.update.Update("example.com.")
+    msg.use_tsig(keyring=keyring, keyname=key_name, algorithm="hmac-sha256")
+    msg.add("host", 60, "A", "192.0.2.123")
+    req_wire = msg.to_wire()
+    parsed_req = dns.message.from_wire(req_wire, keyring=keyring)
+
+    plugin = SimpleNamespace(records={})
+    resp_wire = up.process_update_message(
+        req_wire,
+        zone_apex="example.com",
+        zone_config={
+            "tsig": {
+                "keys": [
+                    {
+                        "name": key_name,
+                        "algorithm": "hmac-sha512",
+                        "secret": secret_b64,
+                    }
+                ]
+            }
+        },
+        plugin=plugin,
+        client_ip="192.0.2.1",
+        listener="udp",
+    )
+
+    parsed_resp = dns.message.from_wire(
+        resp_wire,
+        keyring=keyring,
+        request_mac=parsed_req.mac,
+    )
+    assert int(parsed_resp.opcode()) == int(dns.opcode.UPDATE)
+    assert int(parsed_resp.rcode()) == int(dns.rcode.NOTAUTH)
+
+
+def test_process_update_message_enforces_tsig_key_allow_names_scope() -> None:
+    """Brief: TSIG key allow_names scope should deny out-of-scope and allow wildcard in-scope names."""
+    key_name = "update-key.zaa."
+    secret_b64 = "dGVzdHNlY3JldA=="
+    keyring = dns.tsigkeyring.from_text({key_name: secret_b64})
+
+    zone_config = {
+        "tsig": {
+            "keys": [
+                {
+                    "name": key_name,
+                    "algorithm": "hmac-sha256",
+                    "secret": secret_b64,
+                    "allow_names": ["monkey.zaa", "*.dyn.zaa"],
+                }
+            ]
+        }
+    }
+    plugin = SimpleNamespace(records={})
+
+    # Out-of-scope owner should be denied.
+    deny_msg = dns.update.Update("zaa.")
+    deny_msg.use_tsig(keyring=keyring, keyname=key_name, algorithm="hmac-sha256")
+    deny_msg.add("test", 60, "A", "192.0.2.10")
+    deny_req_wire = deny_msg.to_wire()
+    deny_req = dns.message.from_wire(deny_req_wire, keyring=keyring)
+
+    deny_resp_wire = up.process_update_message(
+        deny_req_wire,
+        zone_apex="zaa",
+        zone_config=zone_config,
+        plugin=plugin,
+        client_ip="192.0.2.1",
+        listener="udp",
+    )
+    deny_resp = dns.message.from_wire(
+        deny_resp_wire,
+        keyring=keyring,
+        request_mac=deny_req.mac,
+    )
+    assert int(deny_resp.rcode()) == int(dns.rcode.NOTAUTH)
+    assert ("test.zaa", int(QTYPE.A)) not in plugin.records
+
+    # Wildcard in-scope owner should be allowed.
+    allow_msg = dns.update.Update("zaa.")
+    allow_msg.use_tsig(keyring=keyring, keyname=key_name, algorithm="hmac-sha256")
+    allow_msg.add("monkey.dyn", 60, "A", "192.0.2.11")
+    allow_req_wire = allow_msg.to_wire()
+    allow_req = dns.message.from_wire(allow_req_wire, keyring=keyring)
+
+    allow_resp_wire = up.process_update_message(
+        allow_req_wire,
+        zone_apex="zaa",
+        zone_config=zone_config,
+        plugin=plugin,
+        client_ip="192.0.2.1",
+        listener="udp",
+    )
+    allow_resp = dns.message.from_wire(
+        allow_resp_wire,
+        keyring=keyring,
+        request_mac=allow_req.mac,
+    )
+    assert int(allow_resp.rcode()) == int(dns.rcode.NOERROR)
+    assert ("monkey.dyn.zaa", int(QTYPE.A)) in plugin.records
+
+
 def test_check_prerequisites_with_none_class_prereq_succeeds_with_empty_records() -> (
     None
 ):
@@ -312,6 +508,40 @@ def test_resolve_tsig_key_by_name() -> None:
     assert up.resolve_tsig_key_by_name("k1.", {}, dns_update_config={}) is None
 
 
+def test_resolve_tsig_key_by_name_uses_pluggable_source_loaders() -> None:
+    """Brief: TSIG key lookup can resolve keys from pluggable external sources.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts resolve_tsig_key_by_name returns key loaded from custom loader.
+    """
+
+    def _api_loader(source: dict) -> list[dict]:
+        _ = source
+        return [
+            {
+                "name": "api-key.example.",
+                "algorithm": "hmac-sha256",
+                "secret": "YXBp",
+            }
+        ]
+
+    zone_cfg = {
+        "tsig": {
+            "key_sources": [{"type": "api", "endpoint": "https://example.invalid/keys"}]
+        }
+    }
+    resolved = up.resolve_tsig_key_by_name(
+        "api-key.example.",
+        zone_cfg,
+        dns_update_config={"tsig_key_source_loaders": {"api": _api_loader}},
+    )
+    assert resolved is not None
+    assert resolved["name"] == "api-key.example."
+
+
 def test_apply_update_operations_returns_noerror_and_does_not_mutate_records() -> None:
     plugin = SimpleNamespace(
         records={("example.com", int(QTYPE.A)): (300, ["1.1.1.1"], ["src"])}
@@ -333,6 +563,50 @@ def test_apply_update_operations_returns_noerror_and_does_not_mutate_records() -
     assert err2 is None
 
 
+def test_apply_update_operations_refreshes_wildcard_owner_index() -> None:
+    """Brief: Wildcard UPDATE owners are immediately used for wildcard matching.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - Asserts wildcard owner index is rebuilt and wildcard matches resolve.
+    """
+    from foghorn.plugins.resolve.zone_records import helpers as zone_helpers
+
+    plugin = SimpleNamespace(
+        records={},
+        _name_index={},
+        _wildcard_owners=[],
+    )
+
+    update_rrset = dns.rrset.from_text(
+        "*.foo.dyn.zaa.",
+        60,
+        dns.rdataclass.IN,
+        dns.rdatatype.A,
+        "198.51.100.77",
+    )
+    rcode, err = up.apply_update_operations(
+        [update_rrset],
+        plugin=plugin,
+        zone_apex="dyn.zaa",
+    )
+    assert rcode == 0
+    assert err is None
+    assert "*.foo.dyn.zaa" in plugin._wildcard_owners
+
+    for qname in ("a.foo.dyn.zaa", "bar.foo.dyn.zaa"):
+        matched_owner, rrsets = zone_helpers.find_best_rrsets_for_name(
+            qname,
+            plugin._name_index,
+            wildcard_patterns=plugin._wildcard_owners,
+        )
+        assert matched_owner == "*.foo.dyn.zaa"
+        assert int(QTYPE.A) in rrsets
+        assert rrsets[int(QTYPE.A)][1] == ["198.51.100.77"]
+
+
 def test_build_update_response_sets_rcode() -> None:
     req = DNSRecord.question("example.com", qtype="A")
 
@@ -346,3 +620,208 @@ def test_build_update_response_sets_rcode() -> None:
     )
     resp2 = DNSRecord.parse(packed2)
     assert resp2.header.rcode == RCODE.REFUSED
+
+
+def _signed_update_wire(
+    *,
+    zone: str,
+    key_name: str,
+    secret_b64: str,
+    owner: str,
+    value: str,
+) -> bytes:
+    """Brief: Build a TSIG-signed UPDATE wire payload.
+
+    Inputs:
+      - zone: Zone apex.
+      - key_name: TSIG key name.
+      - secret_b64: Base64 TSIG secret.
+      - owner: Relative owner label in zone.
+      - value: A record IPv4 value.
+
+    Outputs:
+      - bytes: Signed UPDATE message.
+    """
+    keyring = dns.tsigkeyring.from_text({key_name: secret_b64})
+    msg = dns.update.Update(zone)
+    msg.use_tsig(keyring=keyring, keyname=key_name, algorithm="hmac-sha256")
+    msg.add(owner, 60, "A", value)
+    return msg.to_wire()
+
+
+def test_process_update_message_replica_role_refuses_direct_updates() -> None:
+    """Brief: Replica role rejects direct UPDATE requests."""
+    key_name = "key.example.com."
+    secret_b64 = "dGVzdHNlY3JldA=="
+    req_wire = _signed_update_wire(
+        zone="example.com.",
+        key_name=key_name,
+        secret_b64=secret_b64,
+        owner="host",
+        value="192.0.2.10",
+    )
+    keyring = dns.tsigkeyring.from_text({key_name: secret_b64})
+    parsed_req = dns.message.from_wire(req_wire, keyring=keyring)
+    plugin = SimpleNamespace(
+        records={},
+        _dns_update_config={
+            "replication": {
+                "role": "replica",
+                "reject_direct_update_on_replica": True,
+            }
+        },
+    )
+    resp_wire = up.process_update_message(
+        req_wire,
+        zone_apex="example.com",
+        zone_config={
+            "tsig": {
+                "keys": [
+                    {
+                        "name": key_name,
+                        "algorithm": "hmac-sha256",
+                        "secret": secret_b64,
+                        "allow_names": ["host.example.com"],
+                    }
+                ]
+            }
+        },
+        plugin=plugin,
+        client_ip="192.0.2.1",
+        listener="udp",
+    )
+    resp = dns.message.from_wire(
+        resp_wire,
+        keyring=keyring,
+        request_mac=parsed_req.mac,
+    )
+    assert resp.rcode() == dns.rcode.REFUSED
+
+
+def test_process_update_message_enforces_max_updates_per_message() -> None:
+    """Brief: Security max_updates_per_message is enforced."""
+    key_name = "key.example.com."
+    secret_b64 = "dGVzdHNlY3JldA=="
+    keyring = dns.tsigkeyring.from_text({key_name: secret_b64})
+    msg = dns.update.Update("example.com.")
+    msg.use_tsig(keyring=keyring, keyname=key_name, algorithm="hmac-sha256")
+    msg.add("a", 60, "A", "192.0.2.11")
+    msg.add("b", 60, "A", "192.0.2.12")
+    req_wire = msg.to_wire()
+    parsed_req = dns.message.from_wire(req_wire, keyring=keyring)
+    plugin = SimpleNamespace(
+        records={},
+        _dns_update_config={"security": {"max_updates_per_message": 1}},
+    )
+    resp_wire = up.process_update_message(
+        req_wire,
+        zone_apex="example.com",
+        zone_config={
+            "tsig": {
+                "keys": [
+                    {
+                        "name": key_name,
+                        "algorithm": "hmac-sha256",
+                        "secret": secret_b64,
+                        "allow_names": ["*.example.com"],
+                    }
+                ]
+            }
+        },
+        plugin=plugin,
+        client_ip="192.0.2.1",
+        listener="udp",
+    )
+    resp = dns.message.from_wire(
+        resp_wire,
+        keyring=keyring,
+        request_mac=parsed_req.mac,
+    )
+    assert resp.rcode() == dns.rcode.REFUSED
+
+
+def test_process_update_message_rate_limit_per_client() -> None:
+    """Brief: Per-client rate limit rejects requests above threshold."""
+    key_name = "key.example.com."
+    secret_b64 = "dGVzdHNlY3JldA=="
+    req_wire = _signed_update_wire(
+        zone="example.com.",
+        key_name=key_name,
+        secret_b64=secret_b64,
+        owner="host",
+        value="192.0.2.13",
+    )
+    keyring = dns.tsigkeyring.from_text({key_name: secret_b64})
+    parsed_req = dns.message.from_wire(req_wire, keyring=keyring)
+    plugin = SimpleNamespace(
+        records={},
+        _dns_update_config={"security": {"rate_limit_per_client": 1}},
+    )
+    zone_cfg = {
+        "tsig": {
+            "keys": [
+                {
+                    "name": key_name,
+                    "algorithm": "hmac-sha256",
+                    "secret": secret_b64,
+                    "allow_names": ["host.example.com"],
+                }
+            ]
+        }
+    }
+    first = up.process_update_message(
+        req_wire,
+        zone_apex="example.com",
+        zone_config=zone_cfg,
+        plugin=plugin,
+        client_ip="192.0.2.1",
+        listener="udp",
+    )
+    first_resp = dns.message.from_wire(
+        first,
+        keyring=keyring,
+        request_mac=parsed_req.mac,
+    )
+    assert first_resp.rcode() == dns.rcode.NOERROR
+
+    second = up.process_update_message(
+        req_wire,
+        zone_apex="example.com",
+        zone_config=zone_cfg,
+        plugin=plugin,
+        client_ip="192.0.2.1",
+        listener="udp",
+    )
+    second_resp = dns.message.from_wire(
+        second,
+        keyring=keyring,
+        request_mac=parsed_req.mac,
+    )
+    assert second_resp.rcode() == dns.rcode.REFUSED
+
+
+def test_apply_update_operations_bumps_soa_serial_on_commit() -> None:
+    """Brief: Successful dynamic commit increments SOA serial."""
+    soa_rdata = "ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300"
+    plugin = SimpleNamespace(
+        records={
+            ("example.com", int(QTYPE.SOA)): (300, [soa_rdata], ["src"]),
+        },
+        _records_lock=threading.RLock(),
+    )
+    update_rrset = dns.rrset.from_text(
+        "host.example.com.",
+        60,
+        dns.rdataclass.IN,
+        dns.rdatatype.A,
+        "198.51.100.20",
+    )
+    rcode, err = up.apply_update_operations(
+        [update_rrset],
+        plugin=plugin,
+        zone_apex="example.com",
+    )
+    assert rcode == 0
+    assert err is None
+    soa_after = plugin.records[("example.com", int(QTYPE.SOA))][1][0]
+    assert " 2 " in f" {soa_after} "

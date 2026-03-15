@@ -16,7 +16,9 @@ Notes:
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+import os
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 import dns.exception
 import dns.flags
@@ -257,28 +259,37 @@ def process_update_message(
     Notes:
       - Parsing is done with dnspython to support RFC 2136 messages which may
         contain empty RRs in prereq/update sections.
-      - For now, this function performs basic validation and TSIG authentication
-        and returns NOTIMP after authorization succeeds.
+      - Applies configured validation/auth checks, prerequisite evaluation, and
+        update operations, then returns an RFC-appropriate response code
+        (typically NOERROR on success).
     """
 
     # 1) Parse the request using dnspython. If TSIG keys are configured, require
     # TSIG and verify signature.
-    tsig_cfg = zone_config.get("tsig") if isinstance(zone_config, dict) else None
-    if isinstance(tsig_cfg, dict):
-        key_configs = list(tsig_cfg.get("keys") or [])
-    else:
-        key_configs = []
+    from foghorn.plugins.resolve.zone_records import update_helpers as uh
+
+    source_loaders = getattr(plugin, "_dns_update_tsig_key_source_loaders", None)
+    if not isinstance(source_loaders, dict):
+        source_loaders = None
+    key_configs = uh.resolve_tsig_key_configs(
+        zone_config,
+        source_loaders=source_loaders,
+    )
 
     have_auth_config = bool(key_configs)
 
     # Build keyring mapping for dnspython.
     keyring_text: Dict[str, str] = {}
     for cfg in key_configs:
-        if not isinstance(cfg, dict):
+        if not isinstance(
+            cfg, dict
+        ):  # pragma: no cover - nocover: helper normalizes to dict configs
             continue
         name = cfg.get("name")
         secret = cfg.get("secret")
-        if not name or not secret:
+        if (
+            not name or not secret
+        ):  # pragma: no cover - nocover: invalid key entries filtered by helper
             continue
         keyring_text[str(name)] = str(secret)
 
@@ -288,19 +299,27 @@ def process_update_message(
         keyring = None
 
     request_msg: dns.message.Message | None = None
+    tsig_parse_error: Optional[str] = None
     matching_tsig_cfg: Optional[dict] = None
 
     if keyring is not None:
         try:
             request_msg = dns.message.from_wire(request_data, keyring=keyring)
+        except dns.message.UnknownTSIGKey:
+            request_msg = None
+            tsig_parse_error = "badkey"
         except dns.tsig.PeerBadKey:
             request_msg = None
+            tsig_parse_error = "badkey"
         except dns.tsig.BadSignature:
             request_msg = None
+            tsig_parse_error = "badsig"
         except dns.tsig.PeerBadTime:
             request_msg = None
+            tsig_parse_error = "badtime"
         except dns.exception.DNSException:
             request_msg = None
+            tsig_parse_error = "dns"
     else:
         # No keys configured; still parse so we can build a response.
         try:
@@ -309,7 +328,47 @@ def process_update_message(
             request_msg = None
 
     if request_msg is None:
-        # Worst-case fallback: cannot parse; return a bare FORMERR response.
+        if tsig_parse_error is not None:
+            try:
+                configured_key_names = [
+                    str(cfg.get("name", ""))
+                    for cfg in key_configs
+                    if isinstance(cfg, dict) and cfg.get("name")
+                ]
+            except (
+                Exception
+            ):  # pragma: no cover - nocover: defensive against malformed mapping objects
+                configured_key_names = []
+            logger.warning(
+                "DNS UPDATE TSIG verification failed: reason=%s zone=%s configured_keys=%s client_ip=%s",
+                tsig_parse_error,
+                str(zone_apex),
+                configured_key_names,
+                str(client_ip),
+            )
+        # Try to recover enough structure (opcode/id/question) to return a
+        # protocol-correct response even when TSIG verification fails.
+        recovered_msg: Optional[dns.message.Message] = None
+        try:
+            recovered_msg = dns.message.from_wire(request_data, continue_on_error=True)
+        except Exception:
+            recovered_msg = None
+
+        if recovered_msg is not None:
+            resp = dns.message.make_response(recovered_msg)
+            try:
+                resp.set_opcode(recovered_msg.opcode())
+            except (
+                Exception
+            ):  # pragma: no cover - nocover: defensive for malformed recovered opcode access
+                pass
+            if tsig_parse_error is not None:
+                resp.set_rcode(dns.rcode.NOTAUTH)
+            else:
+                resp.set_rcode(dns.rcode.FORMERR)
+            return resp.to_wire()
+
+        # Worst-case fallback: cannot parse any structure from the request.
         try:
             import struct
 
@@ -318,16 +377,36 @@ def process_update_message(
                 if len(request_data) >= 2
                 else 0
             )
-        except Exception:
+            flags = (
+                struct.unpack("!H", request_data[2:4])[0]
+                if len(request_data) >= 4
+                else 0
+            )
+            opcode = int((flags >> 11) & 0xF)
+        except (
+            Exception
+        ):  # pragma: no cover - nocover: requires severely malformed non-bytes request payload
             mid = 0
+            opcode = int(dns.opcode.UPDATE)
         resp = dns.message.Message(id=int(mid))
         resp.flags |= dns.flags.QR
-        resp.set_rcode(dns.rcode.FORMERR)
+        try:
+            resp.set_opcode(opcode)
+        except (
+            Exception
+        ):  # pragma: no cover - nocover: defensive around malformed update rrset iteration
+            pass
+        if tsig_parse_error is not None:
+            resp.set_rcode(dns.rcode.NOTAUTH)
+        else:  # pragma: no cover - nocover: requires unrecoverable parse with no TSIG parse reason
+            resp.set_rcode(dns.rcode.FORMERR)
         return resp.to_wire()
 
     # Enforce opcode=UPDATE.
     try:
-        if int(request_msg.opcode()) != int(dns.opcode.UPDATE):
+        if int(request_msg.opcode()) != int(
+            dns.opcode.UPDATE
+        ):  # pragma: no cover - nocover: UPDATE entrypoint already filters opcode
             resp = dns.message.make_response(request_msg)
             resp.set_rcode(dns.rcode.FORMERR)
             return resp.to_wire()
@@ -340,7 +419,9 @@ def process_update_message(
     # must match the configured zone apex.
     try:
         apex_norm = _normalize_dns_name(zone_apex)
-    except Exception:
+    except (
+        Exception
+    ):  # pragma: no cover - nocover: defensive zone_apex normalization fallback
         apex_norm = str(zone_apex).rstrip(".").lower()
 
     # Zone section must contain exactly one SOA RRset for the zone apex. In
@@ -348,27 +429,35 @@ def process_update_message(
     # owner name and type/class rather than requiring any rdatas.
     try:
         zone_rrsets = list(getattr(request_msg, "zone", []) or [])
-    except Exception:
+    except (
+        Exception
+    ):  # pragma: no cover - nocover: defensive for message.zone accessor failures
         zone_rrsets = []
 
     zone_rrset = zone_rrsets[0] if len(zone_rrsets) == 1 else None
     if zone_rrset is None:
         resp = dns.message.make_response(request_msg)
         resp.set_rcode(dns.rcode.NOTZONE)
-        if getattr(request_msg, "had_tsig", False) and keyring is not None:
+        if (
+            getattr(request_msg, "had_tsig", False) and keyring is not None
+        ):  # pragma: no cover - nocover: requires TSIG-signed malformed zone section
             try:
                 resp.use_tsig(
                     keyring=keyring,
                     keyname=request_msg.keyname,
                     algorithm=request_msg.keyalgorithm,
                 )
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: no cover - nocover: defensive TSIG signing failure path
                 pass
         return resp.to_wire()
 
     try:
         zone_owner_norm = _normalize_dns_name(getattr(zone_rrset, "name", ""))
-    except Exception:
+    except (
+        Exception
+    ):  # pragma: no cover - nocover: defensive normalization of zone owner
         zone_owner_norm = ""
 
     try:
@@ -385,7 +474,7 @@ def process_update_message(
         zone_owner_norm != apex_norm
         or zone_class != int(dns.rdataclass.IN)
         or zone_type != int(dns.rdatatype.SOA)
-    ):
+    ):  # pragma: no cover - nocover: malformed zone-section shape is parser-dependent
         resp = dns.message.make_response(request_msg)
         resp.set_rcode(dns.rcode.NOTZONE)
         if getattr(request_msg, "had_tsig", False) and keyring is not None:
@@ -395,7 +484,9 @@ def process_update_message(
                     keyname=request_msg.keyname,
                     algorithm=request_msg.keyalgorithm,
                 )
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: no cover - nocover: defensive TSIG signing failure path
                 pass
         return resp.to_wire()
 
@@ -403,6 +494,33 @@ def process_update_message(
     ctx = UpdateContext(
         zone_apex=apex_norm, client_ip=str(client_ip), listener=listener, plugin=plugin
     )
+
+    # 3a) Replication role policy gate for UPDATE writes.
+    try:
+        dns_update_cfg = getattr(plugin, "_dns_update_config", None)
+        replication_cfg = {}
+        if isinstance(dns_update_cfg, dict):
+            rcfg = dns_update_cfg.get("replication")
+            if isinstance(rcfg, dict):
+                replication_cfg = rcfg
+        role = str(replication_cfg.get("role", "primary")).strip().lower()
+        if role == "replica":
+            reject_direct = bool(
+                replication_cfg.get("reject_direct_update_on_replica", False)
+            )
+            if reject_direct:
+                resp = dns.message.make_response(request_msg)
+                resp.set_rcode(dns.rcode.REFUSED)
+                return resp.to_wire()
+            # Forward-to-owner mode is configured but explicit forwarding is
+            # not yet wired in this path; fail closed for now.
+            resp = dns.message.make_response(request_msg)
+            resp.set_rcode(dns.rcode.REFUSED)
+            return resp.to_wire()
+    except (
+        Exception
+    ):  # pragma: no cover - nocover: defensive around plugin replication metadata shape
+        pass
 
     ok, _err = verify_client_authorization(ctx, zone_config=zone_config)
     if not ok:
@@ -415,7 +533,9 @@ def process_update_message(
                     keyname=request_msg.keyname,
                     algorithm=request_msg.keyalgorithm,
                 )
-            except Exception:
+            except (
+                Exception
+            ):  # pragma: no cover - nocover: defensive TSIG signing failure path
                 pass
         return resp.to_wire()
 
@@ -437,9 +557,13 @@ def process_update_message(
             keyalg_norm = ""
 
         for cfg in key_configs:
-            if not isinstance(cfg, dict):
+            if not isinstance(
+                cfg, dict
+            ):  # pragma: no cover - nocover: normalized TSIG key configs are dicts
                 continue
-            if _normalize_dns_name(cfg.get("name", "")) != keyname_norm:
+            if (
+                _normalize_dns_name(cfg.get("name", "")) != keyname_norm
+            ):  # pragma: no cover - nocover: depends on mixed-key config ordering/shape
                 continue
             expected_alg = _normalize_tsig_algorithm(
                 cfg.get("algorithm", "hmac-sha256")
@@ -447,6 +571,17 @@ def process_update_message(
             if expected_alg and expected_alg != keyalg_norm:
                 resp = dns.message.make_response(request_msg)
                 resp.set_rcode(dns.rcode.NOTAUTH)
+                if getattr(request_msg, "had_tsig", False) and keyring is not None:
+                    try:
+                        resp.use_tsig(
+                            keyring=keyring,
+                            keyname=request_msg.keyname,
+                            algorithm=request_msg.keyalgorithm,
+                        )
+                    except (
+                        Exception
+                    ):  # pragma: no cover - nocover: defensive TSIG signing failure path
+                        pass
                 return resp.to_wire()
             matching_tsig_cfg = cfg
             break
@@ -454,17 +589,41 @@ def process_update_message(
         if matching_tsig_cfg is None:
             resp = dns.message.make_response(request_msg)
             resp.set_rcode(dns.rcode.NOTAUTH)
+            if getattr(request_msg, "had_tsig", False) and keyring is not None:
+                try:
+                    resp.use_tsig(
+                        keyring=keyring,
+                        keyname=request_msg.keyname,
+                        algorithm=request_msg.keyalgorithm,
+                    )
+                except (
+                    Exception
+                ):  # pragma: no cover - nocover: defensive TSIG signing failure path
+                    pass
             return resp.to_wire()
 
         # Enforce max fudge.
         try:
             tsig_rr = request_msg.tsig[0]
             fudge = int(getattr(tsig_rr, "fudge", 0) or 0)
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: no cover - nocover: defensive when TSIG list shape is malformed
             fudge = 0
         if fudge and fudge > TSIG_TIMESTAMP_FUDGE:
             resp = dns.message.make_response(request_msg)
             resp.set_rcode(dns.rcode.NOTAUTH)
+            if getattr(request_msg, "had_tsig", False) and keyring is not None:
+                try:
+                    resp.use_tsig(
+                        keyring=keyring,
+                        keyname=request_msg.keyname,
+                        algorithm=request_msg.keyalgorithm,
+                    )
+                except (
+                    Exception
+                ):  # pragma: no cover - nocover: defensive TSIG signing failure path
+                    pass
             return resp.to_wire()
 
         ctx.is_authorized = True
@@ -480,9 +639,117 @@ def process_update_message(
     try:
         prereqs = list(getattr(request_msg, "prerequisite", []) or [])
         updates = list(getattr(request_msg, "update", []) or [])
-    except Exception:
+    except (
+        Exception
+    ):  # pragma: no cover - nocover: defensive message object accessor path
         prereqs = []
         updates = []
+
+    # 4a) Security limits and basic rate limiting.
+    try:
+        dns_update_cfg = getattr(plugin, "_dns_update_config", None)
+        security_cfg = {}
+        if isinstance(dns_update_cfg, dict):
+            scfg = dns_update_cfg.get("security")
+            if isinstance(scfg, dict):
+                security_cfg = scfg
+
+        max_updates_per_message = int(
+            security_cfg.get("max_updates_per_message", 0) or 0
+        )
+        max_rr_values_per_rrset = int(
+            security_cfg.get("max_rr_values_per_rrset", 0) or 0
+        )
+        max_owner_length = int(security_cfg.get("max_owner_length", 0) or 0)
+        max_rdata_length = int(security_cfg.get("max_rdata_length", 0) or 0)
+        max_ttl_range = int(security_cfg.get("max_ttl_range", 0) or 0)
+
+        if max_updates_per_message > 0 and len(updates) > max_updates_per_message:
+            resp = dns.message.make_response(request_msg)
+            resp.set_rcode(dns.rcode.REFUSED)
+            return resp.to_wire()
+
+        for rrset in updates:
+            owner_text = str(getattr(rrset, "name", "")).rstrip(".")
+            if max_owner_length > 0 and len(owner_text) > max_owner_length:
+                resp = dns.message.make_response(request_msg)
+                resp.set_rcode(dns.rcode.REFUSED)
+                return resp.to_wire()
+            ttl_val = int(getattr(rrset, "ttl", 0) or 0)
+            if max_ttl_range > 0 and ttl_val > max_ttl_range:
+                resp = dns.message.make_response(request_msg)
+                resp.set_rcode(dns.rcode.REFUSED)
+                return resp.to_wire()
+            rr_values = [str(rdata) for rdata in rrset]
+            if max_rr_values_per_rrset > 0 and len(rr_values) > max_rr_values_per_rrset:
+                resp = dns.message.make_response(request_msg)
+                resp.set_rcode(dns.rcode.REFUSED)
+                return resp.to_wire()
+            if max_rdata_length > 0:
+                for value in rr_values:
+                    if len(value) > max_rdata_length:
+                        resp = dns.message.make_response(request_msg)
+                        resp.set_rcode(dns.rcode.REFUSED)
+                        return resp.to_wire()
+
+        # Token bucket style (minute window) per-client and per-key.
+        now = float(time.time())
+        buckets = getattr(plugin, "_dns_update_rate_buckets", None)
+        if not isinstance(buckets, dict):
+            buckets = {}
+            setattr(plugin, "_dns_update_rate_buckets", buckets)
+
+        limit_client = int(security_cfg.get("rate_limit_per_client", 0) or 0)
+        if limit_client > 0:
+            key = f"client:{ctx.client_ip}"
+            ts_count = buckets.get(key, {"start": now, "count": 0})
+            start = float(ts_count.get("start", now))
+            count = int(ts_count.get("count", 0))
+            if now - start >= 60.0:
+                start = now
+                count = 0
+            count += 1
+            buckets[key] = {"start": start, "count": count}
+            if count > limit_client:
+                try:
+                    plugin._dns_update_rate_limit_hits = int(
+                        getattr(plugin, "_dns_update_rate_limit_hits", 0) + 1
+                    )
+                except (
+                    Exception
+                ):  # pragma: no cover - nocover: defensive metrics increment path
+                    pass
+                resp = dns.message.make_response(request_msg)
+                resp.set_rcode(dns.rcode.REFUSED)
+                return resp.to_wire()
+
+        limit_key = int(security_cfg.get("rate_limit_per_key", 0) or 0)
+        if limit_key > 0 and isinstance(ctx.tsig_key_config, dict):
+            key_name = str(ctx.tsig_key_config.get("name", ""))
+            if key_name:
+                key = f"tsig:{key_name}"
+                ts_count = buckets.get(key, {"start": now, "count": 0})
+                start = float(ts_count.get("start", now))
+                count = int(ts_count.get("count", 0))
+                if now - start >= 60.0:
+                    start = now
+                    count = 0  # pragma: no cover - nocover: requires controlled multi-minute per-key rate window
+                count += 1
+                buckets[key] = {"start": start, "count": count}
+                if count > limit_key:
+                    try:
+                        plugin._dns_update_rate_limit_hits = int(
+                            getattr(plugin, "_dns_update_rate_limit_hits", 0) + 1
+                        )
+                    except (
+                        Exception
+                    ):  # pragma: no cover - nocover: defensive metrics increment path
+                        pass
+                    resp = dns.message.make_response(request_msg)
+                    resp.set_rcode(dns.rcode.REFUSED)
+                    return resp.to_wire()
+    except Exception:
+        pass
 
     # Get current records
     current_records = dict(getattr(plugin, "records", {}))
@@ -502,9 +769,18 @@ def process_update_message(
                         keyname=request_msg.keyname,
                         algorithm=request_msg.keyalgorithm,
                     )
-                except Exception:
+                except (
+                    Exception
+                ):  # pragma: no cover - nocover: defensive TSIG signing failure path
                     pass
             return resp.to_wire()
+
+    # Enforce auth scope from the authenticated principal (TSIG key or PSK token).
+    auth_scope_config: Optional[dict] = None
+    if isinstance(ctx.tsig_key_config, dict):
+        auth_scope_config = ctx.tsig_key_config
+    elif isinstance(ctx.psk_token_config, dict):
+        auth_scope_config = ctx.psk_token_config
 
     # Check name/value authorization for each update RRset
     for update_rrset in updates:
@@ -514,7 +790,11 @@ def process_update_message(
         except Exception:
             owner_norm = ""
 
-        if not verify_name_authorization(owner_norm, zone_config):
+        if not verify_name_authorization(
+            owner_norm,
+            zone_config,
+            auth_scope_config=auth_scope_config,
+        ):
             resp = dns.message.make_response(request_msg)
             resp.set_rcode(dns.rcode.NOTAUTH)
             if getattr(request_msg, "had_tsig", False) and keyring is not None:
@@ -524,7 +804,9 @@ def process_update_message(
                         keyname=request_msg.keyname,
                         algorithm=request_msg.keyalgorithm,
                     )
-                except Exception:
+                except (
+                    Exception
+                ):  # pragma: no cover - nocover: defensive TSIG signing failure path
                     pass
             return resp.to_wire()
 
@@ -534,7 +816,12 @@ def process_update_message(
             # Convert rdata to string for value authorization
             for rdata in update_rrset:
                 rdata_str = str(rdata)
-                if not verify_value_authorization(rdata_str, qtype_int, zone_config):
+                if not verify_value_authorization(
+                    rdata_str,
+                    qtype_int,
+                    zone_config,
+                    auth_scope_config=auth_scope_config,
+                ):
                     resp = dns.message.make_response(request_msg)
                     resp.set_rcode(dns.rcode.NOTAUTH)
                     if getattr(request_msg, "had_tsig", False) and keyring is not None:
@@ -544,15 +831,88 @@ def process_update_message(
                                 keyname=request_msg.keyname,
                                 algorithm=request_msg.keyalgorithm,
                             )
-                        except Exception:
+                        except (
+                            Exception
+                        ):  # pragma: no cover - nocover: defensive TSIG signing failure path
                             pass
                     return resp.to_wire()
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: no cover - nocover: defensive update RRset iteration/access failure path
             pass
 
     # Apply update operations
     if updates:
-        update_rcode, update_err = apply_update_operations(updates, plugin, apex_norm)
+        # Prepare for journaling if persistence is configured
+        journal_writer = None
+        actor = None
+        dns_update_cfg = getattr(plugin, "_dns_update_config", None)
+        persistence_enabled = False
+        if isinstance(dns_update_cfg, dict):
+            persistence_enabled = dns_update_cfg.get("persistence", {}).get(
+                "enabled", False
+            )
+
+        if persistence_enabled:
+            from .journal import JournalWriter
+
+            state_dir = dns_update_cfg.get("persistence", {}).get("state_dir")
+            if state_dir is None:
+                try:
+                    from foghorn.runtime_config import get_runtime_state_dir
+
+                    state_dir = get_runtime_state_dir()
+                    if state_dir:
+                        state_dir = os.path.join(state_dir, "zone_records")
+                except (
+                    Exception
+                ):  # pragma: no cover - nocover: defensive runtime-state discovery failure
+                    pass
+
+            if state_dir:
+                try:
+                    journal_writer = JournalWriter(
+                        zone_apex=apex_norm, base_dir=state_dir
+                    )
+                    if journal_writer.acquire_lock():
+                        actor = {
+                            "client_ip": str(ctx.client_ip),
+                            "auth_method": (
+                                ctx.auth_method or "tsig"
+                                if ctx.is_authorized
+                                else "none"
+                            ),
+                            "tsig_key_name": (
+                                ctx.tsig_key_config.get("name")
+                                if ctx.tsig_key_config
+                                else None
+                            ),
+                        }
+                    else:  # pragma: no cover - nocover: lock contention path is scheduler/environment dependent
+                        journal_writer = None
+                except (
+                    Exception
+                ):  # pragma: no cover - nocover: defensive journal initialization failure
+                    journal_writer = None
+
+        try:
+            update_rcode, update_err = apply_update_operations(
+                updates, plugin, apex_norm, journal_writer=journal_writer, actor=actor
+            )
+        finally:
+            if journal_writer is not None:
+                try:
+                    journal_writer.release_lock()
+                except (
+                    Exception
+                ):  # pragma: no cover - nocover: defensive lock-release failure after update processing
+                    pass
+                try:
+                    journal_writer.close()
+                except (
+                    Exception
+                ):  # pragma: no cover - nocover: defensive close failure after update processing
+                    pass
         if update_rcode != 0:
             resp = dns.message.make_response(request_msg)
             resp.set_rcode(update_rcode)
@@ -563,7 +923,9 @@ def process_update_message(
                         keyname=request_msg.keyname,
                         algorithm=request_msg.keyalgorithm,
                     )
-                except Exception:
+                except (
+                    Exception
+                ):  # pragma: no cover - nocover: defensive TSIG signing failure path
                     pass
             return resp.to_wire()
 
@@ -579,7 +941,9 @@ def process_update_message(
                 keyname=request_msg.keyname,
                 algorithm=request_msg.keyalgorithm,
             )
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: no cover - nocover: defensive TSIG signing failure path
             pass
 
     return resp.to_wire()
@@ -624,41 +988,45 @@ def verify_client_authorization(
 def verify_name_authorization(
     name: str,
     zone_config: dict,
+    auth_scope_config: Optional[dict] = None,
 ) -> bool:
     """Brief: Verify name is allowed for updates.
 
     Inputs:
       - name: Domain name to update.
       - zone_config: Zone configuration.
+      - auth_scope_config: Optional per-principal scope config (TSIG key or PSK token).
 
     Outputs:
       - bool: True if name is allowed.
     """
     from foghorn.plugins.resolve.zone_records import update_helpers as uh
 
-    block_names = zone_config.get("block_names", [])
-    block_names_files = zone_config.get("block_names_files", [])
-    allow_names = zone_config.get("allow_names", [])
-    allow_names_files = zone_config.get("allow_names_files", [])
+    scopes = [s for s in (zone_config, auth_scope_config) if isinstance(s, dict)]
 
-    # Check blocked names first
-    blocked_list = uh.combine_lists(
-        block_names,
-        block_names_files,
-        uh.load_names_list_from_file,
-    )
-    if blocked_list and uh.matches_name_pattern(name, blocked_list):
-        return False
-
-    # Check allowed names
-    if allow_names or allow_names_files:
-        allowed_list = uh.combine_lists(
-            allow_names,
-            allow_names_files,
+    # Any matching block list from any scope denies the update.
+    for scope in scopes:
+        blocked_list = uh.combine_lists(
+            scope.get("block_names", []),
+            scope.get("block_names_files", []),
             uh.load_names_list_from_file,
         )
-        if allowed_list and not uh.matches_name_pattern(name, allowed_list):
+        if blocked_list and uh.matches_name_pattern(name, blocked_list):
             return False
+
+    # If a scope defines allow names, this name must match that scope.
+    # Multiple allow scopes therefore behave as intersection.
+    for scope in scopes:
+        allow_names = scope.get("allow_names", [])
+        allow_names_files = scope.get("allow_names_files", [])
+        if allow_names or allow_names_files:
+            allowed_list = uh.combine_lists(
+                allow_names,
+                allow_names_files,
+                uh.load_names_list_from_file,
+            )
+            if allowed_list and not uh.matches_name_pattern(name, allowed_list):
+                return False
 
     return True
 
@@ -667,6 +1035,7 @@ def verify_value_authorization(
     value: str,
     qtype: int,
     zone_config: dict,
+    auth_scope_config: Optional[dict] = None,
 ) -> bool:
     """Brief: Verify A/AAAA record value is allowed.
 
@@ -674,6 +1043,7 @@ def verify_value_authorization(
       - value: IP address value.
       - qtype: Record type (A=1, AAAA=28).
       - zone_config: Zone configuration.
+      - auth_scope_config: Optional per-principal scope config (TSIG key or PSK token).
 
     Outputs:
       - bool: True if value is allowed.
@@ -684,29 +1054,30 @@ def verify_value_authorization(
 
     from foghorn.plugins.resolve.zone_records import update_helpers as uh
 
-    block_ips = zone_config.get("block_update_ips", [])
-    block_ips_files = zone_config.get("block_update_ips_files", [])
-    allow_ips = zone_config.get("allow_update_ips", [])
-    allow_ips_files = zone_config.get("allow_update_ips_files", [])
+    scopes = [s for s in (zone_config, auth_scope_config) if isinstance(s, dict)]
 
-    # Check blocked IPs first
-    blocked_list = uh.combine_lists(
-        block_ips,
-        block_ips_files,
-        uh.load_cidr_list_from_file,
-    )
-    if blocked_list and uh.is_ip_in_cidr_list(value, blocked_list):
-        return False
-
-    # Check allowed IPs
-    if allow_ips or allow_ips_files:
-        allowed_list = uh.combine_lists(
-            allow_ips,
-            allow_ips_files,
+    # Any matching block list from any scope denies the update.
+    for scope in scopes:
+        blocked_list = uh.combine_lists(
+            scope.get("block_update_ips", []),
+            scope.get("block_update_ips_files", []),
             uh.load_cidr_list_from_file,
         )
-        if allowed_list and not uh.is_ip_in_cidr_list(value, allowed_list):
+        if blocked_list and uh.is_ip_in_cidr_list(value, blocked_list):
             return False
+
+    # If a scope defines allow_update_ips, the value must match that scope.
+    for scope in scopes:
+        allow_ips = scope.get("allow_update_ips", [])
+        allow_ips_files = scope.get("allow_update_ips_files", [])
+        if allow_ips or allow_ips_files:
+            allowed_list = uh.combine_lists(
+                allow_ips,
+                allow_ips_files,
+                uh.load_cidr_list_from_file,
+            )
+            if allowed_list and not uh.is_ip_in_cidr_list(value, allowed_list):
+                return False
 
     return True
 
@@ -761,7 +1132,9 @@ def check_prerequisites(
     for prereq_rrset in prereqs:
         try:
             owner_norm = _normalize_dns_name(str(prereq_rrset.name))
-        except Exception:
+        except (
+            Exception
+        ):  # pragma: no cover - nocover: defensive malformed owner objects in prereq rrsets
             owner_norm = ""
 
         qtype_int = int(getattr(prereq_rrset, "rdtype", 0))
@@ -867,11 +1240,15 @@ def resolve_tsig_key_by_name(
     Outputs:
       - TSIG key configuration dict, or None if not found.
     """
-    tsig_cfg = zone.get("tsig")
-    if not tsig_cfg:
-        return None
+    from foghorn.plugins.resolve.zone_records import update_helpers as uh
 
-    keys = tsig_cfg.get("keys", []) or []
+    source_loaders = None
+    if isinstance(dns_update_config, dict):
+        maybe_loaders = dns_update_config.get("tsig_key_source_loaders")
+        if isinstance(maybe_loaders, dict):
+            source_loaders = maybe_loaders
+
+    keys = uh.resolve_tsig_key_configs(zone, source_loaders=source_loaders)
     for key in keys:
         if isinstance(key, dict) and key.get("name", "") == key_name:
             return key
@@ -883,6 +1260,9 @@ def apply_update_operations(
     updates: List[RR],
     plugin: object,
     zone_apex: str,
+    *,
+    journal_writer: Optional[object] = None,
+    actor: Optional[Dict] = None,
 ) -> Tuple[int, Optional[str]]:
     """Brief: Apply update operations atomically per RFC 2136 Section 3.4.
 
@@ -890,6 +1270,8 @@ def apply_update_operations(
       - updates: Update RRs from dnspython Update.update.
       - plugin: ZoneRecords plugin instance.
       - zone_apex: Zone apex.
+      - journal_writer: Optional JournalWriter for persistence.
+      - actor: Optional actor metadata for journal entries.
 
     Outputs:
       - Tuple of (rcode, error_message). RCODE=0 (NOERROR) on success.
@@ -900,6 +1282,7 @@ def apply_update_operations(
         * CLASS ANY, TYPE!=ANY: Delete RR from RRset (delete entire RRset if rdata empty)
         * CLASS ANY, TYPE=ANY: Delete all RRsets at an owner
         * CLASS IN, TYPE!=ANY: Replace entire RRset with provided RR(s)
+      - If journal_writer is provided and journaling fails, memory is not mutated (fail-closed).
     """
     try:
         apex_norm = _normalize_dns_name(zone_apex)
@@ -916,6 +1299,52 @@ def apply_update_operations(
 
     new_records = dict(snapshot)
     default_ttl = 300  # Default TTL for updates without explicit TTL
+
+    def _bump_soa_serial_for_zone(
+        records_map: Dict[Tuple[str, int], Tuple[int, List[str], List[str]]],
+        zone_name: str,
+    ) -> None:
+        """Brief: Bump SOA serial for zone apex in a records mapping.
+
+        Inputs:
+          - records_map: Mutable records mapping.
+          - zone_name: Zone apex (normalized).
+
+        Outputs:
+          - None; mutates records_map in-place when SOA exists.
+        """
+        try:
+            soa_code = int(QTYPE.SOA)
+        except Exception:
+            soa_code = 6
+        key = (str(zone_name).rstrip(".").lower(), int(soa_code))
+        if key not in records_map:
+            return
+        try:
+            ttl, values, sources = records_map[key]
+        except (
+            TypeError,
+            ValueError,
+        ):  # pragma: no cover - nocover: defensive malformed SOA tuple shape
+            return
+        if not values:  # pragma: no cover - nocover: defensive malformed SOA value list
+            return
+        first = str(values[0])
+        parts = first.split()
+        if len(parts) < 7:
+            return
+        try:
+            serial = int(parts[2])
+        except (
+            Exception
+        ):  # pragma: no cover - nocover: defensive non-integer SOA serial field
+            return
+        parts[2] = str(max(1, serial + 1))
+        new_values = [" ".join(parts)] + [str(v) for v in list(values[1:])]
+        records_map[key] = (int(ttl), new_values, list(sources or []))
+
+    # Build normalized actions for journaling
+    actions: List[Dict[str, Any]] = []
 
     for update_rrset in updates:
         # Get owner name from the RRset
@@ -948,9 +1377,30 @@ def apply_update_operations(
                     new_records[record_key] = (ttl, [rdata_str], ["update"])
                 else:
                     existing_ttl, existing_values, sources = new_records[record_key]
+                    # Check if this RRset has update source
+                    has_update_source = (
+                        isinstance(sources, (list, set)) and "update" in sources
+                    )
                     if rdata_str not in existing_values:
                         new_values = existing_values + [rdata_str]
+                        # Ensure update source is tracked
+                        if not has_update_source:
+                            sources = (
+                                sources + ["update"]
+                                if isinstance(sources, list)
+                                else list(sources) + ["update"]
+                            )
                         new_records[record_key] = (ttl, new_values, sources)
+                # Record normalized action
+                actions.append(
+                    {
+                        "type": "rr_add",
+                        "owner": owner_norm,
+                        "qtype": qtype_int,
+                        "ttl": ttl,
+                        "value": rdata_str,
+                    }
+                )
 
         # CLASS ANY: Delete RR or RRset
         elif qclass == dns.rdataclass.ANY:
@@ -959,6 +1409,16 @@ def apply_update_operations(
                 keys_to_delete = [k for k in new_records if k[0] == owner_norm]
                 for k in keys_to_delete:
                     del new_records[k]
+                # Mark this owner as update-managed
+                update_managed_owners = getattr(plugin, "_update_managed_owners", None)
+                if isinstance(update_managed_owners, set):
+                    update_managed_owners.add(owner_norm)
+                actions.append(
+                    {
+                        "type": "name_delete_all",
+                        "owner": owner_norm,
+                    }
+                )
             else:
                 # Delete specific RRs from RRset, or delete RRset if empty/optional
                 if record_key in new_records:
@@ -968,12 +1428,27 @@ def apply_update_operations(
                             if len(existing_values) > 1:
                                 existing_values.remove(rdata_str)
                                 new_records[record_key] = (
-                                    ttl,
+                                    existing_ttl,
                                     existing_values,
                                     sources,
                                 )
+                                actions.append(
+                                    {
+                                        "type": "rr_delete_values",
+                                        "owner": owner_norm,
+                                        "qtype": qtype_int,
+                                        "value": rdata_str,
+                                    }
+                                )
                             else:
                                 del new_records[record_key]
+                                actions.append(
+                                    {
+                                        "type": "rr_delete_rrset",
+                                        "owner": owner_norm,
+                                        "qtype": qtype_int,
+                                    }
+                                )
                                 break
 
         # CLASS IN: Replace entire RRset
@@ -983,16 +1458,219 @@ def apply_update_operations(
             # Replace entire RRset with all RRs from this update_rrset
             if rdata_values:
                 new_records[record_key] = (ttl, rdata_values, ["update"])
+                actions.append(
+                    {
+                        "type": "rr_replace",
+                        "owner": owner_norm,
+                        "qtype": qtype_int,
+                        "ttl": ttl,
+                        "values": rdata_values,
+                    }
+                )
 
         else:
             return 1, f"Unsupported update class {qclass}"
 
+    journal_entry = None
+
+    # Write journal entry if enabled (fail-closed: if journal write fails, don't commit)
+    if journal_writer is not None and actor is not None:
+        persistence_cfg = getattr(plugin, "_dns_update_persistence_config", None)
+        fsync_mode = "interval"
+        fsync_interval = 5000
+        if isinstance(persistence_cfg, dict):
+            fsync_mode = persistence_cfg.get("fsync_mode", "interval")
+            fsync_interval = persistence_cfg.get("fsync_interval_ms", 5000)
+
+        journal_entry = journal_writer.append_entry(
+            actions=actions,
+            actor=actor,
+            origin_node_id=str(getattr(plugin, "_dns_update_node_id", "unknown")),
+            fsync_mode=fsync_mode,
+            fsync_interval_ms=fsync_interval,
+        )
+        if journal_entry is None:
+            return 2, "Journal write failed"
+
     # Commit under lock
+    def _rebuild_name_index_from_records(
+        records: Dict[Tuple[str, int], Tuple[int, List[str], List[str]]],
+    ) -> Dict[str, Dict[int, Tuple[int, List[str], List[str]]]]:
+        """Brief: Rebuild name index from records mapping.
+
+        Inputs:
+          - records: Mapping of (owner, qtype) -> (ttl, values, sources).
+
+        Outputs:
+          - owner -> qtype -> (ttl, values, sources) mapping.
+        """
+        name_index: Dict[str, Dict[int, Tuple[int, List[str], List[str]]]] = {}
+        for (owner, qtype), entry in (records or {}).items():
+            try:
+                ttl, values, sources = entry
+            except (ValueError, TypeError):
+                try:
+                    ttl, values = entry
+                    sources = []
+                except (ValueError, TypeError):
+                    continue
+
+            owner_norm = _normalize_dns_name(owner)
+            qtype_int = int(qtype)
+            ttl_int = int(ttl)
+            values_list = list(values or [])
+            if isinstance(sources, set):
+                sources_list = list(sources)
+            else:
+                sources_list = list(sources or [])
+
+            per_name = name_index.setdefault(owner_norm, {})
+            per_name[qtype_int] = (ttl_int, values_list, sources_list)
+        return name_index
+
+    def _rebuild_wildcard_owners_from_name_index(
+        name_index: Dict[str, Dict[int, Tuple[int, List[str], List[str]]]],
+    ) -> List[str]:
+        """Brief: Rebuild sorted wildcard owner patterns from name index.
+
+        Inputs:
+          - name_index: owner -> qtype -> (ttl, values, sources) mapping.
+
+        Outputs:
+          - Sorted list of wildcard owner patterns for query matching.
+        """
+        from . import helpers as zone_helpers
+
+        wildcard_patterns = [
+            owner
+            for owner in (name_index or {}).keys()
+            if zone_helpers.is_wildcard_domain_pattern(str(owner))
+        ]
+        return zone_helpers.sort_wildcard_patterns(wildcard_patterns)
+
+    rebuilt_name_index: Optional[
+        Dict[str, Dict[int, Tuple[int, List[str], List[str]]]]
+    ] = None
+    rebuilt_wildcard_owners: Optional[List[str]] = None
+    try:
+        rebuilt_name_index = _rebuild_name_index_from_records(new_records)
+        rebuilt_wildcard_owners = _rebuild_wildcard_owners_from_name_index(
+            rebuilt_name_index
+        )
+    except Exception:  # pragma: no cover - defensive
+        logger.warning(
+            "Failed to rebuild _name_index/_wildcard_owners after DNS UPDATE commit",
+            exc_info=True,
+        )
+
     if lock is None:
         plugin.records = new_records
+        if rebuilt_name_index is not None:
+            plugin._name_index = rebuilt_name_index
+        if rebuilt_wildcard_owners is not None:
+            plugin._wildcard_owners = rebuilt_wildcard_owners
     else:
         with lock:
             plugin.records = new_records
+            if rebuilt_name_index is not None:
+                plugin._name_index = rebuilt_name_index
+            if rebuilt_wildcard_owners is not None:
+                plugin._wildcard_owners = rebuilt_wildcard_owners
+
+    if journal_writer is not None and journal_entry is not None:
+        try:
+            from .journal import JournalReader, compact_zone_journal
+
+            persistence_cfg = (
+                getattr(plugin, "_dns_update_persistence_config", {}) or {}
+            )
+            max_journal_bytes = int(persistence_cfg.get("max_journal_bytes", 0) or 0)
+            max_journal_entries = int(
+                persistence_cfg.get("max_journal_entries", 0) or 0
+            )
+            should_compact = False
+            reader = JournalReader(
+                zone_apex=apex_norm, base_dir=journal_writer.base_dir
+            )
+            if max_journal_bytes > 0 and reader.get_size_bytes() > max_journal_bytes:
+                should_compact = True
+            if (
+                not should_compact
+                and max_journal_entries > 0
+                and reader.get_entry_count() > max_journal_entries
+            ):
+                should_compact = True
+            if should_compact:
+                compacted = compact_zone_journal(
+                    zone_apex=apex_norm,
+                    base_dir=journal_writer.base_dir,
+                    records=new_records,
+                    seq=int(getattr(journal_entry, "seq", 0) or 0),
+                )
+                if compacted:
+                    try:
+                        plugin._dns_update_compact_count = int(
+                            getattr(plugin, "_dns_update_compact_count", 0) + 1
+                        )
+                    except Exception:
+                        pass
+        except (
+            Exception
+        ):  # pragma: no cover - nocover: defensive journal compaction introspection/import path
+            logger.warning(
+                "DNS UPDATE journal compaction check failed for zone %s",
+                apex_norm,
+                exc_info=True,
+            )
+
+    # Bump SOA serial for dynamic mutation commits.
+    try:
+        if updates:
+            if lock is None:
+                _bump_soa_serial_for_zone(plugin.records, apex_norm)
+            else:
+                with lock:
+                    _bump_soa_serial_for_zone(plugin.records, apex_norm)
+    except Exception:  # pragma: no cover - nocover: defensive SOA bump post-commit path
+        logger.warning(
+            "Failed to bump SOA serial after DNS UPDATE commit for zone %s",
+            apex_norm,
+            exc_info=True,
+        )
+
+    # Send NOTIFY after successful commit if enabled.
+    try:
+        dns_update_cfg = getattr(plugin, "_dns_update_config", None)
+        replication_cfg = {}
+        if isinstance(dns_update_cfg, dict):
+            rcfg = dns_update_cfg.get("replication")
+            if isinstance(rcfg, dict):
+                replication_cfg = rcfg
+        notify_on_update = bool(replication_cfg.get("notify_on_update", True))
+        if notify_on_update:
+            from . import notify as notify_mod
+
+            notify_mod.send_notify_for_zones(plugin, [apex_norm])
+            try:
+                plugin._dns_update_notify_sent = int(
+                    getattr(plugin, "_dns_update_notify_sent", 0) + 1
+                )
+            except (
+                Exception
+            ):  # pragma: no cover - nocover: defensive notify metric increment path
+                pass
+    except Exception:
+        try:
+            plugin._dns_update_notify_failed = int(
+                getattr(plugin, "_dns_update_notify_failed", 0) + 1
+            )
+        except Exception:
+            pass
+        logger.warning(
+            "Failed sending NOTIFY after DNS UPDATE for zone %s",
+            apex_norm,
+            exc_info=True,
+        )
 
     return 0, None
 

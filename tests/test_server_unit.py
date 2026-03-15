@@ -8,6 +8,7 @@ Outputs:
   - None
 """
 
+import threading
 from dnslib import QTYPE, RCODE, RR, A, DNSRecord
 
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
@@ -219,6 +220,52 @@ def test_send_query_with_failover_concurrent_path_uses_first_success(monkeypatch
     assert resp == b"resp-good"
     assert used == {"host": "good", "port": 53}
     assert reason == "ok"
+
+
+def test_send_query_with_failover_concurrent_path_limits_scheduling_window():
+    """Brief: concurrent failover keeps a bounded in-flight window.
+
+    Inputs:
+      - Four upstreams with max_concurrent=2 and immediate success on first upstream.
+
+    Outputs:
+      - None: Asserts later upstreams are not attempted when an early success is available.
+    """
+
+    attempted_hosts: list[str] = []
+    slow_fail_gate = threading.Event()
+    success_wire = DNSRecord.question("example.com", "A").reply().pack()
+
+    class DummyQuery:
+        def send(self, host, port, timeout=None):
+            attempted_hosts.append(host)
+            if host == "u1":
+                return success_wire
+            if host == "u2":
+                slow_fail_gate.wait(0.1)
+                raise RuntimeError("u2 failed")
+            raise RuntimeError(f"unexpected upstream attempt: {host}")
+
+    resp, used, reason = send_query_with_failover(
+        DummyQuery(),
+        upstreams=[
+            {"host": "u1", "port": 53},
+            {"host": "u2", "port": 53},
+            {"host": "u3", "port": 53},
+            {"host": "u4", "port": 53},
+        ],
+        timeout_ms=100,
+        qname="example.com",
+        qtype=QTYPE.A,
+        max_concurrent=2,
+    )
+
+    assert resp == success_wire
+    assert used == {"host": "u1", "port": 53}
+    assert reason == "ok"
+    assert "u1" in attempted_hosts
+    assert "u3" not in attempted_hosts
+    assert "u4" not in attempted_hosts
 
 
 def _make_handler_for_cache_tests(min_cache_ttl: int):

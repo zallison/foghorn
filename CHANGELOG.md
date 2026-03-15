@@ -17,6 +17,13 @@ All notable changes to this project will be documented in this file.
 - Rate limit plugin now adds EDE messages (code 17 "Rate-Limited") when rate limiting, providing better visibility into why queries were rejected.
 
 ### Added
+- Admin API: added `/api/v1/config/schema` and `/config/schema` endpoints (FastAPI and threaded admin server) to return the active JSON config schema document.
+- ZoneRecords DNS UPDATE TSIG config now supports pluggable external key loading via `tsig.key_sources` (default `type: file` loader).
+- ZoneRecords DNS UPDATE now supports optional persistence, replication, and security config blocks under `dns_update`:
+  - `dns_update.persistence` (journal fsync/size/compaction controls),
+  - `dns_update.replication` (role/node/NOTIFY routing controls),
+  - `dns_update.security` (message/rrset/owner/rdata/ttl limits and update rate limits).
+- ZoneRecords DNS UPDATE persistence now includes durable per-zone journal files, startup replay, and journal compaction primitives.
 - Upstreams: support backup upstream endpoints via `upstreams.backup.endpoints` (normalized alongside primary endpoints).
 - Upstreams: added `upstreams.health` tuning config (health thresholds/probes) and surfaced it in admin upstream status payloads.
 - Upstreams: added `upstreams.health.profile` to apply built-in upstream health preset bundles from `upstreams_health_profiles.yaml`.
@@ -51,6 +58,8 @@ All notable changes to this project will be documented in this file.
   - Added DoH parameter size validation before base64 decoding to prevent processing oversized payloads.
   - Added automated upstream health cleanup to prevent unbounded memory growth in `upstream_health` dict.
   - Reduced default recursive `max_depth` from 16 to 12 for better DoS resistance (fully configurable via `server.resolver.max_depth`).
+- Config schema generation now allows optional `comment` and `id` metadata fields on object mappings, with runtime validation enforcing string type and max length (254).
+- RateLimit plugin now supports `burst_windows` to cap consecutive burst windows and `stats_log_interval_seconds` for periodic summary logs.
 - Resolver runtime: added `servers/dns_runtime_state.py` as a shared runtime/config state holder used across UDP handler and shared resolver/helper paths.
 - Resolver pipeline: non-QUERY opcodes can now be handled by resolve plugins via `handle_opcode()` so plugins can explicitly drop, deny, or override those requests.
 - Caching:
@@ -61,6 +70,20 @@ All notable changes to this project will be documented in this file.
   - Added `axfr_enabled` and `axfr_allow_clients` policy gates for zone transfers.
 
 ### Changed
+- ZoneRecords resolver now prioritizes UPDATE-managed RRsets over static source RRsets for the same owner, so dynamic DNS UPDATE answers win during query resolution.
+- DNS UPDATE internals now track source metadata in committed RRsets and rebuild the name index after atomic update commits to keep resolver lookups in sync.
+- DNS UPDATE processing now supports persisted journal replay during ZoneRecords load/reload cycles, with per-zone sequence tracking and replay metrics in plugin snapshots.
+- DNS UPDATE post-commit behavior now bumps zone SOA serials and can emit NOTIFY according to replication settings.
+- DNS UPDATE request handling now enforces replication role policy gates (including optional direct-update rejection on replicas) and bounded security/rate-limit controls.
+- ZoneRecords NOTIFY fanout now skips local listener endpoints to prevent self-loop NOTIFY storms.
+- ZoneRecords DNSSEC auto-signing now defaults to enabled when a `dnssec_signing` block is present (unless `dnssec_signing.enabled: false` is set).
+- Runtime lifecycle: `main()` now runs best-effort shutdown hooks for loaded resolver plugins, cache backends, and query-log/statistics backends via `run_shutdown_plugins`.
+- Plugin lifecycle: setup() now supports DNS-aware provider-first orchestration via `setup_provides_dns` / `setup_requires_dns`, allowing setup consumers to resolve hostnames using earlier resolver plugins (optionally falling back to system DNS).
+- Resolver forwarding: when `forward_local` is disabled, RFC1918 IPv4 reverse PTR (`in-addr.arpa`) queries are now treated like `.local` and are not forwarded upstream.
+- Upstream failover concurrency now uses a rolling bounded in-flight window (`max_concurrent`) and stops scheduling additional upstream attempts after the first successful response.
+- RateLimit profile presets were retuned and expanded (`home`, `lan`, `smb`, `enterprise`, `localhost`), with `default` now pointing at the `lan` preset.
+- RateLimit built-in profile defaults were further retuned in `rate_limit_profiles.yaml` (including `home`, `smb`, and `enterprise` thresholds), and profile resolution tests were updated to match the active defaults.
+- Admin UI dark-theme form controls now use higher-contrast input/select/textarea backgrounds for search and query-log panes.
 - Plugin priorities: `hooks.priority` and per-hook priorities now accept either an integer or `{priority: <int>}` shorthand; legacy `*_priority` fields remain supported.
 - Plugin targeting: configuration now prefers a nested `targets` object with `ips`, `ignore_ips`, `listeners`, `domains`, `domains_mode`, `qtypes`, `opcodes`, and `rcodes` (legacy flat keys still accepted).
 - Admin upstream status now reads from runtime snapshots, including backup upstreams when present.
@@ -81,7 +104,7 @@ All notable changes to this project will be documented in this file.
 - Cache: in-memory and SQLite caches can reserve separate capacity for NXDOMAIN responses to prevent cache pollution under NXDOMAIN floods.
 - RateLimit: base-domain extraction is now Public Suffix List aware (eTLD+1) when `publicsuffix2` is available.
 - RateLimit: sqlite `rate_profiles` storage is now bounded and pruned (TTL + max rows) via `max_profiles`, `profile_ttl_seconds`, and `prune_interval_seconds`.
-- RateLimit: UDP keying can be made spoofing-robust via `udp_keying` (default `cidr`) and `udp_client_prefix_v4`/`udp_client_prefix_v6` bucketing.
+- RateLimit: UDP keying can be made spoofing-robust via `udp_keying` (default `cidr`) and `bucket_network_prefix_v4`/`bucket_network_prefix_v6` bucketing.
 - UpstreamRouter: `_forward_with_failover` now delegates to the hardened core `send_query_with_failover` implementation (TXID/question validation, transport support), avoiding inconsistent forwarding behavior.
 - Stats/query log: async queue is now bounded; under sustained overload some stats operations may be dropped with DEBUG/INFO visibility via queue metrics.
 - Query log stats pressure messages are now suppressed until the queue exceeds 5% utilization.
@@ -94,6 +117,7 @@ All notable changes to this project will be documented in this file.
 - Admin UI: plugin snapshot groups can now include optional `className` styling, and RateLimit snapshots render dedicated configuration and profile tables (including scroll handling for larger profile sets).
 - Logging: upstream skip de-duplication messages are now logged at DEBUG (was WARNING).
 - Logging: added ANSI-highlighted console rendering (timestamps, levels, key/value tokens, IP/port, plugin markers, quoted/path-like values) with a top-level `color` toggle while file/syslog output remains non-colored.
+- Logging: BracketLevelFormatter now highlights bracketed SHA1-style values (short+long forms) alongside existing bracketed container-id rendering.
 - Diagrams: config diagram source and PNG rendering now use Graphviz (`dot`) (replacing Mermaid/mmdc).
 - Diagrams: added a dark-theme diagram PNG endpoint.
 - Diagrams: dot output styling now defaults to a sans font, uses a Graphviz colorscheme, and applies light/dark-aware shading for resolver/upstream/plugin clusters.
@@ -106,9 +130,18 @@ All notable changes to this project will be documented in this file.
 - Runtime/config parity: listener default host/port handling is now aligned across startup, effective-config dump output, rate-limit exposure checks, and config-diagram extraction.
 - Logging/transport diagnostics: DoT and admin TLS failure warnings now include richer certificate/key/CA context with likely-cause hints.
 - Failover diagnostics: upstream skip/failure logging now includes stable upstream identity labels and health context summaries.
+- Upstream failover connection-refused warnings are now throttled under sustained failures to reduce repetitive log noise.
 - Admin UI: plugin table rendering now supports client-side searchable sections, and rate-limit snapshots include config item details.
+- Resolver forward-local gating now uses a cached helper for `.local` and RFC1918 PTR block checks in the hot path.
+- Config interpolation now ignores non-ALL_CAPS keys defined in top-level `variables`/`vars` (allowing mixed-case entries to be used as YAML anchors without interpolation effects).
+- Startup banner logging now includes a stable config-file fingerprint (`config_sha1`) derived from config file contents, with a safe fallback to `unknown` when file hashing fails.
+- Makefile `docker-run` now exports `LISTEN` and `LISTEN_PORT` environment variables into the runtime container.
+- RateLimit defaults now use `./config/var/dbs/rate_limit.db` for profile storage across runtime helpers, examples, and API output.
 
 ### Fixed
+- DNS UPDATE TSIG parse/verification failures now return protocol-correct UPDATE responses with `NOTAUTH` (instead of malformed opcode handling), including improved TSIG failure diagnostics.
+- DNS UPDATE authorization now enforces per-key/per-token `allow_names` and `allow_update_ips` scope (combined with zone-level policy), preventing out-of-scope updates from being accepted.
+- ZoneRecords DNS UPDATE now rebuilds wildcard-owner indexes after update commits, so wildcard UPDATE owners (for example `*.foo.dyn.zaa`) are immediately used during resolution.
 
 - ZoneRecords DNSSEC: improved NSEC3 denial-of-existence handling so NODATA responses only include relevant NSEC3 proofs.
 - Diagrams: upstream routes now handle template variable hosts (e.g., `${host}`) by showing placeholder when host is a template variable and transport/port are present.
@@ -119,15 +152,29 @@ All notable changes to this project will be documented in this file.
 - ZoneRecords DNSSEC negative-response helpers now handle source-aware RRset entries `(ttl, values, sources)` to avoid tuple-unpacking errors.
 - Server internals: migrated remaining shared runtime attribute access away from `DNSUDPHandler` class state to `DNSRuntimeState`, reducing transport coupling and improving helper/test isolation.
 - DNSSEC: `ensure_zone_keys` now searches fallback relative key directories (including `config/.config` cwd patterns) before concluding keys are missing when generation is disabled.
+- Main signal handling: fixed SIGUSR reset-flag comparisons so `sigusr1_resets_stats` / `sigusr2_resets_stats` gating is evaluated correctly.
+- Makefile `run` and `docker-run` now pass `LISTEN_PORT` correctly (fixing `docker-run` mistakenly reusing `LISTEN`).
+- Logging formatter bracket-highlighting now more reliably identifies SHA1-style IDs and bracketed container IDs.
 
 ### Tests
+- Added ZoneRecords TSIG update tests covering pluggable `key_sources` resolution paths.
+- Added ZoneRecords DNS UPDATE persistence tests for journal append/replay/compaction and restart replay behavior.
+- Added Docker-marked cluster-oriented tests for single-writer shared journal convergence and replica direct-write refusal.
+- Added web/admin route coverage asserting `/api/v1/config/schema` and `/config/schema` return matching schema payloads in both FastAPI and threaded modes.
+- Added DNS UPDATE regression tests for TSIG bad-key handling, TSIG algorithm mismatch responses, and key-scoped `allow_names` enforcement (including wildcard scope matches).
+- Added DNS UPDATE regression coverage for wildcard-owner index rebuilds after update commits.
+- Added lifecycle tests for `run_shutdown_plugins()` and main-loop shutdown hook invocation.
+- Added failover concurrency regression coverage to verify bounded in-flight scheduling and no unnecessary later-upstream attempts after early success.
 
 - Updated upstream failover coverage to assert DEBUG-level (de-duplicated) skip logs for malformed upstream responses.
+- Added NOTIFY regression coverage to ensure local self-loop targets are skipped.
+- Added DNSSEC regression coverage to assert NXDOMAIN authority output when auto-signing is explicitly disabled.
 - Added branch-coverage tests for ZoneRecords UPDATE/TSIG branches, asyncio UDP CIDR inflight limits, web admin config/diagram edge paths, and config/security helper normalization behavior.
 - Updated ZoneRecords resolver and server EDE-path tests to assert plugin-owned NOTIFY behavior and explicit ZoneRecords plugin loading for NOTIFY opcode coverage.
 - Added targeted branch tests for server opcode handling fallback paths, DNSServer runtime wiring/defensive defaults, upstream-health payload shaping, and expanded DoT server branch coverage.
 - Added regression coverage for obsolete listener-key validation, listener default normalization consistency, and relative DNSSEC key-dir fallback lookup behavior.
 - Updated `tests/test_main_additional_coverage.py` fixtures to use `server.listen.dns.host` / `server.listen.dns.port` so startup-path tests no longer rely on obsolete `server.listen.host` / `server.listen.port` keys.
+- Added config schema validation tests covering accepted/rejected `comment` and `id` metadata values (type and length constraints).
 
 ### Documentation
 - Updated README and plugin docs/examples to reflect the nested `targets` config and hook priority shorthands.
@@ -135,6 +182,7 @@ All notable changes to this project will be documented in this file.
 - Updated ZoneRecords docs to clarify source precedence order and AXFR reload timing behavior.
 - Added Graphviz `dot` rendering instructions for config diagrams.
 - Documented DEBUG-level upstream skip/failover logs and de-duplication behavior in the README.
+- Updated rate-limit README/docs/examples/API references for `burst_windows`, `stats_log_interval_seconds`, and the new default DB path.
 
 ----
 

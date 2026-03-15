@@ -72,6 +72,8 @@ class RateLimitConfig(BaseModel):
         average (controls how quickly we ramp *down*). Defaults to alpha when
         omitted.
       - burst_factor: Allowed multiplier over learned average RPS when enforcing.
+      - burst_windows: Number of consecutive burst windows allowed before the
+        burst factor is disabled (0 means unlimited).
       - min_enforce_rps: Minimum RPS threshold for enforcement.
       - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).
       - db_path: Path to sqlite3 database storing learned profiles.
@@ -83,16 +85,18 @@ class RateLimitConfig(BaseModel):
 
       - udp_keying: Keying override applied when ctx.listener == 'udp' and the
         request is not secure. Options:
-          - 'cidr' (default): bucket client IPs into /udp_client_prefix_v4 or
-            /udp_client_prefix_v6 to reduce spoofed-IP cardinality.
+          - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or
+            /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.
           - 'domain': ignore client identity and key only by base domain.
-      - udp_client_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.
-      - udp_client_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.
+      - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.
+      - bucket_network_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.
 
       - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',
         'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.
       - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.
       - ttl: Optional TTL used when synthesizing IP responses.
+      - stats_log_interval_seconds: Interval for periodic rate-limit summary logs
+        (0 disables).
 
     Outputs:
       - RateLimitConfig instance with normalized field types.
@@ -104,22 +108,24 @@ class RateLimitConfig(BaseModel):
     alpha: float = Field(default=0.2, ge=0.0, le=1.0)
     alpha_down: Optional[float] = Field(default=0.2, ge=0.0, le=1.0)
     burst_factor: float = Field(default=3.0, ge=1.0)
+    burst_windows: int = Field(default=6, ge=0)
     min_enforce_rps: float = Field(default=50.0, ge=0.0)
     global_max_rps: float = Field(default=5000.0, ge=0.0)
-    db_path: str = Field(default="./config/var/rate_limit.db")
+    db_path: str = Field(default="./config/var/dbs/rate_limit.db")
 
     max_profiles: int = Field(default=10000, ge=1)
     profile_ttl_seconds: int = Field(default=7 * 24 * 60 * 60, ge=0)
     prune_interval_seconds: int = Field(default=60, ge=0)
 
     udp_keying: str = Field(default="cidr")
-    udp_client_prefix_v4: int = Field(default=24, ge=0, le=32)
-    udp_client_prefix_v6: int = Field(default=56, ge=0, le=128)
+    bucket_network_prefix_v4: int = Field(default=24, ge=0, le=32)
+    bucket_network_prefix_v6: int = Field(default=56, ge=0, le=128)
 
     deny_response: str = Field(default="refused")
     deny_response_ip4: Optional[str] = None
     deny_response_ip6: Optional[str] = None
     ttl: int = Field(default=60, ge=0)
+    stats_log_interval_seconds: int = Field(default=3600, ge=0)
 
     class Config:
         extra = "allow"
@@ -210,19 +216,23 @@ class RateLimit(BasePlugin):
             raw_udp_keying = "cidr"
         self.udp_keying = raw_udp_keying
 
-        self.udp_client_prefix_v4 = self._parse_int_config(
-            "udp_client_prefix_v4",
+        self.bucket_network_prefix_v4 = self._parse_int_config(
+            "bucket_network_prefix_v4",
             24,
             minimum=0,
         )
-        self.udp_client_prefix_v6 = self._parse_int_config(
-            "udp_client_prefix_v6",
+        self.bucket_network_prefix_v6 = self._parse_int_config(
+            "bucket_network_prefix_v6",
             56,
             minimum=0,
         )
         # Clamp prefix bounds explicitly.
-        self.udp_client_prefix_v4 = max(0, min(32, int(self.udp_client_prefix_v4)))
-        self.udp_client_prefix_v6 = max(0, min(128, int(self.udp_client_prefix_v6)))
+        self.bucket_network_prefix_v4 = max(
+            0, min(32, int(self.bucket_network_prefix_v4))
+        )
+        self.bucket_network_prefix_v6 = max(
+            0, min(128, int(self.bucket_network_prefix_v6))
+        )
 
         # sqlite bounds / pruning knobs.
         self.max_profiles = self._parse_int_config("max_profiles", 10000, minimum=1)
@@ -247,12 +257,19 @@ class RateLimit(BasePlugin):
             "alpha_down", self.alpha, minimum=0.0, maximum=1.0
         )
         self.burst_factor = self._parse_float_config("burst_factor", 3.0, minimum=1.0)
+        self.burst_windows = self._parse_int_config("burst_windows", 6, minimum=0)
         self.min_enforce_rps = self._parse_float_config(
             "min_enforce_rps", 50.0, minimum=0.0
         )
         self.global_max_rps = self._parse_float_config(
             "global_max_rps", 5000.0, minimum=0.0
         )
+        self.stats_log_interval_seconds = self._parse_int_config(
+            "stats_log_interval_seconds",
+            3600,
+            minimum=0,
+        )
+        self._last_stats_log_ts: float = 0.0
 
         # Deny policy configuration
         deny_resp = str(
@@ -292,8 +309,8 @@ class RateLimit(BasePlugin):
         )
 
         # SQLite-backed learned profiles
-        cfg_db_path = self.config.get("db_path", "./config/var/rate_limit.db")
-        self.db_path: str = str(cfg_db_path or "./config/var/rate_limit.db")
+        cfg_db_path = self.config.get("db_path", "./config/var/dbs/rate_limit.db")
+        self.db_path: str = str(cfg_db_path or "./config/var/dbs/rate_limit.db")
         self._db_lock = threading.Lock()
         self._db_init()
 
@@ -604,9 +621,9 @@ class RateLimit(BasePlugin):
 
             ip_obj = ipaddress.ip_address(str(client_ip).strip())
             if ip_obj.version == 4:
-                prefix = int(getattr(self, "udp_client_prefix_v4", 24) or 24)
+                prefix = int(getattr(self, "bucket_network_prefix_v4", 24) or 24)
             else:
-                prefix = int(getattr(self, "udp_client_prefix_v6", 56) or 56)
+                prefix = int(getattr(self, "bucket_network_prefix_v6", 56) or 56)
             prefix = max(0, min(32 if ip_obj.version == 4 else 128, prefix))
             net = ipaddress.ip_network(f"{ip_obj}/{prefix}", strict=False)
             return str(net)
@@ -708,12 +725,151 @@ class RateLimit(BasePlugin):
             now_ts = int(now)
             try:
                 self._db_update_profile(key, rps, now_ts)
+                self._update_burst_counter(key, rps)
             except (
                 Exception
             ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 logger.warning("RateLimit: failed to update profile for %s", key)
 
         return window_id, count
+
+    def _get_burst_count(self, key: str) -> int:
+        """Brief: Return the current burst window count for a key.
+
+        Inputs:
+          - key: Normalized profile key string.
+
+        Outputs:
+          - int: Current burst window count (0 when unset or malformed).
+        """
+
+        raw = self._window_cache.get((key, 1))
+        if raw is None:
+            return 0
+        try:
+            return int(raw.decode())
+        except Exception:
+            return 0
+
+    def _set_burst_count(self, key: str, count: int) -> None:
+        """Brief: Store burst window count in the window cache.
+
+        Inputs:
+          - key: Normalized profile key string.
+          - count: Burst window count to persist.
+
+        Outputs:
+          - None.
+        """
+
+        if int(getattr(self, "burst_windows", 0) or 0) <= 0:
+            return
+        ttl = max(
+            self.window_seconds * (max(int(self.burst_windows), 1) + 2),
+            self.window_seconds * 2,
+        )
+        try:
+            payload = str(int(count)).encode()
+            self._window_cache.set((key, 1), int(ttl), payload)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("RateLimit: failed updating burst window cache for %s", key)
+
+    def _update_burst_counter(self, key: str, rps: float) -> None:
+        """Brief: Update burst window counter based on the last completed window.
+
+        Inputs:
+          - key: Normalized profile key string.
+          - rps: Observed requests-per-second for the completed window.
+
+        Outputs:
+          - None (updates cached burst count).
+        """
+
+        if int(getattr(self, "burst_windows", 0) or 0) <= 0:
+            return
+
+        try:
+            profile = self._db_get_profile(key)
+        except Exception:
+            profile = None
+        if not profile:
+            return
+        avg_rps, _max_rps, samples = profile
+        if int(samples) < int(self.warmup_windows):
+            self._set_burst_count(key, 0)
+            return
+
+        threshold = max(
+            float(avg_rps) * float(self.burst_factor), float(self.min_enforce_rps)
+        )
+        if self.global_max_rps > 0.0:
+            threshold = min(threshold, float(self.global_max_rps))
+
+        if float(rps) > float(threshold):
+            count = self._get_burst_count(key)
+            if count < int(self.burst_windows):
+                count += 1
+            else:
+                count = int(self.burst_windows)
+        else:
+            count = 0
+
+        self._set_burst_count(key, count)
+
+    def _maybe_log_stats(self, now: float) -> None:
+        """Brief: Periodically log rate-limit summary statistics.
+
+        Inputs:
+          - now: Current epoch seconds.
+
+        Outputs:
+          - None (logs info when activity is present and interval has elapsed).
+        """
+
+        interval = int(getattr(self, "stats_log_interval_seconds", 0) or 0)
+        if interval <= 0:
+            return
+        last_ts = float(getattr(self, "_last_stats_log_ts", 0.0) or 0.0)
+        if now - last_ts < float(interval):
+            return
+
+        buckets = 0
+        avg_rps = 0.0
+        max_rps = 0.0
+        max_bucket_avg_rps = 0.0
+        try:
+            with self._db_lock:
+                cur = self._conn.cursor()
+                cur.execute(
+                    "SELECT COUNT(*), AVG(avg_rps), MAX(max_rps), MAX(avg_rps) FROM rate_profiles"
+                )
+                row = cur.fetchone()
+            if row:
+                buckets = int(row[0] or 0)
+                avg_rps = float(row[1] or 0.0)
+                max_rps = float(row[2] or 0.0)
+                max_bucket_avg_rps = float(row[3] or 0.0)
+        except Exception:  # pragma: no cover - defensive
+            buckets = 0
+
+        try:
+            self._last_stats_log_ts = float(now)
+        except Exception:
+            self._last_stats_log_ts = 0.0
+
+        if buckets <= 0 or avg_rps <= 0.0:
+            return
+
+        plugin_name = str(getattr(self, "name", "rate_limit") or "rate_limit")
+        logger.info(
+            "RateLimit stats name=%s avg_rps=%.2f max_rps=%.2f buckets=%d "
+            + "max_bucket_avg_rps=%.2f",
+            plugin_name,
+            avg_rps,
+            max_rps,
+            buckets,
+            max_bucket_avg_rps,
+        )
 
     def _build_deny_decision(
         self,
@@ -836,6 +992,7 @@ class RateLimit(BasePlugin):
         # Update per-window counters and learn from the previous window if complete.
         _, count = self._increment_window(key, now=now)
         current_rps = float(count) / float(self.window_seconds)
+        self._maybe_log_stats(now)
 
         profile = None
         try:
@@ -861,11 +1018,22 @@ class RateLimit(BasePlugin):
             return None
 
         # Derive allowed RPS from learned average plus configured caps.
-        allowed_rps = max(
+        burst_allowed_rps = max(
             avg_rps * float(self.burst_factor), float(self.min_enforce_rps)
         )
+        baseline_allowed_rps = max(avg_rps, float(self.min_enforce_rps))
         if self.global_max_rps > 0.0:
-            allowed_rps = min(allowed_rps, float(self.global_max_rps))
+            burst_allowed_rps = min(burst_allowed_rps, float(self.global_max_rps))
+            baseline_allowed_rps = min(baseline_allowed_rps, float(self.global_max_rps))
+
+        if int(getattr(self, "burst_windows", 0) or 0) > 0:
+            burst_count = self._get_burst_count(key)
+            if int(burst_count) >= int(self.burst_windows):
+                allowed_rps = baseline_allowed_rps
+            else:
+                allowed_rps = burst_allowed_rps
+        else:
+            allowed_rps = burst_allowed_rps
 
         if current_rps <= allowed_rps:
             return None
@@ -933,8 +1101,13 @@ class RateLimit(BasePlugin):
                         {"key": "window_seconds", "label": "Window (s)"},
                         {"key": "warmup_windows", "label": "Warmup windows"},
                         {"key": "burst_factor", "label": "Burst factor"},
+                        {"key": "burst_windows", "label": "Burst windows"},
                         {"key": "min_enforce_rps", "label": "Min enforce RPS"},
                         {"key": "global_max_rps", "label": "Global max RPS"},
+                        {
+                            "key": "stats_log_interval_seconds",
+                            "label": "Stats log interval (s)",
+                        },
                         {"key": "udp_keying", "label": "UDP keying"},
                         {"key": "db_path", "label": "DB path"},
                     ],
@@ -1004,6 +1177,9 @@ class RateLimit(BasePlugin):
                 getattr(self, "burst_factor", self.config.get("burst_factor", 3.0))
                 or 0.0
             ),
+            "burst_windows": int(
+                getattr(self, "burst_windows", self.config.get("burst_windows", 6)) or 0
+            ),
             "min_enforce_rps": float(
                 getattr(
                     self, "min_enforce_rps", self.config.get("min_enforce_rps", 50.0)
@@ -1016,22 +1192,30 @@ class RateLimit(BasePlugin):
                 )
                 or 0.0
             ),
-            "udp_keying": str(
-                getattr(self, "udp_keying", self.config.get("udp_keying", "cidr"))
-            ),
-            "udp_client_prefix_v4": int(
+            "stats_log_interval_seconds": int(
                 getattr(
                     self,
-                    "udp_client_prefix_v4",
-                    self.config.get("udp_client_prefix_v4", 24),
+                    "stats_log_interval_seconds",
+                    self.config.get("stats_log_interval_seconds", 900),
                 )
                 or 0
             ),
-            "udp_client_prefix_v6": int(
+            "udp_keying": str(
+                getattr(self, "udp_keying", self.config.get("udp_keying", "cidr"))
+            ),
+            "bucket_network_prefix_v4": int(
                 getattr(
                     self,
-                    "udp_client_prefix_v6",
-                    self.config.get("udp_client_prefix_v6", 56),
+                    "bucket_network_prefix_v4",
+                    self.config.get("bucket_network_prefix_v4", 24),
+                )
+                or 0
+            ),
+            "bucket_network_prefix_v6": int(
+                getattr(
+                    self,
+                    "bucket_network_prefix_v6",
+                    self.config.get("bucket_network_prefix_v6", 56),
                 )
                 or 0
             ),

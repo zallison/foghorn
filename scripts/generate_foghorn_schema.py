@@ -746,6 +746,76 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
         logger.exception("Failed to augment server.listen/server.limits schema")
 
 
+def _allow_comment_id_fields(schema: Dict[str, Any]) -> None:
+    """Brief: Allow optional comment/id keys on every object schema.
+
+    Inputs:
+      - schema: Mutable JSON Schema mapping (updated in place).
+
+    Outputs:
+      - None; schema is updated to allow `comment` and `id` keys on objects.
+
+    Notes:
+      - Applies a lightweight rule: any schema node that represents an object
+        (explicit type=object, or has properties/patternProperties) will gain
+        optional `comment` and `id` properties constrained to <= 254 chars.
+      - This keeps additionalProperties=False schemas strict while still
+        allowing comment/id everywhere.
+    """
+
+    comment_id_schema = {
+        "type": "string",
+        "maxLength": 254,
+        "description": "Optional human metadata string (max 254 characters).",
+    }
+
+    def _is_object_schema(node: Dict[str, Any]) -> bool:
+        if "properties" in node or "patternProperties" in node:
+            return True
+        t = node.get("type")
+        if isinstance(t, str) and t == "object":
+            return True
+        if isinstance(t, list) and "object" in t:
+            return True
+        return False
+
+    def _ensure_comment_id(node: Dict[str, Any]) -> None:
+        props = node.get("properties")
+        if not isinstance(props, dict):
+            props = {}
+            node["properties"] = props
+        props.setdefault("comment", dict(comment_id_schema))
+        props.setdefault("id", dict(comment_id_schema))
+
+    def _walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+
+        if _is_object_schema(node):
+            _ensure_comment_id(node)
+
+        for key in ("properties", "patternProperties", "$defs", "definitions"):
+            child = node.get(key)
+            if isinstance(child, dict):
+                for sub in child.values():
+                    _walk(sub)
+
+        items = node.get("items")
+        if isinstance(items, dict):
+            _walk(items)
+        elif isinstance(items, list):
+            for sub in items:
+                _walk(sub)
+
+        for key in ("oneOf", "anyOf", "allOf"):
+            child = node.get(key)
+            if isinstance(child, list):
+                for sub in child:
+                    _walk(sub)
+
+    _walk(schema)
+
+
 def _build_v2_root_schema(
     base: Dict[str, Any], plugins: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -1734,7 +1804,9 @@ def build_document(base_schema_path: Optional[str] = None) -> Dict[str, Any]:
     _enrich_schema_descriptions(base)
 
     plugins = collect_plugin_schemas()
-
+    v2_root = _build_v2_root_schema(base, plugins)
+    _allow_comment_id_fields(v2_root)
+    return v2_root
     return _build_v2_root_schema(base, plugins)
 
 
