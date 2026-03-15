@@ -3,31 +3,37 @@
 
 # High burt factor
 home: &home
-  min_enforce_rps: 5
-  global_max_rps: 200
-  burst_factor: 5.0
   alpha: .5
   alpha_down: .1
-  window_seconds: 5
+  burst_factor: 5.0
+  burst_windows: 6   # 30s
+  global_max_rps: 200
+  min_enforce_rps: 10
   warmup_windows: 12 # Still 1 minute.
+  window_seconds: 5
 
 # For our lan we tamp down the burst factor slightly
 lan: &lan
   min_enforce_rps: 5
   global_max_rps: 500
   burst_factor: 4.0
+  burst_windows: 5
   alpha: .2
   alpha_down: .05
+  bucket_network_prefix_v4: 32 # x.x.x.x/32
 
 smb: &smb
   min_enforce_rps: 20
   global_max_rps: 1500
   burst_factor: 3.0
+  bucket_network_prefix_v4: 24 # x.x.x.x/24
 
 enterprise: &enterprise
   min_enforce_rps: 30
   global_max_rps: 2000
   burst_factor: 2.0
+  burst_windows: 6
+  bucket_network_prefix_v4: 16 # x.x.x.x/24
 
 localhost: &localhost
   min_enforce_rps: 20
