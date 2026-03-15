@@ -138,6 +138,11 @@ def parse_config_variables(
     else:
         merged = {}
 
+    # Track which variable keys were sourced from the config file. This is used
+    # by config_schema normalization to restrict whole-node injection to
+    # config-authored variables only (environment variables are interpolation-only).
+    cfg["__schema_validation_config_var_keys"] = sorted(str(k) for k in merged.keys())
+
     env = environ or dict(os.environ)
     for k, v in env.items():
         if not isinstance(k, str):
@@ -341,6 +346,7 @@ def parse_config_file(
     *,
     cli_vars: Optional[List[str]] = None,
     unknown_keys: str = "warn",
+    skip_schema_validation: bool = False,
 ) -> Dict[str, Any]:
     """Brief: Read, variable-merge, and schema-validate a v2 YAML config file.
 
@@ -350,6 +356,7 @@ def parse_config_file(
       - unknown_keys: Policy for unknown config keys not described by the
         JSON Schema ("ignore", "warn", or "error"). See
         ``foghorn.config.config_schema.validate_config`` for semantics.
+      - skip_schema_validation: When true, bypass JSON Schema validation.
 
     Outputs:
       - dict: Parsed configuration mapping (mutated by validate_config).
@@ -373,7 +380,12 @@ def parse_config_file(
 
     # Expand and validate variables, then run JSON Schema validation.
     parse_config_variables(cfg, cli_vars=list(cli_vars or []))
-    validate_config(cfg, config_path=config_path, unknown_keys=unknown_keys)
+    validate_config(
+        cfg,
+        config_path=config_path,
+        unknown_keys=unknown_keys,
+        skip_schema_validation=bool(skip_schema_validation),
+    )
     _validate_tls_ca_files(cfg)
 
     return cfg

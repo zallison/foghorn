@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import logging
+import re
 
 from foghorn.utils.register_caches import apply_decorated_cache_overrides
 
@@ -50,6 +52,16 @@ def _build_main_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Policy for unknown config keys not described by the JSON Schema: "
             "ignore (keep current behaviour), warn (default), or error."
+        ),
+    )
+    parser.add_argument(
+        "--skip-schema-validation",
+        dest="skip_schema_validation",
+        action="store_true",
+        help=(
+            "Skip JSON Schema validation of the configuration. This is unsafe and "
+            "should only be used for debugging or in environments where the schema "
+            "file cannot be shipped."
         ),
     )
     return parser
@@ -106,11 +118,22 @@ def _apply_cache_overrides_from_config(
         if isinstance(cache_block, dict):
             # Preferred key: server.cache.func_caches (list of DecoratedCacheOverride).
             candidate = cache_block.get("func_caches")
+            used_key = "func_caches"
+
             # Backwards-compatible fallbacks for older configs/tests.
             if not isinstance(candidate, list):
                 candidate = cache_block.get("modify")
+                used_key = "modify"
             if not isinstance(candidate, list):
                 candidate = cache_block.get("decorated_overrides")
+                used_key = "decorated_overrides"
+
+            if used_key != "func_caches" and isinstance(candidate, list):
+                logger.warning(
+                    "server.cache.%s is deprecated; use server.cache.func_caches",
+                    used_key,
+                )
+
             if isinstance(candidate, list):
                 raw_overrides = [o for o in candidate if isinstance(o, dict)]
         apply_decorated_cache_overrides(raw_overrides)
@@ -171,7 +194,22 @@ def _build_listener_configs(
     raw_host = dns_cfg.get("host", "127.0.0.1")
     raw_port = dns_cfg.get("port", 5335)
 
-    default_host = str(raw_host)
+    default_host = str(raw_host).strip()
+    if not default_host:
+        raise ValueError("config.server.listen.dns.host must be a non-empty string")
+
+    # Best-effort validation: accept IP literals or plausible hostnames.
+    try:
+        ipaddress.ip_address(default_host)
+    except Exception:
+        hostname_re = re.compile(
+            r"^(?=.{1,253}$)([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$"
+        )
+        if hostname_re.match(default_host) is None:
+            raise ValueError(
+                f"config.server.listen.dns.host must be a valid IP or hostname, got: {default_host!r}"
+            )
+
     try:
         default_port = int(raw_port)
     except (TypeError, ValueError):
@@ -210,7 +248,10 @@ def _build_listener_configs(
     )
 
     dot_section = listen_cfg.get("dot")
-    dot_default_enabled = True if isinstance(dot_section, dict) else False
+    if isinstance(dot_section, dict):
+        dot_default_enabled = bool(dot_section.get("enabled", True))
+    else:
+        dot_default_enabled = False
     dot_cfg = _merge_listen_subsection(
         listen_cfg=listen_cfg,
         key="dot",
@@ -218,7 +259,10 @@ def _build_listener_configs(
     )
 
     doh_section = listen_cfg.get("doh")
-    doh_default_enabled = True if isinstance(doh_section, dict) else False
+    if isinstance(doh_section, dict):
+        doh_default_enabled = bool(doh_section.get("enabled", True))
+    else:
+        doh_default_enabled = False
     doh_cfg = _merge_listen_subsection(
         listen_cfg=listen_cfg,
         key="doh",
@@ -267,15 +311,21 @@ def _parse_resolver_cfg(
     *,
     cfg: dict,
     server_cfg: dict,
+    logger: logging.Logger,
 ) -> tuple[dict, str, int, int, int]:
     """Brief: Normalize resolver mode and timeout/depth settings.
 
     Inputs:
       - cfg: Parsed root configuration mapping.
       - server_cfg: Parsed server config mapping.
+      - logger: Logger for warnings on deprecated/unsafe values.
 
     Outputs:
       - tuple: (resolver_cfg, resolver_mode, recursive_max_depth, recursive_timeout_ms, recursive_per_try_timeout_ms).
+
+    Notes:
+      - resolver.mode: "none" is treated as the legacy alias for "master" and will log a warning.
+      - resolver.max_depth is capped to a safe maximum.
     """
 
     # Resolver configuration (forward vs recursive) with conservative defaults.
@@ -283,13 +333,37 @@ def _parse_resolver_cfg(
     if not isinstance(resolver_cfg, dict):
         raise ValueError("config.server.resolver must be a mapping when present")
 
-    resolver_mode = str(resolver_cfg.get("mode", "forward")).lower()
+    resolver_mode = str(resolver_cfg.get("mode", "forward")).lower().strip()
     if resolver_mode == "none":
+        logger.warning('resolver.mode "none" is deprecated; use "master"')
         resolver_mode = "master"
+
+    allowed_modes = {"forward", "recursive", "master"}
+    if resolver_mode not in allowed_modes:
+        raise ValueError(
+            f"config.server.resolver.mode must be one of {sorted(allowed_modes)}, got: {resolver_mode!r}"
+        )
+
     try:
         recursive_max_depth = int(resolver_cfg.get("max_depth", 12))
     except (TypeError, ValueError):
         recursive_max_depth = 12
+
+    if recursive_max_depth < 1:
+        logger.warning(
+            "resolver.max_depth must be >= 1; clamping %s -> 1",
+            recursive_max_depth,
+        )
+        recursive_max_depth = 1
+
+    max_safe_depth = 32
+    if recursive_max_depth > max_safe_depth:
+        logger.warning(
+            "resolver.max_depth too high; clamping %s -> %s",
+            recursive_max_depth,
+            max_safe_depth,
+        )
+        recursive_max_depth = max_safe_depth
     try:
         recursive_timeout_ms = int(resolver_cfg.get("timeout_ms", 2000))
     except (TypeError, ValueError):
@@ -315,6 +389,7 @@ def _normalize_upstreams_for_mode(
     cfg: dict,
     resolver_mode: str,
     recursive_timeout_ms: int,
+    logger: logging.Logger,
 ) -> tuple[list, list, int]:
     """Brief: Normalize upstream and timeout settings by resolver mode.
 
@@ -322,6 +397,7 @@ def _normalize_upstreams_for_mode(
       - cfg: Parsed root configuration mapping.
       - resolver_mode: Effective resolver mode.
       - recursive_timeout_ms: Recursive timeout fallback.
+      - logger: Logger for warnings on malformed backup upstream config.
 
     Outputs:
       - tuple[list, list, int]: (upstreams, upstream_backups, timeout_ms).
@@ -332,7 +408,11 @@ def _normalize_upstreams_for_mode(
         upstreams, timeout_ms = normalize_upstream_config(cfg)
         try:
             upstream_backups = normalize_upstream_backup_config(cfg)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Failed to parse upstream backup config, backups disabled: %s",
+                exc,
+            )
             upstream_backups = []
     else:
         upstreams = []
@@ -368,19 +448,21 @@ def _configure_resolver_executor(
 
         configure_resolver_executor(max_workers=resolver_workers)
     except Exception:
-        logger.debug("Failed to configure resolver executor", exc_info=True)
+        logger.warning("Failed to configure resolver executor", exc_info=True)
 
 
 def _load_cache_plugin_from_cfg(
     *,
     cfg: dict,
     server_cfg: dict,
+    logger: logging.Logger,
 ) -> object | None:
     """Brief: Load configured cache plugin using v2 and legacy config fallbacks.
 
     Inputs:
       - cfg: Parsed root configuration mapping.
       - server_cfg: Parsed server config mapping.
+      - logger: Logger for warning output on failure.
 
     Outputs:
       - object | None: Cache plugin instance or None on failure.
@@ -406,16 +488,22 @@ def _load_cache_plugin_from_cfg(
         if cache_cfg is None:
             cache_cfg = cfg.get("cache")
         cache_plugin = load_cache_plugin(cache_cfg)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to load cache plugin, running without cache: %s", exc)
         cache_plugin = None
     return cache_plugin
 
 
-def _install_cache_plugin_global(cache_plugin: object | None) -> None:
+def _install_cache_plugin_global(
+    *,
+    cache_plugin: object | None,
+    logger: logging.Logger,
+) -> None:
     """Brief: Install cache plugin into global resolver cache slot, best effort.
 
     Inputs:
       - cache_plugin: Cache plugin instance or None.
+      - logger: Logger for warning output on failure.
 
     Outputs:
       - None.
@@ -428,8 +516,8 @@ def _install_cache_plugin_global(cache_plugin: object | None) -> None:
             from foghorn.plugins.resolve import base as plugin_base
 
             plugin_base.DNS_CACHE = cache_plugin  # type: ignore[assignment]
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to install cache plugin globally: %s", exc)
 
 
 def _get_min_cache_ttl(cache_plugin: object | None) -> int:
@@ -483,7 +571,10 @@ def _resolve_web_config(
     except Exception:
         server_http = None
 
-    web_cfg = server_http or cfg.get("http") or cfg.get("webserver", {}) or {}
+    if server_http is not None:
+        web_cfg = server_http
+    else:
+        web_cfg = cfg.get("http") or cfg.get("webserver", {}) or {}
     if not isinstance(web_cfg, dict):
         web_cfg = {}
     # If a http block exists, default enabled to True unless explicitly disabled
