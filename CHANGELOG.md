@@ -78,6 +78,7 @@ All notable changes to this project will be documented in this file.
 - ZoneRecords NOTIFY fanout now skips local listener endpoints to prevent self-loop NOTIFY storms.
 - ZoneRecords DNSSEC auto-signing now defaults to enabled when a `dnssec_signing` block is present (unless `dnssec_signing.enabled: false` is set).
 - Runtime lifecycle: `main()` now runs best-effort shutdown hooks for loaded resolver plugins, cache backends, and query-log/statistics backends via `run_shutdown_plugins`.
+- Plugin lifecycle: setup() now supports DNS-aware provider-first orchestration via `setup_provides_dns` / `setup_requires_dns`, allowing setup consumers to resolve hostnames using earlier resolver plugins (optionally falling back to system DNS).
 - Resolver forwarding: when `forward_local` is disabled, RFC1918 IPv4 reverse PTR (`in-addr.arpa`) queries are now treated like `.local` and are not forwarded upstream.
 - Upstream failover concurrency now uses a rolling bounded in-flight window (`max_concurrent`) and stops scheduling additional upstream attempts after the first successful response.
 - RateLimit profile presets were retuned and expanded (`home`, `lan`, `smb`, `enterprise`, `localhost`), with `default` now pointing at the `lan` preset.
@@ -103,7 +104,7 @@ All notable changes to this project will be documented in this file.
 - Cache: in-memory and SQLite caches can reserve separate capacity for NXDOMAIN responses to prevent cache pollution under NXDOMAIN floods.
 - RateLimit: base-domain extraction is now Public Suffix List aware (eTLD+1) when `publicsuffix2` is available.
 - RateLimit: sqlite `rate_profiles` storage is now bounded and pruned (TTL + max rows) via `max_profiles`, `profile_ttl_seconds`, and `prune_interval_seconds`.
-- RateLimit: UDP keying can be made spoofing-robust via `udp_keying` (default `cidr`) and `udp_client_prefix_v4`/`udp_client_prefix_v6` bucketing.
+- RateLimit: UDP keying can be made spoofing-robust via `udp_keying` (default `cidr`) and `bucket_network_prefix_v4`/`bucket_network_prefix_v6` bucketing.
 - UpstreamRouter: `_forward_with_failover` now delegates to the hardened core `send_query_with_failover` implementation (TXID/question validation, transport support), avoiding inconsistent forwarding behavior.
 - Stats/query log: async queue is now bounded; under sustained overload some stats operations may be dropped with DEBUG/INFO visibility via queue metrics.
 - Query log stats pressure messages are now suppressed until the queue exceeds 5% utilization.
