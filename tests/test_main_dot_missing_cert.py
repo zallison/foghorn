@@ -1,5 +1,5 @@
 """
-Brief: Ensure DoT listener is skipped with error log when cert/key missing.
+Brief: Ensure DoT listener startup is fatal with an error log when cert/key are missing.
 
 Inputs:
   - None
@@ -78,7 +78,8 @@ def test_main_dot_missing_cert_logs_error(monkeypatch, caplog):
 
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         with caplog.at_level(logging.ERROR, logger="foghorn.main"):
-            main_mod.main(["--config", "x.yaml"])
+            rc = main_mod.main(["--config", "x.yaml"])
+            assert rc == 1
             assert any(
                 "cert_file/key_file not provided" in r.message for r in caplog.records
             )

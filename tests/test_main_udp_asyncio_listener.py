@@ -12,7 +12,6 @@ Outputs:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 from unittest.mock import mock_open, patch
@@ -162,7 +161,9 @@ def test_main_udp_asyncio_permissionerror_falls_back_to_threaded(
         def server_close(self) -> None:
             return
 
-    monkeypatch.setattr(real_socketserver, "ThreadingUDPServer", DummyThreadingUDPServer)
+    monkeypatch.setattr(
+        real_socketserver, "ThreadingUDPServer", DummyThreadingUDPServer
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
 
@@ -236,7 +237,9 @@ def test_main_udp_asyncio_permissionerror_exit_on_failure(
         def server_close(self) -> None:
             return
 
-    monkeypatch.setattr(real_socketserver, "ThreadingUDPServer", DummyThreadingUDPServer)
+    monkeypatch.setattr(
+        real_socketserver, "ThreadingUDPServer", DummyThreadingUDPServer
+    )
     monkeypatch.setattr(main_mod, "init_logging", lambda cfg: None)
     monkeypatch.setattr(main_mod, "start_webserver", lambda *a, **k: None)
 
