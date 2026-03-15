@@ -1434,21 +1434,42 @@ class BasePlugin:
         """
         return None
 
+    def handle_sigusr(self, sig_label: str) -> None:
+        """Brief: Handle SIGUSR1/SIGUSR2 notifications.
+
+        Inputs:
+          - sig_label: Signal label string, typically "SIGUSR1" or "SIGUSR2".
+
+        Outputs:
+          - None
+
+        Notes:
+          - This is the preferred unified hook.
+          - For backward compatibility, the main process may still call
+            handle_sigusr2() when handle_sigusr() is not implemented.
+
+        Example:
+            >>> class P(BasePlugin):
+            ...     def handle_sigusr(self, sig_label: str) -> None:
+            ...         self.last = sig_label
+            >>> p = P()
+            >>> p.handle_sigusr('SIGUSR1')
+            >>> p.last
+            'SIGUSR1'
+        """
+        return None
+
     def handle_sigusr2(self) -> None:
-        """Brief: Handle SIGUSR2 signal (default implementation is a no-op).
+        """Brief: Legacy SIGUSR2 hook (default implementation is a no-op).
 
         Inputs:
           - None
 
         Outputs:
-          - None (subclasses may override to perform maintenance or resets).
+          - None
 
-        Example:
-            >>> class P(BasePlugin):
-            ...     def handle_sigusr2(self):
-            ...         self.touched = True
-            >>> p = P()
-            >>> p.handle_sigusr2()
+        Notes:
+          - Prefer overriding handle_sigusr(sig_label) instead.
         """
         return None
 
