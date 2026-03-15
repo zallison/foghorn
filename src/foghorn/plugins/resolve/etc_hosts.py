@@ -65,6 +65,8 @@ class EtcHosts(BasePlugin):
     reverse mappings so PTR lookups for those addresses can be answered locally.
     """
 
+    setup_provides_dns = True
+
     @classmethod
     def get_config_model(cls):
         """Brief: Return the Pydantic model used to validate plugin configuration.
@@ -130,9 +132,7 @@ class EtcHosts(BasePlugin):
         self._poll_interval = float(
             self.config.get("watchdog_poll_interval_seconds", 60.0)
         )
-        self._poll_interval_configured = (
-            "watchdog_poll_interval_seconds" in self.config
-        )
+        self._poll_interval_configured = "watchdog_poll_interval_seconds" in self.config
         self._last_stat_snapshot = None
         self._poll_stop = None
         self._poll_thread = None
@@ -158,9 +158,8 @@ class EtcHosts(BasePlugin):
         # is further rate-limited by the reload debouncing in
         # _reload_hosts_from_watchdog.
         if (
-            (watchdog_enabled or self._poll_interval_configured)
-            and self._poll_interval > 0.0
-        ):
+            watchdog_enabled or self._poll_interval_configured
+        ) and self._poll_interval > 0.0:
             logger.info(
                 "EtcHosts polling enabled (interval_seconds=%s)",
                 self._poll_interval,

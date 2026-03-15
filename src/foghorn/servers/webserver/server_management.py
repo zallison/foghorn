@@ -389,7 +389,7 @@ def start_webserver(
         plugins=plugins,
     )
 
-    config_uvicorn = uvicorn.Config(app, host=host, port=port, log_level="info")
+    config_uvicorn = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config_uvicorn)
 
     def _runner() -> None:

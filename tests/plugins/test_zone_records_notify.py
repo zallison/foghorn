@@ -339,6 +339,48 @@ def test_send_notify_for_zones_with_lock_snapshots_learned_targets(monkeypatch) 
     assert all(z == "example.com" for (z, _t) in calls)
 
 
+def test_send_notify_for_zones_skips_local_self_loop_targets(monkeypatch) -> None:
+    """Brief: send_notify_for_zones should skip targets matching local listeners.
+
+    Inputs:
+      - plugin: object with static+learned NOTIFY targets.
+
+    Outputs:
+      - None: Asserts local target is filtered while remote target is sent.
+    """
+
+    class Plugin:
+        _axfr_notify_static_targets = [
+            {"host": "127.0.0.1", "port": 53, "transport": "tcp"},
+            {"host": "203.0.113.5", "port": 53, "transport": "tcp"},
+        ]
+        _axfr_notify_learned = {}
+
+    calls: list[tuple[str, dict]] = []
+
+    def fake_send(zone_apex: str, target: dict) -> None:
+        calls.append((zone_apex, dict(target)))
+
+    monkeypatch.setattr(
+        notify,
+        "_resolve_target_ips",
+        lambda host: {str(host)},
+        raising=True,
+    )
+    monkeypatch.setattr(
+        notify,
+        "_get_local_dns_listener_endpoints",
+        lambda: {("127.0.0.1", 53)},
+        raising=True,
+    )
+    monkeypatch.setattr(notify, "send_notify_to_target", fake_send, raising=True)
+
+    notify.send_notify_for_zones(Plugin(), ["example.com"])
+    assert calls == [
+        ("example.com", {"host": "203.0.113.5", "port": 53, "transport": "tcp"})
+    ]
+
+
 def test_send_notify_for_zones_without_lock_uses_learned_snapshot(monkeypatch) -> None:
     """Brief: send_notify_for_zones should work even when plugin has no lock.
 

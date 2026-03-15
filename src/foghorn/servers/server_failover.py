@@ -845,7 +845,12 @@ def _send_query_with_failover_impl(
             Exception,
         ) as e:  # pragma: no cover - defensive: network/transport failure
             file_info = _format_transport_error_file_info(e, tls_ca_file_hint)
-            if _is_connection_refused_error(e):
+
+            # Limit warnings to not flood log.
+            if _is_connection_refused_error(e) and (
+                upstream_health["fail_count"] <= 25
+                or (upstream_health["fail_count"] % 25) == 0
+            ):
                 _warn_upstream_skip_once_with_health(
                     upstream_key,
                     upstream_health,
@@ -884,22 +889,56 @@ def _send_query_with_failover_impl(
             if resp is not None:
                 return resp, used, reason
     else:
-        # Concurrency path: query up to max_c upstreams in parallel and return
-        # the first successful response.
+        # Concurrency path: keep at most max_c attempts in-flight at a time and
+        # return on the first successful response. This avoids queueing all
+        # upstreams immediately (which would effectively probe every upstream
+        # even when an earlier attempt succeeds).
         workers = min(max_c, len(upstreams))
+        executor: Optional[ThreadPoolExecutor] = None
+        pending: Dict = {}
+        next_index = 0
         try:
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = [executor.submit(_try_single, up) for up in upstreams]
-                for fut in as_completed(futures):
-                    try:
-                        resp, used, reason = fut.result()
-                    except Exception as e:  # pragma: no cover - defensive
-                        last_exception = e
-                        continue
-                    if resp is not None:
-                        return resp, used, reason
+            executor = ThreadPoolExecutor(max_workers=workers)
+
+            # Prime the first in-flight window.
+            while next_index < workers:
+                fut = executor.submit(_try_single, upstreams[next_index])
+                pending[fut] = next_index
+                next_index += 1
+
+            while pending:
+                # Process one completion at a time so we can refill the window
+                # only after a failed attempt.
+                completed = next(as_completed(list(pending.keys())))
+                pending.pop(completed, None)
+                try:
+                    resp, used, reason = completed.result()
+                except Exception as e:  # pragma: no cover - defensive
+                    last_exception = e
+                    resp, used, reason = None, None, "all_failed"
+
+                if resp is not None:
+                    # Cancel queued (not-yet-started) attempts; in-flight
+                    # attempts may continue and will be bounded by workers.
+                    for fut in pending:
+                        try:
+                            fut.cancel()
+                        except Exception:
+                            pass
+                    return resp, used, reason
+
+                if next_index < len(upstreams):
+                    fut = executor.submit(_try_single, upstreams[next_index])
+                    pending[fut] = next_index
+                    next_index += 1
         except Exception as e:  # pragma: no cover - defensive: executor failure
             last_exception = e
+        finally:
+            if executor is not None:
+                try:
+                    executor.shutdown(wait=True, cancel_futures=True)
+                except Exception:  # pragma: no cover - defensive
+                    pass
 
     attempted_summary = ", ".join(attempted_upstream_labels) or "none"
     health_summary = (
@@ -909,27 +948,28 @@ def _send_query_with_failover_impl(
         )
         or "none"
     )
+
     # Transient network errors to not log.
     ignored_errors = [
         "short read on length header",
     ]
     if str(last_exception) not in ignored_errors:
         logger.warning(
-            "All upstreams failed for %s %s. Upstreams: %s. Health: %s. Last error: %s",
+            "All upstreams failed for %s %s. Last error: %s (attempted=%s health=%s)",
             qname,
             qtype,
+            last_exception,
             attempted_summary,
             health_summary,
-            last_exception,
         )
     else:
         logger.debug(
-            "All upstreams failed for %s %s. Upstreams: %s. Health: %s. Last error: %s",
+            "All upstreams failed for %s %s. Last error: %s (attempted=%s health=%s)",
             qname,
             qtype,
+            last_exception,
             attempted_summary,
             health_summary,
-            last_exception,
         )
 
     return None, None, "all_failed"

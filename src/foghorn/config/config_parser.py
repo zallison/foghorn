@@ -51,6 +51,19 @@ def _is_var_key(key: str) -> bool:
     return bool(_re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key))
 
 
+def _is_interpolation_var_key(key: str) -> bool:
+    """Brief: Check whether a variable key should participate in interpolation.
+
+    Inputs:
+      - key: Candidate variable name.
+
+    Outputs:
+      - bool: True when key is a valid identifier and has no lowercase letters.
+    """
+
+    return _is_var_key(key) and key.upper() == key
+
+
 def _parse_yaml_value(text: str) -> Any:
     """Brief: Parse a CLI/environment variable value as YAML.
 
@@ -91,6 +104,8 @@ def parse_config_variables(
       - Accepts both top-level 'variables' (preferred) and legacy 'vars'. When
         both are present, 'variables' wins.
       - Keys must match [A-Za-z_][A-Za-z0-9_]*.
+      - Keys from config-file 'variables'/'vars' that are not ALL_CAPS are
+        ignored for interpolation (reserved for YAML anchors).
       - Values are parsed as YAML so list/dict/int/bool values can be provided.
 
     Example:
@@ -107,11 +122,19 @@ def parse_config_variables(
     if variables_base is not None:
         if not isinstance(variables_base, dict):
             raise ValueError("config.variables must be a mapping when present")
-        merged: Dict[str, Any] = dict(variables_base)
+        merged = {
+            k: v
+            for k, v in variables_base.items()
+            if isinstance(k, str) and _is_interpolation_var_key(k)
+        }
     elif vars_base is not None:
         if not isinstance(vars_base, dict):
             raise ValueError("config.vars must be a mapping when present")
-        merged = dict(vars_base)
+        merged = {
+            k: v
+            for k, v in vars_base.items()
+            if isinstance(k, str) and _is_interpolation_var_key(k)
+        }
     else:
         merged = {}
 

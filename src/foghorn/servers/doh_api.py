@@ -731,7 +731,7 @@ def start_doh_server(
         app,
         host=host,
         port=port,
-        log_level="info",
+        log_level="warning",
         ssl_certfile=ssl_cert,
         ssl_keyfile=ssl_key,
     )

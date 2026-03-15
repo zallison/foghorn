@@ -18,6 +18,7 @@ CONTAINER_NAME ?= foghorn
 CONTAINER_DATA ?= ./.docker
 # Only used if your config.yaml uses LISTEN as a variable
 LISTEN ?= 0.0.0.0
+LISTEN_PORT ?= 53
 # Label for docker_hosts.py
 FH_PRIORITY ?= 100
 # Default ports
@@ -74,7 +75,7 @@ vars-make: vars-header-Make var-print-IGNORE_EXTS
 
 # Variables for Docker
 .PHONY: vars-docker
-vars-docker: vars-header-Docker var-print-PREFIX var-print-TAG var-print-CONTAINER_DATA var-print-CONTAINER_NAME var-print-LISTEN var-print-FH_PRIORITY var-print-ADMINPORT var-print-TCPPORT var-print-UDPPORT
+vars-docker: vars-header-Docker var-print-PREFIX var-print-TAG var-print-CONTAINER_DATA var-print-CONTAINER_NAME var-print-LISTEN var-print-LISTEN_PORT var-print-FH_PRIORITY var-print-ADMINPORT var-print-TCPPORT var-print-UDPPORT
 	@echo
 
 # Variables for openssl
@@ -94,7 +95,7 @@ vars-python: vars-header-Python var-print-VENV
 run: $(VENV)/bin/foghorn
 	. ${VENV}/bin/activate
 	mkdir var 2>/dev/null || true
-	LISTEN=${LISTEN} ${VENV}/bin/foghorn --config config/config.yaml
+	LISTEN=${LISTEN} LISTEN_PORT=${LISTEN_PORT} ${VENV}/bin/foghorn --config config/config.yaml
 
 .PHONY: env
 env:
@@ -112,6 +113,13 @@ $(VENV)/bin/foghorn: pyproject.toml
 schema:
 	./scripts/generate_foghorn_schema.py -o assets/config-schema.json > /dev/null
 	echo >> assets/config-schema.json
+.PHONY: ui-bundle
+ui-bundle:
+	python ./scripts/build_admin_ui_bundle.py
+
+.PHONY: ui-bundle-runtime
+ui-bundle-runtime:
+	python ./scripts/build_admin_ui_bundle.py --runtime-only
 
 
 .PHONY: env-dev
@@ -288,6 +296,8 @@ docker-run: docker-build
         --privileged \
 		--label "com.foghorn.priority=${FH_PRIORITY}" \
 		-v /etc/hosts:/etc/hosts:ro \
+		-e LISTEN=${LISTEN} \
+		-e LISTEN_PORT=${LISTEN_PORT} \
         --restart unless-stopped \
         ${PREFIX}/${CONTAINER_NAME}:${TAG}
 
@@ -340,15 +350,13 @@ help:
 	@echo "  env              - Create virtual environment in $(VENV)"
 	@echo "  env-dev          - Install project in editable mode with dev dependencies into $(VENV)"
 	@echo "  run              - Execute foghorn --config config/config.yaml using $(VENV)"
-	@echo "  schema           - Regenerate assets/config-schema.json"
 	@echo "  test             - Run pytest with coverage and update README coverage badge"
+	@echo "  schema           - Regenerate assets/config-schema.json"
+	@echo "DNSSEC helper:"
 	@echo "  dnssec-sign-zone - Sign a DNS zone file with DNSSEC records (see target for ZONE/INPUT/OUTPUT args)"
-	@echo "  gen-tsig-key     - Generate a TSIG key for DNS UPDATE (use NAME= and ALGO=)"
+	@echo "DNS UPDATE helpers:"
+	@echo "  gen-tsig-key     - Generate a TSIG key for DNS UPDATE (optional: NAME=dynamic-key.example.com ALGO=hmac-sha256)"
 	@echo "  gen-psk-token    - Generate a PSK token for DNS UPDATE"
-	@echo "Variable inspection:"
-	@echo "  vars-print-all-all - Print all make variables (debug/introspection)"
-	@echo "  vars-print-all     - Print grouped Foghorn-related variables (make/docker/SSL/Python)"
-	@echo "  var-print-FOO      - Print a single variable named FOO"
 	@echo "Build and run containers:"
 	@echo "  docker-build     - Build docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
 	@echo "  docker-clean     - Remove docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
@@ -370,6 +378,12 @@ help:
 	@echo "  package-build    - Build the Python package into dist/"
 	@echo "  package-publish  - Publish the package to pypi"
 	@echo "  package-publish-dev - Publish the package to testpypi"
+	@echo "  ui-bundle        - Build embedded single-file admin UI JS bundle for CDN use"
+	@echo "  ui-bundle-runtime - Build runtime-only admin UI JS bundle (no embedded HTML/CSS)"
+	@echo "Variable inspection:"
+	@echo "  vars-print-all-all - Print all make variables (debug/introspection)"
+	@echo "  vars-print-all     - Print grouped Foghorn-related variables (make/docker/SSL/Python)"
+	@echo "  var-print-FOO      - Print a single variable named FOO"
 
 
 # EOF

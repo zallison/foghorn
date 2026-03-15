@@ -604,6 +604,8 @@ class MySqlStatsStore(BaseStatsStore):
         qtype: Optional[str] = None,
         qname: Optional[str] = None,
         rcode: Optional[str] = None,
+        status: Optional[str] = None,
+        source: Optional[str] = None,
         start_ts: Optional[float] = None,
         end_ts: Optional[float] = None,
         page: int = 1,
@@ -616,6 +618,8 @@ class MySqlStatsStore(BaseStatsStore):
             qtype: Optional qtype filter.
             qname: Optional qname filter.
             rcode: Optional rcode filter.
+            status: Optional status filter.
+            source: Optional result.source filter.
             start_ts: Optional inclusive start timestamp.
             end_ts: Optional exclusive end timestamp.
             page: 1-based page index.
@@ -642,6 +646,16 @@ class MySqlStatsStore(BaseStatsStore):
         if rcode:
             where.append(f"rcode = {self._placeholder}")
             params.append(rcode.strip().upper())
+        if status:
+            where.append(f"LOWER(COALESCE(status, '')) = {self._placeholder}")
+            params.append(status.strip().lower())
+        if source:
+            source_s = source.strip().lower()
+            where.append(
+                f"(LOWER(result_json) LIKE {self._placeholder} OR LOWER(result_json) LIKE {self._placeholder})"
+            )
+            params.append(f'%"source":"{source_s}"%')
+            params.append(f'%"source": "{source_s}"%')
         if isinstance(start_ts, (int, float)):
             where.append(f"ts >= {self._placeholder}")
             params.append(float(start_ts))

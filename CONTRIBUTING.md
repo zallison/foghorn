@@ -54,6 +54,11 @@ Docker/integration tests:
 Plugin tests:
 - If a test instantiates a plugin and it defines `setup()`, call `plugin.setup()`.
 
+## Pull requests
+All PRs must include:
+- Tests that validate the proposed change.
+- Example configuration updates showing all available options relevant to the changed feature(s).
+
 ## Schema generation
 `assets/config-schema.json` is generated output.
 - Do not edit it directly.

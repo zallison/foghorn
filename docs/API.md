@@ -312,7 +312,7 @@ Example response:
   "server_time": "2026-02-24T05:36:03Z",
   "databases": [
     {
-      "db_path": "./config/var/rate_limit.db",
+      "db_path": "./config/var/dbs/rate_limit.db",
       "total_profiles": 3,
       "max_avg_rps": 1.25,
       "max_max_rps": 7.5,

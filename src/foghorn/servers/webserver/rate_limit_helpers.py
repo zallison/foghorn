@@ -40,7 +40,7 @@ def _collect_rate_limit_stats(config: Dict[str, Any] | None) -> Dict[str, Any]:
 
     # Heuristic fallback: if no explicit db_path is configured but the default
     # RateLimit db exists, include it.
-    default_db = "./config/var/rate_limit.db"
+    default_db = "./config/var/dbs/rate_limit.db"
     if not db_paths and os.path.exists(default_db):  # pragma: no cover
         db_paths.append(default_db)
 

@@ -61,6 +61,8 @@ def build_query_log_payload(
     qtype: str | None,
     qname: str | None,
     rcode: str | None,
+    status: str | None,
+    source: str | None,
     start_ts: float | None,
     end_ts: float | None,
     page: int,
@@ -71,6 +73,7 @@ def build_query_log_payload(
     Inputs:
       - store: Stats store object that exposes select_query_log(**kwargs).
       - client_ip/qtype/qname/rcode: Optional filters.
+      - status/source: Optional filters for query status and result source.
       - start_ts/end_ts: Optional unix timestamps in seconds (UTC).
       - page: 1-indexed page number.
       - page_size: page size (already clamped).
@@ -85,6 +88,8 @@ def build_query_log_payload(
         qtype=qtype,
         qname=qname,
         rcode=rcode,
+        status=status,
+        source=source,
         start_ts=start_ts,
         end_ts=end_ts,
         page=page,
@@ -357,53 +362,134 @@ def build_upstream_status_payload(
 
     now = float(now_ts) if now_ts is not None else _time.time()
 
+    def _safe_int(value: Any) -> int:
+        """Brief: Coerce a value to a non-negative integer count.
+
+        Inputs:
+          - value: Any numeric-ish object.
+
+        Outputs:
+          - int >= 0 suitable for counter fields.
+        """
+
+        try:
+            return max(0, int(float(value)))
+        except Exception:
+            return 0
+
+    def _collect_run_upstream_counts(stats_collector: Any) -> Dict[str, Dict[str, int]]:
+        """Brief: Build per-upstream run counters from the live stats collector.
+
+        Inputs:
+          - stats_collector: Collector object expected to expose snapshot().
+
+        Outputs:
+          - Mapping keyed by upstream id with:
+              - run_query_count
+              - run_failed_count
+        """
+
+        counts: Dict[str, Dict[str, int]] = {}
+        if stats_collector is None:
+            return counts
+        snapshot_fn = getattr(stats_collector, "snapshot", None)
+        if not callable(snapshot_fn):
+            return counts
+
+        snap = None
+        try:
+            snap = snapshot_fn(reset=False)
+        except TypeError:
+            try:
+                snap = snapshot_fn()
+            except Exception:
+                snap = None
+        except Exception:
+            snap = None
+
+        upstream_outcomes = getattr(snap, "upstreams", None)
+        if not isinstance(upstream_outcomes, dict):
+            return counts
+
+        for upstream_id, outcomes in upstream_outcomes.items():
+            if not isinstance(outcomes, dict):
+                continue
+            total = 0
+            failed = 0
+            for outcome_key, raw_count in outcomes.items():
+                count = _safe_int(raw_count)
+                if count <= 0:
+                    continue
+                total += count
+                key = str(outcome_key or "").strip().lower()
+                if key not in {"success", "ok"}:
+                    failed += count
+            counts[str(upstream_id)] = {
+                "run_query_count": total,
+                "run_failed_count": failed,
+            }
+        return counts
+
     try:
         from foghorn.runtime_config import get_runtime_snapshot
 
         snap = get_runtime_snapshot()
-        primary = list(getattr(snap, 'upstream_addrs', []) or [])
-        backup = list(getattr(snap, 'upstream_backup_addrs', []) or [])
-        strategy = str(getattr(snap, 'upstream_strategy', 'failover') or 'failover')
+        primary = list(getattr(snap, "upstream_addrs", []) or [])
+        backup = list(getattr(snap, "upstream_backup_addrs", []) or [])
+        strategy = str(getattr(snap, "upstream_strategy", "failover") or "failover")
         try:
-            max_concurrent = int(getattr(snap, 'upstream_max_concurrent', 1) or 1)
+            max_concurrent = int(getattr(snap, "upstream_max_concurrent", 1) or 1)
         except Exception:
             max_concurrent = 1
         if max_concurrent < 1:
             max_concurrent = 1
-        from foghorn.runtime_config import UpstreamHealthConfig, parse_upstream_health_config
+        from foghorn.runtime_config import (
+            UpstreamHealthConfig,
+            parse_upstream_health_config,
+        )
 
-        health_cfg = getattr(snap, 'upstream_health', None)
+        health_cfg = getattr(snap, "upstream_health", None)
         if not isinstance(health_cfg, UpstreamHealthConfig):
             health_cfg = parse_upstream_health_config({})
 
         import foghorn.servers.server as server_mod
+
+        run_counts = _collect_run_upstream_counts(
+            getattr(snap, "stats_collector", None)
+        )
 
         items: list[Dict[str, Any]] = []
         for up in primary:
             if not isinstance(up, dict):
                 continue
             rec = server_mod._UPSTREAM_HEALTH.describe_upstream(
-                role='primary', upstream=up, now=now, cfg=health_cfg
+                role="primary", upstream=up, now=now, cfg=health_cfg
             )
             if rec:
+                run_count = run_counts.get(str(rec.get("id") or ""), {})
+                rec["run_query_count"] = _safe_int(run_count.get("run_query_count"))
+                rec["run_failed_count"] = _safe_int(run_count.get("run_failed_count"))
                 items.append(rec)
         for up in backup:
             if not isinstance(up, dict):
                 continue
             rec = server_mod._UPSTREAM_HEALTH.describe_upstream(
-                role='backup', upstream=up, now=now, cfg=health_cfg
+                role="backup", upstream=up, now=now, cfg=health_cfg
             )
             if rec:
+                run_count = run_counts.get(str(rec.get("id") or ""), {})
+                rec["run_query_count"] = _safe_int(run_count.get("run_query_count"))
+                rec["run_failed_count"] = _safe_int(run_count.get("run_failed_count"))
                 items.append(rec)
 
         return {
-            'strategy': strategy,
-            'max_concurrent': max_concurrent,
-            'items': items,
+            "strategy": strategy,
+            "max_concurrent": max_concurrent,
+            "items": items,
         }
     except Exception:
         # Best-effort fallback when runtime snapshot is unavailable.
-        return {'strategy': 'failover', 'max_concurrent': 1, 'items': []}
+        return {"strategy": "failover", "max_concurrent": 1, "items": []}
 
 
 def collect_admin_pages_for_response(plugins: Iterable[object]) -> list[dict[str, Any]]:

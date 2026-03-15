@@ -382,6 +382,10 @@ The `Makefile` in the project root provides shortcuts for common tasks. Importan
   - Activate the venv, create `var/` if needed, and run `foghorn --config config/config.yaml`.
 - `make schema`
   - Run `scripts/generate_foghorn_schema.py` and refresh `assets/config-schema.json`.
+- `make ui-bundle`
+  - Build `dist/foghorn-admin-ui.cdn.js` as a single JavaScript artifact with embedded admin HTML/CSS/JS for CDN delivery.
+- `make ui-bundle-runtime`
+  - Build `dist/foghorn-admin-ui.cdn.js` with runtime JavaScript only (no embedded HTML/CSS).
 - `make test`
   - Run pytest with coverage over `src`, reusing the dev environment if present.
 - `make clean`

@@ -18,6 +18,7 @@ import threading
 import time
 
 import pytest
+import foghorn.runtime_config as runtime_config_mod
 
 from foghorn.runtime_config import (
     _build_snapshot,
@@ -364,3 +365,36 @@ def test_empty_config_snapshot() -> None:
     }
     snap = _build_snapshot(cfg, stats_collector=None, generation=0)
     assert snap.resolver_mode == "recursive"
+
+
+def test_build_snapshot_passes_context_to_setup_runner(monkeypatch) -> None:
+    """_build_snapshot forwards resolver/upstream context to run_setup_plugins."""
+
+    captured: dict[str, object] = {}
+
+    def _record_setup(plugins, **kwargs):  # type: ignore[no-untyped-def]
+        captured["plugins"] = list(plugins)
+        captured.update(kwargs)
+
+    monkeypatch.setattr(runtime_config_mod, "run_setup_plugins", _record_setup)
+    monkeypatch.setattr(runtime_config_mod, "load_plugins", lambda _specs: [])
+
+    cfg = {
+        "server": {
+            "resolver": {"mode": "forward", "timeout_ms": 2450},
+        },
+        "upstreams": {
+            "strategy": "failover",
+            "max_concurrent": 5,
+            "endpoints": [{"host": "8.8.8.8", "port": 53}],
+        },
+    }
+
+    snap = _build_snapshot(cfg, stats_collector=None, generation=3)
+
+    assert captured["plugins"] == []
+    assert captured["upstreams"] == snap.upstream_addrs
+    assert captured["upstream_backups"] == snap.upstream_backup_addrs
+    assert captured["timeout_ms"] == snap.timeout_ms
+    assert captured["resolver_mode"] == snap.resolver_mode
+    assert captured["upstream_max_concurrent"] == snap.upstream_max_concurrent

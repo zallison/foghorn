@@ -359,6 +359,38 @@ def test_config_raw_paths_match(tmp_path) -> None:
         assert data["config"]["initial"] == 1
 
 
+def test_config_schema_paths_match() -> None:
+    """Brief: /api/v1/config/schema matches /config/schema in FastAPI mode.
+
+    Inputs:
+      - App created with minimal config and webserver enabled.
+
+    Outputs:
+      - None: Asserts both URLs return the same schema document/path metadata.
+    """
+
+    cfg = {
+        "webserver": {"enabled": True},
+        "listen": {"udp": {"enabled": False}},
+        "resolver": {"mode": "recursive"},
+    }
+    app = create_app(stats=None, config=cfg, log_buffer=RingBuffer())
+    client = TestClient(app)
+
+    canonical = client.get("/api/v1/config/schema")
+    alias = client.get("/config/schema")
+
+    assert canonical.status_code == 200
+    assert alias.status_code == 200
+
+    canonical_data = canonical.json()
+    alias_data = alias.json()
+    assert canonical_data["schema_path"] == alias_data["schema_path"]
+    assert canonical_data["schema"] == alias_data["schema"]
+    assert canonical_data["schema_path"].endswith("config-schema.json")
+    assert "$schema" in canonical_data["schema"]
+
+
 def test_health_endpoint_returns_ok() -> None:
     """Brief: /health must respond with HTTP 200 and status "ok".
 
@@ -1245,7 +1277,7 @@ def test_query_log_endpoint_paginates_and_filters(tmp_path) -> None:
 
     Outputs:
       - Response contains total/page/page_size metadata.
-      - Results are ordered newest-first and can be filtered by rcode.
+      - Results are ordered newest-first and can be filtered by rcode/status/source.
     """
 
     store = StatsSQLiteStore(str(tmp_path / "stats.db"))
@@ -1261,7 +1293,7 @@ def test_query_log_endpoint_paginates_and_filters(tmp_path) -> None:
         status="ok",
         error=None,
         first="1.2.3.4",
-        result={"source": "upstream"},
+        result={"source": "cache"},
         ts=1000.0,
     )
     collector.record_query_result(
@@ -1316,6 +1348,21 @@ def test_query_log_endpoint_paginates_and_filters(tmp_path) -> None:
     data2 = resp2.json()
     assert data2["total"] == 2
     assert all(item.get("rcode") == "NXDOMAIN" for item in data2["items"])
+
+    # Filter by status
+    resp3 = client.get("/api/v1/query_log", params={"status": "error"})
+    assert resp3.status_code == 200
+    data3 = resp3.json()
+    assert data3["total"] == 2
+    assert all(item.get("status") == "error" for item in data3["items"])
+
+    # Filter by result source
+    resp4 = client.get("/api/v1/query_log", params={"source": "cache"})
+    assert resp4.status_code == 200
+    data4 = resp4.json()
+    assert data4["total"] == 1
+    assert len(data4["items"]) == 1
+    assert data4["items"][0]["qname"] == "example.com"
 
 
 def test_query_log_aggregate_fills_zero_buckets(tmp_path) -> None:

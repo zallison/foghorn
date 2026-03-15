@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import yaml
+from ...config.config_schema import get_default_schema_path
 
 from ...stats import StatsCollector, StatsSnapshot, get_process_uptime_seconds
 from ...utils.config_diagram import (
@@ -948,6 +949,46 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             },
         )
 
+    def _handle_config_schema(
+        self,
+    ) -> None:  # pragma: no cover - threaded /config/schema mirrors FastAPI endpoint
+        """Brief: Handle GET /config/schema and return the active JSON schema.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - JSON payload with server_time, schema_path, and schema document.
+        """
+
+        if not self._require_auth():
+            return
+
+        schema_path_str = "<unknown>"
+        try:
+            schema_path = get_default_schema_path()
+            schema_path_str = str(schema_path)
+            with schema_path.open("r", encoding="utf-8") as f:
+                schema = json.load(f)
+        except Exception as exc:  # pragma: no cover - environment-specific I/O
+            self._send_json(
+                500,
+                {
+                    "detail": f"failed to read config schema from {schema_path_str}: {exc}",
+                    "server_time": _utc_now_iso(),
+                },
+            )
+            return
+
+        self._send_json(
+            200,
+            {
+                "server_time": _utc_now_iso(),
+                "schema_path": schema_path_str,
+                "schema": schema,
+            },
+        )
+
     def _handle_config_diagram_png(self, params: Dict[str, list[str]]) -> None:
         """Brief: Handle GET /api/v1/config/diagram.png.
 
@@ -1496,6 +1537,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
         qtype = (params.get("qtype") or [None])[0]
         qname = (params.get("qname") or [None])[0]
         rcode = (params.get("rcode") or [None])[0]
+        status = (params.get("status") or [None])[0]
+        source = (params.get("source") or [None])[0]
         start = (params.get("start") or [None])[0]
         end = (params.get("end") or [None])[0]
 
@@ -1545,6 +1588,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             qtype=str(qtype) if qtype is not None else None,
             qname=str(qname) if qname is not None else None,
             rcode=str(rcode) if rcode is not None else None,
+            status=str(status) if status is not None else None,
+            source=str(source) if source is not None else None,
             start_ts=start_ts,
             end_ts=end_ts,
             page=page,
@@ -3026,6 +3071,8 @@ class _ThreadedAdminRequestHandler(http.server.BaseHTTPRequestHandler):
             self._handle_config_raw()
         elif path in {"/config/raw.json", "/api/v1/config/raw.json"}:
             self._handle_config_raw_json()
+        elif path in {"/config/schema", "/api/v1/config/schema"}:
+            self._handle_config_schema()
         elif path in {"/api/v1/config/diagram.png", "/config/diagram.png"}:
             self._handle_config_diagram_png(params)
         elif path in {"/api/v1/config/diagram-dark.png", "/config/diagram-dark.png"}:

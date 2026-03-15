@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import os
 import shutil
 import signal
@@ -7,8 +9,9 @@ import sys as _sys
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from ...config.config_schema import get_default_schema_path
 
 from ...stats import StatsCollector
 from ...utils.config_diagram import (
@@ -141,6 +144,39 @@ def _register_config_routes(app: FastAPI, auth_dep: Any) -> None:
         redact_keys = _get_redact_keys(cfg)
         clean = sanitize_config(cfg, redact_keys=redact_keys)
         return {"server_time": _utc_now_iso(), "config": clean}
+
+    @app.get("/api/v1/config/schema", dependencies=[Depends(auth_dep)])
+    @app.get(
+        "/config/schema", dependencies=[Depends(auth_dep)], include_in_schema=False
+    )
+    async def get_config_schema() -> Dict[str, Any]:
+        """Brief: Return the current JSON schema used for config validation.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - Dict containing:
+              - server_time: Current UTC timestamp.
+              - schema_path: Absolute path to the active schema file.
+              - schema: Parsed JSON Schema document.
+        """
+
+        try:
+            schema_path = get_default_schema_path()
+            with schema_path.open("r", encoding="utf-8") as f:
+                schema = json.load(f)
+        except Exception as exc:  # pragma: no cover - environment-specific I/O
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"failed to read config schema: {exc}",
+            ) from exc
+
+        return {
+            "server_time": _utc_now_iso(),
+            "schema_path": str(schema_path),
+            "schema": schema,
+        }
 
     @app.get("/api/v1/config/diagram.png", dependencies=[Depends(auth_dep)])
     @app.get(
@@ -1037,6 +1073,8 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
         qtype: str | None = None,
         qname: str | None = None,
         rcode: str | None = None,
+        query_status: str | None = Query(default=None, alias="status"),
+        source: str | None = None,
         start: str | None = None,
         end: str | None = None,
         page: int = 1,
@@ -1082,6 +1120,7 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
             ps = 100
         if ps > 1000:
             ps = 1000
+        status_filter = query_status if isinstance(query_status, str) else None
 
         payload = _admin_logic.build_query_log_payload(
             store,
@@ -1089,6 +1128,8 @@ def _register_query_log_routes(app: FastAPI, auth_dep: Any) -> None:
             qtype=qtype,
             qname=qname,
             rcode=rcode,
+            status=status_filter,
+            source=source,
             start_ts=start_ts,
             end_ts=end_ts,
             page=int(page) if isinstance(page, int) else 1,
