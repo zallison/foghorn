@@ -1072,7 +1072,8 @@ def extract_listener_lines(cfg: dict[str, Any]) -> list[str]:
     for name in ("udp", "tcp", "dot", "doh"):
         section = listen_cfg.get(name)
         if isinstance(section, dict):
-            enabled = bool(section.get("enabled", enabled_defaults[name]))
+            # Presence of a listener block implies enabled=true unless explicitly disabled.
+            enabled = bool(section.get("enabled", True))
             host = str(section.get("host", default_host))
             try:
                 port = int(section.get("port", defaults[name]) or defaults[name])

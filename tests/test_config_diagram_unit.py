@@ -480,24 +480,25 @@ def test_node_id_sanitizes_and_falls_back_to_plugin() -> None:
     assert cm._node_id("pre", "!!!", 2) == "pre_2_plugin"
 
 
-def test_extract_listener_lines_handles_dns_and_named_sections() -> None:
-    """Brief: extract_listener_lines applies dns host/port defaults plus explicit sections.
+def test_extract_listener_lines_implies_enabled_for_present_listener_blocks() -> None:
+    """Brief: extract_listener_lines treats present listener blocks as enabled by default.
 
     Inputs:
       - server.listen.dns with host/port defaults.
-      - server.listen.tcp section enabled=true.
+      - server.listen.tcp/dot/doh present without explicit enabled values.
       - server.listen.dot section using invalid port.
 
     Outputs:
-      - None; asserts ordered results.
+      - None; asserts ordered listener lines include udp/tcp/dot/doh.
     """
 
     cfg = {
         "server": {
             "listen": {
                 "dns": {"host": "127.0.0.1", "port": "bad"},
-                "tcp": {"enabled": True},
-                "dot": {"enabled": True, "host": "0.0.0.0", "port": "bad"},
+                "tcp": {},
+                "dot": {"host": "0.0.0.0", "port": "bad"},
+                "doh": {},
             }
         }
     }
@@ -506,6 +507,33 @@ def test_extract_listener_lines_handles_dns_and_named_sections() -> None:
     assert lines[0].startswith("udp: 127.0.0.1:5335")
     assert lines[1].startswith("tcp: 127.0.0.1:5335")
     assert "dot: 0.0.0.0:853" in lines
+    assert "doh: 127.0.0.1:1443" in lines
+
+
+def test_extract_listener_lines_respects_explicit_enabled_false() -> None:
+    """Brief: extract_listener_lines keeps explicit enabled=false listeners disabled.
+
+    Inputs:
+      - server.listen.dns defaults.
+      - server.listen.tcp/dot/doh with enabled=false.
+
+    Outputs:
+      - None; asserts only udp remains enabled.
+    """
+
+    cfg = {
+        "server": {
+            "listen": {
+                "dns": {"host": "127.0.0.1", "port": 5335},
+                "tcp": {"enabled": False},
+                "dot": {"enabled": False},
+                "doh": {"enabled": False},
+            }
+        }
+    }
+
+    lines = cm.extract_listener_lines(cfg)
+    assert lines == ["udp: 127.0.0.1:5335"]
 
 
 def test_extract_upstream_lines_forward_only_and_endpoint_formats() -> None:
