@@ -4380,6 +4380,12 @@
                   "minimum": 1,
                   "type": "integer"
                 },
+                "max_query_bytes": {
+                  "default": 4096,
+                  "description": "Maximum UDP query payload bytes accepted by the UDP listener. Packets smaller than 12 bytes (DNS header) or larger than this limit are dropped silently. Default: 4096.",
+                  "minimum": 12,
+                  "type": "integer"
+                },
                 "max_response_bytes": {
                   "default": null,
                   "description": "Optional explicit UDP response size ceiling. When null, defaults to server.dnssec.udp_payload_size. Effective ceiling per query is min(client advertised EDNS UDP size (or 512 without EDNS), server ceiling).",
