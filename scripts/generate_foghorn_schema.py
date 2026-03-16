@@ -642,7 +642,7 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
                                 "type": "array",
                                 "description": (
                                     "Optional CIDR bucket limits for UDP in-flight queries. Each entry is {cidr, max_inflight}. "
-                                    "When multiple buckets match a client IP, the strictest (smallest max_inflight) wins."
+                                    "When multiple buckets match a client IP, the most-specific (largest prefixlen) wins."
                                 ),
                                 "items": {
                                     "type": "object",
@@ -660,6 +660,18 @@ def _augment_server_limits_and_listen_schema(base: Dict[str, Any]) -> None:
                                     },
                                     "required": ["cidr", "max_inflight"],
                                 },
+                            },
+                        )
+                        udp_props.setdefault(
+                            "max_query_bytes",
+                            {
+                                "type": "integer",
+                                "minimum": 12,
+                                "default": 4096,
+                                "description": (
+                                    "Maximum UDP query payload bytes accepted by the UDP listener. "
+                                    "Packets smaller than 12 bytes (DNS header) or larger than this limit are dropped silently."
+                                ),
                             },
                         )
                         udp_props.setdefault(
@@ -1013,7 +1025,7 @@ def _build_v2_root_schema(
                         "type": "array",
                         "description": (
                             "Optional CIDR bucket limits for UDP in-flight queries. Each entry is {cidr, max_inflight}. "
-                            "When multiple buckets match a client IP, the strictest (smallest max_inflight) wins."
+                            "When multiple buckets match a client IP, the most-specific (largest prefixlen) wins."
                         ),
                         "items": {
                             "type": "object",
@@ -1031,6 +1043,18 @@ def _build_v2_root_schema(
                             },
                             "required": ["cidr", "max_inflight"],
                         },
+                    },
+                )
+                udp_props.setdefault(
+                    "max_query_bytes",
+                    {
+                        "type": "integer",
+                        "minimum": 12,
+                        "default": 4096,
+                        "description": (
+                            "Maximum UDP query payload bytes accepted by the UDP listener. "
+                            "Packets smaller than 12 bytes (DNS header) or larger than this limit are dropped silently."
+                        ),
                     },
                 )
                 udp_props.setdefault(
