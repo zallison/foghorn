@@ -21,13 +21,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from dnslib import DNSRecord, RCODE
+from dnslib import DNSRecord
 
 from foghorn.servers import udp_asyncio_server as udp_mod
 
 
-def test_make_overloaded_response_returns_none_when_unparseable() -> None:
-    """Brief: Unparseable query bytes yield None.
+def test_make_overloaded_response_returns_none_when_too_short_for_txid() -> None:
+    """Brief: Too-short query bytes yield None.
 
     Inputs:
       - Invalid wire bytes.
@@ -40,47 +40,31 @@ def test_make_overloaded_response_returns_none_when_unparseable() -> None:
 
 
 def test_make_overloaded_response_sets_servfail_and_preserves_txid() -> None:
-    """Brief: Overload response is SERVFAIL with matching TXID.
+    """Brief: Overload response is a minimal SERVFAIL with matching TXID.
 
     Inputs:
       - Valid DNS query bytes.
 
     Outputs:
-      - None; asserts SERVFAIL and TXID match.
+      - None; asserts TXID matches and header indicates SERVFAIL.
+
+    Notes:
+      - The overload response is intentionally a minimal 12-byte header. It does
+        not include a question section, so dnslib parsing is not expected to
+        succeed.
     """
 
     q = DNSRecord.question("example.com")
     q.header.id = 0xBEEF
-    resp_wire = udp_mod._make_overloaded_response(q.pack())
+    query_wire = q.pack()
+
+    resp_wire = udp_mod._make_overloaded_response(query_wire)
     assert resp_wire is not None
 
-    resp = DNSRecord.parse(resp_wire)
-    assert resp.header.id == 0xBEEF
-    assert resp.header.rcode == RCODE.SERVFAIL
-
-
-def test_make_overloaded_response_returns_none_when_reply_build_fails(
-    monkeypatch: Any,
-) -> None:
-    """Brief: Reply-building errors are swallowed.
-
-    Inputs:
-      - monkeypatch: patches DNSRecord.parse to return an object whose reply() raises.
-
-    Outputs:
-      - None; asserts helper returns None.
-    """
-
-    class _FakeReq:
-        def reply(self) -> DNSRecord:  # noqa: D401
-            """Always raise to simulate unexpected dnslib failure."""
-
-            raise RuntimeError("boom")
-
-    monkeypatch.setattr(udp_mod.DNSRecord, "parse", lambda _b: _FakeReq())
-
-    q = DNSRecord.question("example.com").pack()
-    assert udp_mod._make_overloaded_response(q) is None
+    assert len(resp_wire) == 12
+    assert resp_wire[0:2] == query_wire[0:2]
+    assert resp_wire[2] == 0x80
+    assert (resp_wire[3] & 0x0F) == 2
 
 
 def test_udp_protocol_init_filters_invalid_cidr_rules() -> None:
@@ -98,6 +82,7 @@ def test_udp_protocol_init_filters_invalid_cidr_rules() -> None:
         executor=None,
         max_inflight=10,
         max_inflight_per_ip=10,
+        max_query_bytes=4096,
         max_inflight_by_cidr=[
             "not-a-dict",
             {"cidr": "10.0.0.0/8", "max_inflight": 5},
@@ -110,11 +95,11 @@ def test_udp_protocol_init_filters_invalid_cidr_rules() -> None:
     )
 
     # Only the valid entries should remain.
-    assert [str(n) for (n, _lim) in proto._cidr_rules] == [
-        "10.0.0.0/8",
-        "2001:db8::/32",
-    ]
-    assert [int(lim) for (_n, lim) in proto._cidr_rules] == [5, 3]
+    assert [str(n) for (n, _lim, _p) in proto._cidr_rules_v4] == ["10.0.0.0/8"]
+    assert [int(lim) for (_n, lim, _p) in proto._cidr_rules_v4] == [5]
+
+    assert [str(n) for (n, _lim, _p) in proto._cidr_rules_v6] == ["2001:db8::/32"]
+    assert [int(lim) for (_n, lim, _p) in proto._cidr_rules_v6] == [3]
 
 
 def test_select_cidr_bucket_returns_none_when_no_rules() -> None:
@@ -132,6 +117,7 @@ def test_select_cidr_bucket_returns_none_when_no_rules() -> None:
         executor=None,
         max_inflight=10,
         max_inflight_per_ip=10,
+        max_query_bytes=4096,
         max_inflight_by_cidr=None,
     )
     assert proto._select_cidr_bucket("10.1.2.3") == (None, None)
@@ -152,13 +138,14 @@ def test_select_cidr_bucket_returns_none_for_invalid_client_ip() -> None:
         executor=None,
         max_inflight=10,
         max_inflight_per_ip=10,
+        max_query_bytes=4096,
         max_inflight_by_cidr=[{"cidr": "10.0.0.0/8", "max_inflight": 5}],
     )
     assert proto._select_cidr_bucket("not-an-ip") == (None, None)
 
 
-def test_select_cidr_bucket_tie_breaker_prefers_more_specific_prefix() -> None:
-    """Brief: When limits tie, the most specific prefix wins.
+def test_select_cidr_bucket_most_specific_wins_over_higher_parent_limit() -> None:
+    """Brief: More-specific CIDR wins even when it has a higher limit.
 
     Inputs:
       - Overlapping CIDRs with identical max_inflight.
@@ -172,15 +159,16 @@ def test_select_cidr_bucket_tie_breaker_prefers_more_specific_prefix() -> None:
         executor=None,
         max_inflight=10,
         max_inflight_per_ip=10,
+        max_query_bytes=4096,
         max_inflight_by_cidr=[
             {"cidr": "10.0.0.0/8", "max_inflight": 5},
-            {"cidr": "10.1.0.0/16", "max_inflight": 5},
+            {"cidr": "10.1.0.0/16", "max_inflight": 100},
         ],
     )
 
     bucket, limit = proto._select_cidr_bucket("10.1.2.3")
     assert bucket == "10.1.0.0/16"
-    assert limit == 5
+    assert limit == 100
 
 
 def test_connection_made_records_transport_only_for_datagram_transport() -> None:
@@ -218,6 +206,7 @@ def test_connection_made_records_transport_only_for_datagram_transport() -> None
         executor=None,
         max_inflight=10,
         max_inflight_per_ip=10,
+        max_query_bytes=4096,
     )
 
     t = DummyDatagramTransport()
@@ -226,6 +215,43 @@ def test_connection_made_records_transport_only_for_datagram_transport() -> None
 
     proto.connection_made(object())
     assert proto._transport is t
+
+
+def test_datagram_received_size_gate_drops_too_small_and_oversized_packets() -> None:
+    """Brief: Datagram size gate drops undersized/oversized packets silently.
+
+    Inputs:
+      - undersized payload (< 12 bytes).
+      - oversized payload (> max_query_bytes).
+
+    Outputs:
+      - None; asserts no counters are incremented and no response is sent.
+    """
+
+    def resolver(_q: bytes, _ip: str) -> bytes:
+        raise AssertionError("resolver should not be called for dropped packets")
+
+    sent: list[bytes] = []
+
+    class DummyTransport:
+        def sendto(self, data: bytes, addr: Any) -> None:  # noqa: ANN401
+            sent.append(data)
+
+    proto = udp_mod._UDPProtocol(
+        resolver,
+        executor=None,
+        max_inflight=10,
+        max_inflight_per_ip=10,
+        max_query_bytes=32,
+    )
+    proto._transport = DummyTransport()  # type: ignore[assignment]
+
+    proto.datagram_received(b"\x00" * 11, ("127.0.0.1", 12345))
+    proto.datagram_received(b"\x00" * 33, ("127.0.0.1", 12345))
+
+    assert proto._inflight_total == 0
+    assert proto._inflight_per_ip == {}
+    assert sent == []
 
 
 def test_datagram_received_ignores_empty_data() -> None:
@@ -243,6 +269,7 @@ def test_datagram_received_ignores_empty_data() -> None:
         executor=None,
         max_inflight=1,
         max_inflight_per_ip=1,
+        max_query_bytes=4096,
     )
     proto._transport = SimpleNamespace(sendto=lambda *_a, **_k: None)
 
@@ -274,14 +301,18 @@ def test_datagram_received_global_overload_sheds_with_servfail() -> None:
         executor=None,
         max_inflight=1,
         max_inflight_per_ip=10,
+        max_query_bytes=4096,
     )
     proto._transport = DummyTransport()  # type: ignore[assignment]
     proto._inflight_total = 1
 
     proto.datagram_received(query, ("127.0.0.1", 12345))
     assert sent
-    resp = DNSRecord.parse(sent[0])
-    assert resp.header.rcode == RCODE.SERVFAIL
+    resp_wire = sent[0]
+    assert len(resp_wire) == 12
+    assert resp_wire[0:2] == query[0:2]
+    assert resp_wire[2] == 0x80
+    assert (resp_wire[3] & 0x0F) == 2
 
 
 def test_datagram_received_per_ip_overload_sheds_and_sendto_errors_are_swallowed() -> (
@@ -308,6 +339,7 @@ def test_datagram_received_per_ip_overload_sheds_and_sendto_errors_are_swallowed
         executor=None,
         max_inflight=100,
         max_inflight_per_ip=1,
+        max_query_bytes=4096,
     )
     proto._transport = DummyTransport()  # type: ignore[assignment]
     proto._inflight_per_ip["127.0.0.1"] = 1
@@ -344,6 +376,7 @@ def test_handle_one_empty_response_decrements_counters() -> None:
             executor=None,
             max_inflight=10,
             max_inflight_per_ip=10,
+            max_query_bytes=4096,
         )
         proto._transport = DummyTransport()  # type: ignore[assignment]
 
@@ -399,6 +432,7 @@ def test_handle_one_sendto_exception_falls_back_to_overload_response(
             executor=None,
             max_inflight=10,
             max_inflight_per_ip=10,
+            max_query_bytes=4096,
         )
         proto._transport = DummyTransport()  # type: ignore[assignment]
         proto._inflight_total = 1
@@ -444,6 +478,7 @@ def test_handle_one_resolver_exception_sends_overload_response(
             executor=None,
             max_inflight=10,
             max_inflight_per_ip=10,
+            max_query_bytes=4096,
         )
         proto._transport = DummyTransport()  # type: ignore[assignment]
         proto._inflight_total = 1
