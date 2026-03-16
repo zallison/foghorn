@@ -1,13 +1,14 @@
 """Failover transport helpers and upstream skip-warning de-duplication."""
 
 from __future__ import annotations
+
 import errno
 import time
 
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Tuple
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional, Set, Tuple
 
 from dnslib import QTYPE, RCODE, DNSRecord
 
@@ -22,6 +23,48 @@ logger = logging.getLogger("foghorn.server")
 # The "warned" state is cleared the next time the upstream succeeds.
 _UPSTREAM_SKIP_WARNED: Dict[str, bool] = {}
 _UPSTREAM_SKIP_LOCK = threading.Lock()
+
+# Shared executor used only for per-query upstream fanout when failover is in
+# concurrent mode. This avoids per-query thread pool creation/destruction.
+_FAILOVER_EXECUTOR: ThreadPoolExecutor | None = None
+_FAILOVER_EXECUTOR_LOCK = threading.Lock()
+_FAILOVER_EXECUTOR_MAX_WORKERS: int | None = 8
+
+
+def _get_failover_executor() -> ThreadPoolExecutor:
+    """Brief: Return the shared ThreadPoolExecutor used for failover fan-out.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - ThreadPoolExecutor: Shared executor.
+
+    Notes:
+      - This executor is used only when max_concurrent > 1 in
+        _send_query_with_failover_impl.
+      - It is intentionally shared and bounded to avoid per-query thread pool
+        creation under load.
+    """
+
+    global _FAILOVER_EXECUTOR
+
+    if _FAILOVER_EXECUTOR is not None:
+        return _FAILOVER_EXECUTOR
+
+    with _FAILOVER_EXECUTOR_LOCK:
+        if _FAILOVER_EXECUTOR is not None:
+            return _FAILOVER_EXECUTOR
+
+        max_workers = _FAILOVER_EXECUTOR_MAX_WORKERS
+        if max_workers is None:
+            max_workers = 8
+
+        _FAILOVER_EXECUTOR = ThreadPoolExecutor(
+            max_workers=int(max_workers),
+            thread_name_prefix="foghorn-failover",
+        )
+        return _FAILOVER_EXECUTOR
 
 
 def _upstream_key_for_skip_warning(
@@ -121,7 +164,17 @@ def _is_connection_refused_error(exc: Exception) -> bool:
 
     Outputs:
       - bool: True when errno/message indicate connection refused.
+
+    Notes:
+      - Prefer errno-based classification to avoid locale-dependent string
+        matching.
     """
+
+    try:
+        if isinstance(exc, ConnectionRefusedError):
+            return True
+    except Exception:
+        pass
 
     try:
         if int(getattr(exc, "errno", 0) or 0) == int(errno.ECONNREFUSED):
@@ -129,7 +182,44 @@ def _is_connection_refused_error(exc: Exception) -> bool:
     except Exception:
         pass
 
+    # Last resort: message matching (may be locale-dependent).
     return "connection refused" in str(exc).lower()
+
+
+def _upstream_fail_count(upstream: Dict) -> float:
+    """Brief: Read best-effort fail_count for an upstream.
+
+    Inputs:
+      - upstream: Upstream configuration mapping.
+
+    Outputs:
+      - float: Current fail_count from DNSRuntimeState.upstream_health.
+
+    Notes:
+      - Uses DNSRuntimeState._upstream_id to find the upstream health entry.
+      - Returns 0.0 if state is unavailable or malformed.
+    """
+
+    try:
+        up_id = DNSRuntimeState._upstream_id(upstream)
+    except Exception:
+        return 0.0
+
+    if not up_id:
+        return 0.0
+
+    try:
+        entry = DNSRuntimeState.upstream_health.get(up_id)
+    except Exception:
+        entry = None
+
+    if not isinstance(entry, dict):
+        return 0.0
+
+    try:
+        return float(entry.get("fail_count", 0.0) or 0.0)
+    except Exception:
+        return 0.0
 
 
 def _upstream_health_context(upstream: Dict, now_ts: Optional[float] = None) -> str:
@@ -245,7 +335,7 @@ def _warn_upstream_skip_once(upstream_key: str, fmt: str, *args) -> None:
         )
         return
 
-    logger.debug(fmt, *args)
+    logger.warning(fmt, *args)
 
 
 def _reset_upstream_skip_warning(upstream_key: str) -> None:
@@ -278,24 +368,26 @@ def _send_query_with_failover_impl(
     dot_error_cls=DoTError,
     tcp_error_cls=TCPError,
 ) -> Tuple[Optional[bytes], Optional[Dict], str]:
-    """
-    Sends a DNS query to a list of upstream servers, with failover and optional
-    per-query concurrency across multiple upstreams.
+    """Brief: Send a DNS query with upstream failover and optional fan-out.
 
-    Args:
-        query: The DNSRecord to send.
-        upstreams: A list of upstream server dicts to try.
-        timeout_ms: The timeout in milliseconds for each attempt.
-        qname: The query name (for logging).
-        qtype: The query type (for logging).
-        max_concurrent: Maximum number of upstreams to query in parallel for
-            this request. Values <1 are treated as 1. When greater than 1,
-            up to ``max_concurrent`` upstreams are queried concurrently and the
-            first successful response is returned.
+    Inputs:
+      - query: dnslib DNSRecord to send.
+      - upstreams: List of upstream configuration mappings.
+      - timeout_ms: Per-attempt timeout in milliseconds.
+      - qname: Query name (logging/validation fallback).
+      - qtype: Query type (logging/validation fallback).
+      - max_concurrent: Max upstreams to query in parallel for this request.
 
-    Returns:
-        A tuple of (response_wire_bytes, used_upstream, reason).
-        reason is 'ok', 'no_upstreams', or 'all_failed'.
+    Outputs:
+      - (response_wire_bytes, used_upstream, reason)
+        - response_wire_bytes: bytes on success, None on failure.
+        - used_upstream: The upstream mapping that succeeded (possibly with
+          transport adjusted), or None.
+        - reason: 'ok', 'no_upstreams', or 'all_failed'.
+
+    Notes:
+      - When max_concurrent > 1, attempts are capped to max_concurrent in-flight
+        futures and the first successful response wins.
     """
     if not upstreams:
         return None, None, "no_upstreams"
@@ -303,6 +395,7 @@ def _send_query_with_failover_impl(
     timeout_sec = timeout_ms / 1000.0
     last_exception: Optional[Exception] = None
     attempted_upstream_labels: list[str] = []
+    attempted_upstream_label_set: Set[str] = set()
     attempted_upstream_health: dict[str, str] = {}
     attempted_upstreams_lock = threading.Lock()
 
@@ -353,11 +446,10 @@ def _send_query_with_failover_impl(
         try:
             qs = getattr(parsed, "questions", None) or []
             if not qs:
-                # Best-effort: if we cannot recover the response question
-                # section, skip question validation rather than rejecting
-                # the response outright (helps tests/mocks and unusual
-                # upstreams).
-                return True
+                # Security hardening: a forwarded upstream response should echo
+                # the question section. Accepting a zero-question response would
+                # weaken cache-poisoning mitigation guidance in RFC 5452.
+                return False
             q0 = qs[0]
 
             # Prefer the original DNSRecord question when present; otherwise
@@ -811,9 +903,11 @@ def _send_query_with_failover_impl(
             _upstream_attempt_context(upstream)
         )
         upstream_health = _upstream_health_context(upstream)
+        fail_count = _upstream_fail_count(upstream)
         try:
             with attempted_upstreams_lock:
-                if upstream_label not in attempted_upstream_labels:
+                if upstream_label not in attempted_upstream_label_set:
+                    attempted_upstream_label_set.add(upstream_label)
                     attempted_upstream_labels.append(upstream_label)
                 attempted_upstream_health[upstream_label] = upstream_health
         except Exception:
@@ -848,8 +942,7 @@ def _send_query_with_failover_impl(
 
             # Limit warnings to not flood log.
             if _is_connection_refused_error(e) and (
-                upstream_health["fail_count"] <= 25
-                or (upstream_health["fail_count"] % 25) == 0
+                fail_count <= 25 or (int(fail_count) % 25) == 0
             ):
                 _warn_upstream_skip_once_with_health(
                     upstream_key,
@@ -894,12 +987,10 @@ def _send_query_with_failover_impl(
         # upstreams immediately (which would effectively probe every upstream
         # even when an earlier attempt succeeds).
         workers = min(max_c, len(upstreams))
-        executor: Optional[ThreadPoolExecutor] = None
-        pending: Dict = {}
+        executor = _get_failover_executor()
+        pending: Dict[Future, int] = {}
         next_index = 0
         try:
-            executor = ThreadPoolExecutor(max_workers=workers)
-
             # Prime the first in-flight window.
             while next_index < workers:
                 fut = executor.submit(_try_single, upstreams[next_index])
@@ -934,11 +1025,8 @@ def _send_query_with_failover_impl(
         except Exception as e:  # pragma: no cover - defensive: executor failure
             last_exception = e
         finally:
-            if executor is not None:
-                try:
-                    executor.shutdown(wait=True, cancel_futures=True)
-                except Exception:  # pragma: no cover - defensive
-                    pass
+            # Shared executor: do not shut down per query.
+            pass
 
     attempted_summary = ", ".join(attempted_upstream_labels) or "none"
     health_summary = (
