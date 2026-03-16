@@ -784,6 +784,11 @@ def main(argv: List[str] | None = None) -> int:
         except Exception:
             max_inflight_per_ip = 64
 
+        try:
+            max_query_bytes = int(udp_cfg.get("max_query_bytes", 4096) or 4096)
+        except Exception:
+            max_query_bytes = 4096
+
         max_inflight_by_cidr = udp_cfg.get("max_inflight_by_cidr")
         if max_inflight_by_cidr is not None and not isinstance(
             max_inflight_by_cidr, list
@@ -819,6 +824,7 @@ def main(argv: List[str] | None = None) -> int:
                     _resolve_udp,
                     max_inflight=max_inflight,
                     max_inflight_per_ip=max_inflight_per_ip,
+                    max_query_bytes=max_query_bytes,
                     max_inflight_by_cidr=max_inflight_by_cidr,
                     executor=get_resolver_executor(),
                     thread_name="foghorn-udp",

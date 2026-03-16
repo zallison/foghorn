@@ -23,37 +23,43 @@ import threading
 from concurrent.futures import Executor
 from typing import Callable
 
-from dnslib import RCODE, DNSRecord
-
 logger = logging.getLogger("foghorn.udp_asyncio")
+
+# RFC 1035 DNS header is 12 bytes.
+_DNS_HEADER_BYTES = 12
+
+# Default cap for UDP query payloads. This is intentionally conservative and is
+# meant as a DoS guardrail rather than a protocol limit.
+DEFAULT_MAX_UDP_QUERY_BYTES = 4096
 
 
 def _make_overloaded_response(query_wire: bytes) -> bytes | None:
-    """Brief: Build a best-effort SERVFAIL response for overload shedding.
+    """Brief: Build a minimal SERVFAIL response for overload shedding.
 
     Inputs:
       - query_wire: Wire-format DNS query bytes.
 
     Outputs:
-      - bytes | None: A SERVFAIL response (with matching TXID) when query_wire is
-        parseable; otherwise None.
+      - bytes | None: A minimal SERVFAIL response (with matching TXID) when
+        query_wire contains a transaction ID; otherwise None.
 
     Notes:
-      - This intentionally stays lightweight: it is used in overload paths where
-        we do not want to perform expensive work.
+      - This function is used in hot overload paths. It intentionally avoids
+        dnslib parsing and constructs only the 12-byte DNS header response.
+      - The response sets:
+          - QR=1 (response)
+          - OPCODE=0
+          - AA=0, TC=0, RD=0
+          - RA=0, Z=0
+          - RCODE=SERVFAIL (2)
+          - QDCOUNT=1, ANCOUNT=NSCOUNT=ARCOUNT=0
     """
 
-    try:
-        req = DNSRecord.parse(query_wire)
-    except Exception:
+    if len(query_wire) < 2:
         return None
 
-    try:
-        r = req.reply()
-        r.header.rcode = RCODE.SERVFAIL
-        return r.pack()
-    except Exception:
-        return None
+    txid = query_wire[0:2]
+    return txid + b"\x80\x02" + b"\x00\x01" + b"\x00\x00" + b"\x00\x00" + b"\x00\x00"
 
 
 class _UDPProtocol(asyncio.DatagramProtocol):
@@ -77,6 +83,7 @@ class _UDPProtocol(asyncio.DatagramProtocol):
         executor: Executor | None,
         max_inflight: int,
         max_inflight_per_ip: int,
+        max_query_bytes: int,
         max_inflight_by_cidr: list[dict[str, object]] | None = None,
     ) -> None:
         """Brief: Initialize protocol state.
@@ -86,6 +93,7 @@ class _UDPProtocol(asyncio.DatagramProtocol):
           - executor: Optional executor for running the resolver.
           - max_inflight: Global cap on concurrent resolver calls (min 1).
           - max_inflight_per_ip: Per-client cap on concurrent resolver calls (min 1).
+          - max_query_bytes: Max UDP payload bytes accepted for a DNS query.
           - max_inflight_by_cidr: Optional list of dicts with keys:
               - cidr: CIDR string
               - max_inflight: positive integer limit for this CIDR bucket
@@ -97,9 +105,12 @@ class _UDPProtocol(asyncio.DatagramProtocol):
         self._executor = executor
         self._max_inflight = max(1, int(max_inflight))
         self._max_inflight_per_ip = max(1, int(max_inflight_per_ip))
+        self._max_query_bytes = max(_DNS_HEADER_BYTES, int(max_query_bytes))
 
-        # Optional CIDR bucket limits: list of (network, max_inflight).
-        self._cidr_rules: list[tuple[ipaddress._BaseNetwork, int]] = []
+        # Optional CIDR bucket limits: partitioned IPv4/IPv6 lists of
+        # (network, max_inflight, prefixlen).
+        self._cidr_rules_v4: list[tuple[ipaddress.IPv4Network, int, int]] = []
+        self._cidr_rules_v6: list[tuple[ipaddress.IPv6Network, int, int]] = []
         if max_inflight_by_cidr:
             for entry in max_inflight_by_cidr:
                 if not isinstance(entry, dict):
@@ -115,7 +126,20 @@ class _UDPProtocol(asyncio.DatagramProtocol):
                     continue
                 if lim_i < 1:
                     continue
-                self._cidr_rules.append((net, lim_i))
+
+                try:
+                    prefixlen = int(getattr(net, "prefixlen", 0) or 0)
+                except Exception:
+                    prefixlen = 0
+
+                if isinstance(net, ipaddress.IPv4Network):
+                    self._cidr_rules_v4.append((net, lim_i, prefixlen))
+                elif isinstance(net, ipaddress.IPv6Network):
+                    self._cidr_rules_v6.append((net, lim_i, prefixlen))
+
+        # Prefer most-specific matches (largest prefixlen) earlier.
+        self._cidr_rules_v4.sort(key=lambda x: x[2], reverse=True)
+        self._cidr_rules_v6.sort(key=lambda x: x[2], reverse=True)
 
         self._inflight_total = 0
         self._inflight_per_ip: dict[str, int] = {}
@@ -149,7 +173,7 @@ class _UDPProtocol(asyncio.DatagramProtocol):
         self._transport = None
 
     def _select_cidr_bucket(self, client_ip: str) -> tuple[str | None, int | None]:
-        """Brief: Pick the strictest matching CIDR bucket for client_ip.
+        """Brief: Pick the most-specific matching CIDR bucket for client_ip.
 
         Inputs:
           - client_ip: Source IP string.
@@ -160,12 +184,19 @@ class _UDPProtocol(asyncio.DatagramProtocol):
             rules match.
 
         Notes:
-          - "Stricter wins": chooses the smallest max_inflight among matches.
-          - When multiple rules share the same limit, the most specific prefix
-            (largest prefixlen) is chosen.
+          - "Most-specific wins": the matching rule with the largest prefixlen
+            is chosen.
+          - When multiple rules share the same prefixlen, the smallest
+            max_inflight is chosen (stricter within equal specificity).
+
+        Example:
+          - Rules:
+              - 10.0.0.0/8 => 5
+              - 10.1.0.0/16 => 100
+            For 10.1.2.3, the /16 rule is chosen and the limit is 100.
         """
 
-        if not self._cidr_rules:
+        if not self._cidr_rules_v4 and not self._cidr_rules_v6:
             return None, None
 
         try:
@@ -173,31 +204,33 @@ class _UDPProtocol(asyncio.DatagramProtocol):
         except Exception:
             return None, None
 
+        if isinstance(addr, ipaddress.IPv4Address):
+            rules = self._cidr_rules_v4
+        else:
+            rules = self._cidr_rules_v6
+
+        if not rules:
+            return None, None
+
         best_net = None
         best_limit: int | None = None
         best_prefix = -1
 
-        for net, limit in self._cidr_rules:
+        for net, limit, prefix in rules:
             try:
                 if addr not in net:
                     continue
             except Exception:
                 continue
 
-            try:
-                prefix = int(getattr(net, "prefixlen", 0) or 0)
-            except Exception:
-                prefix = 0
-
-            if best_limit is None or limit < best_limit:
-                best_limit = limit
-                best_net = net
+            if prefix > best_prefix:
                 best_prefix = prefix
-            elif (
-                best_limit is not None and limit == best_limit and prefix > best_prefix
-            ):
+                best_limit = int(limit)
                 best_net = net
-                best_prefix = prefix
+            elif prefix == best_prefix:
+                if best_limit is None or int(limit) < int(best_limit):
+                    best_limit = int(limit)
+                    best_net = net
 
         if best_net is None or best_limit is None:
             return None, None
@@ -214,7 +247,9 @@ class _UDPProtocol(asyncio.DatagramProtocol):
           - None; schedules background resolver work or sheds load with SERVFAIL.
         """
 
-        if not data:
+        if len(data) < _DNS_HEADER_BYTES or len(data) > self._max_query_bytes:
+            # Drop invalid/oversized packets silently (no response) to avoid
+            # amplification and wasted work on attack traffic.
             return
 
         client_ip = addr[0] if isinstance(addr, tuple) and addr else "0.0.0.0"
@@ -285,8 +320,9 @@ class _UDPProtocol(asyncio.DatagramProtocol):
                 return
             if self._transport is not None:
                 self._transport.sendto(resp, addr)
-        except Exception:
+        except Exception as _exc:
             # Defensive: do not crash the protocol on resolver failures.
+            logger.debug("Resolver error for %s: %s", client_ip, _exc, exc_info=True)
             try:
                 resp = _make_overloaded_response(data)
                 if resp and self._transport is not None:
@@ -308,6 +344,15 @@ class _UDPProtocol(asyncio.DatagramProtocol):
                         self._inflight_per_cidr.pop(bucket_key, None)
                     else:
                         self._inflight_per_cidr[bucket_key] = cur_b - 1
+
+                # Defensive recovery: if counter bookkeeping ever drifts and the
+                # dict grows unexpectedly, reset it rather than leaking memory.
+                if len(self._inflight_per_ip) > (self._max_inflight * 2):
+                    logger.warning(
+                        "inflight_per_ip size %d exceeds safety cap; clearing",
+                        len(self._inflight_per_ip),
+                    )
+                    self._inflight_per_ip.clear()
             except (
                 Exception
             ):  # pragma: nocover - defensive: counter bookkeeping should not raise
@@ -322,6 +367,7 @@ async def serve_udp_asyncio(
     *,
     max_inflight: int = 1024,
     max_inflight_per_ip: int = 64,
+    max_query_bytes: int = DEFAULT_MAX_UDP_QUERY_BYTES,
     max_inflight_by_cidr: list[dict[str, object]] | None = None,
     executor: Executor | None = None,
     stop_event: asyncio.Event | None = None,
@@ -336,6 +382,7 @@ async def serve_udp_asyncio(
       - resolver: Callable (query_bytes, client_ip) -> response_bytes.
       - max_inflight: Global cap on concurrent in-flight resolver calls.
       - max_inflight_per_ip: Per-client-IP cap on in-flight resolver calls.
+      - max_query_bytes: Max UDP payload bytes accepted for a DNS query.
       - max_inflight_by_cidr: Optional list of CIDR bucket limits.
       - executor: Optional executor used to run the synchronous resolver.
       - stop_event: Optional asyncio.Event used to request shutdown.
@@ -353,6 +400,7 @@ async def serve_udp_asyncio(
             executor=executor,
             max_inflight=max_inflight,
             max_inflight_per_ip=max_inflight_per_ip,
+            max_query_bytes=max_query_bytes,
             max_inflight_by_cidr=max_inflight_by_cidr,
         ),
         local_addr=(host, int(port)),
@@ -410,6 +458,17 @@ class UDPAsyncioServerHandle:
         stop_event: asyncio.Event | None,
         transport_holder: dict[str, object],
     ) -> None:
+        """Brief: Create a handle to a threaded asyncio UDP listener.
+
+        Inputs:
+          - thread: Listener thread.
+          - loop: Event loop running on the listener thread (or None).
+          - stop_event: asyncio.Event used to request shutdown (or None).
+          - transport_holder: Mapping that may contain the underlying transport.
+
+        Outputs:
+          - None; stores references for stop() and inspection.
+        """
         self.thread = thread
         self._loop = loop
         self._stop_event = stop_event
@@ -440,6 +499,7 @@ def start_udp_asyncio_threaded(
     *,
     max_inflight: int = 1024,
     max_inflight_per_ip: int = 64,
+    max_query_bytes: int = DEFAULT_MAX_UDP_QUERY_BYTES,
     max_inflight_by_cidr: list[dict[str, object]] | None = None,
     executor: Executor | None = None,
     startup_timeout_s: float = 2.0,
@@ -453,6 +513,7 @@ def start_udp_asyncio_threaded(
       - resolver: Callable (query_bytes, client_ip) -> response_bytes.
       - max_inflight: Global cap on in-flight resolver calls.
       - max_inflight_per_ip: Per-client-IP cap on in-flight resolver calls.
+      - max_query_bytes: Max UDP payload bytes accepted for a DNS query.
       - max_inflight_by_cidr: Optional list of CIDR bucket limits.
       - executor: Optional executor used to run resolver.
       - startup_timeout_s: Max seconds to wait for the socket bind to complete.
@@ -484,6 +545,7 @@ def start_udp_asyncio_threaded(
                     resolver,
                     max_inflight=max_inflight,
                     max_inflight_per_ip=max_inflight_per_ip,
+                    max_query_bytes=max_query_bytes,
                     max_inflight_by_cidr=max_inflight_by_cidr,
                     executor=executor,
                     stop_event=stop_event,
@@ -519,6 +581,14 @@ def start_udp_asyncio_threaded(
         Exception
     ):  # pragma: nocover - defensive: threading.Event.wait should not raise
         pass
+
+    if not started.is_set():
+        logger.warning(
+            "UDP listener on %s:%d did not signal startup within %.1fs",
+            host,
+            int(port),
+            float(startup_timeout_s),
+        )
 
     exc = state.get("exc")
     if isinstance(exc, BaseException):
