@@ -18,6 +18,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 - Admin API: added `/api/v1/config/schema` and `/config/schema` endpoints (FastAPI and threaded admin server) to return the active JSON config schema document.
+- UDP listener: added `server.listen.udp.max_query_bytes` (default 4096) to cap accepted UDP query payload size; packets smaller than a DNS header (12 bytes) or larger than the cap are dropped silently.
 - ZoneRecords DNS UPDATE TSIG config now supports pluggable external key loading via `tsig.key_sources` (default `type: file` loader).
 - ZoneRecords DNS UPDATE now supports optional persistence, replication, and security config blocks under `dns_update`:
   - `dns_update.persistence` (journal fsync/size/compaction controls),
@@ -82,6 +83,7 @@ All notable changes to this project will be documented in this file.
 - Plugin lifecycle: setup() now supports DNS-aware provider-first orchestration via `setup_provides_dns` / `setup_requires_dns`, allowing setup consumers to resolve hostnames using earlier resolver plugins (optionally falling back to system DNS).
 - Resolver forwarding: when `forward_local` is disabled, RFC1918 IPv4 reverse PTR (`in-addr.arpa`) queries are now treated like `.local` and are not forwarded upstream.
 - Upstream failover concurrency now uses a rolling bounded in-flight window (`max_concurrent`) and stops scheduling additional upstream attempts after the first successful response.
+- UDP asyncio CIDR in-flight bucketing now selects the most-specific matching CIDR (largest prefixlen) rather than the strictest/smallest `max_inflight` among matches.
 - RateLimit profile presets were retuned and expanded (`home`, `lan`, `smb`, `enterprise`, `localhost`), with `default` now pointing at the `lan` preset.
 - RateLimit built-in profile defaults were further retuned in `rate_limit_profiles.yaml` (including `home`, `smb`, and `enterprise` thresholds), and profile resolution tests were updated to match the active defaults.
 - Admin UI dark-theme form controls now use higher-contrast input/select/textarea backgrounds for search and query-log panes.
@@ -116,7 +118,7 @@ All notable changes to this project will be documented in this file.
 - Admin UI: when the config diagram PNG is unavailable, the UI now preserves the normal two-pane layout and shows Graphviz dot source in the diagram pane.
 - Admin UI: light theme success messages (e.g. config save) now use higher-contrast colors.
 - Admin UI: plugin snapshot groups can now include optional `className` styling, and RateLimit snapshots render dedicated configuration and profile tables (including scroll handling for larger profile sets).
-- Logging: upstream skip de-duplication messages are now logged at DEBUG (was WARNING).
+- Logging: upstream skip de-duplication messages are now logged at WARNING (de-duplicated; emitted once per upstream key until a success clears the warned state).
 - Logging: added ANSI-highlighted console rendering (timestamps, levels, key/value tokens, IP/port, plugin markers, quoted/path-like values) with a top-level `color` toggle while file/syslog output remains non-colored.
 - Logging: BracketLevelFormatter now highlights bracketed SHA1-style values (short+long forms) alongside existing bracketed container-id rendering.
 - Diagrams: config diagram source and PNG rendering now use Graphviz (`dot`) (replacing Mermaid/mmdc).
@@ -143,6 +145,10 @@ All notable changes to this project will be documented in this file.
 - RateLimit defaults now use `./config/var/dbs/rate_limit.db` for profile storage across runtime helpers, examples, and API output.
 
 ### Fixed
+- Upstream failover: fixed a crash in the connection-refused warning path when upstream-health data was missing/malformed.
+- Upstream failover: hardened response validation to reject upstream replies with an empty question section.
+- UDP listener overload shedding: worst-case SERVFAIL fallback now constructs a minimal 12-byte DNS header response without parsing the query (preserving TXID when possible).
+
 - DNS UPDATE TSIG parse/verification failures now return protocol-correct UPDATE responses with `NOTAUTH` (instead of malformed opcode handling), including improved TSIG failure diagnostics.
 - DNS UPDATE authorization now enforces per-key/per-token `allow_names` and `allow_update_ips` scope (combined with zone-level policy), preventing out-of-scope updates from being accepted.
 - ZoneRecords DNS UPDATE now rebuilds wildcard-owner indexes after update commits, so wildcard UPDATE owners (for example `*.foo.dyn.zaa`) are immediately used during resolution.
