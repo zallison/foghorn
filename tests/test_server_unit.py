@@ -85,51 +85,58 @@ def test_compute_effective_ttl_non_noerror_or_no_answers_returns_floor():
 
 
 def test_send_query_with_failover_parsing_and_servfail_failover(monkeypatch):
-    """
-    Brief: send_query_with_failover skips SERVFAIL and parsing errors, succeeds on next.
+    """Brief: Failover skips SERVFAIL and parse errors, succeeds on next upstream.
 
     Inputs:
-      - upstreams: two servers, first returns SERVFAIL, second OK
+      - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None: Asserts second upstream chosen and 'ok' reason
+      - None.
+
+    Notes:
+      - Uses real dnslib packets so response validation (TXID/question echo)
+        is exercised.
     """
 
-    class DummyQuery:
-        def send(self, host, port, timeout=None):
-            if host == "bad":
-                return b"bad-bytes"
-            return b"good-bytes"
+    qname = "example.com"
+    q = DNSRecord.question(qname, "A")
 
-    class DummyParsed:
-        class header:
-            rcode = RCODE.SERVFAIL
+    servfail = q.reply()
+    servfail.header.rcode = RCODE.SERVFAIL
+    servfail_wire = servfail.pack()
 
-    class DummyParsedOK:
-        class header:
-            rcode = RCODE.NOERROR
+    ok = q.reply()
+    ok.header.rcode = RCODE.NOERROR
+    ok_wire = ok.pack()
 
-    parse_calls = {"count": 0}
+    calls = {"n": 0}
 
-    def fake_parse(wire):
-        parse_calls["count"] += 1
-        if wire == b"bad-bytes":
-            return DummyParsed
-        return DummyParsedOK
+    def fake_udp_query(host, port, query_bytes, timeout_ms=0):  # noqa: ARG001
+        calls["n"] += 1
+        if host == "bad":
+            return servfail_wire
+        if host == "good":
+            return ok_wire
+        return b"not-a-dns-packet"
 
-    monkeypatch.setattr("foghorn.servers.server.DNSRecord.parse", fake_parse)
+    import foghorn.servers.transports.udp as udp_mod
+
+    monkeypatch.setattr(udp_mod, "udp_query", fake_udp_query)
 
     resp, used, reason = send_query_with_failover(
-        DummyQuery(),
-        upstreams=[{"host": "bad", "port": 53}, {"host": "good", "port": 53}],
+        q,
+        upstreams=[
+            {"host": "bad", "port": 53, "transport": "udp"},
+            {"host": "good", "port": 53, "transport": "udp"},
+        ],
         timeout_ms=1000,
-        qname="example.com",
+        qname=qname,
         qtype=QTYPE.A,
     )
 
-    assert resp == b"good-bytes"
-    assert used == {"host": "good", "port": 53}
     assert reason == "ok"
+    assert used == {"host": "good", "port": 53, "transport": "udp"}
+    assert resp == ok_wire
 
 
 def test_send_query_with_failover_all_failed(monkeypatch):
@@ -182,44 +189,46 @@ def test_send_query_with_failover_no_upstreams():
 
 
 def test_send_query_with_failover_concurrent_path_uses_first_success(monkeypatch):
-    """Brief: send_query_with_failover with max_concurrent>1 returns first successful upstream.
+    """Brief: max_concurrent>1 returns first successful upstream.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None: Asserts winner comes from second upstream when first fails.
+      - None.
+
+    Notes:
+      - Uses real dnslib packets so response validation remains enabled.
     """
 
-    class DummyQuery:
-        def send(self, host, port, timeout=None):
-            if host == "bad":
-                return b"resp-bad"
-            return b"resp-good"
+    qname = "example.com"
+    q = DNSRecord.question(qname, "A")
+    ok_wire = q.reply().pack()
 
-    def fake_parse(wire):
-        class _R:
-            class header:
-                rcode = RCODE.NOERROR
+    def fake_udp_query(host, port, query_bytes, timeout_ms=0):  # noqa: ARG001
+        if host == "bad":
+            return b"not-a-dns-packet"
+        return ok_wire
 
-        if wire == b"resp-bad":
-            raise ValueError("bad parse")
-        return _R
+    import foghorn.servers.transports.udp as udp_mod
 
-    monkeypatch.setattr("foghorn.servers.server.DNSRecord.parse", fake_parse)
+    monkeypatch.setattr(udp_mod, "udp_query", fake_udp_query)
 
     resp, used, reason = send_query_with_failover(
-        DummyQuery(),
-        upstreams=[{"host": "bad", "port": 53}, {"host": "good", "port": 53}],
+        q,
+        upstreams=[
+            {"host": "bad", "port": 53, "transport": "udp"},
+            {"host": "good", "port": 53, "transport": "udp"},
+        ],
         timeout_ms=100,
-        qname="example.com",
+        qname=qname,
         qtype=QTYPE.A,
         max_concurrent=2,
     )
 
-    assert resp == b"resp-good"
-    assert used == {"host": "good", "port": 53}
     assert reason == "ok"
+    assert used is not None and used.get("host") == "good"
+    assert resp == ok_wire
 
 
 def test_send_query_with_failover_concurrent_path_limits_scheduling_window():

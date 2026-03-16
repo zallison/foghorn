@@ -172,7 +172,9 @@ def test_ensure_edns_request_sets_do_bit(mode: str, expect_do: bool) -> None:
     assert bool(flags & 0x8000) is bool(expect_do)
 
 
-def test_handle_pre_deny_records_stats_and_query_result(set_runtime_snapshot):
+def test_handle_pre_deny_records_stats_and_query_result(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: pre-resolve deny path records stats and NXDOMAIN.
 
     Inputs:
@@ -193,10 +195,19 @@ def test_handle_pre_deny_records_stats_and_query_result(set_runtime_snapshot):
 
     q = DNSRecord.question("predeny-stats.example", "A")
 
+    def _forbidden_send_query_with_failover(*_a, **_kw):
+        raise AssertionError(
+            "send_query_with_failover should not be called for pre-plugin deny"
+        )
+
+    monkeypatch.setattr(
+        srv, "send_query_with_failover", _forbidden_send_query_with_failover
+    )
+
     stats = _Stats()
     set_runtime_snapshot(
         plugins=[_PreDeny()],
-        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        upstream_addrs=[{"host": "h", "port": 53}],
         stats_collector=stats,
     )
 
@@ -213,7 +224,9 @@ def test_handle_pre_deny_records_stats_and_query_result(set_runtime_snapshot):
     assert "record_query_result" in kinds
 
 
-def test_handle_pre_override_records_stats_and_query_result(set_runtime_snapshot):
+def test_handle_pre_override_records_stats_and_query_result(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: pre-resolve override path records stats and uses override reply.
 
     Inputs:
@@ -236,10 +249,19 @@ def test_handle_pre_override_records_stats_and_query_result(set_runtime_snapshot
 
     q = DNSRecord.question("preoverride-stats.example", "A")
 
+    def _forbidden_send_query_with_failover(*_a, **_kw):
+        raise AssertionError(
+            "send_query_with_failover should not be called for pre-plugin override"
+        )
+
+    monkeypatch.setattr(
+        srv, "send_query_with_failover", _forbidden_send_query_with_failover
+    )
+
     stats = _Stats()
     set_runtime_snapshot(
         plugins=[_PreOverride()],
-        upstream_addrs=[{"host": "8.8.8.8", "port": 53}],
+        upstream_addrs=[{"host": "h", "port": 53}],
         stats_collector=stats,
     )
 
@@ -283,7 +305,9 @@ def test_handle_no_upstreams_with_stats_records_query_result(set_runtime_snapsho
     assert "record_query_result" in kinds
 
 
-def test_handle_all_failed_with_stats_records_upstream_rcode(monkeypatch, set_runtime_snapshot):
+def test_handle_all_failed_with_stats_records_upstream_rcode(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: All-upstreams-failed path records upstream result and upstream rcode.
 
     Inputs:
@@ -323,11 +347,12 @@ def test_handle_all_failed_with_stats_records_upstream_rcode(monkeypatch, set_ru
 
 
 # ---- DNSSEC validate branches ----
-def testfoghorn_dnssec_dnssec_validate_upstream_ad_pass(monkeypatch, set_runtime_snapshot):
+def testfoghorn_dnssec_dnssec_validate_upstream_ad_pass(
+    monkeypatch, set_runtime_snapshot
+):
 
     base_q = DNSRecord.question("ad.example", "A")
     ok = _mk_ok_reply(base_q, ad=1)
-
 
     # Force the shared resolver path (used by UDP and others) to return an AD=1
     # NOERROR reply so that validate+upstream_ad can classify it as secure.
@@ -392,7 +417,9 @@ def testfoghorn_dnssec_dnssec_validate_local_true(monkeypatch, set_runtime_snaps
     assert DNSRecord.parse(s1.sent[-1][0]).header.rcode == RCODE.NOERROR
 
 
-def test_resolve_core_dnssec_upstream_ad_shared_helper(monkeypatch, set_runtime_snapshot):
+def test_resolve_core_dnssec_upstream_ad_shared_helper(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: _resolve_core uses the shared DNSSEC helper for upstream_ad.
 
     Inputs:
@@ -401,7 +428,6 @@ def test_resolve_core_dnssec_upstream_ad_shared_helper(monkeypatch, set_runtime_
     Outputs:
       - Ensures dnssec_status is 'dnssec_secure' and stats hook is invoked.
     """
-
 
     q = DNSRecord.question("ad-core.example", "A")
     ok = _mk_ok_reply(q, ad=1)
@@ -435,7 +461,9 @@ def test_resolve_core_dnssec_upstream_ad_shared_helper(monkeypatch, set_runtime_
     assert "record_dnssec_status" in kinds
 
 
-def test_no_upstreams_with_client_edns_preserves_opt_payload(monkeypatch, set_runtime_snapshot):
+def test_no_upstreams_with_client_edns_preserves_opt_payload(
+    monkeypatch, set_runtime_snapshot
+):
     """Brief: SERVFAIL/no-upstreams path echoes client EDNS OPT and payload size.
 
     Inputs:

@@ -38,6 +38,7 @@ def test_main_udp_defaults_to_asyncio_and_stops_handle(monkeypatch: Any) -> None
         "      host: 127.0.0.1\n"
         "      port: 5354\n"
         "      use_asyncio: true\n"
+        "      max_query_bytes: 1234\n"
         "      max_inflight_by_cidr:\n"
         "        - cidr: 10.0.0.0/8\n"
         "          max_inflight: 5\n"
@@ -77,6 +78,7 @@ def test_main_udp_defaults_to_asyncio_and_stops_handle(monkeypatch: Any) -> None
         assert host == "127.0.0.1"
         assert int(port) == 5354
         assert kw.get("thread_name") == "foghorn-udp"
+        assert kw.get("max_query_bytes") == 1234
         assert kw.get("max_inflight_by_cidr") == [
             {"cidr": "10.0.0.0/8", "max_inflight": 5},
             {"cidr": "10.1.0.0/16", "max_inflight": 2},

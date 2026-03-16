@@ -142,6 +142,9 @@ def clear_runtime_between_tests():
         pass
 
 
+_TEST_SNAPSHOT_GENERATION = 0
+
+
 @pytest.fixture
 def set_runtime_snapshot():
     """Brief: Initialize the active RuntimeSnapshot for a test with overrides.
@@ -162,6 +165,14 @@ def set_runtime_snapshot():
         from foghorn.runtime_config import get_runtime_snapshot, initialize_runtime
 
         base = get_runtime_snapshot()
+
+        # Ensure generation changes for each test snapshot. Some hot-path caches
+        # (e.g., plugin ordering) key off generation when using RuntimeSnapshot.
+        if "generation" not in overrides:
+            global _TEST_SNAPSHOT_GENERATION
+            _TEST_SNAPSHOT_GENERATION += 1
+            overrides["generation"] = int(_TEST_SNAPSHOT_GENERATION)
+
         snap = replace(base, **overrides)
         initialize_runtime(snapshot=snap, config_path="test.yaml")
         return snap

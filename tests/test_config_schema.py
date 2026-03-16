@@ -233,17 +233,19 @@ def test_get_default_schema_path_last_resort_uses_project_root(monkeypatch) -> N
     assert p == expected
 
 
-def test_validate_config_schema_loading_errors_are_best_effort(
-    monkeypatch, caplog
-) -> None:
-    """Brief: validate_config logs schema loading failures and skips validation.
+def test_validate_config_schema_loading_errors_are_fatal(monkeypatch, caplog) -> None:
+    """Brief: validate_config raises when schema loading fails.
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture used to make _load_schema raise.
-      - caplog: Pytest caplog fixture used to capture warning logs.
+      - caplog: Pytest caplog fixture used to capture error logs.
 
     Outputs:
-      - None; asserts that a warning is logged and no exception is raised.
+      - None; asserts that an error is logged and ValueError is raised.
+
+    Notes:
+      - Foghorn treats schema load failures as a deployment error and refuses to
+        proceed without schema validation unless skip_schema_validation is set.
     """
 
     def boom_load(_schema_path):  # noqa: D401, ARG001
@@ -264,14 +266,15 @@ def test_validate_config_schema_loading_errors_are_best_effort(
 
     fake_schema_path = config_schema_mod.Path("/nonexistent/schema.json")
 
-    with caplog.at_level("WARNING", logger="foghorn.config.config_schema"):
-        # Should not raise despite schema loading failure; behaviour is
-        # best-effort with a warning and skipped validation.
-        validate_config({}, schema_path=fake_schema_path, config_path="cfg.yaml")
+    with caplog.at_level("ERROR", logger="foghorn.config.config_schema"):
+        with pytest.raises(
+            ValueError, match=r"Failed to load or parse configuration schema"
+        ):
+            validate_config({}, schema_path=fake_schema_path, config_path="cfg.yaml")
 
     joined = "\n".join(r.getMessage() for r in caplog.records)
     assert "Failed to load or parse configuration schema" in joined
-    assert "skipping JSON Schema validation" in joined
+    assert "refusing to start without schema validation" in joined
     assert "disk failure" in joined
 
 

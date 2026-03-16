@@ -5,7 +5,7 @@ Inputs:
   - Synthetic client IPs.
 
 Outputs:
-  - Verifies strictest matching CIDR rule selection.
+  - Verifies most-specific matching CIDR rule selection.
   - Verifies overload shedding occurs when a CIDR bucket limit is reached.
 """
 
@@ -15,18 +15,18 @@ import asyncio
 import threading
 from typing import Any
 
-from dnslib import RCODE, DNSRecord
+from dnslib import DNSRecord
 
 
-def test_udp_asyncio_select_cidr_bucket_stricter_wins() -> None:
-    """Brief: When multiple CIDRs match, the smallest max_inflight is selected.
+def test_udp_asyncio_select_cidr_bucket_most_specific_wins() -> None:
+    """Brief: When multiple CIDRs match, the most specific prefix wins.
 
     Inputs:
       - CIDR rules: overlapping /8 and /16.
       - client_ip: '10.1.2.3' (matches both).
 
     Outputs:
-      - Asserts the /16 rule is selected when it has a stricter limit.
+      - Asserts the /16 rule is selected even when it has a higher limit.
     """
 
     from foghorn.servers.udp_asyncio_server import _UDPProtocol
@@ -36,15 +36,16 @@ def test_udp_asyncio_select_cidr_bucket_stricter_wins() -> None:
         executor=None,
         max_inflight=100,
         max_inflight_per_ip=100,
+        max_query_bytes=4096,
         max_inflight_by_cidr=[
             {"cidr": "10.0.0.0/8", "max_inflight": 5},
-            {"cidr": "10.1.0.0/16", "max_inflight": 2},
+            {"cidr": "10.1.0.0/16", "max_inflight": 100},
         ],
     )
 
     bucket_key, limit = proto._select_cidr_bucket("10.1.2.3")
     assert bucket_key == "10.1.0.0/16"
-    assert limit == 2
+    assert limit == 100
 
 
 def test_udp_asyncio_cidr_bucket_limit_sheds_overload() -> None:
@@ -81,6 +82,7 @@ def test_udp_asyncio_cidr_bucket_limit_sheds_overload() -> None:
             executor=None,
             max_inflight=100,
             max_inflight_per_ip=100,
+            max_query_bytes=4096,
             max_inflight_by_cidr=[{"cidr": "10.1.0.0/16", "max_inflight": 1}],
         )
         dummy = DummyTransport()
@@ -95,8 +97,11 @@ def test_udp_asyncio_cidr_bucket_limit_sheds_overload() -> None:
         proto.datagram_received(query, addr)
 
         assert len(dummy.sent) == 1
-        resp = DNSRecord.parse(dummy.sent[0][0])
-        assert resp.header.rcode == RCODE.SERVFAIL
+        resp_wire = dummy.sent[0][0]
+        assert len(resp_wire) == 12
+        assert resp_wire[0:2] == query[0:2]
+        assert resp_wire[2] == 0x80
+        assert (resp_wire[3] & 0x0F) == 2
 
         release.set()
         await asyncio.sleep(0.05)

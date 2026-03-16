@@ -359,7 +359,11 @@ def test_main_runs_shutdown_hooks_for_cache_querylog_and_resolve(monkeypatch):
     monkeypatch.setattr(
         main_mod, "_load_cache_plugin_from_cfg", lambda **_kw: cache_obj
     )
-    monkeypatch.setattr(main_mod, "_install_cache_plugin_global", lambda _cache: None)
+    monkeypatch.setattr(
+        main_mod,
+        "_install_cache_plugin_global",
+        lambda cache_plugin=None, logger=None, **_kw: None,
+    )
     monkeypatch.setattr(
         main_mod,
         "_initialize_statistics_subsystem",
@@ -485,7 +489,7 @@ def test_main_passes_resolver_context_to_run_setup_plugins(monkeypatch) -> None:
     with patch("builtins.open", mock_open(read_data=yaml_data)):
         rc = main_mod.main(["--config", "cfg.yaml"])
 
-    assert rc == 1
+    assert rc == 0
     assert captured["resolver_mode"] == "forward"
     assert captured["timeout_ms"] == 2500
     assert captured["upstream_max_concurrent"] == 4
