@@ -1080,6 +1080,10 @@ def _resolve_core(
         # Decide between forwarding, recursion, and authoritative-only (no
         # forwarding) based on resolver_mode.
         resolver_mode = str(getattr(handler, "resolver_mode", "forward")).lower()
+        # Backward-compatible alias: "none" historically meant authoritative-only
+        # mode (no forwarding), which is now called "master".
+        if resolver_mode == "none":
+            resolver_mode = "master"
 
         if resolver_mode == "recursive":
             # In recursive mode we bypass configured upstreams and instead walk

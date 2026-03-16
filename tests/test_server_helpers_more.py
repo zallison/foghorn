@@ -47,39 +47,48 @@ def test_set_response_id_exception_returns_original():
 
 
 def test_send_query_with_failover_parse_exception_then_ok(monkeypatch):
-    """
-    Brief: Parsing error on first upstream triggers failover to second.
+    """Brief: Parse error on one upstream triggers failover to the next.
 
     Inputs:
-      - monkeypatch: make DNSRecord.parse raise for first response
+      - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None: Asserts success on second upstream
+      - None.
+
+    Notes:
+      - This test uses a real dnslib DNSRecord so response validation (TXID and
+        question echo) is exercised.
     """
 
-    class DummyQuery:
-        def send(self, host, port, timeout=None):
-            return b"resp-%s" % host.encode()
+    q = DNSRecord.question("parse-failover.example", "A")
+    good_wire = q.reply().pack()
 
-    def fake_parse(wire):
-        if wire == b"resp-bad":
-            raise ValueError("bad parse")
+    calls = {"n": 0}
 
-        class Dummy:
-            class header:
-                rcode = RCODE.NOERROR
+    def fake_udp_query(host, port, query_bytes, timeout_ms=0):  # noqa: ARG001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return b"not-a-dns-packet"
+        return good_wire
 
-        return Dummy
+    import foghorn.servers.transports.udp as udp_mod
 
-    monkeypatch.setattr(server_mod.DNSRecord, "parse", staticmethod(fake_parse))
+    monkeypatch.setattr(udp_mod, "udp_query", fake_udp_query)
+
     resp, used, reason = server_mod.send_query_with_failover(
-        DummyQuery(),
-        upstreams=[{"host": "bad", "port": 53}, {"host": "ok", "port": 53}],
+        q,
+        upstreams=[
+            {"host": "bad", "port": 53, "transport": "udp"},
+            {"host": "ok", "port": 53, "transport": "udp"},
+        ],
         timeout_ms=100,
-        qname="x",
-        qtype=1,
+        qname="parse-failover.example",
+        qtype=QTYPE.A,
     )
-    assert resp == b"resp-ok" and used["host"] == "ok" and reason == "ok"
+
+    assert reason == "ok"
+    assert used is not None and used.get("host") == "ok"
+    assert resp == good_wire
 
 
 def test_cache_and_send_response_parse_exception(monkeypatch):
@@ -204,10 +213,22 @@ def test_handle_inner_exception_logs_and_does_not_send(monkeypatch):
 
     DNSUDPHandler.handle(h)
 
-    # Worst-case fallback echoes the original query bytes instead of
-    # constructing a response; ensure exactly one such send occurred.
+    # Worst-case fallback: when both the shared resolver and the UDP handler's
+    # own SERVFAIL synthesis fail, the handler sends a minimal header-only
+    # SERVFAIL (it must never reflect the original query bytes).
     assert len(h.request[1].calls) == 1
-    assert h.request[1].calls[0][0] == data
+
+    sent = h.request[1].calls[0][0]
+    assert isinstance(sent, (bytes, bytearray))
+    assert len(sent) == 12
+
+    # TXID must be preserved when possible.
+    assert sent[0:2] == data[0:2]
+
+    # Flags: QR must be set; RCODE must be SERVFAIL (2).
+    flags = int.from_bytes(sent[2:4], "big")
+    assert bool(flags & 0x8000) is True
+    assert int(flags & 0x000F) == int(RCODE.SERVFAIL)
 
 
 def test_forward_with_failover_helper_delegates(monkeypatch):

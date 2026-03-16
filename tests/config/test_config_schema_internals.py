@@ -395,32 +395,38 @@ def test_validate_config_rejects_invalid_unknown_keys_policy() -> None:
         config_schema_mod.validate_config({}, unknown_keys="bogus")
 
 
-def test_validate_config_skips_when_schema_file_missing(tmp_path: Path) -> None:
-    """Brief: validate_config returns without error when schema file is missing.
+def test_validate_config_raises_when_schema_file_missing(tmp_path: Path) -> None:
+    """Brief: validate_config raises when schema file is missing.
 
     Inputs:
       - tmp_path: pytest temporary path fixture.
 
     Outputs:
-      - None; asserts no exception when schema_path does not exist.
+      - None; asserts ValueError is raised when schema_path does not exist.
+
+    Notes:
+      - Foghorn treats missing schema as a deployment error unless
+        skip_schema_validation is explicitly set.
     """
 
     missing = tmp_path / "does-not-exist.json"
     cfg: Dict[str, Any] = {"listen": {"host": "127.0.0.1", "port": 5353}}
-    config_schema_mod.validate_config(cfg, schema_path=missing)
+
+    with pytest.raises(ValueError, match=r"Configuration schema file .* not found"):
+        config_schema_mod.validate_config(cfg, schema_path=missing)
 
 
-def test_validate_config_skips_when_schema_load_fails(
+def test_validate_config_raises_when_schema_load_fails(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Brief: validate_config logs and returns when _load_schema raises.
+    """Brief: validate_config raises when _load_schema fails.
 
     Inputs:
       - tmp_path: pytest temporary path fixture.
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None; asserts no exception when _load_schema raises OSError/SchemaError.
+      - None; asserts ValueError is raised when _load_schema raises.
     """
 
     path = tmp_path / "schema.json"
@@ -432,20 +438,23 @@ def test_validate_config_skips_when_schema_load_fails(
     monkeypatch.setattr(config_schema_mod, "_load_schema", _boom)
 
     cfg: Dict[str, Any] = {"listen": {"host": "127.0.0.1", "port": 5353}}
-    config_schema_mod.validate_config(cfg, schema_path=path)
+    with pytest.raises(
+        ValueError, match=r"Failed to load or parse configuration schema"
+    ):
+        config_schema_mod.validate_config(cfg, schema_path=path)
 
 
-def test_validate_config_skips_when_jsonschema_not_installed(
+def test_validate_config_raises_when_jsonschema_not_installed(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """Brief: validate_config returns when Draft202012Validator is None.
+    """Brief: validate_config raises when Draft202012Validator is None.
 
     Inputs:
       - tmp_path: pytest temporary path fixture.
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None; asserts no exception and no validation when Draft202012Validator is None.
+      - None; asserts ValueError is raised when jsonschema is unavailable.
     """
 
     path = tmp_path / "schema.json"
@@ -454,7 +463,8 @@ def test_validate_config_skips_when_jsonschema_not_installed(
     monkeypatch.setattr(config_schema_mod, "Draft202012Validator", None)
 
     cfg: Dict[str, Any] = {"listen": {"host": "127.0.0.1", "port": 5353}}
-    config_schema_mod.validate_config(cfg, schema_path=path)
+    with pytest.raises(ValueError, match=r"jsonschema is not installed"):
+        config_schema_mod.validate_config(cfg, schema_path=path)
 
 
 def test_validate_config_handles_non_extra_and_extra_errors(
