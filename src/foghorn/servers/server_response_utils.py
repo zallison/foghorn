@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Optional
 
@@ -13,13 +14,78 @@ from foghorn.utils.register_caches import registered_cached
 logger = logging.getLogger("foghorn.server")
 
 
+def _compute_effective_ttl_cache_key(resp: object, min_cache_ttl: int) -> tuple:
+    """Brief: Stable key for compute_effective_ttl caching.
+
+    Inputs:
+      - resp: Parsed DNSRecord-like object.
+      - min_cache_ttl: Minimum TTL floor in seconds.
+
+    Outputs:
+      - tuple: Cache key.
+
+    Notes:
+      - Keyed only by fields that influence the computed TTL (rcode, presence of
+        answers, and answer TTL values), plus the min_cache_ttl input.
+      - This avoids id(resp)-based keys which can collide after GC and provides
+        meaningful cache hits for repeated TTL patterns.
+    """
+
+    try:
+        rcode = int(getattr(getattr(resp, "header", None), "rcode", 0) or 0)
+    except Exception:
+        rcode = 0
+
+    rr_list = getattr(resp, "rr", None) or []
+    has_answers = bool(rr_list)
+
+    ttls: tuple[int, ...]
+    try:
+        ttls = tuple(
+            int(getattr(rr, "ttl", 0) or 0)
+            for rr in rr_list
+            if isinstance(getattr(rr, "ttl", None), (int, float))
+        )
+    except Exception:
+        ttls = ()
+
+    return (rcode, has_answers, ttls, int(min_cache_ttl))
+
+
+def _max_cache_ttl_seconds() -> int:
+    """Brief: Resolve a maximum cache TTL cap for computed TTLs.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - int: Max TTL in seconds (>= 0). Default 86400.
+
+    Notes:
+      - Prefers the active DNS cache implementation's max_cache_ttl attribute
+        when available; otherwise falls back to 86400 seconds.
+    """
+
+    try:
+        from foghorn.plugins.resolve import base as plugin_base
+
+        cache_obj = getattr(plugin_base, "DNS_CACHE", None)
+        raw = getattr(cache_obj, "max_cache_ttl", None)
+        if raw is None:
+            return 86400
+        val = int(raw)
+        return max(0, val)
+    except Exception:
+        return 86400
+
+
 @registered_cached(
     cache=TTLCache(maxsize=1024, ttl=60),
-    key=lambda resp, min_cache_ttl: (id(resp), int(min_cache_ttl)),
+    key=_compute_effective_ttl_cache_key,
 )
 def compute_effective_ttl(resp: DNSRecord, min_cache_ttl: int) -> int:
     """
-    Computes cache TTL with min floor applied for any DNS response.
+    Computes cache TTL with a min floor (and max cap) applied for any DNS response.
 
     Inputs:
       - resp: dnslib.DNSRecord, the parsed DNS response to cache
@@ -28,8 +94,11 @@ def compute_effective_ttl(resp: DNSRecord, min_cache_ttl: int) -> int:
     Outputs:
       - int: effective TTL in seconds to use for cache expiry
 
-    For NOERROR + answers: max(min(answer.ttl), min_cache_ttl)
+    For NOERROR + answers: clamp(max(min(answer.ttl), min_cache_ttl), max_cache_ttl)
     For all other cases: min_cache_ttl
+
+    Cache key semantics:
+      - (rcode, has_answers, tuple(answer_ttls), min_cache_ttl)
 
     Example:
       >>> # Mock resp with NOERROR and answer RRs with TTL 30, min_cache_ttl=60
@@ -42,7 +111,11 @@ def compute_effective_ttl(resp: DNSRecord, min_cache_ttl: int) -> int:
         has_answers = bool(resp.rr)
         if rcode == RCODE.NOERROR and has_answers:
             answer_min_ttl = min(rr.ttl for rr in resp.rr)
-            return max(int(answer_min_ttl), int(min_cache_ttl))
+            ttl = max(int(answer_min_ttl), int(min_cache_ttl))
+            max_cache_ttl = _max_cache_ttl_seconds()
+            if max_cache_ttl > 0:
+                ttl = min(int(ttl), int(max_cache_ttl))
+            return max(0, int(ttl))
         return max(0, int(min_cache_ttl))
     except Exception:
         # Defensive: on parsing error, fall back to min_cache_ttl
@@ -77,9 +150,18 @@ def _compute_negative_ttl(resp: DNSRecord, fallback_ttl: int) -> int:
                     if isinstance(ttl_val, (int, float)):
                         soa_ttls.append(int(ttl_val))
                     rdata = getattr(rr, "rdata", None)
-                    minimum = getattr(rdata, "minttl", None) or getattr(
-                        rdata, "minimum", None
-                    )
+                    minimum = getattr(rdata, "minttl", None)
+                    if minimum is None:
+                        minimum = getattr(rdata, "minimum", None)
+                    if minimum is None:
+                        # dnslib SOA stores the RFC 2308 negative caching TTL as
+                        # the 5th element of rdata.times when provided.
+                        try:
+                            times = getattr(rdata, "times", None)
+                            if isinstance(times, tuple) and len(times) >= 5:
+                                minimum = times[4]
+                        except Exception:
+                            minimum = None
                     if isinstance(
                         minimum, (int, float)
                     ):  # pragma: no cover - defensive/metrics path excluded from coverage
@@ -148,6 +230,9 @@ def _set_response_id(wire: bytes, req_id: int) -> bytes:
         return wire
 
 
+_EDNS_PAYLOAD_CLAMP_WARNED: set[int] = set()
+
+
 def _ensure_edns_request(
     req: DNSRecord, *, dnssec_mode: str, edns_udp_payload: int
 ) -> None:
@@ -184,6 +269,15 @@ def _ensure_edns_request(
         server_max = 1232
     if server_max < 512:
         server_max = 512
+    if server_max > 4096:
+        # Clamp oversized EDNS UDP payload values to avoid pathological UDP
+        # fragmentation and oversized responses.
+        if server_max not in _EDNS_PAYLOAD_CLAMP_WARNED:
+            _EDNS_PAYLOAD_CLAMP_WARNED.add(server_max)
+            logger.warning(
+                "Clamping edns_udp_payload from %d to 4096 bytes", int(server_max)
+            )
+        server_max = 4096
 
     if opt_rr is not None:
         try:
@@ -250,7 +344,9 @@ def _echo_client_edns(req: DNSRecord, resp: DNSRecord) -> None:
             return
         # Echo the first client OPT RR to keep behaviour simple and
         # deterministic; typical queries only carry a single OPT.
-        resp.add_ar(client_opts[0])
+        # NOTE: Copy the OPT RR to avoid aliasing/mutating the original request
+        # object when we later append EDNS options (e.g., EDE).
+        resp.add_ar(copy.deepcopy(client_opts[0]))
     except Exception:  # pragma: no cover - defensive: best-effort only
         # EDNS echo should never prevent a response from being generated.
         return
@@ -278,6 +374,7 @@ def _attach_ede_option(
       - Only attaches EDE when the client advertised EDNS(0) via an OPT RR.
       - Reuses an existing OPT in resp when present; otherwise copies the first
         client OPT into resp before appending the EDE option.
+      - EXTRA-TEXT is truncated to 255 UTF-8 bytes.
     """
 
     try:
@@ -307,7 +404,8 @@ def _attach_ede_option(
         if opt_rr is None:
             # Conservative: echo the first client OPT into the response, then
             # re-scan to obtain the actual instance attached to resp.
-            resp.add_ar(client_opts[0])
+            # NOTE: Copy to avoid mutating req.ar when we append EDNS options.
+            resp.add_ar(copy.deepcopy(client_opts[0]))
             for rr in getattr(resp, "ar", None) or []:
                 if getattr(rr, "rtype", None) == QTYPE.OPT:
                     opt_rr = rr
@@ -328,9 +426,12 @@ def _attach_ede_option(
         payload = code.to_bytes(2, "big")
         if text:
             try:
-                payload += str(text).encode(
-                    "utf-8"
-                )  # pragma: no cover - defensive/metrics path excluded from coverage
+                encoded = str(text).encode("utf-8")
+                # Bound EXTRA-TEXT to 255 bytes to reduce risk of oversized UDP
+                # responses while keeping diagnostics useful.
+                if len(encoded) > 255:
+                    encoded = encoded[:255].decode("utf-8", "ignore").encode("utf-8")
+                payload += encoded  # pragma: no cover - defensive/metrics path excluded from coverage
             except Exception:
                 # Best-effort: ignore text encoding failures.
                 pass
@@ -341,17 +442,3 @@ def _attach_ede_option(
             rdata_list.append(EDNSOption(15, payload))
     except Exception:  # pragma: no cover - defensive: best-effort only
         return
-
-
-def _set_response_id_bytes(wire: bytes, req_id: int) -> bytes:
-    try:
-        if len(wire) >= 2:
-            hi = (req_id >> 8) & 0xFF
-            lo = req_id & 0xFF
-            return bytes([hi, lo]) + wire[2:]
-        return wire
-    except (
-        Exception
-    ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-        logger.error("Failed to set response id (cached): %s", e)
-        return wire
