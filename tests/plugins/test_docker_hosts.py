@@ -400,14 +400,13 @@ def test_docker_hosts_multiple_ips_in_answer(monkeypatch):
 
 
 def test_docker_hosts_txt_for_a_and_aaaa_in_additional_section(monkeypatch):
-    """Brief: TXT metadata for A/AAAA responses is placed in the ADDITIONAL section.
+    """Brief: TXT metadata for A/AAAA responses is opt-in via config.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
 
     Outputs:
-      - None; asserts TXT RRs for A/AAAA replies appear only in ADDITIONAL, not
-        ANSWER.
+      - None; asserts TXT RRs are absent by default and present when enabled.
     """
 
     mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
@@ -425,21 +424,32 @@ def test_docker_hosts_txt_for_a_and_aaaa_in_additional_section(monkeypatch):
     plugin.setup()
     ctx = PluginContext(client_ip="127.0.0.1")
 
-    # A query: TXT records should be in ADDITIONAL, not ANSWER.
+    # A query: default behavior keeps TXT out of ADDITIONAL.
     q_a = DNSRecord.question("web", "A")
     dec_a = plugin.pre_resolve("web", QTYPE.A, q_a.pack(), ctx)
     assert dec_a is not None and dec_a.response is not None
     resp_a = DNSRecord.parse(dec_a.response)
     assert all(rr.rtype != QTYPE.TXT for rr in resp_a.rr)
-    assert any(rr.rtype == QTYPE.TXT for rr in resp_a.ar)
+    assert all(rr.rtype != QTYPE.TXT for rr in resp_a.ar)
 
-    # AAAA query: same behaviour for IPv6 answers.
+    # AAAA query: same default behavior for IPv6.
     q_aaaa = DNSRecord.question("web", "AAAA")
     dec_aaaa = plugin.pre_resolve("web", QTYPE.AAAA, q_aaaa.pack(), ctx)
     assert dec_aaaa is not None and dec_aaaa.response is not None
     resp_aaaa = DNSRecord.parse(dec_aaaa.response)
     assert all(rr.rtype != QTYPE.TXT for rr in resp_aaaa.rr)
-    assert any(rr.rtype == QTYPE.TXT for rr in resp_aaaa.ar)
+    assert all(rr.rtype != QTYPE.TXT for rr in resp_aaaa.ar)
+
+    plugin_opt = DockerHosts(  # type: ignore[arg-type]
+        expose_txt_in_additional=True,
+        endpoints=[{"url": "unix:///var/run/docker.sock"}],
+    )
+    monkeypatch.setattr(plugin_opt, "_iter_containers_for_endpoint", fake_iter)
+    plugin_opt.setup()
+    dec_a_opt = plugin_opt.pre_resolve("web", QTYPE.A, q_a.pack(), ctx)
+    assert dec_a_opt is not None and dec_a_opt.response is not None
+    resp_a_opt = DNSRecord.parse(dec_a_opt.response)
+    assert any(rr.rtype == QTYPE.TXT for rr in resp_a_opt.ar)
 
 
 def test_docker_hosts_get_config_model_returns_pydantic_model():
@@ -551,6 +561,7 @@ def test_docker_hosts_setup_parses_endpoint_fields_and_logs_warnings(caplog):
     assert any("invalid use_ipv4" in m for m in messages)
     assert any("invalid use_ipv6" in m for m in messages)
     assert any("invalid ttl" in m for m in messages)
+    assert any("uses plaintext TCP" in m for m in messages)
 
 
 def test_docker_hosts_iter_containers_returns_empty_when_no_client(monkeypatch):
@@ -666,13 +677,13 @@ def test_docker_hosts_reload_from_docker_logs_when_no_containers(monkeypatch, ca
 def test_docker_hosts_reload_from_docker_ttl_cast_fallback_and_invalid_reverse_ptr(
     monkeypatch, caplog
 ):
-    """Brief: _reload_from_docker falls back TTL cast and logs invalid reverse pointers.
+    """Brief: _reload_from_docker falls back TTL cast and ignores malformed IPs.
 
     Inputs:
       - monkeypatch/caplog: pytest fixtures.
 
     Outputs:
-      - None; asserts warnings for invalid IP reverse pointers and that forward mappings still include the raw strings.
+      - None; asserts malformed IPs are dropped and mappings remain empty.
     """
 
     mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
@@ -712,14 +723,8 @@ def test_docker_hosts_reload_from_docker_ttl_cast_fallback_and_invalid_reverse_p
     caplog.set_level("WARNING", logger=mod.__name__)
     plugin._reload_from_docker()
 
-    # Leading '/' stripped from Name in mapping key.
-    assert "web" in plugin._forward_v4  # type: ignore[attr-defined]
-    assert plugin._forward_v4["web"] == ["bad-ip"]  # type: ignore[attr-defined,index]
-    assert plugin._forward_v6["web"] == ["bad-ipv6"]  # type: ignore[attr-defined,index]
-
-    messages = [r.getMessage() for r in caplog.records]
-    assert any("invalid IPv4 address" in m for m in messages)
-    assert any("invalid IPv6 address" in m for m in messages)
+    assert plugin._forward_v4 == {}  # type: ignore[attr-defined]
+    assert plugin._forward_v6 == {}  # type: ignore[attr-defined]
 
 
 def test_docker_hosts_pre_resolve_returns_none_when_not_targeted(monkeypatch):
@@ -750,13 +755,13 @@ def test_docker_hosts_pre_resolve_returns_none_when_not_targeted(monkeypatch):
 def test_docker_hosts_pre_resolve_missing_mappings_and_parse_failure(
     monkeypatch, caplog
 ):
-    """Brief: pre_resolve returns None when mappings missing; PTR parse failure yields override(None).
+    """Brief: pre_resolve returns None when mappings missing and on parse failure.
 
     Inputs:
       - monkeypatch/caplog: pytest fixtures.
 
     Outputs:
-      - None; asserts None for missing mappings and override decision with None response on parse failure.
+      - None; asserts None for missing mappings and parse-failure fallback.
     """
 
     mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
@@ -786,9 +791,7 @@ def test_docker_hosts_pre_resolve_missing_mappings_and_parse_failure(
         b"not-a-dns-packet",
         ctx,
     )
-    assert dec is not None
-    assert dec.action == "override"
-    assert dec.response is None
+    assert dec is None
     assert any("parse failure for PTR" in r.getMessage() for r in caplog.records)
 
 
@@ -896,31 +899,31 @@ def test_docker_hosts_reload_loop_executes_reload_once(monkeypatch):
     monkeypatch.setattr(plugin, "_reload_from_docker", lambda: None)
     plugin.setup()
 
-    calls = {"reload": 0, "sleep": 0}
+    calls = {"reload": 0, "wait": 0}
 
     def fake_reload() -> None:
         calls["reload"] += 1
 
-    def fake_sleep(_seconds: float) -> None:
-        calls["sleep"] += 1
-        # Allow first sleep, then escape loop on the next iteration.
-        if calls["sleep"] >= 2:
-            raise KeyboardInterrupt
+    class DummyStopEvent:
+        def wait(self, timeout: float) -> bool:  # noqa: D401
+            """Return False once, then True to stop loop."""
+
+            _ = timeout
+            calls["wait"] += 1
+            return calls["wait"] >= 2
+
+        def set(self) -> None:  # noqa: D401
+            """Compatibility no-op for shutdown()."""
+
+            return None
 
     plugin._reload_interval = 0.0001  # type: ignore[attr-defined]
     monkeypatch.setattr(plugin, "_reload_from_docker", fake_reload)
-
-    import time
-
-    monkeypatch.setattr(time, "sleep", fake_sleep)
-
-    try:
-        plugin._reload_loop()
-    except KeyboardInterrupt:
-        pass
+    plugin._stop_event = DummyStopEvent()  # type: ignore[attr-defined]
+    plugin._reload_loop()
 
     assert calls["reload"] == 1
-    assert calls["sleep"] >= 2
+    assert calls["wait"] >= 2
 
 
 def test_docker_hosts_health_filter_default_skips_unhealthy(monkeypatch):
@@ -2101,7 +2104,7 @@ def test_docker_hosts_pre_resolve_parse_failures_and_txt_includes_a_records(
       - monkeypatch/caplog: pytest fixtures.
 
     Outputs:
-      - None; asserts override(None) on parse failure and mixed TXT/A/AAAA answers.
+      - None; asserts parse failures return None and mixed TXT/A/AAAA answers.
     """
 
     mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
@@ -2115,22 +2118,17 @@ def test_docker_hosts_pre_resolve_parse_failures_and_txt_includes_a_records(
 
     ctx = PluginContext(client_ip="127.0.0.1")
 
-    # A/AAAA/TXT parse failures log and return override(None).
+    # A/AAAA/TXT parse failures log and return None.
     caplog.set_level("WARNING", logger=mod.__name__)
 
     dec_a = plugin.pre_resolve("web", QTYPE.A, b"not-a-dns-packet", ctx)
-    assert dec_a is not None and dec_a.action == "override" and dec_a.response is None
+    assert dec_a is None
 
     dec_aaaa = plugin.pre_resolve("web", QTYPE.AAAA, b"not-a-dns-packet", ctx)
-    assert (
-        dec_aaaa is not None
-        and dec_aaaa.action == "override"
-        and dec_aaaa.response is None
-    )
+    assert dec_aaaa is None
 
     dec_txt_fail = plugin.pre_resolve("web", QTYPE.TXT, b"not-a-dns-packet", ctx)
-    assert dec_txt_fail is not None and dec_txt_fail.action == "override"
-    assert dec_txt_fail.response is None
+    assert dec_txt_fail is None
 
     assert any("parse failure for A" in r.getMessage() for r in caplog.records)
     assert any("parse failure for AAAA" in r.getMessage() for r in caplog.records)
@@ -2198,6 +2196,144 @@ def test_docker_hosts_pre_resolve_txt_returns_none_when_no_mappings(monkeypatch)
     ctx = PluginContext(client_ip="127.0.0.1")
     q_txt = DNSRecord.question("missing", "TXT")
     assert plugin.pre_resolve("missing", QTYPE.TXT, q_txt.pack(), ctx) is None
+
+
+def test_docker_hosts_rejects_invalid_container_dns_names(monkeypatch):
+    """Brief: Invalid/adversarial container names are not published as DNS names.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts only valid names are mapped.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+
+    containers = [
+        {
+            "Id": "c1",
+            "Name": "/ok-name",
+            "Config": {"Hostname": "ok-name"},
+            "NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.5"}}},
+        },
+        {
+            "Id": "c2",
+            "Name": "/*.example.com",
+            "Config": {"Hostname": "*.example.com"},
+            "NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.6"}}},
+        },
+        {
+            "Id": "c3",
+            "Name": "/" + ("a" * 64),
+            "Config": {"Hostname": "bad"},
+            "NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.7"}}},
+        },
+    ]
+
+    monkeypatch.setattr(plugin, "_iter_containers_for_endpoint", lambda _ep: containers)
+    plugin.setup()
+
+    assert "ok-name" in plugin._forward_v4  # type: ignore[attr-defined]
+    assert "*.example.com" not in plugin._forward_v4  # type: ignore[attr-defined]
+    assert ("a" * 64) not in plugin._forward_v4  # type: ignore[attr-defined]
+
+
+def test_docker_hosts_normalizes_underscores_to_hyphens(monkeypatch):
+    """Brief: Docker-style names with underscores are normalized to hyphens.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts normalized forward and reverse mappings.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+
+    containers = [
+        {
+            "Id": "c1",
+            "Name": "/nginx_zackallison",
+            "Config": {"Hostname": "nginx_zackallison"},
+            "NetworkSettings": {
+                "Networks": {"bridge": {"IPAddress": "172.17.0.5"}},
+            },
+        }
+    ]
+
+    monkeypatch.setattr(plugin, "_iter_containers_for_endpoint", lambda _ep: containers)
+    plugin.setup()
+
+    assert "nginx-zackallison" in plugin._forward_v4  # type: ignore[attr-defined]
+    assert "nginx_zackallison" not in plugin._forward_v4  # type: ignore[attr-defined]
+
+    ptr = ipaddress.ip_address("172.17.0.5").reverse_pointer
+    assert plugin._reverse[ptr] == "nginx-zackallison"  # type: ignore[attr-defined,index]
+
+    ctx = PluginContext(client_ip="127.0.0.1")
+    q = DNSRecord.question("nginx-zackallison", "A")
+    dec = plugin.pre_resolve("nginx-zackallison", QTYPE.A, q.pack(), ctx)
+    assert dec is not None and dec.response is not None
+
+
+def test_docker_hosts_sanitize_txt_chunk_removes_controls_and_clamps_bytes():
+    """Brief: TXT sanitizer strips controls and clamps UTF-8 byte length.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts no controls and byte length <= 253.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    text = "bad\x00line\x1f\t" + ("é" * 200)
+    cleaned = mod.DockerHosts._sanitize_txt_chunk(text)  # type: ignore[attr-defined]
+    assert "\x00" not in cleaned
+    assert "\x1f" not in cleaned
+    assert len(cleaned.encode("utf-8")) <= 253
+
+
+def test_docker_hosts_shutdown_sets_stop_event(monkeypatch):
+    """Brief: shutdown() signals stop event for the reload loop.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts stop-event set is called.
+    """
+
+    mod = importlib.import_module("foghorn.plugins.resolve.docker_hosts")
+    DockerHosts = mod.DockerHosts
+    plugin = DockerHosts(endpoints=[{"url": "unix:///var/run/docker.sock"}])  # type: ignore[arg-type]
+    monkeypatch.setattr(plugin, "_reload_from_docker", lambda: None)
+    plugin.setup()
+
+    calls = {"set": 0}
+
+    class DummyStopEvent:
+        def wait(self, timeout: float) -> bool:  # noqa: D401
+            """Compatibility wait method."""
+
+            _ = timeout
+            return False
+
+        def set(self) -> None:  # noqa: D401
+            """Count stop signal calls."""
+
+            calls["set"] += 1
+
+    plugin._stop_event = DummyStopEvent()  # type: ignore[attr-defined]
+    plugin.shutdown()
+    assert calls["set"] == 1
 
 
 def test_docker_hosts_admin_ui_descriptor_handles_errors_and_empty_name(monkeypatch):
