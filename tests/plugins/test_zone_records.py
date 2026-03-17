@@ -58,7 +58,9 @@ def test_load_records_uniques_and_preserves_order_single_file(
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+    )
     plugin.setup()
 
     key = ("example.com", int(QTYPE.A))
@@ -382,7 +384,9 @@ def test_pre_resolve_uses_value_order_from_config(tmp_path: pathlib.Path) -> Non
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+    )
     plugin.setup()
 
     ctx = PluginContext(client_ip="127.0.0.1")
@@ -776,7 +780,9 @@ def test_load_records_skips_blank_and_comment_lines(tmp_path: pathlib.Path) -> N
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+    )
     plugin.setup()
 
     key = ("example.com", int(QTYPE.A))
@@ -801,7 +807,9 @@ def test_load_records_malformed_line_wrong_field_count(tmp_path: pathlib.Path) -
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+    )
     with pytest.raises(ValueError):
         plugin.setup()
 
@@ -822,7 +830,9 @@ def test_load_records_malformed_line_empty_field(tmp_path: pathlib.Path) -> None
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+    )
     with pytest.raises(ValueError):
         plugin.setup()
 
@@ -842,7 +852,9 @@ def test_load_records_qtype_numeric_and_negative_ttl(tmp_path: pathlib.Path) -> 
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+    )
     with pytest.raises(ValueError):
         plugin.setup()
 
@@ -861,8 +873,9 @@ def test_load_records_invalid_ttl_non_integer(tmp_path: pathlib.Path) -> None:
 
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
-
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+    )
     with pytest.raises(ValueError):
         plugin.setup()
 
@@ -895,7 +908,9 @@ def test_load_records_qtype_fallback_to_get_int(
     monkeypatch.setattr(loader_mod, "QTYPE", DummyQType())
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+    )
     plugin.setup()
 
     key = ("example.com", 42)
@@ -948,7 +963,9 @@ def test_load_records_assigns_without_lock(tmp_path: pathlib.Path) -> None:
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+    )
     plugin.setup()
 
 
@@ -977,7 +994,9 @@ def test_auto_ptr_generated_from_a_and_aaaa(tmp_path: pathlib.Path) -> None:
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin = ZoneRecords(
+        file_paths=[str(records_file)],
+    )
     plugin.setup()
 
     v4_rev = ipaddress.ip_address("192.0.2.10").reverse_pointer.rstrip(".").lower()
@@ -2054,7 +2073,7 @@ def test_authoritative_cname_and_any_semantics(tmp_path: pathlib.Path) -> None:
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(file_paths=[str(records_file)])
+    plugin = ZoneRecords(file_paths=[str(records_file)], any_query_enabled=True)
     plugin.setup()
 
     ctx = PluginContext(client_ip="127.0.0.1")
@@ -2111,7 +2130,9 @@ def test_bind_paths_loads_rfc1035_zone_and_answers(tmp_path: pathlib.Path) -> No
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(bind_paths=[str(zone_file)])
+    plugin = ZoneRecords(
+        bind_paths=[str(zone_file)],
+    )
     plugin.setup()
 
     ctx = PluginContext(client_ip="127.0.0.1")
@@ -2249,7 +2270,10 @@ def test_bind_paths_multiple_rrsets_and_any_semantics(tmp_path: pathlib.Path) ->
     mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
     ZoneRecords = mod.ZoneRecords
 
-    plugin = ZoneRecords(bind_paths=[str(zone_file)])
+    plugin = ZoneRecords(
+        bind_paths=[str(zone_file)],
+        any_query_enabled=True,
+    )
     plugin.setup()
 
     ctx = PluginContext(client_ip="127.0.0.1")
