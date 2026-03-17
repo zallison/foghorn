@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+from foghorn.config.config_parser import parse_config_variables
 
 from foghorn.config.config_schema import get_default_schema_path, validate_config
 
@@ -1789,8 +1790,17 @@ def load_config(config_path: str) -> dict[str, Any]:
 
     if not isinstance(obj, dict):
         return {}
+    # Match runtime parsing behavior for variable expansion by merging config/env
+    # variables before schema validation.
+    parse_config_variables(obj, cli_vars=[])
 
     validate_config(obj, config_path=config_path, unknown_keys="ignore")
+
+    # Defensive cleanup in case the validation pipeline changes and leaves helper
+    # metadata behind.
+    obj.pop("vars", None)
+    obj.pop("variables", None)
+    obj.pop("__schema_validation_config_var_keys", None)
 
     return obj
 

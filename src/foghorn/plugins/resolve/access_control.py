@@ -6,7 +6,7 @@ from functools import lru_cache
 from typing import Dict, List, Optional
 
 from dnslib import QTYPE, RCODE, DNSRecord
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from .base import (
     AdminPageSpec,
@@ -55,8 +55,7 @@ class AccessControlConfig(BaseModel):
     deny: List[str] = Field(default_factory=list)
     deny_response: str = Field(default="refused")
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @plugin_aliases("acl", "access_control")
@@ -175,10 +174,10 @@ class AccessControl(BasePlugin):
 
         mode = str(getattr(self, "deny_response", "refused") or "refused").lower()
         if mode == "drop":
-            return PluginDecision(action="drop", stat="access_control")
+            return self._decision(action="drop", stat="access_control")
 
         if mode == "nxdomain":
-            return PluginDecision(action="deny", stat="access_control")
+            return self._decision(action="deny", stat="access_control")
 
         if mode in {"refused", "servfail", "noerror_empty", "nodata"}:
             try:
@@ -188,7 +187,7 @@ class AccessControl(BasePlugin):
                     "AccessControl: failed to parse request while building deny response: %s",
                     exc,
                 )
-                return PluginDecision(action="deny", stat="access_control")
+                return self._decision(action="deny", stat="access_control")
 
             reply = request.reply()
             if mode == "refused":
@@ -199,7 +198,7 @@ class AccessControl(BasePlugin):
                 reply.header.rcode = RCODE.NOERROR
                 reply.rr = []
 
-            return PluginDecision(
+            return self._decision(
                 action="override",
                 response=reply.pack(),
                 stat="access_control",
@@ -222,14 +221,14 @@ class AccessControl(BasePlugin):
             if ipaddr:
                 wire = self._make_a_response(qname, qtype, raw_req, ctx, ipaddr)
                 if wire is not None:
-                    return PluginDecision(
+                    return self._decision(
                         action="override",
                         response=wire,
                         stat="access_control",
                     )
 
         # Fallback: NXDOMAIN-style deny.
-        return PluginDecision(action="deny", stat="access_control")
+        return self._decision(action="deny", stat="access_control")
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
@@ -272,7 +271,7 @@ class AccessControl(BasePlugin):
         logger.debug("Access %s for %s (default policy)", self.default, ctx.client_ip)
         if self.default == "deny":
             return self._build_deny_decision(qname, qtype, req, ctx)
-        return PluginDecision(action="allow")
+        return self._decision(action="allow")
 
     def get_admin_pages(self) -> List[AdminPageSpec]:
         """Brief: Describe the AccessControl admin page for the web UI.

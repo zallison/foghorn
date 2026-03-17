@@ -4,7 +4,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from dnslib import RCODE, DNSRecord
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
@@ -42,8 +42,7 @@ class UpstreamRoute(BaseModel):
     suffix: Optional[str] = None
     upstreams: List[UpstreamRouteTarget] = Field(default_factory=list)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class UpstreamRouterConfig(BaseModel):
@@ -58,8 +57,7 @@ class UpstreamRouterConfig(BaseModel):
 
     routes: List[UpstreamRoute] = Field(default_factory=list)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @plugin_aliases("upstream_router", "router", "upstream")
