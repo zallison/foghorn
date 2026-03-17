@@ -25,6 +25,10 @@ plugins:
         - "example.com|A|300|192.0.2.10"
         - "www.example.com|CNAME|300|example.com"
       ttl: 300
+      # Optional: QTYPE=ANY handling (disabled by default).
+      any_query_enabled: false
+      any_answer_rrset_limit: 16
+      any_answer_record_limit: 64
 
       # DNS UPDATE configuration
       dns_update:

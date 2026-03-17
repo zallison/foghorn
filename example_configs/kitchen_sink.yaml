@@ -199,6 +199,10 @@ plugins:
     watchdog_poll_interval_seconds: 60.0   # set to 0 to disable
 
     ttl: 300
+    # Optional: QTYPE=ANY handling (disabled by default).
+    any_query_enabled: false
+    any_answer_rrset_limit: 16
+    any_answer_record_limit: 64
 
     # Optional: Domains to return NXDOMAIN when there's no match.
     #           It will not continue to other plugins.
