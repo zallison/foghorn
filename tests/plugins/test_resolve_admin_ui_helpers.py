@@ -51,24 +51,11 @@ def test_make_deepcopy_safe_covers_non_trivial_branches() -> None:
     assert isinstance(set_out, list)
     assert set(set_out) == {1, 2}
 
-    # generic objects -> class name
+    # generic objects -> fixed placeholder
     class Foo:
         pass
 
-    assert admin_ui._make_deepcopy_safe(Foo()) == "Foo"
-
-    # Force the last-resort exception handler path for __class__.__name__ lookup.
-    class _BoomName(type):
-        def __getattribute__(cls, name: str):
-            if name == "__name__":
-                raise RuntimeError("nope")
-            return super().__getattribute__(name)
-
-    class Weird(metaclass=_BoomName):
-        def __str__(self) -> str:
-            return "weird"
-
-    assert admin_ui._make_deepcopy_safe(Weird()) == "weird"
+    assert admin_ui._make_deepcopy_safe(Foo()) == "<object>"
 
 
 def test_truncate_handles_small_and_disabled_limits() -> None:
@@ -156,7 +143,7 @@ def test_config_to_items_handles_redaction_and_deepcopy_unsafe_values() -> None:
     assert by_key["password"] == "***"
     assert "***" in by_key["nested"]
     assert '"token": "t"' not in by_key["nested"]
-    assert by_key["cache"] == "RLock"
+    assert by_key["cache"] == "<object>"
 
     # Custom redact_keys: only redact password, leave nested.token visible.
     items2 = admin_ui.config_to_items(cfg, redact_keys=["password"])
@@ -210,3 +197,49 @@ def test_limit_rows_enforces_limits_and_stops_iteration() -> None:
 
     # When the iterable is shorter than the limit, all rows are returned.
     assert admin_ui.limit_rows([{"x": 1}, {"x": 2}], limit=10) == [{"x": 1}, {"x": 2}]
+
+
+def test_fallback_sanitize_config_supports_substring_key_matches() -> None:
+    """Brief: Fallback sanitizer redacts keys matching any configured substring.
+
+    Inputs:
+      - Config with exact and substring-sensitive key names.
+
+    Outputs:
+      - None; asserts values are redacted in both matching styles.
+    """
+
+    cfg = {
+        "api_key": "a",
+        "dns_api_key": "b",
+        "nested": {"auth_token": "c", "safe": "ok"},
+    }
+
+    clean = admin_ui._fallback_sanitize_config(cfg, redact_keys=["api_key", "token"])
+    assert clean["api_key"] == "***"
+    assert clean["dns_api_key"] == "***"
+    assert clean["nested"]["auth_token"] == "***"
+    assert clean["nested"]["safe"] == "ok"
+
+
+def test_config_to_items_masks_url_userinfo_for_url_and_endpoint_keys() -> None:
+    """Brief: URL userinfo is masked for url/endpoint-like key names.
+
+    Inputs:
+      - Config values containing credentials in URL userinfo segments.
+
+    Outputs:
+      - None; asserts userinfo is replaced while preserving host/path.
+    """
+
+    cfg = {
+        "url": "https://user:secret@example.com/dns-query",
+        "endpoint": "http://token@internal.local/v1",
+        "nested": {"proxy_url": "socks5://alice:pw@proxy.local:1080"},
+    }
+    items = admin_ui.config_to_items(cfg, redact_keys=[])
+    by_key = {row["key"]: row["value"] for row in items}
+
+    assert by_key["url"] == "https://***@example.com/dns-query"
+    assert by_key["endpoint"] == "http://***@internal.local/v1"
+    assert "socks5://***@proxy.local:1080" in by_key["nested"]
