@@ -8,6 +8,8 @@ Outputs:
 """
 
 from types import SimpleNamespace
+import builtins
+
 import dns.message
 import dns.opcode
 import dns.rcode
@@ -17,6 +19,7 @@ import dns.update
 from dnslib import OPCODE, QTYPE, RCODE, DNSRecord
 
 from foghorn.plugins.resolve.base import PluginDecision
+from foghorn.servers import server_opcode as opcode_mod
 from foghorn.servers.server_opcode import _handle_non_query_opcode
 
 
@@ -56,6 +59,16 @@ def _call_non_query(opcode: int, data: bytes, plugins: list[object]):
     Outputs:
       - Optional[_ResolveCoreResult] as returned by _handle_non_query_opcode.
     """
+
+    # Clear module-local caches to keep tests deterministic (rate limiter and
+    # plugin sort caching are process-global in server_opcode).
+    try:
+        import foghorn.servers.server_opcode as _op
+
+        _op._OP_RATE_BUCKETS.clear()
+        _op._OP_PLUGINS_SORT_CACHE.clear()
+    except Exception:
+        pass
 
     handler = SimpleNamespace(plugins=plugins)
     return _handle_non_query_opcode(
@@ -199,6 +212,34 @@ def test_targets_opcode_false_skips_plugin_and_later_drop_wins() -> None:
     assert skip.handle_calls == 0
     assert result.rcode_name == "DROP"
     assert result.wire == b""
+
+
+def _make_update_with_tsig(
+    *,
+    zone: str,
+    key_name: str,
+    key_secret_b64: str,
+    algorithm: str = "hmac-sha256",
+    request_id: int = 0x1234,
+) -> bytes:
+    """Brief: Build a minimal UPDATE message with TSIG.
+
+    Inputs:
+      - zone: Zone apex.
+      - key_name: TSIG key name.
+      - key_secret_b64: Base64 secret.
+      - algorithm: TSIG algorithm identifier.
+      - request_id: DNS message ID.
+
+    Outputs:
+      - bytes: Wire-format DNS UPDATE message.
+    """
+    keyring = dns.tsigkeyring.from_text({key_name: key_secret_b64})
+    msg = dns.update.Update(zone)
+    msg.id = int(request_id)
+    msg.use_tsig(keyring=keyring, keyname=key_name, algorithm=algorithm)
+    msg.add("host", 60, "A", "192.0.2.123")
+    return msg.to_wire()
 
 
 def test_override_response_sets_id_and_passes_qname_qtype_context() -> None:
@@ -428,6 +469,299 @@ def test_default_notimp_with_non_bytes_input_uses_mid_zero_fallback() -> None:
     assert result.rcode_name == "NOTIMP"
     resp = DNSRecord.parse(result.wire)
     assert resp.header.id == 0
+    assert resp.header.rcode == RCODE.NOTIMP
+
+
+def test_tsig_signed_update_refused_when_no_keys_configured(monkeypatch) -> None:
+    """Brief: TSIG-signed non-QUERY messages are refused when no keys exist.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts REFUSED response for TSIG-signed UPDATE when keyring config
+        is absent.
+    """
+
+    wire = _make_update_with_tsig(
+        zone="example.com.",
+        key_name="key.example.com.",
+        key_secret_b64="dGVzdHNlY3JldA==",
+        request_id=0xBEEF,
+    )
+
+    # Ensure server_opcode sees had_tsig=True even when parsing without keyring.
+    keyring = dns.tsigkeyring.from_text({"key.example.com.": "dGVzdHNlY3JldA=="})
+    signed_msg = dns.message.from_wire(wire, keyring=keyring)
+    assert getattr(signed_msg, "had_tsig", False) is True
+
+    def _fake_from_wire(w, *args, **kwargs):  # noqa: ANN001
+        # Simulate a first parse error (no keyring supplied) and then a
+        # continue_on_error parse that yields a TSIG-bearing message.
+        if kwargs.get("continue_on_error"):
+            return signed_msg
+        raise Exception("parse failed")
+
+    monkeypatch.setattr(dns.message, "from_wire", _fake_from_wire)
+
+    handler = SimpleNamespace(plugins=[])
+    result = _handle_non_query_opcode(
+        opcode=OPCODE.UPDATE,
+        data=wire,
+        client_ip="127.0.0.1",
+        listener="udp",
+        secure=False,
+        handler=handler,
+    )
+
+    assert result is not None
+    assert result.rcode_name == "REFUSED"
+    resp = DNSRecord.parse(result.wire)
+    assert resp.header.id == 0xBEEF
+    assert resp.header.rcode == RCODE.REFUSED
+
+
+def test_tsig_signed_update_refused_on_bad_signature(monkeypatch) -> None:
+    """Brief: TSIG-signed messages are refused when MAC verification fails.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts REFUSED when configured TSIG secret does not match.
+    """
+
+    wire = _make_update_with_tsig(
+        zone="example.com.",
+        key_name="key.example.com.",
+        key_secret_b64="dGVzdHNlY3JldA==",
+        request_id=0xCAFE,
+    )
+
+    # Ensure server_opcode sees had_tsig=True on the initial parsing path while
+    # still allowing update_processor.verify_tsig_auth() to call the real parser
+    # with a keyring.
+    keyring = dns.tsigkeyring.from_text({"key.example.com.": "dGVzdHNlY3JldA=="})
+    signed_msg = dns.message.from_wire(wire, keyring=keyring)
+    assert getattr(signed_msg, "had_tsig", False) is True
+
+    real_from_wire = dns.message.from_wire
+
+    def _fake_from_wire(w, *args, **kwargs):  # noqa: ANN001
+        if "keyring" in kwargs:
+            return real_from_wire(w, *args, **kwargs)
+        if kwargs.get("continue_on_error"):
+            return signed_msg
+        raise Exception("parse failed")
+
+    monkeypatch.setattr(dns.message, "from_wire", _fake_from_wire)
+
+    class _KeysPlugin:
+        _dns_update_tsig_key_source_loaders = None
+        _dns_update_config = {
+            "zones": [
+                {
+                    "zone": "example.com",
+                    "tsig": {
+                        "keys": [
+                            {
+                                "name": "key.example.com.",
+                                "algorithm": "hmac-sha256",
+                                "secret": "b3RoZXJzZWNyZXQ=",
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+
+    handler = SimpleNamespace(plugins=[_KeysPlugin()])
+    result = _handle_non_query_opcode(
+        opcode=OPCODE.UPDATE,
+        data=wire,
+        client_ip="127.0.0.1",
+        listener="udp",
+        secure=False,
+        handler=handler,
+    )
+
+    assert result is not None
+    assert result.rcode_name == "REFUSED"
+    resp = DNSRecord.parse(result.wire)
+    assert resp.header.id == 0xCAFE
+    assert resp.header.rcode == RCODE.REFUSED
+
+
+def test_oversized_non_query_refused() -> None:
+    """Brief: Oversized non-QUERY messages are refused before parsing.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts REFUSED when payload exceeds MAX_NON_QUERY_BYTES.
+    """
+
+    oversized = b"\x12\x34\x20\x00" + (b"x" * (int(opcode_mod.MAX_NON_QUERY_BYTES) + 1))
+    handler = SimpleNamespace(plugins=[])
+
+    result = _handle_non_query_opcode(
+        opcode=OPCODE.NOTIFY,
+        data=oversized,
+        client_ip="127.0.0.1",
+        listener="udp",
+        secure=False,
+        handler=handler,
+    )
+
+    assert result is not None
+    assert result.rcode_name == "REFUSED"
+    resp = DNSRecord.parse(result.wire)
+    assert resp.header.id == 0x1234
+    assert resp.header.rcode == RCODE.REFUSED
+
+
+def test_non_query_rate_limit_refused(monkeypatch) -> None:
+    """Brief: Non-QUERY opcode safety rate limiter refuses excess requests.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts (limit+1)th request in same time bucket is REFUSED.
+    """
+
+    opcode_mod._OP_RATE_BUCKETS.clear()
+
+    # Freeze bucket time so all calls fall into the same 1-second window.
+    monkeypatch.setattr(opcode_mod.time, "time", lambda: 1700000000.0)
+
+    handler = SimpleNamespace(plugins=[])
+    wire = _make_non_query_wire(opcode=OPCODE.NOTIFY, request_id=0x1111)
+    limit = int(opcode_mod.NON_QUERY_RATE_LIMIT_PER_SEC)
+
+    last = None
+    for _ in range(limit + 1):
+        last = _handle_non_query_opcode(
+            opcode=OPCODE.NOTIFY,
+            data=wire,
+            client_ip="127.0.0.1",
+            listener="udp",
+            secure=False,
+            handler=handler,
+        )
+
+    assert last is not None
+    assert last.rcode_name == "REFUSED"
+    resp = DNSRecord.parse(last.wire)
+    assert resp.header.id == 0x1111
+    assert resp.header.rcode == RCODE.REFUSED
+
+
+def test_notify_allowlist_refuses_disallowed_client(monkeypatch) -> None:
+    """Brief: NOTIFY is refused when AXFR policy is enabled and client not allowed.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts REFUSED for disallowed client_ip.
+    """
+
+    monkeypatch.setattr(
+        "foghorn.runtime_config.get_runtime_snapshot",
+        lambda: SimpleNamespace(axfr_enabled=True, axfr_allow_clients=["192.0.2.0/24"]),
+    )
+
+    handler = SimpleNamespace(plugins=[])
+    wire = _make_non_query_wire(opcode=OPCODE.NOTIFY, request_id=0x2222)
+    result = _handle_non_query_opcode(
+        opcode=OPCODE.NOTIFY,
+        data=wire,
+        client_ip="198.51.100.1",
+        listener="udp",
+        secure=False,
+        handler=handler,
+    )
+
+    assert result is not None
+    assert result.rcode_name == "REFUSED"
+    resp = DNSRecord.parse(result.wire)
+    assert resp.header.id == 0x2222
+    assert resp.header.rcode == RCODE.REFUSED
+
+
+def test_notify_allowlist_allows_allowed_client_and_falls_through_notimp(
+    monkeypatch,
+) -> None:
+    """Brief: Allowed NOTIFY clients proceed to default NOTIMP when unhandled.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts NOTIMP for allowed client when no plugin handles opcode.
+    """
+
+    monkeypatch.setattr(
+        "foghorn.runtime_config.get_runtime_snapshot",
+        lambda: SimpleNamespace(axfr_enabled=True, axfr_allow_clients=["192.0.2.0/24"]),
+    )
+
+    handler = SimpleNamespace(plugins=[])
+    wire = _make_non_query_wire(opcode=OPCODE.NOTIFY, request_id=0x3333)
+    result = _handle_non_query_opcode(
+        opcode=OPCODE.NOTIFY,
+        data=wire,
+        client_ip="192.0.2.1",
+        listener="udp",
+        secure=False,
+        handler=handler,
+    )
+
+    assert result is not None
+    assert result.rcode_name == "NOTIMP"
+    resp = DNSRecord.parse(result.wire)
+    assert resp.header.id == 0x3333
+    assert resp.header.rcode == RCODE.NOTIMP
+
+
+def test_dnspython_missing_returns_notimp(monkeypatch) -> None:
+    """Brief: When dnspython is unavailable, non-QUERY handling returns NOTIMP.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts NOTIMP and ID preservation.
+    """
+
+    real_import = builtins.__import__
+
+    def _fake_import(
+        name, globals=None, locals=None, fromlist=(), level=0
+    ):  # noqa: ANN001
+        if name == "dns" or name.startswith("dns."):
+            raise ImportError("dnspython missing")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+
+    handler = SimpleNamespace(plugins=[])
+    wire = _make_non_query_wire(opcode=OPCODE.NOTIFY, request_id=0x4444)
+    result = _handle_non_query_opcode(
+        opcode=OPCODE.NOTIFY,
+        data=wire,
+        client_ip="127.0.0.1",
+        listener="udp",
+        secure=False,
+        handler=handler,
+    )
+
+    assert result is not None
+    assert result.rcode_name == "NOTIMP"
+    resp = DNSRecord.parse(result.wire)
+    assert resp.header.id == 0x4444
     assert resp.header.rcode == RCODE.NOTIMP
 
 
