@@ -9,7 +9,7 @@ from functools import lru_cache
 from typing import Optional, Tuple
 
 from dnslib import QTYPE, RCODE, DNSRecord, EDNSOption
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from foghorn.plugins.resolve.admin_ui import config_to_items
 
 from foghorn.plugins.resolve.base import (
@@ -127,8 +127,7 @@ class RateLimitConfig(BaseModel):
     ttl: int = Field(default=60, ge=0)
     stats_log_interval_seconds: int = Field(default=3600, ge=0)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @lru_cache(maxsize=16384)
@@ -892,7 +891,7 @@ class RateLimit(BasePlugin):
 
         mode = (getattr(self, "deny_response", "refused") or "refused").lower()
         if mode == "nxdomain":
-            return PluginDecision(action="deny", stat="rate_limit")
+            return self._decision(action="deny", stat="rate_limit")
 
         if mode in {"refused", "servfail", "noerror_empty", "nodata"}:
             try:
@@ -904,7 +903,7 @@ class RateLimit(BasePlugin):
                     "RateLimit: failed to parse request while building deny response: %s",
                     exc,
                 )
-                return PluginDecision(action="deny")
+                return self._decision(action="deny", stat="rate_limit")
 
             reply = req.reply()
             if mode == "refused":
@@ -935,7 +934,7 @@ class RateLimit(BasePlugin):
             except Exception as exc:
                 logger.debug("RateLimit: failed to attach EDE option: %s", exc)
 
-            return PluginDecision(
+            return self._decision(
                 action="override",
                 response=reply.pack(),
                 stat="rate_limit",
@@ -953,14 +952,14 @@ class RateLimit(BasePlugin):
             if ipaddr:
                 wire = self._make_a_response(qname, qtype, raw_req, ctx, ipaddr)
                 if wire is not None:
-                    return PluginDecision(
+                    return self._decision(
                         action="override",
                         response=wire,
                         stat="rate_limit",
                     )
 
         # Fallback: simple deny (refused by default)
-        return PluginDecision(action="deny", stat="rate_limit")
+        return self._decision(action="deny", stat="rate_limit")
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext

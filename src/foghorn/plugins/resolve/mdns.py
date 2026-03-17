@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 from cachetools import Cache, LRUCache
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, ConfigDict
 from dnslib import (
     AAAA,
     PTR,
@@ -266,8 +266,7 @@ class MdnsBridgeConfig(BaseModel):
     include_ipv6: bool = True
     info_timeout_ms: int = Field(default=1500, ge=0)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @dataclass(frozen=True)

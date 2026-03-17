@@ -5,7 +5,7 @@ import threading
 from typing import Dict, List, Optional, Tuple
 
 from dnslib import QTYPE, DNSRecord
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from foghorn.servers.dns_runtime_state import DNSRuntimeState
 
 from foghorn.servers.server import resolve_query_bytes
@@ -40,8 +40,7 @@ class DnsPrefetchConfig(BaseModel):
     max_consecutive_misses: int = Field(default=5, ge=1)
     qtypes: List[str] = Field(default_factory=lambda: ["A", "AAAA"])
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @plugin_aliases("dns_prefetch", "prefetch")

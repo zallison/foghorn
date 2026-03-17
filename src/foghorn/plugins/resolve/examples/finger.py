@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from dnslib import QTYPE, RR, TXT, DNSHeader, DNSRecord
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, ConfigDict
 
 from foghorn.plugins.resolve.base import (
     BasePlugin,
@@ -75,8 +75,7 @@ class FingerConfig(BaseModel):
     allow_users: List[str] = Field(default_factory=list)
     deny_users: List[str] = Field(default_factory=list)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
     @validator("domain", pre=True)
     def _normalize_domain(cls, v: object) -> str:  # type: ignore[override]
