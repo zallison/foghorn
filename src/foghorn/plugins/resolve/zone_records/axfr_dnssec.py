@@ -386,68 +386,6 @@ def _merge_transferred_rrs_into_mappings(
             zone_soa[owner] = (stored_ttl, values_ax, sources_ax)
 
 
-def _classify_local_zones_dnssec(
-    name_index: Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]],
-    zone_soa: Dict[str, Tuple[int, List[str], Set[str]]],
-    dnssec_classified_axfr: Set[str],
-    autosign_enabled: bool = False,
-) -> None:
-    """Brief: Classify DNSSEC state for zones built from local sources.
-
-    Inputs:
-      - name_index: owner -> qtype -> (ttl, [values], {sources}) index.
-      - zone_soa: zone apex -> (ttl, [soa_values], {sources}) mapping.
-      - dnssec_classified_axfr: Set of apexes already classified via AXFR.
-      - autosign_enabled: True when dnssec_signing auto-signing is enabled
-        for local zones in this load cycle.
-
-    Outputs:
-      - None; logs dnssec_state for each local zone apex and updates no other
-        state.
-    """
-
-    try:
-        try:
-            dnskey_code_all = int(QTYPE.DNSKEY)
-        except Exception:  # pragma: no cover - defensive
-            dnskey_code_all = 48
-        try:
-            rrsig_code_all = int(QTYPE.RRSIG)
-        except Exception:  # pragma: no cover - defensive
-            rrsig_code_all = 46
-
-        for apex_owner in list(zone_soa.keys()):
-            if apex_owner in dnssec_classified_axfr:
-                continue
-            owner_rrsets = name_index.get(apex_owner, {}) or {}
-            has_dnskey = int(dnskey_code_all) in owner_rrsets
-            has_rrsig = int(rrsig_code_all) in owner_rrsets
-            if has_dnskey and has_rrsig:
-                dnssec_state = "autosign" if autosign_enabled else "present"
-            elif has_dnskey or has_rrsig:
-                dnssec_state = "partial"
-            else:
-                dnssec_state = "none"
-            logger.info(
-                (
-                    "ZoneRecords zone %s dnssec_state=%s "
-                    "(autosign_enabled=%s, "
-                    "apex_has_dnskey=%s, "
-                    "apex_has_rrsig=%s)"
-                ),
-                apex_owner,
-                dnssec_state,
-                autosign_enabled,
-                has_dnskey,
-                has_rrsig,
-            )
-    except Exception:  # pragma: no cover - defensive logging only
-        logger.warning(
-            "ZoneRecords: failed to classify DNSSEC state for local zones",
-            exc_info=True,
-        )
-
-
 def dnssec_postprocess_zones(
     mapping: Dict[Tuple[str, int], Tuple[int, List[str], Set[str]]],
     name_index: Dict[str, Dict[int, Tuple[int, List[str], Set[str]]]],
@@ -481,7 +419,7 @@ def dnssec_postprocess_zones(
             dnssec_cfg_raw,
             log=logger,
         )
-    _classify_local_zones_dnssec(
+    _zone_helpers.classify_local_zones_dnssec(
         name_index,
         zone_soa,
         dnssec_classified_axfr,
