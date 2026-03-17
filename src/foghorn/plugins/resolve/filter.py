@@ -16,7 +16,7 @@ from dnslib import AAAA as RDATA_AAAA
 from dnslib import QTYPE, RCODE, RR
 from dnslib import A as RDATA_A
 from dnslib import DNSHeader, DNSRecord
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
 
@@ -72,10 +72,13 @@ class FilterConfig(BaseModel):
     blocked_ips: List[Union[str, Dict[str, object]]] = Field(default_factory=list)
     blocked_ips_files: List[str] = Field(default_factory=list)
 
-    clear: int = Field(default=1, ge=0)
+    clear: int = Field(default=0, ge=0)
+    strict_file_loading: bool = Field(default=False)
+    max_domain_labels: int = Field(default=32, ge=1)
+    max_pattern_match_domain_length: int = Field(default=253, ge=1)
+    deny_response_ip_fallback: str = Field(default="nxdomain")
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @plugin_aliases("filter", "block", "allow")
@@ -162,15 +165,28 @@ class Filter(BasePlugin):
         # avoid "InterfaceError: bad parameter or other API misuse" from
         # concurrent use of a single connection.
         self._db_lock = threading.Lock()
+        self._parse_warn_lock = threading.Lock()
+        self._last_parse_warn_ts = 0.0
 
         self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 600)  # 10 minutes
         raw_db_path = self.config.get("db_path")
         # None/empty db_path => per-instance in-memory database.
         self.db_path: str = raw_db_path or ":memory:"
+        self.strict_file_loading = bool(self.config.get("strict_file_loading", False))
+        self.max_domain_labels = max(1, int(self.config.get("max_domain_labels", 32)))
+        self.max_pattern_match_domain_length = max(
+            1, int(self.config.get("max_pattern_match_domain_length", 253))
+        )
 
         raw_default = self.config.get("default", "deny")
 
         self.default = str(raw_default).lower()
+        if self.default not in {"allow", "deny"}:
+            logger.warning(
+                "Filter: unknown default policy %r; defaulting to 'deny'",
+                raw_default,
+            )
+            self.default = "deny"
 
         # TTL used when synthesizing A/AAAA responses (e.g., when deny_response="ip")
         self._ttl = int(self.config.get("ttl", 300))
@@ -188,6 +204,9 @@ class Filter(BasePlugin):
         ).lower()
         self.deny_response_ip4: Optional[str] = self.config.get("deny_response_ip4")
         self.deny_response_ip6: Optional[str] = self.config.get("deny_response_ip6")
+        self.deny_response_ip_fallback: str = str(
+            self.config.get("deny_response_ip_fallback", "nxdomain")
+        ).lower()
 
         # Optional per-query-type allow/deny controls.
         #
@@ -251,12 +270,25 @@ class Filter(BasePlugin):
                 self.deny_response,
             )
             self.deny_response = "nxdomain"
+        if self.deny_response_ip_fallback not in valid_deny_responses:
+            logger.warning(
+                "Filter: unknown deny_response_ip_fallback %r; defaulting to 'nxdomain'",
+                self.deny_response_ip_fallback,
+            )
+            self.deny_response_ip_fallback = "nxdomain"
+        elif self.deny_response_ip_fallback == "ip":
+            logger.warning(
+                "Filter: deny_response_ip_fallback cannot be 'ip'; defaulting to 'nxdomain'"
+            )
+            self.deny_response_ip_fallback = "nxdomain"
 
         self.blocklist_files: List[str] = self._expand_globs(
-            list(self.config.get("blocked_domains_files", []))
+            list(self.config.get("blocked_domains_files", [])),
+            strict=self.strict_file_loading,
         )
         self.allowlist_files: List[str] = self._expand_globs(
-            list(self.config.get("allowed_domains_files", []))
+            list(self.config.get("allowed_domains_files", [])),
+            strict=self.strict_file_loading,
         )
 
         self.blocklist = self.config.get("blocked_domains", [])
@@ -268,18 +300,26 @@ class Filter(BasePlugin):
 
         # Compile regex patterns for domain filtering from inline config
         for pattern in self.config.get("blocked_patterns", []):
-            try:
-                self.blocked_patterns.append(re.compile(pattern, re.IGNORECASE))
-            except (
-                re.error
-            ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                logger.error("Invalid regex pattern '%s': %s", pattern, e)
+            compiled = self._compile_block_pattern(str(pattern))
+            if compiled is not None:
+                self.blocked_patterns.append(compiled)
 
         # Post-resolve (IP) filtering configuration
         # Maps IP networks/addresses to their actions
         self.blocked_networks: Dict[
             Union[ipaddress.IPv4Network, ipaddress.IPv6Network], Dict
         ] = {}
+        self._blocked_networks_by_prefix: Dict[
+            int,
+            Dict[
+                int,
+                List[Tuple[Union[ipaddress.IPv4Network, ipaddress.IPv6Network], Dict]],
+            ],
+        ] = {4: {}, 6: {}}
+        self._blocked_network_prefixes: Dict[int, Tuple[int, ...]] = {
+            4: tuple(),
+            6: tuple(),
+        }
         self.blocked_ips: Dict[
             Union[ipaddress.IPv4Address, ipaddress.IPv6Address], Dict
         ] = {}
@@ -376,18 +416,122 @@ class Filter(BasePlugin):
 
         # Load patterns/keywords/IPs from files (additive to inline config)
         for patfile in self._expand_globs(
-            list(self.config.get("blocked_patterns_files", []))
+            list(self.config.get("blocked_patterns_files", [])),
+            strict=self.strict_file_loading,
         ):
             for pat in self._load_patterns_from_file(patfile):
                 self.blocked_patterns.append(pat)
         for kwfile in self._expand_globs(
-            list(self.config.get("blocked_keywords_files", []))
+            list(self.config.get("blocked_keywords_files", [])),
+            strict=self.strict_file_loading,
         ):
             self.blocked_keywords.update(self._load_keywords_from_file(kwfile))
         for ipfile in self._expand_globs(
-            list(self.config.get("blocked_ips_files", []))
+            list(self.config.get("blocked_ips_files", [])),
+            strict=self.strict_file_loading,
         ):
             self._load_blocked_ips_from_file(ipfile)
+        self._rebuild_blocked_network_index()
+
+    @staticmethod
+    def _is_pattern_safe(pattern: str) -> bool:
+        """Brief: Heuristically reject regexes with common catastrophic-backtracking shapes.
+
+        Inputs:
+            pattern: Regex pattern text.
+        Outputs:
+            bool indicating whether the pattern is accepted for runtime matching.
+        """
+        text = str(pattern or "")
+        if not text or len(text) > 512:
+            return False
+        suspicious = (
+            r"\([^)]*[+*][^)]*\)[+*{]",
+            r"\(\?:[^)]*[+*][^)]*\)[+*{]",
+            r"\(\.\*\)\+",
+            r"\(\.\+\)\+",
+            r"\.\*.*\.\*",
+            r"\\[1-9]",
+        )
+        return not any(re.search(token, text) for token in suspicious)
+
+    def _compile_block_pattern(
+        self,
+        pattern: str,
+        *,
+        path: Optional[str] = None,
+        line_number: Optional[int] = None,
+        flags: int = re.IGNORECASE,
+    ) -> Optional[re.Pattern]:
+        """Brief: Compile a block pattern after safety checks.
+
+        Inputs:
+            pattern: Regex text.
+            path: Optional source file path.
+            line_number: Optional source line number.
+            flags: Regex compile flags.
+        Outputs:
+            Compiled pattern or None when rejected/invalid.
+        """
+        source = (
+            f"{path}:{line_number}"
+            if path is not None and line_number is not None
+            else "config"
+        )
+        if not self._is_pattern_safe(pattern):
+            logger.warning(
+                "Rejected potentially unsafe regex pattern from %s: %r",
+                source,
+                pattern,
+            )
+            return None
+        try:
+            return re.compile(pattern, flags)
+        except re.error as e:
+            logger.error("Invalid regex pattern from %s: %r (%s)", source, pattern, e)
+            return None
+
+    def _rebuild_blocked_network_index(self) -> None:
+        """Brief: Build per-version/prefix indexes for faster network rule lookup.
+
+        Inputs:
+            None.
+        Outputs:
+            None.
+        """
+        by_prefix: Dict[
+            int,
+            Dict[
+                int,
+                List[Tuple[Union[ipaddress.IPv4Network, ipaddress.IPv6Network], Dict]],
+            ],
+        ] = {4: {}, 6: {}}
+        for network, action in self.blocked_networks.items():
+            version = int(network.version)
+            prefixlen = int(network.prefixlen)
+            by_prefix.setdefault(version, {}).setdefault(prefixlen, []).append(
+                (network, action)
+            )
+        self._blocked_networks_by_prefix = by_prefix
+        self._blocked_network_prefixes = {
+            version: tuple(sorted(prefixes.keys(), reverse=True))
+            for version, prefixes in by_prefix.items()
+        }
+
+    def _should_log_parse_warning(self) -> bool:
+        """Brief: Rate-limit parse-failure warnings.
+
+        Inputs:
+            None.
+        Outputs:
+            bool indicating whether warning-level logging should be emitted.
+        """
+        now = time.time()
+        with self._parse_warn_lock:
+            if now - float(self._last_parse_warn_ts) >= 30.0:
+                self._last_parse_warn_ts = now
+                return True
+        return False
 
     @staticmethod
     def _normalize_domain(domain: object) -> str:
@@ -501,6 +645,14 @@ class Filter(BasePlugin):
                 return self._build_deny_decision_pre(qname, qtype, req, ctx)
 
         # Check regex patterns
+        if len(domain) > int(self.max_pattern_match_domain_length):
+            logger.warning(
+                "Domain '%s' exceeds max_pattern_match_domain_length=%d; denying request",
+                qname,
+                int(self.max_pattern_match_domain_length),
+            )
+            self.add_to_cache(domain_key, False)
+            return self._build_deny_decision_pre(qname, qtype, req, ctx)
         for pattern in self.blocked_patterns:
             if pattern.search(domain):
                 logger.debug(
@@ -549,8 +701,20 @@ class Filter(BasePlugin):
         try:
             response = DNSRecord.parse(response_wire)
         except Exception as e:
-            logger.error("Failed to parse DNS response: %s", e)
-            return PluginDecision(action=self.default)
+            if self._should_log_parse_warning():
+                logger.warning(
+                    "Filter: failed to parse DNS response for qname=%s client=%s: %s",
+                    qname,
+                    getattr(ctx, "client_ip", "unknown"),
+                    e,
+                )
+            else:
+                logger.debug(
+                    "Filter: failed to parse DNS response for qname=%s",
+                    qname,
+                    exc_info=True,
+                )
+            return PluginDecision(action="deny")
 
         blocked_ips_deny = []  # IPs that should cause NXDOMAIN
         blocked_ips_remove = []  # IPs that should be removed
@@ -714,6 +878,34 @@ class Filter(BasePlugin):
             return PluginDecision(action="override", response=reply.pack())
 
         if mode == "ip":
+            if qtype not in (QTYPE.A, QTYPE.AAAA):
+                fallback_mode = (
+                    getattr(self, "deny_response_ip_fallback", "nxdomain") or "nxdomain"
+                ).lower()
+                logger.debug(
+                    "Filter: deny_response='ip' unsupported qtype=%s; fallback=%s",
+                    qtype,
+                    fallback_mode,
+                )
+                if fallback_mode == "drop":
+                    return PluginDecision(action="drop")
+                if fallback_mode == "nxdomain":
+                    return PluginDecision(action="deny")
+                if fallback_mode in {"refused", "servfail", "noerror_empty", "nodata"}:
+                    try:
+                        request = DNSRecord.parse(raw_req)
+                    except Exception:
+                        return PluginDecision(action="deny")
+                    reply = request.reply()
+                    if fallback_mode == "refused":
+                        reply.header.rcode = RCODE.REFUSED
+                    elif fallback_mode == "servfail":
+                        reply.header.rcode = RCODE.SERVFAIL
+                    else:
+                        reply.header.rcode = RCODE.NOERROR
+                        reply.rr = []
+                    return PluginDecision(action="override", response=reply.pack())
+                return PluginDecision(action="deny")
             ipaddr: Optional[str] = None
             if qtype == QTYPE.A and self.deny_response_ip4:
                 ipaddr = str(self.deny_response_ip4)
@@ -899,10 +1091,14 @@ class Filter(BasePlugin):
         if ip_addr in self.blocked_ips:
             return self.blocked_ips[ip_addr]
 
-        # Check network ranges
-        for network, action in self.blocked_networks.items():
-            if ip_addr in network:
-                return action
+        # Check network ranges (most-specific prefixes first).
+        version = int(ip_addr.version)
+        prefixes = self._blocked_network_prefixes.get(version, tuple())
+        buckets = self._blocked_networks_by_prefix.get(version, {})
+        for prefixlen in prefixes:
+            for network, action in buckets.get(prefixlen, []):
+                if ip_addr in network:
+                    return action
 
         return None
 
@@ -919,7 +1115,7 @@ class Filter(BasePlugin):
         return self.conn
 
     @staticmethod
-    def _expand_globs(paths: List[str]) -> List[str]:
+    def _expand_globs(paths: List[str], strict: bool = True) -> List[str]:
         """
         Expand a list of file paths and globs into concrete file paths.
 
@@ -939,14 +1135,21 @@ class Filter(BasePlugin):
         """
         resolved: List[str] = []
         for p in paths:
-            matches = glob.glob(p)
+            matches = sorted(glob.glob(p))
             if matches:
                 resolved.extend(matches)
             else:
                 if os.path.exists(p):
                     resolved.append(p)
                 else:
-                    raise FileNotFoundError(f"No file(s) match pattern or path: {p}")
+                    if strict:
+                        raise FileNotFoundError(
+                            f"No file(s) match pattern or path: {p}"
+                        )
+                    logger.warning(
+                        "Filter: skipping missing list/pattern path %s (strict_file_loading=false)",
+                        p,
+                    )
         return resolved
 
     @staticmethod
@@ -999,33 +1202,34 @@ class Filter(BasePlugin):
         logger.info(f"Filter: adding {path} to the database")
         patterns: List[re.Pattern] = []
         for ln, text in self._iter_noncomment_lines(path):
-            try:
-                if text.lstrip().startswith("{"):
-                    try:
-                        obj = json.loads(text)
-                    except json.JSONDecodeError as e:
-                        logger.error("Invalid JSON in %s:%d: %s", path, ln, e)
-                        continue
-                    if not isinstance(obj, dict) or "pattern" not in obj:
-                        logger.error(
-                            "JSON pattern missing 'pattern' in %s:%d", path, ln
-                        )
-                        continue
-                    patt = str(obj["pattern"])
-                    flags = 0
-                    for f in obj.get("flags") or []:
-                        fs = str(f).upper()
-                        if fs == "IGNORECASE":
-                            flags |= re.IGNORECASE
-                    if flags == 0:
-                        flags = re.IGNORECASE
-                    patterns.append(re.compile(patt, flags))
-                else:
-                    patterns.append(re.compile(text, re.IGNORECASE))
-            except re.error as e:
-                logger.error(
-                    "Invalid regex pattern in %s:%d: %s (%s)", path, ln, text, e
+            if text.lstrip().startswith("{"):
+                try:
+                    obj = json.loads(text)
+                except json.JSONDecodeError as e:
+                    logger.error("Invalid JSON in %s:%d: %s", path, ln, e)
+                    continue
+                if not isinstance(obj, dict) or "pattern" not in obj:
+                    logger.error("JSON pattern missing 'pattern' in %s:%d", path, ln)
+                    continue
+                patt = str(obj["pattern"])
+                flags = 0
+                for f in obj.get("flags") or []:
+                    fs = str(f).upper()
+                    if fs == "IGNORECASE":
+                        flags |= re.IGNORECASE
+                if flags == 0:
+                    flags = re.IGNORECASE
+                compiled = self._compile_block_pattern(
+                    patt, path=path, line_number=ln, flags=flags
                 )
+                if compiled is not None:
+                    patterns.append(compiled)
+            else:
+                compiled = self._compile_block_pattern(
+                    text, path=path, line_number=ln, flags=re.IGNORECASE
+                )
+                if compiled is not None:
+                    patterns.append(compiled)
         return patterns
 
     def _load_keywords_from_file(self, path: str) -> Set[str]:
@@ -1191,7 +1395,13 @@ class Filter(BasePlugin):
         logger.debug("Creating blocked_domains database")
 
         # Clear blocklist, maybe
-        if self.config.get("clear", 1):
+        clear_db = bool(self.config.get("clear", 0))
+        if clear_db and self.db_path != ":memory:":
+            logger.warning(
+                "Filter: clear=1 with persistent db_path=%s will drop blocked_domains on startup",
+                self.db_path,
+            )
+        if clear_db:
             logger.debug("clearing allow/deny databases")
             self.conn.execute("DROP TABLE IF EXISTS blocked_domains")
 
@@ -1342,25 +1552,28 @@ class Filter(BasePlugin):
 
         # Prepare candidate suffixes from most specific to least specific.
         labels = normalized.split(".") if normalized else []
+        if len(labels) > int(self.max_domain_labels):
+            labels = labels[-int(self.max_domain_labels) :]
         candidates = (
             [".".join(labels[i:]) for i in range(len(labels))]
             if labels
             else [normalized]
         )
-
-        row = None
+        mode_by_domain: Dict[str, str] = {}
         with self._db_lock:
-            for cand in candidates:
-                cur = self.conn.execute(
-                    "SELECT mode FROM blocked_domains WHERE domain = ?",
-                    (cand,),
-                )
-                row = cur.fetchone()
-                if row is not None:
-                    break
+            placeholders = ",".join("?" for _ in candidates)
+            cur = self.conn.execute(
+                f"SELECT domain, mode FROM blocked_domains WHERE domain IN ({placeholders})",
+                tuple(candidates),
+            )
+            for domain_value, mode in cur.fetchall():
+                mode_by_domain[str(domain_value)] = str(mode)
 
         allowed: bool = self.default == "allow"
-        if row:
-            allowed = row[0] == "allow"
+        for candidate in candidates:
+            mode = mode_by_domain.get(candidate)
+            if mode is not None:
+                allowed = mode == "allow"
+                break
 
         return allowed

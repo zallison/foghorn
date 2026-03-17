@@ -346,8 +346,8 @@ def test_glob_expansion_for_new_files(tmp_path):
         assert p.pre_resolve("demo", QTYPE.A, b"", ctx).action == "deny"
 
 
-def test_missing_files_raise(tmp_path):
-    """Brief: setup() raises FileNotFoundError when a patterns file is missing.
+def test_missing_files_raise_when_strict_enabled(tmp_path):
+    """Brief: setup() raises FileNotFoundError when strict_file_loading is enabled.
 
     Inputs:
       - tmp_path: temporary directory for nonexistent patterns file.
@@ -358,12 +358,35 @@ def test_missing_files_raise(tmp_path):
     p = Filter(
         db_path=str(tmp_path / "bl.db"),
         blocked_patterns_files=[str(tmp_path / "nope.re")],
+        strict_file_loading=True,
     )
     with pytest.raises(FileNotFoundError):
         p.setup()
     # setup() may have opened the SQLite DB before failing; close defensively.
     if getattr(p, "conn", None) is not None:
         p.conn.close()
+
+
+def test_missing_files_are_skipped_when_not_strict(tmp_path):
+    """Brief: setup() skips missing files when strict_file_loading is disabled.
+
+    Inputs:
+      - tmp_path: temporary directory for nonexistent patterns file.
+
+    Outputs:
+      - None: Asserts setup succeeds and plugin remains usable.
+    """
+    p = Filter(
+        db_path=str(tmp_path / "bl_non_strict.db"),
+        blocked_patterns_files=[str(tmp_path / "nope.re")],
+        strict_file_loading=False,
+        default="allow",
+    )
+    p.setup()
+
+    with closing(p.conn):
+        ctx = PluginContext(client_ip="1.2.3.4")
+        assert p.pre_resolve("ok.example", QTYPE.A, b"", ctx).action == "skip"
 
 
 def test_expand_globs_fallback_to_os_path_exists(tmp_path, monkeypatch):
