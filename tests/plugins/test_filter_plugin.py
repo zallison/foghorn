@@ -406,13 +406,13 @@ def test_post_resolve_replace_version_mismatch_and_invalid_runtime(tmp_path):
 
 def test_post_resolve_non_a_aaaa_and_parse_error(tmp_path):
     """
-    Brief: Non-A/AAAA qtype returns None; parse error returns default action.
+    Brief: Non-A/AAAA qtype returns None; parse error returns deterministic deny.
 
     Inputs:
       - qtype: MX for None; bad wire to force parse error
 
     Outputs:
-      - None: Asserts None and default decision
+      - None: Asserts None and deterministic deny decision.
     """
     db = tmp_path / "bl.db"
     p = Filter(db_path=str(db), blocked_ips=["1.2.3.4"], default="allow")
@@ -425,9 +425,9 @@ def test_post_resolve_non_a_aaaa_and_parse_error(tmp_path):
         res = plugin.post_resolve("ex.com", QTYPE.MX, b"", ctx)
         assert res is None
 
-        # Parse error returns default action
+        # Parse error returns deterministic deny action
         dec = plugin.post_resolve("ex.com", QTYPE.A, b"not-dns", ctx)
-        assert dec.action == "allow"
+        assert dec.action == "deny"
 
 
 def test_add_to_cache_and_get_ip_action(tmp_path):
@@ -457,6 +457,7 @@ def test_add_to_cache_and_get_ip_action(tmp_path):
         plugin.blocked_networks[ipaddress.ip_network("10.0.0.0/8")] = {
             "action": "remove"
         }
+        plugin._rebuild_blocked_network_index()
         assert (
             plugin._get_ip_action(ipaddress.ip_address("1.2.3.4"))["action"] == "deny"
         )
@@ -970,7 +971,7 @@ def test_pre_resolve_ip_mode_for_aaaa_and_other_qtypes(tmp_path):
       - tmp_path fixture.
 
     Outputs:
-      - None: Asserts AAAA and non-A/AAAA paths build override responses and honor TTL.
+      - None: Asserts AAAA override and fallback deny mode for non-A/AAAA qtypes.
     """
     db = tmp_path / "bl_ipmode.db"
     p = Filter(
@@ -1000,7 +1001,65 @@ def test_pre_resolve_ip_mode_for_aaaa_and_other_qtypes(tmp_path):
 
         dec_txt = p.pre_resolve("blocked.com", QTYPE.TXT, wiretxt, ctx)
         assert isinstance(dec_txt, PluginDecision)
-        assert dec_txt.action == "override"
+        assert dec_txt.action == "deny"
+
+
+def test_pre_resolve_rejects_unsafe_regex_patterns(tmp_path):
+    """Brief: Unsafe blocked_patterns are rejected during setup.
+
+    Inputs:
+      - blocked_patterns containing catastrophic-style regex.
+    Outputs:
+      - None: Asserts unsafe pattern is skipped while safe pattern still applies.
+    """
+    db = tmp_path / "bl_unsafe_regex.db"
+    p = Filter(
+        db_path=str(db),
+        default="allow",
+        blocked_patterns=["(a+)+$", "^safe\\."],
+    )
+    p.setup()
+    ctx = PluginContext(client_ip="1.2.3.4")
+
+    with closing(p.conn):
+        assert p.pre_resolve("safe.example", QTYPE.A, b"", ctx).action == "deny"
+        assert p.pre_resolve("aaaa.example", QTYPE.A, b"", ctx).action == "skip"
+
+
+def test_is_allowed_uses_single_query_and_respects_suffix_priority(
+    tmp_path, monkeypatch
+):
+    """Brief: is_allowed uses one DB query while preserving most-specific suffix semantics.
+
+    Inputs:
+      - allow for example.com; deny for sub.example.com.
+    Outputs:
+      - None: Asserts one SQL round-trip and most-specific match behavior.
+    """
+    db = tmp_path / "bl_is_allowed.db"
+    p = Filter(db_path=str(db), default="deny")
+    p.setup()
+
+    with closing(p.conn):
+        p._db_insert_domain("example.com", "config", "allow")
+        p._db_insert_domain("sub.example.com", "config", "deny")
+        p.conn.commit()
+
+        execute_calls = {"count": 0}
+        original_conn = p.conn
+
+        class _ConnWrapper:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, *args, **kwargs):
+                execute_calls["count"] += 1
+                return self._inner.execute(*args, **kwargs)
+
+        monkeypatch.setattr(p, "conn", _ConnWrapper(original_conn))
+
+        assert p.is_allowed("sub.example.com") is False
+        assert execute_calls["count"] == 1
 
 
 def test_build_deny_decision_pre_unknown_mode_defaults_to_deny(tmp_path):
