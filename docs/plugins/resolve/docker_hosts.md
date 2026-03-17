@@ -15,6 +15,11 @@ Typical uses:
 - Make containers reachable via DNS (e.g. `web.docker.example`).
 - Provide human-readable inventory of containers via TXT lookups.
 
+Security notes:
+- Keep `expose_txt_in_additional` disabled on untrusted/public resolvers to
+  reduce amplification and topology disclosure risk.
+- Prefer `unix://` sockets or TLS-protected Docker TCP endpoints.
+
 ## Basic configuration
 
 ```yaml path=null start=null
@@ -61,6 +66,9 @@ plugins:
 	  # When true, publish TXT summaries:
 	  #   _containers.<suffix> and _hosts.<suffix>
 	  discovery: true
+	  # When true, include host TXT in A/AAAA ADDITIONAL replies.
+	  # Default false for safer response sizes and reduced metadata exposure.
+	  expose_txt_in_additional: false
 
 	  # Optional default suffix for container names, e.g. 'web' -> 'web.docker.zaa'
 	  suffix: docker.${DOMAIN}
@@ -89,6 +97,10 @@ plugins:
 		- url: tcp://docker1.lan:2375     # A front end like haproxy looking for server.docker.lan
 		  use_ipv4: 192.168.12.21          # and only receive healthy targets.  If there are no
 											   # results then they can look for server.backup.lan
+		  tls_verify: true
+		  tls_ca: /etc/docker/ca.pem
+		  tls_cert: /etc/docker/cert.pem
+		  tls_key: /etc/docker/key.pem
 		- url: tcp://docker2.lan:2375
 		  use_ipv4: 192.168.12.22
 
@@ -126,6 +138,12 @@ Top-level `config` keys (described by `DockerHostsConfig`):
 	- `suffix: str | null`
 	  - Optional DNS suffix to apply to containers from this endpoint. When
 		omitted/empty, the plugin-level `suffix` (if any) is used.
+	- `tls_verify: bool`
+	  - Enable TLS server verification for TCP Docker endpoints.
+	- `tls_cert: str | null`, `tls_key: str | null`
+	  - Optional client certificate/key paths.
+	- `tls_ca: str | null`
+	  - Optional CA bundle path used to verify daemon certs.
 
 - `ttl: int`
   - Plugin-level default TTL when an endpoint does not define its own.
@@ -136,6 +154,9 @@ Top-level `config` keys (described by `DockerHostsConfig`):
 - `discovery: bool`
   - When `true`, publish TXT summaries under special names like
 	`_containers.<suffix>` and `_hosts.<suffix>`.
+- `expose_txt_in_additional: bool`
+  - When `true`, include TXT summaries in A/AAAA `ADDITIONAL` records.
+  - Default is `false` to reduce amplification/disclosure risk.
 - `suffix: str | null`
   - Default DNS suffix to append to container names, e.g. `docker.zaa`.
   - Container name `web` becomes `web.docker.zaa`.
@@ -160,6 +181,8 @@ Top-level `config` keys (described by `DockerHostsConfig`):
   endpoints.
 - The plugin remains usable even when the `docker` SDK is not installed, but it
   will log a warning and behave as inert until the SDK becomes available.
+- For `tcp://` endpoints without TLS config, the plugin logs a warning because
+  the Docker API connection is plaintext.
 
 ### Common BasePlugin options
 
