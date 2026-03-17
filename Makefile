@@ -268,13 +268,13 @@ ssl-clean-keys:
 
 
 # ----------------
-# :End| openssl keys:
+# :End:openssl keys:
 # ----------------
 
 
 
 # ---------------
-# :Docker|Helpers:
+# :Docker:Helpers:
 # ---------------
 .PHONY: docker
 docker: docker-build docker-run docker-logs

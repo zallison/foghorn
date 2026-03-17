@@ -2,7 +2,6 @@
 
 # Use the latest official Python image
 FROM python
-#:slim
 
 # Set working directory inside the container
 WORKDIR /foghorn
@@ -24,7 +23,7 @@ RUN pip install --root-user-action=ignore "."
 
 ## Suggested expose and mappings
 # Listens on ports > 1024 by default.
-# 53→53353 # Standard UDP/TCP
+# 53→5335 # Default UDP/TCP
 EXPOSE 5335/tcp
 EXPOSE 5335/udp
 
