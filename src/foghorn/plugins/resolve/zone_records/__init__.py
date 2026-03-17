@@ -8,12 +8,13 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import socket
 import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
 from dnslib import OPCODE, QTYPE, RCODE, DNSHeader, DNSRecord
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from foghorn.plugins.resolve.base import (
     BasePlugin,
@@ -22,7 +23,6 @@ from foghorn.plugins.resolve.base import (
     plugin_aliases,
 )
 from foghorn.servers.dns_runtime_state import DNSRuntimeState
-from foghorn.utils.register_caches import registered_lru_cached
 
 from . import (
     axfr_polling,
@@ -38,6 +38,14 @@ logger = logging.getLogger(__name__)
 _NOTIFY_LOGGER = logging.getLogger("foghorn.server")
 _NOTIFY_BG_LOCK = threading.Lock()
 _NOTIFY_REFRESH_INFLIGHT: set[str] = set()
+_NOTIFY_REFRESH_STATE: Dict[str, Dict[str, object]] = {}
+_NOTIFY_RESOLVE_CACHE_LOCK = threading.Lock()
+_NOTIFY_RESOLVE_CACHE: Dict[tuple[str, str, str], tuple[float, Optional[Dict]]] = {}
+_NOTIFY_RESOLVE_CACHE_TTL_SECONDS = 30.0
+_NOTIFY_RATE_LIMIT_LOCK = threading.Lock()
+_NOTIFY_RATE_LIMIT_STATE: Dict[str, Dict[str, float]] = {}
+_NOTIFY_RATE_LIMIT_PER_SECOND = 1.0
+_NOTIFY_RATE_LIMIT_BURST = 20.0
 
 
 class UpdateTsigKeyConfig(BaseModel):
@@ -88,8 +96,7 @@ class UpdateTsigKeyConfig(BaseModel):
         default=None, description="File paths containing blocked IPs."
     )
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class UpdatePskTokenConfig(BaseModel):
@@ -134,8 +141,7 @@ class UpdatePskTokenConfig(BaseModel):
         default=None, description="File paths containing blocked IPs."
     )
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class UpdateZoneApexConfig(BaseModel):
@@ -226,8 +232,7 @@ class UpdateZoneApexConfig(BaseModel):
         """
         return str(v).lstrip(".")
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class PersistenceConfig(BaseModel):
@@ -286,8 +291,7 @@ class PersistenceConfig(BaseModel):
         description="Tombstone ratio threshold for compaction.",
     )
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class ReplicationConfig(BaseModel):
@@ -327,8 +331,7 @@ class ReplicationConfig(BaseModel):
         description="Reject client UPDATE on replica nodes (false=forward to owner).",
     )
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class SecurityConfig(BaseModel):
@@ -389,8 +392,7 @@ class SecurityConfig(BaseModel):
         description="Token bucket rate limit per TSIG key (requests per minute).",
     )
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class DnsUpdateConfig(BaseModel):
@@ -428,8 +430,7 @@ class DnsUpdateConfig(BaseModel):
         description="Security limits and rate limiting.",
     )
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class AxfrUpstreamConfig(BaseModel):
@@ -462,8 +463,7 @@ class AxfrUpstreamConfig(BaseModel):
     )
     ca_file: Optional[str] = Field(default=None, description="CA bundle path for DoT.")
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class AxfrZoneConfig(BaseModel):
@@ -509,8 +509,7 @@ class AxfrZoneConfig(BaseModel):
         ),
     )
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class ZoneDnssecNsec3Config(BaseModel):
@@ -537,8 +536,7 @@ class ZoneDnssecNsec3Config(BaseModel):
         description="NSEC3 iterations value (RFC 5155).",
     )
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class ZoneDnssecSigningConfig(BaseModel):
@@ -634,8 +632,7 @@ class ZoneDnssecSigningConfig(BaseModel):
             )
         return normalized
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class BindZoneFileConfig(BaseModel):
@@ -668,8 +665,7 @@ class BindZoneFileConfig(BaseModel):
         ),
     )
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class ZoneRecordsConfig(BaseModel):
@@ -695,6 +691,9 @@ class ZoneRecordsConfig(BaseModel):
       - ttl: Default TTL in seconds.
       - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords
         should return NXDOMAIN/NODATA instead of falling through to upstream.
+      - any_query_enabled: Allow QTYPE=ANY responses (default False).
+      - any_answer_rrset_limit: Max RRsets returned for QTYPE=ANY responses.
+      - any_answer_record_limit: Max total records returned for QTYPE=ANY responses.
       - axfr_zones: Optional list of AXFR-backed zones.
 
     Outputs:
@@ -732,6 +731,20 @@ class ZoneRecordsConfig(BaseModel):
             "the internal mapping, instead of falling through to upstream resolution."
         ),
     )
+    any_query_enabled: bool = Field(
+        default=False,
+        description="Allow QTYPE=ANY responses from ZoneRecords.",
+    )
+    any_answer_rrset_limit: int = Field(
+        default=16,
+        ge=1,
+        description="Maximum RRsets returned for QTYPE=ANY responses.",
+    )
+    any_answer_record_limit: int = Field(
+        default=64,
+        ge=1,
+        description="Maximum total records returned for QTYPE=ANY responses.",
+    )
     axfr_zones: Optional[List[AxfrZoneConfig]] = None
     axfr_notify: Optional[List[AxfrUpstreamConfig]] = Field(
         default=None,
@@ -761,29 +774,168 @@ class ZoneRecordsConfig(BaseModel):
     dnssec_signing: Optional[ZoneDnssecSigningConfig] = None
     dns_update: Optional[DnsUpdateConfig] = None
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
-@registered_lru_cached(maxsize=1024)
+def _upstream_fingerprint(upstreams: List[Dict]) -> str:
+    """Brief: Build a deterministic fingerprint for candidate upstreams.
+
+    Inputs:
+      - upstreams: List of upstream configuration mappings.
+
+    Outputs:
+      - str: Stable fingerprint for short-lived auth cache keys.
+    """
+    items: List[str] = []
+    for upstream in upstreams or []:
+        if not isinstance(upstream, dict):
+            continue
+        host = str(upstream.get("host", "")).strip().lower()
+        port = str(upstream.get("port", ""))
+        transport = str(upstream.get("transport", "")).strip().lower()
+        server_name = str(upstream.get("server_name", "")).strip().lower()
+        items.append(f"{host}|{port}|{transport}|{server_name}")
+    if not items:
+        return ""
+    return "||".join(sorted(items))
+
+
+def _is_ip_literal(value: str) -> bool:
+    """Brief: Check whether text is a valid IPv4/IPv6 literal.
+
+    Inputs:
+      - value: Hostname or IP text.
+
+    Outputs:
+      - bool: True when value parses as an IP literal.
+    """
+    try:
+        ipaddress.ip_address(str(value).strip())
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_host_ips(hostname: str) -> set[str]:
+    """Brief: Resolve a hostname to IPv4/IPv6 addresses.
+
+    Inputs:
+      - hostname: DNS hostname to resolve.
+
+    Outputs:
+      - set[str]: Resolved IP addresses, empty set on lookup failure.
+    """
+    resolved: set[str] = set()
+    try:
+        info = socket.getaddrinfo(
+            str(hostname),
+            None,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM,
+        )
+    except Exception:
+        return resolved
+
+    for entry in info or []:
+        try:
+            sockaddr = entry[4]
+            ip_text = str(sockaddr[0]).strip()
+        except Exception:
+            continue
+        if ip_text:
+            resolved.add(ip_text)
+    return resolved
+
+
+def _sender_matches_upstream(sender_ip: str, upstream: Dict) -> bool:
+    """Brief: Validate sender IP against one upstream without PTR trust.
+
+    Inputs:
+      - sender_ip: Sender IPv4/IPv6 address string.
+      - upstream: Upstream mapping with host metadata.
+
+    Outputs:
+      - bool: True when sender matches upstream by IP literal or forward DNS.
+    """
+    if not isinstance(upstream, dict):
+        return False
+    host = upstream.get("host")
+    if not isinstance(host, str):
+        return False
+
+    sender = str(sender_ip).strip()
+    host_text = host.strip()
+    if not sender or not host_text:
+        return False
+
+    if _is_ip_literal(host_text):
+        return host_text.lower() == sender.lower()
+    return sender in _resolve_host_ips(host_text)
+
+
+def _resolve_notify_sender_upstream_from_candidates(
+    sender_ip: str,
+    upstreams: List[Dict],
+    cache_scope: str,
+) -> Optional[Dict]:
+    """Brief: Match sender to one upstream with TTL-bounded caching.
+
+    Inputs:
+      - sender_ip: Sender IPv4/IPv6 address text.
+      - upstreams: Candidate upstream mappings.
+      - cache_scope: Cache namespace (global vs per-zone).
+
+    Outputs:
+      - dict | None: Matching upstream mapping, or None when unauthorized.
+    """
+    if not sender_ip:
+        return None
+    try:
+        sender = str(sender_ip).strip()
+    except Exception:
+        sender = str(sender_ip)
+    if not sender:
+        return None
+
+    candidates = [u for u in (upstreams or []) if isinstance(u, dict)]
+    if not candidates:
+        return None
+
+    cache_key = (sender, str(cache_scope), _upstream_fingerprint(candidates))
+    now = time.time()
+    with _NOTIFY_RESOLVE_CACHE_LOCK:
+        cached = _NOTIFY_RESOLVE_CACHE.get(cache_key)
+        if cached is not None:
+            expires_at, result = cached
+            if now < float(expires_at):
+                return result
+            _NOTIFY_RESOLVE_CACHE.pop(cache_key, None)
+
+    match: Optional[Dict] = None
+    for upstream in candidates:
+        if _sender_matches_upstream(sender, upstream):
+            match = upstream
+            break
+
+    with _NOTIFY_RESOLVE_CACHE_LOCK:
+        _NOTIFY_RESOLVE_CACHE[cache_key] = (
+            now + float(_NOTIFY_RESOLVE_CACHE_TTL_SECONDS),
+            match,
+        )
+    return match
+
+
 def _resolve_notify_sender_upstream(sender_ip: str) -> Optional[Dict]:
-    """Brief: Map a NOTIFY sender IP address to a configured upstream.
+    """Brief: Map a NOTIFY sender IP address to a configured global upstream.
 
     Inputs:
       - sender_ip: String IPv4/IPv6 address of the NOTIFY sender.
 
     Outputs:
-      - dict | None: Matching upstream configuration mapping when the sender is
-        recognized as one of the configured upstreams, otherwise None.
+      - dict | None: Matching upstream configuration mapping when sender is
+        recognized among configured global upstreams, otherwise None.
     """
     if not sender_ip:
-        return None
-
-    try:
-        ip_text = str(sender_ip).strip()
-    except Exception:
-        ip_text = str(sender_ip)
-    if not ip_text:
         return None
 
     try:
@@ -791,89 +943,120 @@ def _resolve_notify_sender_upstream(sender_ip: str) -> Optional[Dict]:
 
         snap = get_runtime_snapshot()
         upstreams = list(snap.upstream_addrs or [])
-        timeout_ms = int(snap.timeout_ms)
     except Exception:
         upstreams = []
-        timeout_ms = 2000
     if not upstreams:
         return None
+    return _resolve_notify_sender_upstream_from_candidates(
+        sender_ip,
+        upstreams,
+        cache_scope="global-upstreams",
+    )
 
-    lowered_ip = ip_text.lower()
 
-    # Fast path: direct IP match against upstream host values.
-    for up in upstreams:
-        if not isinstance(up, dict):
-            continue
-        host = up.get("host")
-        if not isinstance(host, str):
-            continue
-        if host.strip().lower() == lowered_ip:
-            return up
+def _resolve_notify_sender_for_zone(
+    plugin: "ZoneRecords",
+    zone_name: str,
+    sender_ip: str,
+) -> Optional[Dict]:
+    """Brief: Resolve and authorize a NOTIFY sender for a specific AXFR zone.
 
-    # Slow path: perform a PTR lookup on the sender IP and try to match the
-    # resulting hostnames against upstream host fields.
+    Inputs:
+      - plugin: ZoneRecords plugin instance.
+      - zone_name: NOTIFY qname interpreted as zone apex.
+      - sender_ip: Sender IPv4/IPv6 address text.
+
+    Outputs:
+      - dict | None: Authorized upstream mapping for this zone, otherwise None.
+    """
     try:
-        addr = ipaddress.ip_address(ip_text)
-        rev_name = addr.reverse_pointer.rstrip(".")
+        zone_norm = str(zone_name).rstrip(".").lower()
     except Exception:
+        zone_norm = str(zone_name).lower()
+    if not zone_norm:
         return None
 
-    try:
-        query = DNSRecord.question(rev_name, qtype=QTYPE.PTR)
-    except Exception:
-        return None
-
-    try:
-        from foghorn.servers.server import send_query_with_failover
-
-        resp_wire, _used_up, _reason = send_query_with_failover(
-            query,
-            upstreams,
-            timeout_ms,
-            rev_name,
-            QTYPE.PTR,
-        )
-    except Exception:
-        return None
-
-    if resp_wire is None:
-        return None
-
-    try:
-        resp = DNSRecord.parse(resp_wire)
-    except Exception:
-        return None
-
-    ptr_names: List[str] = []
-    try:
-        for rr in getattr(resp, "rr", []) or []:
-            if getattr(rr, "rtype", None) != QTYPE.PTR:
-                continue
-            try:
-                target = str(getattr(rr, "rdata", "")).rstrip(".").lower()
-            except Exception:
-                target = str(getattr(rr, "rdata", "")).lower()
-            if target:
-                ptr_names.append(target)
-    except Exception:
-        ptr_names = []
-
-    if not ptr_names:
-        return None
-
-    for up in upstreams:
-        if not isinstance(up, dict):
-            continue
-        host = up.get("host")
-        if not isinstance(host, str):
+    zone_cfg = list(getattr(plugin, "_axfr_zones", []) or [])
+    for entry in zone_cfg:
+        if not isinstance(entry, dict):
             continue
         try:
-            host_norm = host.rstrip(".").lower()
+            entry_zone = str(entry.get("zone", "")).rstrip(".").lower()
         except Exception:
-            host_norm = str(host).lower()
-        if host_norm and host_norm in ptr_names:
-            return up
+            entry_zone = str(entry.get("zone", "")).lower()
+        if entry_zone != zone_norm:
+            continue
+        upstreams = list(entry.get("upstreams") or [])
+        return _resolve_notify_sender_upstream_from_candidates(
+            sender_ip,
+            upstreams,
+            cache_scope=f"zone:{zone_norm}",
+        )
     return None
+
+
+def _get_zone_notify_min_refresh_seconds(
+    plugin: "ZoneRecords",
+    zone_norm: str,
+) -> float:
+    """Brief: Read the per-zone NOTIFY refresh cooldown from AXFR config.
+
+    Inputs:
+      - plugin: ZoneRecords plugin instance.
+      - zone_norm: Lower-cased zone apex without trailing dot.
+
+    Outputs:
+      - float: Non-negative minimum seconds between NOTIFY-triggered refreshes.
+    """
+    zone_cfg = list(getattr(plugin, "_axfr_zones", []) or [])
+    for entry in zone_cfg:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            entry_zone = str(entry.get("zone", "")).rstrip(".").lower()
+        except Exception:
+            entry_zone = str(entry.get("zone", "")).lower()
+        if entry_zone != zone_norm:
+            continue
+        try:
+            return max(0.0, float(entry.get("minimum_reload_time", 0.0) or 0.0))
+        except Exception:
+            return 0.0
+    return 0.0
+
+
+def _notify_sender_is_rate_limited(sender_ip: str) -> bool:
+    """Brief: Apply a token-bucket limiter for inbound NOTIFY sender IPs.
+
+    Inputs:
+      - sender_ip: Sender IPv4/IPv6 address string.
+
+    Outputs:
+      - bool: True when NOTIFY should be refused due to sender rate limit.
+    """
+    key = str(sender_ip or "").strip() or "unknown"
+    now = time.time()
+    with _NOTIFY_RATE_LIMIT_LOCK:
+        state = _NOTIFY_RATE_LIMIT_STATE.get(key)
+        if not isinstance(state, dict):
+            state = {"tokens": _NOTIFY_RATE_LIMIT_BURST, "updated_at": now}
+            _NOTIFY_RATE_LIMIT_STATE[key] = state
+
+        last = float(state.get("updated_at", now))
+        tokens = float(state.get("tokens", _NOTIFY_RATE_LIMIT_BURST))
+        elapsed = max(0.0, now - last)
+        tokens = min(
+            _NOTIFY_RATE_LIMIT_BURST,
+            tokens + elapsed * _NOTIFY_RATE_LIMIT_PER_SECOND,
+        )
+        if tokens < 1.0:
+            state["tokens"] = tokens
+            state["updated_at"] = now
+            return True
+
+        state["tokens"] = tokens - 1.0
+        state["updated_at"] = now
+        return False
 
 
 def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
@@ -930,9 +1113,11 @@ def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
             ]
         except Exception:
             continue
-
         if zone_norm not in zones:
             continue
+
+        zone_key = f"{id(plugin)}:{zone_norm}"
+        zone_min_reload = _get_zone_notify_min_refresh_seconds(plugin, zone_norm)
 
         def _worker(p=plugin) -> None:
             """Brief: Background worker that re-runs AXFR-backed loads.
@@ -956,23 +1141,111 @@ def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
                     exc_info=True,
                 )
 
+        def _schedule_coalesced_refresh(delay_seconds: float) -> None:
+            """Brief: Schedule one deferred refresh for a zone after cooldown.
+
+            Inputs:
+              - delay_seconds: Delay before running the deferred refresh.
+
+            Outputs:
+              - None
+            """
+
+            def _timer_fire() -> None:
+                with _NOTIFY_BG_LOCK:
+                    state = _NOTIFY_REFRESH_STATE.setdefault(zone_key, {})
+                    state["timer"] = None
+                    if zone_key in _NOTIFY_REFRESH_INFLIGHT:
+                        state["pending"] = True
+                        return
+                    _NOTIFY_REFRESH_INFLIGHT.add(zone_key)
+                    state["pending"] = False
+                    state["next_allowed_at"] = time.time() + float(zone_min_reload)
+
+                def _wrapped() -> None:
+                    try:
+                        _worker()
+                    finally:
+                        with _NOTIFY_BG_LOCK:
+                            _NOTIFY_REFRESH_INFLIGHT.discard(zone_key)
+                            state = _NOTIFY_REFRESH_STATE.setdefault(zone_key, {})
+                            pending = bool(state.get("pending", False))
+                            if pending:
+                                state["pending"] = False
+                                now_inner = time.time()
+                                next_allowed_at = float(
+                                    state.get("next_allowed_at", now_inner)
+                                )
+                                delay_next = max(0.0, next_allowed_at - now_inner)
+                            else:
+                                delay_next = 0.0
+                        if pending:
+                            _schedule_coalesced_refresh(delay_next)
+
+                try:
+                    submit_bg(zone_key, _wrapped)
+                except Exception:  # pragma: no cover - defensive logging only
+                    with _NOTIFY_BG_LOCK:
+                        _NOTIFY_REFRESH_INFLIGHT.discard(zone_key)
+                    logger.warning(
+                        "Failed to schedule AXFR refresh for NOTIFY %s via upstream %r",
+                        zone_norm,
+                        upstream,
+                        exc_info=True,
+                    )
+
+            timer = threading.Timer(max(0.0, float(delay_seconds)), _timer_fire)
+            timer.daemon = True
+            with _NOTIFY_BG_LOCK:
+                state = _NOTIFY_REFRESH_STATE.setdefault(zone_key, {})
+                if state.get("timer") is not None:
+                    return
+                state["timer"] = timer
+            timer.start()
+
         with _NOTIFY_BG_LOCK:
-            if zone_norm in _NOTIFY_REFRESH_INFLIGHT:
+            state = _NOTIFY_REFRESH_STATE.setdefault(zone_key, {})
+            now = time.time()
+            next_allowed_at = float(state.get("next_allowed_at", 0.0))
+            if zone_key in _NOTIFY_REFRESH_INFLIGHT:
+                state["pending"] = True
                 continue
-            _NOTIFY_REFRESH_INFLIGHT.add(zone_norm)
+            if next_allowed_at > now:
+                state["pending"] = True
+                delay = next_allowed_at - now
+            else:
+                _NOTIFY_REFRESH_INFLIGHT.add(zone_key)
+                state["pending"] = False
+                state["next_allowed_at"] = now + float(zone_min_reload)
+                delay = 0.0
+
+        if delay > 0.0:
+            _schedule_coalesced_refresh(delay)
+            continue
 
         def _wrapped() -> None:
             try:
                 _worker()
             finally:
                 with _NOTIFY_BG_LOCK:
-                    _NOTIFY_REFRESH_INFLIGHT.discard(zone_norm)
+                    _NOTIFY_REFRESH_INFLIGHT.discard(zone_key)
+                    state = _NOTIFY_REFRESH_STATE.setdefault(zone_key, {})
+                    pending = bool(state.get("pending", False))
+                    if pending:
+                        state["pending"] = False
+                        now_inner = time.time()
+                        next_allowed_at = float(state.get("next_allowed_at", now_inner))
+                        delay_next = max(0.0, next_allowed_at - now_inner)
+                    else:
+                        delay_next = 0.0
+                if pending:
+                    _schedule_coalesced_refresh(delay_next)
 
         try:
-            submit_bg(zone_norm, _wrapped)
+            submit_bg(zone_key, _wrapped)
         except Exception:  # pragma: no cover - defensive logging only
             with _NOTIFY_BG_LOCK:
-                _NOTIFY_REFRESH_INFLIGHT.discard(zone_norm)
+                _NOTIFY_REFRESH_INFLIGHT.discard(zone_key)
             logger.warning(
                 "Failed to schedule AXFR refresh for NOTIFY %s via upstream %r",
                 zone_norm,
@@ -999,15 +1272,37 @@ def _build_notify_response(
     Outputs:
       - bytes: Packed DNS response wire payload.
     """
-    req = DNSRecord.parse(req_wire)
-    reply = req.reply()
-    reply.header.rcode = int(rcode)
+    try:
+        req = DNSRecord.parse(req_wire)
+    except Exception:
+        req = None
+
+    if req is not None:
+        reply = req.reply()
+        reply.header.rcode = int(rcode)
+    else:
+        req_id = 0
+        try:
+            if isinstance(req_wire, (bytes, bytearray)) and len(req_wire) >= 2:
+                req_id = int.from_bytes(bytes(req_wire[:2]), "big")
+        except Exception:
+            req_id = 0
+        reply = DNSRecord(
+            DNSHeader(
+                id=req_id,
+                qr=1,
+                aa=1,
+                ra=0,
+                rcode=int(rcode),
+            )
+        )
 
     try:
         from foghorn.servers import server as server_mod
 
-        server_mod._echo_client_edns(req, reply)
-        if ede_code is not None:
+        if req is not None:
+            server_mod._echo_client_edns(req, reply)
+        if req is not None and ede_code is not None:
             server_mod._attach_ede_option(
                 req,
                 reply,
@@ -1021,7 +1316,8 @@ def _build_notify_response(
     try:
         from foghorn.servers import server as server_mod
 
-        wire = server_mod._set_response_id(wire, req.header.id)
+        if req is not None:
+            wire = server_mod._set_response_id(wire, req.header.id)
     except Exception:
         pass
     return wire
@@ -1052,7 +1348,17 @@ def _handle_notify_opcode(
     if int(opcode) != int(getattr(OPCODE, "NOTIFY", 4)):
         return None
 
-    req_parsed = DNSRecord.parse(req)
+    try:
+        req_parsed = DNSRecord.parse(req)
+    except Exception:
+        return PluginDecision(
+            action="override",
+            response=_build_notify_response(
+                req,
+                int(RCODE.FORMERR),
+                ede_text="Malformed NOTIFY message",
+            ),
+        )
     if req_parsed.questions:
         q0 = req_parsed.questions[0]
         notify_qname = str(q0.qname).rstrip(".")
@@ -1082,9 +1388,19 @@ def _handle_notify_opcode(
         client_ip = str(getattr(ctx, "client_ip", "") or "")
     except Exception:
         client_ip = ""
+    if _notify_sender_is_rate_limited(client_ip):
+        return PluginDecision(
+            action="override",
+            response=_build_notify_response(
+                req,
+                int(RCODE.REFUSED),
+                ede_code=15,
+                ede_text="NOTIFY sender rate limited",
+            ),
+        )
 
     try:
-        upstream = _resolve_notify_sender_upstream(client_ip)
+        upstream = _resolve_notify_sender_for_zone(plugin, notify_qname, client_ip)
     except Exception:
         upstream = None
 
@@ -1095,7 +1411,7 @@ def _handle_notify_opcode(
                 req,
                 int(RCODE.REFUSED),
                 ede_code=15,
-                ede_text="NOTIFY sender not configured as upstream",
+                ede_text="NOTIFY sender not authorized for zone upstreams",
             ),
         )
 
@@ -1227,6 +1543,19 @@ class ZoneRecords(BasePlugin):
         self._nxdomain_zones = helpers.normalize_zone_suffixes(
             self.config.get("nxdomain_zones")
         )
+        self._any_query_enabled = bool(self.config.get("any_query_enabled", False))
+        try:
+            self._any_answer_rrset_limit = max(
+                1, int(self.config.get("any_answer_rrset_limit", 16))
+            )
+        except (TypeError, ValueError):
+            self._any_answer_rrset_limit = 16
+        try:
+            self._any_answer_record_limit = max(
+                1, int(self.config.get("any_answer_record_limit", 64))
+            )
+        except (TypeError, ValueError):
+            self._any_answer_record_limit = 64
 
         # Normalize AXFR and NOTIFY configuration
         self._axfr_zones = helpers.normalize_axfr_config(axfr_cfg)

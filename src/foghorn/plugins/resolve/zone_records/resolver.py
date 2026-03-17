@@ -6,6 +6,7 @@ Inputs/Outputs:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Dict, List, Optional, Tuple
 
@@ -16,6 +17,42 @@ from foghorn.plugins.resolve.base import PluginContext, PluginDecision
 from . import dnssec, helpers, update_processor
 
 logger = logging.getLogger(__name__)
+_DEFAULT_ANY_ANSWER_RRSET_LIMIT = 16
+_DEFAULT_ANY_ANSWER_RECORD_LIMIT = 64
+
+
+def _get_any_query_policy(plugin: object) -> Tuple[bool, int, int]:
+    """Brief: Resolve ZoneRecords QTYPE=ANY policy and limits from plugin state.
+
+    Inputs:
+      - plugin: ZoneRecords plugin instance.
+
+    Outputs:
+      - Tuple of (enabled, rrset_limit, record_limit).
+    """
+    config = getattr(plugin, "config", {}) or {}
+    enabled = bool(
+        getattr(plugin, "_any_query_enabled", config.get("any_query_enabled", False))
+    )
+    rrset_limit = getattr(
+        plugin,
+        "_any_answer_rrset_limit",
+        config.get("any_answer_rrset_limit", _DEFAULT_ANY_ANSWER_RRSET_LIMIT),
+    )
+    record_limit = getattr(
+        plugin,
+        "_any_answer_record_limit",
+        config.get("any_answer_record_limit", _DEFAULT_ANY_ANSWER_RECORD_LIMIT),
+    )
+    try:
+        rrset_limit_int = max(1, int(rrset_limit))
+    except (TypeError, ValueError):
+        rrset_limit_int = _DEFAULT_ANY_ANSWER_RRSET_LIMIT
+    try:
+        record_limit_int = max(1, int(record_limit))
+    except (TypeError, ValueError):
+        record_limit_int = _DEFAULT_ANY_ANSWER_RECORD_LIMIT
+    return enabled, rrset_limit_int, record_limit_int
 
 
 def _entry_has_update_source(entry: object) -> bool:
@@ -179,376 +216,437 @@ def pre_resolve(
             return None
     except Exception:  # pragma: no cover - defensive
         logger.warning(
-            "ZoneRecords: targets() evaluation failed; applying globally",
+            "ZoneRecords: targets() evaluation failed; skipping plugin for safety",
             exc_info=True,
         )
+        return None
     logger.debug("pre-resolve zone-records %s %s", name, type_name)
+    any_queries_enabled, any_rrset_limit, any_record_limit = _get_any_query_policy(
+        plugin
+    )
 
     # Safe concurrent read from mappings when a watcher may be reloading.
     lock = getattr(plugin, "_records_lock", None)
-    if lock is None:
+    lock_context = lock if lock is not None else contextlib.nullcontext()
+
+    with lock_context:
         records = getattr(plugin, "records", {})
         name_index = getattr(plugin, "_name_index", {})
         zone_soa = getattr(plugin, "_zone_soa", {})
         mapping_by_qtype = getattr(plugin, "mapping", None)
         wildcard_owners = getattr(plugin, "_wildcard_owners", None)
-    else:
-        with lock:
-            records = dict(getattr(plugin, "records", {}))
-            name_index = dict(getattr(plugin, "_name_index", {}))
-            zone_soa = dict(getattr(plugin, "_zone_soa", {}))
-            mapping_by_qtype = dict(getattr(plugin, "mapping", {}) or {})
-            wildcard_owners = list(getattr(plugin, "_wildcard_owners", []) or [])
 
-    zone_apex = helpers.find_zone_for_name(name, zone_soa)
+        zone_apex = helpers.find_zone_for_name(name, zone_soa)
 
-    # If this name is not covered by any authoritative zone, preserve the
-    # legacy exact-match override behaviour keyed by (name, qtype), *unless*
-    # nxdomain_zones is configured to force NXDOMAIN/NODATA under specific
-    # suffixes.
-    if zone_apex is None:
-        key = (name, qtype_int)
-        entry = records.get(key)
+        # If this name is not covered by any authoritative zone, preserve the
+        # legacy exact-match override behaviour keyed by (name, qtype), *unless*
+        # nxdomain_zones is configured to force NXDOMAIN/NODATA under specific
+        # suffixes.
+        if zone_apex is None:
+            key = (name, qtype_int)
+            entry = records.get(key)
 
-        # If entry has update source, return only update values
-        if entry:
-            try:
-                ttl, values, sources = entry
-            except (ValueError, TypeError):
-                # Fallback to 2-tuple format for backward compatibility
-                ttl, values = entry
-                sources = set()
-            # If "update" is in sources, filter to only update-sourced values
-            if sources and "update" in (
-                sources if isinstance(sources, (list, set)) else []
-            ):
-                # Keep all values since update source means all values from this RRset should be returned
-                pass
+            # If there's no exact match, try wildcard owners.
+            if not entry:
+                matched_owner, rrsets = helpers.find_best_rrsets_for_name(
+                    name, name_index, wildcard_patterns=wildcard_owners
+                )
+                if matched_owner is not None and qtype_int in (rrsets or {}):
+                    entry = rrsets[qtype_int]
 
-        # If there's no exact match, try wildcard owners.
-        if not entry:
-            matched_owner, rrsets = helpers.find_best_rrsets_for_name(
-                name, name_index, wildcard_patterns=wildcard_owners
+            if not entry:
+                # Optional: treat selected suffixes as authoritative NXDOMAIN/NODATA
+                # zones even without an SOA.
+                try:
+                    nxdomain_zones = list(getattr(plugin, "_nxdomain_zones", []) or [])
+                except Exception:  # pragma: no cover - defensive
+                    nxdomain_zones = []
+
+                matched_zone: Optional[str] = None
+                if nxdomain_zones:
+                    for z in nxdomain_zones:
+                        try:
+                            zone_norm = str(z).rstrip(".").lower()
+                        except Exception:
+                            continue
+                        if not zone_norm:
+                            continue
+                        if name == zone_norm or name.endswith("." + zone_norm):
+                            matched_zone = zone_norm
+                            break
+
+                if matched_zone is None:
+                    return None
+
+                try:
+                    request = DNSRecord.parse(req)
+                except Exception as e:  # pragma: no cover - defensive parsing
+                    logger.warning("ZoneRecords parse failure (nxdomain_zones): %s", e)
+                    return None
+
+                want_dnssec_nx = bool(dnssec.client_wants_dnssec(request))
+                reply = DNSRecord(
+                    DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=0),
+                    q=request.q,
+                )
+                owner = str(request.q.qname).rstrip(".") + "."
+
+                matched_owner_nx, rrsets = helpers.find_best_rrsets_for_name(
+                    name, name_index, wildcard_patterns=wildcard_owners
+                )
+                cname_code = int(QTYPE.CNAME)
+
+                # CNAME at owner name: always answer with CNAME regardless of qtype.
+                if cname_code in rrsets:
+                    ttl_cname, cname_values, _ = rrsets[cname_code]
+                    added = dnssec.add_rrset_to_reply(
+                        reply,
+                        owner,
+                        cname_code,
+                        ttl_cname,
+                        list(cname_values),
+                        include_dnssec=want_dnssec_nx,
+                        mapping_by_qtype=mapping_by_qtype,
+                    )
+                    if not added:
+                        return None
+                    if want_dnssec_nx:
+                        dnssec.add_dnssec_rrsets(
+                            reply,
+                            owner,
+                            rrsets,
+                            matched_zone,
+                            name_index,
+                            mapping_by_qtype=mapping_by_qtype,
+                        )
+                    return PluginDecision(action="override", response=reply.pack())
+
+                if rrsets:
+                    # ANY query returns all RRsets at the owner.
+                    if qtype_int == int(QTYPE.ANY):
+                        if not any_queries_enabled:
+                            reply.header.rcode = RCODE.REFUSED
+                            return PluginDecision(
+                                action="override", response=reply.pack()
+                            )
+                        added_any = False
+                        rrset_count = 0
+                        record_count = 0
+                        truncated = False
+                        for rr_qtype, (ttl_rr, values_rr, _) in rrsets.items():
+                            if not want_dnssec_nx and dnssec.is_dnssec_rrtype(rr_qtype):
+                                continue
+                            if (
+                                rrset_count >= any_rrset_limit
+                                or record_count >= any_record_limit
+                            ):
+                                truncated = True
+                                break
+                            if dnssec.add_rrset_to_reply(
+                                reply,
+                                owner,
+                                rr_qtype,
+                                ttl_rr,
+                                list(values_rr),
+                                include_dnssec=want_dnssec_nx,
+                                mapping_by_qtype=mapping_by_qtype,
+                            ):
+                                added_any = True
+                                rrset_count += 1
+                                record_count += len(list(values_rr))
+                        if truncated:
+                            reply.header.tc = 1
+                        if not added_any and not truncated:
+                            return None
+                        if want_dnssec_nx and not truncated:
+                            dnssec.add_dnssec_rrsets(
+                                reply,
+                                owner,
+                                rrsets,
+                                matched_zone,
+                                name_index,
+                                mapping_by_qtype=mapping_by_qtype,
+                            )
+                        return PluginDecision(action="override", response=reply.pack())
+
+                    # Exact qtype match.
+                    if qtype_int in rrsets:
+                        ttl_rr, values_rr, _ = rrsets[qtype_int]
+                        include_dnssec = want_dnssec_nx or dnssec.is_dnssec_rrtype(
+                            qtype_int
+                        )
+                        if not dnssec.add_rrset_to_reply(
+                            reply,
+                            owner,
+                            qtype_int,
+                            ttl_rr,
+                            list(values_rr),
+                            include_dnssec=include_dnssec,
+                            mapping_by_qtype=mapping_by_qtype,
+                        ):
+                            return None
+                        if want_dnssec_nx:
+                            dnssec.add_dnssec_rrsets(
+                                reply,
+                                owner,
+                                rrsets,
+                                matched_zone,
+                                name_index,
+                                mapping_by_qtype=mapping_by_qtype,
+                            )
+                        return PluginDecision(action="override", response=reply.pack())
+
+                    # Name exists under the configured suffix, but requested type is absent.
+                    reply.header.rcode = RCODE.NOERROR
+
+                    # DNSSEC denial-of-existence for wildcard-expanded answers is tricky,
+                    # and the NSEC3 proof logic assumes concrete owner names. Avoid
+                    # attaching NSEC3 when the rrsets came from a wildcard owner.
+                    if want_dnssec_nx and matched_owner_nx == name:
+                        dnssec.add_nsec3_denial_of_existence(
+                            reply,
+                            name,
+                            matched_zone,
+                            records,
+                            name_index,
+                            mapping_by_qtype=mapping_by_qtype,
+                        )
+
+                    return PluginDecision(action="override", response=reply.pack())
+
+                # Name does not exist under the configured suffix.
+                reply.header.rcode = RCODE.NXDOMAIN
+                return PluginDecision(action="override", response=reply.pack())
+
+            ttl, values, _ = entry
+            logger.debug(
+                "ZoneRecords got entry for %s %s -> %s", name, type_name, values
             )
-            if matched_owner is not None and qtype_int in (rrsets or {}):
-                entry = rrsets[qtype_int]
-                # Check sources in wildcard match entry too
-                if entry:
-                    try:
-                        ttl, values, sources = entry
-                    except (ValueError, TypeError):
-                        ttl, values = entry
-                        sources = set()
-                    if sources and "update" in (
-                        sources if isinstance(sources, (list, set)) else []
-                    ):
-                        # Only return update-sourced values
-                        pass
-
-        if not entry:
-            # Optional: treat selected suffixes as authoritative NXDOMAIN/NODATA
-            # zones even without an SOA.
-            try:
-                nxdomain_zones = list(getattr(plugin, "_nxdomain_zones", []) or [])
-            except Exception:  # pragma: no cover - defensive
-                nxdomain_zones = []
-
-            matched_zone: Optional[str] = None
-            if nxdomain_zones:
-                for z in nxdomain_zones:
-                    try:
-                        zone_norm = str(z).rstrip(".").lower()
-                    except Exception:
-                        continue
-                    if not zone_norm:
-                        continue
-                    if name == zone_norm or name.endswith("." + zone_norm):
-                        matched_zone = zone_norm
-                        break
-
-            if matched_zone is None:
-                return None
 
             try:
                 request = DNSRecord.parse(req)
             except Exception as e:  # pragma: no cover - defensive parsing
-                logger.warning("ZoneRecords parse failure (nxdomain_zones): %s", e)
+                logger.warning("ZoneRecords parse failure: %s", e)
                 return None
 
-            want_dnssec_nx = bool(dnssec.client_wants_dnssec(request))
+            want_dnssec_legacy = dnssec.client_wants_dnssec(request)
+
             reply = DNSRecord(
-                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=1), q=request.q
+                DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=0), q=request.q
             )
             owner = str(request.q.qname).rstrip(".") + "."
-
-            matched_owner_nx, rrsets = helpers.find_best_rrsets_for_name(
-                name, name_index, wildcard_patterns=wildcard_owners
+            # For update-sourced entries, bypass precomputed mapping_by_qtype because
+            # it may still contain stale RR objects from file-based loads.
+            effective_mapping_by_qtype = (
+                None if _entry_has_update_source(entry) else mapping_by_qtype
             )
-            cname_code = int(QTYPE.CNAME)
 
-            # CNAME at owner name: always answer with CNAME regardless of qtype.
-            if cname_code in rrsets:
-                ttl_cname, cname_values, _ = rrsets[cname_code]
-                added = dnssec.add_rrset_to_reply(
+            added = dnssec.add_rrset_to_reply(
+                reply,
+                owner,
+                qtype_int,
+                ttl,
+                list(values),
+                include_dnssec=want_dnssec_legacy or False,
+                mapping_by_qtype=effective_mapping_by_qtype,
+            )
+            if not added:
+                return None
+
+            return PluginDecision(action="override", response=reply.pack())
+
+        # Authoritative path: name is inside a zone managed by this plugin.
+        try:
+            request = DNSRecord.parse(req)
+        except Exception as e:  # pragma: no cover - defensive parsing
+            logger.warning("ZoneRecords parse failure (authoritative path): %s", e)
+            return None
+
+        # Detect whether the client wants DNSSEC records via EDNS(0) DO bit.
+        want_dnssec = bool(dnssec.client_wants_dnssec(request))
+
+        owner = str(request.q.qname).rstrip(".") + "."
+        reply = DNSRecord(
+            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=0), q=request.q
+        )
+
+        matched_owner, rrsets = helpers.find_best_rrsets_for_name(
+            name, name_index, wildcard_patterns=wildcard_owners
+        )
+        cname_code = int(QTYPE.CNAME)
+
+        # CNAME at owner name: always answer with CNAME regardless of qtype.
+        if cname_code in rrsets:
+            ttl_cname, cname_values, _ = rrsets[cname_code]
+            if len(rrsets) > 1:
+                logger.warning(
+                    "CustomRecords zone %s has CNAME and other RRsets at %s; "
+                    "answering with CNAME only",
+                    zone_apex,
+                    name,
+                )
+            added = dnssec.add_rrset_to_reply(
+                reply,
+                owner,
+                cname_code,
+                ttl_cname,
+                list(cname_values),
+                include_dnssec=want_dnssec,
+                mapping_by_qtype=mapping_by_qtype,
+            )
+            if not added:
+                return None
+            if want_dnssec:
+                dnssec.add_dnssec_rrsets(
                     reply,
                     owner,
-                    cname_code,
-                    ttl_cname,
-                    list(cname_values),
-                    include_dnssec=want_dnssec_nx,
+                    rrsets,
+                    zone_apex,
+                    name_index,
                     mapping_by_qtype=mapping_by_qtype,
                 )
-                if not added:
+            return PluginDecision(action="override", response=reply.pack())
+
+        # No CNAME at this owner; distinguish positive, NODATA, and NXDOMAIN.
+        if rrsets:
+            # Check if any RRset at this owner has update source - prioritize those
+            update_sourced_rrsets = {}
+            for qtype_key, (ttl_val, values_val, sources) in rrsets.items():
+                if sources and "update" in (
+                    sources if isinstance(sources, (list, set)) else []
+                ):
+                    update_sourced_rrsets[qtype_key] = rrsets[qtype_key]
+
+            # Use only update-sourced RRsets if they exist for this owner
+            if update_sourced_rrsets:
+                rrsets = update_sourced_rrsets
+            effective_mapping_by_qtype = (
+                None if update_sourced_rrsets else mapping_by_qtype
+            )
+
+            # Positive answers for specific qtypes.
+            if qtype_int == int(QTYPE.ANY):
+                if not any_queries_enabled:
+                    reply.header.rcode = RCODE.REFUSED
+                    return PluginDecision(action="override", response=reply.pack())
+                added_any = False
+                rrset_count = 0
+                record_count = 0
+                truncated = False
+                for rr_qtype, (ttl_rr, values_rr, _) in rrsets.items():
+                    # For QTYPE=ANY with DO=0, suppress DNSSEC-only RR types
+                    if not want_dnssec and dnssec.is_dnssec_rrtype(rr_qtype):
+                        continue
+                    if (
+                        rrset_count >= any_rrset_limit
+                        or record_count >= any_record_limit
+                    ):
+                        truncated = True
+                        break
+                    if dnssec.add_rrset_to_reply(
+                        reply,
+                        owner,
+                        rr_qtype,
+                        ttl_rr,
+                        list(values_rr),
+                        include_dnssec=want_dnssec,
+                        mapping_by_qtype=effective_mapping_by_qtype,
+                    ):
+                        added_any = True
+                        rrset_count += 1
+                        record_count += len(list(values_rr))
+                if truncated:
+                    reply.header.tc = 1
+                if not added_any and not truncated:
                     return None
-                if want_dnssec_nx:
+                if want_dnssec and not truncated:
                     dnssec.add_dnssec_rrsets(
                         reply,
                         owner,
                         rrsets,
-                        matched_zone,
+                        zone_apex,
                         name_index,
-                        mapping_by_qtype=mapping_by_qtype,
+                        mapping_by_qtype=effective_mapping_by_qtype,
                     )
                 return PluginDecision(action="override", response=reply.pack())
 
-            if rrsets:
-                # ANY query returns all RRsets at the owner.
-                if qtype_int == int(QTYPE.ANY):
-                    added_any = False
-                    for rr_qtype, (ttl_rr, values_rr, _) in rrsets.items():
-                        if not want_dnssec_nx and dnssec.is_dnssec_rrtype(rr_qtype):
-                            continue
-                        if dnssec.add_rrset_to_reply(
-                            reply,
-                            owner,
-                            rr_qtype,
-                            ttl_rr,
-                            list(values_rr),
-                            include_dnssec=want_dnssec_nx,
-                            mapping_by_qtype=mapping_by_qtype,
-                        ):
-                            added_any = True
-                    if not added_any:
-                        return None
-                    if want_dnssec_nx:
-                        dnssec.add_dnssec_rrsets(
-                            reply,
-                            owner,
-                            rrsets,
-                            matched_zone,
-                            name_index,
-                            mapping_by_qtype=mapping_by_qtype,
-                        )
-                    return PluginDecision(action="override", response=reply.pack())
-
-                # Exact qtype match.
-                if qtype_int in rrsets:
-                    ttl_rr, values_rr, _ = rrsets[qtype_int]
-                    include_dnssec = want_dnssec_nx or dnssec.is_dnssec_rrtype(
-                        qtype_int
-                    )
-                    if not dnssec.add_rrset_to_reply(
-                        reply,
-                        owner,
-                        qtype_int,
-                        ttl_rr,
-                        list(values_rr),
-                        include_dnssec=include_dnssec,
-                        mapping_by_qtype=mapping_by_qtype,
-                    ):
-                        return None
-                    if want_dnssec_nx:
-                        dnssec.add_dnssec_rrsets(
-                            reply,
-                            owner,
-                            rrsets,
-                            matched_zone,
-                            name_index,
-                            mapping_by_qtype=mapping_by_qtype,
-                        )
-                    return PluginDecision(action="override", response=reply.pack())
-
-                # Name exists under the configured suffix, but requested type is absent.
-                reply.header.rcode = RCODE.NOERROR
-
-                # DNSSEC denial-of-existence for wildcard-expanded answers is tricky,
-                # and the NSEC3 proof logic assumes concrete owner names. Avoid
-                # attaching NSEC3 when the rrsets came from a wildcard owner.
-                if want_dnssec_nx and matched_owner_nx == name:
-                    dnssec.add_nsec3_denial_of_existence(
-                        reply,
-                        name,
-                        matched_zone,
-                        records,
-                        name_index,
-                        mapping_by_qtype=mapping_by_qtype,
-                    )
-
-                return PluginDecision(action="override", response=reply.pack())
-
-            # Name does not exist under the configured suffix.
-            reply.header.rcode = RCODE.NXDOMAIN
-            return PluginDecision(action="override", response=reply.pack())
-
-        ttl, values, _ = entry
-        logger.debug("ZoneRecords got entry for %s %s -> %s", name, type_name, values)
-
-        try:
-            request = DNSRecord.parse(req)
-        except Exception as e:  # pragma: no cover - defensive parsing
-            logger.warning("ZoneRecords parse failure: %s", e)
-            return None
-
-        want_dnssec_legacy = dnssec.client_wants_dnssec(request)
-
-        reply = DNSRecord(
-            DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=1), q=request.q
-        )
-        owner = str(request.q.qname).rstrip(".") + "."
-        # For update-sourced entries, bypass precomputed mapping_by_qtype because
-        # it may still contain stale RR objects from file-based loads.
-        effective_mapping_by_qtype = (
-            None if _entry_has_update_source(entry) else mapping_by_qtype
-        )
-
-        added = dnssec.add_rrset_to_reply(
-            reply,
-            owner,
-            qtype_int,
-            ttl,
-            list(values),
-            include_dnssec=want_dnssec_legacy or False,
-            mapping_by_qtype=effective_mapping_by_qtype,
-        )
-        if not added:
-            return None
-
-        return PluginDecision(action="override", response=reply.pack())
-
-    # Authoritative path: name is inside a zone managed by this plugin.
-    try:
-        request = DNSRecord.parse(req)
-    except Exception as e:  # pragma: no cover - defensive parsing
-        logger.warning("ZoneRecords parse failure (authoritative path): %s", e)
-        return None
-
-    # Detect whether the client wants DNSSEC records via EDNS(0) DO bit.
-    want_dnssec = bool(dnssec.client_wants_dnssec(request))
-
-    owner = str(request.q.qname).rstrip(".") + "."
-    reply = DNSRecord(
-        DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=1), q=request.q
-    )
-
-    matched_owner, rrsets = helpers.find_best_rrsets_for_name(
-        name, name_index, wildcard_patterns=wildcard_owners
-    )
-    cname_code = int(QTYPE.CNAME)
-
-    # CNAME at owner name: always answer with CNAME regardless of qtype.
-    if cname_code in rrsets:
-        ttl_cname, cname_values, _ = rrsets[cname_code]
-        if len(rrsets) > 1:
-            logger.warning(
-                "CustomRecords zone %s has CNAME and other RRsets at %s; "
-                "answering with CNAME only",
-                zone_apex,
-                name,
-            )
-        added = dnssec.add_rrset_to_reply(
-            reply,
-            owner,
-            cname_code,
-            ttl_cname,
-            list(cname_values),
-            include_dnssec=want_dnssec,
-            mapping_by_qtype=mapping_by_qtype,
-        )
-        if not added:
-            return None
-        if want_dnssec:
-            dnssec.add_dnssec_rrsets(
-                reply,
-                owner,
-                rrsets,
-                zone_apex,
-                name_index,
-                mapping_by_qtype=mapping_by_qtype,
-            )
-        return PluginDecision(action="override", response=reply.pack())
-
-    # No CNAME at this owner; distinguish positive, NODATA, and NXDOMAIN.
-    if rrsets:
-        # Check if any RRset at this owner has update source - prioritize those
-        update_sourced_rrsets = {}
-        for qtype_key, (ttl_val, values_val, sources) in rrsets.items():
-            if sources and "update" in (
-                sources if isinstance(sources, (list, set)) else []
-            ):
-                update_sourced_rrsets[qtype_key] = rrsets[qtype_key]
-
-        # Use only update-sourced RRsets if they exist for this owner
-        if update_sourced_rrsets:
-            rrsets = update_sourced_rrsets
-        effective_mapping_by_qtype = None if update_sourced_rrsets else mapping_by_qtype
-
-        # Positive answers for specific qtypes.
-        if qtype_int == int(QTYPE.ANY):
-            added_any = False
-            for rr_qtype, (ttl_rr, values_rr, _) in rrsets.items():
-                # For QTYPE=ANY with DO=0, suppress DNSSEC-only RR types
-                if not want_dnssec and dnssec.is_dnssec_rrtype(rr_qtype):
-                    continue
-                if dnssec.add_rrset_to_reply(
+            if qtype_int in rrsets:
+                ttl_rr, values_rr, _ = rrsets[qtype_int]
+                # For DNSSEC RR types queried directly, always allow signatures.
+                include_dnssec = want_dnssec or dnssec.is_dnssec_rrtype(qtype_int)
+                if not dnssec.add_rrset_to_reply(
                     reply,
                     owner,
-                    rr_qtype,
+                    qtype_int,
                     ttl_rr,
                     list(values_rr),
-                    include_dnssec=want_dnssec,
+                    include_dnssec=include_dnssec,
                     mapping_by_qtype=effective_mapping_by_qtype,
                 ):
-                    added_any = True
-            if not added_any:
-                return None
-            if want_dnssec:
-                dnssec.add_dnssec_rrsets(
-                    reply,
-                    owner,
-                    rrsets,
-                    zone_apex,
-                    name_index,
-                    mapping_by_qtype=effective_mapping_by_qtype,
-                )
+                    return None
+                if want_dnssec:
+                    dnssec.add_dnssec_rrsets(
+                        reply,
+                        owner,
+                        rrsets,
+                        zone_apex,
+                        name_index,
+                        mapping_by_qtype=effective_mapping_by_qtype,
+                    )
+                return PluginDecision(action="override", response=reply.pack())
+
+            # NODATA: name exists in zone but requested type is absent.
+            reply.header.rcode = RCODE.NOERROR
+            soa_entry = zone_soa.get(zone_apex)
+            if soa_entry is not None:
+                soa_ttl, soa_values, _ = soa_entry
+                soa_owner = zone_apex.rstrip(".") + "."
+
+                if want_dnssec:
+                    dnssec.add_rrset_to_reply(
+                        reply,
+                        soa_owner,
+                        int(QTYPE.SOA),
+                        int(soa_ttl),
+                        list(soa_values),
+                        include_dnssec=True,
+                        mapping_by_qtype=mapping_by_qtype,
+                        section="auth",
+                    )
+
+                    # Avoid NSEC3 proofs for wildcard-expanded names (see note above).
+                    if matched_owner == name:
+                        dnssec.add_nsec3_denial_of_existence(
+                            reply,
+                            name,
+                            qtype_int,
+                            zone_apex,
+                            records,
+                            name_index,
+                            mapping_by_qtype=mapping_by_qtype,
+                        )
+                else:
+                    for value in list(soa_values):
+                        zone_line = f"{soa_owner} {soa_ttl} IN SOA {value}"
+                        try:
+                            from dnslib import RR
+
+                            rrs = RR.fromZone(zone_line)
+                        except Exception as exc:  # pragma: no cover - defensive
+                            logger.warning(
+                                "ZoneRecords invalid SOA value %r for zone %s: %s",
+                                value,
+                                zone_apex,
+                                exc,
+                            )
+                            continue
+                        for rr in rrs:
+                            reply.add_auth(rr)
+
             return PluginDecision(action="override", response=reply.pack())
 
-        if qtype_int in rrsets:
-            ttl_rr, values_rr, _ = rrsets[qtype_int]
-            # For DNSSEC RR types queried directly, always allow signatures.
-            include_dnssec = want_dnssec or dnssec.is_dnssec_rrtype(qtype_int)
-            if not dnssec.add_rrset_to_reply(
-                reply,
-                owner,
-                qtype_int,
-                ttl_rr,
-                list(values_rr),
-                include_dnssec=include_dnssec,
-                mapping_by_qtype=effective_mapping_by_qtype,
-            ):
-                return None
-            if want_dnssec:
-                dnssec.add_dnssec_rrsets(
-                    reply,
-                    owner,
-                    rrsets,
-                    zone_apex,
-                    name_index,
-                    mapping_by_qtype=effective_mapping_by_qtype,
-                )
-            return PluginDecision(action="override", response=reply.pack())
-
-        # NODATA: name exists in zone but requested type is absent.
-        reply.header.rcode = RCODE.NOERROR
+        # NXDOMAIN: no RRsets at this owner name within the authoritative zone.
+        reply.header.rcode = RCODE.NXDOMAIN
         soa_entry = zone_soa.get(zone_apex)
         if soa_entry is not None:
             soa_ttl, soa_values, _ = soa_entry
@@ -565,18 +663,15 @@ def pre_resolve(
                     mapping_by_qtype=mapping_by_qtype,
                     section="auth",
                 )
-
-                # Avoid NSEC3 proofs for wildcard-expanded names (see note above).
-                if matched_owner == name:
-                    dnssec.add_nsec3_denial_of_existence(
-                        reply,
-                        name,
-                        qtype_int,
-                        zone_apex,
-                        records,
-                        name_index,
-                        mapping_by_qtype=mapping_by_qtype,
-                    )
+                dnssec.add_nsec3_denial_of_existence(
+                    reply,
+                    name,
+                    qtype_int,
+                    zone_apex,
+                    records,
+                    name_index,
+                    mapping_by_qtype=mapping_by_qtype,
+                )
             else:
                 for value in list(soa_values):
                     zone_line = f"{soa_owner} {soa_ttl} IN SOA {value}"
@@ -596,50 +691,3 @@ def pre_resolve(
                         reply.add_auth(rr)
 
         return PluginDecision(action="override", response=reply.pack())
-
-    # NXDOMAIN: no RRsets at this owner name within the authoritative zone.
-    reply.header.rcode = RCODE.NXDOMAIN
-    soa_entry = zone_soa.get(zone_apex)
-    if soa_entry is not None:
-        soa_ttl, soa_values, _ = soa_entry
-        soa_owner = zone_apex.rstrip(".") + "."
-
-        if want_dnssec:
-            dnssec.add_rrset_to_reply(
-                reply,
-                soa_owner,
-                int(QTYPE.SOA),
-                int(soa_ttl),
-                list(soa_values),
-                include_dnssec=True,
-                mapping_by_qtype=mapping_by_qtype,
-                section="auth",
-            )
-            dnssec.add_nsec3_denial_of_existence(
-                reply,
-                name,
-                qtype_int,
-                zone_apex,
-                records,
-                name_index,
-                mapping_by_qtype=mapping_by_qtype,
-            )
-        else:
-            for value in list(soa_values):
-                zone_line = f"{soa_owner} {soa_ttl} IN SOA {value}"
-                try:
-                    from dnslib import RR
-
-                    rrs = RR.fromZone(zone_line)
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.warning(
-                        "ZoneRecords invalid SOA value %r for zone %s: %s",
-                        value,
-                        zone_apex,
-                        exc,
-                    )
-                    continue
-                for rr in rrs:
-                    reply.add_auth(rr)
-
-    return PluginDecision(action="override", response=reply.pack())
