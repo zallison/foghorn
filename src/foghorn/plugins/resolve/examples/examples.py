@@ -4,7 +4,7 @@ import logging
 from typing import List, Optional, Union
 
 from dnslib import AAAA, QTYPE, A, DNSRecord
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from foghorn.plugins.resolve.base import plugin_aliases
 from foghorn.utils.register_caches import registered_lru_cached
@@ -34,8 +34,7 @@ class ExamplesConfig(BaseModel):
     apply_to_qtypes: List[str] = Field(default_factory=lambda: ["*"])
     rewrite_first_ipv4: List[dict] = Field(default_factory=list)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @plugin_aliases("examples")

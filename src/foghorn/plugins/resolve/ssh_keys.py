@@ -23,7 +23,7 @@ import time
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 from dnslib import QTYPE, RR, DNSHeader, DNSRecord
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from foghorn.plugins.resolve.base import (
     BasePlugin,
@@ -58,8 +58,7 @@ class SshKeysConfig(BaseModel):
     port: int = Field(default=22, ge=1, le=65535)
     timeout_seconds: float = Field(default=5.0, ge=0.1)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @plugin_aliases("ssh_keys")

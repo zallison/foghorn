@@ -22,7 +22,7 @@ import threading
 import time
 from typing import Any, Dict, Optional, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class StatsStoreBackendConfig(BaseModel):
@@ -57,8 +57,7 @@ class StatsStoreBackendConfig(BaseModel):
         description="Backend-specific configuration options",
     )
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class BaseStatsStore:

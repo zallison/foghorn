@@ -6,7 +6,7 @@ import threading
 import time
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
 from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
@@ -35,8 +35,7 @@ class GreylistConfig(BaseModel):
     cache_ttl_seconds: int = Field(default=300, ge=0)
     cache_max_entries: int = Field(default=100000, ge=0)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class GreylistExample(BasePlugin):

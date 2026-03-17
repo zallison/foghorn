@@ -18,16 +18,16 @@ def test_plugin_decision_post_init_short_circuits(monkeypatch) -> None:
     """Brief: PluginDecision.__post_init__ returns early when plugin+label set.
 
     Inputs:
-      - monkeypatch: used to ensure inspect.stack is not consulted.
+      - monkeypatch: used to ensure sys._getframe is not consulted.
 
     Outputs:
       - None; asserts decision retains provided plugin metadata.
     """
 
-    def boom():  # type: ignore[no-untyped-def]
-        raise AssertionError("inspect.stack should not be called")
+    def boom(_depth: int):  # type: ignore[no-untyped-def]
+        raise AssertionError("sys._getframe should not be called")
 
-    monkeypatch.setattr(base_mod.inspect, "stack", boom)
+    monkeypatch.setattr(base_mod.sys, "_getframe", boom)
 
     d = PluginDecision(action="allow", plugin=BasePlugin, plugin_label="x")
     assert d.plugin is BasePlugin
@@ -152,9 +152,7 @@ def test_targets_domain_filter_requires_qname_and_matches_modes() -> None:
     Outputs:
       - None.
     """
-    p_exact = BasePlugin(
-        targets={"domains": ["example.com"], "domains_mode": "exact"}
-    )
+    p_exact = BasePlugin(targets={"domains": ["example.com"], "domains_mode": "exact"})
     p_exact.setup()
 
     ctx = PluginContext(client_ip="192.0.2.1")
@@ -301,6 +299,54 @@ def test_normalize_opcode_list_and_targets_opcode(caplog, monkeypatch) -> None:
 
     p._target_opcodes = ["*"]  # type: ignore[assignment]
     assert p.targets_opcode(123) is True
+
+
+def test_targets_rcode_matches_int_input_against_string_config() -> None:
+    """Brief: targets_rcode matches integer runtime rcode against string targets.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None.
+    """
+    p = BasePlugin(target_rcodes=["NXDOMAIN"])
+    p.setup()
+
+    assert p.targets_rcode(3) is True
+    assert p.targets_rcode(2) is False
+
+
+def test_targets_rcode_matches_string_input_against_int_config() -> None:
+    """Brief: targets_rcode matches mnemonic runtime rcode against integer targets.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None.
+    """
+    p = BasePlugin(target_rcodes=[3])
+    p.setup()
+
+    assert p.targets_rcode("NXDOMAIN") is True
+    assert p.targets_rcode("SERVFAIL") is False
+
+
+def test_targets_rcode_wildcard_matches_all() -> None:
+    """Brief: targets_rcode wildcard target always matches.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None.
+    """
+    p = BasePlugin(target_rcodes=["*"])
+    p.setup()
+
+    assert p.targets_rcode(3) is True
+    assert p.targets_rcode("SERVFAIL") is True
 
 
 def test_handle_opcode_default_noop() -> None:

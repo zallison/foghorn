@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import ipaddress
 import json
 import logging
@@ -42,6 +41,7 @@ from dnslib import (  # noqa: F401 - imports are for implementations of this cla
 from foghorn.config.logging_config import BracketLevelFormatter, SyslogFormatter
 from foghorn.plugins.cache.base import CachePlugin
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
+from foghorn.plugins.resolve import admin_ui
 
 # Canonical DNS response cache used by the resolver.
 #
@@ -157,12 +157,13 @@ class PluginDecision:
         if self.plugin is not None and self.plugin_label is not None:
             return
 
-        # Best-effort: walk the call stack and look for a "self" bound to a
+        # Best-effort: walk caller frames and look for a "self" bound to a
         # BasePlugin instance, which indicates a plugin hook constructed this
-        # decision. Any failures here must not affect normal query handling.
+        # decision. Use direct frame walking to avoid inspect.stack() overhead.
         try:
-            for frame_info in inspect.stack():
-                self_obj = frame_info.frame.f_locals.get("self")
+            frame = sys._getframe(1)
+            while frame is not None:
+                self_obj = frame.f_locals.get("self")
                 if isinstance(self_obj, BasePlugin):
                     if self.plugin is None:
                         self.plugin = type(self_obj)
@@ -176,6 +177,8 @@ class PluginDecision:
                         if label is not None:
                             self.plugin_label = str(label)
                     break
+                frame = frame.f_back
+            del frame
         except Exception:  # pragma: no cover - defensive best-effort only
             return
 
@@ -466,6 +469,11 @@ class BasePlugin:
                 mode=targets_cfg.get("domains_mode", "suffix"),
             )
         )
+        if self._targets_domains and self._targets_domains_mode == "any":
+            logger.warning(
+                "BasePlugin: targets.domains is configured but domains_mode='any' "
+                + "disables domain filtering; did you mean 'suffix' or 'exact'?"
+            )
 
         # Optional listener-level targeting: restrict this plugin to specific
         # listeners (udp/tcp/dot/doh). When the normalized set is empty, listener
@@ -1015,7 +1023,7 @@ class BasePlugin:
         """
         # Fast path: wildcard or empty list means "all qtypes".
         try:
-            qtypes = list(getattr(self, "_target_qtypes", ["*"]))
+            qtypes = getattr(self, "_target_qtypes", ["*"])
         except (
             Exception
         ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
@@ -1103,7 +1111,8 @@ class BasePlugin:
             return False
         if "*" in op_list:
             return True
-        # Accept match by numeric code or by mnemonic string
+        # Accept match by numeric code and by mnemonic string regardless of
+        # whether the configured targets are int codes or text mnemonics.
         try:
             name = OPCODE.get(int(opcode), str(opcode))
         except Exception:
@@ -1165,7 +1174,7 @@ class BasePlugin:
         """
         # Fast path: wildcard or empty list means "all rcodes".
         try:
-            rcodes = list(getattr(self, "_target_rcodes", ["*"]))
+            rcodes = getattr(self, "_target_rcodes", ["*"])
         except Exception:
             rcodes = ["*"]
 
@@ -1174,19 +1183,41 @@ class BasePlugin:
 
         # Accept match by numeric code or by mnemonic string
         try:
-            code = int(rcode)
+            code_int = int(rcode)
         except (ValueError, TypeError):
-            code = None
+            code_int = None
 
-        if code is not None:
-            # Check both integer and string representations
-            return code in {rc for rc in rcodes if isinstance(rc, int)}
+        if code_int is not None:
+            try:
+                code_str = str(RCODE.get(code_int, str(code_int))).upper()
+            except Exception:
+                code_str = str(code_int).upper()
         else:
-            # Check mnemonic string match
-            rcode_str = str(rcode).upper()
-            return rcode_str in {
-                str(rc).upper() for rc in rcodes if not isinstance(rc, int)
-            }
+            code_str = str(rcode).upper()
+            try:
+                parsed = int(code_str)
+            except (ValueError, TypeError):
+                parsed = None
+            if parsed is not None:
+                code_int = parsed
+                try:
+                    code_str = str(RCODE.get(parsed, str(parsed))).upper()
+                except Exception:
+                    code_str = str(parsed).upper()
+
+        for rc in rcodes:
+            if isinstance(rc, int) and code_int is not None and rc == code_int:
+                return True
+            if isinstance(rc, int):
+                try:
+                    rc_name = str(RCODE.get(rc, str(rc))).upper()
+                except Exception:
+                    rc_name = str(rc).upper()
+                if rc_name == code_str:
+                    return True
+            if str(rc).upper() == code_str:
+                return True
+        return False
 
     def handle_opcode(
         self,
@@ -1263,6 +1294,24 @@ class BasePlugin:
             return ".".join(labels[-int(base_labels) :])
         return name
 
+    def _decision(self, action: str, **kwargs: object) -> PluginDecision:
+        """Brief: Create a PluginDecision with explicit plugin metadata.
+
+        Inputs:
+          - action: Decision action (for example, 'allow', 'deny', 'override').
+          - **kwargs: Optional PluginDecision fields such as stat, response,
+            ede_code, and ede_text.
+
+        Outputs:
+          - PluginDecision with plugin and plugin_label pre-populated from this
+            plugin instance unless explicitly supplied by the caller.
+        """
+        if "plugin" not in kwargs:
+            kwargs["plugin"] = type(self)
+        if "plugin_label" not in kwargs:
+            kwargs["plugin_label"] = str(getattr(self, "name", self.__class__.__name__))
+        return PluginDecision(action=action, **kwargs)
+
     def get_admin_ui_descriptor(self) -> Optional[Dict[str, object]]:
         """Brief: Describe this plugin's admin web UI surface (if any).
 
@@ -1309,18 +1358,6 @@ class BasePlugin:
           'example'
         """
 
-        def _to_json_safe(value: object) -> Any:
-            if value is None or isinstance(value, (str, int, float, bool)):
-                return value
-            if isinstance(value, (list, tuple, set)):
-                return [_to_json_safe(v) for v in value]
-            if isinstance(value, dict):
-                return {str(k): _to_json_safe(v) for k, v in value.items()}
-            try:
-                return str(value)
-            except Exception:
-                return repr(value)
-
         def _targets_to_strings(values: object) -> list[str]:
             out: list[str] = []
             try:
@@ -1330,20 +1367,14 @@ class BasePlugin:
                 return []
             return out
 
-        config_items: list[dict[str, object]] = []
         try:
             cfg = dict(self.config or {})
         except Exception:
             cfg = {}
-
-        for key in sorted(cfg.keys()):
-            value = cfg.get(key)
-            config_items.append(
-                {
-                    "key": str(key),
-                    "value": _to_json_safe(value),
-                }
-            )
+        config_items = admin_ui.config_to_items(
+            cfg,
+            redact_keys=admin_ui.DEFAULT_REDACT_KEYS,
+        )
 
         summary: dict[str, object] = {
             "name": str(getattr(self, "name", self.__class__.__name__)),

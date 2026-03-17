@@ -6,7 +6,7 @@ import secrets
 from typing import List, Optional, Union
 
 from dnslib import QTYPE, RCODE, DNSRecord
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
@@ -56,8 +56,7 @@ class FlakyServerConfig(BaseModel):
     fuzz_actions: List[str] = Field(default_factory=lambda: ["bit_flip", "swap_bytes"])
     seed: Optional[int] = None
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @plugin_aliases("flaky_server", "flaky", "buggy")

@@ -8,7 +8,7 @@ import time
 from typing import Dict, Iterable, List, Optional
 
 from dnslib import AAAA, PTR, QTYPE, RR, A, DNSHeader, DNSRecord
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 try:  # watchdog is used for cross-platform file watching
     from watchdog.events import FileSystemEventHandler
@@ -50,8 +50,7 @@ class EtcHostsConfig(BaseModel):
     watchdog_poll_interval_seconds: float = Field(default=60.0, ge=0)
     ttl: int = Field(default=300, ge=0)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @plugin_aliases("hosts", "hostfile", "etc-hosts", "etc_hosts", "etchosts", "/etc/hosts")

@@ -10,7 +10,7 @@ from typing import Iterable, List, Optional, Set
 from urllib.parse import urlparse
 
 import requests
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from .base import BasePlugin
 
@@ -53,8 +53,7 @@ class FileDownloaderConfig(BaseModel):
     add_comment: Optional[bool] = Field(default=False)
     hash_filenames: bool = Field(default=False)
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 class FileDownloader(BasePlugin):

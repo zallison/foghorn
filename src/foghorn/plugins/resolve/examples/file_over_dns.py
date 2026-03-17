@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from dnslib import QTYPE, RR, TXT, DNSHeader, DNSRecord
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing_extensions import Literal
 
 from foghorn.plugins.resolve.base import BasePlugin, PluginContext, PluginDecision
@@ -69,8 +69,7 @@ class FileOverDnsConfig(BaseModel):
     max_chunk_bytes: int = Field(default=4096, ge=1, le=4096)
     format: Literal["base64", "raw"] = Field(default="base64")
 
-    class Config:
-        extra = "allow"
+    model_config = ConfigDict(extra="allow")
 
 
 @registered_lru_cached(maxsize=16_384)
