@@ -53,6 +53,7 @@ class _Plugin:
         zone_soa: dict[str, tuple[int, list[str], list[str]]] | None = None,
         nxdomain_zones: list[object] | None = None,
         dns_update_config: dict[str, Any] | None = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
         self._targets_return = bool(targets_return)
         self._records_lock = None
@@ -64,6 +65,14 @@ class _Plugin:
         self._nxdomain_zones = list(nxdomain_zones or [])
         self._axfr_zone_metadata: dict[str, dict[str, object]] = {}
         self._dns_update_config = dns_update_config
+        self.config = config or {}
+        self._any_query_enabled = bool(self.config.get("any_query_enabled", False))
+        self._any_answer_rrset_limit = int(
+            self.config.get("any_answer_rrset_limit", 16)
+        )
+        self._any_answer_record_limit = int(
+            self.config.get("any_answer_record_limit", 64)
+        )
 
     def targets(self, _ctx: object) -> bool:
         """Brief: Return canned target-match status for tests.
@@ -363,11 +372,12 @@ def test_handle_opcode_notify_valid_sender_returns_noerror_and_updates_metadata(
 
     calls: list[tuple[str, dict[str, object]]] = []
     upstream = {"host": "198.51.100.10", "port": 53, "transport": "tcp"}
+    plugin._axfr_zones = [{"zone": "example.com", "upstreams": [upstream]}]
 
     monkeypatch.setattr(
         zone_records_mod,
-        "_resolve_notify_sender_upstream",
-        lambda _ip: upstream,
+        "_resolve_notify_sender_for_zone",
+        lambda *_args, **_kwargs: upstream,
         raising=True,
     )
     monkeypatch.setattr(
@@ -645,8 +655,8 @@ def test_handle_opcode_notify_updates_existing_zone_metadata_entry(
 
     monkeypatch.setattr(
         zone_records_mod,
-        "_resolve_notify_sender_upstream",
-        lambda _ip: {"host": "198.51.100.10", "port": 53},
+        "_resolve_notify_sender_for_zone",
+        lambda *_args, **_kwargs: {"host": "198.51.100.10", "port": 53},
         raising=True,
     )
     monkeypatch.setattr(
@@ -721,6 +731,7 @@ def test_pre_resolve_nxdomain_zone_any_handles_partial_add_failures_without_dnss
                 int(QTYPE.AAAA): (60, ["2001:db8::27"], ["src"]),
             }
         },
+        config={"any_query_enabled": True},
     )
     ctx = PluginContext(client_ip="192.0.2.1")
     req = _make_query("host.private.test", int(QTYPE.ANY))
@@ -1144,6 +1155,7 @@ def test_pre_resolve_nxdomain_zone_any_branch_returns_none_when_all_rrs_filtered
                 int(QTYPE.RRSIG): (60, ["A 13 2 300 1 1 1 example. AAA="], ["src"])
             }
         },
+        config={"any_query_enabled": True},
     )
     ctx = PluginContext(client_ip="192.0.2.1")
     req = _make_query("host.private.test", int(QTYPE.ANY))
@@ -1178,6 +1190,7 @@ def test_pre_resolve_nxdomain_zone_any_branch_with_dnssec_adds_rrsets(
                 int(QTYPE.A): (60, ["192.0.2.20"], ["src"]),
             }
         },
+        config={"any_query_enabled": True},
     )
     ctx = PluginContext(client_ip="192.0.2.1")
     req = _make_query("host.private.test", int(QTYPE.ANY))
@@ -1418,6 +1431,7 @@ def test_pre_resolve_authoritative_any_returns_none_when_all_rrsets_filtered(
                 int(QTYPE.RRSIG): (60, ["A 13 2 300 1 1 1 example. AAA="], ["src"])
             }
         },
+        config={"any_query_enabled": True},
     )
     ctx = PluginContext(client_ip="192.0.2.1")
     req = _make_query("host.example.com", int(QTYPE.ANY))
@@ -1459,6 +1473,7 @@ def test_pre_resolve_authoritative_any_handles_partial_add_failures_and_dnssec(
                 int(QTYPE.AAAA): (60, ["2001:db8::24"], ["src"]),
             }
         },
+        config={"any_query_enabled": True},
     )
     ctx = PluginContext(client_ip="192.0.2.1")
     req = _make_query("host.example.com", int(QTYPE.ANY))
@@ -1488,6 +1503,103 @@ def test_pre_resolve_authoritative_any_handles_partial_add_failures_and_dnssec(
     assert decision is not None
     assert decision.action == "override"
     assert calls
+
+
+def test_pre_resolve_any_refused_when_disabled(
+    _stub_dnssec_defaults: None,
+) -> None:
+    """Brief: QTYPE=ANY is refused by default when any_query_enabled is false.
+
+    Inputs:
+      - _stub_dnssec_defaults: fixture for dnssec stubs.
+
+    Outputs:
+      - None; asserts REFUSED response.
+    """
+    plugin = _Plugin(
+        zone_soa={
+            "example.com": (
+                300,
+                ["ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300"],
+                ["src"],
+            )
+        },
+        name_index={"host.example.com": {int(QTYPE.A): (60, ["192.0.2.24"], ["src"])}},
+    )
+    ctx = PluginContext(client_ip="192.0.2.1")
+    req = _make_query("host.example.com", int(QTYPE.ANY))
+    decision = resolver.pre_resolve(
+        plugin,
+        "host.example.com",
+        int(QTYPE.ANY),
+        req,
+        ctx,
+    )
+    assert decision is not None
+    response = DNSRecord.parse(decision.response or b"")
+    assert response.header.rcode == RCODE.REFUSED
+
+
+def test_pre_resolve_targets_exception_fails_closed(
+    _stub_dnssec_defaults: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: pre_resolve returns None when targets() raises to avoid fail-open.
+
+    Inputs:
+      - _stub_dnssec_defaults: fixture for dnssec stubs.
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts None decision on targets() error.
+    """
+    plugin = _Plugin(
+        records={("exact.example", int(QTYPE.A)): (300, ["192.0.2.10"], ["src"])}
+    )
+    ctx = PluginContext(client_ip="192.0.2.1")
+
+    def _boom(_ctx: object) -> bool:
+        raise RuntimeError("targets boom")
+
+    monkeypatch.setattr(plugin, "targets", _boom, raising=True)
+    req = _make_query("exact.example", int(QTYPE.A))
+    assert resolver.pre_resolve(plugin, "exact.example", int(QTYPE.A), req, ctx) is None
+
+
+def test_pre_resolve_ad_bit_unset_by_default(
+    _stub_dnssec_defaults: None,
+) -> None:
+    """Brief: AD flag is not set on authoritative replies by default.
+
+    Inputs:
+      - _stub_dnssec_defaults: fixture for dnssec stubs.
+
+    Outputs:
+      - None; asserts AD bit is false.
+    """
+    plugin = _Plugin(
+        zone_soa={
+            "example.com": (
+                300,
+                ["ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300"],
+                ["src"],
+            )
+        },
+        name_index={"host.example.com": {int(QTYPE.A): (60, ["192.0.2.24"], ["src"])}},
+        config={"any_query_enabled": True},
+    )
+    ctx = PluginContext(client_ip="192.0.2.1")
+    req = _make_query("host.example.com", int(QTYPE.A))
+    decision = resolver.pre_resolve(
+        plugin,
+        "host.example.com",
+        int(QTYPE.A),
+        req,
+        ctx,
+    )
+    assert decision is not None
+    response = DNSRecord.parse(decision.response or b"")
+    assert response.header.ad == 0
 
 
 def test_pre_resolve_authoritative_nodata_with_missing_soa_entry_still_overrides(
