@@ -31,6 +31,10 @@ plugins:
         - "example.com|NS|300|ns1.example.com."
         - "example.com|A|300|192.0.2.10"
       ttl: 300
+      # Optional: QTYPE=ANY handling (disabled by default).
+      any_query_enabled: false
+      any_answer_rrset_limit: 16
+      any_answer_record_limit: 64
 
       dns_update:
         enabled: true
