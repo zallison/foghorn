@@ -1,6 +1,14 @@
-"""Opcode handling helpers shared by server resolution paths."""
+"""Opcode handling helpers shared by server resolution paths.
+
+Notes:
+  - Non-QUERY opcode dispatch (e.g. NOTIFY/UPDATE) may carry TSIG (RFC 2845).
+    When a TSIG is present, this module attempts best-effort MAC verification
+    before dispatching to plugins. If no TSIG keys are configured, TSIG-signed
+    messages are refused.
+"""
 
 import logging
+import time
 from typing import NamedTuple, Optional
 
 from dnslib import DNSHeader, DNSRecord, RCODE
@@ -10,6 +18,20 @@ from foghorn.plugins.resolve.base import PluginContext, PluginDecision
 from .server_response_utils import _set_response_id
 
 logger = logging.getLogger("foghorn.server")
+
+# Generous ceiling for non-QUERY messages (UPDATE/NOTIFY) to reduce CPU/memory
+# exposure to oversized payloads while still supporting realistic operational
+# use.
+MAX_NON_QUERY_BYTES = 8192
+
+# Default per-opcode, per-source-IP rate limit for non-QUERY opcodes.
+# Intended as a lightweight safety net distinct from the adaptive RateLimit
+# plugin (which typically targets QUERY traffic).
+NON_QUERY_RATE_LIMIT_PER_SEC = 10
+
+# Module-local caches for hot-path helpers.
+_OP_PLUGINS_SORT_CACHE: dict[tuple[int, ...], list[object]] = {}
+_OP_RATE_BUCKETS: dict[tuple[int, str], tuple[int, int]] = {}
 
 
 class _ResolveCoreResult(NamedTuple):
@@ -51,23 +73,147 @@ def _handle_non_query_opcode(
 
     Outputs:
       - _ResolveCoreResult when handled (drop/override/deny/notimp), else None.
+
+    Notes:
+      - UPDATE/NOTIFY messages may be TSIG-signed. When a TSIG is present and
+        keys are configured, we attempt MAC verification before plugin dispatch.
+        When a TSIG is present but no keys are configured, we refuse.
     """
 
     if opcode == 0:
         return None
 
-    import dns.message
-    import dns.rcode
+    raw_data = data
+    data_bytes = data if isinstance(data, (bytes, bytearray)) else b""
+
+    # Size ceiling before any dnspython parsing.
+    if len(data_bytes) > int(MAX_NON_QUERY_BYTES):
+        # Oversized non-QUERY messages are refused to reduce parser load.
+        try:
+            mid = int.from_bytes(data_bytes[0:2], "big") if len(data_bytes) >= 2 else 0
+        except Exception:
+            mid = 0
+        r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1, opcode=int(opcode)))
+        r.header.rcode = RCODE.REFUSED
+        wire = r.pack()
+        return _ResolveCoreResult(
+            wire=wire,
+            dnssec_status=None,
+            upstream_id=None,
+            rcode_name="REFUSED",
+        )
+
+    # Lightweight per-opcode, per-source-IP rate limiter (1-second buckets).
+    try:
+        limit = int(NON_QUERY_RATE_LIMIT_PER_SEC)
+    except Exception:
+        limit = 0
+    if limit > 0 and client_ip:
+        now_bucket = int(time.time())
+        key = (int(opcode), str(client_ip))
+        prev_bucket, prev_count = _OP_RATE_BUCKETS.get(key, (now_bucket, 0))
+        if prev_bucket != now_bucket:
+            prev_bucket, prev_count = now_bucket, 0
+        prev_count += 1
+        _OP_RATE_BUCKETS[key] = (prev_bucket, prev_count)
+        if prev_count > limit:
+            try:
+                mid = (
+                    int.from_bytes(data_bytes[0:2], "big")
+                    if len(data_bytes) >= 2
+                    else 0
+                )
+            except Exception:
+                mid = 0
+            r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1, opcode=int(opcode)))
+            r.header.rcode = RCODE.REFUSED
+            wire = r.pack()
+            return _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=None,
+                rcode_name="REFUSED",
+            )
+
+    # For NOTIFY (opcode 4), enforce the AXFR/NOTIFY allowlist when configured.
+    if int(opcode) == 4:
+        try:
+            import ipaddress
+
+            from foghorn.runtime_config import get_runtime_snapshot
+
+            snap = get_runtime_snapshot()
+            allow_raw = list(getattr(snap, "axfr_allow_clients", []) or [])
+            enabled = bool(getattr(snap, "axfr_enabled", False))
+        except Exception:
+            allow_raw = []
+            enabled = False
+        if enabled:
+            allowed = False
+            try:
+                ip_obj = ipaddress.ip_address(str(client_ip).strip())
+            except Exception:
+                ip_obj = None
+            if ip_obj is not None:
+                for entry in allow_raw:
+                    try:
+                        net = ipaddress.ip_network(str(entry), strict=False)
+                    except Exception:
+                        continue
+                    try:
+                        if ip_obj in net:
+                            allowed = True
+                            break
+                    except Exception:
+                        continue
+            if not allowed:
+                try:
+                    mid = (
+                        int.from_bytes(data_bytes[0:2], "big")
+                        if len(data_bytes) >= 2
+                        else 0
+                    )
+                except Exception:
+                    mid = 0
+                r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1, opcode=int(opcode)))
+                r.header.rcode = RCODE.REFUSED
+                wire = r.pack()
+                return _ResolveCoreResult(
+                    wire=wire,
+                    dnssec_status=None,
+                    upstream_id=None,
+                    rcode_name="REFUSED",
+                )
+
+    # dnspython is optional; if unavailable, return a minimal NOTIMP.
+    try:
+        import dns.message
+        import dns.rcode
+    except ImportError:
+        try:
+            mid = int.from_bytes(data_bytes[0:2], "big") if len(data_bytes) >= 2 else 0
+        except Exception:
+            mid = 0
+        r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1, opcode=int(opcode)))
+        r.header.rcode = RCODE.NOTIMP
+        wire = r.pack()
+        return _ResolveCoreResult(
+            wire=wire,
+            dnssec_status=None,
+            upstream_id=None,
+            rcode_name="NOTIMP",
+        )
 
     try:
-        msg = dns.message.from_wire(data)
+        msg = dns.message.from_wire(data_bytes)
     except Exception:
         # For signed messages (e.g. TSIG UPDATE) dnspython can raise when no
         # keyring is supplied. Retry with continue_on_error so we can still
         # recover opcode/question metadata for plugin dispatch and response
-        # shaping.
+        # shaping. TSIG verification (when possible) is performed before plugin
+        # dispatch.
         try:
-            msg = dns.message.from_wire(data, continue_on_error=True)
+            msg = dns.message.from_wire(data_bytes, continue_on_error=True)
         except Exception:
             msg = None
 
@@ -82,13 +228,161 @@ def _handle_non_query_opcode(
             qname = ""
             qtype = 0
 
+    # If dnspython parsed with continue_on_error, extracted question metadata may
+    # be partial. Perform a basic sanity check before surfacing it to plugins.
+    def _looks_like_dns_name(text: str) -> bool:
+        """Brief: Minimal qname validation for plugin context.
+
+        Inputs:
+          - text: Candidate domain name (no trailing dot).
+
+        Outputs:
+          - bool: True when the string resembles a plausible DNS name.
+        """
+        try:
+            s = str(text or "")
+        except Exception:
+            return False
+        if not s:
+            return False
+        if len(s) > 253:
+            return False
+        # Allow underscore for SRV-like names.
+        allowed = set(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._"
+        )
+        if any(ch not in allowed for ch in s):
+            return False
+        for label in s.split("."):
+            if not label:
+                return False
+            if len(label) > 63:
+                return False
+            if label.startswith("-") or label.endswith("-"):
+                return False
+        return True
+
+    if qname and not _looks_like_dns_name(qname):
+        logger.debug("Non-query opcode parse yielded malformed qname=%r", qname)
+        qname = ""
+        qtype = 0
+
+    # Best-effort TSIG verification before plugin dispatch.
+    if msg is not None and getattr(msg, "had_tsig", False):
+        from foghorn.plugins.resolve.zone_records import update_helpers
+        from foghorn.plugins.resolve.zone_records import update_processor
+
+        # Gather TSIG key configs across ZoneRecords instances.
+        key_configs: list[dict] = []
+        try:
+            plugins = list(getattr(handler, "plugins", []) or [])
+        except Exception:
+            plugins = []
+        for plug in plugins:
+            dns_update_cfg = getattr(plug, "_dns_update_config", None)
+            if not isinstance(dns_update_cfg, dict):
+                continue
+            zones = dns_update_cfg.get("zones", []) or []
+            if not isinstance(zones, list):
+                continue
+            source_loaders = getattr(plug, "_dns_update_tsig_key_source_loaders", None)
+            if not isinstance(source_loaders, dict):
+                source_loaders = None
+            for zone_cfg in zones:
+                if not isinstance(zone_cfg, dict):
+                    continue
+                try:
+                    key_configs.extend(
+                        update_helpers.resolve_tsig_key_configs(
+                            zone_cfg,
+                            source_loaders=source_loaders,
+                        )
+                    )
+                except Exception:
+                    continue
+
+        if not key_configs:
+            logger.warning(
+                "TSIG-signed opcode %s from %s rejected: no keyring configured",
+                opcode,
+                client_ip,
+            )
+            if msg is not None:
+                resp = dns.message.make_response(msg)
+                resp.set_rcode(dns.rcode.REFUSED)
+                wire = resp.to_wire()
+            else:
+                try:
+                    mid = (
+                        int.from_bytes(data_bytes[0:2], "big")
+                        if len(data_bytes) >= 2
+                        else 0
+                    )
+                except Exception:
+                    mid = 0
+                r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1, opcode=int(opcode)))
+                r.header.rcode = RCODE.REFUSED
+                wire = r.pack()
+            return _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=None,
+                rcode_name="REFUSED",
+            )
+
+        ok, err, _cfg = update_processor.verify_tsig_auth(
+            data_bytes, key_configs=key_configs
+        )
+        if not ok:
+            logger.warning(
+                "TSIG-signed opcode %s from %s rejected: %s",
+                opcode,
+                client_ip,
+                err or "TSIG verification failed",
+            )
+            if msg is not None:
+                resp = dns.message.make_response(msg)
+                resp.set_rcode(dns.rcode.REFUSED)
+                wire = resp.to_wire()
+            else:
+                try:
+                    mid = (
+                        int.from_bytes(data_bytes[0:2], "big")
+                        if len(data_bytes) >= 2
+                        else 0
+                    )
+                except Exception:
+                    mid = 0
+                r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1, opcode=int(opcode)))
+                r.header.rcode = RCODE.REFUSED
+                wire = r.pack()
+            return _ResolveCoreResult(
+                wire=wire,
+                dnssec_status=None,
+                upstream_id=None,
+                rcode_name="REFUSED",
+            )
+
     ctx = PluginContext(client_ip=client_ip, listener=listener, secure=secure)
     try:
         ctx.qname = qname
     except Exception:  # pragma: no cover - defensive
         pass
 
-    for p in sorted(handler.plugins, key=lambda p: getattr(p, "pre_priority", 50)):
+    try:
+        plugins_list = list(getattr(handler, "plugins", []) or [])
+    except Exception:
+        plugins_list = []
+    cache_key = tuple([len(plugins_list)] + [int(id(p)) for p in plugins_list])
+    ordered = _OP_PLUGINS_SORT_CACHE.get(cache_key)
+    if ordered is None:
+        ordered = sorted(plugins_list, key=lambda p: getattr(p, "pre_priority", 50))
+        _OP_PLUGINS_SORT_CACHE[cache_key] = ordered
+        # Best-effort cache bound.
+        if len(_OP_PLUGINS_SORT_CACHE) > 256:
+            _OP_PLUGINS_SORT_CACHE.clear()
+
+    for p in ordered:
         try:
             if hasattr(p, "targets_opcode") and not p.targets_opcode(opcode):
                 continue
@@ -96,7 +390,7 @@ def _handle_non_query_opcode(
             pass
 
         try:
-            decision = p.handle_opcode(opcode, qname, qtype, data, ctx)
+            decision = p.handle_opcode(opcode, qname, qtype, raw_data, ctx)
         except Exception:  # pragma: no cover - defensive
             logger.warning("Plugin handle_opcode() raised", exc_info=True)
             continue
@@ -116,10 +410,21 @@ def _handle_non_query_opcode(
             wire = decision.response
             # Ensure the response ID matches the request ID.
             try:
-                wire = _set_response_id(wire, int.from_bytes(data[0:2], "big"))
+                wire = _set_response_id(wire, int.from_bytes(data_bytes[0:2], "big"))
+            except Exception:
+                pass
+            # Ensure QR bit is set in case a plugin accidentally returns a query.
+            try:
+                if len(wire) >= 3 and not (wire[2] & 0x80):
+                    wire = wire[:2] + bytes([wire[2] | 0x80]) + wire[3:]
             except Exception:
                 pass
             try:
+                # dnslib expects at least a full DNS header (12 bytes). For
+                # shorter payloads, keep a synthetic label rather than deriving
+                # an arbitrary rcode from partial flags.
+                if len(wire) < 12:
+                    raise ValueError("override wire too short")
                 parsed = DNSRecord.parse(wire)
                 rcode_name = RCODE.get(parsed.header.rcode, str(parsed.header.rcode))
             except Exception:
@@ -139,16 +444,18 @@ def _handle_non_query_opcode(
             else:
                 # Worst-case: return a bare REFUSED header without parsing.
                 try:
-                    mid = int.from_bytes(data[0:2], "big")
+                    mid = int.from_bytes(data_bytes[0:2], "big")
                 except Exception:
                     mid = 0
                 r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1, opcode=int(opcode)))
                 r.header.rcode = RCODE.REFUSED
                 wire = r.pack()
-            try:
-                wire = _set_response_id(wire, int.from_bytes(data[0:2], "big"))
-            except Exception:
-                pass
+                try:
+                    wire = _set_response_id(
+                        wire, int.from_bytes(data_bytes[0:2], "big")
+                    )
+                except Exception:
+                    pass
             return _ResolveCoreResult(
                 wire=wire,
                 dnssec_status=None,
@@ -164,16 +471,16 @@ def _handle_non_query_opcode(
     else:
         # Worst-case: return a bare NOTIMP header without parsing.
         try:
-            mid = int.from_bytes(data[0:2], "big")
+            mid = int.from_bytes(data_bytes[0:2], "big")
         except Exception:
             mid = 0
         r = DNSRecord(DNSHeader(id=mid, qr=1, ra=1, opcode=int(opcode)))
         r.header.rcode = RCODE.NOTIMP
         wire = r.pack()
-    try:
-        wire = _set_response_id(wire, int.from_bytes(data[0:2], "big"))
-    except Exception:
-        pass
+        try:
+            wire = _set_response_id(wire, int.from_bytes(data_bytes[0:2], "big"))
+        except Exception:
+            pass
     return _ResolveCoreResult(
         wire=wire,
         dnssec_status=None,
