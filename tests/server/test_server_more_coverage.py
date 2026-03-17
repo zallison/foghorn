@@ -8,7 +8,7 @@ Outputs:
   - None (pytest assertions)
 """
 
-from dnslib import NS, QTYPE, RCODE, RR, SOA, A, DNSRecord
+from dnslib import NS, QTYPE, RCODE, RR, SOA, A, DNSRecord, EDNS0
 
 import foghorn.servers.server as srv
 from foghorn.plugins.cache.in_memory_ttl import InMemoryTTLCache
@@ -47,6 +47,70 @@ def test_compute_effective_ttl_variants():
         pass
 
     assert srv.compute_effective_ttl(_Bad(), 15) == 15
+
+
+def test_compute_negative_ttl_soa_minimum_zero_disables_negative_caching():
+    """Brief: SOA minimum TTL=0 yields negative/referral TTL 0 (do not cache).
+
+    Inputs:
+      - DNSRecord with SOA in authority section, SOA times minimum=0.
+      - fallback_ttl: nonzero.
+
+    Outputs:
+      - None; asserts _compute_negative_ttl returns 0.
+    """
+
+    q = DNSRecord.question("negttl.example", "A")
+    r = q.reply()
+
+    # Authority SOA TTL is nonzero, but SOA minimum field is explicitly 0.
+    soa = SOA(
+        "ns.negttl.example.",
+        "hostmaster.negttl.example.",
+        (1, 3600, 600, 86400, 0),
+    )
+    r.add_auth(RR("negttl.example", QTYPE.SOA, rdata=soa, ttl=300))
+
+    assert srv._compute_negative_ttl(r, fallback_ttl=60) == 0
+
+
+def test_attach_ede_option_does_not_mutate_request_opt_rr(monkeypatch):
+    """Brief: Attaching EDE must not alias/mutate the request OPT RR.
+
+    Inputs:
+      - req: DNSRecord with an EDNS0 OPT RR.
+      - resp: synthetic reply without OPT.
+
+    Outputs:
+      - None; asserts req OPT rdata is unchanged while resp gains EDE.
+    """
+
+    class _Snap:
+        enable_ede = True
+
+    monkeypatch.setattr("foghorn.runtime_config.get_runtime_snapshot", lambda: _Snap())
+
+    req = DNSRecord.question("ede.example", "A")
+    req.add_ar(EDNS0(udp_len=1232))
+    req_opt = [rr for rr in (req.ar or []) if rr.rtype == QTYPE.OPT][0]
+
+    # dnslib represents OPT options as a list stored on rdata.
+    before = list(getattr(req_opt, "rdata", []) or [])
+
+    resp = req.reply()
+    # Ensure resp does not already carry an OPT.
+    resp.ar = []
+
+    srv._attach_ede_option(req, resp, 15, "blocked by policy")
+
+    after = list(getattr(req_opt, "rdata", []) or [])
+    assert after == before
+
+    resp_opts = [rr for rr in (resp.ar or []) if rr.rtype == QTYPE.OPT]
+    assert resp_opts
+    resp_rdata = getattr(resp_opts[0], "rdata", None)
+    assert isinstance(resp_rdata, list)
+    assert any(getattr(opt, "code", None) == 15 for opt in resp_rdata)
 
 
 def test__set_response_id_error_path_logged(caplog):

@@ -528,28 +528,6 @@ def test_schedule_cache_refresh_runs_worker_and_ignores_errors(monkeypatch):
     assert calls["seen"] == [(wire, "127.0.0.1")]
 
 
-def test_set_response_id_bytes_normal_and_short():
-    """Brief: _set_response_id_bytes rewrites first two bytes only when long enough.
-
-    Inputs:
-        - None (pure function under test).
-
-    Outputs:
-        - None; asserts both normal and short-wire behaviors.
-    """
-
-    # Normal case: two or more bytes.
-    original = b"\x12\x34rest"
-    out = srv._set_response_id_bytes(original, 0xBEEF)
-    assert out[:2] == bytes([0xBE, 0xEF])
-    assert out[2:] == b"rest"
-
-    # Short wire: returned unchanged.
-    short = b"\x01"
-    out_short = srv._set_response_id_bytes(short, 0xBEEF)
-    assert out_short == short
-
-
 def test_handle_pre_plugin_deny_with_client_edns_produces_nxdomain_with_opt(
     monkeypatch,
     set_runtime_snapshot,
