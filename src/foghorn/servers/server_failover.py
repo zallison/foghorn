@@ -163,11 +163,13 @@ def _is_connection_refused_error(exc: Exception) -> bool:
       - exc: Exception raised by a transport attempt.
 
     Outputs:
-      - bool: True when errno/message indicate connection refused.
+      - bool: True when errno/class indicate a refused connection.
 
     Notes:
-      - Prefer errno-based classification to avoid locale-dependent string
-        matching.
+      - Prefer errno- and type-based classification to avoid locale-dependent
+        string matching.
+      - Some libraries wrap OSErrors and/or collapse errno into generic
+        exceptions; in that case, we fall back to best-effort message matching.
     """
 
     try:
@@ -177,10 +179,22 @@ def _is_connection_refused_error(exc: Exception) -> bool:
         pass
 
     try:
-        if int(getattr(exc, "errno", 0) or 0) == int(errno.ECONNREFUSED):
-            return True
+        err = int(getattr(exc, "errno", 0) or 0)
     except Exception:
-        pass
+        err = 0
+
+    refused_errnos = {
+        int(errno.ECONNREFUSED),
+        # Treat other common network connection failures as "refused" for
+        # operator-facing warning rate limiting.
+        int(errno.ECONNRESET),
+        int(errno.ETIMEDOUT),
+        int(errno.EHOSTUNREACH),
+        int(errno.ENETUNREACH),
+    }
+
+    if err in refused_errnos:
+        return True
 
     # Last resort: message matching (may be locale-dependent).
     return "connection refused" in str(exc).lower()
@@ -220,6 +234,31 @@ def _upstream_fail_count(upstream: Dict) -> float:
         return float(entry.get("fail_count", 0.0) or 0.0)
     except Exception:
         return 0.0
+
+
+def _should_emit_upstream_skip_warning(fail_count: float) -> bool:
+    """Brief: Decide whether to emit a skip-upstream warning given fail_count.
+
+    Inputs:
+      - fail_count: Current upstream fail_count value.
+
+    Outputs:
+      - bool: True when warnings should be emitted for this failure.
+
+    Notes:
+      - Intended to reduce log spam for transient failures.
+      - Emits warnings for counts 3..25 inclusive, and then every 25 thereafter.
+    """
+    try:
+        fc = int(fail_count)
+    except Exception:
+        return True
+
+    if 3 <= fc <= 25:
+        return True
+
+    # For larger values, emit every 25th failure (but not at 0).
+    return fc > 0 and (fc % 25) == 0
 
 
 def _upstream_health_context(upstream: Dict, now_ts: Optional[float] = None) -> str:
@@ -303,7 +342,6 @@ def _warn_upstream_skip_once_with_health(
     Outputs:
       - None. Delegates to _warn_upstream_skip_once.
     """
-
     _warn_upstream_skip_once(
         upstream_key, f"{fmt} [health: %s]", *args, upstream_health
     )
@@ -397,6 +435,7 @@ def _send_query_with_failover_impl(
     attempted_upstream_labels: list[str] = []
     attempted_upstream_label_set: Set[str] = set()
     attempted_upstream_health: dict[str, str] = {}
+    attempted_upstream_fail_counts: dict[str, float] = {}
     attempted_upstreams_lock = threading.Lock()
 
     # Precompute whether the original query advertised EDNS(0) via an OPT RR in
@@ -672,12 +711,11 @@ def _send_query_with_failover_impl(
                 _warn_upstream_skip_once_with_health(
                     upstream_key,
                     upstream_health,
-                    "Skipping upstream %s (%s:%d via %s) for %s (mismatched response)",
+                    "Skipping upstream %s (%s:%d via %s) (mismatched response)",
                     upstream_label,
                     host,
                     port,
                     transport,
-                    qname,
                 )
                 last_exception = Exception(
                     f"mismatched response from {host}:{port} via {transport}"
@@ -696,7 +734,6 @@ def _send_query_with_failover_impl(
                     "Upstream %s:%d returned FORMERR for EDNS query %s; retrying without EDNS",
                     host,
                     port,
-                    qname,
                 )
                 try:
                     from foghorn.servers.transports.udp import (
@@ -721,12 +758,11 @@ def _send_query_with_failover_impl(
                         _warn_upstream_skip_once_with_health(
                             upstream_key,
                             upstream_health,
-                            "Skipping upstream %s (%s:%d via %s) for %s (mismatched response after EDNS fallback)",
+                            "Skipping upstream %s (%s:%d via %s) (mismatched response after EDNS fallback)",
                             upstream_label,
                             host,
                             port,
                             transport,
-                            qname,
                         )
                         last_exception = Exception(
                             f"mismatched response from {host}:{port} without EDNS"
@@ -736,12 +772,11 @@ def _send_query_with_failover_impl(
                     _warn_upstream_skip_once_with_health(
                         upstream_key,
                         upstream_health,
-                        "Skipping upstream %s (%s:%d via %s) for %s (EDNS fallback failed): %s",
+                        "Skipping upstream %s (%s:%d via %s) (EDNS fallback failed): %s",
                         upstream_label,
                         host,
                         port,
                         transport,
-                        qname,
                         e2,
                     )
                     last_exception = e2
@@ -752,12 +787,11 @@ def _send_query_with_failover_impl(
                     _warn_upstream_skip_once_with_health(
                         upstream_key,
                         upstream_health,
-                        "Skipping upstream %s (%s:%d via %s) for %s (SERVFAIL after EDNS fallback)",
+                        "Skipping upstream %s (%s:%d via %s) (SERVFAIL after EDNS fallback)",
                         upstream_label,
                         host,
                         port,
                         transport,
-                        qname,
                     )
                     last_exception = Exception(
                         f"FORMERR/SERVFAIL from {host}:{port} without EDNS"
@@ -772,12 +806,11 @@ def _send_query_with_failover_impl(
                 _warn_upstream_skip_once_with_health(
                     upstream_key,
                     upstream_health,
-                    "Skipping upstream %s (%s:%d via %s) for %s (returned SERVFAIL)",
+                    "Skipping upstream %s (%s:%d via %s) (returned SERVFAIL)",
                     upstream_label,
                     host,
                     port,
                     transport,
-                    qname,
                 )
                 last_exception = Exception(f"SERVFAIL from {host}:{port}")
                 return None, None, "all_failed"
@@ -785,7 +818,7 @@ def _send_query_with_failover_impl(
             # If UDP and TC=1, fallback to TCP for full response
             tc_flag = getattr(parsed_response.header, "tc", 0)
             if transport == "udp" and tc_flag == 1:
-                logger.debug("Truncated UDP response for %s; retrying over TCP", qname)
+                logger.debug("Truncated UDP response from %s; retrying over TCP", host)
                 try:
                     response_wire = tcp_query_fn(
                         host,
@@ -802,11 +835,10 @@ def _send_query_with_failover_impl(
                         _warn_upstream_skip_once_with_health(
                             upstream_key,
                             upstream_health,
-                            "Skipping upstream %s (%s:%d via tcp) for %s (mismatched TCP response after truncation): %s",
+                            "Skipping upstream %s (%s:%d via tcp) (mismatched TCP response after truncation): %s",
                             upstream_label,
                             host,
                             port,
-                            qname,
                             e3,
                         )
                         last_exception = e3
@@ -818,12 +850,11 @@ def _send_query_with_failover_impl(
                     _warn_upstream_skip_once_with_health(
                         upstream_key,
                         upstream_health,
-                        "Skipping upstream %s (%s:%d via %s) for %s (TCP retry after truncation failed): %s",
+                        "Skipping upstream %s (%s:%d via %s) (TCP retry after truncation failed): %s",
                         upstream_label,
                         host,
                         port,
                         transport,
-                        qname,
                         e2,
                     )
                     last_exception = e2
@@ -833,12 +864,11 @@ def _send_query_with_failover_impl(
             _warn_upstream_skip_once_with_health(
                 upstream_key,
                 upstream_health,
-                "Skipping upstream %s (%s:%d via %s) for %s (failed to parse response): %s",
+                "Skipping upstream %s (%s:%d via %s) (failed to parse response): %s",
                 upstream_label,
                 host,
                 port,
                 transport,
-                qname,
                 e,
             )
             last_exception = e
@@ -910,6 +940,7 @@ def _send_query_with_failover_impl(
                     attempted_upstream_label_set.add(upstream_label)
                     attempted_upstream_labels.append(upstream_label)
                 attempted_upstream_health[upstream_label] = upstream_health
+                attempted_upstream_fail_counts[upstream_label] = fail_count
         except Exception:
             pass
 
@@ -940,37 +971,62 @@ def _send_query_with_failover_impl(
         ) as e:  # pragma: no cover - defensive: network/transport failure
             file_info = _format_transport_error_file_info(e, tls_ca_file_hint)
 
-            # Limit warnings to not flood log.
-            if _is_connection_refused_error(e) and (
-                fail_count <= 25 or (int(fail_count) % 25) == 0
-            ):
-                _warn_upstream_skip_once_with_health(
-                    upstream_key,
-                    upstream_health,
-                    "Skipping upstream %s (%s:%d via %s) for %s: connection refused (%s: %s%s)",
-                    upstream_label,
-                    host,
-                    port,
-                    transport,
-                    qname,
-                    type(e).__name__,
-                    str(e),
-                    file_info,
-                )
+            should_warn = _should_emit_upstream_skip_warning(fail_count)
+
+            if should_warn:
+                if _is_connection_refused_error(e):
+                    _warn_upstream_skip_once_with_health(
+                        upstream_key,
+                        upstream_health,
+                        "Skipping upstream %s (%s:%d via %s): connection refused (%s: %s%s)",
+                        upstream_label,
+                        host,
+                        port,
+                        transport,
+                        type(e).__name__,
+                        str(e),
+                        file_info,
+                    )
+                else:
+                    _warn_upstream_skip_once_with_health(
+                        upstream_key,
+                        upstream_health,
+                        "Skipping upstream %s (%s:%d via %s): %s: %s%s",
+                        upstream_label,
+                        host,
+                        port,
+                        transport,
+                        type(e).__name__,
+                        str(e),
+                        file_info,
+                    )
             else:
-                _warn_upstream_skip_once_with_health(
-                    upstream_key,
-                    upstream_health,
-                    "Skipping upstream %s (%s:%d via %s) for %s: %s: %s%s",
-                    upstream_label,
-                    host,
-                    port,
-                    transport,
-                    qname,
-                    type(e).__name__,
-                    str(e),
-                    file_info,
-                )
+                # Keep details available for troubleshooting, but avoid warning spam.
+                if _is_connection_refused_error(e):
+                    logger.debug(
+                        "Skipping upstream %s (%s:%d via %s): connection refused (%s: %s%s) [health: %s]",
+                        upstream_label,
+                        host,
+                        port,
+                        transport,
+                        type(e).__name__,
+                        str(e),
+                        file_info,
+                        upstream_health,
+                    )
+                else:
+                    logger.debug(
+                        "Skipping upstream %s (%s:%d via %s): %s: %s%s [health: %s]",
+                        upstream_label,
+                        host,
+                        port,
+                        transport,
+                        type(e).__name__,
+                        str(e),
+                        file_info,
+                        upstream_health,
+                    )
+
             last_exception = e
             return None, None, "all_failed"
 
@@ -1028,36 +1084,31 @@ def _send_query_with_failover_impl(
             # Shared executor: do not shut down per query.
             pass
 
-    attempted_summary = ", ".join(attempted_upstream_labels) or "none"
+    attempted_order = sorted(attempted_upstream_label_set)
+    attempted_summary = ", ".join(attempted_order) or "none"
     health_summary = (
         ", ".join(
             f"{label} [{attempted_upstream_health.get(label, 'state=unknown')}]"
-            for label in attempted_upstream_labels
+            for label in attempted_order
         )
         or "none"
     )
 
-    # Transient network errors to not log.
-    ignored_errors = [
-        "short read on length header",
-    ]
-    if str(last_exception) not in ignored_errors:
-        logger.warning(
-            "All upstreams failed for %s %s. Last error: %s (attempted=%s health=%s)",
-            qname,
-            qtype,
-            last_exception,
-            attempted_summary,
-            health_summary,
+    try:
+        all_failed_should_warn = any(
+            float(fc) > 1.0 for fc in attempted_upstream_fail_counts.values()
         )
-    else:
-        logger.debug(
-            "All upstreams failed for %s %s. Last error: %s (attempted=%s health=%s)",
-            qname,
-            qtype,
-            last_exception,
-            attempted_summary,
-            health_summary,
-        )
+    except Exception:
+        all_failed_should_warn = False
+
+    all_failed_logger = logger.warning if all_failed_should_warn else logger.debug
+    all_failed_logger(
+        "All upstreams failed %s (qtype=%s). Last error: %s (attempted=%s health=%s)",
+        qname,
+        qtype,
+        last_exception,
+        attempted_summary,
+        health_summary,
+    )
 
     return None, None, "all_failed"
