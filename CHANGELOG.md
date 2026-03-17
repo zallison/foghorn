@@ -73,6 +73,15 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - ZoneRecords resolver now prioritizes UPDATE-managed RRsets over static source RRsets for the same owner, so dynamic DNS UPDATE answers win during query resolution.
+- ZoneRecords resolver now refuses QTYPE=ANY by default, applies RRset/record caps with TC on oversized responses, fails closed on targets() errors, avoids per-query map copies by holding the records lock, and no longer sets AD by default on authoritative replies.
+- ZoneRecords NOTIFY handling now validates per-zone upstream authorization, rate-limits senders, and coalesces AXFR refresh scheduling to reduce duplicate reloads.
+- Non-QUERY opcode handling now enforces size/rate limits, validates TSIG for signed UPDATE/NOTIFY requests, and applies NOTIFY allowlist checks before plugin dispatch.
+- Recursive resolver now uses the full IPv4 root hint set, validates response TXID/question matches, filters out-of-bailiwick glue, and refines per-try timeouts.
+- Server response helpers now clamp cache TTLs to a max value, clamp EDNS payload sizes, and avoid mutating client OPT records while attaching EDE options.
+- DockerHosts now supports TLS configuration for TCP endpoints, validates container DNS names (normalizing underscores), and optionally exposes TXT metadata in ADDITIONAL when enabled.
+- Filter plugin now supports strict file loading, safe regex compilation, domain length/label caps, and deny-response fallbacks for non-A/AAAA queries.
+- Admin UI config rendering now redacts URL userinfo, expands redact key matching, and uses a safe fallback sanitizer when webserver helpers are unavailable.
+- Config diagram generation now expands variables prior to schema validation to match runtime parsing behavior.
 - DNS UPDATE internals now track source metadata in committed RRsets and rebuild the name index after atomic update commits to keep resolver lookups in sync.
 - DNS UPDATE processing now supports persisted journal replay during ZoneRecords load/reload cycles, with per-zone sequence tracking and replay metrics in plugin snapshots.
 - DNS UPDATE post-commit behavior now bumps zone SOA serials and can emit NOTIFY according to replication settings.
