@@ -51,7 +51,6 @@ from .server_response_utils import (
     _echo_client_edns,
     _ensure_edns_request,  # noqa: F401
     _set_response_id,
-    _set_response_id_bytes,  # noqa: F401
     compute_effective_ttl,  # noqa: F401
 )
 
