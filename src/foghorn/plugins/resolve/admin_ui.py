@@ -8,55 +8,72 @@ Inputs/Outputs:
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+import re
+from typing import Any, Dict, Iterable, List, Optional
+
+
+def _fallback_sanitize_config(
+    cfg: Dict[str, Any], redact_keys: List[str] | None = None
+) -> Dict[str, Any]:
+    """Fallback sanitize_config when webserver helpers are unavailable.
+
+    Inputs:
+      - cfg: Original config dictionary.
+      - redact_keys: Optional list of key names to redact.
+
+    Outputs:
+      - Deep-ish sanitized dict (best-effort). Values for matching keys are
+        replaced by '***'.
+    """
+
+    if not isinstance(cfg, dict):
+        return {}
+    if not redact_keys:
+        return dict(cfg)
+    targets = {str(k).lower() for k in redact_keys}
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            out: Dict[str, Any] = {}
+            for k, v in node.items():
+                key_str = str(k).lower()
+                if any(target in key_str for target in targets):
+                    out[str(k)] = "***"
+                else:
+                    out[str(k)] = _walk(v)
+            return out
+        if isinstance(node, list):
+            return [_walk(x) for x in node]
+        return node
+
+    return _walk(cfg)
+
 
 try:
     # Prefer the canonical redaction logic used by the admin webserver.
     from foghorn.servers.webserver.config_helpers import sanitize_config
 except Exception:  # pragma: no cover - defensive fallback
-
-    def sanitize_config(
-        cfg: Dict[str, Any], redact_keys: List[str] | None = None
-    ) -> Dict[str, Any]:
-        """Fallback sanitize_config when webserver helpers are unavailable.
-
-        Inputs:
-          - cfg: Original config dictionary.
-          - redact_keys: Optional list of key names to redact.
-
-        Outputs:
-          - Deep-ish sanitized dict (best-effort). Values for matching keys are
-            replaced by '***'.
-        """
-
-        if not isinstance(cfg, dict):
-            return {}
-        if not redact_keys:
-            return dict(cfg)
-        targets = {str(k) for k in redact_keys}
-
-        def _walk(node: Any) -> Any:
-            if isinstance(node, dict):
-                out: Dict[str, Any] = {}
-                for k, v in node.items():
-                    if str(k) in targets:
-                        out[str(k)] = "***"
-                    else:
-                        out[str(k)] = _walk(v)
-                return out
-            if isinstance(node, list):
-                return [_walk(x) for x in node]
-            return node
-
-        return _walk(cfg)
+    sanitize_config = _fallback_sanitize_config
 
 
 DEFAULT_REDACT_KEYS = [
+    # NOTE: These entries are key-name patterns only. Embedded credentials
+    # inside values (for example URL userinfo) are handled separately.
     "token",
     "password",
     "secret",
+    "key",
     "api_key",
     "apikey",
+    "psk",
+    "hmac_key",
+    "signing_key",
+    "key_file",
+    "cert",
+    "tls_cert",
+    "dsn",
+    "connection_string",
+    "proxy",
     "access_token",
     "refresh_token",
     "client_secret",
@@ -65,6 +82,7 @@ DEFAULT_REDACT_KEYS = [
     "authorization",
     "bearer",
 ]
+_URL_USERINFO_RE = re.compile(r"://[^@]+@")
 
 
 def _make_deepcopy_safe(value: Any) -> Any:
@@ -80,7 +98,7 @@ def _make_deepcopy_safe(value: Any) -> Any:
 
     Notes:
       - Tuples/sets are converted into lists.
-      - Unknown object types are converted to a stable string (usually the class name).
+      - Unknown object types are converted to a fixed non-sensitive placeholder.
       - This primarily exists because config_parser injects a live cache instance into
         every plugin config under the key "cache". Some cache implementations contain
         non-pickleable locks (e.g. RLock), which breaks copy.deepcopy().
@@ -102,14 +120,45 @@ def _make_deepcopy_safe(value: Any) -> Any:
         return [_make_deepcopy_safe(v) for v in value]
 
     # For any other object (cache instances, regex objects, sockets, etc.), use a
-    # stable, non-sensitive string representation.
-    #
-    # Avoid reading common "pretty" attributes like `.name`, since they can
-    # unintentionally contain sensitive data (e.g. token-bearing identifiers).
-    try:
-        return value.__class__.__name__
-    except Exception:
-        return str(value)
+    # fixed non-sensitive placeholder.
+    return "<object>"
+
+
+def _redact_url_userinfo(value: str) -> str:
+    """Brief: Redact URL userinfo while preserving scheme and host.
+
+    Inputs:
+      - value: Potential URL-like string.
+
+    Outputs:
+      - String where URL userinfo segments are replaced with '***'.
+    """
+
+    return _URL_USERINFO_RE.sub("://***@", str(value))
+
+
+def _mask_url_userinfo_for_keys(node: Any) -> Any:
+    """Brief: Recursively mask URL userinfo for url/endpoint-like keys.
+
+    Inputs:
+      - node: Arbitrary JSON-like structure.
+
+    Outputs:
+      - Structure with URL credentials masked for url/endpoint keys.
+    """
+
+    if isinstance(node, dict):
+        out: Dict[str, Any] = {}
+        for k, v in node.items():
+            key_str = str(k).lower()
+            if isinstance(v, str) and ("url" in key_str or "endpoint" in key_str):
+                out[str(k)] = _redact_url_userinfo(v)
+            else:
+                out[str(k)] = _mask_url_userinfo_for_keys(v)
+        return out
+    if isinstance(node, list):
+        return [_mask_url_userinfo_for_keys(v) for v in node]
+    return node
 
 
 def _truncate(text: str, max_len: int = 200) -> str:
@@ -203,6 +252,7 @@ def config_to_items(
         safe_cfg = {}
 
     clean = sanitize_config(safe_cfg, redact_keys=list(keys or []))
+    clean = _mask_url_userinfo_for_keys(clean)
 
     out: List[Dict[str, str]] = []
     for k in sorted(clean.keys()):
