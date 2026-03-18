@@ -20,6 +20,7 @@ from foghorn.plugins.resolve.base import (
     plugin_aliases,
 )
 from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
+from foghorn.utils import dns_names, ip_networks
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ def _psl_registrable_domain(qname: str) -> str | None:
       - Returns None for empty input.
     """
 
-    s = str(qname).strip().rstrip(".").lower()
+    s = dns_names.normalize_name(qname)
     if not s:
         return None
 
@@ -50,12 +51,30 @@ def _psl_registrable_domain(qname: str) -> str | None:
         # get_sld() returns the registrable domain (eTLD+1) when possible.
         out = get_sld(s)
         if out:
-            return str(out).strip().rstrip(".").lower()
+            return dns_names.normalize_name(out)
         return None
     except Exception:
         # Defensive: on any import/runtime error, fall back to non-PSL behavior
         # in the caller.
         return None
+
+
+def _psl_is_available() -> bool:
+    """Brief: Return True when publicsuffix2 PSL extraction is available.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - bool: True when publicsuffix2 imports and get_sld is callable.
+    """
+
+    try:
+        from publicsuffix2 import get_sld  # noqa: F401
+
+        return True
+    except Exception:
+        return False
 
 
 class RateLimitConfig(BaseModel):
@@ -88,8 +107,14 @@ class RateLimitConfig(BaseModel):
           - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or
             /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.
           - 'domain': ignore client identity and key only by base domain.
+      - assume_udp_when_listener_missing: When True, treat missing/unknown
+        listener values on insecure transports as UDP for spoofing mitigation.
       - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.
       - bucket_network_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.
+      - warmup_max_rps: Optional hard RPS cap enforced during warmup
+        (0 disables).
+      - bootstrap_rps: Optional baseline RPS used to seed profiles when
+        no historical samples exist (0 disables).
 
       - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',
         'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.
@@ -97,6 +122,8 @@ class RateLimitConfig(BaseModel):
       - ttl: Optional TTL used when synthesizing IP responses.
       - stats_log_interval_seconds: Interval for periodic rate-limit summary logs
         (0 disables).
+      - psl_strict: When True, fail startup if PSL extraction is unavailable
+        in domain-based modes.
 
     Outputs:
       - RateLimitConfig instance with normalized field types.
@@ -118,14 +145,18 @@ class RateLimitConfig(BaseModel):
     prune_interval_seconds: int = Field(default=60, ge=0)
 
     udp_keying: str = Field(default="cidr")
+    assume_udp_when_listener_missing: bool = Field(default=True)
     bucket_network_prefix_v4: int = Field(default=24, ge=0, le=32)
     bucket_network_prefix_v6: int = Field(default=56, ge=0, le=128)
+    warmup_max_rps: float = Field(default=0.0, ge=0.0)
+    bootstrap_rps: float = Field(default=0.0, ge=0.0)
 
     deny_response: str = Field(default="refused")
     deny_response_ip4: Optional[str] = None
     deny_response_ip6: Optional[str] = None
     ttl: int = Field(default=60, ge=0)
     stats_log_interval_seconds: int = Field(default=3600, ge=0)
+    psl_strict: bool = Field(default=False)
 
     model_config = ConfigDict(extra="allow")
 
@@ -158,7 +189,7 @@ def _to_base_domain(qname: str, base_labels: int = 2) -> str:
         return psl
 
     # Fallback: last-N labels (previous behavior).
-    s = str(qname).rstrip(".").lower()
+    s = dns_names.normalize_name(qname)
     labels = [p for p in s.split(".") if p]
     if len(labels) >= base_labels:
         return ".".join(labels[-base_labels:])
@@ -204,6 +235,18 @@ class RateLimit(BasePlugin):
             logger.warning("RateLimit: invalid mode %r; using 'per_client'", raw_mode)
             raw_mode = "per_client"
         self.mode = raw_mode
+        # PSL availability guard for domain-based modes.
+        self._psl_available = bool(_psl_is_available())
+        if self.mode in {"per_client_domain", "per_domain"} and not self._psl_available:
+            psl_strict = self._parse_bool_config("psl_strict", False)
+            msg = (
+                "RateLimit: publicsuffix2 not available; domain-based mode "
+                f"{self.mode!r} is unsafe for multi-label public suffixes."
+            )
+            if psl_strict:
+                raise RuntimeError(msg)
+            logger.warning("%s Switching mode to 'per_client'.", msg)
+            self.mode = "per_client"
 
         # Spoofing-aware keying for UDP (best-effort).
         raw_udp_keying = str(self.config.get("udp_keying", "cidr") or "cidr").lower()
@@ -214,6 +257,11 @@ class RateLimit(BasePlugin):
             )
             raw_udp_keying = "cidr"
         self.udp_keying = raw_udp_keying
+        self.assume_udp_when_listener_missing = self._parse_bool_config(
+            "assume_udp_when_listener_missing",
+            True,
+        )
+        self._missing_listener_warned = False
 
         self.bucket_network_prefix_v4 = self._parse_int_config(
             "bucket_network_prefix_v4",
@@ -260,6 +308,10 @@ class RateLimit(BasePlugin):
         self.min_enforce_rps = self._parse_float_config(
             "min_enforce_rps", 50.0, minimum=0.0
         )
+        self.warmup_max_rps = self._parse_float_config(
+            "warmup_max_rps", 0.0, minimum=0.0
+        )
+        self.bootstrap_rps = self._parse_float_config("bootstrap_rps", 0.0, minimum=0.0)
         self.global_max_rps = self._parse_float_config(
             "global_max_rps", 5000.0, minimum=0.0
         )
@@ -306,6 +358,7 @@ class RateLimit(BasePlugin):
             namespace=module_namespace(__file__),
             cache_plugin=self.config.get("cache"),
         )
+        self._window_locks = [threading.Lock() for _ in range(256)]
 
         # SQLite-backed learned profiles
         cfg_db_path = self.config.get("db_path", "./config/var/dbs/rate_limit.db")
@@ -383,6 +436,30 @@ class RateLimit(BasePlugin):
             )
             value = maximum
         return value
+
+    def _parse_bool_config(self, key: str, default: bool) -> bool:
+        """Brief: Parse boolean configuration values.
+
+        Inputs:
+          - key: Configuration key name.
+          - default: Fallback boolean value on parse failure.
+
+        Outputs:
+          - bool: Parsed boolean value.
+        """
+
+        raw = self.config.get(key, default)
+        if isinstance(raw, bool):
+            return raw
+        if raw is None:
+            return bool(default)
+        text = str(raw).strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+        logger.warning("RateLimit: %s non-boolean %r; using %s", key, raw, default)
+        return bool(default)
 
     def _db_init(self) -> None:
         """Brief: Initialize sqlite3 database for learned rate profiles.
@@ -618,7 +695,9 @@ class RateLimit(BasePlugin):
         try:
             import ipaddress
 
-            ip_obj = ipaddress.ip_address(str(client_ip).strip())
+            ip_obj = ip_networks.parse_ip(client_ip)
+            if ip_obj is None:
+                return str(client_ip)
             if ip_obj.version == 4:
                 prefix = int(getattr(self, "bucket_network_prefix_v4", 24) or 24)
             else:
@@ -628,6 +707,80 @@ class RateLimit(BasePlugin):
             return str(net)
         except Exception:
             return str(client_ip)
+
+    def _window_lock_for_key(self, key: str) -> threading.Lock:
+        """Brief: Return a stripe lock for the given key to protect window updates.
+
+        Inputs:
+          - key: Normalized profile key string.
+
+        Outputs:
+          - threading.Lock instance used to serialize window cache updates.
+        """
+
+        locks = getattr(self, "_window_locks", None)
+        if not locks:
+            return threading.Lock()
+        return locks[hash(key) % len(locks)]
+
+    def _should_apply_udp_keying(self, listener: str, secure: bool) -> bool:
+        """Brief: Decide whether to apply UDP spoofing mitigation keying.
+
+        Inputs:
+          - listener: Normalized listener string.
+          - secure: Boolean security flag for the transport.
+
+        Outputs:
+          - bool: True when UDP keying should be applied.
+        """
+
+        if listener == "udp":
+            return not secure
+        known = {"udp", "tcp", "dot", "doh"}
+        if listener and listener in known:
+            return False
+        if secure:
+            return False
+        return bool(getattr(self, "assume_udp_when_listener_missing", True))
+
+    def _warn_missing_listener(self) -> None:
+        """Brief: Log a one-time warning when listener metadata is missing.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None (logs a warning at most once per plugin instance).
+        """
+
+        if bool(getattr(self, "_missing_listener_warned", False)):
+            return
+        logger.warning(
+            "RateLimit: listener metadata missing; applying UDP keying fallback."
+        )
+        self._missing_listener_warned = True
+
+    def _seed_profile(self, key: str, rps: float, now_ts: int, samples: int) -> None:
+        """Brief: Seed a rate profile with a bootstrap baseline.
+
+        Inputs:
+          - key: Normalized profile key string.
+          - rps: Baseline requests-per-second to seed.
+          - now_ts: Current epoch seconds for last_update.
+          - samples: Initial samples count to persist.
+
+        Outputs:
+          - None (writes a baseline row into sqlite).
+        """
+
+        with self._db_lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "INSERT OR REPLACE INTO rate_profiles (key, avg_rps, max_rps, samples, last_update) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (key, float(rps), float(rps), int(samples), int(now_ts)),
+            )
+            self._conn.commit()
 
     def _make_key(self, qname: str, ctx: PluginContext) -> str:
         """Brief: Build the profiling key according to the configured mode.
@@ -649,7 +802,9 @@ class RateLimit(BasePlugin):
         secure = bool(getattr(ctx, "secure", False))
 
         # Spoofing-aware UDP overrides.
-        if listener == "udp" and not secure:
+        if self._should_apply_udp_keying(listener, secure):
+            if not listener:
+                self._warn_missing_listener()
             udp_keying = str(getattr(self, "udp_keying", "cidr") or "cidr").lower()
             if udp_keying == "domain":
                 # Ignore client identity entirely for UDP.
@@ -682,41 +837,42 @@ class RateLimit(BasePlugin):
         window_id = int(now // float(self.window_seconds))
         cache_key = (key, 0)
 
-        raw = self._window_cache.get(cache_key)
         prev_window_id: Optional[int] = None
         prev_count: Optional[int] = None
-
-        if raw is None:
-            # First observation for this key.
-            count = 1
-        else:
-            try:
-                text = raw.decode()
-                stored_window_str, stored_count_str = text.split(":", 1)
-                stored_window_id = int(stored_window_str)
-                stored_count = int(stored_count_str)
-            except (
-                Exception
-            ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                stored_window_id = window_id
-                stored_count = 0
-
-            if stored_window_id == window_id:
-                count = stored_count + 1
-            else:
-                # Completed window; update profile from the previous window before
-                # starting a new one.
-                prev_window_id = stored_window_id
-                prev_count = stored_count
+        lock = self._window_lock_for_key(key)
+        with lock:
+            raw = self._window_cache.get(cache_key)
+            if raw is None:
+                # First observation for this key.
                 count = 1
+            else:
+                try:
+                    text = raw.decode()
+                    stored_window_str, stored_count_str = text.split(":", 1)
+                    stored_window_id = int(stored_window_str)
+                    stored_count = int(stored_count_str)
+                except (
+                    Exception
+                ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
+                    stored_window_id = window_id
+                    stored_count = 0
 
-        # Persist the updated window counter with a TTL slightly larger than a single window.
-        ttl = max(self.window_seconds * 2, self.window_seconds + 1)
-        try:
-            payload = f"{window_id}:{count}".encode()
-            self._window_cache.set(cache_key, int(ttl), payload)
-        except Exception:  # pragma: no cover - defensive logging only
-            logger.debug("RateLimit: failed updating window cache for %s", key)
+                if stored_window_id == window_id:
+                    count = stored_count + 1
+                else:
+                    # Completed window; update profile from the previous window before
+                    # starting a new one.
+                    prev_window_id = stored_window_id
+                    prev_count = stored_count
+                    count = 1
+
+            # Persist the updated window counter with a TTL slightly larger than a single window.
+            ttl = max(self.window_seconds * 2, self.window_seconds + 1)
+            try:
+                payload = f"{window_id}:{count}".encode()
+                self._window_cache.set(cache_key, int(ttl), payload)
+            except Exception:  # pragma: no cover - defensive logging only
+                logger.debug("RateLimit: failed updating window cache for %s", key)
 
         # If we have a completed window, update the learned profile in sqlite.
         if prev_window_id is not None and prev_count is not None and prev_count > 0:
@@ -941,13 +1097,13 @@ class RateLimit(BasePlugin):
             )
 
         if mode == "ip":
+            if qtype not in {QTYPE.A, QTYPE.AAAA}:
+                return self._decision(action="deny", stat="rate_limit")
             ipaddr: Optional[str] = None
             if qtype == QTYPE.A and self.deny_response_ip4:
                 ipaddr = str(self.deny_response_ip4)
             elif qtype == QTYPE.AAAA and self.deny_response_ip6:
                 ipaddr = str(self.deny_response_ip6)
-            elif self.deny_response_ip4 or self.deny_response_ip6:
-                ipaddr = str(self.deny_response_ip4 or self.deny_response_ip6)
 
             if ipaddr:
                 wire = self._make_a_response(qname, qtype, raw_req, ctx, ipaddr)
@@ -1007,13 +1163,37 @@ class RateLimit(BasePlugin):
             )
 
         if not profile:
-            # No baseline yet; learning-only phase.
-            return None
+            bootstrap_rps = float(getattr(self, "bootstrap_rps", 0.0) or 0.0)
+            if bootstrap_rps > 0.0:
+                now_ts = int(now)
+                seed_samples = max(int(self.warmup_windows), 1)
+                try:
+                    self._seed_profile(key, bootstrap_rps, now_ts, seed_samples)
+                    profile = (bootstrap_rps, bootstrap_rps, seed_samples)
+                except Exception:
+                    profile = None
+            if not profile:
+                warmup_cap = float(getattr(self, "warmup_max_rps", 0.0) or 0.0)
+                if warmup_cap > 0.0:
+                    allowed_rps = warmup_cap
+                    if self.global_max_rps > 0.0:
+                        allowed_rps = min(allowed_rps, float(self.global_max_rps))
+                    if current_rps > allowed_rps:
+                        return self._build_deny_decision(qname, qtype, req, ctx)
+                # No baseline yet; learning-only phase.
+                return None
 
         avg_rps, _max_rps, samples = profile
 
         # Require at least warmup_windows completed windows before enforcing.
         if samples < int(self.warmup_windows):
+            warmup_cap = float(getattr(self, "warmup_max_rps", 0.0) or 0.0)
+            if warmup_cap > 0.0:
+                allowed_rps = warmup_cap
+                if self.global_max_rps > 0.0:
+                    allowed_rps = min(allowed_rps, float(self.global_max_rps))
+                if current_rps > allowed_rps:
+                    return self._build_deny_decision(qname, qtype, req, ctx)
             return None
 
         # Derive allowed RPS from learned average plus configured caps.
@@ -1099,8 +1279,10 @@ class RateLimit(BasePlugin):
                         {"key": "mode", "label": "Mode"},
                         {"key": "window_seconds", "label": "Window (s)"},
                         {"key": "warmup_windows", "label": "Warmup windows"},
+                        {"key": "warmup_max_rps", "label": "Warmup max RPS"},
                         {"key": "burst_factor", "label": "Burst factor"},
                         {"key": "burst_windows", "label": "Burst windows"},
+                        {"key": "bootstrap_rps", "label": "Bootstrap RPS"},
                         {"key": "min_enforce_rps", "label": "Min enforce RPS"},
                         {"key": "global_max_rps", "label": "Global max RPS"},
                         {
@@ -1108,7 +1290,12 @@ class RateLimit(BasePlugin):
                             "label": "Stats log interval (s)",
                         },
                         {"key": "udp_keying", "label": "UDP keying"},
+                        {
+                            "key": "assume_udp_when_listener_missing",
+                            "label": "Assume UDP when listener missing",
+                        },
                         {"key": "db_path", "label": "DB path"},
+                        {"key": "psl_available", "label": "PSL available"},
                     ],
                 },
                 {
@@ -1161,6 +1348,10 @@ class RateLimit(BasePlugin):
                 getattr(self, "warmup_windows", self.config.get("warmup_windows", 6))
                 or 0
             ),
+            "warmup_max_rps": float(
+                getattr(self, "warmup_max_rps", self.config.get("warmup_max_rps", 0.0))
+                or 0.0
+            ),
             "alpha": float(
                 getattr(self, "alpha", self.config.get("alpha", 0.2)) or 0.0
             ),
@@ -1178,6 +1369,10 @@ class RateLimit(BasePlugin):
             ),
             "burst_windows": int(
                 getattr(self, "burst_windows", self.config.get("burst_windows", 6)) or 0
+            ),
+            "bootstrap_rps": float(
+                getattr(self, "bootstrap_rps", self.config.get("bootstrap_rps", 0.0))
+                or 0.0
             ),
             "min_enforce_rps": float(
                 getattr(
@@ -1202,6 +1397,13 @@ class RateLimit(BasePlugin):
             "udp_keying": str(
                 getattr(self, "udp_keying", self.config.get("udp_keying", "cidr"))
             ),
+            "assume_udp_when_listener_missing": bool(
+                getattr(
+                    self,
+                    "assume_udp_when_listener_missing",
+                    self.config.get("assume_udp_when_listener_missing", True),
+                )
+            ),
             "bucket_network_prefix_v4": int(
                 getattr(
                     self,
@@ -1223,6 +1425,7 @@ class RateLimit(BasePlugin):
                     self, "deny_response", self.config.get("deny_response", "refused")
                 )
             ),
+            "psl_available": bool(getattr(self, "_psl_available", False)),
             "db_path": db_path,
             "max_profiles": int(
                 getattr(self, "max_profiles", self.config.get("max_profiles", 10000))
@@ -1248,3 +1451,26 @@ class RateLimit(BasePlugin):
 
         # Keep the snapshot JSON-safe and cheap: no DB scans here.
         return snapshot
+
+    def shutdown(self) -> None:
+        """Brief: Close sqlite3 connection on shutdown/reload.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None (closes db connection if present).
+        """
+
+        try:
+            conn = getattr(self, "_conn", None)
+        except Exception:
+            conn = None
+        if conn is not None:
+            with self._db_lock:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                self._conn = None
+        super().shutdown()
