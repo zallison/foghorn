@@ -31,6 +31,7 @@ from foghorn.plugins.resolve.base import (
     PluginDecision,
     plugin_aliases,
 )
+from foghorn.utils import dns_names, ip_networks
 from foghorn.utils.ssh_keys import fetch_ssh_host_key_hex
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,25 @@ class SshKeysConfig(BaseModel):
       - db_path: Filesystem path to the sqlite database storing SSH keys.
       - port: SSH TCP port used when probing hosts.
       - timeout_seconds: Socket/handshake timeout when fetching keys.
+      - scan_allowlist: Optional list of CIDR/IP strings allowed for scanning.
+      - scan_blocklist: Optional list of CIDR/IP strings excluded from scanning.
+      - allow_public_scan: When false, skip targets resolving to public IPs unless
+        they are explicitly allowed.
+      - max_targets: Maximum number of scan targets processed per startup scan.
+      - max_cidr_hosts: Maximum number of hosts to expand per CIDR target.
+      - lazy_scan: When true, allow on-demand single-host scans for CIDR targets.
+      - max_lazy_scans: Maximum number of concurrent lazy scans.
+      - response_allowlist: Optional list of client CIDR/IPs allowed to receive
+        SSHFP responses.
+      - response_blocklist: Optional list of client CIDR/IPs excluded from SSHFP
+        responses.
+      - allow_public_responses: When false, only respond to non-public clients
+        unless explicitly allowlisted.
+      - include_sha1: When true, include SHA-1 SSHFP records (fp_type=1).
+      - retention_seconds: Age threshold for pruning stale DB rows.
+      - max_rows: Maximum number of rows to retain in the DB (oldest evicted).
+      - prune_interval_seconds: Minimum time between DB prune passes.
+      - db_path_allowlist: Allowed base directories for db_path.
 
     Outputs:
       - SshKeysConfig instance with normalized field types.
@@ -57,6 +77,23 @@ class SshKeysConfig(BaseModel):
     db_path: str = Field(default="./config/var/ssh_keys.db")
     port: int = Field(default=22, ge=1, le=65535)
     timeout_seconds: float = Field(default=5.0, ge=0.1)
+    scan_allowlist: List[str] = Field(default_factory=list)
+    scan_blocklist: List[str] = Field(default_factory=list)
+    allow_public_scan: bool = Field(default=False)
+    max_targets: int = Field(default=4096, ge=0)
+    max_cidr_hosts: int = Field(default=1024, ge=0)
+    lazy_scan: bool = Field(default=True)
+    max_lazy_scans: int = Field(default=32, ge=0)
+    response_allowlist: List[str] = Field(default_factory=list)
+    response_blocklist: List[str] = Field(default_factory=list)
+    allow_public_responses: bool = Field(default=False)
+    include_sha1: bool = Field(default=True)
+    retention_seconds: float = Field(default=0.0, ge=0.0)
+    max_rows: int = Field(default=0, ge=0)
+    prune_interval_seconds: float = Field(default=300.0, ge=0.0)
+    db_path_allowlist: List[str] = Field(
+        default_factory=lambda: ["./config/var", "./var", "./data", "."]
+    )
 
     model_config = ConfigDict(extra="allow")
 
@@ -72,8 +109,8 @@ class SshKeys(BasePlugin):
       - For each probed subject, attempt to discover both hostname and IP and
         store entries for both when available.
       - During pre_resolve(), answer SSHFP queries whose qname matches a
-        cached subject by synthesizing SSHFP RRs with SHA-1 and SHA-256
-        fingerprints derived from the stored public key.
+        cached subject by synthesizing SSHFP RRs with SHA-256 (and optional
+        SHA-1) fingerprints derived from the stored public key.
     """
 
     # Restrict this plugin to SSHFP by default.
@@ -114,9 +151,36 @@ class SshKeys(BasePlugin):
         self._db_path: str = str(cfg.db_path)
         self._port: int = int(cfg.port)
         self._timeout: float = float(cfg.timeout_seconds)
+        self._scan_allowlist = self._parse_networks(
+            cfg.scan_allowlist, label="scan_allowlist"
+        )
+        self._scan_blocklist = self._parse_networks(
+            cfg.scan_blocklist, label="scan_blocklist"
+        )
+        self._allow_public_scan: bool = bool(cfg.allow_public_scan)
+        self._max_targets: int = int(cfg.max_targets)
+        self._max_cidr_hosts: int = int(cfg.max_cidr_hosts)
+        self._lazy_scan_enabled: bool = bool(cfg.lazy_scan)
+        self._max_lazy_scans: int = int(cfg.max_lazy_scans)
+        self._response_allowlist = self._parse_networks(
+            cfg.response_allowlist, label="response_allowlist"
+        )
+        self._response_blocklist = self._parse_networks(
+            cfg.response_blocklist, label="response_blocklist"
+        )
+        self._allow_public_responses: bool = bool(cfg.allow_public_responses)
+        self._include_sha1: bool = bool(cfg.include_sha1)
+        self._retention_seconds: float = float(cfg.retention_seconds)
+        self._max_rows: int = int(cfg.max_rows)
+        self._prune_interval_seconds: float = float(cfg.prune_interval_seconds)
+        self._db_path_allowlist: List[str] = list(cfg.db_path_allowlist or [])
+        self._cidr_networks = self._parse_cidr_targets(self._targets)
+        self._last_prune: float = 0.0
 
         self._db_lock: threading.RLock = threading.RLock()
         self._conn: Optional[sqlite3.Connection] = None
+        self._lazy_scan_lock: threading.Lock = threading.Lock()
+        self._lazy_scans: set[str] = set()
 
     # ---------------------- setup and database helpers ----------------------
 
@@ -139,6 +203,101 @@ class SshKeys(BasePlugin):
             return
 
         self._run_initial_scan(self._targets)
+        self._maybe_prune_db(force=True)
+
+    def _parse_networks(
+        self, entries: Iterable[str], *, label: str
+    ) -> List[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+        """Brief: Parse CIDR/IP strings into ipaddress network objects.
+
+        Inputs:
+          - entries: Iterable of CIDR/IP strings.
+          - label: Configuration label used for warning messages.
+
+        Outputs:
+          - List of ipaddress network objects (IPv4Network/IPv6Network).
+        """
+
+        networks: List[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+        for raw in entries or []:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            net = ip_networks.parse_network(text, strict=False)
+            if net is None:
+                logger.warning("SshKeys: invalid %s entry %r", label, text)
+                continue
+            networks.append(net)
+        return networks
+
+    def _parse_cidr_targets(
+        self, entries: Iterable[str]
+    ) -> List[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+        """Brief: Extract CIDR targets for membership checks without expansion.
+
+        Inputs:
+          - entries: Iterable of target strings (IPs, CIDRs, hostnames).
+
+        Outputs:
+          - List of ipaddress network objects for CIDR targets.
+        """
+
+        networks: List[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+        for raw in entries or []:
+            text = str(raw or "").strip()
+            if not text or "/" not in text:
+                continue
+            net = ip_networks.parse_network(text, strict=False)
+            if net is None:
+                logger.warning("SshKeys: invalid CIDR target %r", text)
+                continue
+            networks.append(net)
+        return networks
+
+    def _resolve_db_path(self, db_path: str) -> str:
+        """Brief: Resolve and validate db_path against configured allowlist.
+
+        Inputs:
+          - db_path: Raw db_path string from configuration.
+
+        Outputs:
+          - Absolute filesystem path to the sqlite database.
+        """
+
+        resolved = os.path.abspath(os.path.expanduser(str(db_path or "")))
+        allowlist = [d for d in (self._db_path_allowlist or []) if str(d).strip()]
+        if not allowlist:
+            logger.warning(
+                "SshKeys: db_path_allowlist is empty; allowing db_path %s",
+                resolved,
+            )
+            return resolved
+
+        allowed_dirs = [os.path.abspath(os.path.expanduser(str(d))) for d in allowlist]
+        for root in allowed_dirs:
+            try:
+                if os.path.commonpath([resolved, root]) == root:
+                    return resolved
+            except Exception:
+                continue
+
+        fallback_root = allowed_dirs[0]
+        safe_name = os.path.basename(resolved) or "ssh_keys.db"
+        fallback = os.path.join(fallback_root, safe_name)
+        fallback_dir = os.path.dirname(fallback) or "."
+        if not os.access(fallback_dir, os.W_OK | os.X_OK):
+            logger.warning(
+                "SshKeys: fallback db_path %s is not writable; using %s",
+                fallback,
+                resolved,
+            )
+            return resolved
+        logger.warning(
+            "SshKeys: db_path %s is outside allowlist; using %s instead",
+            resolved,
+            fallback,
+        )
+        return fallback
 
     def _init_db(self) -> None:
         """Brief: Create sqlite connection and ensure ssh_keys table exists.
@@ -151,7 +310,8 @@ class SshKeys(BasePlugin):
             creates the required table and index if they do not already exist.
         """
 
-        db_path = os.path.abspath(os.path.expanduser(self._db_path))
+        db_path = self._resolve_db_path(self._db_path)
+        self._db_path = db_path
         dir_path = os.path.dirname(db_path) or "."
         try:
             os.makedirs(dir_path, exist_ok=True)
@@ -185,6 +345,9 @@ class SshKeys(BasePlugin):
                 "CREATE INDEX IF NOT EXISTS idx_ssh_keys_hostname ON ssh_keys(hostname)"
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ssh_keys_ip ON ssh_keys(ip)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ssh_keys_last_seen ON ssh_keys(last_seen)"
+            )
 
         self._conn = conn
 
@@ -290,6 +453,65 @@ class SshKeys(BasePlugin):
                     ),
                 )
             conn.commit()
+        self._maybe_prune_db()
+
+    def _maybe_prune_db(self, *, force: bool = False) -> None:
+        """Brief: Prune stale/overflow DB rows on a configurable interval.
+
+        Inputs:
+          - force: When true, run pruning regardless of interval timing.
+
+        Outputs:
+          - None; deletes stale rows and/or trims to max_rows when configured.
+        """
+
+        if self._retention_seconds <= 0 and self._max_rows <= 0:
+            return
+
+        now = float(time.time())
+        if not force and (now - self._last_prune) < self._prune_interval_seconds:
+            return
+
+        self._last_prune = now
+        self._prune_db(now)
+
+    def _prune_db(self, now: float) -> None:
+        """Brief: Delete stale or excess rows from the sqlite cache.
+
+        Inputs:
+          - now: Current timestamp (seconds since epoch).
+
+        Outputs:
+          - None; mutates the sqlite database in-place.
+        """
+
+        conn = self._conn
+        if conn is None:
+            return
+
+        with self._db_lock:
+            cur = conn.cursor()
+            if self._retention_seconds > 0:
+                cutoff = float(now) - float(self._retention_seconds)
+                cur.execute("DELETE FROM ssh_keys WHERE last_seen < ?", (cutoff,))
+            if self._max_rows > 0:
+                cur.execute("SELECT COUNT(*) FROM ssh_keys")
+                row = cur.fetchone()
+                total = int(row[0]) if row else 0
+                if total > self._max_rows:
+                    excess = total - self._max_rows
+                    cur.execute(
+                        """
+                        DELETE FROM ssh_keys
+                        WHERE subject IN (
+                            SELECT subject FROM ssh_keys
+                            ORDER BY last_seen ASC
+                            LIMIT ?
+                        )
+                        """,
+                        (excess,),
+                    )
+            conn.commit()
 
     # ---------------------- scanning helpers ----------------------
 
@@ -304,16 +526,22 @@ class SshKeys(BasePlugin):
             SSH host keys. Errors are logged but do not abort startup.
         """
 
-        work_items: List[Tuple[str, str]] = list(self._iter_scan_items(entries))
-        if not work_items:
-            return
-
         # Filter out subjects that already exist in the database so we do not
         # re-probe them on every restart.
         pending: List[Tuple[str, str]] = []
-        for kind, value in work_items:
+        scanned = 0
+        for kind, value in self._iter_scan_items(entries):
+            if self._max_targets > 0 and scanned >= self._max_targets:
+                logger.warning(
+                    "SshKeys: scan target cap reached (%d); skipping remaining entries",
+                    self._max_targets,
+                )
+                break
+            scanned += 1
             subject = self._normalize_subject(value)
             if not subject:
+                continue
+            if kind == "ip" and not self._is_scan_ip_allowed(value):
                 continue
             if self._db_subject_exists(subject):
                 continue
@@ -358,19 +586,26 @@ class SshKeys(BasePlugin):
 
             # CIDR range.
             if "/" in text:
-                try:
-                    net = ipaddress.ip_network(text, strict=False)
-                except Exception:
+                net = ip_networks.parse_network(text, strict=False)
+                if net is None:
                     logger.warning("SshKeys: invalid CIDR target %r", text)
                     continue
+                emitted = 0
                 for addr in net.hosts():
+                    if self._max_cidr_hosts > 0 and emitted >= self._max_cidr_hosts:
+                        logger.warning(
+                            "SshKeys: CIDR %s exceeds max_cidr_hosts=%d; truncating",
+                            text,
+                            self._max_cidr_hosts,
+                        )
+                        break
+                    emitted += 1
                     yield "ip", str(addr)
                 continue
 
             # Bare IP address.
-            try:
-                ip_obj = ipaddress.ip_address(text)
-            except Exception:
+            ip_obj = ip_networks.parse_ip(text)
+            if ip_obj is None:
                 # Treat as hostname.
                 yield "hostname", text
                 continue
@@ -391,10 +626,13 @@ class SshKeys(BasePlugin):
 
         if kind == "ip":
             ip = value
+            if not self._is_scan_ip_allowed(ip):
+                logger.info("SshKeys: scan target %s blocked by policy", ip)
+                return
             hostname: Optional[str]
             try:
                 host, _aliases, _addrs = socket.gethostbyaddr(ip)
-                hostname = host.rstrip(".") or None
+                hostname = dns_names.normalize_name(host) or None
             except Exception:
                 hostname = None
 
@@ -407,13 +645,13 @@ class SshKeys(BasePlugin):
                 return
 
             if hostname is None:
-                hostname = str(info.hostname or "").rstrip(".") or None
+                hostname = dns_names.normalize_name(info.hostname or "") or None
 
             self._db_upsert_pair(hostname, ip, info.key_type, info.key_hex)
             return
 
         # Hostname path.
-        hostname = value.rstrip(".")
+        hostname = dns_names.normalize_name(value)
         ip: Optional[str] = None
         try:
             # Prefer IPv4/IPv6 addresses that are likely to succeed for SSH.
@@ -429,6 +667,14 @@ class SshKeys(BasePlugin):
                     break
         except Exception:
             ip = None
+        if ip is None:
+            logger.info(
+                "SshKeys: unable to resolve hostname %s to an IP; skipping", hostname
+            )
+            return
+        if not self._is_scan_ip_allowed(ip):
+            logger.info("SshKeys: scan target %s (%s) blocked by policy", hostname, ip)
+            return
 
         try:
             info = fetch_ssh_host_key_hex(
@@ -455,10 +701,7 @@ class SshKeys(BasePlugin):
           - Lowercased subject without trailing dot, or empty string on error.
         """
 
-        text = str(subject or "").strip()
-        if not text:
-            return ""
-        return text.rstrip(".").lower()
+        return dns_names.normalize_name(subject)
 
     @staticmethod
     def _sshfp_algorithm_for_key_type(key_type: str) -> Optional[int]:
@@ -488,6 +731,95 @@ class SshKeys(BasePlugin):
             return 6
         return None
 
+    def _is_scan_ip_allowed(self, ip_text: str) -> bool:
+        """Brief: Determine whether a scan target IP is allowed by policy.
+
+        Inputs:
+          - ip_text: IP address string.
+
+        Outputs:
+          - bool indicating whether scanning this IP is permitted.
+        """
+
+        addr = ip_networks.parse_ip(ip_text)
+        if addr is None:
+            return False
+
+        if ip_networks.ip_in_any_network(addr, self._scan_blocklist):
+            return False
+        if self._scan_allowlist:
+            return ip_networks.ip_in_any_network(addr, self._scan_allowlist)
+        if self._allow_public_scan:
+            return True
+        return not addr.is_global
+
+    def _is_response_allowed(self, ctx: PluginContext) -> bool:
+        """Brief: Determine whether a client may receive SSHFP responses.
+
+        Inputs:
+          - ctx: PluginContext containing client_ip.
+
+        Outputs:
+          - bool indicating whether this client is authorized.
+        """
+
+        client_ip = str(getattr(ctx, "client_ip", "") or "")
+        if not client_ip:
+            return False
+        addr = ip_networks.parse_ip(client_ip)
+        if addr is None:
+            return False
+
+        if ip_networks.ip_in_any_network(addr, self._response_blocklist):
+            return False
+        if self._response_allowlist:
+            return ip_networks.ip_in_any_network(addr, self._response_allowlist)
+        if self._allow_public_responses:
+            return True
+        return not addr.is_global
+
+    def _enqueue_lazy_scan(self, kind: str, value: str) -> None:
+        """Brief: Launch a background lazy scan for a single target.
+
+        Inputs:
+          - kind: Either "ip" or "hostname".
+          - value: Target value string.
+
+        Outputs:
+          - None; spawns a daemon thread when under concurrency limits.
+        """
+
+        subject = self._normalize_subject(value)
+        if not subject:
+            return
+
+        with self._lazy_scan_lock:
+            if subject in self._lazy_scans:
+                return
+            if self._max_lazy_scans > 0 and (
+                len(self._lazy_scans) >= self._max_lazy_scans
+            ):
+                logger.debug(
+                    "SshKeys: lazy scan limit reached (%d); skipping %s",
+                    self._max_lazy_scans,
+                    subject,
+                )
+                return
+            self._lazy_scans.add(subject)
+
+        def _run() -> None:
+            try:
+                self._scan_single(kind, value)
+            finally:
+                with self._lazy_scan_lock:
+                    self._lazy_scans.discard(subject)
+
+        threading.Thread(
+            target=_run,
+            name=f"SshKeysLazyScan:{subject}",
+            daemon=True,
+        ).start()
+
     def pre_resolve(
         self,
         qname: str,
@@ -511,6 +843,8 @@ class SshKeys(BasePlugin):
 
         if not self.targets(ctx):
             return None
+        if not self._is_response_allowed(ctx):
+            return None
 
         try:
             if int(qtype) != int(QTYPE.SSHFP):
@@ -524,6 +858,10 @@ class SshKeys(BasePlugin):
 
         row = self._db_get_row(subject)
         if not row:
+            if self._lazy_scan_enabled and self._cidr_networks:
+                addr = ip_networks.parse_ip(subject)
+                if addr is not None and any(addr in net for net in self._cidr_networks):
+                    self._enqueue_lazy_scan("ip", subject)
             return None
 
         key_type, key_hex = row
@@ -540,7 +878,7 @@ class SshKeys(BasePlugin):
             logger.warning("SshKeys: invalid key_hex for subject %s", subject)
             return None
 
-        sha1_hex = hashlib.sha1(key_bytes).hexdigest()
+        sha1_hex = hashlib.sha1(key_bytes).hexdigest() if self._include_sha1 else ""
         sha256_hex = hashlib.sha256(key_bytes).hexdigest()
 
         try:
@@ -555,7 +893,11 @@ class SshKeys(BasePlugin):
         )
 
         had_rr = False
-        for fp_type, fp_hex in ((1, sha1_hex), (2, sha256_hex)):
+        fingerprints = []
+        if self._include_sha1:
+            fingerprints.append((1, sha1_hex))
+        fingerprints.append((2, sha256_hex))
+        for fp_type, fp_hex in fingerprints:
             line = f"{owner} {self._ttl} IN SSHFP {alg} {fp_type} {fp_hex}"
             try:
                 rrs = RR.fromZone(line)
