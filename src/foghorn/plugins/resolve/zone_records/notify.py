@@ -5,7 +5,6 @@ Inputs/Outputs:
 """
 
 from __future__ import annotations
-import ipaddress
 
 import logging
 import socket
@@ -16,6 +15,7 @@ from dnslib import OPCODE, QTYPE, DNSRecord
 
 from foghorn.servers.transports.dot import dot_query
 from foghorn.servers.transports.tcp import tcp_query
+from foghorn.utils import ip_networks
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +73,10 @@ def _resolve_target_ips(host: str) -> set[str]:
     text = str(host or "").strip()
     if not text:
         return out
-    try:
-        out.add(str(ipaddress.ip_address(text)))
+    ip_obj = ip_networks.parse_ip(text)
+    if ip_obj is not None:
+        out.add(str(ip_obj))
         return out
-    except Exception:
-        pass
     try:
         infos = socket.getaddrinfo(text, None, 0, socket.SOCK_STREAM)
     except Exception:
@@ -85,7 +84,9 @@ def _resolve_target_ips(host: str) -> set[str]:
     for info in infos:
         try:
             addr = info[4][0]
-            out.add(str(ipaddress.ip_address(addr)))
+            ip_obj = ip_networks.parse_ip(addr)
+            if ip_obj is not None:
+                out.add(str(ip_obj))
         except Exception:
             continue
     return out
@@ -141,17 +142,29 @@ def record_axfr_client(
       - When the plugin does not expose an _axfr_notify_lock (unexpected), this
         function is a no-op.
     """
-    try:
-        zone_norm = str(zone_apex).rstrip(".").lower()
-    except Exception:
-        zone_norm = str(zone_apex).rstrip(".").lower()
+    from foghorn.utils import dns_names
+
+    def _safe_str(value: object) -> str:
+        """Brief: Best-effort string conversion with a retry.
+
+        Inputs:
+          - value: Any object convertible to string.
+
+        Outputs:
+          - str: Converted string or empty string on failure.
+        """
+        try:
+            return str(value)
+        except Exception:
+            try:
+                return str(value)
+            except Exception:
+                return ""
+
+    zone_norm = dns_names.normalize_name(_safe_str(zone_apex))
     if not zone_norm:
         return
-
-    try:
-        host = str(client_ip).strip()
-    except Exception:
-        host = str(client_ip).strip()
+    host = _safe_str(client_ip).strip()
     if not host:
         return
 
@@ -216,10 +229,9 @@ def send_notify_to_target(zone_apex: str, target: Dict[str, object]) -> None:
       - Only "tcp" and "dot" transports are supported. Any transport other than
         "dot" is treated as plain TCP.
     """
-    try:
-        apex = str(zone_apex).rstrip(".").lower()
-    except Exception:  # pragma: no cover - defensive
-        apex = str(zone_apex).lower()
+    from foghorn.utils import dns_names
+
+    apex = dns_names.normalize_name(zone_apex)
     if not apex:
         return
 
@@ -321,10 +333,9 @@ def send_notify_for_zones(
                 learned_snapshot[zone] = dict(targets)
 
     for apex in zone_apexes:
-        try:
-            zone_norm = str(apex).rstrip(".").lower()
-        except Exception:  # pragma: no cover - defensive
-            zone_norm = str(apex).lower()
+        from foghorn.utils import dns_names
+
+        zone_norm = dns_names.normalize_name(apex)
         if not zone_norm:
             continue
 

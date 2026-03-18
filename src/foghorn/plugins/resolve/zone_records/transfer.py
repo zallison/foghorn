@@ -44,7 +44,9 @@ def iter_zone_rrs_for_transfer(
         out of scope for this helper.
     """
     # Normalize apex and check whether this plugin is authoritative.
-    apex = str(zone_apex).rstrip(".").lower() if zone_apex is not None else ""
+    from foghorn.utils import dns_names
+
+    apex = dns_names.normalize_name(zone_apex) if zone_apex is not None else ""
     if not apex:
         return None
 
@@ -79,10 +81,7 @@ def iter_zone_rrs_for_transfer(
     # Walk all owners inside this zone. An owner belongs to the zone when it
     # is equal to the apex or is a strict subdomain.
     for owner, rrsets in name_index.items():
-        try:
-            owner_norm = str(owner).rstrip(".").lower()
-        except Exception:  # pragma: no cover - defensive
-            owner_norm = str(owner).lower()
+        owner_norm = dns_names.normalize_name(owner)
 
         if owner_norm != apex and not owner_norm.endswith("." + apex):
             continue
@@ -142,23 +141,9 @@ def _client_allowed_for_axfr(client_ip: str | None) -> bool:
     if not allow_raw:
         return False
 
-    try:
-        ip_obj = ipaddress.ip_address(str(client_ip).strip())
-    except Exception:
-        return False
+    from foghorn.utils import ip_networks
 
-    for entry in allow_raw:
-        try:
-            net = ipaddress.ip_network(str(entry), strict=False)
-        except Exception:
-            continue
-        try:
-            if ip_obj in net:
-                return True
-        except Exception:
-            continue
-
-    return False
+    return ip_networks.ip_string_in_cidrs(str(client_ip).strip(), allow_raw)
 
 
 def iter_axfr_messages(req: DNSRecord, client_ip: str | None = None) -> List[bytes]:
@@ -191,11 +176,10 @@ def iter_axfr_messages(req: DNSRecord, client_ip: str | None = None) -> List[byt
         q = req.questions[
             0
         ]  # pragma: no cover - defensive/metrics path excluded from coverage
-        qname_text = str(q.qname).rstrip(
-            "."
-        )  # pragma: no cover - defensive/metrics path excluded from coverage
-        qname_norm = (
-            qname_text.lower()
+        from foghorn.utils import dns_names
+
+        qname_norm = dns_names.normalize_name(
+            q.qname
         )  # pragma: no cover - defensive/metrics path excluded from coverage
     except Exception as exc:  # pragma: no cover - defensive parsing
         logger.warning("iter_axfr_messages: malformed query: %s", exc)
@@ -255,8 +239,10 @@ def iter_axfr_messages(req: DNSRecord, client_ip: str | None = None) -> List[byt
         )  # pragma: no cover - defensive/metrics path excluded from coverage
         return [r.pack()]
 
-    apex_owner = zone_apex.rstrip(
-        "."
+    from foghorn.utils import dns_names
+
+    apex_owner = dns_names.normalize_name(
+        zone_apex
     )  # pragma: no cover - defensive/metrics path excluded from coverage
     soa_rrs: List[RR] = (
         []
@@ -265,12 +251,9 @@ def iter_axfr_messages(req: DNSRecord, client_ip: str | None = None) -> List[byt
         []
     )  # pragma: no cover - defensive/metrics path excluded from coverage
     for rr in rrs:  # pragma: no cover - defensive/metrics path excluded from coverage
-        try:  # pragma: no cover - defensive/metrics path excluded from coverage
-            owner_norm = str(rr.rname).rstrip(".").lower()
-        except Exception:  # pragma: no cover - defensive
-            owner_norm = str(
-                rr.rname
-            ).lower()  # pragma: no cover - defensive/metrics path excluded from coverage
+        owner_norm = dns_names.normalize_name(
+            rr.rname
+        )  # pragma: no cover - defensive/metrics path excluded from coverage
         if (
             rr.rtype == QTYPE.SOA and owner_norm == apex_owner
         ):  # pragma: no cover - defensive/metrics path excluded from coverage

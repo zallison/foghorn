@@ -10,6 +10,7 @@ from dnslib import QTYPE, RR
 
 from foghorn.dnssec import zone_helpers as _zone_helpers
 from foghorn.servers.transports.axfr import AXFRError, axfr_transfer
+from foghorn.utils import dns_names
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,7 @@ def overlay_axfr_zones(
         if not zone_name or not isinstance(upstreams, list):
             continue
 
-        zone_text = str(zone_name).rstrip(".").lower()
+        zone_text = dns_names.normalize_name(zone_name)
         if not zone_text:
             continue
 
@@ -254,7 +255,7 @@ def _classify_axfr_zone_dnssec(
     """
 
     try:
-        apex_owner = zone_text.rstrip(".")
+        apex_owner = dns_names.normalize_name(zone_text)
         has_dnskey = False
         has_rrsig = False
         try:
@@ -267,10 +268,7 @@ def _classify_axfr_zone_dnssec(
             rrsig_code = 46
 
         for rr in transferred:
-            try:
-                owner_norm = str(rr.rname).rstrip(".").lower()
-            except Exception:  # pragma: no cover - defensive
-                owner_norm = str(rr.rname).lower()
+            owner_norm = dns_names.normalize_name(rr.rname)
             if owner_norm != apex_owner:
                 continue
             if int(rr.rtype) == int(dnskey_code):
@@ -341,7 +339,7 @@ def _merge_transferred_rrs_into_mappings(
 
     for rr in transferred:
         try:
-            owner = str(rr.rname).rstrip(".").lower()
+            owner = dns_names.normalize_name(rr.rname)
             qtype_code = int(rr.rtype)
             ttl = int(rr.ttl)
             value = str(rr.rdata)

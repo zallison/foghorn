@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple
 from dnslib import QTYPE, RR, DNSRecord
 
 from foghorn.security_limits import MAX_AXFR_FRAME_BYTES
+from foghorn.utils import dns_names
 
 from .dot import _build_ssl_context
 
@@ -76,7 +77,7 @@ def axfr_transfer(
         terminal SOA records.
     """
 
-    zone_qname = (zone.rstrip(".") or ".") + "."
+    zone_qname = f"{dns_names.normalize_name(zone) or '.'}."
 
     try:
         q = DNSRecord.question(zone_qname, "AXFR")
@@ -150,7 +151,7 @@ def axfr_transfer(
                 raise AXFRError(f"failed to parse AXFR response: {exc}") from exc
 
             for rr in resp.rr:
-                owner = str(rr.rname).rstrip(".").lower()
+                owner = dns_names.normalize_name(rr.rname)
                 rdata_text = str(rr.rdata)
                 if rr.rtype == QTYPE.SOA:
                     key = (owner, rdata_text)
