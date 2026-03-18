@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
 import os
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -17,6 +19,9 @@ from .base import BasePlugin
 logger = logging.getLogger(__name__)
 
 ONE_DAY_SECONDS = 24 * 60 * 60
+MAX_DOMAIN_LIST_LINE_LENGTH = 2048
+FAILURE_BACKOFF_BASE_SECONDS = 30
+FAILURE_BACKOFF_MAX_SECONDS = 15 * 60
 
 
 class FileDownloaderConfig(BaseModel):
@@ -40,6 +45,8 @@ class FileDownloaderConfig(BaseModel):
         line to downloaded files (default: False).
       - hash_filenames: Plugin-level default for whether filenames should
         include a URL hash (default: False).
+      - allow_private_hosts: When True, allow loopback/link-local/RFC1918 targets.
+      - allowlist_hosts: Optional list of hostnames or domain suffixes to allow.
 
     Outputs:
       - FileDownloaderConfig instance with normalized field types.
@@ -52,6 +59,8 @@ class FileDownloaderConfig(BaseModel):
     interval_seconds: Optional[int] = Field(default=None, ge=0)
     add_comment: Optional[bool] = Field(default=False)
     hash_filenames: bool = Field(default=False)
+    allow_private_hosts: bool = Field(default=False)
+    allowlist_hosts: Optional[List[str]] = Field(default=None)
 
     model_config = ConfigDict(extra="allow")
 
@@ -67,9 +76,11 @@ class FileDownloader(BasePlugin):
       - interval_days (float|int|None): If set, re-check and update no more often than
         this many days (legacy 'interval_seconds' is still accepted as a deprecated
         alias).
+      - allow_private_hosts (bool): When True, allow loopback/link-local/RFC1918 targets.
+      - allowlist_hosts (List[str]|None): Optional hostnames or suffixes to allow.
 
     Outputs:
-      - Writes one file per URL under download_path, named as '{base}-{sha1(url)[:12]}{ext}'.
+      - Writes one file per URL under download_path, named as '{base}-{sha256(url)[:12]}{ext}'.
         If the URL path has no extension, no extension is added (e.g., 'base-<hash>').
         The first line of each file is a timestamped header: '# YYYY-MM-DD HH:MM - url'.
 
@@ -130,6 +141,15 @@ class FileDownloader(BasePlugin):
         self._default_hash_filenames: bool = bool(
             self.config.get("hash_filenames", False)
         )
+        self._allow_private_hosts: bool = bool(
+            self.config.get("allow_private_hosts", False)
+        )
+        raw_allowlist = self.config.get("allowlist_hosts")
+        self._allowlist_hosts: List[str] = [
+            str(host).strip().lower()
+            for host in (raw_allowlist or [])
+            if str(host).strip()
+        ]
 
         # Public, string-only URL list preserved for backwards compatibility and
         # tests. Per-URL options are tracked separately in _url_options.
@@ -168,6 +188,7 @@ class FileDownloader(BasePlugin):
         else:
             self.interval_seconds = None
         self._last_run: float = 0.0
+        self._failure_state: dict[str, dict[str, float | int]] = {}
         self._stop_event: threading.Event | None = None
         self._background_thread: threading.Thread | None = None
 
@@ -354,6 +375,8 @@ class FileDownloader(BasePlugin):
             decide whether to prepend a header line.
         """
 
+        path_to_url: dict[str, str] = {}
+        planned: list[tuple[str, str, str]] = []
         for url in urls:
             hash_filenames, _ = self._get_effective_url_options(url)
             if hash_filenames:
@@ -362,15 +385,39 @@ class FileDownloader(BasePlugin):
                 fname = self._make_plain_filename(url)
 
             fpath = os.path.join(self.download_path, fname)
+            prior = path_to_url.get(fpath)
+            if prior and prior != url:
+                raise ValueError(
+                    f"Filename collision for {fpath}: {prior} vs {url} (enable hash_filenames)"
+                )
+            path_to_url[fpath] = url
+            planned.append((url, fpath, fname))
+
+        for url, fpath, fname in planned:
             logger.debug("FileDownloader checking: %s", url)
             # Try HEAD for last-modified; fall back to GET
             if self._needs_update(url, fpath):
                 logger.info("Downloading list %s to %s", url, fpath)
-                self._fetch(url, fpath)
+                temp_path = self._fetch(url, fpath)
+                try:
+                    if not self._validate_domain_list(temp_path):
+                        raise ValueError(
+                            f"Invalid content in {fname} ({url}): expected domain-per-line list"
+                        )
+                    os.replace(temp_path, fpath)
+                    self._clear_failure_state(url)
+                finally:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except OSError:
+                            logger.warning(
+                                "FileDownloader failed cleaning temp file %s", temp_path
+                            )
 
             if not self._validate_domain_list(fpath):
                 raise ValueError(
-                    f"Invalid content in {fname}: expected domain-per-line list"
+                    f"Invalid content in {fname} ({url}): expected domain-per-line list"
                 )
 
     def _needs_update(self, url: str, filepath: str) -> bool:
@@ -390,17 +437,19 @@ class FileDownloader(BasePlugin):
           - If no interval is configured, files younger than one day are treated
             as fresh and also return False.
           - Otherwise, consults the remote Last-Modified header when available and
-            returns True only when the remote copy is newer, falling back to True
-            on parsing or network errors.
+            returns True only when the remote copy is newer, falling back to a
+            backoff cooldown on parsing or network errors.
         """
         if not os.path.exists(filepath):
             return True
+        now = time.time()
+        if self._is_failure_cooldown_active(url, now):
+            return False
 
         # Do not update files that are younger than the configured interval_days
         # (when present) or younger than one day by default; during setup this
         # prevents recently-created list files from being rewritten unnecessarily.
         try:
-            now = time.time()
             local_mtime = os.path.getmtime(filepath)
             min_age = ONE_DAY_SECONDS
             if self.interval_seconds is not None:
@@ -430,9 +479,11 @@ class FileDownloader(BasePlugin):
                     local_mtime = os.path.getmtime(filepath)
                     return remote_mtime > local_mtime
                 except Exception:
-                    return True
+                    self._record_failure(url, now)
+                    return False
         except requests.RequestException:
-            return True
+            self._record_failure(url, now)
+            return False
         return True
 
     # --- Helpers for filenames, per-URL options, and url files ---
@@ -451,7 +502,7 @@ class FileDownloader(BasePlugin):
         sentinel = object()
         for entry in raw_urls:
             if isinstance(entry, str):
-                url = entry
+                url = self._validate_and_normalize_url(entry, source="urls")
                 use_hashed = self._default_hash_filenames
                 add_comment = self._default_add_comment
             elif isinstance(entry, dict):
@@ -461,6 +512,7 @@ class FileDownloader(BasePlugin):
                         "FileDownloader skipping urls entry without 'url': %r", entry
                     )
                     continue
+                url = self._validate_and_normalize_url(url, source="urls")
                 raw_use_hashed = entry.get("hash_filenames", sentinel)
                 if raw_use_hashed is sentinel:
                     use_hashed = self._default_hash_filenames
@@ -512,18 +564,14 @@ class FileDownloader(BasePlugin):
 
     def _url_hash12(self, url: str) -> str:
         """
-        Brief: Return first 12 hex chars of sha1 over the full URL.
+        Brief: Return first 12 hex chars of sha256 over the full URL.
 
         Inputs:
           - url (str): The full URL string used to download.
         Outputs:
           - (str): 12-character lowercase hex digest.
-
-        Example usage:
-            >>> FileDownloader()._url_hash12('https://example.com/a.txt')
-            '0a1b2c3d4e5f'
         """
-        h = hashlib.sha1(url.encode("utf-8")).hexdigest()
+        h = hashlib.sha256(url.encode("utf-8")).hexdigest()
         return h[:12]
 
     def _derive_base_and_ext(self, url: str) -> tuple[str, str]:
@@ -554,7 +602,7 @@ class FileDownloader(BasePlugin):
 
     def _make_hashed_filename(self, url: str, base_name: str | None = None) -> str:
         """
-        Brief: Build '{base}-{sha1[:12]}{ext}' using URL-derived or provided base.
+        Brief: Build '{base}-{sha256[:12]}{ext}' using URL-derived or provided base.
 
         Inputs:
           - url (str): The full URL.
@@ -633,7 +681,13 @@ class FileDownloader(BasePlugin):
                         s = raw.strip()
                         if not s or s.startswith("#"):
                             continue
-                        urls.add(s)
+                        try:
+                            url = self._validate_and_normalize_url(
+                                s, source=f"url_files:{path}"
+                            )
+                            urls.add(url)
+                        except ValueError as exc:
+                            logger.warning("Skipping invalid URL in %s: %s", path, exc)
             except FileNotFoundError:
                 logger.warning("url_files entry not found: %s", path)
         return urls
@@ -651,15 +705,15 @@ class FileDownloader(BasePlugin):
         ts = now or datetime.now()
         return f"# {ts.strftime('%Y-%m-%d %H:%M')} - {url}"
 
-    def _fetch(self, url: str, filepath: str) -> None:
-        """Brief: Download a single URL to filepath, honoring add_comment option.
+    def _fetch(self, url: str, filepath: str) -> str:
+        """Brief: Download a single URL to a temp file, honoring add_comment option.
 
         Inputs:
           - url: Source URL to fetch.
-          - filepath: Destination path for the downloaded content.
+          - filepath: Final destination path for the downloaded content.
 
         Outputs:
-          - None; writes the downloaded body (and optional header) to filepath.
+          - (str): Path to the temp file containing the downloaded content.
 
         Behavior:
           - When the effective add_comment option for the URL is True, a
@@ -667,22 +721,55 @@ class FileDownloader(BasePlugin):
           - When add_comment is False or None, only the body is written.
         """
 
-        r = requests.get(url, timeout=20)
-        r.raise_for_status()
+        now = time.time()
+        try:
+            r = requests.get(url, timeout=20)
+            r.raise_for_status()
+        except requests.RequestException:
+            self._record_failure(url, now)
+            raise
         _, add_comment = self._get_effective_url_options(url)
         body = r.text
-        with open(filepath, "w", encoding="utf-8", errors="ignore") as f:
-            if add_comment is True:
-                header = self._make_header_line(url)
-                f.write(header)
-                f.write("\n")
-            f.write(body)
+        temp_dir = os.path.dirname(filepath) or "."
+        fd, temp_path = tempfile.mkstemp(
+            prefix=".file_downloader.", dir=temp_dir, text=True
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", errors="ignore") as f:
+                if add_comment is True:
+                    header = self._make_header_line(url)
+                    f.write(header)
+                    f.write("\n")
+                f.write(body)
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                logger.warning("FileDownloader failed cleaning temp file %s", temp_path)
+            self._record_failure(url, now)
+            raise
+        return temp_path
 
     def _validate_domain_list(self, filepath: str) -> bool:
+        """Brief: Validate that a file contains domain-per-line entries.
+
+        Inputs:
+          - filepath (str): Path to the downloaded list file.
+        Outputs:
+          - (bool): True if all non-comment lines are valid domains.
+
+        Behavior:
+          - Validates the entire file.
+          - Rejects oversized lines, control characters, or invalid labels.
+        """
         try:
             seen = 0
             with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                 for raw in f:
+                    if len(raw) > MAX_DOMAIN_LIST_LINE_LENGTH:
+                        return False
                     line = raw.strip()
                     # Treat both '#' and '!' as comment prefixes to support
                     # AdGuard/Adblock-style lists where '!' starts a comment.
@@ -698,13 +785,186 @@ class FileDownloader(BasePlugin):
                     line = line.split("#", 1)[0].split("!", 1)[0].strip()
                     if not line:
                         continue
-                    # Reject typical hosts-format entries (start with an IP) or
-                    # lines lacking a dot or containing whitespace.
-                    if " " in line or "\t" in line or "." not in line:
+                    adguard_token, adguard_matched = self._extract_adguard_domain_token(
+                        line
+                    )
+                    if adguard_matched:
+                        if not adguard_token:
+                            # Recognized AdGuard syntax that does not encode a
+                            # DNS domain token for Filter (e.g. cosmetic rule).
+                            continue
+                        line = adguard_token
+                    if not self._is_valid_domain_token(line):
                         return False
                     seen += 1
-                    if seen >= 5:
-                        return True
-            return False
+            return seen > 0
         except Exception:
             return False
+
+    @staticmethod
+    def _extract_adguard_domain_token(line: str) -> tuple[str, bool]:
+        """Brief: Extract a DNS domain token from an AdGuard/Adblock rule line.
+
+        Inputs:
+          - line (str): Candidate non-comment list line.
+        Outputs:
+          - (domain_token, matched):
+              - domain_token: Parsed domain token (empty if none present).
+              - matched: True when line is recognized as AdGuard-style syntax.
+        """
+        text = str(line).strip()
+        if not text:
+            return "", False
+
+        if text.startswith("@@"):
+            text = text[2:].lstrip()
+
+        # Cosmetic rules are valid AdGuard syntax but do not provide DNS
+        # domains for this plugin's domain list semantics.
+        if any(marker in text for marker in ("##", "#@#", "#?#", "#$#")):
+            return "", True
+
+        if not text.startswith("||"):
+            return "", False
+
+        token = text[2:].strip()
+        if "^" in token:
+            token = token.split("^", 1)[0]
+        if "$" in token:
+            token = token.split("$", 1)[0]
+        if "/" in token:
+            token = token.split("/", 1)[0]
+
+        return token.strip().strip("."), True
+
+    def _validate_and_normalize_url(self, url: str, source: str) -> str:
+        """Brief: Validate URL scheme/host and enforce allowlist/private rules.
+
+        Inputs:
+          - url (str): Raw URL string to validate.
+          - source (str): Origin of the URL for error messages.
+        Outputs:
+          - (str): Normalized URL string.
+
+        Behavior:
+          - Allows only http/https schemes.
+          - Rejects loopback/link-local/RFC1918 targets unless configured.
+        """
+        candidate = str(url).strip()
+        if not candidate:
+            raise ValueError(f"{source} entry is empty")
+        parsed = urlparse(candidate)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"{source} entry has invalid scheme: {candidate}")
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError(f"{source} entry missing hostname: {candidate}")
+        host_lc = hostname.lower().rstrip(".")
+        if self._allowlist_hosts and self._is_allowlisted_host(host_lc):
+            return candidate
+        if self._is_private_host(host_lc) and not self._allow_private_hosts:
+            raise ValueError(f"{source} entry points to private host: {candidate}")
+        return candidate
+
+    def _is_allowlisted_host(self, host: str) -> bool:
+        """Brief: Check if host matches configured allowlist entries.
+
+        Inputs:
+          - host (str): Lowercased hostname without trailing dot.
+        Outputs:
+          - (bool): True if host matches an allowlist entry.
+
+        Behavior:
+          - Exact matches are allowed.
+          - Entries starting with '.' allow subdomain suffix matches.
+        """
+        for entry in self._allowlist_hosts:
+            if entry.startswith("."):
+                suffix = entry.lstrip(".")
+                if host == suffix or host.endswith(f".{suffix}"):
+                    return True
+            elif host == entry:
+                return True
+        return False
+
+    def _is_private_host(self, host: str) -> bool:
+        """Brief: Determine if a hostname is loopback/link-local/RFC1918.
+
+        Inputs:
+          - host (str): Lowercased hostname without trailing dot.
+        Outputs:
+          - (bool): True if host is private/loopback/link-local/etc.
+        """
+        if host in ("localhost",):
+            return True
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        return bool(
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        )
+
+    def _is_valid_domain_token(self, token: str) -> bool:
+        """Brief: Validate a single domain token from a list file.
+
+        Inputs:
+          - token (str): Raw token string after comment stripping.
+        Outputs:
+          - (bool): True if token is a valid DNS-style domain name.
+
+        Behavior:
+          - Rejects whitespace, control chars, or overly long names.
+          - Enforces label length and character rules.
+        """
+        from foghorn.utils import dns_names
+
+        return dns_names.is_list_domain_token(token)
+
+    def _record_failure(self, url: str, now: float) -> None:
+        """Brief: Record a URL failure and update backoff state.
+
+        Inputs:
+          - url (str): URL that failed.
+          - now (float): Current timestamp.
+        Outputs:
+          - None; updates internal backoff state.
+        """
+        state = self._failure_state.get(url, {"count": 0, "last_failure": 0.0})
+        count = int(state.get("count", 0)) + 1
+        self._failure_state[url] = {"count": count, "last_failure": now}
+
+    def _clear_failure_state(self, url: str) -> None:
+        """Brief: Clear failure backoff state after a successful download.
+
+        Inputs:
+          - url (str): URL that succeeded.
+        Outputs:
+          - None.
+        """
+        self._failure_state.pop(url, None)
+
+    def _is_failure_cooldown_active(self, url: str, now: float) -> bool:
+        """Brief: Determine if a URL is in failure backoff cooldown.
+
+        Inputs:
+          - url (str): URL to check.
+          - now (float): Current timestamp.
+        Outputs:
+          - (bool): True if still in cooldown window.
+        """
+        state = self._failure_state.get(url)
+        if not state:
+            return False
+        count = int(state.get("count", 0))
+        last_failure = float(state.get("last_failure", 0.0))
+        backoff = min(
+            FAILURE_BACKOFF_MAX_SECONDS,
+            FAILURE_BACKOFF_BASE_SECONDS * (2 ** max(0, count - 1)),
+        )
+        return (now - last_failure) < backoff
