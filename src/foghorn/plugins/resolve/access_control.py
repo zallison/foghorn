@@ -15,6 +15,7 @@ from .base import (
     PluginDecision,
     plugin_aliases,
 )
+from foghorn.utils import ip_networks
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,10 @@ def _parse_client_ip(client_ip: str) -> ipaddress.IPv4Address | ipaddress.IPv6Ad
       - This keeps per-query overhead low when many requests repeat the same
         client IPs.
     """
-    return ipaddress.ip_address(str(client_ip))
+    parsed = ip_networks.parse_ip(client_ip)
+    if parsed is None:
+        raise ValueError(f"invalid client ip {client_ip!r}")
+    return parsed
 
 
 class AccessControlConfig(BaseModel):
@@ -116,11 +120,17 @@ class AccessControl(BasePlugin):
             )
             self.default = "allow"
 
+        def _parse_network_or_raise(value: object) -> ipaddress._BaseNetwork:
+            net = ip_networks.parse_network(value)
+            if net is None:
+                raise ValueError(f"invalid network {value!r}")
+            return net
+
         self.allow_nets = [
-            ipaddress.ip_network(n, strict=False) for n in self.config.get("allow", [])
+            _parse_network_or_raise(n) for n in self.config.get("allow", [])
         ]
         self.deny_nets = [
-            ipaddress.ip_network(n, strict=False) for n in self.config.get("deny", [])
+            _parse_network_or_raise(n) for n in self.config.get("deny", [])
         ]
 
         deny_resp = str(

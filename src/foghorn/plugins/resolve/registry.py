@@ -22,6 +22,10 @@ from .base import BasePlugin
 # Outputs:
 #   - Mapping from module name -> ImportError string.
 _DISCOVERY_IMPORT_ERRORS: Dict[str, str] = {}
+_DISCOVERY_IMPORT_ERRORS_BY_PACKAGE: Dict[str, Dict[str, str]] = {}
+
+# Cached plugin registries by package name.
+_DISCOVERY_CACHE: Dict[str, Dict[str, Type[BasePlugin]]] = {}
 
 logger = logging.getLogger(__name__)
 
@@ -76,13 +80,55 @@ def _strict_plugin_discovery_enabled() -> bool:
     return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _debug_plugin_discovery_enabled() -> bool:
+    """Brief: Check whether debug hints for plugin discovery are enabled.
+
+    Inputs:
+      - None (reads environment variable FOGHORN_DEBUG_PLUGIN_DISCOVERY).
+
+    Outputs:
+      - bool: True when debug hints are enabled.
+    """
+
+    val = os.getenv("FOGHORN_DEBUG_PLUGIN_DISCOVERY", "")
+    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def clear_plugin_discovery_cache(package_name: str | None = None) -> None:
+    """Brief: Clear cached plugin discovery results.
+
+    Inputs:
+      - package_name: Optional package name to clear. When None, clears all.
+
+    Outputs:
+      - None
+
+    Example:
+      >>> clear_plugin_discovery_cache()
+    """
+
+    global _DISCOVERY_CACHE, _DISCOVERY_IMPORT_ERRORS, _DISCOVERY_IMPORT_ERRORS_BY_PACKAGE
+    if package_name is None:
+        _DISCOVERY_CACHE = {}
+        _DISCOVERY_IMPORT_ERRORS_BY_PACKAGE = {}
+        _DISCOVERY_IMPORT_ERRORS = {}
+        return
+
+    _DISCOVERY_CACHE.pop(package_name, None)
+    _DISCOVERY_IMPORT_ERRORS_BY_PACKAGE.pop(package_name, None)
+    if package_name == "foghorn.plugins":
+        _DISCOVERY_IMPORT_ERRORS = {}
+
+
 def discover_plugins(
     package_name: str = "foghorn.plugins",
+    force_refresh: bool = False,
 ) -> Dict[str, Type[BasePlugin]]:
     """Brief: Discover and register plugins by importing plugin modules.
 
     Inputs:
       - package_name: Package path to scan for plugins.
+      - force_refresh: When True, bypass cached discovery results.
 
     Outputs:
       - dict[str, type[BasePlugin]] mapping normalized aliases to plugin classes.
@@ -103,10 +149,17 @@ def discover_plugins(
       True
     """
 
+    global _DISCOVERY_IMPORT_ERRORS
+
+    if not force_refresh and package_name in _DISCOVERY_CACHE:
+        cached = _DISCOVERY_CACHE[package_name]
+        cached_errors = _DISCOVERY_IMPORT_ERRORS_BY_PACKAGE.get(package_name, {})
+        _DISCOVERY_IMPORT_ERRORS = dict(cached_errors)
+        return dict(cached)
+
     registry: Dict[str, Type[BasePlugin]] = {}
 
     # Reset per-discovery error registry.
-    global _DISCOVERY_IMPORT_ERRORS
     _DISCOVERY_IMPORT_ERRORS = {}
 
     strict = _strict_plugin_discovery_enabled()
@@ -162,6 +215,8 @@ def discover_plugins(
                     )
                 registry[alias] = obj
 
+    _DISCOVERY_CACHE[package_name] = dict(registry)
+    _DISCOVERY_IMPORT_ERRORS_BY_PACKAGE[package_name] = dict(_DISCOVERY_IMPORT_ERRORS)
     return registry
 
 
@@ -193,13 +248,24 @@ def get_plugin_class(
 
         hint = ""
         if _DISCOVERY_IMPORT_ERRORS:
-            # Include only a small sample to keep errors readable.
-            sample = list(_DISCOVERY_IMPORT_ERRORS.items())[:5]
-            formatted = ", ".join([f"{m} ({err})" for m, err in sample])
-            hint = (
-                " Some plugin modules could not be imported due to missing optional "
-                f"dependencies: {formatted}."
+            logger.debug(
+                "Plugin discovery import errors for %s: %s",
+                identifier,
+                _DISCOVERY_IMPORT_ERRORS,
             )
+            if _debug_plugin_discovery_enabled() or _strict_plugin_discovery_enabled():
+                # Include only a small sample to keep errors readable.
+                sample = list(_DISCOVERY_IMPORT_ERRORS.items())[:5]
+                formatted = ", ".join([f"{m} ({err})" for m, err in sample])
+                hint = (
+                    " Some plugin modules could not be imported due to missing optional "
+                    f"dependencies: {formatted}."
+                )
+            else:
+                hint = (
+                    " Some plugin modules could not be imported due to missing optional "
+                    "dependencies."
+                )
 
         raise KeyError(
             f"Unknown plugin alias '{identifier}'. "
