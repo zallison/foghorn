@@ -15,6 +15,7 @@ from foghorn.plugins.resolve.registry import (
     _camel_to_snake,
     _default_alias_for,
     _normalize,
+    clear_plugin_discovery_cache,
     discover_plugins,
     get_plugin_class,
 )
@@ -313,7 +314,8 @@ def test_discover_plugins_duplicate_alias_raises_1(tmp_path, monkeypatch):
             lambda pkg="foghorn.plugins": ["foghorn.plugins.filter", "dupe_pkg.mod1"],
         )
 
-        registry = discover_plugins("foghorn.plugins")
+        clear_plugin_discovery_cache("foghorn.plugins")
+        registry = discover_plugins("foghorn.plugins", force_refresh=True)
         assert isinstance(registry, dict)
         assert "filter" in registry
         raise Exception("wtf")
@@ -377,7 +379,8 @@ def test_discover_plugins_import_exception_propagates(monkeypatch):
     )
 
     with pytest.raises(ImportError):
-        discover_plugins()
+        clear_plugin_discovery_cache("foghorn.plugins")
+        discover_plugins(force_refresh=True)
 
 
 def test_discover_plugins_no_duplicates():
