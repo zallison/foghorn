@@ -109,7 +109,7 @@
         "config_schema": {
           "$defs": {
             "DockerEndpointConfig": {
-              "description": "Brief: Per-endpoint configuration for DockerHosts.\n\nIn addition to full container names and IDs, DockerHosts also exposes a\nshort container ID alias (the first 12 hex characters) for convenience.\n\nInputs:\n  - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n    \"tcp://127.0.0.1:2375\").\n  - reload_interval_second: Interval in seconds between background refreshes\n    for this endpoint. When set to 0, the endpoint is only refreshed at\n    startup (or when other endpoints cause a global refresh).\n  - use_ipv4: Optional IPv4 address to use in answers instead of\n    per-container IPv4 addresses discovered from this endpoint.\n  - use_ipv6: Optional IPv6 address to use in answers instead of\n    per-container IPv6 addresses discovered from this endpoint.\n  - ttl: Optional TTL override for answers derived from this endpoint; when\n    omitted, the plugin-level ttl is used.\n\nOutputs:\n  - DockerEndpointConfig instance with normalized field types.",
+              "description": "Brief: Per-endpoint configuration for DockerHosts.\n\nIn addition to full container names and IDs, DockerHosts also exposes a\nshort container ID alias (the first 12 hex characters) for convenience.\n\nInputs:\n  - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n    \"tcp://127.0.0.1:2375\").\n  - reload_interval_second: Interval in seconds between background refreshes\n    for this endpoint. When set to 0, the endpoint is only refreshed at\n    startup (or when other endpoints cause a global refresh).\n  - use_ipv4: Optional IPv4 address to use in answers instead of\n    per-container IPv4 addresses discovered from this endpoint.\n  - use_ipv6: Optional IPv6 address to use in answers instead of\n    per-container IPv6 addresses discovered from this endpoint.\n  - ttl: Optional TTL override for answers derived from this endpoint; when\n    omitted, the plugin-level ttl is used.\n  - tls_verify: When true, verify Docker daemon TLS certs for tcp://\n    endpoints.\n  - tls_cert: Optional client TLS certificate path.\n  - tls_key: Optional client TLS private-key path.\n  - tls_ca: Optional CA bundle path used to verify the daemon cert.\n\nOutputs:\n  - DockerEndpointConfig instance with normalized field types.",
               "properties": {
                 "reload_interval_second": {
                   "default": 60.0,
@@ -117,6 +117,54 @@
                   "minimum": 0,
                   "title": "Reload Interval Second",
                   "type": "number"
+                },
+                "tls_ca": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Tls Ca"
+                },
+                "tls_cert": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Tls Cert"
+                },
+                "tls_key": {
+                  "anyOf": [
+                    {
+                      "description": "Type: string.",
+                      "type": "string"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Tls Key"
+                },
+                "tls_verify": {
+                  "default": false,
+                  "description": "Type: boolean. Default: false.",
+                  "title": "Tls Verify",
+                  "type": "boolean"
                 },
                 "ttl": {
                   "anyOf": [
@@ -175,7 +223,7 @@
             }
           },
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for DockerHosts plugin.\n\nInputs:\n  - endpoints: List of endpoint dictionaries.\n    Each entry must contain:\n      - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n        \"tcp://127.0.0.1:2375\").\n    and may contain:\n      - reload_interval_second: float seconds between refreshes for that\n        endpoint.\n      - use_ipv4: Optional IPv4 address to use instead of per-container\n        IPv4 addresses for containers discovered via that endpoint.\n      - use_ipv6: Optional IPv6 address to use instead of per-container\n        IPv6 addresses for containers discovered via that endpoint.\n      - ttl: Optional TTL override (seconds) for answers derived from that\n        endpoint.\n  - ttl: Plugin-level DNS answer TTL in seconds used when an endpoint does\n    not specify its own ttl.\n  - health: List of acceptable container health/status values. Supported:\n    \"starting\", \"healthy\", \"running\", \"unhealthy\". Default:\n    [\"healthy\", \"running\"].\n  - discovery: When true, publish a TXT record at\n    \"_containers.<suffix>\" (or \"_containers\" when no suffix is configured)\n    containing container summary lines, plus a host-level summary under\n    \"_hosts.<suffix>\" (or \"_hosts\").\n\nOutputs:\n  - DockerHostsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for DockerHosts plugin.\n\nInputs:\n  - endpoints: List of endpoint dictionaries.\n    Each entry must contain:\n      - url: Docker endpoint URL (e.g. \"unix:///var/run/docker.sock\",\n        \"tcp://127.0.0.1:2375\").\n    and may contain:\n      - reload_interval_second: float seconds between refreshes for that\n        endpoint.\n      - use_ipv4: Optional IPv4 address to use instead of per-container\n        IPv4 addresses for containers discovered via that endpoint.\n      - use_ipv6: Optional IPv6 address to use instead of per-container\n        IPv6 addresses for containers discovered via that endpoint.\n      - ttl: Optional TTL override (seconds) for answers derived from that\n        endpoint.\n  - ttl: Plugin-level DNS answer TTL in seconds used when an endpoint does\n    not specify its own ttl.\n  - health: List of acceptable container health/status values. Supported:\n    \"starting\", \"healthy\", \"running\", \"unhealthy\". Default:\n    [\"healthy\", \"running\"].\n  - discovery: When true, publish a TXT record at\n    \"_containers.<suffix>\" (or \"_containers\" when no suffix is configured)\n    containing container summary lines, plus a host-level summary under\n    \"_hosts.<suffix>\" (or \"_hosts\").\n  - expose_txt_in_additional: When true, include per-host TXT summaries in\n    A/AAAA ADDITIONAL sections.\n\nOutputs:\n  - DockerHostsConfig instance with normalized field types.",
           "properties": {
             "discovery": {
               "default": false,
@@ -190,6 +238,12 @@
               },
               "title": "Endpoints",
               "type": "array"
+            },
+            "expose_txt_in_additional": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Expose Txt In Additional",
+              "type": "boolean"
             },
             "health": {
               "description": "Type: array.",
@@ -230,22 +284,8 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for EtcHosts.\n\nInputs:\n  - file_path: Legacy single hosts file path.\n  - file_paths: Preferred list of hosts file paths.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Response TTL in seconds.\n\nOutputs:\n  - EtcHostsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for EtcHosts.\n\nInputs:\n  - file_paths: Preferred list of hosts file paths.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Response TTL in seconds.\n\nOutputs:\n  - EtcHostsConfig instance with normalized field types.",
           "properties": {
-            "file_path": {
-              "anyOf": [
-                {
-                  "description": "Type: string.",
-                  "type": "string"
-                },
-                {
-                  "description": "Type: null.",
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "File Path"
-            },
             "file_paths": {
               "anyOf": [
                 {
@@ -312,7 +352,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for FileDownloader.\n\nInputs:\n  - download_path: Directory where list files are written.\n  - urls: Explicit list of HTTP(S) URLs to download. Each entry may be either\n    a bare URL string or an object with keys:\n      - url (str): The URL to download.\n      - hash_filenames (bool | None): When True, use hashed filenames;\n        when False, derive filenames directly from the URL; when None in a\n        per-URL object, fall back to the plugin-level default.\n      - add_comment (bool | None): When True, prepend a timestamped comment\n        line to the downloaded file; when False or None, no comment is\n        written for that URL.\n  - url_files: Paths to files containing one URL per line.\n  - interval_days: Optional number of days between refreshes (>= 0).\n  - interval_seconds: Optional legacy seconds-based interval (>= 0).\n  - add_comment: Plugin-level default for whether to add a comment header\n    line to downloaded files (default: False).\n  - hash_filenames: Plugin-level default for whether filenames should\n    include a URL hash (default: False).\n\nOutputs:\n  - FileDownloaderConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for FileDownloader.\n\nInputs:\n  - download_path: Directory where list files are written.\n  - urls: Explicit list of HTTP(S) URLs to download. Each entry may be either\n    a bare URL string or an object with keys:\n      - url (str): The URL to download.\n      - hash_filenames (bool | None): When True, use hashed filenames;\n        when False, derive filenames directly from the URL; when None in a\n        per-URL object, fall back to the plugin-level default.\n      - add_comment (bool | None): When True, prepend a timestamped comment\n        line to the downloaded file; when False or None, no comment is\n        written for that URL.\n  - url_files: Paths to files containing one URL per line.\n  - interval_days: Optional number of days between refreshes (>= 0).\n  - interval_seconds: Optional legacy seconds-based interval (>= 0).\n  - add_comment: Plugin-level default for whether to add a comment header\n    line to downloaded files (default: False).\n  - hash_filenames: Plugin-level default for whether filenames should\n    include a URL hash (default: False).\n  - allow_private_hosts: When True, allow loopback/link-local/RFC1918 targets.\n  - allowlist_hosts: Optional list of hostnames or domain suffixes to allow.\n\nOutputs:\n  - FileDownloaderConfig instance with normalized field types.",
           "properties": {
             "add_comment": {
               "anyOf": [
@@ -328,6 +368,30 @@
               "default": false,
               "description": "Default: false.",
               "title": "Add Comment"
+            },
+            "allow_private_hosts": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Allow Private Hosts",
+              "type": "boolean"
+            },
+            "allowlist_hosts": {
+              "anyOf": [
+                {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Allowlist Hosts"
             },
             "download_path": {
               "default": "./config/var/lists",
@@ -509,8 +573,8 @@
               "type": "integer"
             },
             "clear": {
-              "default": 1,
-              "description": "Type: integer. Default: 1.",
+              "default": 0,
+              "description": "Type: integer. Default: 0.",
               "minimum": 0,
               "title": "Clear",
               "type": "integer"
@@ -568,6 +632,32 @@
               ],
               "default": null,
               "title": "Deny Response Ip6"
+            },
+            "deny_response_ip_fallback": {
+              "default": "nxdomain",
+              "description": "Type: string. Default: \"nxdomain\".",
+              "title": "Deny Response Ip Fallback",
+              "type": "string"
+            },
+            "max_domain_labels": {
+              "default": 32,
+              "description": "Type: integer. Default: 32.",
+              "minimum": 1,
+              "title": "Max Domain Labels",
+              "type": "integer"
+            },
+            "max_pattern_match_domain_length": {
+              "default": 253,
+              "description": "Type: integer. Default: 253.",
+              "minimum": 1,
+              "title": "Max Pattern Match Domain Length",
+              "type": "integer"
+            },
+            "strict_file_loading": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Strict File Loading",
+              "type": "boolean"
             },
             "ttl": {
               "default": 300,
@@ -735,13 +825,46 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for MdnsBridge.\n\nInputs:\n  - domain: str DNS domain suffix to treat as the mDNS namespace (default: `.local`).\n  - ttl: int DNS TTL to apply to synthesized answers.\n  - network_enabled: bool controlling whether the plugin starts active\n    zeroconf browsing and uses `get_service_info()` to fetch ServiceInfo. When\n    False, the plugin still initializes internal state but does not touch the\n    network (useful for tests).\n  - include_ipv4: bool controlling whether A records are synthesized.\n  - include_ipv6: bool controlling whether AAAA records are synthesized.\n  - info_timeout_ms: int timeout in milliseconds for fetching ServiceInfo.\n  - zeroconf_interfaces: Which interfaces Zeroconf should bind to.\n    Accepts: \"default\" | \"all\" | list[str] of interface IPs.\n  - zeroconf_ip_version: Which IP versions Zeroconf should use.\n    Accepts: \"v4\" | \"v6\" | \"all\".\n  - zeroconf_unicast: bool passed to Zeroconf(unicast=...).\n  - service_types: Optional list[str] of service types to browse directly\n    (e.g., `_http._tcp.local.`). Useful when `_services._dns-sd._udp.local.`\n    is not advertised on the network.\n\nOutputs:\n  - MdnsBridgeConfig instance.",
+          "description": "Brief: Typed configuration model for MdnsBridge.\n\nInputs:\n  - domain: str DNS domain suffix to treat as the mDNS namespace (default: `.local`).\n  - ttl: int DNS TTL to apply to synthesized answers.\n  - network_enabled: bool controlling whether the plugin starts active\n    zeroconf browsing and uses `get_service_info()` to fetch ServiceInfo. When\n    False, the plugin still initializes internal state but does not touch the\n    network (useful for tests).\n  - include_ipv4: bool controlling whether A records are synthesized.\n  - include_ipv6: bool controlling whether AAAA records are synthesized.\n  - info_timeout_ms: int timeout in milliseconds for fetching ServiceInfo.\n  - zeroconf_interfaces: Which interfaces Zeroconf should bind to.\n    Accepts: \"default\" | \"all\" | list[str] of interface IPs.\n  - zeroconf_ip_version: Which IP versions Zeroconf should use.\n    Accepts: \"v4\" | \"v6\" | \"all\".\n  - zeroconf_unicast: bool passed to Zeroconf(unicast=...).\n  - service_types: Optional list[str] of service types to browse directly\n    (e.g., `_http._tcp.local.`). Useful when `_services._dns-sd._udp.local.`\n    is not advertised on the network.\n  - cache_ttl_seconds: int TTL for cached records in memory (0 disables).\n  - cache_prune_interval_seconds: int minimum seconds between prune passes.\n  - cache_max_entries: int hard cap on tracked cache owners (0 disables).\n  - response_max_rrs: int maximum total RRs per synthesized response (0 disables).\n  - response_max_ips_per_host: int maximum A/AAAA records per host in additionals (0 disables).\n  - response_max_txt_strings: int maximum TXT strings to emit per RR (0 disables).\n  - response_max_txt_bytes: int maximum UTF-8 bytes to emit per TXT RR (0 disables).\n  - enable_rrtype_fallback: bool enabling non-standard A/AAAA fallback to PTR/TXT.\n  - enable_additional_glue: bool controlling whether extra TXT/A/AAAA are added as additionals.\n\nOutputs:\n  - MdnsBridgeConfig instance.",
           "properties": {
+            "cache_max_entries": {
+              "default": 20000,
+              "description": "Type: integer. Default: 20000.",
+              "minimum": 0,
+              "title": "Cache Max Entries",
+              "type": "integer"
+            },
+            "cache_prune_interval_seconds": {
+              "default": 60,
+              "description": "Type: integer. Default: 60.",
+              "minimum": 0,
+              "title": "Cache Prune Interval Seconds",
+              "type": "integer"
+            },
+            "cache_ttl_seconds": {
+              "default": 1800,
+              "description": "Type: integer. Default: 1800.",
+              "minimum": 0,
+              "title": "Cache Ttl Seconds",
+              "type": "integer"
+            },
             "domain": {
               "default": ".local",
               "description": "Type: string. Default: \".local\".",
               "title": "Domain",
               "type": "string"
+            },
+            "enable_additional_glue": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Enable Additional Glue",
+              "type": "boolean"
+            },
+            "enable_rrtype_fallback": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Enable Rrtype Fallback",
+              "type": "boolean"
             },
             "include_ipv4": {
               "default": true,
@@ -767,6 +890,34 @@
               "description": "Type: boolean. Default: true.",
               "title": "Network Enabled",
               "type": "boolean"
+            },
+            "response_max_ips_per_host": {
+              "default": 4,
+              "description": "Type: integer. Default: 4.",
+              "minimum": 0,
+              "title": "Response Max Ips Per Host",
+              "type": "integer"
+            },
+            "response_max_rrs": {
+              "default": 100,
+              "description": "Type: integer. Default: 100.",
+              "minimum": 0,
+              "title": "Response Max Rrs",
+              "type": "integer"
+            },
+            "response_max_txt_bytes": {
+              "default": 1024,
+              "description": "Type: integer. Default: 1024.",
+              "minimum": 0,
+              "title": "Response Max Txt Bytes",
+              "type": "integer"
+            },
+            "response_max_txt_strings": {
+              "default": 16,
+              "description": "Type: integer. Default: 16.",
+              "minimum": 0,
+              "title": "Response Max Txt Strings",
+              "type": "integer"
             },
             "service_types": {
               "description": "Type: array.",
@@ -823,7 +974,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or\n        /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - bucket_network_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or\n        /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - bucket_network_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist (0 disables).\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
           "properties": {
             "alpha": {
               "default": 0.2,
@@ -849,6 +1000,19 @@
               "default": 0.2,
               "description": "Default: 0.2.",
               "title": "Alpha Down"
+            },
+            "assume_udp_when_listener_missing": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Assume Udp When Listener Missing",
+              "type": "boolean"
+            },
+            "bootstrap_rps": {
+              "default": 0.0,
+              "description": "Type: number. Default: 0.0.",
+              "minimum": 0.0,
+              "title": "Bootstrap Rps",
+              "type": "number"
             },
             "bucket_network_prefix_v4": {
               "default": 24,
@@ -961,6 +1125,12 @@
               "title": "Prune Interval Seconds",
               "type": "integer"
             },
+            "psl_strict": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Psl Strict",
+              "type": "boolean"
+            },
             "stats_log_interval_seconds": {
               "default": 3600,
               "description": "Type: integer. Default: 3600.",
@@ -980,6 +1150,13 @@
               "description": "Type: string. Default: \"cidr\".",
               "title": "Udp Keying",
               "type": "string"
+            },
+            "warmup_max_rps": {
+              "default": 0.0,
+              "description": "Type: number. Default: 0.0.",
+              "minimum": 0.0,
+              "title": "Warmup Max Rps",
+              "type": "number"
             },
             "warmup_windows": {
               "default": 6,
@@ -1007,13 +1184,74 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for SshKeys.\n\nInputs:\n  - targets: List of IPs, CIDR ranges, and/or hostnames to scan.\n  - scan_threads: Maximum number of concurrent SSH probes.\n  - ttl: DNS TTL to apply to synthesized SSHFP answers.\n  - db_path: Filesystem path to the sqlite database storing SSH keys.\n  - port: SSH TCP port used when probing hosts.\n  - timeout_seconds: Socket/handshake timeout when fetching keys.\n\nOutputs:\n  - SshKeysConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for SshKeys.\n\nInputs:\n  - targets: List of IPs, CIDR ranges, and/or hostnames to scan.\n  - scan_threads: Maximum number of concurrent SSH probes.\n  - ttl: DNS TTL to apply to synthesized SSHFP answers.\n  - db_path: Filesystem path to the sqlite database storing SSH keys.\n  - port: SSH TCP port used when probing hosts.\n  - timeout_seconds: Socket/handshake timeout when fetching keys.\n  - scan_allowlist: Optional list of CIDR/IP strings allowed for scanning.\n  - scan_blocklist: Optional list of CIDR/IP strings excluded from scanning.\n  - allow_public_scan: When false, skip targets resolving to public IPs unless\n    they are explicitly allowed.\n  - max_targets: Maximum number of scan targets processed per startup scan.\n  - max_cidr_hosts: Maximum number of hosts to expand per CIDR target.\n  - lazy_scan: When true, allow on-demand single-host scans for CIDR targets.\n  - max_lazy_scans: Maximum number of concurrent lazy scans.\n  - response_allowlist: Optional list of client CIDR/IPs allowed to receive\n    SSHFP responses.\n  - response_blocklist: Optional list of client CIDR/IPs excluded from SSHFP\n    responses.\n  - allow_public_responses: When false, only respond to non-public clients\n    unless explicitly allowlisted.\n  - include_sha1: When true, include SHA-1 SSHFP records (fp_type=1).\n  - retention_seconds: Age threshold for pruning stale DB rows.\n  - max_rows: Maximum number of rows to retain in the DB (oldest evicted).\n  - prune_interval_seconds: Minimum time between DB prune passes.\n  - db_path_allowlist: Allowed base directories for db_path.\n\nOutputs:\n  - SshKeysConfig instance with normalized field types.",
           "properties": {
+            "allow_public_responses": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Allow Public Responses",
+              "type": "boolean"
+            },
+            "allow_public_scan": {
+              "default": false,
+              "description": "Type: boolean. Default: false.",
+              "title": "Allow Public Scan",
+              "type": "boolean"
+            },
             "db_path": {
               "default": "./config/var/ssh_keys.db",
               "description": "Type: string. Default: \"./config/var/ssh_keys.db\".",
               "title": "Db Path",
               "type": "string"
+            },
+            "db_path_allowlist": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Db Path Allowlist",
+              "type": "array"
+            },
+            "include_sha1": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Include Sha1",
+              "type": "boolean"
+            },
+            "lazy_scan": {
+              "default": true,
+              "description": "Type: boolean. Default: true.",
+              "title": "Lazy Scan",
+              "type": "boolean"
+            },
+            "max_cidr_hosts": {
+              "default": 1024,
+              "description": "Type: integer. Default: 1024.",
+              "minimum": 0,
+              "title": "Max Cidr Hosts",
+              "type": "integer"
+            },
+            "max_lazy_scans": {
+              "default": 32,
+              "description": "Type: integer. Default: 32.",
+              "minimum": 0,
+              "title": "Max Lazy Scans",
+              "type": "integer"
+            },
+            "max_rows": {
+              "default": 0,
+              "description": "Type: integer. Default: 0.",
+              "minimum": 0,
+              "title": "Max Rows",
+              "type": "integer"
+            },
+            "max_targets": {
+              "default": 4096,
+              "description": "Type: integer. Default: 4096.",
+              "minimum": 0,
+              "title": "Max Targets",
+              "type": "integer"
             },
             "port": {
               "default": 22,
@@ -1022,6 +1260,56 @@
               "minimum": 1,
               "title": "Port",
               "type": "integer"
+            },
+            "prune_interval_seconds": {
+              "default": 300.0,
+              "description": "Type: number. Default: 300.0.",
+              "minimum": 0.0,
+              "title": "Prune Interval Seconds",
+              "type": "number"
+            },
+            "response_allowlist": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Response Allowlist",
+              "type": "array"
+            },
+            "response_blocklist": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Response Blocklist",
+              "type": "array"
+            },
+            "retention_seconds": {
+              "default": 0.0,
+              "description": "Type: number. Default: 0.0.",
+              "minimum": 0.0,
+              "title": "Retention Seconds",
+              "type": "number"
+            },
+            "scan_allowlist": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Scan Allowlist",
+              "type": "array"
+            },
+            "scan_blocklist": {
+              "description": "Type: array.",
+              "items": {
+                "description": "Type: string.",
+                "type": "string"
+              },
+              "title": "Scan Blocklist",
+              "type": "array"
             },
             "scan_threads": {
               "default": 4,
@@ -1945,8 +2233,28 @@
             }
           },
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"merge\" (default): preserve existing records and overlay newly loaded ones.\n    - \"replace\": rebuild records from configured sources on each load.\n    - \"first\": use the first configured source group in this order:\n      records (inline) \u2192 axfr_zones \u2192 file_paths \u2192 bind_paths, and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - axfr_zones: Optional list of AXFR-backed zones.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"merge\" (default): preserve existing records and overlay newly loaded ones.\n    - \"replace\": rebuild records from configured sources on each load.\n    - \"first\": use the first configured source group in this order:\n      records (inline) \u2192 axfr_zones \u2192 file_paths \u2192 bind_paths, and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - any_query_enabled: Allow QTYPE=ANY responses (default False).\n  - any_answer_rrset_limit: Max RRsets returned for QTYPE=ANY responses.\n  - any_answer_record_limit: Max total records returned for QTYPE=ANY responses.\n  - axfr_zones: Optional list of AXFR-backed zones.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
           "properties": {
+            "any_answer_record_limit": {
+              "default": 64,
+              "description": "Maximum total records returned for QTYPE=ANY responses. Default: 64.",
+              "minimum": 1,
+              "title": "Any Answer Record Limit",
+              "type": "integer"
+            },
+            "any_answer_rrset_limit": {
+              "default": 16,
+              "description": "Maximum RRsets returned for QTYPE=ANY responses. Default: 16.",
+              "minimum": 1,
+              "title": "Any Answer Rrset Limit",
+              "type": "integer"
+            },
+            "any_query_enabled": {
+              "default": false,
+              "description": "Allow QTYPE=ANY responses from ZoneRecords. Default: false.",
+              "title": "Any Query Enabled",
+              "type": "boolean"
+            },
             "axfr_notify": {
               "anyOf": [
                 {

@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### Recent incremental updates
+- Added shared DNS/IP helper modules (`dns_names`, `ip_networks`) and adopted them across resolver, server, querylog, stats, and ZoneRecords paths to standardize normalization and network parsing.
+- Hardened resolver plugins with stricter list/file parsing, safer validation, cache/pruning controls, and improved policy enforcement in Filter, FileDownloader, mDNS, SSH Keys, and related host-source/access-control paths.
+- Expanded RateLimit behavior and configuration with bootstrap/warmup controls and PSL strictness options, and improved built-in profile loading fallback behavior.
+- Updated plugin test coverage and plugin documentation/schema content to reflect the new parsing, normalization, and policy semantics.
 
 ### Breaking Changes
 
