@@ -23,6 +23,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from foghorn.utils import dns_names
+
 from .base import BaseStatsStore
 from .sqlite import _is_subdomain, _normalize_domain
 
@@ -502,7 +504,7 @@ class PostgresStatsStore(BaseStatsStore):
             params.append(qtype.strip().upper())
         if qname:
             where.append("name = %s")
-            params.append(qname.strip().rstrip(".").lower())
+            params.append(dns_names.normalize_name(qname))
         if rcode:
             where.append("rcode = %s")
             params.append(rcode.strip().upper())
@@ -635,7 +637,7 @@ class PostgresStatsStore(BaseStatsStore):
             params.append(qtype.strip().upper())
         if qname:
             where.append("name = %s")
-            params.append(qname.strip().rstrip(".").lower())
+            params.append(dns_names.normalize_name(qname))
         if rcode:
             where.append("rcode = %s")
             params.append(rcode.strip().upper())

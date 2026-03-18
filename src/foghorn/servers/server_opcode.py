@@ -11,7 +11,8 @@ import logging
 import time
 from typing import NamedTuple, Optional
 
-from dnslib import DNSHeader, DNSRecord, RCODE
+from dnslib import RCODE, DNSHeader, DNSRecord
+from foghorn.utils import dns_names, ip_networks
 
 from foghorn.plugins.resolve.base import PluginContext, PluginDecision
 
@@ -138,8 +139,6 @@ def _handle_non_query_opcode(
     # For NOTIFY (opcode 4), enforce the AXFR/NOTIFY allowlist when configured.
     if int(opcode) == 4:
         try:
-            import ipaddress
-
             from foghorn.runtime_config import get_runtime_snapshot
 
             snap = get_runtime_snapshot()
@@ -149,23 +148,7 @@ def _handle_non_query_opcode(
             allow_raw = []
             enabled = False
         if enabled:
-            allowed = False
-            try:
-                ip_obj = ipaddress.ip_address(str(client_ip).strip())
-            except Exception:
-                ip_obj = None
-            if ip_obj is not None:
-                for entry in allow_raw:
-                    try:
-                        net = ipaddress.ip_network(str(entry), strict=False)
-                    except Exception:
-                        continue
-                    try:
-                        if ip_obj in net:
-                            allowed = True
-                            break
-                    except Exception:
-                        continue
+            allowed = ip_networks.ip_string_in_cidrs(str(client_ip).strip(), allow_raw)
             if not allowed:
                 try:
                     mid = (
@@ -222,7 +205,7 @@ def _handle_non_query_opcode(
     if msg is not None and getattr(msg, "question", None):
         try:
             q0 = msg.question[0]
-            qname = str(getattr(q0, "name", "")).rstrip(".")
+            qname = dns_names.normalize_name(getattr(q0, "name", ""))
             qtype = int(getattr(q0, "rdtype", 0))
         except Exception:
             qname = ""

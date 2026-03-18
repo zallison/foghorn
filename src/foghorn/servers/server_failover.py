@@ -14,6 +14,7 @@ from dnslib import QTYPE, RCODE, DNSRecord
 
 from foghorn.servers.transports.dot import DoTError, get_dot_pool
 from foghorn.servers.transports.tcp import TCPError, get_tcp_pool, tcp_query
+from foghorn.utils import dns_names
 from .dns_runtime_state import DNSRuntimeState
 
 logger = logging.getLogger("foghorn.server")
@@ -512,8 +513,8 @@ def _send_query_with_failover_impl(
             if expected_qtype is None:
                 expected_qtype = qtype
 
-            resp_qname = str(getattr(q0, "qname", "")).rstrip(".").lower()
-            exp_qname_norm = str(expected_qname).rstrip(".").lower()
+            resp_qname = dns_names.normalize_name(getattr(q0, "qname", ""))
+            exp_qname_norm = dns_names.normalize_name(expected_qname)
             if resp_qname != exp_qname_norm:
                 return False
 
@@ -1002,30 +1003,57 @@ def _send_query_with_failover_impl(
                     )
             else:
                 # Keep details available for troubleshooting, but avoid warning spam.
+                should_show_health = (2 <= fail_count <= 10) or (
+                    fail_count > 0 and (int(fail_count) % 25) == 0
+                )
                 if _is_connection_refused_error(e):
-                    logger.debug(
-                        "Skipping upstream %s (%s:%d via %s): connection refused (%s: %s%s) [health: %s]",
-                        upstream_label,
-                        host,
-                        port,
-                        transport,
-                        type(e).__name__,
-                        str(e),
-                        file_info,
-                        upstream_health,
-                    )
+                    if should_show_health:
+                        logger.debug(
+                            "Skipping upstream %s (%s:%d via %s): connection refused (%s: %s%s) [health: %s]",
+                            upstream_label,
+                            host,
+                            port,
+                            transport,
+                            type(e).__name__,
+                            str(e),
+                            file_info,
+                            upstream_health,
+                        )
+                    else:
+                        logger.debug(
+                            "Skipping upstream %s (%s:%d via %s): connection refused (%s: %s%s)",
+                            upstream_label,
+                            host,
+                            port,
+                            transport,
+                            type(e).__name__,
+                            str(e),
+                            file_info,
+                        )
                 else:
-                    logger.debug(
-                        "Skipping upstream %s (%s:%d via %s): %s: %s%s [health: %s]",
-                        upstream_label,
-                        host,
-                        port,
-                        transport,
-                        type(e).__name__,
-                        str(e),
-                        file_info,
-                        upstream_health,
-                    )
+                    if should_show_health:
+                        logger.debug(
+                            "Skipping upstream %s (%s:%d via %s): %s: %s%s [health: %s]",
+                            upstream_label,
+                            host,
+                            port,
+                            transport,
+                            type(e).__name__,
+                            str(e),
+                            file_info,
+                            upstream_health,
+                        )
+                    else:
+                        logger.debug(
+                            "Skipping upstream %s (%s:%d via %s): %s: %s%s",
+                            upstream_label,
+                            host,
+                            port,
+                            transport,
+                            type(e).__name__,
+                            str(e),
+                            file_info,
+                        )
 
             last_exception = e
             return None, None, "all_failed"
@@ -1103,8 +1131,7 @@ def _send_query_with_failover_impl(
 
     all_failed_logger = logger.warning if all_failed_should_warn else logger.debug
     all_failed_logger(
-        "All upstreams failed %s (qtype=%s). Last error: %s (attempted=%s health=%s)",
-        qname,
+        "All upstreams failed. qtype=%s. Last error: %s (attempted: %s health: %s)",
         qtype,
         last_exception,
         attempted_summary,

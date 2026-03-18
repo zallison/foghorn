@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Set
 
 from foghorn.plugins.querylog import BaseStatsStore
 from foghorn.utils.register_caches import registered_lru_cached
+from foghorn.utils import ip_networks
 
 from ..domain import _normalize_domain
 from ..histogram import LatencyHistogram
@@ -33,7 +34,10 @@ def _parse_client_ip_for_ignore(
         configured, so caching avoids repeated ipaddress parsing for common
         client IPs.
     """
-    return ipaddress.ip_address(str(client_ip).strip())
+    parsed = ip_networks.parse_ip(client_ip)
+    if parsed is None:
+        raise ValueError(f"invalid client ip {client_ip!r}")
+    return parsed
 
 
 class _StatsCollectorInitMixin:
@@ -347,9 +351,8 @@ class _StatsCollectorInitMixin:
         for raw in clients:
             if not raw:
                 continue
-            try:
-                net = ipaddress.ip_network(str(raw), strict=False)
-            except Exception:  # pragma: no cover
+            net = ip_networks.parse_network(raw, strict=False)
+            if net is None:  # pragma: no cover
                 logger.debug("StatsCollector: invalid ignore client %r", raw)
                 continue
             client_networks.append(net)
