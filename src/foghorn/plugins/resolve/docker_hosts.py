@@ -679,6 +679,25 @@ class DockerHosts(BasePlugin):
         return bool(label_re.match(label))
 
     @staticmethod
+    def _is_valid_container_id_alias(name: str) -> bool:
+        """Brief: Validate a full Docker container ID alias.
+
+        Inputs:
+          - name: Candidate alias label.
+
+        Outputs:
+          - bool indicating whether name is exactly 64 hex characters.
+        """
+
+        token = str(name or "").strip().lower()
+        if len(token) != 64:
+            return False
+        for ch in token:
+            if ch not in "0123456789abcdef":
+                return False
+        return True
+
+    @staticmethod
     def _sanitize_txt_chunk(text: str, max_bytes: int = 253) -> str:
         """Brief: Remove control characters and clamp TXT chunk UTF-8 bytes.
 
@@ -871,23 +890,23 @@ class DockerHosts(BasePlugin):
                 raw_name = _strip_env_domain(raw_name)
                 hostname = _strip_env_domain(hostname) if hostname else hostname
 
-                candidate_names: List[str] = []
+                candidate_names: List[Tuple[str, bool]] = []
                 if raw_name:
-                    candidate_names.append(raw_name)
+                    candidate_names.append((raw_name, False))
                 if hostname and hostname != raw_name:
-                    candidate_names.append(hostname)
+                    candidate_names.append((hostname, False))
                 # Note: project-name is no longer used as a DNS label source; it is
                 # retained only for metadata in TXT/Info summaries.
                 if container_id:
                     # Include both short and full IDs so lookups by abbreviated
                     # container ID work when rendered into hosts-style records
                     # or when querying via PTR names generated from these labels.
-                    candidate_names.append(container_id[:12])
-                    candidate_names.append(container_id)
+                    candidate_names.append((container_id[:12], True))
+                    candidate_names.append((container_id, True))
 
-                normalized_names: List[str] = []
+                normalized_candidates: List[Tuple[str, bool]] = []
                 seen: set[str] = set()
-                for n in candidate_names:
+                for n, is_container_id_alias in candidate_names:
                     # Ensure normalized names do not retain any leading or
                     # trailing dots so we never publish names that begin with
                     # ".". Docker/container names can include underscores;
@@ -897,16 +916,19 @@ class DockerHosts(BasePlugin):
                     if not key or key in seen:
                         continue
                     seen.add(key)
-                    normalized_names.append(key)
+                    normalized_candidates.append((key, is_container_id_alias))
                 valid_names: List[str] = []
-                for key in normalized_names:
-                    if not self._is_valid_dns_name(key):
-                        logger.warning(
-                            "DockerHosts: skipping invalid container DNS name %r",
-                            key,
-                        )
+                for key, is_container_id_alias in normalized_candidates:
+                    if self._is_valid_dns_name(key):
+                        valid_names.append(key)
                         continue
-                    valid_names.append(key)
+                    if is_container_id_alias and self._is_valid_container_id_alias(key):
+                        valid_names.append(key)
+                        continue
+                    logger.warning(
+                        "DockerHosts: skipping invalid container DNS name %r",
+                        key,
+                    )
                 normalized_names = valid_names
 
                 if (
