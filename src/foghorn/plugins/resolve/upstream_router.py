@@ -7,6 +7,7 @@ from dnslib import RCODE, DNSRecord
 from pydantic import BaseModel, Field, ConfigDict
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
+from foghorn.utils import dns_names
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +123,7 @@ class UpstreamRouter(BasePlugin):
         if not self.targets(ctx):
             return None
 
-        q = qname.rstrip(".").lower()
+        q = dns_names.normalize_name(qname)
         upstream_candidates = self._match_upstream_candidates(q)
         if upstream_candidates:
             # Set candidates on the context for the main server handler to use.
@@ -164,9 +165,9 @@ class UpstreamRouter(BasePlugin):
             domain = r.get("domain")
             suffix = r.get("suffix")
             if domain:
-                route["domain"] = str(domain).rstrip(".").lower()
+                route["domain"] = dns_names.normalize_name(domain)
             if suffix:
-                s = str(suffix).lower()
+                s = dns_names.normalize_name(suffix)
                 # Normalize suffix by removing a leading dot for simpler checks
                 if s.startswith("."):
                     s = s[1:]

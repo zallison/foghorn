@@ -1261,16 +1261,14 @@ class BasePlugin:
           - str: Normalized domain name string (may be empty when input is
             empty or cannot be coerced).
         """
-        try:
-            text = str(qname)
-        except Exception:  # pragma: no cover - defensive
-            text = ""
+        from foghorn.utils import dns_names
 
-        if strip_trailing_dot:
-            text = text.rstrip(".")
-        if lower:
-            text = text.lower()
-        return text
+        return dns_names.normalize_name(
+            qname,
+            lower=bool(lower),
+            strip_trailing_dot=bool(strip_trailing_dot),
+            strip_whitespace=True,
+        )
 
     @staticmethod
     def base_domain(qname: object, base_labels: int = 2) -> str:

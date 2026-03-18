@@ -40,7 +40,9 @@ def _normalize_domain(domain: str) -> str:
         >>> _normalize_domain('Example.COM.')
         'example.com'
     """
-    return domain.rstrip(".").lower()
+    from foghorn.utils import dns_names
+
+    return dns_names.normalize_name(domain)
 
 
 @registered_lru_cached(maxsize=(16 * 1024))

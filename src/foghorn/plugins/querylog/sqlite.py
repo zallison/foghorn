@@ -40,7 +40,9 @@ def _normalize_domain(domain: str) -> str:
         Normalized lowercase domain without trailing dot.
     """
 
-    return domain.rstrip(".").lower()
+    from foghorn.utils import dns_names
+
+    return dns_names.normalize_name(domain)
 
 
 def _is_subdomain(domain: str) -> bool:
@@ -400,7 +402,7 @@ class SqliteStatsStore(BaseStatsStore):
         source_s = str(source).strip().lower() if source is not None else None
         qname_s = None
         if qname is not None:
-            qname_s = str(qname).strip().rstrip(".").lower()
+            qname_s = _normalize_domain(qname)
 
         where: List[str] = []
         params: List[Any] = []
@@ -560,7 +562,7 @@ class SqliteStatsStore(BaseStatsStore):
         rcode_s = str(rcode).strip().upper() if rcode is not None else None
         qname_s = None
         if qname is not None:
-            qname_s = str(qname).strip().rstrip(".").lower()
+            qname_s = _normalize_domain(qname)
 
         where: List[str] = ["ts >= ?", "ts < ?"]
         params: List[Any] = [start_f, end_f]
