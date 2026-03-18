@@ -17,6 +17,7 @@ import struct
 import threading
 import time
 from typing import Callable, Dict, List, Optional, Set, Tuple
+from foghorn.utils import dns_names
 
 logger = logging.getLogger(__name__)
 TsigKeySourceLoader = Callable[[dict], List[dict]]
@@ -60,7 +61,9 @@ def load_names_list_from_file(path: str) -> List[str]:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                names.append(line.rstrip(".").lower())
+                from foghorn.utils import dns_names
+
+                names.append(dns_names.normalize_name(line))
     except Exception as exc:
         logger.warning("Failed to load names list from %s: %s", path, exc)
     return names
@@ -262,13 +265,9 @@ def normalize_cidr(
     Outputs:
       - Network object or None if invalid.
     """
-    try:
-        if "/" in cidr:
-            return ipaddress.ip_network(cidr, strict=False)
-        else:
-            return ipaddress.ip_network(ipaddress.ip_address(cidr))
-    except (ValueError, ipaddress.AddressValueError):
-        return None
+    from foghorn.utils import ip_networks
+
+    return ip_networks.parse_network(cidr, strict=False)
 
 
 def collect_update_file_paths(dns_update_config: dict) -> List[str]:
@@ -363,7 +362,7 @@ def reload_update_lists(plugin: object) -> None:
             if not isinstance(zone, dict):
                 continue
 
-            zone_key = str(zone.get("zone", "")).rstrip(".").lower()
+            zone_key = dns_names.normalize_name(zone.get("zone", ""))
 
             # Reload each list type
             for list_type in [
@@ -412,16 +411,9 @@ def is_ip_in_cidr_list(ip_str: str, cidr_list: List[str]) -> bool:
     Outputs:
       - bool: True if IP is in any CIDR.
     """
-    try:
-        ip = ipaddress.ip_address(ip_str)
-    except (ValueError, ipaddress.AddressValueError):
-        return False
+    from foghorn.utils import ip_networks
 
-    for cidr in cidr_list:
-        net = normalize_cidr(cidr)
-        if net and ip in net:
-            return True
-    return False
+    return ip_networks.ip_string_in_cidrs(ip_str, cidr_list)
 
 
 def matches_name_pattern(name: str, patterns: List[str]) -> bool:
@@ -434,9 +426,11 @@ def matches_name_pattern(name: str, patterns: List[str]) -> bool:
     Outputs:
       - bool: True if name matches any pattern.
     """
-    name_norm = str(name).rstrip(".").lower()
+    from foghorn.utils import dns_names
+
+    name_norm = dns_names.normalize_name(name)
     for pattern in patterns:
-        pattern_norm = str(pattern).rstrip(".").lower()
+        pattern_norm = dns_names.normalize_name(pattern)
         if fnmatch.fnmatch(name_norm, pattern_norm):
             return True
     return False

@@ -19,6 +19,7 @@ import logging
 import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
+from cachetools import TTLCache
 
 import dns.exception
 import dns.flags
@@ -31,6 +32,7 @@ import dns.rdatatype
 import dns.tsig
 import dns.tsigkeyring
 from dnslib import DNSRecord, QTYPE, RCODE, RR
+from foghorn.utils.register_caches import registered_cached
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,7 @@ logger = logging.getLogger(__name__)
 TSIG_TIMESTAMP_FUDGE = 300
 
 
+@registered_cached(cache=TTLCache(maxsize=4096, ttl=3600))
 def _normalize_dns_name(name: str) -> str:
     """Brief: Normalize a DNS name for comparisons.
 
@@ -47,9 +50,12 @@ def _normalize_dns_name(name: str) -> str:
     Outputs:
       - Lowercased name without trailing dot.
     """
-    return str(name).rstrip(".").lower()
+    from foghorn.utils import dns_names
+
+    return dns_names.normalize_name(name)
 
 
+@registered_cached(cache=TTLCache(maxsize=1024, ttl=3600))
 def _normalize_tsig_algorithm(alg: str) -> str:
     """Brief: Normalize a TSIG algorithm name.
 
@@ -422,7 +428,7 @@ def process_update_message(
     except (
         Exception
     ):  # pragma: no cover - nocover: defensive zone_apex normalization fallback
-        apex_norm = str(zone_apex).rstrip(".").lower()
+        apex_norm = ""
 
     # Zone section must contain exactly one SOA RRset for the zone apex. In
     # UPDATE messages the SOA RRset is often *empty* (no rdata); we validate the
@@ -670,7 +676,7 @@ def process_update_message(
             return resp.to_wire()
 
         for rrset in updates:
-            owner_text = str(getattr(rrset, "name", "")).rstrip(".")
+            owner_text = _normalize_dns_name(getattr(rrset, "name", ""))
             if max_owner_length > 0 and len(owner_text) > max_owner_length:
                 resp = dns.message.make_response(request_msg)
                 resp.set_rcode(dns.rcode.REFUSED)
@@ -1127,7 +1133,7 @@ def check_prerequisites(
     try:
         apex_norm = _normalize_dns_name(zone_apex)
     except Exception:
-        apex_norm = str(zone_apex).rstrip(".").lower()
+        apex_norm = ""
 
     for prereq_rrset in prereqs:
         try:
@@ -1287,7 +1293,7 @@ def apply_update_operations(
     try:
         apex_norm = _normalize_dns_name(zone_apex)
     except Exception:
-        apex_norm = str(zone_apex).rstrip(".").lower()
+        apex_norm = ""
 
     # Snapshot current records
     lock = getattr(plugin, "_records_lock", None)
@@ -1317,7 +1323,7 @@ def apply_update_operations(
             soa_code = int(QTYPE.SOA)
         except Exception:
             soa_code = 6
-        key = (str(zone_name).rstrip(".").lower(), int(soa_code))
+        key = (_normalize_dns_name(zone_name), int(soa_code))
         if key not in records_map:
             return
         try:
