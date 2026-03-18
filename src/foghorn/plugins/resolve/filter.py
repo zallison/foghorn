@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import glob
+import hashlib
 import ipaddress
 import json
 import logging
@@ -19,6 +20,7 @@ from dnslib import DNSHeader, DNSRecord
 from pydantic import BaseModel, Field, ConfigDict
 
 from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
+from foghorn.utils import ip_networks
 
 from .base import BasePlugin, PluginContext, PluginDecision, plugin_aliases
 
@@ -165,6 +167,7 @@ class Filter(BasePlugin):
         # avoid "InterfaceError: bad parameter or other API misuse" from
         # concurrent use of a single connection.
         self._db_lock = threading.Lock()
+        self._loaded_list_file_fingerprints: Dict[Tuple[str, str], str] = {}
         self._parse_warn_lock = threading.Lock()
         self._last_parse_warn_ts = 0.0
 
@@ -355,23 +358,22 @@ class Filter(BasePlugin):
                             ip_spec,
                         )
                         continue
-                    try:
-                        # Validate the replacement IP
-                        ipaddress.ip_address(replace_with)
-                    except (
-                        ValueError
-                    ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                    # Validate the replacement IP
+                    if (
+                        ip_networks.parse_ip(replace_with) is None
+                    ):  # pragma: no cover - defensive
                         logger.error(
-                            "Invalid 'replace_with' IP address '%s' for rule '%s': %s",
+                            "Invalid 'replace_with' IP address '%s' for rule '%s'",
                             replace_with,
                             ip_spec,
-                            e,
                         )
                         continue
 
                 if "/" in ip_spec:
                     # It's a network/subnet
-                    network = ipaddress.ip_network(ip_spec, strict=False)
+                    network = ip_networks.parse_network(ip_spec, strict=False)
+                    if network is None:
+                        raise ValueError(f"invalid network {ip_spec!r}")
                     if action == "replace":
                         self.blocked_networks[network] = {
                             "action": action,
@@ -381,7 +383,9 @@ class Filter(BasePlugin):
                         self.blocked_networks[network] = {"action": action}
                 else:
                     # It's a single IP address
-                    ip_addr = ipaddress.ip_address(ip_spec)
+                    ip_addr = ip_networks.parse_ip(ip_spec)
+                    if ip_addr is None:
+                        raise ValueError(f"invalid ip {ip_spec!r}")
                     if action == "replace":
                         self.blocked_ips[ip_addr] = {
                             "action": action,
@@ -548,7 +552,9 @@ class Filter(BasePlugin):
           - Many sources include a trailing '.' for absolute names; the plugin
             stores and queries domains without the trailing dot.
         """
-        return str(domain).strip().rstrip(".").lower()
+        from foghorn.utils import dns_names
+
+        return dns_names.normalize_name(domain)
 
     def add_to_cache(self, key: any, allowed: bool):
         """Brief: Add a pre-resolve decision to the TTL cache.
@@ -726,7 +732,10 @@ class Filter(BasePlugin):
         for rr in original_records:
             if rr.rtype in (QTYPE.A, QTYPE.AAAA):
                 try:
-                    ip_addr = ipaddress.ip_address(str(rr.rdata))
+                    ip_addr = ip_networks.parse_ip(str(rr.rdata))
+                    if ip_addr is None:
+                        modified_records.append(rr)
+                        continue
                     action_config = self._get_ip_action(ip_addr)
 
                     if action_config:
@@ -749,8 +758,13 @@ class Filter(BasePlugin):
                             records_changed = True
                         elif action == "replace":
                             replace_ip_str = action_config.get("replace_with")
-                            try:
-                                replacement_ip = ipaddress.ip_address(replace_ip_str)
+                            replacement_ip = ip_networks.parse_ip(replace_ip_str)
+                            if replacement_ip is None:  # pragma: no cover - defensive
+                                logger.error(
+                                    "Invalid replacement IP: %s", replace_ip_str
+                                )
+                                modified_records.append(rr)
+                            else:
                                 # Ensure IP versions are compatible
                                 if ip_addr.version == replacement_ip.version:
                                     # Replace rdata with correct RDATA type
@@ -773,13 +787,6 @@ class Filter(BasePlugin):
                                     )
                                     modified_records.append(rr)
                                 records_changed = True
-                            except (
-                                ValueError
-                            ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-                                logger.error(
-                                    "Invalid replacement IP: %s", replace_ip_str
-                                )
-                                modified_records.append(rr)
                         else:
                             modified_records.append(rr)
                     else:
@@ -915,11 +922,7 @@ class Filter(BasePlugin):
                 ipaddr = str(self.deny_response_ip4 or self.deny_response_ip6)
 
             if ipaddr:
-                try:
-                    ipaddress.ip_address(ipaddr)
-                except (
-                    ValueError
-                ):  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
+                if ip_networks.parse_ip(ipaddr) is None:  # pragma: no cover - defensive
                     logger.error(
                         "Filter: invalid deny_response IP %r for %s",
                         ipaddr,
@@ -1332,7 +1335,9 @@ class Filter(BasePlugin):
                     action = "deny"
 
                 if "/" in ip_spec:
-                    network = ipaddress.ip_network(ip_spec, strict=False)
+                    network = ip_networks.parse_network(ip_spec, strict=False)
+                    if network is None:
+                        raise ValueError(f"invalid network {ip_spec!r}")
                     if action == "replace":
                         if not replace_with:
                             logger.error(
@@ -1342,9 +1347,7 @@ class Filter(BasePlugin):
                                 ip_spec,
                             )
                             continue
-                        try:
-                            ipaddress.ip_address(replace_with)
-                        except ValueError:
+                        if ip_networks.parse_ip(replace_with) is None:
                             logger.error(
                                 "Invalid replace_with '%s' in %s:%d",
                                 replace_with,
@@ -1359,7 +1362,9 @@ class Filter(BasePlugin):
                     else:
                         self.blocked_networks[network] = {"action": action}
                 else:
-                    ip_addr = ipaddress.ip_address(ip_spec)
+                    ip_addr = ip_networks.parse_ip(ip_spec)
+                    if ip_addr is None:
+                        raise ValueError(f"invalid ip {ip_spec!r}")
                     if action == "replace":
                         if not replace_with:
                             logger.error(
@@ -1369,9 +1374,7 @@ class Filter(BasePlugin):
                                 ip_spec,
                             )
                             continue
-                        try:
-                            ipaddress.ip_address(replace_with)
-                        except ValueError:
+                        if ip_networks.parse_ip(replace_with) is None:
                             logger.error(
                                 "Invalid replace_with '%s' in %s:%d",
                                 replace_with,
@@ -1435,6 +1438,98 @@ class Filter(BasePlugin):
             (normalized_domain, filename, mode, added_at),
         )
 
+    @staticmethod
+    def _file_content_fingerprint(path: str) -> str:
+        """
+        Brief: Compute a stable SHA-256 fingerprint for a list file.
+
+        Inputs:
+            path: Absolute or relative path to a list file.
+        Outputs:
+            Hex SHA-256 digest string of the current file bytes.
+        """
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _extract_adguard_domain(
+        line: str,
+    ) -> Tuple[str, Optional[str], bool]:
+        """
+        Brief: Parse a single AdGuard/Adblock-style line into a domain token.
+
+        Inputs:
+            line: Raw non-comment line.
+        Outputs:
+            Tuple of (domain, mode_override, matched):
+              - domain: Parsed domain token (empty when no domain token is present).
+              - mode_override: Optional mode override (\"allow\" for '@@' exception rules).
+              - matched: True when the input resembles an AdGuard-style rule.
+        """
+        text = str(line).strip()
+        if not text:
+            return "", None, False
+
+        mode_override: Optional[str] = None
+        if text.startswith("@@"):
+            mode_override = "allow"
+            text = text[2:].lstrip()
+
+        # Cosmetic rules should be treated as recognized AdGuard syntax but do
+        # not contain DNS domain tokens for this plugin.
+        if any(marker in text for marker in ("##", "#@#", "#?#", "#$#")):
+            return "", mode_override, True
+
+        if not text.startswith("||"):
+            return "", None, False
+
+        token = text[2:].strip()
+        if "^" in token:
+            token = token.split("^", 1)[0]
+        if "$" in token:
+            token = token.split("$", 1)[0]
+        if "/" in token:
+            token = token.split("/", 1)[0]
+
+        return token.strip().strip("."), mode_override, True
+
+    @staticmethod
+    def _extract_hosts_domains(line: str) -> Tuple[List[str], bool]:
+        """
+        Brief: Parse a hosts-style line into one or more domain tokens.
+
+        Inputs:
+            line: Raw non-comment line.
+        Outputs:
+            Tuple of (domains, matched):
+              - domains: Domain tokens found after the leading IP column.
+              - matched: True when the line is recognized as hosts syntax.
+        """
+        parts = str(line).split()
+        if len(parts) < 2:
+            return [], False
+        if ip_networks.parse_ip(parts[0]) is None:
+            return [], False
+        domains = [str(token).strip().strip(".") for token in parts[1:]]
+        return [d for d in domains if d], True
+
+    @staticmethod
+    def _is_plain_domain_token(token: str) -> bool:
+        """
+        Brief: Heuristically validate a plain domain token.
+
+        Inputs:
+            token: Candidate token.
+        Outputs:
+            bool indicating whether the token looks like a supported domain entry.
+        """
+        from foghorn.utils import dns_names
+
+        return dns_names.is_plain_domain_token(token)
+
     def load_list_from_file(self, filename: str, mode: str = "deny") -> None:
         """
         Load domains from a file into the database.
@@ -1456,6 +1551,18 @@ class Filter(BasePlugin):
         if not os.path.isfile(filename):
             raise FileNotFoundError(f"No file {filename}")
 
+        source_filename = os.path.abspath(filename)
+        fingerprint_key = (source_filename, mode)
+        content_fingerprint = self._file_content_fingerprint(source_filename)
+        cached_fingerprint = self._loaded_list_file_fingerprints.get(fingerprint_key)
+        if cached_fingerprint == content_fingerprint:
+            logger.debug(
+                "Filter: skipping unchanged %s list file %s",
+                mode,
+                source_filename,
+            )
+            return
+
         def _normalize_token(token: str) -> str:
             """
             Brief: Normalize a domain token from list files.
@@ -1466,39 +1573,46 @@ class Filter(BasePlugin):
               - normalized token with AdGuard/Adblock-style wrappers removed.
 
             Behaviour:
-              - If the token starts with '||', the prefix is removed.
-              - If a caret ('^') is present, the caret must be the last
-                non-whitespace character on the line; otherwise the token is
-                ignored. For a valid AdGuard-style token like '||domain.com^',
-                the resulting domain is 'domain.com'.
+              - Trims surrounding whitespace and trailing dots.
+              - Removes a leading '||' wrapper used by AdGuard/Adblock syntax.
             """
             t = token.strip()
             if t.startswith("||"):
-                # Drop the leading '||'.
                 t = t[2:]
-                caret_idx = t.find("^")
-                if caret_idx != -1:
-                    # Anything non-whitespace after the caret means we ignore
-                    # this token entirely (e.g. '||domain.com^$third-party').
-                    rest = t[caret_idx + 1 :]
-                    if rest.strip():
-                        return ""
-                    t = t[:caret_idx]
-            return t
+            return t.strip().strip(".")
 
         logger.debug("Opening %s for %s", filename, mode)
+        matched_supported_format = False
+        inserted_domains = 0
+        unsupported_lines = 0
         # Use a single transaction per file for performance on very large lists.
         with self.conn:
+            # Replace previous entries from this source/mode when file content
+            # changes so removed domains do not remain stale in the DB.
+            self.conn.execute(
+                "DELETE FROM blocked_domains WHERE filename = ? AND mode = ?",
+                (source_filename, mode),
+            )
             with open(filename, "r", encoding="utf-8") as fh:
                 for raw in fh:
                     line = raw.strip()
                     # Treat both '#' and '!' as comment prefixes so that
                     # AdGuard-style list comments are ignored.
-                    if not line or line.startswith("#") or line.startswith("!"):
+                    if (
+                        not line
+                        or line.startswith("#")
+                        or line.startswith("!")
+                        or line.startswith("[")
+                    ):
+                        continue
+                    line = line.split("#", 1)[0].split("!", 1)[0].strip()
+                    if not line:
                         continue
                     eff_mode = mode
                     domain_val = None
+                    domains_to_insert: List[str] = []
                     if line.lstrip().startswith("{"):
+                        matched_supported_format = True
                         try:
                             obj = json.loads(line)
                         except json.JSONDecodeError as e:
@@ -1521,13 +1635,52 @@ class Filter(BasePlugin):
                         }:
                             eff_mode = line_mode.lower()
                     else:
-                        domain_val = _normalize_token(line)
-                    if not domain_val:
-                        logger.error("Missing domain entry in %s", filename)
+                        adguard_domain, adguard_mode, adguard_matched = (
+                            self._extract_adguard_domain(line)
+                        )
+                        if adguard_matched:
+                            matched_supported_format = True
+                            if adguard_mode in {"allow", "deny"}:
+                                eff_mode = adguard_mode
+                            if adguard_domain:
+                                domains_to_insert.append(
+                                    _normalize_token(adguard_domain)
+                                )
+                        else:
+                            host_domains, hosts_matched = self._extract_hosts_domains(
+                                line
+                            )
+                            if hosts_matched:
+                                matched_supported_format = True
+                                domains_to_insert.extend(
+                                    _normalize_token(domain) for domain in host_domains
+                                )
+                            elif self._is_plain_domain_token(line):
+                                matched_supported_format = True
+                                domains_to_insert.append(_normalize_token(line))
+                            else:
+                                unsupported_lines += 1
+                                continue
+                    if domain_val is not None:
+                        domains_to_insert.append(domain_val)
+                    domains_to_insert = [d for d in domains_to_insert if d]
+                    if not domains_to_insert:
                         continue
-                    self._db_insert_domain(
-                        self._normalize_domain(domain_val), filename, eff_mode
-                    )
+                    for token in domains_to_insert:
+                        self._db_insert_domain(
+                            self._normalize_domain(token), source_filename, eff_mode
+                        )
+                        inserted_domains += 1
+        self._loaded_list_file_fingerprints[fingerprint_key] = content_fingerprint
+        if (
+            not matched_supported_format
+            and unsupported_lines > 0
+            and inserted_domains == 0
+        ):
+            logger.warning(
+                "Filter: unsupported list format in %s (no entries loaded)",
+                filename,
+            )
 
     def is_allowed(self, domain: str) -> bool:
         """
