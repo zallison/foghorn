@@ -20,6 +20,19 @@ import foghorn.plugins.resolve.file_downloader as file_downloader_mod
 from foghorn.plugins.resolve.file_downloader import FileDownloader
 
 
+def _setup_downloader_for_tests(dl: FileDownloader) -> None:
+    """Brief: Call setup with a no-op _maybe_run to avoid network activity.
+
+    Inputs:
+      - dl (FileDownloader): Downloader instance to prepare.
+    Outputs:
+      - None; calls setup() after stubbing _maybe_run.
+    """
+
+    dl._maybe_run = lambda force: None
+    dl.setup()
+
+
 @pytest.fixture
 def downloader(tmp_path):
     """Brief: Construct FileDownloader with a temporary download path and no URLs.
@@ -31,7 +44,9 @@ def downloader(tmp_path):
       - FileDownloader: Instance configured with empty urls/url_files and temp path.
     """
 
-    return FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
+    return dl
 
 
 def test_url_hash12_length_and_stability(downloader):
@@ -128,6 +143,7 @@ def test_read_url_files_parses_and_logs_missing(tmp_path, caplog):
     """
 
     dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
     f1 = tmp_path / "urls1.txt"
     f1.write_text("# comment\n\nhttps://one.example\n  https://two.example  \n")
     missing = tmp_path / "missing.txt"
@@ -170,6 +186,7 @@ def test_init_merges_url_files_and_logs_debug(tmp_path, caplog):
     ]
     # Debug message about added URLs is logged
     assert any("FileDownloader added" in rec.getMessage() for rec in caplog.records)
+    _setup_downloader_for_tests(dl)
 
 
 def test_make_header_line_uses_supplied_datetime(downloader):
@@ -187,6 +204,151 @@ def test_make_header_line_uses_supplied_datetime(downloader):
     assert line == "# 2024-01-02 03:04 - https://example.com"
 
 
+def test_validate_and_normalize_url_rejects_non_http(tmp_path):
+    """Brief: _validate_and_normalize_url rejects non-http/https schemes.
+
+    Inputs:
+      - tmp_path: Temporary directory for download_path.
+
+    Outputs:
+      - None; asserts ValueError for unsupported schemes.
+    """
+
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
+    with pytest.raises(ValueError):
+        dl._validate_and_normalize_url("ftp://example.com/list.txt", source="urls")
+
+
+def test_validate_and_normalize_url_rejects_private_host(tmp_path):
+    """Brief: _validate_and_normalize_url rejects private hosts by default.
+
+    Inputs:
+      - tmp_path: Temporary directory for download_path.
+
+    Outputs:
+      - None; asserts ValueError for private targets.
+    """
+
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
+    with pytest.raises(ValueError):
+        dl._validate_and_normalize_url("http://127.0.0.1/list.txt", source="urls")
+
+
+def test_validate_and_normalize_url_allows_private_with_flag(tmp_path):
+    """Brief: _validate_and_normalize_url allows private hosts when enabled.
+
+    Inputs:
+      - tmp_path: Temporary directory for download_path.
+
+    Outputs:
+      - None; asserts private host URLs are accepted with allow_private_hosts.
+    """
+
+    dl = FileDownloader(
+        download_path=str(tmp_path),
+        urls=[],
+        url_files=[],
+        allow_private_hosts=True,
+    )
+    _setup_downloader_for_tests(dl)
+    url = dl._validate_and_normalize_url("http://127.0.0.1/list.txt", source="urls")
+    assert url == "http://127.0.0.1/list.txt"
+
+
+def test_validate_and_normalize_url_allows_allowlisted_host(tmp_path):
+    """Brief: _validate_and_normalize_url allows hosts on allowlist.
+
+    Inputs:
+      - tmp_path: Temporary directory for download_path.
+
+    Outputs:
+      - None; asserts allowlisted hosts bypass private checks.
+    """
+
+    dl = FileDownloader(
+        download_path=str(tmp_path),
+        urls=[],
+        url_files=[],
+        allowlist_hosts=["localhost"],
+    )
+    _setup_downloader_for_tests(dl)
+    url = dl._validate_and_normalize_url("http://localhost/list.txt", source="urls")
+    assert url == "http://localhost/list.txt"
+
+
+def test_read_url_files_skips_invalid_urls(tmp_path, caplog):
+    """Brief: _read_url_files skips invalid or private URLs and logs warnings.
+
+    Inputs:
+      - tmp_path: Temporary directory for URL list files.
+      - caplog: Pytest logging capture fixture.
+
+    Outputs:
+      - None; asserts only valid URLs are returned.
+    """
+
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
+    f1 = tmp_path / "urls1.txt"
+    f1.write_text(
+        "ftp://bad.example/list.txt\nhttp://127.0.0.1/list.txt\nhttps://ok.example\n"
+    )
+
+    caplog.set_level("WARNING")
+    urls = dl._read_url_files([str(f1)])
+    assert urls == {"https://ok.example"}
+    assert any("Skipping invalid URL" in rec.getMessage() for rec in caplog.records)
+
+
+def test_needs_update_respects_failure_backoff(monkeypatch, tmp_path):
+    """Brief: _needs_update suppresses retries during backoff window.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Temporary directory for local file.
+
+    Outputs:
+      - None; asserts RequestException triggers cooldown.
+    """
+
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
+    f = tmp_path / "list.txt"
+    f.write_text("# header\n")
+
+    def failing_head(url, timeout):  # noqa: ARG001
+        raise requests.RequestException("boom")
+
+    monkeypatch.setattr(file_downloader_mod.requests, "head", failing_head)
+    assert dl._needs_update("https://example.com/a.txt", str(f)) is False
+
+    def should_not_call(url, timeout):  # pragma: no cover - backoff short-circuits
+        raise AssertionError("requests.head should not be called during backoff")
+
+    monkeypatch.setattr(file_downloader_mod.requests, "head", should_not_call)
+    assert dl._needs_update("https://example.com/a.txt", str(f)) is False
+
+
+def test_download_all_detects_plain_filename_collisions(tmp_path):
+    """Brief: _download_all raises on filename collisions when hashing is disabled.
+
+    Inputs:
+      - tmp_path: Temporary directory for download_path.
+
+    Outputs:
+      - None; asserts ValueError on collisions.
+    """
+
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
+    urls = ["https://a.example/list.txt", "https://b.example/list.txt"]
+
+    with pytest.raises(ValueError):
+        dl._download_all(urls)
+
+
 def test_needs_update_true_for_missing_file(tmp_path):
     """Brief: _needs_update returns True when local file does not exist.
 
@@ -198,6 +360,7 @@ def test_needs_update_true_for_missing_file(tmp_path):
     """
 
     dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
     missing = tmp_path / "missing.txt"
     assert dl._needs_update("https://example.com/a.txt", str(missing)) is True
 
@@ -214,6 +377,7 @@ def test_needs_update_uses_last_modified_header(monkeypatch, tmp_path):
     """
 
     dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
     f = tmp_path / "list.txt"
     f.write_text("# header\n")
 
@@ -241,18 +405,19 @@ def test_needs_update_uses_last_modified_header(monkeypatch, tmp_path):
     assert dl._needs_update("https://example.com/a.txt", str(f)) is False
 
 
-def test_needs_update_true_on_bad_last_modified(monkeypatch, tmp_path):
-    """Brief: _needs_update returns True when Last-Modified is unparsable.
+def test_needs_update_false_on_bad_last_modified(monkeypatch, tmp_path):
+    """Brief: _needs_update returns False when Last-Modified is unparsable.
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture.
       - tmp_path: Temporary directory for local file.
 
     Outputs:
-      - None; asserts True when time.strptime raises inside _needs_update.
+      - None; asserts False when time.strptime raises inside _needs_update.
     """
 
     dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
     f = tmp_path / "list.txt"
     f.write_text("# header\n")
     os.utime(f, (1_700_000_000, 1_700_000_000))
@@ -265,21 +430,22 @@ def test_needs_update_true_on_bad_last_modified(monkeypatch, tmp_path):
 
     monkeypatch.setattr(file_downloader_mod.requests, "head", fake_head)
 
-    assert dl._needs_update("https://example.com/a.txt", str(f)) is True
+    assert dl._needs_update("https://example.com/a.txt", str(f)) is False
 
 
-def test_needs_update_true_on_request_exception(monkeypatch, tmp_path):
-    """Brief: _needs_update returns True when requests.head raises RequestException.
+def test_needs_update_false_on_request_exception(monkeypatch, tmp_path):
+    """Brief: _needs_update returns False when requests.head raises RequestException.
 
     Inputs:
       - monkeypatch: Pytest monkeypatch fixture.
       - tmp_path: Temporary directory for local file.
 
     Outputs:
-      - None; asserts True when RequestException is raised.
+      - None; asserts False when RequestException is raised.
     """
 
     dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
     f = tmp_path / "list.txt"
     f.write_text("# header\n")
     os.utime(f, (1_700_000_000, 1_700_000_000))
@@ -289,7 +455,7 @@ def test_needs_update_true_on_request_exception(monkeypatch, tmp_path):
 
     monkeypatch.setattr(file_downloader_mod.requests, "head", fake_head)
 
-    assert dl._needs_update("https://example.com/a.txt", str(f)) is True
+    assert dl._needs_update("https://example.com/a.txt", str(f)) is False
 
 
 def test_needs_update_true_when_no_last_modified(monkeypatch, tmp_path):
@@ -304,6 +470,7 @@ def test_needs_update_true_when_no_last_modified(monkeypatch, tmp_path):
     """
 
     dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
     f = tmp_path / "list.txt"
     f.write_text("# header\n")
     os.utime(f, (1_700_000_000, 1_700_000_000))
@@ -331,6 +498,7 @@ def test_needs_update_false_for_recent_file(monkeypatch, tmp_path):
     """
 
     dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
     f = tmp_path / "list.txt"
     f.write_text("# header\n")
 
@@ -361,6 +529,7 @@ def test_needs_update_uses_interval_days_for_min_age(monkeypatch, tmp_path):
     dl = FileDownloader(
         download_path=str(tmp_path), urls=[], url_files=[], interval_days=7
     )
+    _setup_downloader_for_tests(dl)
     f = tmp_path / "list.txt"
     f.write_text("# header\n")
 
@@ -387,19 +556,16 @@ def test_validate_domain_list_accepts_good_domain_only_list(tmp_path):
       - tmp_path: Temporary directory for domain list file.
 
     Outputs:
-      - None; asserts True when at least 5 valid domain lines exist.
+      - None; asserts True when at least one valid domain line exists.
     """
 
     dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
     f = tmp_path / "domains.txt"
     lines = [
         "# header",
         "",
         "one.example",
-        "two.example",
-        "three.example",
-        "four.example",
-        "five.example",
     ]
     f.write_text("\n".join(lines))
 
@@ -417,15 +583,12 @@ def test_validate_domain_list_ignores_bang_comment_lines(tmp_path):
     """
 
     dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
     f = tmp_path / "adguard.txt"
     lines = [
         "# header",
         "! AdGuard comment line",
         "one.example",
-        "two.example",
-        "three.example",
-        "four.example",
-        "five.example",
     ]
     f.write_text("\n".join(lines))
 
@@ -443,6 +606,7 @@ def test_validate_domain_list_rejects_hosts_and_bad_lines(tmp_path):
     """
 
     dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
 
     # Hosts-style file: IP followed by hostname -> reject
     hosts = tmp_path / "hosts.txt"
@@ -455,8 +619,8 @@ def test_validate_domain_list_rejects_hosts_and_bad_lines(tmp_path):
     assert dl._validate_domain_list(str(bad)) is False
 
 
-def test_validate_domain_list_false_when_insufficient_valid_lines(tmp_path):
-    """Brief: _validate_domain_list returns False when fewer than 5 valid domains.
+def test_validate_domain_list_false_when_no_valid_lines(tmp_path):
+    """Brief: _validate_domain_list returns False when no valid domains exist.
 
     Inputs:
       - tmp_path: Temporary directory for short list file.
@@ -466,8 +630,9 @@ def test_validate_domain_list_false_when_insufficient_valid_lines(tmp_path):
     """
 
     dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
     short = tmp_path / "short.txt"
-    short.write_text("one.example\ntwo.example\nthree.example\nfour.example\n")
+    short.write_text("# header\n! comment\n")
     assert dl._validate_domain_list(str(short)) is False
 
 
@@ -488,6 +653,7 @@ def test_fetch_writes_header_and_body(monkeypatch, tmp_path):
         url_files=[],
         add_comment=True,
     )
+    _setup_downloader_for_tests(dl)
     url = "https://example.com/list.txt"
     out = tmp_path / "out.txt"
 
@@ -510,8 +676,10 @@ def test_fetch_writes_header_and_body(monkeypatch, tmp_path):
         lambda src_url, now=None: f"# HEADER {src_url}",
     )
 
-    dl._fetch(url, str(out))
-    content = out.read_text(encoding="utf-8")
+    temp_path = dl._fetch(url, str(out))
+    with open(temp_path, "r", encoding="utf-8") as handle:
+        content = handle.read()
+    os.remove(temp_path)
     lines = content.splitlines()
     assert lines[0] == f"# HEADER {url}"
     assert lines[1:] == ["line1", "line2"]
@@ -531,18 +699,21 @@ def test_download_all_fetches_and_validates(monkeypatch, tmp_path):
     dl = FileDownloader(
         download_path=str(tmp_path), urls=[], url_files=[], add_comment=True
     )
+    _setup_downloader_for_tests(dl)
     url = "https://example.com/list.txt"
 
     # Deterministic filename in tmp_path
     monkeypatch.setattr(dl, "_make_hashed_filename", lambda _url: "list.txt")
     monkeypatch.setattr(dl, "_needs_update", lambda _url, _path: True)
 
-    def fake_fetch(src_url, fpath):
+    def fake_fetch(src_url, _fpath):
         assert src_url == url
         header = dl._make_header_line(src_url, now=datetime(2024, 1, 2, 3, 4))
         body = "one.example\ntwo.example\nthree.example\nfour.example\nfive.example\n"
-        with open(fpath, "w", encoding="utf-8") as f:
+        temp_path = tmp_path / "temp.txt"
+        with open(temp_path, "w", encoding="utf-8") as f:
             f.write(header + "\n" + body)
+        return str(temp_path)
 
     monkeypatch.setattr(dl, "_fetch", fake_fetch)
 
@@ -566,6 +737,7 @@ def test_download_all_skips_when_no_update_needed(monkeypatch, tmp_path):
     dl = FileDownloader(
         download_path=str(tmp_path), urls=[], url_files=[], add_comment=True
     )
+    _setup_downloader_for_tests(dl)
     url = "https://example.com/list.txt"
 
     monkeypatch.setattr(dl, "_make_hashed_filename", lambda _url: "list.txt")
@@ -604,6 +776,7 @@ def test_download_all_raises_on_invalid_content(monkeypatch, tmp_path):
     dl = FileDownloader(
         download_path=str(tmp_path), urls=[], url_files=[], add_comment=True
     )
+    _setup_downloader_for_tests(dl)
     url = "https://example.com/list.txt"
 
     monkeypatch.setattr(dl, "_make_hashed_filename", lambda _url: "list.txt")
@@ -1033,6 +1206,7 @@ def test_needs_update_ignores_stat_oserror_and_uses_remote(monkeypatch, tmp_path
     """
 
     dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    _setup_downloader_for_tests(dl)
     f = tmp_path / "list.txt"
     f.write_text("# header\n")
 

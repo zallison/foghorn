@@ -53,7 +53,7 @@ def test_warmup_phase_does_not_enforce(tmp_path, monkeypatch):
         burst_factor=2.0,
     )
     plugin.setup()
-    ctx = PluginContext(client_ip="1.2.3.4")
+    ctx = PluginContext(client_ip="1.2.3.4", listener="tcp")
 
     with closing(plugin._conn):
         # Window 0: high volume, but no prior samples
@@ -91,7 +91,7 @@ def test_enforces_after_learning_when_rate_spikes(tmp_path, monkeypatch):
         global_max_rps=1000.0,
     )
     plugin.setup()
-    ctx = PluginContext(client_ip="1.2.3.4")
+    ctx = PluginContext(client_ip="1.2.3.4", listener="tcp")
 
     with closing(plugin._conn):
         # Training window: steady 10 rps baseline
@@ -173,7 +173,7 @@ def test_profiles_persist_and_can_be_read_from_db(tmp_path, monkeypatch):
         burst_factor=2.0,
     )
     plugin.setup()
-    ctx = PluginContext(client_ip="1.2.3.4")
+    ctx = PluginContext(client_ip="1.2.3.4", listener="tcp")
 
     with closing(plugin._conn):
         # Single window with a fixed number of queries
@@ -239,6 +239,25 @@ def test_to_base_domain_is_psl_aware_for_private_suffixes_like_github_io():
     assert rate_limit_module._to_base_domain("a.b.user.github.io.") == "user.github.io"
 
 
+def test_missing_psl_switches_domain_mode_to_per_client(tmp_path, monkeypatch):
+    """Brief: Missing PSL support forces domain-based modes to fall back.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite DB.
+      - monkeypatch: pytest monkeypatch fixture to simulate missing PSL.
+
+    Outputs:
+      - None: asserts mode changes and PSL availability is False.
+    """
+
+    monkeypatch.setattr(rate_limit_module, "_psl_is_available", lambda: False)
+    db = tmp_path / "rl-psl-missing.db"
+    plugin = RateLimit(db_path=str(db), mode="per_domain")
+    plugin.setup()
+    assert plugin.mode == "per_client"
+    assert plugin._psl_available is False
+
+
 def test_get_config_model_returns_config_class():
     """Brief: get_config_model exposes the RateLimitConfig model.\n\n    Inputs:\n      - None.\n\n    Outputs:\n      - None: asserts the returned model is RateLimitConfig.\n"""
 
@@ -263,8 +282,12 @@ def test_rate_limit_config_applies_defaults_for_new_fields():
     assert cfg.prune_interval_seconds == 60
 
     assert cfg.udp_keying == "cidr"
+    assert cfg.assume_udp_when_listener_missing is True
     assert cfg.bucket_network_prefix_v4 == 24
     assert cfg.bucket_network_prefix_v6 == 56
+    assert cfg.warmup_max_rps == 0.0
+    assert cfg.bootstrap_rps == 0.0
+    assert cfg.psl_strict is False
 
 
 def test_rate_limit_config_validates_max_profiles_ge_1():
@@ -448,7 +471,7 @@ def test_per_client_domain_mode_uses_client_and_base_domain(tmp_path, monkeypatc
     )
     plugin.setup()
 
-    ctx = PluginContext(client_ip="1.2.3.4")
+    ctx = PluginContext(client_ip="1.2.3.4", listener="tcp")
     key = plugin._make_key("sub.example.com.", ctx)
     assert key.startswith("1.2.3.4|")
     assert key.endswith("example.com")
@@ -465,6 +488,51 @@ def test_increment_window_default_now_uses_time(monkeypatch, tmp_path):
     window_id, count = plugin._increment_window("client-1")
     assert window_id == int(30.0 // 10)
     assert count == 1
+
+
+def test_increment_window_is_atomic_under_concurrency(tmp_path):
+    """Brief: Concurrent window increments for a key are not lost.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite DB.
+
+    Outputs:
+      - None: asserts final count equals total increments.
+    """
+
+    db = tmp_path / "rl-concurrent.db"
+    plugin = RateLimit(db_path=str(db), window_seconds=10, warmup_windows=0)
+    plugin.setup()
+
+    key = "client-1"
+    threads: list[threading.Thread] = []
+    errors: list[Exception] = []
+    per_thread = 50
+    num_threads = 20
+    barrier = threading.Barrier(num_threads)
+
+    def worker() -> None:
+        try:
+            barrier.wait()
+            for _ in range(per_thread):
+                plugin._increment_window(key, now=0.0)
+        except Exception as exc:  # pragma: no cover - exercised via stress
+            errors.append(exc)
+
+    for _ in range(num_threads):
+        threads.append(threading.Thread(target=worker))
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    raw = plugin._window_cache.get((key, 0))
+    assert raw is not None
+    window_id_str, count_str = raw.decode().split(":", 1)
+    assert int(window_id_str) == 0
+    assert int(count_str) == per_thread * num_threads
 
 
 def test_build_deny_decision_status_codes(tmp_path):
@@ -521,6 +589,11 @@ def test_build_deny_decision_ip_mode_and_fallback(tmp_path):
         "example.com", QTYPE.AAAA, wire_aaaa, ctx
     )
     assert decision_aaaa.action == "override"
+
+    req_mx = DNSRecord.question("example.com", "MX")
+    wire_mx = req_mx.pack()
+    decision_mx = plugin._build_deny_decision("example.com", QTYPE.MX, wire_mx, ctx)
+    assert decision_mx.action == "deny"
 
     # When no IPs are configured, IP mode falls back to a simple deny.
     plugin2 = RateLimit(db_path=str(db), deny_response="ip")
@@ -622,7 +695,7 @@ def test_malformed_rate_profiles_rows_are_ignored(tmp_path, monkeypatch):
         min_enforce_rps=0.0,
     )
     plugin.setup()
-    ctx = PluginContext(client_ip="192.0.2.1")
+    ctx = PluginContext(client_ip="192.0.2.1", listener="tcp")
 
     # Seed a malformed row with bad "numeric" values that will fail conversion.
     cur = plugin._conn.cursor()
