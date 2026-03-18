@@ -13,6 +13,8 @@ import re
 from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from foghorn.utils import dns_names
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,7 +93,7 @@ def normalize_zone_suffixes(raw: object) -> List[str]:
             continue
         if not text:
             continue
-        zones.append(text.rstrip(".").lower())
+        zones.append(dns_names.normalize_name(text))
 
     # De-duplicate while preserving order.
     zones = list(dict.fromkeys(zones))
@@ -369,7 +371,7 @@ def normalize_axfr_config(raw: object) -> List[Dict[str, object]]:
         if poll_interval is not None and poll_interval <= 0:
             poll_interval = None
 
-        zone_text = str(zone_val).rstrip(".").lower() if zone_val is not None else ""
+        zone_text = dns_names.normalize_name(zone_val) if zone_val is not None else ""
         if not zone_text:
             logger.warning(
                 "ZoneRecords axfr_zones[%d] ignored: missing or empty 'zone'", idx
@@ -511,7 +513,7 @@ def _split_dns_labels(text: str) -> tuple[str, ...]:
         inputs.
     """
     try:
-        norm = str(text).strip().rstrip(".").lower()
+        norm = dns_names.normalize_name(text)
     except Exception:  # pragma: no cover - defensive
         norm = str(text).rstrip(".").lower()
 
@@ -709,10 +711,7 @@ def find_best_rrsets_for_name(
           1) the match whose *leading* wildcard consumed the fewest characters
           2) on ties, the most-specific pattern (per sort_wildcard_patterns())
     """
-    try:
-        norm = str(name).rstrip(".").lower()
-    except Exception:  # pragma: no cover - defensive
-        norm = str(name).lower()
+    norm = dns_names.normalize_name(name)
 
     if norm in name_index:
         return norm, name_index.get(norm, {}) or {}
@@ -761,18 +760,12 @@ def snapshot_zone_state(
       - set of (owner, qtype, ttl, values) tuples for owners inside zone.
     """
     snapshot: set[Tuple[str, int, int, Tuple[str, ...]]] = set()
-    try:
-        apex = str(zone_apex).rstrip(".").lower()
-    except Exception:  # pragma: no cover - defensive
-        apex = str(zone_apex).lower()
+    apex = dns_names.normalize_name(zone_apex)
     if not apex:
         return snapshot
 
     for owner, rrsets in name_index.items():
-        try:
-            owner_norm = str(owner).rstrip(".").lower()
-        except Exception:  # pragma: no cover - defensive
-            owner_norm = str(owner).lower()
+        owner_norm = dns_names.normalize_name(owner)
         if owner_norm != apex and not owner_norm.endswith("." + apex):
             continue
         for qcode, (ttl, values, _) in rrsets.items():

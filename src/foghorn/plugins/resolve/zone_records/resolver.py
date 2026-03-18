@@ -121,12 +121,14 @@ def handle_opcode(
         ):
             return None
 
-        zone_norm = str(qname).rstrip(".").lower()
+        from foghorn.utils import dns_names
+
+        zone_norm = dns_names.normalize_name(qname)
         zone_cfg = None
         for z in dns_update_cfg.get("zones", []) or []:
             if not isinstance(z, dict):
                 continue
-            apex = str(z.get("zone", "")).rstrip(".").lower()
+            apex = dns_names.normalize_name(z.get("zone", ""))
             if apex and apex == zone_norm:
                 zone_cfg = z
                 break
@@ -194,10 +196,9 @@ def pre_resolve(
         DNSKEY RRsets from the zone data in positive answers.
     """
     # Normalize domain to a consistent lookup key.
-    try:
-        name = str(qname).rstrip(".").lower()
-    except Exception:  # pragma: no cover - defensive
-        name = str(qname).lower()
+    from foghorn.utils import dns_names
+
+    name = dns_names.normalize_name(qname)
 
     qtype_int = int(qtype)
     type_name = QTYPE.get(qtype_int, str(qtype_int))
@@ -265,10 +266,7 @@ def pre_resolve(
                 matched_zone: Optional[str] = None
                 if nxdomain_zones:
                     for z in nxdomain_zones:
-                        try:
-                            zone_norm = str(z).rstrip(".").lower()
-                        except Exception:
-                            continue
+                        zone_norm = dns_names.normalize_name(z)
                         if not zone_norm:
                             continue
                         if name == zone_norm or name.endswith("." + zone_norm):
@@ -289,7 +287,7 @@ def pre_resolve(
                     DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=0),
                     q=request.q,
                 )
-                owner = str(request.q.qname).rstrip(".") + "."
+                owner = f"{dns_names.normalize_name(request.q.qname)}."
 
                 matched_owner_nx, rrsets = helpers.find_best_rrsets_for_name(
                     name, name_index, wildcard_patterns=wildcard_owners
@@ -434,7 +432,7 @@ def pre_resolve(
             reply = DNSRecord(
                 DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=0), q=request.q
             )
-            owner = str(request.q.qname).rstrip(".") + "."
+            owner = f"{dns_names.normalize_name(request.q.qname)}."
             # For update-sourced entries, bypass precomputed mapping_by_qtype because
             # it may still contain stale RR objects from file-based loads.
             effective_mapping_by_qtype = (
@@ -465,7 +463,7 @@ def pre_resolve(
         # Detect whether the client wants DNSSEC records via EDNS(0) DO bit.
         want_dnssec = bool(dnssec.client_wants_dnssec(request))
 
-        owner = str(request.q.qname).rstrip(".") + "."
+        owner = f"{dns_names.normalize_name(request.q.qname)}."
         reply = DNSRecord(
             DNSHeader(id=request.header.id, qr=1, aa=1, ra=1, ad=0), q=request.q
         )
@@ -600,7 +598,7 @@ def pre_resolve(
             soa_entry = zone_soa.get(zone_apex)
             if soa_entry is not None:
                 soa_ttl, soa_values, _ = soa_entry
-                soa_owner = zone_apex.rstrip(".") + "."
+                soa_owner = f"{dns_names.normalize_name(zone_apex)}."
 
                 if want_dnssec:
                     dnssec.add_rrset_to_reply(
@@ -650,7 +648,7 @@ def pre_resolve(
         soa_entry = zone_soa.get(zone_apex)
         if soa_entry is not None:
             soa_ttl, soa_values, _ = soa_entry
-            soa_owner = zone_apex.rstrip(".") + "."
+            soa_owner = f"{dns_names.normalize_name(zone_apex)}."
 
             if want_dnssec:
                 dnssec.add_rrset_to_reply(

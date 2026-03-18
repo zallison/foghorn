@@ -5,6 +5,7 @@ import pathlib
 from typing import Dict, List, Optional, Set, Tuple
 
 from dnslib import QTYPE, RR
+from foghorn.utils import dns_names
 
 logger = logging.getLogger(__name__)
 
@@ -344,16 +345,13 @@ def auto_sign_zones(
             nsec3param_code_all = 51
 
         for apex_owner in list(zone_soa.keys()):
-            origin_text = apex_owner.rstrip(".").lower() + "."
+            origin_text = f"{dns_names.normalize_name(apex_owner)}."
             origin = _dns_name.from_text(origin_text)
 
             zone_obj = _dns_zone.Zone(origin)
 
             for owner, rrsets in name_index.items():
-                try:
-                    owner_norm = str(owner).rstrip(".").lower()
-                except Exception:  # pragma: no cover - defensive
-                    owner_norm = str(owner).lower()
+                owner_norm = dns_names.normalize_name(owner)
 
                 if owner_norm != apex_owner and not owner_norm.endswith(
                     "." + apex_owner
@@ -479,9 +477,9 @@ def auto_sign_zones(
                         owner_abs = _dns_name.from_text(str(owner_name))
                     if not owner_abs.is_absolute():
                         owner_abs = owner_abs.derelativize(origin)
-                    owner_norm = owner_abs.to_text().rstrip(".").lower()
+                    owner_norm = dns_names.normalize_name(owner_abs.to_text())
                 except Exception:  # pragma: no cover - defensive
-                    owner_norm = str(owner_name).rstrip(".").lower()
+                    owner_norm = dns_names.normalize_name(owner_name)
 
                 for rdataset in node_obj:
                     if rdataset.rdtype not in (
@@ -572,7 +570,8 @@ def build_dnssec_helper_mapping(
         ) in mapping.items():
             if int(qcode_idx) != int(rrsig_code_idx):
                 continue
-            owner_norm_idx = str(owner_name_idx).rstrip(".").lower()
+            owner_norm_idx = dns_names.normalize_name(owner_name_idx)
+
             for v_idx in list(vals_idx):
                 try:
                     parts = str(v_idx).split()
@@ -616,7 +615,7 @@ def build_dnssec_helper_mapping(
             vals_idx,
             _sources,
         ) in mapping.items():
-            owner_norm_idx = str(owner_name_idx).rstrip(".").lower()
+            owner_norm_idx = dns_names.normalize_name(owner_name_idx)
             qcode_int = int(qcode_idx)
 
             if qcode_int == int(rrsig_code_idx):

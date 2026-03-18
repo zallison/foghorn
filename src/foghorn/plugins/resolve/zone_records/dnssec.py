@@ -10,6 +10,7 @@ import logging
 from typing import Dict, List, Optional, Set, Tuple
 
 from dnslib import QTYPE, RR, DNSRecord
+from foghorn.utils import dns_names
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ def add_rrset_to_reply(
     Outputs:
       - bool: True when at least one RR was added to the reply.
     """
-    owner_key = str(owner_name).rstrip(".").lower()
+    owner_key = dns_names.normalize_name(owner_name)
     added_any = False
 
     # Determine the numeric RRSIG type code once so we can reliably
@@ -161,8 +162,8 @@ def _find_closest_encloser(
       - Closest encloser name inside the zone (at minimum the zone apex).
     """
 
-    candidate = str(qname).rstrip(".").lower()
-    apex = str(zone_apex).rstrip(".").lower()
+    candidate = dns_names.normalize_name(qname)
+    apex = dns_names.normalize_name(zone_apex)
 
     while candidate and candidate != apex:
         if candidate in name_index:
@@ -259,7 +260,9 @@ def add_nsec3_denial_of_existence(
         return
 
     # Extract hashing parameters from apex-level NSEC3PARAM.
-    param_entry = records.get((str(zone_apex), int(nsec3param_code)))
+    param_entry = records.get(
+        (dns_names.normalize_name(zone_apex), int(nsec3param_code))
+    )
     if not param_entry:
         return
 
@@ -285,8 +288,8 @@ def add_nsec3_denial_of_existence(
         return
 
     # Compute closest encloser and derived names.
-    qn = str(qname).rstrip(".").lower()
-    apex = str(zone_apex).rstrip(".").lower()
+    qn = dns_names.normalize_name(qname)
+    apex = dns_names.normalize_name(zone_apex)
 
     is_nodata = qn in name_index
 
@@ -328,10 +331,7 @@ def add_nsec3_denial_of_existence(
     # names (first label is the hash).
     hash_to_owner: Dict[str, str] = {}
     for owner in nsec3_by_name.keys():
-        try:
-            owner_norm = str(owner).rstrip(".").lower()
-        except Exception:
-            continue
+        owner_norm = dns_names.normalize_name(owner)
         if not owner_norm.endswith("." + apex):
             continue
         first = owner_norm.split(".", 1)[0]
@@ -484,7 +484,7 @@ def add_dnssec_rrsets(
         appropriate. Per-RRset RRSIGs for other types are attached via
         add_rrset_to_reply using the pre-built helper mapping.
     """
-    owner_normalized = owner_name.rstrip(".").lower()
+    owner_normalized = dns_names.normalize_name(owner_name)
 
     # DNSKEY code is looked up defensively so tests that monkeypatch QTYPE
     # continue to behave as expected.

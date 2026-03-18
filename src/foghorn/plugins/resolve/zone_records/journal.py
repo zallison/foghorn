@@ -29,6 +29,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from foghorn.utils import dns_names
+
 logger = logging.getLogger(__name__)
 
 JOURNAL_SCHEMA_VERSION = 1
@@ -157,7 +159,8 @@ class JournalWriter:
           - zone_apex: Zone name.
           - base_dir: Base directory for journals.
         """
-        self.zone_apex = str(zone_apex).rstrip(".").lower()
+        self.zone_apex = dns_names.normalize_name(zone_apex)
+
         self.base_dir = str(base_dir)
         self.zone_dir = os.path.join(self.base_dir, self.zone_apex)
         self.journal_path = os.path.join(self.zone_dir, "journal.ndjson")
@@ -358,7 +361,7 @@ class JournalReader:
           - zone_apex: Zone name.
           - base_dir: Base directory for journals.
         """
-        self.zone_apex = str(zone_apex).rstrip(".").lower()
+        self.zone_apex = dns_names.normalize_name(zone_apex)
         self.base_dir = str(base_dir)
         self.zone_dir = os.path.join(self.base_dir, self.zone_apex)
         self.journal_path = os.path.join(self.zone_dir, "journal.ndjson")
@@ -477,7 +480,7 @@ def load_manifest(zone_apex: str, base_dir: str) -> Manifest:
       - Manifest instance (empty if missing).
     """
     manifest_path = os.path.join(
-        base_dir, zone_apex.rstrip(".").lower(), "manifest.json"
+        base_dir, dns_names.normalize_name(zone_apex), "manifest.json"
     )
 
     if not os.path.exists(manifest_path):
@@ -507,7 +510,7 @@ def save_manifest(manifest: Manifest, zone_apex: str, base_dir: str) -> bool:
     Outputs:
       - bool: True if successful.
     """
-    zone_apex_norm = str(zone_apex).rstrip(".").lower()
+    zone_apex_norm = dns_names.normalize_name(zone_apex)
     zone_dir = os.path.join(base_dir, zone_apex_norm)
     manifest_path = os.path.join(zone_dir, "manifest.json")
     tmp_path = manifest_path + ".tmp"
@@ -551,7 +554,7 @@ def apply_actions_to_records(
     updated = dict(records or {})
     for action in actions or []:
         action_type = str(action.get("type", ""))
-        owner = str(action.get("owner", "")).rstrip(".").lower()
+        owner = dns_names.normalize_name(action.get("owner", ""))
         qtype = int(action.get("qtype", 0) or 0)
         key = (owner, qtype)
 
@@ -654,7 +657,8 @@ def save_snapshot(
     Outputs:
       - bool: True when snapshot persisted.
     """
-    zone = str(zone_apex).rstrip(".").lower()
+    zone = dns_names.normalize_name(zone_apex)
+
     zone_dir = os.path.join(base_dir, zone)
     snapshot_path = os.path.join(zone_dir, "snapshot.ndjson")
     tmp_path = snapshot_path + ".tmp"
@@ -673,7 +677,7 @@ def save_snapshot(
             fh.write(json.dumps(header, separators=(",", ":")) + "\n")
             for (owner, qtype), (ttl, values, sources) in sorted(records.items()):
                 row = {
-                    "owner": str(owner).rstrip(".").lower(),
+                    "owner": dns_names.normalize_name(owner),
                     "qtype": int(qtype),
                     "ttl": int(ttl),
                     "values": [str(v) for v in list(values or [])],
@@ -706,7 +710,8 @@ def load_snapshot(
     Outputs:
       - Tuple of (records, snapshot_seq).
     """
-    zone = str(zone_apex).rstrip(".").lower()
+    zone = dns_names.normalize_name(zone_apex)
+
     snapshot_path = os.path.join(base_dir, zone, "snapshot.ndjson")
     if not os.path.exists(snapshot_path):
         return {}, 0
@@ -725,7 +730,7 @@ def load_snapshot(
                     continue
                 row = json.loads(raw)
                 key = (
-                    str(row.get("owner", "")).rstrip(".").lower(),
+                    dns_names.normalize_name(row.get("owner", "")),
                     int(row.get("qtype", 0) or 0),
                 )
                 records[key] = (
@@ -756,7 +761,7 @@ def compact_zone_journal(
     Outputs:
       - bool: True when compaction succeeded.
     """
-    zone = str(zone_apex).rstrip(".").lower()
+    zone = dns_names.normalize_name(zone_apex)
     zone_dir = os.path.join(base_dir, zone)
     journal_path = os.path.join(zone_dir, "journal.ndjson")
     old_path = os.path.join(zone_dir, "journal.old")

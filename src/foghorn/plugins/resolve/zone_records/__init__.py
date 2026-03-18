@@ -12,6 +12,7 @@ import socket
 import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple
+from cachetools import TTLCache
 
 from dnslib import OPCODE, QTYPE, RCODE, DNSHeader, DNSRecord
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -23,6 +24,8 @@ from foghorn.plugins.resolve.base import (
     plugin_aliases,
 )
 from foghorn.servers.dns_runtime_state import DNSRuntimeState
+from foghorn.utils import dns_names
+from foghorn.utils.register_caches import registered_cached
 
 from . import (
     axfr_polling,
@@ -969,10 +972,7 @@ def _resolve_notify_sender_for_zone(
     Outputs:
       - dict | None: Authorized upstream mapping for this zone, otherwise None.
     """
-    try:
-        zone_norm = str(zone_name).rstrip(".").lower()
-    except Exception:
-        zone_norm = str(zone_name).lower()
+    zone_norm = dns_names.normalize_name(zone_name)
     if not zone_norm:
         return None
 
@@ -980,10 +980,7 @@ def _resolve_notify_sender_for_zone(
     for entry in zone_cfg:
         if not isinstance(entry, dict):
             continue
-        try:
-            entry_zone = str(entry.get("zone", "")).rstrip(".").lower()
-        except Exception:
-            entry_zone = str(entry.get("zone", "")).lower()
+        entry_zone = dns_names.normalize_name(entry.get("zone", ""))
         if entry_zone != zone_norm:
             continue
         upstreams = list(entry.get("upstreams") or [])
@@ -993,6 +990,31 @@ def _resolve_notify_sender_for_zone(
             cache_scope=f"zone:{zone_norm}",
         )
     return None
+
+
+@registered_cached(cache=TTLCache(maxsize=1024, ttl=10))
+def _zone_has_axfr_config(plugin: "ZoneRecords", zone_name: str) -> bool:
+    """Brief: Determine whether AXFR config exists for a zone.
+
+    Inputs:
+      - plugin: ZoneRecords plugin instance.
+      - zone_name: Zone name to check for AXFR configuration.
+
+    Outputs:
+      - bool: True when a matching AXFR zone configuration exists.
+    """
+    zone_norm = dns_names.normalize_name(zone_name)
+    if not zone_norm:
+        return False
+
+    zone_cfg = list(getattr(plugin, "_axfr_zones", []) or [])
+    for entry in zone_cfg:
+        if not isinstance(entry, dict):
+            continue
+        entry_zone = dns_names.normalize_name(entry.get("zone", ""))
+        if entry_zone == zone_norm:
+            return True
+    return False
 
 
 def _get_zone_notify_min_refresh_seconds(
@@ -1012,10 +1034,7 @@ def _get_zone_notify_min_refresh_seconds(
     for entry in zone_cfg:
         if not isinstance(entry, dict):
             continue
-        try:
-            entry_zone = str(entry.get("zone", "")).rstrip(".").lower()
-        except Exception:
-            entry_zone = str(entry.get("zone", "")).lower()
+        entry_zone = dns_names.normalize_name(entry.get("zone", ""))
         if entry_zone != zone_norm:
             continue
         try:
@@ -1071,10 +1090,7 @@ def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
       - None; schedules background reloads for matching AXFR-backed ZoneRecords
         plugins. Errors are logged and do not affect NOTIFY acknowledgement.
     """
-    try:
-        zone_norm = str(zone_name).rstrip(".").lower()
-    except Exception:
-        zone_norm = str(zone_name).lower()
+    zone_norm = dns_names.normalize_name(zone_name)
     if not zone_norm:
         return
 
@@ -1107,7 +1123,7 @@ def _schedule_notify_axfr_refresh(zone_name: str, upstream: Dict) -> None:
 
         try:
             zones = [
-                str(entry.get("zone", "")).rstrip(".").lower()
+                dns_names.normalize_name(entry.get("zone", ""))
                 for entry in cfg
                 if isinstance(entry, dict)
             ]
@@ -1361,10 +1377,10 @@ def _handle_notify_opcode(
         )
     if req_parsed.questions:
         q0 = req_parsed.questions[0]
-        notify_qname = str(q0.qname).rstrip(".")
+        notify_qname = dns_names.normalize_name(q0.qname)
         notify_qtype = int(q0.qtype)
     else:
-        notify_qname = str(qname).rstrip(".")
+        notify_qname = dns_names.normalize_name(qname)
         notify_qtype = int(qtype)
 
     try:
@@ -1398,6 +1414,7 @@ def _handle_notify_opcode(
                 ede_text="NOTIFY sender rate limited",
             ),
         )
+    zone_has_axfr = _zone_has_axfr_config(plugin, notify_qname)
 
     try:
         upstream = _resolve_notify_sender_for_zone(plugin, notify_qname, client_ip)
@@ -1405,15 +1422,21 @@ def _handle_notify_opcode(
         upstream = None
 
     if upstream is None:
-        return PluginDecision(
-            action="override",
-            response=_build_notify_response(
-                req,
-                int(RCODE.REFUSED),
-                ede_code=15,
-                ede_text="NOTIFY sender not authorized for zone upstreams",
-            ),
-        )
+        if not zone_has_axfr:
+            try:
+                upstream = _resolve_notify_sender_upstream(client_ip)
+            except Exception:
+                upstream = None
+        if upstream is None:
+            return PluginDecision(
+                action="override",
+                response=_build_notify_response(
+                    req,
+                    int(RCODE.REFUSED),
+                    ede_code=15,
+                    ede_text="NOTIFY sender not authorized for zone upstreams",
+                ),
+            )
 
     try:
         upstream_id = DNSRuntimeState._upstream_id(upstream)
@@ -1438,10 +1461,7 @@ def _handle_notify_opcode(
             exc_info=True,
         )
 
-    try:
-        zone_norm = str(notify_qname).rstrip(".").lower()
-    except Exception:
-        zone_norm = str(notify_qname).lower()
+    zone_norm = dns_names.normalize_name(notify_qname)
     if zone_norm:
         try:
             zone_metadata = getattr(plugin, "_axfr_zone_metadata", None)
@@ -1746,7 +1766,7 @@ class ZoneRecords(BasePlugin):
                 owner_raw, qtype_raw, _ttl_raw, value_raw = parts
                 if not owner_raw or not qtype_raw or not value_raw:
                     continue
-                owner = owner_raw.rstrip(".").lower()
+                owner = dns_names.normalize_name(owner_raw)
                 qcode = _parse_qtype_code(qtype_raw)
                 if qcode is None:
                     continue
@@ -1807,7 +1827,8 @@ class ZoneRecords(BasePlugin):
             ttl = entry[0]
             values = entry[1]
 
-            owner_norm = str(owner).rstrip(".").lower()
+            owner_norm = dns_names.normalize_name(owner)
+
             zone = helpers.find_zone_for_name(owner_norm, zone_soa)
             try:
                 qtype_name = QTYPE.get(int(qcode), str(qcode))
@@ -1850,7 +1871,7 @@ class ZoneRecords(BasePlugin):
                 configured_zones: List[str] = []
                 if isinstance(zones_raw, list):
                     configured_zones = [
-                        str(z.get("zone", "")).rstrip(".").lower()
+                        dns_names.normalize_name(z.get("zone", ""))
                         for z in zones_raw
                         if isinstance(z, dict) and z.get("zone")
                     ]
@@ -1952,7 +1973,7 @@ class ZoneRecords(BasePlugin):
                     sources = []
                 except (TypeError, ValueError):
                     continue
-            owner_norm = str(owner).rstrip(".").lower()
+            owner_norm = dns_names.normalize_name(owner)
             qtype_int = int(qtype)
             per_owner = name_index.setdefault(owner_norm, {})
             per_owner[qtype_int] = (
@@ -2008,7 +2029,7 @@ class ZoneRecords(BasePlugin):
         zones = []
         if isinstance(dns_update_cfg.get("zones"), list):
             zones = [
-                str(z.get("zone", "")).rstrip(".").lower()
+                dns_names.normalize_name(z.get("zone", ""))
                 for z in dns_update_cfg["zones"]
                 if isinstance(z, dict) and z.get("zone")
             ]
@@ -2065,12 +2086,12 @@ class ZoneRecords(BasePlugin):
         zones_raw = dns_update_cfg.get("zones")
         if isinstance(zones_raw, list):
             configured_zones = [
-                str(z.get("zone", "")).rstrip(".").lower()
+                dns_names.normalize_name(z.get("zone", ""))
                 for z in zones_raw
                 if isinstance(z, dict) and z.get("zone")
             ]
         if zone_apex is not None:
-            target = str(zone_apex).rstrip(".").lower()
+            target = dns_names.normalize_name(zone_apex)
             configured_zones = [z for z in configured_zones if z == target]
         if not configured_zones:
             return result

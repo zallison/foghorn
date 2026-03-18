@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from dnslib import QTYPE, RR
 
 from foghorn.servers.transports.axfr import axfr_transfer
+from foghorn.utils import dns_names
 
 from . import axfr_dnssec as _axfr_dnssec
 from . import helpers
@@ -170,7 +171,7 @@ def _merge_rr_value(
       - None; mutates mapping/name_index/zone_soa in-place and updates
         overwritten_by_source when merge_policy='overwrite'.
     """
-    owner_norm = str(owner).rstrip(".").lower()
+    owner_norm = dns_names.normalize_name(owner)
     key = (owner_norm, int(qtype_code))
 
     existing = mapping.get(key)
@@ -274,7 +275,7 @@ def process_record_line(
             f"empty field in {raw_line!r}"
         )
 
-    domain = domain_raw.rstrip(".").lower()
+    domain = dns_names.normalize_name(domain_raw)
 
     # Parse qtype as number or mnemonic (e.g., "A", "AAAA").
     qtype_code: Optional[int]
@@ -518,7 +519,7 @@ def load_records(plugin: object) -> None:
         )
         zone_soa = _clone_zone_soa(base_zone_soa)
         dnssec_classified_axfr: set[str] = {
-            str(x).rstrip(".").lower() for x in set(base_dnssec_axfr)
+            dns_names.normalize_name(x) for x in set(base_dnssec_axfr)
         }
     else:
         mapping = {}
@@ -681,7 +682,7 @@ def load_records(plugin: object) -> None:
             seen_rrsets = set()
             for rr in rrs:
                 try:
-                    owner = str(rr.rname).rstrip(".").lower()
+                    owner = dns_names.normalize_name(rr.rname)
                     qtype_code = int(rr.rtype)
                     ttl = int(rr.ttl)
                     value = str(rr.rdata)
@@ -721,7 +722,7 @@ def load_records(plugin: object) -> None:
 
             if candidate_names:
                 label_lists = [
-                    str(n).rstrip(".").lower().split(".") for n in candidate_names
+                    dns_names.normalize_name(n).split(".") for n in candidate_names
                 ]
                 common_suffix_rev: List[str] = list(reversed(label_lists[0]))
                 for labels in label_lists[1:]:
@@ -753,7 +754,7 @@ def load_records(plugin: object) -> None:
                         cfg_tld = None
                     if cfg_tld:
                         suffix_label = common_suffix_rev[0].lower()
-                        if suffix_label == str(cfg_tld).rstrip(".").lower():
+                        if suffix_label == dns_names.normalize_name(cfg_tld):
                             accept_suffix = True
 
                 if accept_suffix:
@@ -807,7 +808,7 @@ def load_records(plugin: object) -> None:
             ptr_code = 12
 
         for owner_name, rrsets in list(name_index.items()):
-            owner_norm = str(owner_name).rstrip(".").lower()
+            owner_norm = dns_names.normalize_name(owner_name)
 
             for rr_qtype in (a_code, aaaa_code):
                 if rr_qtype not in rrsets:
@@ -828,7 +829,7 @@ def load_records(plugin: object) -> None:
                     if ip_obj.version == 6 and rr_qtype != aaaa_code:
                         continue
 
-                    reverse_owner = ip_obj.reverse_pointer.rstrip(".").lower()
+                    reverse_owner = dns_names.normalize_name(ip_obj.reverse_pointer)
                     ptr_target = owner_norm + "."
                     key_ptr = (reverse_owner, int(ptr_code))
                     existing_ptr = mapping.get(key_ptr)
