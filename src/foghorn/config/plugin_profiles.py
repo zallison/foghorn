@@ -100,14 +100,30 @@ def load_builtin_profiles(plugin_type: str = "rate_limit") -> Dict[str, Any]:
         # Fallback (source tree / editable installs): look relative to the resolve package.
         import foghorn.plugins.resolve as _resolve_pkg
 
-        resolve_dir = Path(_resolve_pkg.__file__).parent
-        profile_path = resolve_dir / f"{plugin_type}_profiles.yaml"
+        resolve_file = getattr(_resolve_pkg, "__file__", None)
+        if resolve_file:
+            resolve_dir = Path(resolve_file).parent
+            profile_path = resolve_dir / f"{plugin_type}_profiles.yaml"
 
-        if profile_path.is_file():
-            with open(profile_path, "r") as f:
-                profiles = yaml.safe_load(f) or {}
-            if isinstance(profiles, dict):
-                return profiles
+            if profile_path.is_file():
+                with open(profile_path, "r") as f:
+                    profiles = yaml.safe_load(f) or {}
+                if isinstance(profiles, dict):
+                    return profiles
+
+        # Additional fallback: resolve relative to this module's package tree.
+        try:
+            base_dir = Path(__file__).resolve().parents[1]
+            alt_profile_path = (
+                base_dir / "plugins" / "resolve" / f"{plugin_type}_profiles.yaml"
+            )
+            if alt_profile_path.is_file():
+                with open(alt_profile_path, "r") as f:
+                    profiles = yaml.safe_load(f) or {}
+                if isinstance(profiles, dict):
+                    return profiles
+        except Exception:
+            pass
 
     except Exception as exc:
         logger.debug("Failed to load built-in profiles for %s: %s", plugin_type, exc)
