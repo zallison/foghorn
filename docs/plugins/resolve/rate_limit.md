@@ -70,8 +70,10 @@ plugins:
       # Window and learning parameters
       window_seconds: 10             # length of measurement window
       warmup_windows: 6              # no enforcement until N complete windows
+      warmup_max_rps: 0.0            # optional hard cap during warmup (0 disables)
       alpha: 0.2                     # EWMA factor when new >= average
       alpha_down: 0.1                # EWMA when new < average (optional)
+      bootstrap_rps: 0.0             # optional bootstrap baseline (0 disables)
 
       # Enforcement thresholds
       burst_factor: 3.0              # allow up to 3x learned average
@@ -87,6 +89,8 @@ plugins:
       deny_response_ip4: 0.0.0.0
       deny_response_ip6: ::1
       ttl: 60                        # TTL for synthetic IP answers when using 'ip'
+      assume_udp_when_listener_missing: true  # apply UDP spoofing fallback when listener is unknown
+      psl_strict: false              # fail startup if PSL extraction is unavailable
       stats_log_interval_seconds: 900  # periodic summary logging (0 disables)
 ```
 
@@ -104,6 +108,8 @@ plugins:
 - `warmup_windows: int`
   - Number of *completed* windows to observe before enforcing. During warmup,
     counters are learned but no queries are blocked.
+- `warmup_max_rps: float`
+  - Optional hard RPS cap enforced during warmup windows. `0` disables.
 - `alpha: float`, `alpha_down: float | null`
   - EWMA smoothing factors for the learned baseline RPS.
   - `alpha` applies when the new rate is >= the baseline; `alpha_down` (or
@@ -116,6 +122,9 @@ plugins:
   - Number of consecutive windows where the current RPS exceeds
     `max(avg_rps * burst_factor, min_enforce_rps)` before the burst factor is
     disabled. `0` keeps the existing unlimited burst behavior.
+- `bootstrap_rps: float`
+  - Optional baseline RPS used to seed a profile when no historical data exists.
+    When set, enforcement can occur immediately instead of waiting for warmup.
 - `min_enforce_rps: float`
   - Minimum baseline RPS required before enforcement is considered; protects
     low-traffic keys from being throttled by a few extra queries.
@@ -127,12 +136,18 @@ plugins:
   - Policy for limited queries (same semantics as Filter):
     - `"nxdomain"` (default), `"refused"`, `"servfail"`, `"noerror_empty"`/`"nodata"`, `"ip"`.
 - `deny_response_ip4: str | null`, `deny_response_ip6: str | null`
-  - Replacement IPs used when `deny_response == 'ip'`.
+  - Replacement IPs used when `deny_response == 'ip'` for A/AAAA queries.
+- `assume_udp_when_listener_missing: bool`
+  - When `true`, missing/unknown listener metadata on insecure transports
+    uses the UDP spoofing fallback (CIDR bucketing or domain-only keying).
 - `ttl: int`
   - TTL for synthetic IP answers when `deny_response == 'ip'`.
 - `stats_log_interval_seconds: int`
   - Periodic summary log interval in seconds. When `0`, summary logging is
     disabled. Logs only when `avg_rps > 0`.
+- `psl_strict: bool`
+  - When `true`, fail startup if PSL extraction is unavailable while using
+    `per_domain`/`per_client_domain` modes.
 
 ### Behaviour
 
@@ -142,6 +157,10 @@ plugins:
   above `min_enforce_rps`, new windows are evaluated against:
   - `burst_factor * baseline`, and
   - `global_max_rps` (if non-zero).
+- When `warmup_max_rps` is set, the plugin enforces that cap even during warmup
+  or before any profile exists.
+- When `bootstrap_rps` is set, the plugin seeds a baseline to reduce the
+  first-window blind spot.
 - When `burst_windows > 0`, the burst factor is disabled after the configured
   number of consecutive burst windows.
 - When the current window's RPS exceeds allowed thresholds, the plugin returns a
