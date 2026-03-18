@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import pathlib
@@ -24,6 +25,7 @@ from foghorn.plugins.resolve.base import (
     PluginDecision,
     plugin_aliases,
 )
+from foghorn.utils import dns_names
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +34,6 @@ class EtcHostsConfig(BaseModel):
     """Brief: Typed configuration model for EtcHosts.
 
     Inputs:
-      - file_path: Legacy single hosts file path.
       - file_paths: Preferred list of hosts file paths.
       - watchdog_enabled: Enable watchdog-based reloads.
       - watchdog_min_interval_seconds: Minimum seconds between reloads.
@@ -43,7 +44,6 @@ class EtcHostsConfig(BaseModel):
       - EtcHostsConfig instance with normalized field types.
     """
 
-    file_path: Optional[str] = None
     file_paths: Optional[List[str]] = None
     watchdog_enabled: Optional[bool] = None
     watchdog_min_interval_seconds: float = Field(default=1.0, ge=0)
@@ -104,7 +104,7 @@ class EtcHosts(BasePlugin):
 
         # Normalize configuration into a list of paths. Default to /etc/hosts.
         provided = self.config.get("file_paths")
-        self.file_paths: List[str] = self._normalize_paths(provided, None)
+        self.file_paths: List[str] = self._normalize_paths(provided)
 
         # Internal synchronization and state
         self._hosts_lock = threading.RLock()
@@ -169,33 +169,32 @@ class EtcHosts(BasePlugin):
             self._poll_interval = 0.0
 
     def _normalize_paths(
-        self, file_paths: Optional[Iterable[str]], legacy: Optional[str]
+        self,
+        file_paths: Optional[Iterable[str]],
+        legacy_path: Optional[str] = None,
     ) -> List[str]:
         """
         Brief: Coerce provided file path inputs into an ordered, de-duplicated list.
 
         Inputs:
           - file_paths: iterable of file path strings (may be None)
-          - legacy: single legacy file path string (may be None)
+          - legacy_path: optional legacy single file path string
 
         Outputs:
           - list[str]: Non-empty list of unique paths (order preserved). Defaults
-            to ["/etc/hosts"]. If both file_paths and legacy file_path are given,
-            the legacy path is included in the set of file paths.
+            to ["/etc/hosts"].
 
         Example:
-          _normalize_paths(["/a", "/b"], None) -> ["/a", "/b"]
           _normalize_paths(["/a", "/b"], "/a") -> ["/a", "/b"]
-          _normalize_paths(None, "/a") -> ["/a"]
+          _normalize_paths(["/a", "/b"], None) -> ["/a", "/b"]
           _normalize_paths(None, None) -> ["/etc/hosts"]
         """
         paths: List[str] = []
         if file_paths:
             for p in file_paths:
                 paths.append(os.path.expanduser(str(p)))
-        if legacy:
-            # Include legacy file_path in the set of file paths
-            paths.append(os.path.expanduser(str(legacy)))
+        if legacy_path:
+            paths.append(os.path.expanduser(str(legacy_path)))
         if not paths:
             paths = [
                 "/etc/hosts"
@@ -226,7 +225,7 @@ class EtcHosts(BasePlugin):
             logging.debug(f"reading hostfile: {fp}")
             hosts_path = pathlib.Path(fp)
             with hosts_path.open("r", encoding="utf-8") as f:
-                for raw_line in f:
+                for line_no, raw_line in enumerate(f, start=1):
                     # Remove inline comments and surrounding whitespace
                     line = raw_line.split("#", 1)[0].strip()
                     if not line:
@@ -234,33 +233,41 @@ class EtcHosts(BasePlugin):
 
                     parts = line.split()
                     if len(parts) < 2:
-                        raise ValueError(
-                            f"File {hosts_path} malformed line: {raw_line}"
+                        msg = (
+                            "EtcHosts: malformed line in "
+                            f"{hosts_path}:{line_no}: {raw_line.rstrip()}"
                         )
+                        logger.warning(msg)
+                        raise ValueError(msg)
 
                     ip = parts[0]
+                    try:
+                        addr = ipaddress.ip_address(ip)
+                    except ValueError:
+                        logger.warning(
+                            "EtcHosts: invalid IP in %s:%s: %s",
+                            hosts_path,
+                            line_no,
+                            ip,
+                        )
+                        continue
 
                     # When adding an IPv4 address, also create the corresponding
                     # in-addr.arpa reverse mapping so reverse lookups can be
                     # resolved from the same hosts data.
                     reverse_name: Optional[str] = None
-                    if ":" not in ip and "." in ip:
-                        octets = ip.split(".")
-                        if len(octets) == 4 and all(o.isdigit() for o in octets):
-                            try:
-                                if all(0 <= int(o) <= 255 for o in octets):
-                                    reverse_name = (
-                                        ".".join(reversed(octets)) + ".in-addr.arpa"
-                                    )
-                            except ValueError:
-                                reverse_name = None
+                    if addr.version == 4:
+                        reverse_name = addr.reverse_pointer
 
                     for domain in parts[1:]:
+                        domain_norm = dns_names.normalize_name(domain)
+                        if not domain_norm:
+                            continue
                         # Later entries override earlier ones by assignment
-                        mapping[domain] = ip
-                        entry_sources[domain] = fp
+                        mapping[domain_norm] = ip
+                        entry_sources[domain_norm] = fp
                         if reverse_name:
-                            mapping[reverse_name] = domain
+                            mapping[reverse_name] = domain_norm
                             entry_sources[reverse_name] = fp
 
         lock = getattr(self, "_hosts_lock", None)
@@ -438,7 +445,7 @@ class EtcHosts(BasePlugin):
         if not self.targets(ctx):
             return None
 
-        qname = qname.rstrip(".")
+        qname = dns_names.normalize_name(qname)
 
         # Safe concurrent read from the hosts mapping when a watcher may be
         # reloading it in the background.
@@ -454,12 +461,14 @@ class EtcHosts(BasePlugin):
 
         # Handle reverse lookups using the precomputed in-addr.arpa entries.
         if qtype == QTYPE.PTR:
+            if not (qname.endswith(".in-addr.arpa") or qname.endswith(".ip6.arpa")):
+                return None
             hostname = str(value).rstrip(".") + "."
             try:
                 request = DNSRecord.parse(req)
             except Exception as exc:
                 logger.warning("EtcHosts: parse failure for PTR %s: %s", qname, exc)
-                return PluginDecision(action="override", response=None)
+                return None
 
             reply = DNSRecord(
                 DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q
@@ -492,6 +501,8 @@ class EtcHosts(BasePlugin):
 
         # Build a proper DNS response with the same TXID
         wire = self._make_a_response(qname, qtype, req, ctx, ip)
+        if not wire:
+            return None
         return PluginDecision(action="override", response=wire)
 
     def _make_a_response(
@@ -532,7 +543,7 @@ class EtcHosts(BasePlugin):
                     rname=request.q.qname,
                     rtype=QTYPE.AAAA,
                     rclass=1,
-                    ttl=60,
+                    ttl=self._ttl,
                     rdata=AAAA(ip),
                 )
             )
