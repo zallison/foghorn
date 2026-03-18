@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
+from foghorn.utils import dns_names
 
 logger = logging.getLogger("foghorn.stats")
 
@@ -74,7 +75,7 @@ class _QueryLogMixin:
         source_s = str(source).strip().lower() if source is not None else None
         qname_s = None
         if qname is not None:
-            qname_s = str(qname).strip().rstrip(".").lower()
+            qname_s = dns_names.normalize_name(qname)
 
         where: List[str] = []
         params: List[Any] = []
@@ -261,7 +262,7 @@ class _QueryLogMixin:
         rcode_s = str(rcode).strip().upper() if rcode is not None else None
         qname_s = None
         if qname is not None:
-            qname_s = str(qname).strip().rstrip(".").lower()
+            qname_s = dns_names.normalize_name(qname)
 
         where: List[str] = ["ts >= ?", "ts < ?"]
         params: List[Any] = [start_f, end_f]

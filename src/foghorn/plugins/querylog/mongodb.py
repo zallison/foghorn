@@ -388,7 +388,7 @@ class MongoStatsStore(BaseStatsStore):
         if qtype:
             flt["qtype"] = qtype.strip().upper()
         if qname:
-            flt["name"] = qname.strip().rstrip(".").lower()
+            flt["name"] = _normalize_domain(qname)
         if rcode:
             flt["rcode"] = rcode.strip().upper()
         if status:
@@ -531,7 +531,7 @@ class MongoStatsStore(BaseStatsStore):
         if qtype:
             flt["qtype"] = qtype.strip().upper()
         if qname:
-            flt["name"] = qname.strip().rstrip(".").lower()
+            flt["name"] = _normalize_domain(qname)
         if rcode:
             flt["rcode"] = rcode.strip().upper()
 

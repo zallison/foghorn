@@ -22,6 +22,7 @@ import logging
 import threading
 from concurrent.futures import Executor
 from typing import Callable
+from foghorn.utils import ip_networks
 
 logger = logging.getLogger("foghorn.udp_asyncio")
 
@@ -119,8 +120,10 @@ class _UDPProtocol(asyncio.DatagramProtocol):
                 limit = entry.get("max_inflight")
                 if not cidr or limit is None:
                     continue
+                net = ip_networks.parse_network(cidr, strict=False)
+                if net is None:
+                    continue
                 try:
-                    net = ipaddress.ip_network(str(cidr), strict=False)
                     lim_i = int(limit)
                 except Exception:
                     continue
@@ -199,9 +202,8 @@ class _UDPProtocol(asyncio.DatagramProtocol):
         if not self._cidr_rules_v4 and not self._cidr_rules_v6:
             return None, None
 
-        try:
-            addr = ipaddress.ip_address(str(client_ip))
-        except Exception:
+        addr = ip_networks.parse_ip(client_ip)
+        if addr is None:
             return None, None
 
         if isinstance(addr, ipaddress.IPv4Address):

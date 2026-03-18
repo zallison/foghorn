@@ -11,6 +11,7 @@ from dnslib import QTYPE, RCODE, DNSRecord
 from foghorn.servers.transports.tcp import tcp_query as _tcp_transport_query
 from foghorn.servers.transports.udp import udp_query as _udp_transport_query
 from foghorn.utils.current_cache import get_current_namespaced_cache, module_namespace
+from foghorn.utils import dns_names
 
 from . import (
     recursive_resolver as _recursive_module,  # Self-import to honour test monkeypatching.
@@ -324,7 +325,7 @@ class RecursiveResolver:
             for rr in auth:
                 if rr.rtype != QTYPE.NS:
                     continue
-                z = str(getattr(rr, "rname", "")).rstrip(".").lower()
+                z = dns_names.normalize_name(getattr(rr, "rname", ""))
                 if z and z not in zone_names:
                     zone_names.append(z)
         except Exception:  # pragma: nocover defensive
@@ -337,8 +338,8 @@ class RecursiveResolver:
                     continue
                 # Defense-in-depth: only accept NS referrals whose owner is
                 # related to the stage query name.
-                owner = str(getattr(rr, "rname", "")).rstrip(".").lower()
-                stage_norm = str(stage_qname).rstrip(".").lower()
+                owner = dns_names.normalize_name(getattr(rr, "rname", ""))
+                stage_norm = dns_names.normalize_name(stage_qname)
                 if (
                     owner
                     and stage_norm
@@ -358,7 +359,7 @@ class RecursiveResolver:
             ns_names = ns_names[:_MAX_NS_NAMES]
 
         def _in_bailiwick(name: str) -> bool:
-            n = name.rstrip(".").lower()
+            n = dns_names.normalize_name(name)
             for z in zone_names:
                 if n == z or n.endswith("." + z):
                     return True
@@ -373,7 +374,7 @@ class RecursiveResolver:
             glue_seen += 1
             if glue_seen > _MAX_GLUE_RECORDS:
                 break
-            name = str(rr.rname).rstrip(".")
+            name = dns_names.normalize_name(rr.rname)
             if zone_names and not _in_bailiwick(name):
                 continue
             try:
@@ -386,7 +387,7 @@ class RecursiveResolver:
 
         servers: List[_Server] = []
         for ns_name in ns_names:
-            key = ns_name.rstrip(".").lower()
+            key = dns_names.normalize_name(ns_name)
             for s in glue.get(key, []):
                 servers.append(s)
                 if len(servers) >= _MAX_NEXT_SERVERS:
@@ -429,7 +430,7 @@ class RecursiveResolver:
             return r.pack(), None
 
         q = req.questions[0]
-        qname = str(q.qname).rstrip(".")
+        qname = dns_names.normalize_name(q.qname)
         qtype = q.qtype
 
         # Precompute suffixes used for QNAME minimization. For
@@ -494,8 +495,8 @@ class RecursiveResolver:
                     return False
                 exp0 = exp_qs[0]
 
-                resp_qname = str(getattr(q0, "qname", "")).rstrip(".").lower()
-                exp_qname = str(getattr(exp0, "qname", "")).rstrip(".").lower()
+                resp_qname = dns_names.normalize_name(getattr(q0, "qname", ""))
+                exp_qname = dns_names.normalize_name(getattr(exp0, "qname", ""))
                 if resp_qname != exp_qname:
                     return False
 

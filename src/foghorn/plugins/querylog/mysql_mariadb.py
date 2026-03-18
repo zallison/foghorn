@@ -5,6 +5,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import BaseStatsStore
+from foghorn.utils import dns_names
 from .sqlite import _is_subdomain, _normalize_domain
 
 """MySQL/MariaDB-backed implementation of the BaseStatsStore interface.
@@ -642,7 +643,7 @@ class MySqlStatsStore(BaseStatsStore):
             params.append(qtype.strip().upper())
         if qname:
             where.append(f"name = {self._placeholder}")
-            params.append(qname.strip().rstrip(".").lower())
+            params.append(dns_names.normalize_name(qname))
         if rcode:
             where.append(f"rcode = {self._placeholder}")
             params.append(rcode.strip().upper())
@@ -781,7 +782,7 @@ class MySqlStatsStore(BaseStatsStore):
             params.append(qtype.strip().upper())
         if qname:
             where.append(f"name = {self._placeholder}")
-            params.append(qname.strip().rstrip(".").lower())
+            params.append(dns_names.normalize_name(qname))
         if rcode:
             where.append(f"rcode = {self._placeholder}")
             params.append(rcode.strip().upper())
