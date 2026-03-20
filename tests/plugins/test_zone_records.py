@@ -3,7 +3,9 @@ import ipaddress
 import logging
 import os
 import pathlib
+import socket
 import threading
+import time
 
 import pytest
 from dnslib import QTYPE, RCODE, RR, DNSRecord
@@ -2622,6 +2624,114 @@ def test_load_records_axfr_errors_do_not_abort(
     assert plugin.records[key][1] == ["192.0.2.10"]
 
 
+def test_axfr_backoff_blocks_retry_until_elapsed() -> None:
+    """Brief: should_attempt_axfr_zone respects failure backoff timing.
+
+    Inputs:
+      - None
+
+    Outputs:
+      - Asserts that backoff blocks attempts until the delay elapses.
+    """
+    axfr_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.axfr_dnssec"
+    )
+
+    zone_cfg = {
+        "minimum_reload_time": 0,
+        "failure_backoff_initial_seconds": 10,
+        "failure_backoff_max_seconds": 60,
+    }
+    now = time.time()
+    zone_metadata = {
+        "example.com": {"failure_count": 1, "last_failure": now},
+    }
+
+    assert (
+        axfr_mod.should_attempt_axfr_zone("example.com", zone_cfg, zone_metadata)
+        is False
+    )
+
+    zone_metadata["example.com"]["last_failure"] = now - 11
+    assert (
+        axfr_mod.should_attempt_axfr_zone("example.com", zone_cfg, zone_metadata)
+        is True
+    )
+
+
+def test_axfr_allow_private_upstreams_skips_non_public(monkeypatch) -> None:
+    """Brief: _axfr_transfer_for_zone skips private upstreams when disallowed.
+
+    Inputs:
+      - monkeypatch: patches socket.getaddrinfo and axfr_fn.
+
+    Outputs:
+      - Asserts that private upstreams are skipped when allow_private_upstreams=False.
+    """
+    axfr_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.axfr_dnssec"
+    )
+
+    def fake_getaddrinfo(host, *_args, **_kwargs):  # noqa: ARG001
+        return [(socket.AF_INET, None, None, "", ("127.0.0.1", 0))]
+
+    monkeypatch.setattr(axfr_mod.socket, "getaddrinfo", fake_getaddrinfo)
+
+    calls = {"n": 0}
+
+    def fake_axfr(*_a, **_k):
+        calls["n"] += 1
+        return []
+
+    transferred, last_error = axfr_mod._axfr_transfer_for_zone(  # noqa: SLF001
+        "example.com",
+        [{"host": "private.example", "port": 53, "timeout_ms": 1000}],
+        axfr_fn=fake_axfr,
+        allow_private_upstreams=False,
+    )
+
+    assert transferred is None
+    assert last_error is None
+    assert calls["n"] == 0
+
+
+def test_axfr_transfer_caps_are_forwarded(monkeypatch) -> None:
+    """Brief: _axfr_transfer_for_zone forwards size caps to axfr_fn.
+
+    Inputs:
+      - monkeypatch: patches socket.getaddrinfo.
+
+    Outputs:
+      - Asserts axfr_fn receives max_rrs and max_total_bytes.
+    """
+    axfr_mod = importlib.import_module(
+        "foghorn.plugins.resolve.zone_records.axfr_dnssec"
+    )
+
+    def fake_getaddrinfo(host, *_args, **_kwargs):  # noqa: ARG001
+        return [(socket.AF_INET, None, None, "", ("192.0.2.10", 0))]
+
+    monkeypatch.setattr(axfr_mod.socket, "getaddrinfo", fake_getaddrinfo)
+
+    seen = {}
+
+    def fake_axfr(*_a, **kwargs):
+        seen["max_rrs"] = kwargs.get("max_rrs")
+        seen["max_total_bytes"] = kwargs.get("max_total_bytes")
+        return []
+
+    axfr_mod._axfr_transfer_for_zone(  # noqa: SLF001
+        "example.com",
+        [{"host": "up.example", "port": 53, "timeout_ms": 1000}],
+        axfr_fn=fake_axfr,
+        max_rrs_per_zone=123,
+        max_bytes_per_zone=456,
+    )
+
+    assert seen["max_rrs"] == 123
+    assert seen["max_total_bytes"] == 456
+
+
 def _make_query_with_do_bit(name: str, qtype: int) -> bytes:
     """Create a DNS query with the DNSSEC OK (DO) bit set.
 
@@ -3067,6 +3177,122 @@ def test_dnssec_nsec3_params_configurable_via_dnssec_signing(
     assert parts[1] == "0"  # flags
     assert int(parts[2]) == 5
     assert parts[3].lower() == "abcd"
+
+
+def test_dnssec_nsec3_iterations_capped_for_hashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: NSEC3 iterations are capped before hashing.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Asserts that NSEC3 hashing uses the capped iteration count.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records.dnssec")
+    mod._nsec3_hash_cached.cache_clear()
+
+    calls: list[int] = []
+
+    class _StubDnssec:
+        def nsec3_hash(
+            self,
+            _name_text: str,
+            _salt_value: object,
+            iterations: int,
+            _alg: int,
+        ) -> str:
+            calls.append(int(iterations))
+            return "BBBB"
+
+    monkeypatch.setattr(mod, "_dns_dnssec", _StubDnssec())
+    monkeypatch.setattr(mod, "add_rrset_to_reply", lambda *_a, **_k: None)
+
+    reply = DNSRecord.question("missing.example.com", qtype="A")
+    records = {
+        ("example.com", int(QTYPE.NSEC3PARAM)): (300, ["1 0 100000 ABCD"], []),
+        ("aaaa.example.com", int(QTYPE.NSEC3)): (300, ["1 0 1 ABCD BBBB A"], []),
+    }
+    mapping_by_qtype = {
+        int(QTYPE.NSEC3): {"aaaa.example.com": [object()]},
+    }
+
+    mod.add_nsec3_denial_of_existence(
+        reply,
+        "missing.example.com",
+        int(QTYPE.A),
+        "example.com",
+        records,
+        {},
+        mapping_by_qtype=mapping_by_qtype,
+    )
+
+    assert calls
+    assert max(calls) == mod.NSEC3_MAX_ITERATIONS_SHA1
+
+
+def test_dnssec_nsec3_uses_cached_owner_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brief: Cached NSEC3 owner index avoids per-query scans.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - Asserts that add_nsec3_denial_of_existence uses the cached index
+        without scanning NSEC3 owner keys.
+    """
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records.dnssec")
+    mod._nsec3_hash_cached.cache_clear()
+
+    class _StubDnssec:
+        def nsec3_hash(
+            self,
+            _name_text: str,
+            _salt_value: object,
+            _iterations: int,
+            _alg: int,
+        ) -> str:
+            return "AAAA"
+
+    class _NoKeysDict(dict):
+        def keys(self) -> object:  # type: ignore[override]
+            raise AssertionError("NSEC3 owner keys should not be scanned")
+
+    added: list[tuple] = []
+    monkeypatch.setattr(mod, "_dns_dnssec", _StubDnssec())
+    monkeypatch.setattr(mod, "add_rrset_to_reply", lambda *a, **k: added.append((a, k)))
+
+    nsec3_owner = "aaaa.example.com"
+    records = {
+        ("example.com", int(QTYPE.NSEC3PARAM)): (300, ["1 0 1 -"], []),
+        (nsec3_owner, int(QTYPE.NSEC3)): (300, ["1 0 1 - AAAA A"], []),
+    }
+    mapping_by_qtype = {
+        int(QTYPE.NSEC3): _NoKeysDict({nsec3_owner: [object()]}),
+    }
+    nsec3_index = {
+        "example.com": {
+            "hash_to_owner": {"AAAA": nsec3_owner},
+            "hashes_sorted": ["AAAA"],
+        }
+    }
+
+    reply = DNSRecord.question("missing.example.com", qtype="A")
+    mod.add_nsec3_denial_of_existence(
+        reply,
+        "missing.example.com",
+        int(QTYPE.A),
+        "example.com",
+        records,
+        {},
+        mapping_by_qtype=mapping_by_qtype,
+        nsec3_index=nsec3_index,
+    )
+
+    assert added
 
 
 def test_dnssec_nxdomain_omits_nsec3_when_do_bit_not_set(

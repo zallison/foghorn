@@ -15,6 +15,7 @@ from dnslib import QTYPE, RR
 
 from foghorn.servers.transports.axfr import axfr_transfer
 from foghorn.utils import dns_names
+from foghorn.dnssec import zone_helpers as _zone_helpers
 
 from . import axfr_dnssec as _axfr_dnssec
 from . import helpers
@@ -870,6 +871,11 @@ def load_records(plugin: object) -> None:
         dnssec_classified_axfr,
         dnssec_cfg_raw if isinstance(dnssec_cfg_raw, dict) else dnssec_cfg_raw,
     )
+    nsec3_index = _zone_helpers.build_nsec3_owner_index(
+        mapping_by_qtype,
+        zone_soa,
+        log=logger,
+    )
 
     # Pre-compute wildcard owner patterns for query-time matching.
     wildcard_owners = helpers.sort_wildcard_patterns(
@@ -879,6 +885,7 @@ def load_records(plugin: object) -> None:
             if helpers.is_wildcard_domain_pattern(str(owner))
         ]
     )
+    zone_suffix_index = helpers.build_zone_suffix_index(zone_soa)
 
     if overwritten_by_source:
         parts: List[str] = []
@@ -897,7 +904,9 @@ def load_records(plugin: object) -> None:
         plugin._name_index = name_index
         plugin._zone_soa = zone_soa
         plugin.mapping = mapping_by_qtype
+        plugin._nsec3_index = nsec3_index
         plugin._wildcard_owners = wildcard_owners
+        plugin._zone_suffix_index = zone_suffix_index
         plugin._dnssec_classified_axfr = set(dnssec_classified_axfr)
     else:
         with lock:
@@ -905,5 +914,7 @@ def load_records(plugin: object) -> None:
             plugin._name_index = name_index
             plugin._zone_soa = zone_soa
             plugin.mapping = mapping_by_qtype
+            plugin._nsec3_index = nsec3_index
             plugin._wildcard_owners = wildcard_owners
+            plugin._zone_suffix_index = zone_suffix_index
             plugin._dnssec_classified_axfr = set(dnssec_classified_axfr)
