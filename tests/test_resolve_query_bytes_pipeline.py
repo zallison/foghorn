@@ -220,11 +220,11 @@ def test_resolve_query_bytes_marks_upstream_health_on_failure(
         DNSRuntimeState.upstream_health.clear()
 
 
-def test_resolve_query_bytes_uses_backup_when_primary_unhealthy(
+def test_resolve_query_bytes_uses_backup_when_all_primaries_degraded(
     monkeypatch: pytest.MonkeyPatch,
     set_runtime_snapshot,
 ) -> None:
-    """Brief: resolve_query_bytes forwards to backup upstreams when primaries are unhealthy.
+    """Brief: resolve_query_bytes forwards to backups only when all primaries are degraded.
 
     Inputs:
       - monkeypatch: pytest monkeypatch fixture.
@@ -274,6 +274,66 @@ def test_resolve_query_bytes_uses_backup_when_primary_unhealthy(
         resp = DNSRecord.parse(wire)
         assert resp.header.rcode == RCODE.NOERROR
         assert chosen["host"] == "9.9.9.9"
+    finally:
+        DNSRuntimeState.upstream_health.clear()
+
+
+def test_resolve_query_bytes_skips_backup_when_any_primary_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+    set_runtime_snapshot,
+) -> None:
+    """Brief: Backup upstreams are skipped when at least one primary is healthy.
+
+    Inputs:
+      - monkeypatch: pytest monkeypatch fixture.
+
+    Outputs:
+      - None; asserts primary upstream is selected when any primary is healthy.
+    """
+
+    q = DNSRecord.question("primary-still-healthy.example", "A")
+    primary_healthy = {"host": "1.1.1.1", "port": 53}
+    primary_degraded = {"host": "1.0.0.1", "port": 53}
+    backup = {"host": "9.9.9.9", "port": 53}
+    chosen = {"host": None}
+    r_ok = q.reply()
+
+    monkeypatch.setattr(server_mod.random, "random", lambda: 1.0)
+
+    def _forward_capture(
+        req,
+        upstreams,
+        timeout_ms,
+        qname,
+        qtype,
+        max_concurrent=None,
+        on_attempt_result=None,
+    ):
+        assert upstreams, "expected at least one upstream candidate"
+        chosen["host"] = upstreams[0].get("host")
+        return r_ok.pack(), upstreams[0], "ok"
+
+    monkeypatch.setattr(server_mod, "send_query_with_failover", _forward_capture)
+    set_runtime_snapshot(
+        plugins=[],
+        upstream_addrs=[primary_healthy, primary_degraded],
+        upstream_backup_addrs=[backup],
+    )
+
+    primary_id = DNSRuntimeState._upstream_id(primary_degraded)
+    DNSRuntimeState.upstream_health.clear()
+    try:
+        import time as _time
+
+        DNSRuntimeState.upstream_health[primary_id] = {
+            "fail_count": 2.0,
+            "down_until": _time.time() + 60.0,
+        }
+
+        wire = resolve_query_bytes(q.pack(), "127.0.0.1")
+        resp = DNSRecord.parse(wire)
+        assert resp.header.rcode == RCODE.NOERROR
+        assert chosen["host"] == "1.1.1.1"
     finally:
         DNSRuntimeState.upstream_health.clear()
 
