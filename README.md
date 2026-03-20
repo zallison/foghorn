@@ -545,17 +545,17 @@ Targeting (preferred shape uses a nested `targets` block):
 
 - `config.targets` (object or legacy list/string)
   - **Preferred object keys**:
-    - `ips`: list/string of CIDR/IPs to target.
-    - `ignore_ips`: list/string of CIDR/IPs to exclude.
-    - `listeners`: list/string of listeners (`udp`, `tcp`, `dot`, `doh`) or aliases:
-      - `secure` → `dot` + `doh`
-      - `unsecure`/`insecure` → `udp` + `tcp`
-      - `any`/`*`/`null` → no restriction
-    - `domains`: list/string of domain names to match.
-    - `domains_mode`: `exact` or `suffix` (defaults to `suffix` when `domains` is set).
-    - `qtypes`: list/string of qtype names or `'*'` for all types (e.g. `['A', 'AAAA']`).
-    - `opcodes`: list/string of DNS opcodes (e.g. `['QUERY']`).
-    - `rcodes`: list/string of response codes for post‑resolve plugins (e.g. `['NOERROR', 'NXDOMAIN']`).
+	- `ips`: list/string of CIDR/IPs to target.
+	- `ignore_ips`: list/string of CIDR/IPs to exclude.
+	- `listeners`: list/string of listeners (`udp`, `tcp`, `dot`, `doh`) or aliases:
+	  - `secure` → `dot` + `doh`
+	  - `unsecure`/`insecure` → `udp` + `tcp`
+	  - `any`/`*`/`null` → no restriction
+	- `domains`: list/string of domain names to match.
+	- `domains_mode`: `exact` or `suffix` (defaults to `suffix` when `domains` is set).
+	- `qtypes`: list/string of qtype names or `'*'` for all types (e.g. `['A', 'AAAA']`).
+	- `opcodes`: list/string of DNS opcodes (e.g. `['QUERY']`).
+	- `rcodes`: list/string of response codes for post‑resolve plugins (e.g. `['NOERROR', 'NXDOMAIN']`).
   - **Legacy form**: if `targets` is a list/string, it is treated as `targets.ips`.
 
 Logging
@@ -569,22 +569,22 @@ Example with all common knobs:
 ```yaml
 plugins:
   - type: some-plugin
-    id: example
-    enabled: true
-    logging:
-      level: debug
-    config:
-      targets:
-        ips:
-          - 192.168.0.0/16
-          - 10.10.10.0/24
-        ignore_ips: [ "192.168.0.10" ]
-        listeners: [ dot, doh ]
-        domains: [ corp.example ]
-        domains_mode: suffix  # exact | suffix
-        qtypes: [ 'A', 'AAAA' ]
-        opcodes: [ 'QUERY' ]
-        rcodes: [ 'NOERROR', 'NXDOMAIN' ]
+	id: example
+	enabled: true
+	logging:
+	  level: debug
+	config:
+	  targets:
+		ips:
+		  - 192.168.0.0/16
+		  - 10.10.10.0/24
+		ignore_ips: [ "192.168.0.10" ]
+		listeners: [ dot, doh ]
+		domains: [ corp.example ]
+		domains_mode: suffix  # exact | suffix
+		qtypes: [ 'A', 'AAAA' ]
+		opcodes: [ 'QUERY' ]
+		rcodes: [ 'NOERROR', 'NXDOMAIN' ]
 ```
 
 ---
@@ -899,6 +899,8 @@ Define custom records either:
   (parsed via dnslib; supports `$ORIGIN`, `$TTL`, and normal RR syntax). Each
   bind_paths entry can be either a string path, or an object with `path`, plus
   optional `origin`/`ttl` overrides.
+- Optional `path_allowlist` can restrict `file_paths` and `bind_paths` to a set
+  of allowed directory prefixes.
 
 All sources are merged into a single internal view per (name, qtype):
 
@@ -913,6 +915,15 @@ All sources are merged into a single internal view per (name, qtype):
   answers AXFR/IXFR for that zone using the same ZoneRecords data.
 - IXFR server side currently implemented as a full AXFR-style transfer.
 - IXFR client side is not yet supported.
+
+Wildcard notes:
+- ZoneRecords treats a leading `*` label as matching **one or more** labels,
+  which differs from RFC 4592. For example, `*.example.org` matches both
+  `a.example.org` and `a.b.example.org`.
+
+Operational guidance:
+- Keep authoritative zone apex counts to less than **1,000 zones per instance**
+  unless you have benchmarked higher counts.
 
 Optional merge controls:
 

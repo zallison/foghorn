@@ -96,6 +96,7 @@ plugins:
     interval_seconds: null
     add_comment: false
     hash_filenames: false
+    head_check: half_age
 - type: filter
   config:
     setup_priority: 20

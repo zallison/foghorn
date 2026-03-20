@@ -91,7 +91,8 @@ plugins:
       ttl: 60                        # TTL for synthetic IP answers when using 'ip'
       assume_udp_when_listener_missing: true  # apply UDP spoofing fallback when listener is unknown
       psl_strict: false              # fail startup if PSL extraction is unavailable
-      stats_log_interval_seconds: 900  # periodic summary logging (0 disables)
+      stats_log_interval_seconds: 900  # periodic summary logging fallback when stats_window_seconds is 0
+      stats_window_seconds: 3600       # logs every 3600s and summarizes only the last 3600s
 ```
 
 ## Options
@@ -143,8 +144,16 @@ plugins:
 - `ttl: int`
   - TTL for synthetic IP answers when `deny_response == 'ip'`.
 - `stats_log_interval_seconds: int`
-  - Periodic summary log interval in seconds. When `0`, summary logging is
+  - Periodic summary log interval in seconds used when
+    `stats_window_seconds == 0`. When both are `0`, summary logging is
     disabled. Logs only when `avg_rps > 0`.
+- `stats_window_seconds: int`
+  - Optional lookback window (seconds) for periodic summary log aggregates.
+    When greater than `0`, stats are logged every `stats_window_seconds` and
+    only per-window samples with `last_update >= now - window` are included.
+    This keeps `avg_rps`/`max_rps` calculations window-scoped instead of
+    lifetime-scoped. `0` uses all stored profiles and defers cadence to
+    `stats_log_interval_seconds`.
 - `psl_strict: bool`
   - When `true`, fail startup if PSL extraction is unavailable while using
     `per_domain`/`per_client_domain` modes.

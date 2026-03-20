@@ -67,6 +67,7 @@ plugins:
       axfr_zones:
         - zone: example.com
           allow_no_dnssec: true
+          poll_interval_seconds: 300
           upstreams:
             - host: 192.0.2.10
               port: 853
@@ -85,6 +86,7 @@ plugins:
               server_name: axfr.example.net
               verify: true
               ca_file: ./keys/foghorn_ca.pem
+      axfr_poll_min_interval_seconds: 60.0
 
       axfr_notify:
         - host: 192.0.2.53
