@@ -70,7 +70,7 @@ class AccessControl(BasePlugin):
     Example use:
         In config.yaml:
         plugins:
-          - module: foghorn.plugins.access_control.AccessControl
+          - module: foghorn.plugins.resolve.access_control.AccessControl
             config:
               default: deny
               allow:
