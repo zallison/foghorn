@@ -225,6 +225,8 @@ Other newer or specialized DNS-related RFCs not listed above should be assumed
   zones, and Foghorn can answer AXFR/IXFR queries for zones served by
   ZoneRecords over DNS-over-TCP and DoT. There is no IXFR client support yet
   and no dynamic NOTIFY/UPDATE-based zone maintenance.
+- ZoneRecords wildcard owners use a non-RFC-4592 rule for leading `*` labels
+  (leading `*` matches one-or-more labels). Documented in the ZoneRecords guide.
 
 ---
 

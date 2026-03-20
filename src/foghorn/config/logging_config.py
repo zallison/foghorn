@@ -80,6 +80,11 @@ class BracketLevelFormatter(logging.Formatter):
         logging.ERROR: COLOR_ERROR,
         logging.CRITICAL: COLOR_CRITICAL,
     }
+    _LOGGER_NAME_PREFIXES = (
+        "foghorn.plugins.",
+        "foghorn.plugin.",
+        "foghorn.",
+    )
     _LOGGER_NAME_COLOR = COLOR_DARKER_BLUE
     _DATE_TIME_COLOR = COLOR_BRIGHT_GREEN
     _TZ_SEPARATOR_COLOR = COLOR_LIGHT_GREY
@@ -321,6 +326,22 @@ class BracketLevelFormatter(logging.Formatter):
             return token_text
         return f"{ansi_color}{token_text}{self._RESET}"
 
+    def _shorten_logger_name(self, logger_name: str) -> str:
+        """Shorten foghorn logger names by stripping known package prefixes.
+
+        Inputs:
+          - logger_name: Fully-qualified logger name.
+
+        Outputs:
+          - str: Display-friendly logger name.
+        """
+        for prefix in self._LOGGER_NAME_PREFIXES:
+            if logger_name.startswith(prefix):
+                shortened_name = logger_name[len(prefix) :]
+                if shortened_name:
+                    return shortened_name
+        return logger_name
+
     def format(self, record):
         """Add level_tag attribute and format the record."""
         level_tag = self._TAGS.get(record.levelno, f"[lvl{record.levelno}]")
@@ -332,7 +353,9 @@ class BracketLevelFormatter(logging.Formatter):
                 level_tag, self._LEVEL_COLORS.get(record.levelno, "\033[37m")
             )
             record.msg = self._highlight_message(record.getMessage())
-            record.name = self._apply_color(record.name, self._LOGGER_NAME_COLOR)
+            record.name = self._apply_color(
+                self._shorten_logger_name(record.name), self._LOGGER_NAME_COLOR
+            )
             record.args = ()
             return super().format(record)
         finally:

@@ -41,6 +41,11 @@ All notable changes to this project will be documented in this file.
 - Runtime: added a dedicated bounded background executor controlled by `server.limits.bg_executor_workers` for non-resolver background tasks.
 - Plugins/config: added plugin profile preset loading helpers plus built-in RateLimit profile presets (default/single/lan/smb/enterprise) and an example configuration demonstrating profile selection and per-field overrides.
 - Plugins/config: include built-in `*_profiles.yaml` in installed distributions so presets can be loaded via package resources.
+- ZoneRecords: added `path_allowlist` support for `file_paths`/`bind_paths`, plus zone suffix and NSEC3 owner indexes to speed authoritative lookups and DNSSEC negative-proof matching.
+- ZoneRecords AXFR: added polling controls (`poll_interval_seconds`, `axfr_poll_min_interval_seconds`) plus transfer safety limits (`max_rrs_per_zone`, `max_bytes_per_zone`, retry/backoff controls, and public/private upstream gating).
+- AXFR transport: added hard per-transfer caps (`max_rrs`, `max_total_bytes`) with explicit transfer errors when exceeded.
+- RateLimit: added `stats_window_seconds` to support window-scoped periodic summary logging and aggregation.
+- Tests: added focused coverage for AXFR size caps, ZoneRecords helpers/journal edge paths, DNS name helpers, and background executor behavior.
 
 - ZoneRecords plugin: Implemented DNS UPDATE (RFC 2136) with full RFC 2136 support:
   - Prerequisite evaluation checks for RRset existence/nonexistence and name in use.
@@ -157,6 +162,12 @@ All notable changes to this project will be documented in this file.
 - Plugin signals: startup/runtime signal dispatch now prefers a unified `handle_sigusr(sig_label)` hook while retaining legacy compatibility paths.
 - Makefile `docker-run` now exports `LISTEN` and `LISTEN_PORT` environment variables into the runtime container.
 - RateLimit defaults now use `./config/var/dbs/rate_limit.db` for profile storage across runtime helpers, examples, and API output.
+- Server EDNS behavior now preserves client EDNS/DO-bit intent and avoids synthesizing OPT records when the request did not include EDNS.
+- Upstream selection now uses backup upstreams only when all primaries are degraded, with updated failover logging thresholds to reduce noisy warnings.
+- FileDownloader now supports configurable upstream HEAD-check policies (`always`, `half_age`, `stale`, `never`) and delayed startup refresh when list files are still fresh.
+- Filter list loading now uses persistent file metadata/fingerprint tracking so unchanged allow/block files are skipped across reloads.
+- ZoneRecords AXFR polling now clamps configured intervals to a minimum floor and coordinates reload contention via a reload lock.
+- Logging formatter now shortens `foghorn.*` logger names in console output, and Influx query-log writes now validate session/timeout/timestamp inputs more defensively.
 
 ### Fixed
 - Upstream failover: fixed a crash in the connection-refused warning path when upstream-health data was missing/malformed.
@@ -180,6 +191,7 @@ All notable changes to this project will be documented in this file.
 - Main signal handling: fixed SIGUSR reset-flag comparisons so `sigusr1_resets_stats` / `sigusr2_resets_stats` gating is evaluated correctly.
 - Makefile `run` and `docker-run` now pass `LISTEN_PORT` correctly (fixing `docker-run` mistakenly reusing `LISTEN`).
 - Logging formatter bracket-highlighting now more reliably identifies SHA1-style IDs and bracketed container IDs.
+- ZoneRecords journal persistence now hardens zone-name normalization, actor/action validation, entry-size limits, and manifest sequence tracking to reduce replay/compaction corruption risk.
 
 ### Tests
 - Added ZoneRecords TSIG update tests covering pluggable `key_sources` resolution paths.

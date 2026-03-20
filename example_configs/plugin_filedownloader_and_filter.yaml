@@ -61,6 +61,7 @@ plugins:
       interval_seconds: 86400
       add_comment: true
       hash_filenames: true
+      head_check: half_age
 
   - type: filter
     id: filter_lists

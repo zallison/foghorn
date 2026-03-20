@@ -214,6 +214,10 @@ Clients without DO=1 receive only the base RRsets without signatures.
 - `file_paths: list[str] | null`
   - Hosts Foghorn's simple pipe-delimited record format. Each non-comment line
 	is `"<domain>|<qtype>|<ttl>|<value>"`.
+- `path_allowlist: list[str] | null`
+  - Optional list of allowed directory prefixes for `file_paths` and `bind_paths`.
+  - Paths outside these prefixes are ignored with a warning.
+  - Protect the config file; without this allowlist, any readable path can be used.
 - `file_path: str | null`
   - Legacy single records file path; merged into `file_paths` when both are set.
   - Prefer `file_paths` for new configurations.
@@ -248,7 +252,28 @@ Clients without DO=1 receive only the base RRsets without signatures.
       zone as having `dnssec_state=present|partial|none` and logs a warning when
       DNSKEY/RRSIG data is missing or incomplete, especially when
       `allow_no_dnssec` is `false`.
+    - `allow_private_upstreams: bool` – allow upstreams that resolve to
+      non-public IPs (private/loopback/link-local). Defaults to `true`; set to
+      `false` to block private upstreams.
+    - `allow_public_upstreams: bool` – allow upstreams that resolve to public
+      IPs. Defaults to `true`; set to `false` to block public upstreams.
+    - `minimum_reload_time: float` – minimum seconds between AXFR reloads.
+    - `max_rrs_per_zone: int | null` – optional cap on total RRs per transfer.
+    - `max_bytes_per_zone: int | null` – optional cap on total response bytes
+      per transfer.
+    - `max_retries_per_zone: int | null` – optional cap on consecutive failed
+      AXFR attempts before giving up.
+    - `failure_backoff_initial_seconds: float` – initial backoff delay after a
+      failed transfer (0 disables backoff).
+    - `failure_backoff_max_seconds: float` – maximum backoff delay (0 disables
+      the cap).
+    - `poll_interval_seconds: int | null` – optional polling interval (seconds)
+      for periodic AXFR refreshes; clamped to `axfr_poll_min_interval_seconds`
+      (hard floor of 10 seconds).
   - AXFR-backed zones are loaded once during initial setup; subsequent reloads come from local files/inline records.
+- `axfr_poll_min_interval_seconds: float`
+  - Minimum polling interval enforced for AXFR polling. Defaults to `60.0`.
+  - Values below the hard floor are clamped to `10.0`.
 - `watchdog_enabled: bool | null`
   - When `true`, and `watchdog` is present, start filesystem watchers for
 	configured files and reload on change.
@@ -290,6 +315,17 @@ Clients without DO=1 receive only the base RRsets without signatures.
   bounded by matching SOA records. IXFR is currently implemented as a full
   AXFR-style transfer (no deltas).
 
+#### Wildcard semantics
+
+ZoneRecords wildcard matching intentionally differs from RFC 4592 for leading
+`*` labels: a leading `*` matches **one or more** labels (any depth). For
+example, `*.example.org` matches `a.example.org` and `a.b.example.org`.
+
+#### Operational guidance
+
+- For production deployments, keep authoritative zone apex counts to roughly
+  **1,000 zones per instance** unless you have benchmarked higher counts.
+
 #### Precedence
 
 When multiple sources define the same owner/qtype, ZoneRecords applies this
@@ -316,6 +352,15 @@ AXFR-backed zones can be reloaded on subsequent plugin loads based on the
 - `minimum_reload_time: float` – Minimum seconds between AXFR reloads. Reloads only
   after this time has elapsed since the initial load or since the last NOTIFY was
   received for the zone. A value of 0 (default) reloads on every load.
+
+#### AXFR Failure Backoff and Limits
+
+AXFR transfers can be constrained and retried with backoff on failure:
+
+- `max_rrs_per_zone` and `max_bytes_per_zone` cap the size of an AXFR transfer.
+- `max_retries_per_zone` caps consecutive failures before giving up.
+- `failure_backoff_initial_seconds` and `failure_backoff_max_seconds` implement
+  exponential backoff between failed attempts.
 
 This allows balancing between keeping zones up-to-date and avoiding excessive transfer
 load on upstream servers.

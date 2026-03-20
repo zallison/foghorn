@@ -157,6 +157,54 @@ def test_formatters_produce_expected_tags():
     assert out2.startswith("[warn] n2:")
 
 
+def test_bracket_formatter_shortens_foghorn_logger_names():
+    """
+    Brief: Formatter shortens foghorn logger names by stripping package prefixes.
+
+    Inputs:
+      - LogRecord names under foghorn and non-foghorn namespaces
+
+    Outputs:
+      - None: Asserts display labels are shortened only for foghorn-prefixed names
+    """
+    fmt = BracketLevelFormatter(fmt="%(asctime)s %(level_tag)s %(name)s: %(message)s")
+
+    plugin_record = logging.LogRecord(
+        "foghorn.plugins.resolve.rate_limit",
+        logging.INFO,
+        __file__,
+        1,
+        "plugin message",
+        (),
+        None,
+    )
+    plugin_out = fmt.format(plugin_record)
+    assert " resolve.rate_limit: plugin message" in plugin_out
+    singular_plugin_record = logging.LogRecord(
+        "foghorn.plugin.resolve.rate_limit",
+        logging.INFO,
+        __file__,
+        1,
+        "singular plugin message",
+        (),
+        None,
+    )
+    singular_plugin_out = fmt.format(singular_plugin_record)
+    assert " resolve.rate_limit: singular plugin message" in singular_plugin_out
+
+    app_record = logging.LogRecord(
+        "foghorn.main", logging.INFO, __file__, 1, "app message", (), None
+    )
+    app_out = fmt.format(app_record)
+    assert " main: app message" in app_out
+
+    other_record = logging.LogRecord(
+        "uvicorn.access", logging.INFO, __file__, 1, "uvicorn message", (), None
+    )
+    other_out = fmt.format(other_record)
+    assert " uvicorn.access: uvicorn message" in other_out
+
+
 def test_bracket_formatter_color_highlights_tokens():
     """
     Brief: Colored formatter injects ANSI escapes for level, logger, timestamp, and key message tokens.
@@ -261,7 +309,7 @@ def test_bracket_formatter_color_highlights_tokens():
     assert f"{COLOR_QUOTED}'single-quoted'\033[0m" in out
     assert f'{COLOR_QUOTED}"double-quoted"\033[0m' in out
     assert "extra(parenthesized)" in out_without_ansi
-    assert "\033[34mfoghorn.main\033[0m" in out
+    assert "\033[34mmain\033[0m" in out
     assert f"{COLOR_BRIGHT_GREEN}2026-03-07\033[0m" in out
     assert re.search(
         rf"{re.escape(COLOR_BRIGHT_GREEN)}\d{{4}}-\d{{2}}-\d{{2}}\033\[0m"

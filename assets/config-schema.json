@@ -974,7 +974,7 @@
         ],
         "config_schema": {
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or\n        /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - bucket_network_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist (0 disables).\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for RateLimit.\n\nInputs:\n  - mode: 'per_client' (default), 'per_client_domain', or 'per_domain'\n    controlling how rate profiles are keyed.\n  - window_seconds: Measurement window size in seconds (>= 1).\n  - warmup_windows: Number of completed windows to observe before enforcing.\n  - alpha: EWMA smoothing factor when the new RPS is >= the learned average\n    (controls how quickly we ramp *up*).\n  - alpha_down: Optional EWMA factor when the new RPS is < the learned\n    average (controls how quickly we ramp *down*). Defaults to alpha when\n    omitted.\n  - burst_factor: Allowed multiplier over learned average RPS when enforcing.\n  - burst_windows: Number of consecutive burst windows allowed before the\n    burst factor is disabled (0 means unlimited).\n  - min_enforce_rps: Minimum RPS threshold for enforcement.\n  - global_max_rps: Hard upper bound on allowed RPS per key (0 disables).\n  - db_path: Path to sqlite3 database storing learned profiles.\n\n  - max_profiles: Maximum number of rows permitted in rate_profiles (>= 1).\n  - profile_ttl_seconds: Best-effort TTL for profiles; rows older than this\n    are pruned during periodic maintenance (0 disables TTL pruning).\n  - prune_interval_seconds: Minimum seconds between prune passes (>= 0).\n\n  - udp_keying: Keying override applied when ctx.listener == 'udp' and the\n    request is not secure. Options:\n      - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or\n        /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.\n      - 'domain': ignore client identity and key only by base domain.\n  - assume_udp_when_listener_missing: When True, treat missing/unknown\n    listener values on insecure transports as UDP for spoofing mitigation.\n  - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.\n  - bucket_network_prefix_v6: IPv6 prefix length used for udp_keying='cidr'.\n  - warmup_max_rps: Optional hard RPS cap enforced during warmup\n    (0 disables).\n  - bootstrap_rps: Optional baseline RPS used to seed profiles when\n    no historical samples exist (0 disables).\n\n  - deny_response: Policy for limited queries ('nxdomain', 'refused', 'servfail',\n    'noerror_empty'/'nodata', or 'ip'). Defaults to 'refused'.\n  - deny_response_ip4 / deny_response_ip6: Optional IPs used when deny_response=='ip'.\n  - ttl: Optional TTL used when synthesizing IP responses.\n  - stats_log_interval_seconds: Interval for periodic rate-limit summary logs\n    (0 disables).\n  - stats_window_seconds: Optional lookback window in seconds applied when\n    computing periodic summary avg/max values (0 uses all profiles).\n  - psl_strict: When True, fail startup if PSL extraction is unavailable\n    in domain-based modes.\n\nOutputs:\n  - RateLimitConfig instance with normalized field types.",
           "properties": {
             "alpha": {
               "default": 0.2,
@@ -1136,6 +1136,13 @@
               "description": "Type: integer. Default: 3600.",
               "minimum": 0,
               "title": "Stats Log Interval Seconds",
+              "type": "integer"
+            },
+            "stats_window_seconds": {
+              "default": 0,
+              "description": "Type: integer. Default: 0.",
+              "minimum": 0,
+              "title": "Stats Window Seconds",
               "type": "integer"
             },
             "ttl": {
@@ -1524,13 +1531,39 @@
             },
             "AxfrZoneConfig": {
               "additionalProperties": false,
-              "description": "Brief: Configuration for a single AXFR-backed zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - upstreams: List of upstream servers to transfer from.\n  - masters: Legacy alias for upstreams (deprecated).\n  - allow_no_dnssec: Accept transfer even if DNSSEC is missing or invalid\n    (default True). When False, zones without valid DNSSEC will be rejected\n    once DNSSEC validation for AXFR is implemented.\n  - minimum_reload_time: Minimum seconds between AXFR reloads. Reloads will\n    only occur after this time has elapsed since the original load or since\n    the last NOTIFY was received for the zone.\n\nOutputs:\n  - AxfrZoneConfig instance.",
+              "description": "Brief: Configuration for a single AXFR-backed zone.\n\nInputs:\n  - zone: Zone apex (e.g. \"example.com\").\n  - upstreams: List of upstream servers to transfer from.\n  - masters: Legacy alias for upstreams (deprecated).\n  - allow_no_dnssec: Accept transfer even if DNSSEC is missing or invalid\n    (default True). When False, zones without valid DNSSEC will be rejected\n    once DNSSEC validation for AXFR is implemented.\n  - minimum_reload_time: Minimum seconds between AXFR reloads. Reloads will\n    only occur after this time has elapsed since the original load or since\n    the last NOTIFY was received for the zone.\n  - poll_interval_seconds: Optional polling interval for periodic AXFR refreshes.\n  - allow_private_upstreams: Allow non-public upstream addresses (default True).\n  - allow_public_upstreams: Allow public upstream addresses (default True).\n  - max_rrs_per_zone: Optional maximum RR count for a single AXFR transfer.\n  - max_bytes_per_zone: Optional maximum total bytes for a single AXFR transfer.\n  - max_retries_per_zone: Optional maximum consecutive transfer failures.\n  - failure_backoff_initial_seconds: Initial backoff delay after failure.\n  - failure_backoff_max_seconds: Maximum backoff delay after failures.\n\nOutputs:\n  - AxfrZoneConfig instance.",
               "properties": {
                 "allow_no_dnssec": {
                   "default": true,
                   "description": "Accept transfer even if DNSSEC is missing or invalid. When False, zones without valid DNSSEC will be rejected once DNSSEC validation for AXFR is implemented. Default: true.",
                   "title": "Allow No Dnssec",
                   "type": "boolean"
+                },
+                "allow_private_upstreams": {
+                  "default": true,
+                  "description": "Allow non-public upstream addresses (private/loopback/link-local). Defaults to true; set false to block private upstreams. Default: true.",
+                  "title": "Allow Private Upstreams",
+                  "type": "boolean"
+                },
+                "allow_public_upstreams": {
+                  "default": true,
+                  "description": "Allow public upstream addresses (defaults to true). Default: true.",
+                  "title": "Allow Public Upstreams",
+                  "type": "boolean"
+                },
+                "failure_backoff_initial_seconds": {
+                  "default": 0,
+                  "description": "Initial backoff delay in seconds after an AXFR failure. Default: 0.",
+                  "minimum": 0,
+                  "title": "Failure Backoff Initial Seconds",
+                  "type": "number"
+                },
+                "failure_backoff_max_seconds": {
+                  "default": 0,
+                  "description": "Maximum backoff delay in seconds after repeated failures. Default: 0.",
+                  "minimum": 0,
+                  "title": "Failure Backoff Max Seconds",
+                  "type": "number"
                 },
                 "masters": {
                   "anyOf": [
@@ -1550,12 +1583,76 @@
                   "description": "Legacy alias for upstreams (deprecated).",
                   "title": "Masters"
                 },
+                "max_bytes_per_zone": {
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional maximum total response bytes allowed per AXFR transfer.",
+                  "title": "Max Bytes Per Zone"
+                },
+                "max_retries_per_zone": {
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional maximum consecutive AXFR failures before giving up.",
+                  "title": "Max Retries Per Zone"
+                },
+                "max_rrs_per_zone": {
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional maximum number of RRs allowed in a single AXFR transfer.",
+                  "title": "Max Rrs Per Zone"
+                },
                 "minimum_reload_time": {
                   "default": 0,
                   "description": "Minimum seconds between AXFR reloads. Reloads only occur after this time has elapsed since the original load or since the last NOTIFY was received for the zone. A value of 0 reloads on every load. Default: 0.",
                   "minimum": 0,
                   "title": "Minimum Reload Time",
                   "type": "number"
+                },
+                "poll_interval_seconds": {
+                  "anyOf": [
+                    {
+                      "description": "Type: integer.",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    {
+                      "description": "Type: null.",
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "description": "Optional polling interval in seconds for periodic AXFR refreshes.",
+                  "title": "Poll Interval Seconds"
                 },
                 "upstreams": {
                   "anyOf": [
@@ -2233,7 +2330,7 @@
             }
           },
           "additionalProperties": true,
-          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"merge\" (default): preserve existing records and overlay newly loaded ones.\n    - \"replace\": rebuild records from configured sources on each load.\n    - \"first\": use the first configured source group in this order:\n      records (inline) \u2192 axfr_zones \u2192 file_paths \u2192 bind_paths, and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - any_query_enabled: Allow QTYPE=ANY responses (default False).\n  - any_answer_rrset_limit: Max RRsets returned for QTYPE=ANY responses.\n  - any_answer_record_limit: Max total records returned for QTYPE=ANY responses.\n  - axfr_zones: Optional list of AXFR-backed zones.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
+          "description": "Brief: Typed configuration model for ZoneRecords.\n\nInputs:\n  - file_paths: Preferred list of records file paths.\n  - path_allowlist: Optional list of allowed directory prefixes for file_paths\n    and bind_paths; paths outside these prefixes are ignored with a warning.\n  - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may\n    be plain strings (paths) or objects with per-file origin/ttl overrides.\n  - records: Optional list of inline records using\n    ``<domain>|<qtype>|<ttl>|<value>`` format.\n  - load_mode: Controls load/reload behaviour:\n    - \"merge\" (default): preserve existing records and overlay newly loaded ones.\n    - \"replace\": rebuild records from configured sources on each load.\n    - \"first\": use the first configured source group in this order:\n      records (inline) \u2192 axfr_zones \u2192 file_paths \u2192 bind_paths, and ignore the others.\n  - merge_policy: \"add\" (default) to append unique values into existing\n    RRsets, or \"overwrite\" to replace RRsets when the same (name,qtype)\n    appears in a later source.\n  - watchdog_enabled: Enable watchdog-based reloads.\n  - watchdog_min_interval_seconds: Minimum seconds between reloads.\n  - watchdog_poll_interval_seconds: Optional polling interval.\n  - ttl: Default TTL in seconds.\n  - nxdomain_zones: Optional list of zone suffixes for which ZoneRecords\n    should return NXDOMAIN/NODATA instead of falling through to upstream.\n  - any_query_enabled: Allow QTYPE=ANY responses (default False).\n  - any_answer_rrset_limit: Max RRsets returned for QTYPE=ANY responses.\n  - any_answer_record_limit: Max total records returned for QTYPE=ANY responses.\n  - axfr_zones: Optional list of AXFR-backed zones.\n- axfr_poll_min_interval_seconds: Minimum poll interval enforced for AXFR polling.\n\nOutputs:\n  - ZoneRecordsConfig instance with normalized field types.",
           "properties": {
             "any_answer_record_limit": {
               "default": 64,
@@ -2294,6 +2391,13 @@
               "default": null,
               "description": "Optional delay in seconds after serving AXFR/IXFR to a client before sending a follow-up NOTIFY for the transferred zone. Ignored when null or zero.",
               "title": "Axfr Notify Scheduled"
+            },
+            "axfr_poll_min_interval_seconds": {
+              "default": 60.0,
+              "description": "Minimum poll interval in seconds for AXFR polling. Values below the hard floor are clamped. Default: 60.0.",
+              "minimum": 0,
+              "title": "Axfr Poll Min Interval Seconds",
+              "type": "number"
             },
             "axfr_zones": {
               "anyOf": [
@@ -2409,6 +2513,25 @@
               "default": null,
               "description": "Optional list of zone suffixes for which ZoneRecords should return NXDOMAIN/NODATA for names under that suffix which are not present in the internal mapping, instead of falling through to upstream resolution.",
               "title": "Nxdomain Zones"
+            },
+            "path_allowlist": {
+              "anyOf": [
+                {
+                  "description": "Type: array.",
+                  "items": {
+                    "description": "Type: string.",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "description": "Type: null.",
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional list of allowed directory prefixes for file_paths and bind_paths. Paths outside these prefixes are ignored with a warning.",
+              "title": "Path Allowlist"
             },
             "records": {
               "anyOf": [
