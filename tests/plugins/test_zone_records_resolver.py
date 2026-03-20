@@ -61,6 +61,7 @@ class _Plugin:
         self._name_index = name_index or {}
         self._zone_soa = zone_soa or {}
         self.mapping: dict[int, Any] = {}
+        self._nsec3_index: dict[str, object] = {}
         self._wildcard_owners: list[str] = []
         self._nxdomain_zones = list(nxdomain_zones or [])
         self._axfr_zone_metadata: dict[str, dict[str, object]] = {}
@@ -1629,7 +1630,7 @@ def test_pre_resolve_authoritative_nodata_with_missing_soa_entry_still_overrides
     monkeypatch.setattr(
         resolver.helpers,
         "find_zone_for_name",
-        lambda _name, _soa: "example.com",
+        lambda _name, _soa, zone_index=None: "example.com",
         raising=True,
     )
 
@@ -1715,7 +1716,7 @@ def test_pre_resolve_authoritative_nxdomain_without_soa_entry_still_overrides(
     monkeypatch.setattr(
         resolver.helpers,
         "find_zone_for_name",
-        lambda _name, _soa: "example.com",
+        lambda _name, _soa, zone_index=None: "example.com",
         raising=True,
     )
 

@@ -6,13 +6,71 @@ Inputs/Outputs:
 
 from __future__ import annotations
 
+import bisect
 import logging
+from functools import lru_cache
 from typing import Dict, List, Optional, Set, Tuple
 
 from dnslib import QTYPE, RR, DNSRecord
 from foghorn.utils import dns_names
 
+try:  # pragma: no cover - optional dependency
+    import dns.dnssec as _dns_dnssec
+except Exception:  # pragma: no cover - optional dependency
+    _dns_dnssec = None
+
 logger = logging.getLogger(__name__)
+
+NSEC3_MAX_ITERATIONS_SHA1 = 100
+NSEC3_MAX_ITERATIONS_OTHER = 500
+NSEC3_HASH_CACHE_SIZE = 2048
+NSEC3_MAX_PROOF_RRSETS = 3
+
+
+def _cap_nsec3_iterations(iterations: int, alg: int) -> tuple[int, bool]:
+    """Brief: Clamp NSEC3 iterations to a safe upper bound per algorithm.
+
+    Inputs:
+      - iterations: Raw NSEC3 iteration count from zone data.
+      - alg: NSEC3 hash algorithm number (RFC 5155).
+
+    Outputs:
+      - tuple[int, bool]: (capped_iterations, was_capped) where was_capped is
+        True when the input exceeded the configured limit.
+    """
+    max_allowed = (
+        int(NSEC3_MAX_ITERATIONS_SHA1)
+        if int(alg) == 1
+        else int(NSEC3_MAX_ITERATIONS_OTHER)
+    )
+    if iterations < 0:
+        return 0, True
+    if iterations > max_allowed:
+        return max_allowed, True
+    return iterations, False
+
+
+@lru_cache(maxsize=NSEC3_HASH_CACHE_SIZE)
+def _nsec3_hash_cached(
+    name_text: str,
+    salt_value: object,
+    iterations: int,
+    alg: int,
+) -> Optional[str]:
+    """Brief: Compute (and cache) an NSEC3 hash for a given name.
+
+    Inputs:
+      - name_text: Absolute owner name with trailing dot.
+      - salt_value: NSEC3 salt in bytes or presentation form string.
+      - iterations: NSEC3 iteration count.
+      - alg: NSEC3 hash algorithm number (RFC 5155).
+
+    Outputs:
+      - Optional[str]: Base32hex hash string, or None on failure.
+    """
+    if _dns_dnssec is None:
+        return None
+    return _dns_dnssec.nsec3_hash(name_text, salt_value, iterations, alg)
 
 
 def client_wants_dnssec(request: object) -> bool:
@@ -183,6 +241,7 @@ def add_nsec3_denial_of_existence(
     records: Dict[Tuple[str, int], Tuple[int, List[str], object]],
     name_index: Dict[str, Dict[int, Tuple[int, List[str], object]]],
     mapping_by_qtype: Optional[Dict[int, Dict[str, List[RR]]]] = None,
+    nsec3_index: Optional[Dict[str, Dict[str, object]]] = None,
 ) -> None:
     """Brief: Add NSEC3 proof material to an authoritative negative response.
 
@@ -195,6 +254,7 @@ def add_nsec3_denial_of_existence(
       - name_index: owner->qtype->(ttl,[values]) index used by ZoneRecords.
       - mapping_by_qtype: Optional helper mapping with pre-built dnslib RR
         instances (base RRsets + covering RRSIGs).
+      - nsec3_index: Optional precomputed NSEC3 owner/hash index keyed by apex.
 
     Outputs:
       - None; appends NSEC3 (and their RRSIGs) into ``reply.auth``.
@@ -274,7 +334,8 @@ def add_nsec3_denial_of_existence(
         p = str(param_vals[0]).split()
         alg = int(p[0])
         _flags = int(p[1])
-        iterations = int(p[2])
+        iterations_raw = p[2]
+        iterations = int(iterations_raw)
         salt_text = str(p[3])
         if salt_text in {"", "-"}:
             salt_hash = ""
@@ -285,7 +346,22 @@ def add_nsec3_denial_of_existence(
             except Exception:
                 salt_hash = str(salt_text)
     except Exception:
+        logger.debug(
+            "ZoneRecords: failed to parse NSEC3PARAM for zone %s",
+            zone_apex,
+            exc_info=True,
+        )
         return
+
+    iterations, was_capped = _cap_nsec3_iterations(int(iterations), int(alg))
+    if was_capped:
+        logger.warning(
+            "ZoneRecords: NSEC3 iterations capped for zone %s (alg=%s): %s -> %s",
+            zone_apex,
+            alg,
+            iterations_raw if "iterations_raw" in locals() else iterations,
+            iterations,
+        )
 
     # Compute closest encloser and derived names.
     qn = dns_names.normalize_name(qname)
@@ -310,38 +386,60 @@ def add_nsec3_denial_of_existence(
         next_closer = f"{next_label}.{closest}"
         wildcard = f"*.{closest}"
 
-    try:
-        import dns.dnssec as _dns_dnssec
+    if _dns_dnssec is None:
+        logger.debug("ZoneRecords: dnspython dnssec unavailable; skipping NSEC3 proofs")
+        return
 
-        h_closest = _dns_dnssec.nsec3_hash(f"{closest}.", salt_hash, iterations, alg)
+    try:
+        h_closest = _nsec3_hash_cached(f"{closest}.", salt_hash, iterations, int(alg))
         h_next = (
-            _dns_dnssec.nsec3_hash(f"{next_closer}.", salt_hash, iterations, alg)
+            _nsec3_hash_cached(f"{next_closer}.", salt_hash, iterations, int(alg))
             if next_closer
             else None
         )
         h_wc = (
-            _dns_dnssec.nsec3_hash(f"{wildcard}.", salt_hash, iterations, alg)
+            _nsec3_hash_cached(f"{wildcard}.", salt_hash, iterations, int(alg))
             if wildcard
             else None
         )
     except Exception:
+        logger.debug(
+            "ZoneRecords: failed to compute NSEC3 hashes for zone %s",
+            zone_apex,
+            exc_info=True,
+        )
         return
 
-    # Build sorted list of available hashes in this zone from the NSEC3 owner
-    # names (first label is the hash).
-    hash_to_owner: Dict[str, str] = {}
-    for owner in nsec3_by_name.keys():
-        owner_norm = dns_names.normalize_name(owner)
-        if not owner_norm.endswith("." + apex):
-            continue
-        first = owner_norm.split(".", 1)[0]
-        if first:
-            hash_to_owner[first.upper()] = owner_norm
-
-    if not hash_to_owner:
+    if h_closest is None:
         return
 
-    hashes_sorted = sorted(hash_to_owner.keys())
+    cache_entry = None
+    if isinstance(nsec3_index, dict):
+        cache_entry = nsec3_index.get(apex)
+
+    if isinstance(cache_entry, dict):
+        hash_to_owner = cache_entry.get("hash_to_owner")
+        hashes_sorted = cache_entry.get("hashes_sorted")
+    else:
+        hash_to_owner = None
+        hashes_sorted = None
+
+    if not isinstance(hash_to_owner, dict) or not isinstance(hashes_sorted, list):
+        # Build sorted list of available hashes in this zone from the NSEC3 owner
+        # names (first label is the hash).
+        hash_to_owner = {}
+        for owner in nsec3_by_name.keys():
+            owner_norm = dns_names.normalize_name(owner)
+            if not owner_norm.endswith("." + apex):
+                continue
+            first = owner_norm.split(".", 1)[0]
+            if first:
+                hash_to_owner[first.upper()] = owner_norm
+
+        if not hash_to_owner:
+            return
+
+        hashes_sorted = sorted(hash_to_owner.keys())
 
     def _covering_owner(target_hash: str) -> str:
         """Return the NSEC3 owner name whose interval covers target_hash.
@@ -354,12 +452,9 @@ def add_nsec3_denial_of_existence(
         """
 
         # Find the greatest hash <= target_hash; wrap to last on underflow.
-        idx = 0
-        for i, h in enumerate(hashes_sorted):
-            if h <= target_hash:
-                idx = i
-            else:
-                break
+        idx = bisect.bisect_right(hashes_sorted, target_hash) - 1
+        if idx < 0:
+            idx = len(hashes_sorted) - 1
         return hash_to_owner[hashes_sorted[idx]]
 
     # For NOERROR/NODATA, only the *exact* NSEC3 RRset at the hashed owner name
@@ -397,6 +492,12 @@ def add_nsec3_denial_of_existence(
     for nsec3_owner in owners_to_add:
         if nsec3_owner in seen:
             continue
+        if len(seen) >= int(NSEC3_MAX_PROOF_RRSETS):
+            logger.debug(
+                "ZoneRecords: NSEC3 proof owner cap reached for zone %s",
+                zone_apex,
+            )
+            break
         seen.add(nsec3_owner)
 
         entry = records.get((nsec3_owner, int(nsec3_code)))

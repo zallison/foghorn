@@ -235,9 +235,13 @@ def pre_resolve(
         name_index = getattr(plugin, "_name_index", {})
         zone_soa = getattr(plugin, "_zone_soa", {})
         mapping_by_qtype = getattr(plugin, "mapping", None)
+        nsec3_index = getattr(plugin, "_nsec3_index", None)
         wildcard_owners = getattr(plugin, "_wildcard_owners", None)
+        zone_suffix_index = getattr(plugin, "_zone_suffix_index", None)
 
-        zone_apex = helpers.find_zone_for_name(name, zone_soa)
+        zone_apex = helpers.find_zone_for_name(
+            name, zone_soa, zone_index=zone_suffix_index
+        )
 
         # If this name is not covered by any authoritative zone, preserve the
         # legacy exact-match override behaviour keyed by (name, qtype), *unless*
@@ -408,6 +412,7 @@ def pre_resolve(
                             records,
                             name_index,
                             mapping_by_qtype=mapping_by_qtype,
+                            nsec3_index=nsec3_index,
                         )
 
                     return PluginDecision(action="override", response=reply.pack())
@@ -622,6 +627,7 @@ def pre_resolve(
                             records,
                             name_index,
                             mapping_by_qtype=mapping_by_qtype,
+                            nsec3_index=nsec3_index,
                         )
                 else:
                     for value in list(soa_values):
@@ -669,6 +675,7 @@ def pre_resolve(
                     records,
                     name_index,
                     mapping_by_qtype=mapping_by_qtype,
+                    nsec3_index=nsec3_index,
                 )
             else:
                 for value in list(soa_values):

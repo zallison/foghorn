@@ -690,3 +690,79 @@ def build_dnssec_helper_mapping(
         mapping_by_qtype = {}
 
     return mapping_by_qtype
+
+
+def build_nsec3_owner_index(
+    mapping_by_qtype: Dict[int, Dict[str, List[RR]]],
+    zone_soa: Dict[str, Tuple[int, List[str], Set[str]]],
+    log: Optional[logging.Logger] = None,
+) -> Dict[str, Dict[str, object]]:
+    """Brief: Build a cached NSEC3 hash->owner index per authoritative zone apex.
+
+    Inputs:
+      - mapping_by_qtype: Helper mapping with pre-built RRsets by qtype/owner.
+      - zone_soa: zone apex -> (ttl, [soa_values], {sources}) mapping.
+      - log: Optional logger; defaults to this module's logger.
+
+    Outputs:
+      - Dict[str, Dict[str, object]]: Mapping of apex -> {"hash_to_owner",
+        "hashes_sorted"} used by query-time NSEC3 lookups.
+    """
+    log = log or logger
+
+    try:
+        try:
+            nsec3_code_idx = int(QTYPE.NSEC3)
+        except Exception:  # pragma: no cover - defensive
+            nsec3_code_idx = 50
+
+        nsec3_by_name = mapping_by_qtype.get(int(nsec3_code_idx), {}) or {}
+        if not nsec3_by_name:
+            return {}
+
+        apexes = [
+            dns_names.normalize_name(apex)
+            for apex in list(zone_soa.keys())
+            if dns_names.normalize_name(apex)
+        ]
+        if not apexes:
+            return {}
+
+        apexes.sort(key=len, reverse=True)
+
+        index: Dict[str, Dict[str, object]] = {}
+        for owner in nsec3_by_name.keys():
+            owner_norm = dns_names.normalize_name(owner)
+            matched_apex: Optional[str] = None
+            for apex in apexes:
+                if owner_norm.endswith("." + apex):
+                    matched_apex = apex
+                    break
+            if not matched_apex:
+                continue
+
+            first = owner_norm.split(".", 1)[0]
+            if not first:
+                continue
+
+            bucket = index.setdefault(
+                matched_apex, {"hash_to_owner": {}, "hashes_sorted": []}
+            )
+            hash_to_owner = bucket.get("hash_to_owner")
+            if isinstance(hash_to_owner, dict):
+                hash_to_owner[first.upper()] = owner_norm
+
+        for apex, bucket in list(index.items()):
+            hash_to_owner = bucket.get("hash_to_owner")
+            if not isinstance(hash_to_owner, dict) or not hash_to_owner:
+                index.pop(apex, None)
+                continue
+            bucket["hashes_sorted"] = sorted(hash_to_owner.keys())
+
+        return index
+    except Exception:  # pragma: no cover - defensive logging only
+        log.warning(
+            "ZoneRecords: failed to build NSEC3 owner index; falling back to per-query scans",
+            exc_info=True,
+        )
+        return {}
