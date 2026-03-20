@@ -47,6 +47,8 @@ class FileDownloaderConfig(BaseModel):
         include a URL hash (default: False).
       - allow_private_hosts: When True, allow loopback/link-local/RFC1918 targets.
       - allowlist_hosts: Optional list of hostnames or domain suffixes to allow.
+      - head_check: When to issue upstream HEAD requests ('always', 'half_age',
+        'stale', or 'never').
 
     Outputs:
       - FileDownloaderConfig instance with normalized field types.
@@ -61,6 +63,7 @@ class FileDownloaderConfig(BaseModel):
     hash_filenames: bool = Field(default=False)
     allow_private_hosts: bool = Field(default=False)
     allowlist_hosts: Optional[List[str]] = Field(default=None)
+    head_check: str = Field(default="stale")
 
     model_config = ConfigDict(extra="allow")
 
@@ -78,6 +81,8 @@ class FileDownloader(BasePlugin):
         alias).
       - allow_private_hosts (bool): When True, allow loopback/link-local/RFC1918 targets.
       - allowlist_hosts (List[str]|None): Optional hostnames or suffixes to allow.
+      - head_check (str): When to issue upstream HEAD requests ('always', 'half_age',
+        'stale', or 'never').
 
     Outputs:
       - Writes one file per URL under download_path, named as '{base}-{sha256(url)[:12]}{ext}'.
@@ -150,6 +155,7 @@ class FileDownloader(BasePlugin):
             for host in (raw_allowlist or [])
             if str(host).strip()
         ]
+        self._head_check: str = str(self.config.get("head_check", "stale")).lower()
 
         # Public, string-only URL list preserved for backwards compatibility and
         # tests. Per-URL options are tracked separately in _url_options.
@@ -189,6 +195,7 @@ class FileDownloader(BasePlugin):
             self.interval_seconds = None
         self._last_run: float = 0.0
         self._failure_state: dict[str, dict[str, float | int]] = {}
+        self._validated_list_meta: dict[str, dict[str, float | int]] = {}
         self._stop_event: threading.Event | None = None
         self._background_thread: threading.Thread | None = None
 
@@ -288,7 +295,10 @@ class FileDownloader(BasePlugin):
         os.makedirs(self.download_path, exist_ok=True)
         # Initial fetch at startup; failures propagate to caller so that
         # abort_on_failure semantics can be enforced by the setup runner.
-        self._maybe_run(force=True)
+        if self._should_delay_startup_check():
+            self._start_delayed_startup_check()
+        else:
+            self._maybe_run(force=True)
 
         # Optional periodic refresh while the process runs
         if self.interval_seconds is None:
@@ -341,6 +351,7 @@ class FileDownloader(BasePlugin):
             name="FileDownloader-refresh",
             daemon=True,
         )
+        logger.info("FileDownloader starting background refresh thread")
         t.start()
         self._background_thread = t
 
@@ -357,6 +368,67 @@ class FileDownloader(BasePlugin):
             Exception
         ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.warning("FileDownloader update failed: %s", e)
+
+    def _should_delay_startup_check(self) -> bool:
+        """Brief: Decide whether startup refresh should be delayed.
+
+        Inputs:
+          - None (uses current urls, download_path, and interval settings).
+
+        Outputs:
+          - True when all local files exist and are still within their fresh
+            window; False otherwise.
+        """
+        if not self.urls:
+            return False
+        min_age = ONE_DAY_SECONDS
+        if self.interval_seconds is not None:
+            try:
+                min_age = max(0, int(self.interval_seconds))
+            except (TypeError, ValueError):
+                min_age = ONE_DAY_SECONDS
+        now = time.time()
+        for url in self.urls:
+            hash_filenames, _ = self._get_effective_url_options(url)
+            if hash_filenames:
+                fname = self._make_hashed_filename(url)
+            else:
+                fname = self._make_plain_filename(url)
+            fpath = os.path.join(self.download_path, fname)
+            if not os.path.exists(fpath):
+                return False
+            try:
+                local_mtime = os.path.getmtime(fpath)
+            except OSError:
+                return False
+            if (now - local_mtime) >= min_age:
+                return False
+        return True
+
+    def _start_delayed_startup_check(self) -> None:
+        """Brief: Run startup refresh in a background thread after a short delay.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+        """
+
+        def _delayed() -> None:
+            time.sleep(10)
+            try:
+                self._maybe_run(force=False)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("FileDownloader delayed startup update failed: %s", exc)
+
+        t = threading.Thread(
+            target=_delayed,
+            name="FileDownloader-startup-check",
+            daemon=True,
+        )
+        logger.info("FileDownloader starting delayed startup check thread")
+        t.start()
 
     def _download_all(self, urls: Iterable[str]) -> None:
         """Brief: Download and validate all provided URLs using per-URL options.
@@ -394,7 +466,7 @@ class FileDownloader(BasePlugin):
             planned.append((url, fpath, fname))
 
         for url, fpath, fname in planned:
-            logger.debug("FileDownloader checking: %s", url)
+            logger.info("checking for updates: %s", url)
             # Try HEAD for last-modified; fall back to GET
             if self._needs_update(url, fpath):
                 logger.info("Downloading list %s to %s", url, fpath)
@@ -405,6 +477,7 @@ class FileDownloader(BasePlugin):
                             f"Invalid content in {fname} ({url}): expected domain-per-line list"
                         )
                     os.replace(temp_path, fpath)
+                    self._validated_list_meta[fpath] = self._file_stat_snapshot(fpath)
                     self._clear_failure_state(url)
                 finally:
                     if os.path.exists(temp_path):
@@ -414,11 +487,12 @@ class FileDownloader(BasePlugin):
                             logger.warning(
                                 "FileDownloader failed cleaning temp file %s", temp_path
                             )
-
-            if not self._validate_domain_list(fpath):
-                raise ValueError(
-                    f"Invalid content in {fname} ({url}): expected domain-per-line list"
-                )
+            if not self._is_validation_current(fpath):
+                if not self._validate_domain_list(fpath):
+                    raise ValueError(
+                        f"Invalid content in {fname} ({url}): expected domain-per-line list"
+                    )
+                self._validated_list_meta[fpath] = self._file_stat_snapshot(fpath)
 
     def _needs_update(self, url: str, filepath: str) -> bool:
         """Brief: Decide whether the local list file should be refreshed.
@@ -436,9 +510,9 @@ class FileDownloader(BasePlugin):
             converted to seconds) when set, returns False without a network call.
           - If no interval is configured, files younger than one day are treated
             as fresh and also return False.
-          - Otherwise, consults the remote Last-Modified header when available and
-            returns True only when the remote copy is newer, falling back to a
-            backoff cooldown on parsing or network errors.
+          - Otherwise, consults the remote Last-Modified header when configured
+            to do so and returns True only when the remote copy is newer, falling
+            back to a backoff cooldown on parsing or network errors.
         """
         if not os.path.exists(filepath):
             return True
@@ -460,15 +534,25 @@ class FileDownloader(BasePlugin):
                     ValueError,
                 ):  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                     min_age = ONE_DAY_SECONDS
-            if (now - local_mtime) < (
-                min_age / 2
-            ):  # If we're over halfway to needing to reload it, reload it.
+            age_seconds = now - local_mtime
+            if self._head_check == "never":
+                return age_seconds >= min_age
+            if self._head_check not in {"always", "half_age", "stale"}:
+                logger.warning(
+                    "FileDownloader head_check %r is invalid; defaulting to 'half_age'",
+                    self._head_check,
+                )
+                self._head_check = "half_age"
+            if self._head_check == "stale" and age_seconds < min_age:
+                return False
+            if self._head_check == "half_age" and age_seconds < (min_age / 2):
                 return False
         except OSError:
             # If we cannot stat the file, fall back to remote checks.
             pass
 
         try:
+            logger.info("FileDownloader checking upstream (HEAD) for %s", url)
             res = requests.head(url, timeout=10)
             lm = res.headers.get("Last-Modified")
             if lm:
@@ -485,6 +569,45 @@ class FileDownloader(BasePlugin):
             self._record_failure(url, now)
             return False
         return True
+
+    @staticmethod
+    def _file_stat_snapshot(path: str) -> dict[str, float | int]:
+        """Brief: Capture file size and timestamps for validation caching.
+
+        Inputs:
+          - path: File path to stat.
+
+        Outputs:
+          - dict with 'size', 'mtime', and 'ctime' values.
+        """
+        st = os.stat(path)
+        return {
+            "size": int(st.st_size),
+            "mtime": float(st.st_mtime),
+            "ctime": float(st.st_ctime),
+        }
+
+    def _is_validation_current(self, path: str) -> bool:
+        """Brief: Check whether a file's validation cache matches current stats.
+
+        Inputs:
+          - path: File path to check.
+
+        Outputs:
+          - True if validation is current, False otherwise.
+        """
+        cached = self._validated_list_meta.get(path)
+        if not cached:
+            return False
+        try:
+            snap = self._file_stat_snapshot(path)
+        except OSError:
+            return False
+        return (
+            int(cached.get("size", -1)) == int(snap["size"])
+            and float(cached.get("mtime", -1)) == float(snap["mtime"])
+            and float(cached.get("ctime", -1)) == float(snap["ctime"])
+        )
 
     # --- Helpers for filenames, per-URL options, and url files ---
     def _init_urls_with_options(self, raw_urls: Iterable[object]) -> None:
