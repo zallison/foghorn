@@ -58,6 +58,8 @@ def axfr_transfer(
     ca_file: Optional[str] = None,
     connect_timeout_ms: int = 2000,
     read_timeout_ms: int = 5000,
+    max_rrs: Optional[int] = None,
+    max_total_bytes: Optional[int] = None,
 ) -> List[RR]:
     """Brief: Perform a blocking AXFR for *zone* over TCP or DoT and return all RRs.
 
@@ -71,6 +73,8 @@ def axfr_transfer(
       - ca_file: Optional path to CA bundle for DoT.
       - connect_timeout_ms: TCP connect timeout in milliseconds.
       - read_timeout_ms: Per-read timeout in milliseconds.
+      - max_rrs: Optional maximum number of RRs allowed before aborting.
+      - max_total_bytes: Optional maximum total response bytes allowed.
 
     Outputs:
       - list[RR]: All RRs returned by the AXFR, including the initial and
@@ -124,6 +128,8 @@ def axfr_transfer(
         rrs: List[RR] = []
         first_soa_key: Tuple[str, str] | None = None
         seen_any_message = False
+        total_bytes = 0
+        rr_count = 0
 
         # Send initial query frame.
         io_sock.sendall(frame)
@@ -145,12 +151,26 @@ def axfr_transfer(
                 raise AXFRError("short read while receiving AXFR response frame")
 
             seen_any_message = True
+            total_bytes += ln
+            if max_total_bytes is not None and max_total_bytes > 0:
+                if total_bytes > int(max_total_bytes):
+                    raise AXFRError(
+                        "AXFR response exceeded max_total_bytes "
+                        f"({total_bytes} > {int(max_total_bytes)})"
+                    )
             try:
                 resp = DNSRecord.parse(body)
             except Exception as exc:  # pragma: no cover - defensive
                 raise AXFRError(f"failed to parse AXFR response: {exc}") from exc
 
             for rr in resp.rr:
+                rr_count += 1
+                if max_rrs is not None and max_rrs > 0:
+                    if rr_count > int(max_rrs):
+                        raise AXFRError(
+                            "AXFR response exceeded max_rrs "
+                            f"({rr_count} > {int(max_rrs)})"
+                        )
                 owner = dns_names.normalize_name(rr.rname)
                 rdata_text = str(rr.rdata)
                 if rr.rtype == QTYPE.SOA:
