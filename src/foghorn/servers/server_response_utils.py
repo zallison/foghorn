@@ -7,7 +7,7 @@ import logging
 from typing import Optional
 
 from cachetools import TTLCache
-from dnslib import EDNS0, QTYPE, RCODE, DNSRecord, EDNSOption
+from dnslib import QTYPE, RCODE, DNSRecord, EDNSOption
 
 from foghorn.utils.register_caches import registered_cached
 
@@ -236,7 +236,7 @@ _EDNS_PAYLOAD_CLAMP_WARNED: set[int] = set()
 def _ensure_edns_request(
     req: DNSRecord, *, dnssec_mode: str, edns_udp_payload: int
 ) -> None:
-    """Brief: Ensure the request carries an EDNS(0) OPT RR and DO bit as needed.
+    """Brief: Preserve client EDNS(0) OPT and DO bit; do not add EDNS.
 
     Inputs:
       - req: DNSRecord request to mutate in-place.
@@ -244,24 +244,31 @@ def _ensure_edns_request(
       - edns_udp_payload: Server-side advertised UDP payload size (bytes).
 
     Outputs:
-      - None; mutates req to include/update an OPT RR.
+      - None; mutates req to align payload size and DO bit when an OPT RR exists.
 
     Example:
       >>> req = DNSRecord.question("example.com", "A")
       >>> _ensure_edns_request(req, dnssec_mode="validate", edns_udp_payload=1232)
     """
+    _ = dnssec_mode
     # Locate an existing OPT record, if any, in the additional section.
-    opt_idx = None
     opt_rr = None
     additional = getattr(req, "ar", []) or []
-    for idx, rr in enumerate(additional):
+    for rr in additional:
         if getattr(rr, "rtype", None) == QTYPE.OPT:
-            opt_idx = idx
             opt_rr = rr
             break
 
-    # Decide DO flag based on dnssec_mode.
-    do_bit = 0x8000 if str(dnssec_mode).lower() in ("passthrough", "validate") else 0
+    # If the client did not include EDNS, do not add an OPT RR.
+    if opt_rr is None:
+        return
+
+    # Respect the client's DO bit only; do not set it unless requested.
+    try:
+        ttl_val = int(getattr(opt_rr, "ttl", 0) or 0)
+    except Exception:
+        ttl_val = 0
+    client_do = 0x8000 if (ttl_val & 0x8000) else 0
 
     try:
         server_max = int(edns_udp_payload)
@@ -279,36 +286,22 @@ def _ensure_edns_request(
             )
         server_max = 4096
 
-    if opt_rr is not None:
-        try:
-            client_payload = int(getattr(opt_rr, "rclass", 0) or 0)
-        except Exception:
-            client_payload = 0
-        if client_payload <= 0:
-            payload = server_max
-        else:
-            payload = (
-                min(client_payload, server_max) if server_max > 0 else client_payload
-            )
-
-        try:
-            ttl_val = int(getattr(opt_rr, "ttl", 0) or 0)
-        except Exception:
-            ttl_val = 0
-        ext_rcode = (ttl_val >> 24) & 0xFF
-        version = (ttl_val >> 16) & 0xFF
-        flags = ttl_val & 0xFFFF
-        flags = (flags & ~0x8000) | do_bit
-        opt_rr.rclass = payload
-        opt_rr.ttl = (ext_rcode << 24) | (version << 16) | (flags & 0xFFFF)
-        return
-
-    flags_str = "do" if do_bit else ""
-    opt_rr = EDNS0(udp_len=server_max, flags=flags_str)
-    if opt_idx is None:
-        req.add_ar(opt_rr)
+    try:
+        client_payload = int(getattr(opt_rr, "rclass", 0) or 0)
+    except Exception:
+        client_payload = 0
+    if client_payload <= 0:
+        payload = server_max
     else:
-        req.ar[opt_idx] = opt_rr
+        payload = min(client_payload, server_max) if server_max > 0 else client_payload
+
+    ext_rcode = (ttl_val >> 24) & 0xFF
+    version = (ttl_val >> 16) & 0xFF
+    flags = ttl_val & 0xFFFF
+    flags = (flags & ~0x8000) | client_do
+    opt_rr.rclass = payload
+    opt_rr.ttl = (ext_rcode << 24) | (version << 16) | (flags & 0xFFFF)
+    return
 
 
 def _echo_client_edns(req: DNSRecord, resp: DNSRecord) -> None:
