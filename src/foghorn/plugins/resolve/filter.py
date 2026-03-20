@@ -167,7 +167,10 @@ class Filter(BasePlugin):
         # avoid "InterfaceError: bad parameter or other API misuse" from
         # concurrent use of a single connection.
         self._db_lock = threading.Lock()
-        self._loaded_list_file_fingerprints: Dict[Tuple[str, str], str] = {}
+        self._loaded_list_file_fingerprints: Dict[
+            Tuple[str, str],
+            Dict[str, Union[str, int, float]],
+        ] = {}
         self._parse_warn_lock = threading.Lock()
         self._last_parse_warn_ts = 0.0
 
@@ -175,6 +178,10 @@ class Filter(BasePlugin):
         raw_db_path = self.config.get("db_path")
         # None/empty db_path => per-instance in-memory database.
         self.db_path: str = raw_db_path or ":memory:"
+        if self.db_path == ":memory:":
+            logger.warning(
+                "Filter: db_path is ':memory:'; data and list cache will reset each startup"
+            )
         self.strict_file_loading = bool(self.config.get("strict_file_loading", False))
         self.max_domain_labels = max(1, int(self.config.get("max_domain_labels", 32)))
         self.max_pattern_match_domain_length = max(
@@ -186,7 +193,7 @@ class Filter(BasePlugin):
         self.default = str(raw_default).lower()
         if self.default not in {"allow", "deny"}:
             logger.warning(
-                "Filter: unknown default policy %r; defaulting to 'deny'",
+                "unknown default policy %r; defaulting to 'deny'",
                 raw_default,
             )
             self.default = "deny"
@@ -269,19 +276,19 @@ class Filter(BasePlugin):
         }
         if self.deny_response not in valid_deny_responses:
             logger.warning(
-                "Filter: unknown deny_response %r; defaulting to 'nxdomain'",
+                "unknown deny_response %r; defaulting to 'nxdomain'",
                 self.deny_response,
             )
             self.deny_response = "nxdomain"
         if self.deny_response_ip_fallback not in valid_deny_responses:
             logger.warning(
-                "Filter: unknown deny_response_ip_fallback %r; defaulting to 'nxdomain'",
+                "unknown deny_response_ip_fallback %r; defaulting to 'nxdomain'",
                 self.deny_response_ip_fallback,
             )
             self.deny_response_ip_fallback = "nxdomain"
         elif self.deny_response_ip_fallback == "ip":
             logger.warning(
-                "Filter: deny_response_ip_fallback cannot be 'ip'; defaulting to 'nxdomain'"
+                "deny_response_ip_fallback cannot be 'ip'; defaulting to 'nxdomain'"
             )
             self.deny_response_ip_fallback = "nxdomain"
 
@@ -405,10 +412,14 @@ class Filter(BasePlugin):
 
         # Load domains from files and inline with defined precedence (last write wins):
         # 1) allowlist files, 2) blocklist files, 3) inline allowed_domains, 4) inline blocked_domains
-        for file in self.allowlist_files:
-            self.load_list_from_file(file, "allow")
-        for file in self.blocklist_files:
-            self.load_list_from_file(file, "deny")
+        allow_changed = self._any_list_file_changed(self.allowlist_files, "allow")
+        if allow_changed:
+            for file in self.allowlist_files:
+                self.load_list_from_file(file, "allow")
+        block_changed = self._any_list_file_changed(self.blocklist_files, "deny")
+        if block_changed:
+            for file in self.blocklist_files:
+                self.load_list_from_file(file, "deny")
 
         # Inline allow/deny domains from config: batch into a single transaction
         if self.allowlist or self.blocklist:
@@ -584,7 +595,7 @@ class Filter(BasePlugin):
         except (
             Exception
         ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
-            logger.warning(f"exception adding to cache {e}")
+            logger.warning("exception adding to cache for key %r: %s", key, e)
 
     def pre_resolve(
         self, qname: str, qtype: int, req: bytes, ctx: PluginContext
@@ -709,14 +720,14 @@ class Filter(BasePlugin):
         except Exception as e:
             if self._should_log_parse_warning():
                 logger.warning(
-                    "Filter: failed to parse DNS response for qname=%s client=%s: %s",
+                    "failed to parse DNS response for qname=%s client=%s: %s",
                     qname,
                     getattr(ctx, "client_ip", "unknown"),
                     e,
                 )
             else:
                 logger.debug(
-                    "Filter: failed to parse DNS response for qname=%s",
+                    "failed to parse DNS response for qname=%s",
                     qname,
                     exc_info=True,
                 )
@@ -868,7 +879,7 @@ class Filter(BasePlugin):
                 Exception
             ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
                 logger.warning(
-                    "Filter: failed to parse request while building deny response: %s",
+                    "failed to parse request while building deny response: %s",
                     e,
                 )
                 return PluginDecision(action="deny")
@@ -890,7 +901,7 @@ class Filter(BasePlugin):
                     getattr(self, "deny_response_ip_fallback", "nxdomain") or "nxdomain"
                 ).lower()
                 logger.debug(
-                    "Filter: deny_response='ip' unsupported qtype=%s; fallback=%s",
+                    "deny_response='ip' unsupported qtype=%s; fallback=%s",
                     qtype,
                     fallback_mode,
                 )
@@ -924,7 +935,7 @@ class Filter(BasePlugin):
             if ipaddr:
                 if ip_networks.parse_ip(ipaddr) is None:  # pragma: no cover - defensive
                     logger.error(
-                        "Filter: invalid deny_response IP %r for %s",
+                        "invalid deny_response IP %r for %s",
                         ipaddr,
                         qname,
                     )
@@ -947,12 +958,10 @@ class Filter(BasePlugin):
             "nodata",
             "ip",
         }:
-            logger.warning(
-                "Filter: unknown deny_response %r; defaulting to NXDOMAIN", mode
-            )
+            logger.warning("unknown deny_response %r; defaulting to NXDOMAIN", mode)
         else:
             logger.debug(
-                "Filter: falling back to NXDOMAIN deny for %s (mode=%s)",
+                "falling back to NXDOMAIN deny for %s (mode=%s)",
                 qname,
                 mode,
             )
@@ -997,7 +1006,7 @@ class Filter(BasePlugin):
                 response.rr = []
             else:
                 logger.warning(
-                    "Filter: unknown deny_response %r in post path; defaulting to NXDOMAIN",
+                    "unknown deny_response %r in post path; defaulting to NXDOMAIN",
                     mode,
                 )
                 return PluginDecision(action="deny")
@@ -1007,7 +1016,7 @@ class Filter(BasePlugin):
             Exception
         ) as e:  # pragma: no cover - defensive: low-value edge case or environment-specific behaviour that is hard to test reliably
             logger.warning(
-                "Filter: failed to pack deny response for %s (%s): %s",
+                "failed to pack deny response for %s (%s): %s",
                 qname,
                 mode,
                 e,
@@ -1045,9 +1054,7 @@ class Filter(BasePlugin):
         try:
             request = DNSRecord.parse(raw_req)
         except Exception as e:
-            logger.warning(
-                "Filter: parse failure while building A/AAAA response: %s", e
-            )
+            logger.warning("parse failure while building A/AAAA response: %s", e)
             return None
 
         reply = DNSRecord(
@@ -1150,7 +1157,7 @@ class Filter(BasePlugin):
                             f"No file(s) match pattern or path: {p}"
                         )
                     logger.warning(
-                        "Filter: skipping missing list/pattern path %s (strict_file_loading=false)",
+                        "skipping missing list/pattern path %s (strict_file_loading=false)",
                         p,
                     )
         return resolved
@@ -1202,7 +1209,7 @@ class Filter(BasePlugin):
             >>> self._load_patterns_from_file('patterns.txt')
             [re.compile('^ads\\.', re.IGNORECASE)]
         """
-        logger.info(f"Filter: adding {path} to the database")
+        logger.info("adding %s to the database", path)
         patterns: List[re.Pattern] = []
         for ln, text in self._iter_noncomment_lines(path):
             if text.lstrip().startswith("{"):
@@ -1401,7 +1408,7 @@ class Filter(BasePlugin):
         clear_db = bool(self.config.get("clear", 0))
         if clear_db and self.db_path != ":memory:":
             logger.warning(
-                "Filter: clear=1 with persistent db_path=%s will drop blocked_domains on startup",
+                "clear=1 with persistent db_path=%s will drop blocked_domains on startup",
                 self.db_path,
             )
         if clear_db:
@@ -1416,8 +1423,98 @@ class Filter(BasePlugin):
             "added_at INTEGER NOT NULL"
             ")"
         )
+        self._ensure_list_file_cache_schema()
 
         self.conn.commit()
+
+    def _any_list_file_changed(self, files: List[str], mode: str) -> bool:
+        """
+        Brief: Determine whether any list file has changed vs cached metadata.
+
+        Inputs:
+            files: List of file paths to check.
+            mode: Either "allow" or "deny".
+        Outputs:
+            True when any file is missing from cache or has changed stats.
+        """
+        if not files:
+            return False
+        for path in files:
+            source_filename = os.path.abspath(path)
+            if not os.path.isfile(source_filename):
+                return True
+            stat_snapshot = self._file_stat_snapshot(source_filename)
+            cached_meta = self._get_list_file_cache(source_filename, mode)
+            if not cached_meta:
+                return True
+            cached_size = int(cached_meta.get("size", -1))
+            cached_mtime = int(cached_meta.get("mtime", -1))
+            cached_ctime = int(cached_meta.get("ctime", -1))
+            if (
+                int(stat_snapshot["size"]) != cached_size
+                or int(stat_snapshot["mtime"]) != cached_mtime
+                or int(stat_snapshot["ctime"]) != cached_ctime
+            ):
+                return True
+        return False
+
+    def _ensure_list_file_cache_schema(self) -> None:
+        """
+        Brief: Ensure list_file_cache schema uses INTEGER timestamps.
+
+        Inputs:
+            None.
+        Outputs:
+            None.
+        """
+        row = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='list_file_cache'"
+        ).fetchone()
+        if not row:
+            self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS list_file_cache ("
+                "filename TEXT NOT NULL, "
+                "mode TEXT CHECK (mode IN ('allow','deny')) NOT NULL, "
+                "size INTEGER NOT NULL, "
+                "mtime INTEGER NOT NULL, "
+                "ctime INTEGER NOT NULL, "
+                "fingerprint TEXT NOT NULL, "
+                "updated_at INTEGER NOT NULL, "
+                "PRIMARY KEY (filename, mode)"
+                ")"
+            )
+            return
+
+        cols = self.conn.execute("PRAGMA table_info(list_file_cache)").fetchall()
+        col_types = {str(c[1]).lower(): str(c[2]).lower() for c in cols}
+        if col_types.get("mtime") == "integer" and col_types.get("ctime") == "integer":
+            return
+
+        with self.conn:
+            self.conn.execute(
+                "CREATE TABLE IF NOT EXISTS list_file_cache_v2 ("
+                "filename TEXT NOT NULL, "
+                "mode TEXT CHECK (mode IN ('allow','deny')) NOT NULL, "
+                "size INTEGER NOT NULL, "
+                "mtime INTEGER NOT NULL, "
+                "ctime INTEGER NOT NULL, "
+                "fingerprint TEXT NOT NULL, "
+                "updated_at INTEGER NOT NULL, "
+                "PRIMARY KEY (filename, mode)"
+                ")"
+            )
+            self.conn.execute(
+                "INSERT OR REPLACE INTO list_file_cache_v2 "
+                "(filename, mode, size, mtime, ctime, fingerprint, updated_at) "
+                "SELECT filename, mode, size, "
+                "CAST(mtime AS INTEGER), CAST(ctime AS INTEGER), "
+                "fingerprint, updated_at "
+                "FROM list_file_cache"
+            )
+            self.conn.execute("DROP TABLE list_file_cache")
+            self.conn.execute(
+                "ALTER TABLE list_file_cache_v2 RENAME TO list_file_cache"
+            )
 
     def _db_insert_domain(self, domain: str, filename: str, mode: str) -> None:
         """
@@ -1453,6 +1550,118 @@ class Filter(BasePlugin):
             for chunk in iter(lambda: fh.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
+
+    @staticmethod
+    def _file_stat_snapshot(path: str) -> Dict[str, Union[int, float]]:
+        """
+        Brief: Capture file size and timestamps for change detection.
+
+        Inputs:
+            path: Absolute or relative path to a list file.
+        Outputs:
+            Dict with 'size', 'mtime', and 'ctime' values (seconds).
+        """
+        st = os.stat(path)
+        return {
+            "size": int(st.st_size),
+            "mtime": int(round(st.st_mtime)),
+            "ctime": int(round(st.st_ctime)),
+        }
+
+    @staticmethod
+    def _normalize_time_ns(value: object) -> int:
+        """
+        Brief: Normalize a cached time value to seconds.
+
+        Inputs:
+            value: Cached time value (seconds or nanoseconds).
+        Outputs:
+            Integer seconds since epoch.
+        """
+        try:
+            raw = float(value)
+        except (TypeError, ValueError):
+            return 0
+        # Heuristic: values >=1e12 are ns; convert to seconds.
+        if raw >= 1_000_000_000_000:
+            return int(round(raw / 1_000_000_000))
+        return int(round(raw))
+
+    def _get_list_file_cache(
+        self,
+        filename: str,
+        mode: str,
+    ) -> Optional[Dict[str, Union[str, int, float]]]:
+        """
+        Brief: Retrieve cached list file metadata from memory or SQLite.
+
+        Inputs:
+            filename: Absolute path to the list file.
+            mode: Either "allow" or "deny".
+        Outputs:
+            Cached metadata dict or None when no cache exists.
+        """
+        cache_key = (filename, mode)
+        cached = self._loaded_list_file_fingerprints.get(cache_key)
+        if cached is not None:
+            return cached
+        with self._db_lock:
+            row = self.conn.execute(
+                "SELECT size, mtime, ctime, fingerprint FROM list_file_cache "
+                "WHERE filename = ? AND mode = ?",
+                (filename, mode),
+            ).fetchone()
+        if row:
+            normalized_mtime = self._normalize_time_ns(row[1])
+            normalized_ctime = self._normalize_time_ns(row[2])
+            cached = {
+                "size": int(row[0]),
+                "mtime": normalized_mtime,
+                "ctime": normalized_ctime,
+                "fingerprint": str(row[3]),
+            }
+            self._loaded_list_file_fingerprints[cache_key] = cached
+            if normalized_mtime != int(round(float(row[1]))) or normalized_ctime != int(
+                round(float(row[2]))
+            ):
+                self._set_list_file_cache(filename, mode, cached)
+            return cached
+        return None
+
+    def _set_list_file_cache(
+        self,
+        filename: str,
+        mode: str,
+        meta: Dict[str, Union[str, int, float]],
+    ) -> None:
+        """
+        Brief: Persist list file metadata to memory and SQLite.
+
+        Inputs:
+            filename: Absolute path to the list file.
+            mode: Either "allow" or "deny".
+            meta: Metadata dict with size, mtime, ctime, and fingerprint.
+        Outputs:
+            None.
+        """
+        cache_key = (filename, mode)
+        self._loaded_list_file_fingerprints[cache_key] = meta
+        with self._db_lock:
+            with self.conn:
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO list_file_cache "
+                    "(filename, mode, size, mtime, ctime, fingerprint, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        filename,
+                        mode,
+                        int(meta.get("size", 0)),
+                        int(meta.get("mtime", 0)),
+                        int(meta.get("ctime", 0)),
+                        str(meta.get("fingerprint", "")),
+                        int(time.time()),
+                    ),
+                )
 
     @staticmethod
     def _extract_adguard_domain(
@@ -1552,16 +1761,59 @@ class Filter(BasePlugin):
             raise FileNotFoundError(f"No file {filename}")
 
         source_filename = os.path.abspath(filename)
-        fingerprint_key = (source_filename, mode)
-        content_fingerprint = self._file_content_fingerprint(source_filename)
-        cached_fingerprint = self._loaded_list_file_fingerprints.get(fingerprint_key)
-        if cached_fingerprint == content_fingerprint:
+        stat_snapshot = self._file_stat_snapshot(source_filename)
+        logger.debug(
+            "Filter: list file stats %s size=%d mtime_ns=%d ctime_ns=%d",
+            source_filename,
+            int(stat_snapshot["size"]),
+            int(stat_snapshot["mtime"]),
+            int(stat_snapshot["ctime"]),
+        )
+        cached_meta = self._get_list_file_cache(source_filename, mode)
+        if cached_meta:
+            cached_size = int(cached_meta.get("size", -1))
+            cached_mtime = int(cached_meta.get("mtime", -1))
+            cached_ctime = int(cached_meta.get("ctime", -1))
             logger.debug(
-                "Filter: skipping unchanged %s list file %s",
-                mode,
+                "Filter: cached list stats %s size=%d mtime_ns=%d ctime_ns=%d",
                 source_filename,
+                cached_size,
+                cached_mtime,
+                cached_ctime,
             )
-            return
+            if (
+                int(stat_snapshot["size"]) == cached_size
+                and int(stat_snapshot["mtime"]) == cached_mtime
+                and int(stat_snapshot["ctime"]) == cached_ctime
+            ):
+                logger.debug(
+                    "skipping unchanged %s list file %s",
+                    mode,
+                    source_filename,
+                )
+                return
+            logger.debug(
+                "Filter: list file changed %s size_match=%s mtime_match=%s ctime_match=%s",
+                source_filename,
+                int(stat_snapshot["size"]) == cached_size,
+                int(stat_snapshot["mtime"]) == cached_mtime,
+                int(stat_snapshot["ctime"]) == cached_ctime,
+            )
+            if int(stat_snapshot["size"]) == cached_size:
+                logger.info("hashing list file %s", source_filename)
+                content_fingerprint = self._file_content_fingerprint(source_filename)
+                cached_fingerprint = cached_meta.get("fingerprint")
+                if cached_fingerprint == content_fingerprint:
+                    cached_meta.update(stat_snapshot)
+                    self._set_list_file_cache(source_filename, mode, cached_meta)
+                    logger.debug(
+                        "skipping unchanged %s list file %s",
+                        mode,
+                        source_filename,
+                    )
+                    return
+        logger.info("hashing list file %s", source_filename)
+        content_fingerprint = self._file_content_fingerprint(source_filename)
 
         def _normalize_token(token: str) -> str:
             """
@@ -1671,14 +1923,28 @@ class Filter(BasePlugin):
                             self._normalize_domain(token), source_filename, eff_mode
                         )
                         inserted_domains += 1
-        self._loaded_list_file_fingerprints[fingerprint_key] = content_fingerprint
+        self._set_list_file_cache(
+            source_filename,
+            mode,
+            {
+                "fingerprint": content_fingerprint,
+                **stat_snapshot,
+            },
+        )
+        if inserted_domains > 0:
+            logger.info(
+                "added %d %s domains from %s",
+                inserted_domains,
+                mode,
+                source_filename,
+            )
         if (
             not matched_supported_format
             and unsupported_lines > 0
             and inserted_domains == 0
         ):
             logger.warning(
-                "Filter: unsupported list format in %s (no entries loaded)",
+                "unsupported list format in %s (no entries loaded)",
                 filename,
             )
 
