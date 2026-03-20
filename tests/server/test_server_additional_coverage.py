@@ -143,19 +143,14 @@ def test_stats_hooks_are_called(monkeypatch, path, set_runtime_snapshot):
 
 
 # ---- EDNS normalization helper coverage ----
-@pytest.mark.parametrize(
-    "mode, expect_do",
-    [("ignore", False), ("passthrough", True), ("validate", True)],
-)
-def test_ensure_edns_request_sets_do_bit(mode: str, expect_do: bool) -> None:
-    """Brief: _ensure_edns_request injects an OPT RR and sets DO bit as needed.
+def test_ensure_edns_request_does_not_add_opt_when_missing() -> None:
+    """Brief: _ensure_edns_request does not add EDNS(0) when the client omitted it.
 
     Inputs:
-      - mode: dnssec_mode string.
-      - expect_do: expected DO bit state.
+      - None.
 
     Outputs:
-      - None; asserts OPT RR is present and DO bit matches expectation.
+      - None; asserts no OPT RR is injected.
     """
 
     from foghorn.servers.server import _ensure_edns_request
@@ -163,13 +158,34 @@ def test_ensure_edns_request_sets_do_bit(mode: str, expect_do: bool) -> None:
     req = DNSRecord.question("edns.example", "A")
     assert not any(rr.rtype == QTYPE.OPT for rr in (req.ar or []))
 
-    _ensure_edns_request(req, dnssec_mode=mode, edns_udp_payload=1232)
+    _ensure_edns_request(req, dnssec_mode="validate", edns_udp_payload=1232)
+
+    opts = [rr for rr in (req.ar or []) if rr.rtype == QTYPE.OPT]
+    assert len(opts) == 0
+
+
+def test_ensure_edns_request_preserves_client_do_bit() -> None:
+    """Brief: _ensure_edns_request preserves the client's DO bit when OPT exists.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts DO bit remains set when client requested it.
+    """
+
+    from dnslib import EDNS0
+    from foghorn.servers.server import _ensure_edns_request
+
+    req = DNSRecord.question("edns-do.example", "A")
+    req.add_ar(EDNS0(udp_len=1232, flags="do"))
+
+    _ensure_edns_request(req, dnssec_mode="ignore", edns_udp_payload=1232)
 
     opts = [rr for rr in (req.ar or []) if rr.rtype == QTYPE.OPT]
     assert len(opts) == 1
-
     flags = int(getattr(opts[0], "ttl", 0) or 0) & 0xFFFF
-    assert bool(flags & 0x8000) is bool(expect_do)
+    assert bool(flags & 0x8000) is True
 
 
 def test_handle_pre_deny_records_stats_and_query_result(

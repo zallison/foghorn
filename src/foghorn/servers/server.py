@@ -1230,6 +1230,39 @@ def _resolve_core(
                     healthy_count += 1
                 return selected, healthy_count
 
+            def _all_primaries_degraded(candidates: List[Dict]) -> bool:
+                """Brief: True when all primary upstreams are degraded/down.
+
+                Inputs:
+                  - candidates: List of primary upstream mappings.
+
+                Outputs:
+                  - bool: True when no primary is fully healthy.
+                """
+                now = _time.time()
+                saw_primary = False
+                for upstream in candidates or []:
+                    if not isinstance(upstream, dict):
+                        continue
+                    saw_primary = True
+                    up_id = DNSRuntimeState._upstream_id(upstream)
+                    if not up_id:
+                        return False
+                    entry = DNSRuntimeState.upstream_health.get(up_id)
+                    if not isinstance(entry, dict):
+                        return False
+                    try:
+                        fail_count = float(entry.get("fail_count", 0.0) or 0.0)
+                    except Exception:
+                        fail_count = 0.0
+                    try:
+                        down_until = float(entry.get("down_until", 0.0) or 0.0)
+                    except Exception:
+                        down_until = 0.0
+                    if fail_count <= 0.0 and down_until <= now:
+                        return False
+                return True if saw_primary else True
+
             primary_selected, primary_healthy_count = _select_upstreams_with_probe(
                 primary_upstreams
             )
@@ -1237,8 +1270,14 @@ def _resolve_core(
                 backup_upstreams
             )
             # Backup upstreams are only considered when all primaries are
-            # unhealthy. Otherwise failover stays within the primary list order.
-            if primary_healthy_count > 0 and primary_selected:
+            # degraded (or none configured). Otherwise failover stays within
+            # the primary list order.
+            primaries_degraded = _all_primaries_degraded(primary_upstreams)
+            if (
+                primary_selected
+                and primary_healthy_count > 0
+                and not primaries_degraded
+            ):
                 upstreams = primary_selected
             elif backup_selected:
                 upstreams = backup_selected

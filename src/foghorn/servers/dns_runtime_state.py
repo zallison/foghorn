@@ -188,7 +188,7 @@ class DNSRuntimeState:
             cls.upstream_health.pop(up_id, None)
 
     def _ensure_edns(self, req: DNSRecord) -> None:
-        """Ensure request has EDNS(0) with payload/DO bit aligned to runtime state.
+        """Ensure request preserves client EDNS(0) and DO bit only.
 
         Inputs:
           - req: DNSRecord to mutate in-place.
@@ -196,21 +196,16 @@ class DNSRuntimeState:
         Outputs:
           - None.
         """
-        opt_idx = None
         opt_rr = None
         additional = getattr(req, "ar", []) or []
-        for idx, rr in enumerate(additional):
+        for rr in additional:
             if rr.rtype == QTYPE.OPT:
-                opt_idx = idx
                 opt_rr = rr
                 break
 
-        do_bit = (
-            0x8000
-            if str(getattr(self, "dnssec_mode", "ignore")).lower()
-            in ("passthrough", "validate")
-            else 0
-        )
+        # If the client did not include EDNS, do not add an OPT RR.
+        if opt_rr is None:
+            return
 
         try:
             server_max = int(getattr(self, "edns_udp_payload", 1232) or 1232)
@@ -219,35 +214,26 @@ class DNSRuntimeState:
         if server_max < 512:
             server_max = 512
 
-        if opt_rr is not None:
-            try:
-                client_payload = int(getattr(opt_rr, "rclass", 0) or 0)
-            except Exception:
-                client_payload = 0
-            if client_payload <= 0:
-                payload = server_max
-            elif server_max > 0:
-                payload = min(client_payload, server_max)
-            else:
-                payload = client_payload
-
-            try:
-                ttl_val = int(getattr(opt_rr, "ttl", 0) or 0)
-            except Exception:
-                ttl_val = 0
-            ext_rcode = (ttl_val >> 24) & 0xFF
-            version = (ttl_val >> 16) & 0xFF
-            flags = ttl_val & 0xFFFF
-            flags = (flags & ~0x8000) | do_bit
-            opt_rr.rclass = payload
-            opt_rr.ttl = (ext_rcode << 24) | (version << 16) | (flags & 0xFFFF)
-            return
-
-        from . import server as _server_mod
-
-        flags_str = "do" if do_bit else ""
-        opt_rr = _server_mod.EDNS0(udp_len=server_max, flags=flags_str)
-        if opt_idx is None:
-            req.add_ar(opt_rr)
+        try:
+            client_payload = int(getattr(opt_rr, "rclass", 0) or 0)
+        except Exception:
+            client_payload = 0
+        if client_payload <= 0:
+            payload = server_max
+        elif server_max > 0:
+            payload = min(client_payload, server_max)
         else:
-            req.ar[opt_idx] = opt_rr
+            payload = client_payload
+
+        try:
+            ttl_val = int(getattr(opt_rr, "ttl", 0) or 0)
+        except Exception:
+            ttl_val = 0
+        client_do = 0x8000 if (ttl_val & 0x8000) else 0
+        ext_rcode = (ttl_val >> 24) & 0xFF
+        version = (ttl_val >> 16) & 0xFF
+        flags = ttl_val & 0xFFFF
+        flags = (flags & ~0x8000) | client_do
+        opt_rr.rclass = payload
+        opt_rr.ttl = (ext_rcode << 24) | (version << 16) | (flags & 0xFFFF)
+        return
