@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress  # reused by DNSSEC auto-sign helper when building PTRs, kept for future use
 import logging
 import pathlib
+import socket
 import time
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
@@ -51,11 +52,110 @@ def should_reload_axfr_zone(
     return time_elapsed >= minimum_reload_time
 
 
+def _compute_axfr_failure_backoff_seconds(
+    failure_count: int,
+    initial_seconds: float,
+    max_seconds: float,
+) -> float:
+    """Brief: Compute exponential backoff window for AXFR failures.
+
+    Inputs:
+      - failure_count: Consecutive failure count for the zone.
+      - initial_seconds: Base backoff delay in seconds.
+      - max_seconds: Maximum backoff delay in seconds.
+
+    Outputs:
+      - float: Backoff duration in seconds (0 when disabled).
+    """
+    if failure_count <= 0:
+        return 0.0
+    if initial_seconds <= 0:
+        return 0.0
+    try:
+        backoff = float(initial_seconds) * (2.0 ** float(failure_count - 1))
+    except Exception:  # pragma: no cover - defensive
+        backoff = float(initial_seconds)
+    if max_seconds > 0:
+        backoff = min(backoff, float(max_seconds))
+    return max(0.0, backoff)
+
+
+def should_attempt_axfr_zone(
+    zone_name: str,
+    zone_cfg: Dict[str, object],
+    zone_metadata: Dict[str, Dict[str, object]],
+    force_reload: bool = False,
+) -> bool:
+    """Brief: Decide whether AXFR should be attempted for a zone.
+
+    Inputs:
+      - zone_name: Normalized zone apex name.
+      - zone_cfg: Zone configuration dict from axfr_zones.
+      - zone_metadata: Plugin's AXFR zone metadata tracking dict.
+      - force_reload: If True, ignore timing/backoff checks and force attempt.
+
+    Outputs:
+      - True if AXFR should be attempted, False otherwise.
+    """
+    if force_reload:
+        return True
+
+    if not should_reload_axfr_zone(zone_name, zone_cfg, zone_metadata):
+        return False
+
+    metadata = zone_metadata.get(zone_name, {})
+    failure_count = int(metadata.get("failure_count", 0) or 0)
+    last_failure = float(metadata.get("last_failure", 0) or 0.0)
+
+    max_retries = zone_cfg.get("max_retries_per_zone")
+    try:
+        max_retries_i = int(max_retries) if max_retries is not None else 0
+    except (TypeError, ValueError):
+        max_retries_i = 0
+    if max_retries_i > 0 and failure_count >= max_retries_i:
+        logger.warning(
+            "ZoneRecords AXFR: skipping %s (max_retries_per_zone=%d reached)",
+            zone_name,
+            max_retries_i,
+        )
+        return False
+
+    try:
+        backoff_initial = float(zone_cfg.get("failure_backoff_initial_seconds", 0))
+    except (TypeError, ValueError):
+        backoff_initial = 0.0
+    try:
+        backoff_max = float(zone_cfg.get("failure_backoff_max_seconds", 0))
+    except (TypeError, ValueError):
+        backoff_max = 0.0
+
+    backoff = _compute_axfr_failure_backoff_seconds(
+        failure_count, backoff_initial, backoff_max
+    )
+    if backoff <= 0:
+        return True
+
+    if last_failure <= 0:
+        return True
+
+    remaining = (last_failure + backoff) - time.time()
+    if remaining > 0:
+        logger.debug(
+            "ZoneRecords AXFR: skipping %s (backoff %.1fs remaining)",
+            zone_name,
+            remaining,
+        )
+        return False
+
+    return True
+
+
 def update_axfr_metadata(
     zone_name: str,
     zone_metadata: Dict[str, Dict[str, object]],
     loaded: bool = False,
     notified: bool = False,
+    failed: bool = False,
 ) -> None:
     """Brief: Update AXFR zone metadata with load/notify timestamps.
 
@@ -64,6 +164,7 @@ def update_axfr_metadata(
       - zone_metadata: Plugin's AXFR zone metadata tracking dict.
       - loaded: If True, update last_loaded timestamp.
       - notified: If True, update last_notify timestamp.
+      - failed: If True, update last_failure timestamp and failure_count.
 
     Outputs:
       - None; updates zone_metadata in-place.
@@ -73,8 +174,19 @@ def update_axfr_metadata(
 
     if loaded:
         zone_metadata[zone_name]["last_loaded"] = time.time()
+        zone_metadata[zone_name]["failure_count"] = 0
+        zone_metadata[zone_name]["last_failure"] = 0.0
     if notified:
         zone_metadata[zone_name]["last_notify"] = time.time()
+    if failed:
+        now = time.time()
+        current = zone_metadata[zone_name].get("failure_count", 0)
+        try:
+            failure_count = int(current) + 1
+        except (TypeError, ValueError):
+            failure_count = 1
+        zone_metadata[zone_name]["failure_count"] = failure_count
+        zone_metadata[zone_name]["last_failure"] = now
 
 
 def overlay_axfr_zones(
@@ -124,17 +236,25 @@ def overlay_axfr_zones(
         if not zone_text:
             continue
 
-        # Check if this zone should be reloaded based on minimum_reload_time
-        if not should_reload_axfr_zone(
+        # Check if this zone should be reloaded based on timing/backoff rules
+        if not should_attempt_axfr_zone(
             zone_text, zone_cfg, zone_metadata, force_reload
         ):
-            logger.debug(
-                "ZoneRecords AXFR: skipping %s (minimum_reload_time not met)",
-                zone_text,
-            )
             continue
 
-        transferred, last_error = _axfr_transfer_for_zone(zone_text, upstreams, axfr_fn)
+        max_rrs = zone_cfg.get("max_rrs_per_zone")
+        max_bytes = zone_cfg.get("max_bytes_per_zone")
+        allow_private = bool(zone_cfg.get("allow_private_upstreams", True))
+        allow_public = bool(zone_cfg.get("allow_public_upstreams", True))
+        transferred, last_error = _axfr_transfer_for_zone(
+            zone_text,
+            upstreams,
+            axfr_fn=axfr_fn,
+            max_rrs_per_zone=max_rrs,
+            max_bytes_per_zone=max_bytes,
+            allow_private_upstreams=allow_private,
+            allow_public_upstreams=allow_public,
+        )
         if not transferred:
             if last_error is not None:
                 logger.warning(
@@ -142,6 +262,7 @@ def overlay_axfr_zones(
                     zone_text,
                     last_error,
                 )
+                update_axfr_metadata(zone_text, zone_metadata, failed=True)
             continue
 
         _classify_axfr_zone_dnssec(
@@ -160,16 +281,72 @@ def overlay_axfr_zones(
         update_axfr_metadata(zone_text, zone_metadata, loaded=True)
 
 
+def _classify_upstream_host(host: str) -> Tuple[bool, bool, List[str]]:
+    """Brief: Classify upstream host IPs as public or non-public.
+
+    Inputs:
+      - host: Hostname or IP address string.
+
+    Outputs:
+      - (has_public, has_non_public, addrs): Booleans indicating public/non-public
+        presence, plus a list of resolved IP address strings.
+    """
+    addrs: List[str] = []
+    has_public = False
+    has_non_public = False
+
+    try:
+        ip = ipaddress.ip_address(host)
+        addrs = [str(ip)]
+        if ip.is_global:
+            has_public = True
+        else:
+            has_non_public = True
+        return has_public, has_non_public, addrs
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        return False, False, []
+
+    for _fam, _socktype, _proto, _canon, sockaddr in infos:
+        if not sockaddr:
+            continue
+        addr = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        addrs.append(str(ip))
+        if ip.is_global:
+            has_public = True
+        else:
+            has_non_public = True
+
+    return has_public, has_non_public, addrs
+
+
 def _axfr_transfer_for_zone(
     zone_text: str,
     upstreams: List[Dict[str, object]],
     axfr_fn: Optional[Callable[..., List[RR]]] = None,
+    max_rrs_per_zone: Optional[object] = None,
+    max_bytes_per_zone: Optional[object] = None,
+    allow_private_upstreams: bool = True,
+    allow_public_upstreams: bool = True,
 ) -> Tuple[Optional[List[RR]], Optional[Exception]]:
     """Brief: Attempt AXFR transfer for a single zone from configured upstreams.
 
     Inputs:
       - zone_text: Normalized zone name (no trailing dot, lowercased).
       - upstreams: List of upstream configuration mappings.
+      - axfr_fn: Optional callable used to perform the AXFR transfer.
+      - max_rrs_per_zone: Optional maximum number of RRs allowed per transfer.
+      - max_bytes_per_zone: Optional maximum total response bytes allowed.
+      - allow_private_upstreams: If False, reject non-public upstream hosts.
+      - allow_public_upstreams: If False, reject public upstream hosts.
 
     Outputs:
       - (transferred_rrs, last_error): the first successful RR list or None
@@ -183,6 +360,19 @@ def _axfr_transfer_for_zone(
     # tests can monkeypatch); fall back to the module-level axfr_transfer
     # import when no callable is provided.
     fn: Callable[..., List[RR]] = axfr_fn or axfr_transfer
+    try:
+        max_rrs_i = int(max_rrs_per_zone) if max_rrs_per_zone is not None else 0
+    except (TypeError, ValueError):
+        max_rrs_i = 0
+    if max_rrs_i <= 0:
+        max_rrs_i = 0
+
+    try:
+        max_bytes_i = int(max_bytes_per_zone) if max_bytes_per_zone is not None else 0
+    except (TypeError, ValueError):
+        max_bytes_i = 0
+    if max_bytes_i <= 0:
+        max_bytes_i = 0
 
     for m in upstreams:
         if not isinstance(m, dict):
@@ -196,6 +386,37 @@ def _axfr_transfer_for_zone(
         ca_file = m.get("ca_file")
         if not host:
             continue
+        host_text = str(host)
+        has_public, has_non_public, addrs = _classify_upstream_host(host_text)
+        if has_non_public and not allow_private_upstreams:
+            addr_text = ", ".join(addrs) if addrs else host_text
+            logger.warning(
+                "ZoneRecords AXFR: skipping %s upstream %s (non-public address disallowed)",
+                zone_text,
+                addr_text,
+            )
+            continue
+        if has_public and not allow_public_upstreams:
+            addr_text = ", ".join(addrs) if addrs else host_text
+            logger.warning(
+                "ZoneRecords AXFR: skipping %s upstream %s (public address disallowed)",
+                zone_text,
+                addr_text,
+            )
+            continue
+        if has_non_public:
+            addr_text = ", ".join(addrs) if addrs else host_text
+            logger.warning(
+                "ZoneRecords AXFR: upstream %s for %s resolves to non-public address",
+                addr_text,
+                zone_text,
+            )
+        elif not addrs:
+            logger.warning(
+                "ZoneRecords AXFR: could not resolve upstream %s for %s",
+                host_text,
+                zone_text,
+            )
         try:
             port_i = int(port)
             timeout_i = int(timeout_ms)
@@ -206,12 +427,12 @@ def _axfr_transfer_for_zone(
             logger.info(
                 "ZoneRecords AXFR: transferring %s from %s:%d via %s",
                 zone_text,
-                host,
+                host_text,
                 port_i,
                 transport,
             )
             transferred = fn(
-                str(host),
+                host_text,
                 port_i,
                 zone_text,
                 transport=transport,
@@ -220,14 +441,25 @@ def _axfr_transfer_for_zone(
                 ca_file=str(ca_file) if ca_file is not None else None,
                 connect_timeout_ms=timeout_i,
                 read_timeout_ms=timeout_i,
+                max_rrs=max_rrs_i if max_rrs_i > 0 else None,
+                max_total_bytes=max_bytes_i if max_bytes_i > 0 else None,
             )
+            if (
+                max_rrs_i > 0
+                and transferred is not None
+                and len(transferred) > max_rrs_i
+            ):
+                raise AXFRError(
+                    f"AXFR for {zone_text} exceeded max_rrs_per_zone "
+                    f"({len(transferred)} > {max_rrs_i})"
+                )
             break
         except AXFRError as exc:
             last_error = exc
             logger.warning(
                 "ZoneRecords AXFR: failed transfer for %s from %s:%d via %s: %s",
                 zone_text,
-                host,
+                host_text,
                 port_i,
                 transport,
                 exc,
@@ -369,6 +601,9 @@ def _merge_transferred_rrs_into_mappings(
 
         if value not in values_ax:
             values_ax.append(value)
+        for label in list(sources_ax):
+            if label.startswith("axfr-") and label != source_label:
+                sources_ax.discard(label)
         sources_ax.add(source_label)
 
         mapping[key] = (stored_ttl, values_ax, sources_ax)
