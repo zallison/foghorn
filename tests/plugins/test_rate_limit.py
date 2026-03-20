@@ -287,6 +287,7 @@ def test_rate_limit_config_applies_defaults_for_new_fields():
     assert cfg.bucket_network_prefix_v6 == 56
     assert cfg.warmup_max_rps == 0.0
     assert cfg.bootstrap_rps == 0.0
+    assert cfg.stats_window_seconds == 0
     assert cfg.psl_strict is False
 
 
@@ -307,7 +308,7 @@ def test_rate_limit_config_validates_max_profiles_ge_1():
 
 
 def test_rate_limit_config_validates_ttls_and_prune_interval_ge_0():
-    """Brief: profile_ttl_seconds and prune_interval_seconds must be >= 0.
+    """Brief: ttl/prune/window knobs must be >= 0.
 
     Inputs:
       - None
@@ -316,13 +317,20 @@ def test_rate_limit_config_validates_ttls_and_prune_interval_ge_0():
       - None: asserts ValidationError for invalid values.
     """
 
-    rate_limit_module.RateLimitConfig(profile_ttl_seconds=0, prune_interval_seconds=0)
+    rate_limit_module.RateLimitConfig(
+        profile_ttl_seconds=0,
+        prune_interval_seconds=0,
+        stats_window_seconds=0,
+    )
 
     with pytest.raises(ValidationError):
         rate_limit_module.RateLimitConfig(profile_ttl_seconds=-1)
 
     with pytest.raises(ValidationError):
         rate_limit_module.RateLimitConfig(prune_interval_seconds=-1)
+
+    with pytest.raises(ValidationError):
+        rate_limit_module.RateLimitConfig(stats_window_seconds=-1)
 
 
 def test_rate_limit_config_validates_bucket_network_prefix_ranges():
@@ -785,6 +793,98 @@ def test_db_get_profile_is_thread_safe_with_lock(tmp_path):
     assert avg_rps >= 0.0
     assert max_rps >= avg_rps
     assert samples >= 1
+
+
+def test_stats_logging_uses_configured_window(tmp_path):
+    """Brief: _maybe_log_stats applies a true sample-based lookback window.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite db.
+
+    Outputs:
+      - None: asserts old spikes outside the window are excluded from max stats.
+    """
+
+    db = tmp_path / "rl-stats-window.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        stats_log_interval_seconds=1,
+        stats_window_seconds=300,
+    )
+    plugin.setup()
+
+    # Same key had a large historical burst, then a recent low window.
+    # Windowed stats should only reflect the recent sample.
+    plugin._db_update_profile("same-key", 100.0, now_ts=1000)
+    plugin._db_update_profile("same-key", 5.0, now_ts=1990)
+
+    records: list[tuple[object, ...]] = []
+    original_logger_info = rate_limit_module.logger.info
+
+    def _capture_info(message: object, *args: object, **kwargs: object) -> None:
+        records.append((message, *args))
+
+    rate_limit_module.logger.info = _capture_info  # type: ignore[assignment]
+    try:
+        plugin._last_stats_log_ts = 0.0
+        plugin._maybe_log_stats(now=2000.0)
+    finally:
+        rate_limit_module.logger.info = original_logger_info  # type: ignore[assignment]
+
+    assert len(records) == 1
+    message, *args = records[0]
+    assert "stats_window_seconds=%d" in str(message)
+
+    # Only the recent sample for the same key should be included (cutoff=1700).
+    assert args[0] == "rate_limit"
+    assert args[1] == 5.0
+    assert args[2] == 5.0
+    assert args[3] == 1
+    assert args[4] == 5.0
+    assert args[5] == 300
+
+
+def test_stats_logging_cadence_follows_stats_window_seconds(tmp_path):
+    """Brief: stats_window_seconds overrides stats log cadence when configured.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite db.
+
+    Outputs:
+      - None: asserts logs emit at stats_window_seconds intervals.
+    """
+
+    db = tmp_path / "rl-stats-cadence.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        stats_log_interval_seconds=900,
+        stats_window_seconds=300,
+    )
+    plugin.setup()
+
+    plugin._db_update_profile("recent", 5.0, now_ts=2005)
+
+    records: list[tuple[object, ...]] = []
+    original_logger_info = rate_limit_module.logger.info
+
+    def _capture_info(message: object, *args: object, **kwargs: object) -> None:
+        records.append((message, *args))
+
+    rate_limit_module.logger.info = _capture_info  # type: ignore[assignment]
+    try:
+        plugin._last_stats_log_ts = 0.0
+        plugin._maybe_log_stats(now=2000.0)
+        # Too soon for a second log when cadence is 300 seconds.
+        plugin._maybe_log_stats(now=2200.0)
+        # Exactly at cadence threshold -> should log again.
+        plugin._maybe_log_stats(now=2300.0)
+    finally:
+        rate_limit_module.logger.info = original_logger_info  # type: ignore[assignment]
+
+    assert len(records) == 2
+    for message, *args in records:
+        assert "stats_window_seconds=%d" in str(message)
+        assert args[5] == 300
 
 
 def test_db_prunes_by_max_profiles(tmp_path):

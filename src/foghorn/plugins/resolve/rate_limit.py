@@ -122,6 +122,8 @@ class RateLimitConfig(BaseModel):
       - ttl: Optional TTL used when synthesizing IP responses.
       - stats_log_interval_seconds: Interval for periodic rate-limit summary logs
         (0 disables).
+      - stats_window_seconds: Optional lookback window in seconds applied when
+        computing periodic summary avg/max values (0 uses all profiles).
       - psl_strict: When True, fail startup if PSL extraction is unavailable
         in domain-based modes.
 
@@ -156,6 +158,7 @@ class RateLimitConfig(BaseModel):
     deny_response_ip6: Optional[str] = None
     ttl: int = Field(default=60, ge=0)
     stats_log_interval_seconds: int = Field(default=3600, ge=0)
+    stats_window_seconds: int = Field(default=0, ge=0)
     psl_strict: bool = Field(default=False)
 
     model_config = ConfigDict(extra="allow")
@@ -320,6 +323,11 @@ class RateLimit(BasePlugin):
             3600,
             minimum=0,
         )
+        self.stats_window_seconds = self._parse_int_config(
+            "stats_window_seconds",
+            0,
+            minimum=0,
+        )
         self._last_stats_log_ts: float = 0.0
 
         # Deny policy configuration
@@ -471,6 +479,8 @@ class RateLimit(BasePlugin):
           - None (creates self._conn and the rate_profiles table).
 
         Notes:
+          - Creates a secondary window-sample table used for true
+            stats_window_seconds summary aggregation.
           - The database is bounded via best-effort pruning in _maybe_prune_db().
         """
 
@@ -497,10 +507,25 @@ class RateLimit(BasePlugin):
                 "last_update INTEGER NOT NULL"
                 ")"
             )
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS rate_profile_windows ("
+                "key TEXT NOT NULL, "
+                "rps REAL NOT NULL, "
+                "last_update INTEGER NOT NULL"
+                ")"
+            )
             # Index to support efficient pruning and stats inspection.
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_rate_profiles_last_update "
                 "ON rate_profiles(last_update)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rate_profile_windows_last_update "
+                "ON rate_profile_windows(last_update)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rate_profile_windows_key "
+                "ON rate_profile_windows(key)"
             )
             self._conn.commit()
 
@@ -577,6 +602,22 @@ class RateLimit(BasePlugin):
                     )
                 except Exception:
                     pass
+            try:
+                history_ttl = max(
+                    int(getattr(self, "profile_ttl_seconds", 0) or 0),
+                    int(getattr(self, "stats_window_seconds", 0) or 0),
+                )
+            except Exception:
+                history_ttl = 0
+            if history_ttl > 0:
+                try:
+                    history_cutoff = int(now_ts) - int(history_ttl)
+                    cur.execute(
+                        "DELETE FROM rate_profile_windows WHERE last_update < ?",
+                        (int(history_cutoff),),
+                    )
+                except Exception:
+                    pass
 
             # Row-count bound.
             try:
@@ -625,7 +666,8 @@ class RateLimit(BasePlugin):
           - now_ts: Epoch seconds of the update time.
 
         Outputs:
-          - None (persists updated avg_rps, max_rps, and samples).
+          - None (persists updated avg_rps, max_rps, samples, and optional
+            per-window sample rows used by stats_window_seconds summaries).
         """
 
         with self._db_lock:
@@ -671,6 +713,12 @@ class RateLimit(BasePlugin):
                         "WHERE key=?",
                         (new_avg, new_max, new_samples, int(now_ts), key),
                     )
+            if int(getattr(self, "stats_window_seconds", 0) or 0) > 0:
+                cur.execute(
+                    "INSERT INTO rate_profile_windows (key, rps, last_update) "
+                    "VALUES (?, ?, ?)",
+                    (key, float(rps), int(now_ts)),
+                )
             self._conn.commit()
 
         # Best-effort pruning outside of the DB lock critical path.
@@ -979,9 +1027,18 @@ class RateLimit(BasePlugin):
 
         Outputs:
           - None (logs info when activity is present and interval has elapsed).
-        """
 
-        interval = int(getattr(self, "stats_log_interval_seconds", 0) or 0)
+        Notes:
+          - When stats_window_seconds > 0, stats are logged every
+            stats_window_seconds.
+          - When stats_window_seconds > 0, summary aggregates include only
+            per-window samples with last_update within that lookback window.
+        """
+        stats_window_seconds = int(getattr(self, "stats_window_seconds", 0) or 0)
+        if stats_window_seconds > 0:
+            interval = int(stats_window_seconds)
+        else:
+            interval = int(getattr(self, "stats_log_interval_seconds", 0) or 0)
         if interval <= 0:
             return
         last_ts = float(getattr(self, "_last_stats_log_ts", 0.0) or 0.0)
@@ -995,9 +1052,29 @@ class RateLimit(BasePlugin):
         try:
             with self._db_lock:
                 cur = self._conn.cursor()
-                cur.execute(
-                    "SELECT COUNT(*), AVG(avg_rps), MAX(max_rps), MAX(avg_rps) FROM rate_profiles"
-                )
+                if stats_window_seconds > 0:
+                    cutoff = int(now) - int(stats_window_seconds)
+                    cur.execute(
+                        "DELETE FROM rate_profile_windows WHERE last_update < ?",
+                        (int(cutoff),),
+                    )
+                    cur.execute(
+                        "SELECT COUNT(*), AVG(avg_rps), MAX(max_rps), MAX(avg_rps) "
+                        + "FROM ("
+                        + "SELECT key, AVG(rps) AS avg_rps, MAX(rps) AS max_rps "
+                        + "FROM rate_profile_windows WHERE last_update >= ? "
+                        + "GROUP BY key"
+                        + ")",
+                        (int(cutoff),),
+                    )
+                    try:
+                        self._conn.commit()
+                    except Exception:
+                        pass
+                else:
+                    cur.execute(
+                        "SELECT COUNT(*), AVG(avg_rps), MAX(max_rps), MAX(avg_rps) FROM rate_profiles"
+                    )
                 row = cur.fetchone()
             if row:
                 buckets = int(row[0] or 0)
@@ -1018,12 +1095,13 @@ class RateLimit(BasePlugin):
         plugin_name = str(getattr(self, "name", "rate_limit") or "rate_limit")
         logger.info(
             "RateLimit stats name=%s avg_rps=%.2f max_rps=%.2f buckets=%d "
-            + "max_bucket_avg_rps=%.2f",
+            + "max_bucket_avg_rps=%.2f stats_window_seconds=%d",
             plugin_name,
             avg_rps,
             max_rps,
             buckets,
             max_bucket_avg_rps,
+            stats_window_seconds,
         )
 
     def _build_deny_decision(
@@ -1289,6 +1367,10 @@ class RateLimit(BasePlugin):
                             "key": "stats_log_interval_seconds",
                             "label": "Stats log interval (s)",
                         },
+                        {
+                            "key": "stats_window_seconds",
+                            "label": "Stats window (s)",
+                        },
                         {"key": "udp_keying", "label": "UDP keying"},
                         {
                             "key": "assume_udp_when_listener_missing",
@@ -1391,6 +1473,14 @@ class RateLimit(BasePlugin):
                     self,
                     "stats_log_interval_seconds",
                     self.config.get("stats_log_interval_seconds", 900),
+                )
+                or 0
+            ),
+            "stats_window_seconds": int(
+                getattr(
+                    self,
+                    "stats_window_seconds",
+                    self.config.get("stats_window_seconds", 0),
                 )
                 or 0
             ),
