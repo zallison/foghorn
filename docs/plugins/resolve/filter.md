@@ -11,7 +11,9 @@ both:
   specific IPs or subnets.
 
 It supports large list files (often fed by `file_downloader`) using an internal
-SQLite database and an in-memory TTL cache for decisions.
+SQLite database and an in-memory TTL cache for decisions. List file fingerprints
+are cached in SQLite when `db_path` is persistent to avoid rehashing unchanged
+files across restarts.
 
 Typical use cases:
 
@@ -125,7 +127,7 @@ plugins:
   - TTL (seconds) for entries in the in-memory domain decision cache.
 - `db_path: str | null`
   - SQLite database path for storing allow/deny lists. When omitted or empty,
-    an in-memory DB is used per Filter instance.
+    an in-memory DB is used per Filter instance (cache resets on every startup).
 - `default: str`
   - Default policy when no list/pattern/keyword match exists: `"allow"` or
     `"deny"` (default: `"deny"`).
@@ -141,7 +143,7 @@ plugins:
 - `deny_response_ip4: str | null`, `deny_response_ip6: str | null`
   - Replacement IPs used when `deny_response == 'ip'`.
 - `clear: int`
-  - When non-zero (default `1`), drop and recreate the internal `blocked_domains` table on startup so it reflects current files and inline config.
+  - When non-zero (default `0`), drop and recreate the internal `blocked_domains` table on startup so it reflects current files and inline config.
   - Set to `0` to preserve existing rows across restarts (for example when pre-populating the database).
 
 - `allowed_domains_files`, `blocked_domains_files: list[str]`
@@ -188,6 +190,9 @@ plugins:
     - `deny` → entire response denied according to `deny_response`.
     - `remove` → record removed; if all are removed, response is denied.
     - `replace` → rdata changed to `replace_with` (same IP family required).
+- List file ordering:
+  - When any allowlist or blocklist file changes, the plugin reloads all files
+    in that group to preserve ordering semantics.
 
 ### Common BasePlugin options
 

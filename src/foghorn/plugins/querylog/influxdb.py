@@ -24,6 +24,7 @@ Notes:
 
 import json
 import logging
+import math
 import time
 from typing import Any, Dict, Optional
 
@@ -118,10 +119,7 @@ def _format_line_protocol(
 class InfluxLogging(BaseStatsStore):
     """InfluxDB-backed logging-only backend for DNS query logs.
 
-    # Aliases used by the stats backend registry.
-    aliases = ("influx", "influxdb")
-
-    Inputs (constructor):
+      Inputs (constructor):
         write_url: HTTP endpoint for InfluxDB line-protocol writes
             (for example, "http://127.0.0.1:8086/api/v2/write").
         org: Optional organization identifier (v2); appended as a query
@@ -138,6 +136,9 @@ class InfluxLogging(BaseStatsStore):
     Outputs:
         Initialized InfluxLogging instance ready to accept query-log entries.
     """
+
+    # Aliases used by the stats backend registry.
+    aliases = ("influx", "influxdb")
 
     def __init__(
         self,
@@ -156,7 +157,17 @@ class InfluxLogging(BaseStatsStore):
         self._org = str(org) if org is not None else None
         self._bucket = str(bucket) if bucket is not None else None
         self._precision = str(precision or "ns")
-        self._timeout = float(timeout)
+        try:
+            timeout_value = float(timeout)
+            if timeout_value <= 0:
+                raise ValueError("timeout must be > 0")
+            self._timeout = timeout_value
+        except Exception:
+            logger.warning(
+                "Invalid InfluxLogging timeout %r; falling back to 2.0 seconds",
+                timeout,
+            )
+            self._timeout = 2.0
 
         # Logging behaviour: default to async for remote HTTP logging, but
         # allow callers to disable it via config.
@@ -167,7 +178,6 @@ class InfluxLogging(BaseStatsStore):
         except Exception:
             self._max_logging_queue = 4096
 
-        self._session = requests.Session(**(session_kwargs or {}))
         self._params: Dict[str, str] = {"precision": self._precision}
         if self._org is not None:
             self._params["org"] = self._org
@@ -178,6 +188,14 @@ class InfluxLogging(BaseStatsStore):
         if token is not None:
             headers["Authorization"] = f"Token {token}"
         self._headers = headers
+
+        try:
+            self._session = requests.Session(**(session_kwargs or {}))
+        except Exception:
+            logger.exception("Failed to initialize InfluxLogging HTTP session")
+            self._session = None
+            self._healthy = False
+            return
 
         # Mark backend as healthy; health_check can be refined after writes.
         self._healthy = True
@@ -195,13 +213,19 @@ class InfluxLogging(BaseStatsStore):
                 },
                 ts=time.time(),
             )
-            self._session.post(
+            resp = self._session.post(
                 self._write_url,
                 params=self._params,
                 data=line.encode("utf-8"),
                 headers=self._headers,
                 timeout=self._timeout,
             )
+            if resp.status_code >= 400:
+                logger.warning(
+                    "InfluxLogging start marker write failed with status %s: %s",
+                    resp.status_code,
+                    resp.text,
+                )
         except Exception:  # pragma: no cover - environment specific
             logger.exception("Failed to publish InfluxDB query_log start marker")
 
@@ -324,6 +348,21 @@ class InfluxLogging(BaseStatsStore):
 
         if not self._healthy:
             return
+        session = getattr(self, "_session", None)
+        if session is None:
+            logger.warning(
+                "InfluxLogging session unavailable; dropping query_log entry"
+            )
+            self._healthy = False
+            return
+
+        try:
+            ts_value = float(ts)
+            if not math.isfinite(ts_value):
+                raise ValueError("timestamp must be finite")
+        except Exception:
+            logger.warning("Invalid query_log timestamp for InfluxLogging: %r", ts)
+            return
 
         # Parse result_json to derive lightweight fields when possible.
         result_obj: Optional[Dict[str, Any]]
@@ -335,7 +374,7 @@ class InfluxLogging(BaseStatsStore):
 
         fields: Dict[str, Any] = {
             "count": 1,
-            "ts": float(ts),
+            "ts": ts_value,
             "name": name,
             "error": error,
             "first": first,
@@ -354,15 +393,19 @@ class InfluxLogging(BaseStatsStore):
             "status": status,
         }
 
-        line = _format_line_protocol(
-            measurement="foghorn_query_log",
-            tags=tags,
-            fields=fields,
-            ts=float(ts),
-        )
+        try:
+            line = _format_line_protocol(
+                measurement="foghorn_query_log",
+                tags=tags,
+                fields=fields,
+                ts=ts_value,
+            )
+        except Exception:
+            logger.exception("Failed to encode InfluxLogging query_log line protocol")
+            return
 
         try:
-            resp = self._session.post(
+            resp = session.post(
                 self._write_url,
                 params=self._params,
                 data=line.encode("utf-8"),

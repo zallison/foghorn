@@ -12,6 +12,8 @@ Key features:
 - Optional per-URL options (`hash_filenames`, `add_comment`).
 - Avoids unnecessary downloads via Last-Modified and minimum-age checks.
 - Optional periodic refresh via `interval_days` / `interval_seconds`.
+- Configurable `HEAD` check policy (`head_check`) and delayed startup refresh
+  when local files are still fresh.
 
 Typical use cases:
 
@@ -78,6 +80,7 @@ plugins:
       # Plugin-level defaults for per-URL options
       add_comment: false               # default: no header line
       hash_filenames: true             # store as base-hash.ext instead of base.ext
+      head_check: stale             # always|half_age|stale|never
 ```
 
 ## Options
@@ -114,6 +117,13 @@ plugins:
     - `false` (default): derive filenames directly from the URL path/netloc
       (`AdguardDNS.txt`, `list1.txt`, `example.com`, ...).
     - `true`: include a short SHA-1 hash suffix: `<base>-<hash12><ext>`.
+- `head_check: str`
+  - When to issue upstream `HEAD` requests:
+    - `always`: always `HEAD` when files are not considered fresh.
+    - `half_age`: start `HEAD` checks when files are older than half
+      the refresh interval (or half a day when no interval is configured).
+    - `stale` (default): only `HEAD` once files are at or beyond the refresh interval.
+    - `never`: skip `HEAD` entirely; only refresh on expiry.
 
 ### Behaviour
 
@@ -122,6 +132,9 @@ plugins:
   treated as fresh and reused without a network call.
 - Otherwise, the plugin uses HTTP `HEAD` and `Last-Modified` (when available)
   to decide whether a remote copy is newer than the local one.
+- On startup, when all local files are still within their fresh window, the
+  plugin delays the first refresh check by 10 seconds in a background thread to
+  allow the rest of setup to finish.
 - Each downloaded file is validated as a "domain-per-line" list; obviously
   malformed content causes setup to fail.
 

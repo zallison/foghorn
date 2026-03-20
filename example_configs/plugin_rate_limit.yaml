@@ -65,7 +65,8 @@ plugins:
       deny_response_ip4: 0.0.0.0
       deny_response_ip6: '::'
       ttl: 60
-      stats_log_interval_seconds: 900
+      stats_log_interval_seconds: 900  # fallback cadence when stats_window_seconds is 0
+      stats_window_seconds: 3600       # with this set, logs run every 3600s
 
 server:
   listen:

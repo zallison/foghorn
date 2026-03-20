@@ -567,7 +567,8 @@ class BasePlugin:
             plugin_logger.removeHandler(handler)
 
         fmt = "%(asctime)s %(level_tag)s %(name)s: %(message)s"
-        formatter = BracketLevelFormatter(fmt=fmt)
+        color_enabled = bool(cfg.get("color", True))
+        formatter = BracketLevelFormatter(fmt=fmt, color=color_enabled)
 
         if bool(cfg.get("stderr", True)):
             stderr_handler = logging.StreamHandler(sys.stderr)
