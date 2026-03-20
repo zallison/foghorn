@@ -1484,9 +1484,22 @@ def apply_update_operations(
         persistence_cfg = getattr(plugin, "_dns_update_persistence_config", None)
         fsync_mode = "interval"
         fsync_interval = 5000
+        max_journal_bytes = 0
         if isinstance(persistence_cfg, dict):
             fsync_mode = persistence_cfg.get("fsync_mode", "interval")
             fsync_interval = persistence_cfg.get("fsync_interval_ms", 5000)
+            max_journal_bytes = int(persistence_cfg.get("max_journal_bytes", 0) or 0)
+
+        security_cfg = {}
+        dns_update_cfg = getattr(plugin, "_dns_update_config", None)
+        if isinstance(dns_update_cfg, dict):
+            scfg = dns_update_cfg.get("security")
+            if isinstance(scfg, dict):
+                security_cfg = scfg
+        max_owner_length = int(security_cfg.get("max_owner_length", 0) or 0)
+        max_rdata_length = int(security_cfg.get("max_rdata_length", 0) or 0)
+        max_transaction_bytes = int(security_cfg.get("max_transaction_bytes", 0) or 0)
+        max_actions = int(security_cfg.get("max_updates_per_message", 0) or 0)
 
         journal_entry = journal_writer.append_entry(
             actions=actions,
@@ -1494,6 +1507,11 @@ def apply_update_operations(
             origin_node_id=str(getattr(plugin, "_dns_update_node_id", "unknown")),
             fsync_mode=fsync_mode,
             fsync_interval_ms=fsync_interval,
+            max_actions=max_actions,
+            max_owner_length=max_owner_length,
+            max_rdata_length=max_rdata_length,
+            max_transaction_bytes=max_transaction_bytes,
+            max_journal_bytes=max_journal_bytes,
         )
         if journal_entry is None:
             return 2, "Journal write failed"
