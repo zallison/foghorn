@@ -482,6 +482,14 @@ class AxfrZoneConfig(BaseModel):
       - minimum_reload_time: Minimum seconds between AXFR reloads. Reloads will
         only occur after this time has elapsed since the original load or since
         the last NOTIFY was received for the zone.
+      - poll_interval_seconds: Optional polling interval for periodic AXFR refreshes.
+      - allow_private_upstreams: Allow non-public upstream addresses (default True).
+      - allow_public_upstreams: Allow public upstream addresses (default True).
+      - max_rrs_per_zone: Optional maximum RR count for a single AXFR transfer.
+      - max_bytes_per_zone: Optional maximum total bytes for a single AXFR transfer.
+      - max_retries_per_zone: Optional maximum consecutive transfer failures.
+      - failure_backoff_initial_seconds: Initial backoff delay after failure.
+      - failure_backoff_max_seconds: Maximum backoff delay after failures.
 
     Outputs:
       - AxfrZoneConfig instance.
@@ -510,6 +518,47 @@ class AxfrZoneConfig(BaseModel):
             "this time has elapsed since the original load or since the last "
             "NOTIFY was received for the zone. A value of 0 reloads on every load."
         ),
+    )
+    poll_interval_seconds: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Optional polling interval in seconds for periodic AXFR refreshes.",
+    )
+    allow_private_upstreams: bool = Field(
+        default=True,
+        description=(
+            "Allow non-public upstream addresses (private/loopback/link-local). "
+            "Defaults to true; set false to block private upstreams."
+        ),
+    )
+    allow_public_upstreams: bool = Field(
+        default=True,
+        description="Allow public upstream addresses (defaults to true).",
+    )
+    max_rrs_per_zone: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Optional maximum number of RRs allowed in a single AXFR transfer.",
+    )
+    max_bytes_per_zone: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Optional maximum total response bytes allowed per AXFR transfer.",
+    )
+    max_retries_per_zone: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Optional maximum consecutive AXFR failures before giving up.",
+    )
+    failure_backoff_initial_seconds: float = Field(
+        default=0,
+        ge=0,
+        description="Initial backoff delay in seconds after an AXFR failure.",
+    )
+    failure_backoff_max_seconds: float = Field(
+        default=0,
+        ge=0,
+        description="Maximum backoff delay in seconds after repeated failures.",
     )
 
     model_config = ConfigDict(extra="forbid")
@@ -676,6 +725,8 @@ class ZoneRecordsConfig(BaseModel):
 
     Inputs:
       - file_paths: Preferred list of records file paths.
+      - path_allowlist: Optional list of allowed directory prefixes for file_paths
+        and bind_paths; paths outside these prefixes are ignored with a warning.
       - bind_paths: Optional list of RFC-1035 style BIND zone files. Entries may
         be plain strings (paths) or objects with per-file origin/ttl overrides.
       - records: Optional list of inline records using
@@ -698,12 +749,20 @@ class ZoneRecordsConfig(BaseModel):
       - any_answer_rrset_limit: Max RRsets returned for QTYPE=ANY responses.
       - any_answer_record_limit: Max total records returned for QTYPE=ANY responses.
       - axfr_zones: Optional list of AXFR-backed zones.
+    - axfr_poll_min_interval_seconds: Minimum poll interval enforced for AXFR polling.
 
     Outputs:
       - ZoneRecordsConfig instance with normalized field types.
     """
 
     file_paths: Optional[List[str]] = None
+    path_allowlist: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional list of allowed directory prefixes for file_paths and "
+            "bind_paths. Paths outside these prefixes are ignored with a warning."
+        ),
+    )
     bind_paths: Optional[List[str | BindZoneFileConfig]] = None
     records: Optional[List[str]] = None
     load_mode: str = Field(
@@ -749,6 +808,14 @@ class ZoneRecordsConfig(BaseModel):
         description="Maximum total records returned for QTYPE=ANY responses.",
     )
     axfr_zones: Optional[List[AxfrZoneConfig]] = None
+    axfr_poll_min_interval_seconds: float = Field(
+        default=60.0,
+        ge=0,
+        description=(
+            "Minimum poll interval in seconds for AXFR polling. "
+            "Values below the hard floor are clamped."
+        ),
+    )
     axfr_notify: Optional[List[AxfrUpstreamConfig]] = Field(
         default=None,
         description=(
@@ -1534,24 +1601,37 @@ class ZoneRecords(BasePlugin):
         provided_paths = self.config.get("file_paths")
         legacy_path = self.config.get("file_path")
         bind_paths_cfg = self.config.get("bind_paths")
+        path_allowlist_cfg = self.config.get("path_allowlist")
         inline_records_cfg = self.config.get("records")
         axfr_cfg = self.config.get("axfr_zones")
 
         self.file_paths = []
         self.bind_paths: List[object] = []
+        self._path_allowlist = helpers.normalize_path_allowlist(path_allowlist_cfg)
 
         if provided_paths is not None or legacy_path is not None:
-            self.file_paths = helpers.normalize_paths(provided_paths, legacy_path)
+            self.file_paths = helpers.normalize_paths(
+                provided_paths,
+                legacy_path,
+                path_allowlist=self._path_allowlist,
+            )
 
         if bind_paths_cfg is not None:
-            self.bind_paths = helpers.normalize_bind_paths(bind_paths_cfg)
+            self.bind_paths = helpers.normalize_bind_paths(
+                bind_paths_cfg,
+                path_allowlist=self._path_allowlist,
+            )
 
         if not self.file_paths and not self.bind_paths:
             if inline_records_cfg or axfr_cfg:
                 self.file_paths = []
                 self.bind_paths = []
             else:
-                self.file_paths = helpers.normalize_paths(None, None)
+                self.file_paths = helpers.normalize_paths(
+                    None,
+                    None,
+                    path_allowlist=self._path_allowlist,
+                )
 
         # Cache inline records
         try:
@@ -1640,11 +1720,15 @@ class ZoneRecords(BasePlugin):
 
         # Initialize state and locks
         self._records_lock = threading.RLock()
+        self._reload_records_lock = threading.RLock()
         self.records: Dict[Tuple[str, int], Tuple[int, List[str], List[str]]] = {}
         self._observer = None
         self._axfr_poll_stop = None
         self._axfr_poll_thread = None
         self._axfr_poll_interval = 0.0
+        self._axfr_poll_min_interval = float(
+            self.config.get("axfr_poll_min_interval_seconds", 60.0)
+        )
 
         # Watchdog configuration
         self._watchdog_min_interval = float(
@@ -1802,11 +1886,13 @@ class ZoneRecords(BasePlugin):
             records_map = dict(getattr(self, "records", {}) or {})
             name_index = dict(getattr(self, "_name_index", {}) or {})
             zone_soa = dict(getattr(self, "_zone_soa", {}) or {})
+            zone_suffix_index = getattr(self, "_zone_suffix_index", None)
         else:
             with lock:
                 records_map = dict(getattr(self, "records", {}) or {})
                 name_index = dict(getattr(self, "_name_index", {}) or {})
                 zone_soa = dict(getattr(self, "_zone_soa", {}) or {})
+                zone_suffix_index = getattr(self, "_zone_suffix_index", None)
 
         zones: List[Dict[str, object]] = []
         for apex, entry in sorted(zone_soa.items(), key=lambda kv: str(kv[0])):
@@ -1829,7 +1915,9 @@ class ZoneRecords(BasePlugin):
 
             owner_norm = dns_names.normalize_name(owner)
 
-            zone = helpers.find_zone_for_name(owner_norm, zone_soa)
+            zone = helpers.find_zone_for_name(
+                owner_norm, zone_soa, zone_index=zone_suffix_index
+            )
             try:
                 qtype_name = QTYPE.get(int(qcode), str(qcode))
             except Exception:
@@ -1951,8 +2039,14 @@ class ZoneRecords(BasePlugin):
         Outputs:
           - None
         """
-        loader.load_records(self)
-        self._apply_dns_update_journal_replay()
+        lock = getattr(self, "_reload_records_lock", None)
+        if lock is None:
+            loader.load_records(self)
+            self._apply_dns_update_journal_replay()
+            return
+        with lock:
+            loader.load_records(self)
+            self._apply_dns_update_journal_replay()
 
     def _rebuild_indexes_from_records(self) -> None:
         """Brief: Rebuild internal name and wildcard indexes from records.
@@ -2170,6 +2264,14 @@ class ZoneRecords(BasePlugin):
                 axfr_stop.set()
             except Exception:  # pragma: no cover - defensive
                 pass
+        reload_lock = getattr(self, "_reload_records_lock", None)
+        if reload_lock is not None:
+            try:
+                acquired = reload_lock.acquire(timeout=2.0)
+            except TypeError:  # pragma: no cover - defensive for older signatures
+                acquired = reload_lock.acquire()
+            if acquired:
+                reload_lock.release()
 
         axfr_thread = getattr(self, "_axfr_poll_thread", None)
         if axfr_thread is not None:

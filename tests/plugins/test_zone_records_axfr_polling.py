@@ -9,7 +9,10 @@ Outputs:
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Optional
+
+import pytest
 
 from foghorn.plugins.resolve.zone_records import axfr_polling
 
@@ -77,10 +80,18 @@ class _Plugin:
       - Object exposing _axfr_zones, _load_records, and poll state attributes.
     """
 
-    def __init__(self, zones: Optional[list[dict[str, object]]] = None) -> None:
+    def __init__(
+        self,
+        zones: Optional[list[dict[str, object]]] = None,
+        *,
+        min_interval_seconds: Optional[float] = None,
+    ) -> None:
         self._axfr_zones = list(zones or [])
         self._axfr_loaded_once = True
         self.load_calls = 0
+        self._reload_records_lock = threading.RLock()
+        if min_interval_seconds is not None:
+            self._axfr_poll_min_interval = float(min_interval_seconds)
 
     def _load_records(self) -> None:
         self.load_calls += 1
@@ -147,14 +158,15 @@ def test_start_axfr_polling_uses_min_interval_and_starts_thread(monkeypatch) -> 
 
     plugin = _Plugin(
         [
-            {"zone": "example.com", "poll_interval_seconds": 10},
-            {"zone": "example.net", "poll_interval_seconds": 5},
-        ]
+            {"zone": "example.com", "poll_interval_seconds": 15},
+            {"zone": "example.net", "poll_interval_seconds": 20},
+        ],
+        min_interval_seconds=10,
     )
 
     axfr_polling.start_axfr_polling(plugin)
 
-    assert plugin._axfr_poll_interval == 5.0
+    assert plugin._axfr_poll_interval == 15.0
     assert plugin._axfr_poll_stop is ev
 
     thread = plugin._axfr_poll_thread
@@ -162,6 +174,32 @@ def test_start_axfr_polling_uses_min_interval_and_starts_thread(monkeypatch) -> 
     assert thread.name == "ZoneRecordsAxfrPoller"
     assert thread.daemon is True
     assert thread.started is True
+
+
+def test_start_axfr_polling_clamps_interval_below_minimum(monkeypatch) -> None:
+    """Brief: poll_interval_seconds below minimum is clamped.
+
+    Inputs:
+      - plugin: zones with poll_interval_seconds lower than minimum.
+
+    Outputs:
+      - None: Asserts minimum interval is enforced.
+    """
+    monkeypatch.setattr(axfr_polling.threading, "Thread", _FakeThread, raising=True)
+
+    ev = _FakeEvent([True])
+    monkeypatch.setattr(axfr_polling.threading, "Event", lambda: ev, raising=True)
+
+    plugin = _Plugin(
+        [
+            {"zone": "example.com", "poll_interval_seconds": 5},
+        ],
+        min_interval_seconds=60,
+    )
+
+    axfr_polling.start_axfr_polling(plugin)
+
+    assert plugin._axfr_poll_interval == 60.0
 
 
 def test_axfr_polling_loop_calls_load_records_and_resets_flag(monkeypatch) -> None:
@@ -180,8 +218,9 @@ def test_axfr_polling_loop_calls_load_records_and_resets_flag(monkeypatch) -> No
 
     plugin = _Plugin(
         [
-            {"zone": "example.com", "poll_interval_seconds": 2},
-        ]
+            {"zone": "example.com", "poll_interval_seconds": 12},
+        ],
+        min_interval_seconds=10,
     )
 
     axfr_polling.start_axfr_polling(plugin)
@@ -192,9 +231,39 @@ def test_axfr_polling_loop_calls_load_records_and_resets_flag(monkeypatch) -> No
     # Execute the captured loop callback synchronously.
     thread.target()
 
-    assert ev.wait_calls == [2.0, 2.0]
+    assert ev.wait_calls == [12.0, 12.0]
     assert plugin._axfr_loaded_once is False
     assert plugin.load_calls == 1
+
+
+def test_axfr_polling_loop_skips_when_reload_inflight(monkeypatch) -> None:
+    """Brief: Skip poll cycle when a reload is already in progress.
+
+    Inputs:
+      - plugin: reload lock pre-acquired to simulate in-flight reload.
+
+    Outputs:
+      - None: Asserts no load occurs.
+    """
+    monkeypatch.setattr(axfr_polling.threading, "Thread", _FakeThread, raising=True)
+
+    ev = _FakeEvent([False, True])
+    monkeypatch.setattr(axfr_polling.threading, "Event", lambda: ev, raising=True)
+
+    class _BusyLock:
+        def acquire(self, blocking: bool = False) -> bool:
+            return False
+
+        def release(self) -> None:
+            raise AssertionError("release should not be called when acquire fails")
+
+    plugin = _Plugin([{"zone": "example.com", "poll_interval_seconds": 2}])
+    plugin._reload_records_lock = _BusyLock()
+    axfr_polling.start_axfr_polling(plugin)
+
+    plugin._axfr_poll_thread.target()
+
+    assert plugin.load_calls == 0
 
 
 def test_axfr_polling_loop_bails_when_interval_non_positive(monkeypatch) -> None:
@@ -242,3 +311,26 @@ def test_axfr_polling_loop_bails_when_stop_event_missing(monkeypatch) -> None:
     plugin._axfr_poll_thread.target()
 
     assert plugin.load_calls == 0
+
+
+def test_start_axfr_polling_requires_load_records(monkeypatch) -> None:
+    """Brief: Missing _load_records should raise a clear error.
+
+    Inputs:
+      - plugin: object without _load_records.
+
+    Outputs:
+      - None: Asserts ValueError is raised.
+    """
+
+    class _NoLoader:
+        def __init__(self) -> None:
+            self._axfr_zones = [{"zone": "example.com", "poll_interval_seconds": 2}]
+
+    monkeypatch.setattr(axfr_polling.threading, "Thread", _FakeThread, raising=True)
+    monkeypatch.setattr(
+        axfr_polling.threading, "Event", lambda: _FakeEvent([]), raising=True
+    )
+
+    with pytest.raises(ValueError, match="plugin._load_records"):
+        axfr_polling.start_axfr_polling(_NoLoader())
