@@ -237,6 +237,90 @@ def test_run_setup_plugins_fallback_default_and_override(monkeypatch):
     assert fallback_values == [True, False]
 
 
+def test_run_setup_plugins_calls_post_setup_after_setup_phase() -> None:
+    """Brief: post_setup runs after all setup hooks complete.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts setup runs by setup_priority before post_setup calls.
+    """
+
+    events: list[str] = []
+
+    class First(BasePlugin):
+        setup_priority = 1
+
+        def __init__(self) -> None:
+            super().__init__()
+
+        def setup(self) -> None:  # type: ignore[override]
+            events.append("setup:first")
+
+        def post_setup(self) -> None:  # type: ignore[override]
+            events.append("post:first")
+
+    class Second(BasePlugin):
+        setup_priority = 2
+
+        def __init__(self) -> None:
+            super().__init__()
+
+        def setup(self) -> None:  # type: ignore[override]
+            events.append("setup:second")
+
+        def post_setup(self) -> None:  # type: ignore[override]
+            events.append("post:second")
+
+    run_setup_plugins([Second(), First()])
+
+    assert events == [
+        "setup:first",
+        "setup:second",
+        "post:first",
+        "post:second",
+    ]
+
+
+def test_run_setup_plugins_post_setup_honors_abort_on_failure() -> None:
+    """Brief: post_setup exceptions honor abort_on_failure configuration.
+
+    Inputs:
+      - None.
+
+    Outputs:
+      - None; asserts non-aborting and aborting post_setup behaviors.
+    """
+
+    class NonAbort(BasePlugin):
+        def __init__(self) -> None:
+            super().__init__(abort_on_failure=False)
+
+        def setup(self) -> None:  # type: ignore[override]
+            return None
+
+        def post_setup(self) -> None:  # type: ignore[override]
+            raise RuntimeError("non-abort finished failure")
+
+    class Abort(BasePlugin):
+        def __init__(self) -> None:
+            super().__init__(abort_on_failure=True)
+
+        def setup(self) -> None:  # type: ignore[override]
+            return None
+
+        def post_setup(self) -> None:  # type: ignore[override]
+            raise RuntimeError("abort finished failure")
+
+    # Non-aborting plugin should not raise.
+    run_setup_plugins([NonAbort()])
+
+    # Aborting plugin should raise RuntimeError.
+    with pytest.raises(RuntimeError):
+        run_setup_plugins([Abort()])
+
+
 def test_run_shutdown_plugins_calls_shutdown_and_continues_on_error(caplog):
     """Brief: run_shutdown_plugins invokes hooks once and continues on errors.
 
