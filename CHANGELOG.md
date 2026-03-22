@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 - Hardened resolver plugins with stricter list/file parsing, safer validation, cache/pruning controls, and improved policy enforcement in Filter, FileDownloader, mDNS, SSH Keys, and related host-source/access-control paths.
 - Expanded RateLimit behavior and configuration with bootstrap/warmup controls and PSL strictness options, and improved built-in profile loading fallback behavior.
 - Updated plugin test coverage and plugin documentation/schema content to reflect the new parsing, normalization, and policy semantics.
+- Added a post-setup plugin lifecycle hook (`post_setup`) so deferred background tasks can start after setup ordering completes; FileDownloader now uses this hook for startup freshness checks.
+- Hardened ZoneRecords load/notify safety with path traversal rejection, source file/record/value budget limits, optional SOA/PTR synthesis controls, and outbound NOTIFY target allowlist/throttling/private-address policy controls.
+- Added a local Docker Compose observability stack (`docker/`) provisioning InfluxDB + Grafana with a prebuilt Foghorn query-log dashboard and datasource wiring.
+- Improved config-diagram rendering efficiency by skipping PNG re-renders when generated DOT content is unchanged.
 
 ### Breaking Changes
 
@@ -20,6 +24,7 @@ All notable changes to this project will be documented in this file.
 - UDP listener now defaults to asyncio everywhere (including localhost). Threaded fallback only allowed on localhost or when explicitly permitted via `allow_unsafe_threaded_listeners`.
 - Extended DNS Errors (RFC 8914) now enabled by default for improved error diagnostics across DNS resolvers, rate limiting, and access control.
 - Rate limit plugin now adds EDE messages (code 17 "Rate-Limited") when rate limiting, providing better visibility into why queries were rejected.
+- ZoneRecords no longer learns NOTIFY destinations from AXFR clients via `axfr_notify_all`; outbound NOTIFY now uses configured `axfr_notify` targets only (`axfr_notify_all` is deprecated and ignored).
 
 ### Added
 - Admin API: added `/api/v1/config/schema` and `/config/schema` endpoints (FastAPI and threaded admin server) to return the active JSON config schema document.
