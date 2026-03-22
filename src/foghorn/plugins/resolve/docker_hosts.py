@@ -89,6 +89,8 @@ class DockerEndpointConfig(BaseModel):
         per-container IPv6 addresses discovered from this endpoint.
       - ttl: Optional TTL override for answers derived from this endpoint; when
         omitted, the plugin-level ttl is used.
+      - suffix: Optional DNS suffix override for names sourced from this
+        endpoint. When omitted, the plugin-level suffix is used.
       - tls_verify: When true, verify Docker daemon TLS certs for tcp://
         endpoints.
       - tls_cert: Optional client TLS certificate path.
@@ -104,6 +106,7 @@ class DockerEndpointConfig(BaseModel):
     use_ipv4: Optional[str] = None
     use_ipv6: Optional[str] = None
     ttl: Optional[int] = Field(default=None, ge=0)
+    suffix: Optional[str] = None
     tls_verify: bool = False
     tls_cert: Optional[str] = None
     tls_key: Optional[str] = None
@@ -399,7 +402,7 @@ class DockerHosts(BasePlugin):
                 tls_verify or tls_cert or tls_key or tls_ca
             ):
                 logger.warning(
-                    "DockerHosts: endpoint %s uses plaintext TCP; consider using TLS on untrusted networks",
+                    "missing TLS: plaintext endpoint %s",
                     url,
                 )
 
