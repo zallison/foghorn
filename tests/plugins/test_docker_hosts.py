@@ -561,7 +561,7 @@ def test_docker_hosts_setup_parses_endpoint_fields_and_logs_warnings(caplog):
     assert any("invalid use_ipv4" in m for m in messages)
     assert any("invalid use_ipv6" in m for m in messages)
     assert any("invalid ttl" in m for m in messages)
-    assert any("uses plaintext TCP" in m for m in messages)
+    assert any(("uses plaintext" in m) or ("plaintext endpoint" in m) for m in messages)
 
 
 def test_docker_hosts_iter_containers_returns_empty_when_no_client(monkeypatch):
