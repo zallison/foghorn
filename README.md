@@ -901,6 +901,7 @@ Define custom records either:
   optional `origin`/`ttl` overrides.
 - Optional `path_allowlist` can restrict `file_paths` and `bind_paths` to a set
   of allowed directory prefixes.
+  - Paths containing explicit `..` segments are rejected.
 
 All sources are merged into a single internal view per (name, qtype):
 
@@ -938,6 +939,13 @@ Optional merge controls:
 - `nxdomain_zones`: optional list of zone suffixes where, if a name does not
   exist in ZoneRecords, the plugin returns NXDOMAIN/NODATA instead of falling
   through to upstream resolution.
+- `max_file_size_bytes`: max allowed bytes per source file in `file_paths` and
+  `bind_paths`.
+- `max_records`: max accepted record values per load cycle.
+- `max_record_value_length`: max per-record value length in characters.
+- `auto_ptr_enabled` / `max_auto_ptr_records`: enable and bound auto-generated
+  PTR values.
+- `soa_synthesis_enabled`: controls inferred SOA fallback when no SOA exists.
 
 ```yaml
 plugins:
