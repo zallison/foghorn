@@ -887,6 +887,65 @@ def test_stats_logging_cadence_follows_stats_window_seconds(tmp_path):
         assert args[5] == 300
 
 
+def test_stats_logging_concurrent_calls_emit_once_per_interval(tmp_path):
+    """Brief: Concurrent _maybe_log_stats calls emit at most one summary line.
+
+    Inputs:
+      - tmp_path: pytest temp path for sqlite db.
+
+    Outputs:
+      - None: asserts only one periodic RateLimit stats log is emitted for a
+        shared interval under concurrent invocation.
+    """
+
+    db = tmp_path / "rl-stats-concurrent.db"
+    plugin = RateLimit(
+        db_path=str(db),
+        stats_log_interval_seconds=1,
+        stats_window_seconds=0,
+    )
+    plugin.setup()
+    plugin._db_update_profile("recent", 5.0, now_ts=2005)
+
+    records: list[tuple[object, ...]] = []
+    errors: list[Exception] = []
+    start = threading.Barrier(3)
+    original_logger_info = rate_limit_module.logger.info
+
+    def _capture_info(message: object, *args: object, **kwargs: object) -> None:
+        records.append((message, *args))
+
+    def _worker() -> None:
+        try:
+            start.wait(timeout=2.0)
+            plugin._maybe_log_stats(now=2000.0)
+        except Exception as exc:  # pragma: no cover - defensive thread collection
+            errors.append(exc)
+
+    rate_limit_module.logger.info = _capture_info  # type: ignore[assignment]
+    plugin._last_stats_log_ts = 0.0
+    plugin._db_lock.acquire()
+    t1 = threading.Thread(target=_worker)
+    t2 = threading.Thread(target=_worker)
+    t1.start()
+    t2.start()
+    try:
+        start.wait(timeout=2.0)
+        # Hold the DB lock briefly so both threads contend in the same interval.
+        threading.Event().wait(0.2)
+    finally:
+        if plugin._db_lock.locked():
+            plugin._db_lock.release()
+        t1.join(timeout=2.0)
+        t2.join(timeout=2.0)
+        rate_limit_module.logger.info = original_logger_info  # type: ignore[assignment]
+
+    assert not errors
+    assert not t1.is_alive()
+    assert not t2.is_alive()
+    assert len(records) == 1
+
+
 def test_db_prunes_by_max_profiles(tmp_path):
     """Brief: sqlite profile table is bounded by max_profiles via pruning.
 

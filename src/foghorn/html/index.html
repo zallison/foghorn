@@ -4080,13 +4080,6 @@
 				}
 				configSection.className = 'fh-rate-limit-config';
 
-				var configRoot = document.createElement('div');
-				body.appendChild(configRoot);
-				var configRows = resolvePath(snapshot, configSection.path || 'config_items');
-				if (!Array.isArray(configRows)) {
-					configRows = [];
-				}
-				renderTableSection(configRoot, configRows, configSection);
 
 				var profilesRoot = document.createElement('div');
 				body.appendChild(profilesRoot);
@@ -4123,6 +4116,14 @@
 						group.appendChild(pre);
 						profilesRoot.appendChild(group);
 					});
+
+				var configRoot = document.createElement('div');
+				body.appendChild(configRoot);
+				var configRows = resolvePath(snapshot, configSection.path || 'config_items');
+				if (!Array.isArray(configRows)) {
+					configRows = [];
+				}
+				renderTableSection(configRoot, configRows, configSection);
 			}
 
 			function loadSnapshotPageV1(pageEl, desc) {

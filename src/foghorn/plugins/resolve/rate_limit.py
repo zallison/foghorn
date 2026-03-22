@@ -107,6 +107,10 @@ class RateLimitConfig(BaseModel):
           - 'cidr' (default): bucket client IPs into /bucket_network_prefix_v4 or
             /bucket_network_prefix_v6 to reduce spoofed-IP cardinality.
           - 'domain': ignore client identity and key only by base domain.
+      - client_prefix_v4: IPv4 prefix length applied to client identity keying
+        for all transports when configured.
+      - client_prefix_v6: IPv6 prefix length applied to client identity keying
+        for all transports when configured.
       - assume_udp_when_listener_missing: When True, treat missing/unknown
         listener values on insecure transports as UDP for spoofing mitigation.
       - bucket_network_prefix_v4: IPv4 prefix length used for udp_keying='cidr'.
@@ -147,6 +151,8 @@ class RateLimitConfig(BaseModel):
     prune_interval_seconds: int = Field(default=60, ge=0)
 
     udp_keying: str = Field(default="cidr")
+    client_prefix_v4: int = Field(default=32, ge=0, le=32)
+    client_prefix_v6: int = Field(default=128, ge=0, le=128)
     assume_udp_when_listener_missing: bool = Field(default=True)
     bucket_network_prefix_v4: int = Field(default=24, ge=0, le=32)
     bucket_network_prefix_v6: int = Field(default=56, ge=0, le=128)
@@ -266,6 +272,20 @@ class RateLimit(BasePlugin):
         )
         self._missing_listener_warned = False
 
+        cfg_map = dict(self.config or {})
+        self._has_client_prefix_v4 = "client_prefix_v4" in cfg_map
+        self._has_client_prefix_v6 = "client_prefix_v6" in cfg_map
+        self.client_prefix_v4 = self._parse_int_config(
+            "client_prefix_v4",
+            32,
+            minimum=0,
+        )
+        self.client_prefix_v6 = self._parse_int_config(
+            "client_prefix_v6",
+            128,
+            minimum=0,
+        )
+
         self.bucket_network_prefix_v4 = self._parse_int_config(
             "bucket_network_prefix_v4",
             24,
@@ -277,6 +297,8 @@ class RateLimit(BasePlugin):
             minimum=0,
         )
         # Clamp prefix bounds explicitly.
+        self.client_prefix_v4 = max(0, min(32, int(self.client_prefix_v4)))
+        self.client_prefix_v6 = max(0, min(128, int(self.client_prefix_v6)))
         self.bucket_network_prefix_v4 = max(
             0, min(32, int(self.bucket_network_prefix_v4))
         )
@@ -329,6 +351,9 @@ class RateLimit(BasePlugin):
             minimum=0,
         )
         self._last_stats_log_ts: float = 0.0
+        # Serialize stats log cadence checks so concurrent resolver threads
+        # cannot emit duplicate periodic summaries in the same interval.
+        self._stats_log_lock = threading.Lock()
 
         # Deny policy configuration
         deny_resp = str(
@@ -756,6 +781,64 @@ class RateLimit(BasePlugin):
         except Exception:
             return str(client_ip)
 
+    def _client_ip_bucket_all_transports(self, client_ip: str) -> str:
+        """Brief: Apply client_prefix bucketing to client identity across transports.
+
+        Inputs:
+          - client_ip: Client IP string (IPv4 or IPv6).
+
+        Outputs:
+          - str: Original client IP when no explicit client_prefix is configured
+            for that address family; otherwise a bucketed CIDR string (or host
+            IP when prefix equals /32 or /128).
+        """
+
+        try:
+            import ipaddress
+
+            ip_obj = ip_networks.parse_ip(client_ip)
+            if ip_obj is None:
+                return str(client_ip)
+
+            if ip_obj.version == 4:
+                has_prefix = bool(getattr(self, "_has_client_prefix_v4", False))
+                prefix = int(getattr(self, "client_prefix_v4", 32) or 32)
+                max_prefix = 32
+            else:
+                has_prefix = bool(getattr(self, "_has_client_prefix_v6", False))
+                prefix = int(getattr(self, "client_prefix_v6", 128) or 128)
+                max_prefix = 128
+
+            if not has_prefix:
+                return str(client_ip)
+
+            prefix = max(0, min(max_prefix, prefix))
+            if prefix >= max_prefix:
+                return str(ip_obj)
+
+            net = ipaddress.ip_network(f"{ip_obj}/{prefix}", strict=False)
+            return str(net)
+        except Exception:
+            return str(client_ip)
+
+    def _has_client_prefix_for_ip(self, client_ip: str) -> bool:
+        """Brief: Return True when a client_prefix was set for this IP family.
+
+        Inputs:
+          - client_ip: Client IP string.
+
+        Outputs:
+          - bool: True when client_prefix_v4/client_prefix_v6 was explicitly set
+            for the parsed IP family.
+        """
+
+        ip_obj = ip_networks.parse_ip(client_ip)
+        if ip_obj is None:
+            return False
+        if ip_obj.version == 4:
+            return bool(getattr(self, "_has_client_prefix_v4", False))
+        return bool(getattr(self, "_has_client_prefix_v6", False))
+
     def _window_lock_for_key(self, key: str) -> threading.Lock:
         """Brief: Return a stripe lock for the given key to protect window updates.
 
@@ -845,7 +928,8 @@ class RateLimit(BasePlugin):
             overridden via udp_keying to reduce spoofed-source cardinality.
         """
 
-        client_ip = getattr(ctx, "client_ip", "") or "unknown"
+        raw_client_ip = str(getattr(ctx, "client_ip", "") or "unknown")
+        client_ip = self._client_ip_bucket_all_transports(raw_client_ip)
         listener = str(getattr(ctx, "listener", "") or "").lower()
         secure = bool(getattr(ctx, "secure", False))
 
@@ -857,8 +941,10 @@ class RateLimit(BasePlugin):
             if udp_keying == "domain":
                 # Ignore client identity entirely for UDP.
                 return _to_base_domain(qname)
-            # Default: bucket client IP.
-            client_ip = self._client_ip_bucket(str(client_ip))
+            # Default: bucket client IP for spoofing mitigation unless an explicit
+            # client_prefix was provided for this address family.
+            if not self._has_client_prefix_for_ip(raw_client_ip):
+                client_ip = self._client_ip_bucket(raw_client_ip)
 
         if self.mode == "per_client_domain":
             base = _to_base_domain(qname)
@@ -1041,9 +1127,18 @@ class RateLimit(BasePlugin):
             interval = int(getattr(self, "stats_log_interval_seconds", 0) or 0)
         if interval <= 0:
             return
-        last_ts = float(getattr(self, "_last_stats_log_ts", 0.0) or 0.0)
-        if now - last_ts < float(interval):
-            return
+        stats_log_lock = getattr(self, "_stats_log_lock", None)
+        if stats_log_lock is None:
+            stats_log_lock = threading.Lock()
+            self._stats_log_lock = stats_log_lock
+        with stats_log_lock:
+            last_ts = float(getattr(self, "_last_stats_log_ts", 0.0) or 0.0)
+            if now - last_ts < float(interval):
+                return
+            try:
+                self._last_stats_log_ts = float(now)
+            except Exception:
+                self._last_stats_log_ts = 0.0
 
         buckets = 0
         avg_rps = 0.0
@@ -1084,12 +1179,22 @@ class RateLimit(BasePlugin):
         except Exception:  # pragma: no cover - defensive
             buckets = 0
 
-        try:
-            self._last_stats_log_ts = float(now)
-        except Exception:
-            self._last_stats_log_ts = 0.0
-
         if buckets <= 0 or avg_rps <= 0.0:
+            # If no stats are available yet, avoid suppressing checks for the
+            # full interval after an empty probe; retry after one request window.
+            retry_seconds = min(
+                int(interval),
+                max(1, int(getattr(self, "window_seconds", 10) or 10)),
+            )
+            with stats_log_lock:
+                current_last = float(getattr(self, "_last_stats_log_ts", 0.0) or 0.0)
+                if current_last == float(now):
+                    try:
+                        self._last_stats_log_ts = (
+                            float(now) - float(interval) + float(retry_seconds)
+                        )
+                    except Exception:
+                        self._last_stats_log_ts = 0.0
             return
 
         plugin_name = str(getattr(self, "name", "rate_limit") or "rate_limit")
@@ -1371,6 +1476,8 @@ class RateLimit(BasePlugin):
                             "key": "stats_window_seconds",
                             "label": "Stats window (s)",
                         },
+                        {"key": "client_prefix_v4", "label": "Client prefix v4"},
+                        {"key": "client_prefix_v6", "label": "Client prefix v6"},
                         {"key": "udp_keying", "label": "UDP keying"},
                         {
                             "key": "assume_udp_when_listener_missing",
@@ -1481,6 +1588,20 @@ class RateLimit(BasePlugin):
                     self,
                     "stats_window_seconds",
                     self.config.get("stats_window_seconds", 0),
+                )
+                or 0
+            ),
+            "client_prefix_v4": int(
+                getattr(
+                    self, "client_prefix_v4", self.config.get("client_prefix_v4", 32)
+                )
+                or 0
+            ),
+            "client_prefix_v6": int(
+                getattr(
+                    self,
+                    "client_prefix_v6",
+                    self.config.get("client_prefix_v6", 128),
                 )
                 or 0
             ),
