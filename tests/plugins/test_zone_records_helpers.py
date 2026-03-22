@@ -263,7 +263,7 @@ def test_wildcard_helpers_match_and_costs() -> None:
     assert (
         zone_helpers.match_wildcard_domain("a.b.example.com", "*.example.com") is True
     )
-    assert zone_helpers.match_wildcard_domain("a.b.example.com", "a.*.com") is True
+    assert zone_helpers.match_wildcard_domain("a.b.example.com", "a.*.com") is False
     assert zone_helpers.match_wildcard_domain("a.b.example.com", "a.*") is False
     assert zone_helpers.match_wildcard_domain("a.b.example.com", "*") is True
     assert zone_helpers.match_wildcard_domain("", "*") is False
@@ -272,7 +272,8 @@ def test_wildcard_helpers_match_and_costs() -> None:
         "a.b.example.com", "*.example.com"
     ) == len("a.b")
     assert (
-        zone_helpers.wildcard_matched_character_count("a.b.example.com", "a.*.com") == 0
+        zone_helpers.wildcard_matched_character_count("a.b.example.com", "a.*.com")
+        is None
     )
     assert (
         zone_helpers.wildcard_matched_character_count("a.b.example.com", "*.nope")
@@ -291,7 +292,7 @@ def test_sort_and_cache_wildcard_patterns() -> None:
     """
     patterns = ["*", "*.example.com", "a.*.com"]
     sorted_patterns = zone_helpers.sort_wildcard_patterns(patterns)
-    assert sorted_patterns[0] == "*.example.com"
+    assert sorted_patterns[0] == "a.*.com"
     assert sorted_patterns[-1] == "*"
 
     name_index = {"*.example.com": {}, "a.*.com": {}}

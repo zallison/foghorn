@@ -56,6 +56,12 @@ plugins:
         - 'www.example.com|A|300|192.0.2.10'
       load_mode: merge
       merge_policy: add
+      max_file_size_bytes: 16777216
+      max_records: 500000
+      max_record_value_length: 4096
+      auto_ptr_enabled: true
+      max_auto_ptr_records: 100000
+      soa_synthesis_enabled: true
       watchdog_enabled: true
       watchdog_min_interval_seconds: 1.0
       watchdog_poll_interval_seconds: 60.0   # set to 0 to disable
@@ -95,7 +101,9 @@ plugins:
           server_name: notify.example.com
           verify: true
           ca_file: ./keys/foghorn_ca.pem
-      axfr_notify_all: false
+      axfr_notify_allow_private_targets: false
+      axfr_notify_min_interval_seconds: 1.0
+      axfr_notify_rate_limit_per_target_per_minute: 60
       axfr_notify_scheduled: 5
 
       dnssec_signing:

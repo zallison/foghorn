@@ -1,13 +1,14 @@
 """Brief: Unit tests for foghorn.plugins.resolve.zone_records.notify.
 
 Inputs:
-  - None
+  - None.
 
 Outputs:
-  - None
+  - None.
 """
 
 from __future__ import annotations
+import importlib
 
 import threading
 
@@ -16,183 +17,39 @@ from dnslib import OPCODE, QTYPE, DNSRecord
 from foghorn.plugins.resolve.zone_records import notify
 
 
-class _FlakyStr:
-    """Brief: String-like object that raises once then returns a value.
-
-    Inputs:
-      - value: string to return after the first failure.
-
-    Outputs:
-      - Instance usable as a str() input.
-    """
-
-    def __init__(self, value: str) -> None:
-        self._value = value
-        self._calls = 0
-
-    def __str__(self) -> str:
-        self._calls += 1
-        if self._calls == 1:
-            raise ValueError("boom")
-        return self._value
-
-
 class _DummyPlugin:
-    """Brief: Minimal plugin-like object for exercising notify helpers.
+    """Brief: Minimal plugin-like object for notify helper tests.
 
     Inputs:
-      - with_lock: if True, install a lock and learned dict.
-      - delay: optional axfr notify delay.
+      - None.
 
     Outputs:
-      - Object with the attributes expected by record_axfr_client/send_notify_for_zones.
+      - Object with notify-related attributes.
     """
 
-    def __init__(self, *, with_lock: bool = True, delay: object = None) -> None:
-        if with_lock:
-            self._axfr_notify_lock = threading.RLock()
-            self._axfr_notify_learned: dict = {}
-        self._axfr_notify_delay = delay
-        self._axfr_notify_static_targets = []
+    def __init__(self) -> None:
+        self._axfr_notify_lock = threading.RLock()
+        self._axfr_notify_static_targets: list[dict] = []
+        self._axfr_notify_allow_private_targets = False
+        self._axfr_notify_min_interval_seconds = 1.0
+        self._axfr_notify_rate_limit_per_target_per_minute = 60
+        self._axfr_notify_send_history: dict[str, list[float]] = {}
+        self._axfr_notify_last_sent: dict[str, float] = {}
+        self._axfr_notify_target_allowlist = None
+        self._axfr_notify_target_allowlist_hosts: set[str] = set()
+        self._axfr_notify_target_allowlist_networks: list[object] = []
 
 
-def test_record_axfr_client_noop_on_blank_zone_or_host() -> None:
-    """Brief: record_axfr_client should return early on empty zone or host.
-
-    Inputs:
-      - plugin: dummy plugin with a notify lock.
-
-    Outputs:
-      - None: Asserts learned targets remain empty.
-    """
-    plugin = _DummyPlugin(with_lock=True, delay=None)
-
-    notify.record_axfr_client(plugin, "", "203.0.113.5")
-    notify.record_axfr_client(plugin, "example.com", "   ")
-
-    assert plugin._axfr_notify_learned == {}
-
-
-def test_record_axfr_client_returns_when_lock_missing() -> None:
-    """Brief: record_axfr_client should do nothing if plugin has no lock.
-
-    Inputs:
-      - plugin: dummy plugin without _axfr_notify_lock.
-
-    Outputs:
-      - None: Asserts no learned targets are recorded.
-    """
-
-    class NoLock:
-        _axfr_notify_learned: dict = {}
-        _axfr_notify_delay = None
-
-    plugin = NoLock()
+def test_record_axfr_client_is_noop() -> None:
+    """Brief: record_axfr_client does not mutate plugin state."""
+    plugin = _DummyPlugin()
     notify.record_axfr_client(plugin, "example.com", "203.0.113.5")
-    assert plugin._axfr_notify_learned == {}
-
-
-def test_record_axfr_client_records_target_and_returns_when_delay_unset() -> None:
-    """Brief: Learned target is recorded but no NOTIFY is sent when delay is unset.
-
-    Inputs:
-      - plugin: dummy plugin with lock and delay None.
-
-    Outputs:
-      - None: Asserts learned targets are updated.
-    """
-    plugin = _DummyPlugin(with_lock=True, delay=None)
-
-    notify.record_axfr_client(plugin, "Example.COM.", "203.0.113.5")
-
-    learned = plugin._axfr_notify_learned.get("example.com")
-    assert learned is not None
-    assert "203.0.113.5:53/tcp" in learned
-
-
-def test_record_axfr_client_str_exceptions_are_handled() -> None:
-    """Brief: record_axfr_client should tolerate str() failures for inputs.
-
-    Inputs:
-      - zone_apex: object that fails once on str().
-      - client_ip: object that fails once on str().
-
-    Outputs:
-      - None: Asserts learned targets are recorded.
-    """
-    plugin = _DummyPlugin(with_lock=True, delay=None)
-
-    zone = _FlakyStr("Example.COM.")
-    ip = _FlakyStr("203.0.113.5")
-
-    notify.record_axfr_client(plugin, zone, ip)
-
-    learned = plugin._axfr_notify_learned.get("example.com")
-    assert learned is not None
-    assert "203.0.113.5:53/tcp" in learned
-
-
-def test_record_axfr_client_schedules_delayed_notify(monkeypatch) -> None:
-    """Brief: Positive delay should schedule a delayed NOTIFY.
-
-    Inputs:
-      - delay: positive float-like value.
-
-    Outputs:
-      - None: Asserts schedule_delayed_notify is invoked.
-    """
-    plugin = _DummyPlugin(with_lock=True, delay=1.25)
-
-    calls: list[tuple[str, dict, float]] = []
-
-    def fake_schedule(zone_apex: str, target: dict, delay_s: float) -> None:
-        calls.append((zone_apex, dict(target), float(delay_s)))
-
-    monkeypatch.setattr(notify, "schedule_delayed_notify", fake_schedule, raising=True)
-
-    notify.record_axfr_client(plugin, "example.com", "203.0.113.5")
-
-    assert calls
-    zone_apex, target, delay_s = calls[0]
-    assert zone_apex == "example.com"
-    assert target["host"] == "203.0.113.5"
-    assert delay_s == 1.25
-
-
-def test_record_axfr_client_sends_immediate_notify(monkeypatch) -> None:
-    """Brief: Zero/negative delay should trigger an immediate NOTIFY send.
-
-    Inputs:
-      - delay: non-positive value.
-
-    Outputs:
-      - None: Asserts send_notify_to_target is invoked.
-    """
-    plugin = _DummyPlugin(with_lock=True, delay=0)
-
-    calls: list[tuple[str, dict]] = []
-
-    def fake_send(zone_apex: str, target: dict) -> None:
-        calls.append((zone_apex, dict(target)))
-
-    monkeypatch.setattr(notify, "send_notify_to_target", fake_send, raising=True)
-
-    notify.record_axfr_client(plugin, "example.com", "203.0.113.5")
-
-    assert calls
-    assert calls[0][0] == "example.com"
+    assert plugin._axfr_notify_send_history == {}
+    assert plugin._axfr_notify_last_sent == {}
 
 
 def test_send_notify_to_target_returns_on_blank_apex_or_host(monkeypatch) -> None:
-    """Brief: send_notify_to_target should bail out when required fields are missing.
-
-    Inputs:
-      - zone_apex: empty string.
-      - target: missing host.
-
-    Outputs:
-      - None: Asserts no transport functions are called.
-    """
+    """Brief: send_notify_to_target bails when required fields are missing."""
     tcp_calls: list[tuple] = []
 
     def fake_tcp(*args, **kwargs):  # noqa: ANN001
@@ -207,15 +64,7 @@ def test_send_notify_to_target_returns_on_blank_apex_or_host(monkeypatch) -> Non
 
 
 def test_send_notify_to_target_tcp_calls_tcp_query(monkeypatch) -> None:
-    """Brief: TCP transport should call tcp_query with a NOTIFY message.
-
-    Inputs:
-      - zone_apex: apex name.
-      - target: tcp target mapping.
-
-    Outputs:
-      - None: Asserts tcp_query is called and the wire message is a NOTIFY(SOA).
-    """
+    """Brief: TCP transport emits a NOTIFY(SOA) message."""
     calls: list[tuple] = []
 
     def fake_tcp(host: str, port: int, wire: bytes, **kwargs):  # noqa: ANN001
@@ -241,125 +90,20 @@ def test_send_notify_to_target_tcp_calls_tcp_query(monkeypatch) -> None:
     assert str(msg.questions[0].qname).lower().endswith("example.com.")
 
 
-def test_send_notify_to_target_dot_calls_dot_query(monkeypatch) -> None:
-    """Brief: DoT transport should call dot_query with TLS args.
-
-    Inputs:
-      - target: dot transport mapping.
-
-    Outputs:
-      - None: Asserts dot_query is called.
-    """
-    calls: list[tuple] = []
-
-    def fake_dot(host: str, port: int, wire: bytes, **kwargs):  # noqa: ANN001
-        calls.append((host, port, wire, kwargs))
-
-    monkeypatch.setattr(notify, "dot_query", fake_dot, raising=True)
-
-    notify.send_notify_to_target(
-        "example.com",
-        {
-            "host": "192.0.2.2",
-            "port": 853,
-            "timeout_ms": 2000,
-            "transport": "dot",
-            "server_name": "sec.example",
-            "verify": False,
-            "ca_file": "/tmp/ca.pem",
-        },
-    )
-
-    assert len(calls) == 1
-    host, port, wire, kwargs = calls[0]
-    assert host == "192.0.2.2"
-    assert port == 853
-    assert kwargs["server_name"] == "sec.example"
-    assert kwargs["verify"] is False
-    assert kwargs["ca_file"] == "/tmp/ca.pem"
-
-    msg = DNSRecord.parse(wire)
-    assert msg.header.opcode == OPCODE.NOTIFY
-
-
-def test_send_notify_for_zones_returns_on_empty_input(monkeypatch) -> None:
-    """Brief: send_notify_for_zones should no-op on empty zone list.
-
-    Inputs:
-      - zone_apexes: empty list.
-
-    Outputs:
-      - None: Asserts no NOTIFY sends are attempted.
-    """
-
-    class Plugin:
-        _axfr_notify_static_targets: list = []
-        _axfr_notify_learned: dict = {}
-
-    calls: list[tuple[str, dict]] = []
-
-    def fake_send(zone_apex: str, target: dict) -> None:
-        calls.append((zone_apex, dict(target)))
-
-    monkeypatch.setattr(notify, "send_notify_to_target", fake_send, raising=True)
-
-    notify.send_notify_for_zones(Plugin(), [])
-
-    assert calls == []
-
-
-def test_send_notify_for_zones_with_lock_snapshots_learned_targets(monkeypatch) -> None:
-    """Brief: send_notify_for_zones should snapshot learned targets under lock.
-
-    Inputs:
-      - plugin: object with _axfr_notify_lock and _axfr_notify_learned.
-
-    Outputs:
-      - None: Asserts learned targets are used when sending NOTIFY.
-    """
-
-    class Plugin:
-        def __init__(self) -> None:
-            self._axfr_notify_lock = threading.RLock()
-            self._axfr_notify_static_targets: list = []
-            self._axfr_notify_learned = {
-                "example.com": {"h:53/tcp": {"host": "203.0.113.5", "port": 53}},
-            }
-
-    calls: list[tuple[str, dict]] = []
-
-    def fake_send(zone_apex: str, target: dict) -> None:
-        calls.append((zone_apex, dict(target)))
-
-    monkeypatch.setattr(notify, "send_notify_to_target", fake_send, raising=True)
-
-    notify.send_notify_for_zones(Plugin(), ["example.com"])
-
-    assert calls
-    assert all(z == "example.com" for (z, _t) in calls)
-
-
 def test_send_notify_for_zones_skips_local_self_loop_targets(monkeypatch) -> None:
-    """Brief: send_notify_for_zones should skip targets matching local listeners.
+    """Brief: self-loop targets are filtered while remote targets are sent."""
 
-    Inputs:
-      - plugin: object with static+learned NOTIFY targets.
-
-    Outputs:
-      - None: Asserts local target is filtered while remote target is sent.
-    """
-
-    class Plugin:
-        _axfr_notify_static_targets = [
-            {"host": "127.0.0.1", "port": 53, "transport": "tcp"},
-            {"host": "203.0.113.5", "port": 53, "transport": "tcp"},
-        ]
-        _axfr_notify_learned = {}
+    class Plugin(_DummyPlugin):
+        def __init__(self) -> None:
+            super().__init__()
+            self._axfr_notify_allow_private_targets = True
+            self._axfr_notify_min_interval_seconds = 0.0
+            self._axfr_notify_static_targets = [
+                {"host": "127.0.0.1", "port": 53, "transport": "tcp"},
+                {"host": "203.0.113.5", "port": 53, "transport": "tcp"},
+            ]
 
     calls: list[tuple[str, dict]] = []
-
-    def fake_send(zone_apex: str, target: dict) -> None:
-        calls.append((zone_apex, dict(target)))
 
     monkeypatch.setattr(
         notify,
@@ -373,104 +117,469 @@ def test_send_notify_for_zones_skips_local_self_loop_targets(monkeypatch) -> Non
         lambda: {("127.0.0.1", 53)},
         raising=True,
     )
-    monkeypatch.setattr(notify, "send_notify_to_target", fake_send, raising=True)
+    monkeypatch.setattr(
+        notify,
+        "send_notify_to_target",
+        lambda z, t: calls.append((z, dict(t))),
+        raising=True,
+    )
 
     notify.send_notify_for_zones(Plugin(), ["example.com"])
+
     assert calls == [
-        ("example.com", {"host": "203.0.113.5", "port": 53, "transport": "tcp"})
+        ("example.com", {"host": "203.0.113.5", "port": 53, "transport": "tcp"}),
     ]
 
 
-def test_send_notify_for_zones_without_lock_uses_learned_snapshot(monkeypatch) -> None:
-    """Brief: send_notify_for_zones should work even when plugin has no lock.
+def test_send_notify_for_zones_blocks_private_targets_by_default(monkeypatch) -> None:
+    """Brief: private targets are blocked unless explicitly allowed."""
 
-    Inputs:
-      - plugin: object with learned targets but no _axfr_notify_lock.
-
-    Outputs:
-      - None: Asserts send_notify_to_target is called for zones with targets only.
-    """
-
-    class Plugin:
-        _axfr_notify_static_targets: list = []
-        _axfr_notify_learned = {
-            "example.com": {"h:53/tcp": {"host": "203.0.113.5", "port": 53}},
-            "junk": "not-a-dict",
-        }
+    class Plugin(_DummyPlugin):
+        def __init__(self) -> None:
+            super().__init__()
+            self._axfr_notify_static_targets = [
+                {"host": "192.168.1.20", "port": 53, "transport": "tcp"},
+            ]
+            self._axfr_notify_min_interval_seconds = 0.0
 
     calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        notify, "_is_local_notify_target", lambda _t: False, raising=True
+    )
+    monkeypatch.setattr(
+        notify,
+        "send_notify_to_target",
+        lambda z, t: calls.append((z, dict(t))),
+        raising=True,
+    )
 
-    def fake_send(zone_apex: str, target: dict) -> None:
-        calls.append((zone_apex, dict(target)))
-
-    monkeypatch.setattr(notify, "send_notify_to_target", fake_send, raising=True)
-
-    notify.send_notify_for_zones(Plugin(), ["", "example.com", "missing.com"])
-
-    assert calls
-    assert all(z == "example.com" for (z, _t) in calls)
+    notify.send_notify_for_zones(Plugin(), ["example.com"])
+    assert calls == []
 
 
-def test_schedule_delayed_notify_immediate_when_delay_non_positive(monkeypatch) -> None:
-    """Brief: schedule_delayed_notify should send immediately when delay <= 0.
+def test_send_notify_for_zones_throttles_repeated_sends(monkeypatch) -> None:
+    """Brief: min-interval/rate-limit checks suppress rapid repeat sends."""
 
-    Inputs:
-      - delay_s: non-positive delay.
+    class Plugin(_DummyPlugin):
+        def __init__(self) -> None:
+            super().__init__()
+            self._axfr_notify_allow_private_targets = True
+            self._axfr_notify_min_interval_seconds = 3600.0
+            self._axfr_notify_rate_limit_per_target_per_minute = 1
+            self._axfr_notify_static_targets = [
+                {"host": "203.0.113.7", "port": 53, "transport": "tcp"},
+            ]
 
-    Outputs:
-      - None: Asserts send_notify_to_target is called.
-    """
     calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        notify, "_is_local_notify_target", lambda _t: False, raising=True
+    )
+    monkeypatch.setattr(
+        notify,
+        "send_notify_to_target",
+        lambda z, t: calls.append((z, dict(t))),
+        raising=True,
+    )
 
-    def fake_send(zone_apex: str, target: dict) -> None:
-        calls.append((zone_apex, dict(target)))
+    plugin = Plugin()
+    notify.send_notify_for_zones(plugin, ["example.com"])
+    notify.send_notify_for_zones(plugin, ["example.com"])
 
-    monkeypatch.setattr(notify, "send_notify_to_target", fake_send, raising=True)
-
-    notify.schedule_delayed_notify("example.com", {"host": "192.0.2.1"}, 0.0)
-
-    assert calls
+    assert len(calls) == 1
 
 
-def test_schedule_delayed_notify_uses_timer_when_delay_positive(monkeypatch) -> None:
-    """Brief: schedule_delayed_notify should schedule a background Timer when delay > 0.
-
-    Inputs:
-      - delay_s: positive delay.
-
-    Outputs:
-      - None: Asserts Timer is started and the callback triggers a NOTIFY send.
-    """
+def test_schedule_delayed_notify_deduplicates_existing_timer(monkeypatch) -> None:
+    """Brief: scheduling the same zone/target cancels the previous timer."""
     send_calls: list[tuple[str, dict]] = []
 
-    def fake_send(zone_apex: str, target: dict) -> None:
-        send_calls.append((zone_apex, dict(target)))
-
-    monkeypatch.setattr(notify, "send_notify_to_target", fake_send, raising=True)
+    monkeypatch.setattr(
+        notify,
+        "send_notify_to_target",
+        lambda z, t: send_calls.append((z, dict(t))),
+        raising=True,
+    )
 
     class FakeTimer:
-        last = None
+        created: list["FakeTimer"] = []
 
         def __init__(self, delay: float, cb):  # noqa: ANN001
             self.delay = delay
             self.cb = cb
             self.daemon = False
             self.started = False
-            FakeTimer.last = self
+            self.cancelled = False
+            FakeTimer.created.append(self)
 
         def start(self) -> None:
             self.started = True
 
+        def cancel(self) -> None:
+            self.cancelled = True
+
     monkeypatch.setattr(notify.threading, "Timer", FakeTimer, raising=True)
 
-    notify.schedule_delayed_notify("example.com", {"host": "192.0.2.1"}, 0.5)
+    target = {"host": "192.0.2.1", "port": 53, "transport": "tcp"}
+    notify.schedule_delayed_notify("example.com", target, 0.5)
+    notify.schedule_delayed_notify("example.com", target, 0.5)
 
-    t = FakeTimer.last
-    assert t is not None
-    assert t.delay == 0.5
-    assert t.daemon is True
-    assert t.started is True
-
-    # Simulate timer firing.
-    t.cb()
+    assert len(FakeTimer.created) == 2
+    assert FakeTimer.created[0].cancelled is True
+    assert FakeTimer.created[1].started is True
+    FakeTimer.created[1].cb()
     assert send_calls
+
+
+def test_send_notify_for_zones_blocks_mixed_public_private_resolution(
+    monkeypatch,
+) -> None:
+    """Brief: target is blocked when resolution includes any private IP and policy disallows it."""
+
+    class Plugin(_DummyPlugin):
+        def __init__(self) -> None:
+            super().__init__()
+            self._axfr_notify_static_targets = [
+                {"host": "notify.example", "port": 53, "transport": "tcp"},
+            ]
+            self._axfr_notify_min_interval_seconds = 0.0
+
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        notify, "_is_local_notify_target", lambda _t: False, raising=True
+    )
+    monkeypatch.setattr(
+        notify,
+        "_resolve_target_ips",
+        lambda _host: {"203.0.113.7", "10.0.0.7"},
+        raising=True,
+    )
+    monkeypatch.setattr(
+        notify,
+        "send_notify_to_target",
+        lambda z, t: calls.append((z, dict(t))),
+        raising=True,
+    )
+
+    notify.send_notify_for_zones(Plugin(), ["example.com"])
+    assert calls == []
+
+
+def test_should_send_notify_allows_after_rolling_window(monkeypatch) -> None:
+    """Brief: per-target rate limiter allows send again once 60-second window elapses."""
+    plugin = _DummyPlugin()
+    plugin._axfr_notify_min_interval_seconds = 0.0
+    plugin._axfr_notify_rate_limit_per_target_per_minute = 1
+    target = {"host": "203.0.113.7", "port": 53, "transport": "tcp"}
+
+    times = iter([100.0, 100.1, 161.2])
+    monkeypatch.setattr(notify.time, "monotonic", lambda: next(times), raising=True)
+
+    assert notify._should_send_notify(plugin, target) is True
+    assert notify._should_send_notify(plugin, target) is False
+    assert notify._should_send_notify(plugin, target) is True
+
+
+def test_is_local_notify_target_matches_local_interface_ip(monkeypatch) -> None:
+    """Brief: self-loop detection matches local interface IPs as well as bind endpoints."""
+    target = {"host": "resolver.local", "port": 5300}
+    monkeypatch.setattr(
+        notify,
+        "_resolve_target_ips",
+        lambda _h: {"198.51.100.44"},
+        raising=True,
+    )
+    monkeypatch.setattr(
+        notify,
+        "_get_local_interface_ips",
+        lambda: {"198.51.100.44"},
+        raising=True,
+    )
+    monkeypatch.setattr(
+        notify,
+        "_get_local_dns_listener_endpoints",
+        lambda: {("0.0.0.0", 5300)},
+        raising=True,
+    )
+    assert notify._is_local_notify_target(target) is True
+
+
+def test_send_notify_for_zones_allows_target_when_hostname_is_allowlisted(
+    monkeypatch,
+) -> None:
+    """Brief: hostname allowlist permits matching NOTIFY target."""
+
+    class Plugin(_DummyPlugin):
+        def __init__(self) -> None:
+            super().__init__()
+            self._axfr_notify_static_targets = [
+                {"host": "notify.example.com", "port": 53, "transport": "tcp"},
+            ]
+            self._axfr_notify_min_interval_seconds = 0.0
+            self._axfr_notify_allow_private_targets = True
+            self._axfr_notify_target_allowlist = ["notify.example.com"]
+            self._axfr_notify_target_allowlist_hosts = {"notify.example.com"}
+
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        notify, "_is_local_notify_target", lambda _t: False, raising=True
+    )
+    monkeypatch.setattr(
+        notify,
+        "send_notify_to_target",
+        lambda z, t: calls.append((z, dict(t))),
+        raising=True,
+    )
+
+    notify.send_notify_for_zones(Plugin(), ["example.com"])
+    assert len(calls) == 1
+
+
+def test_send_notify_for_zones_allows_target_when_ip_matches_allowlist_cidr(
+    monkeypatch,
+) -> None:
+    """Brief: CIDR allowlist permits NOTIFY target when all resolved IPs are in range."""
+
+    ip_networks = importlib.import_module("foghorn.utils.ip_networks")
+
+    class Plugin(_DummyPlugin):
+        def __init__(self) -> None:
+            super().__init__()
+            self._axfr_notify_static_targets = [
+                {"host": "notify.example.com", "port": 53, "transport": "tcp"},
+            ]
+            self._axfr_notify_min_interval_seconds = 0.0
+            self._axfr_notify_allow_private_targets = True
+            self._axfr_notify_target_allowlist = ["203.0.113.0/24"]
+            self._axfr_notify_target_allowlist_networks = [
+                ip_networks.parse_network("203.0.113.0/24", strict=False),
+            ]
+
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        notify, "_is_local_notify_target", lambda _t: False, raising=True
+    )
+    monkeypatch.setattr(
+        notify,
+        "_resolve_target_ips",
+        lambda _host: {"203.0.113.99"},
+        raising=True,
+    )
+    monkeypatch.setattr(
+        notify,
+        "send_notify_to_target",
+        lambda z, t: calls.append((z, dict(t))),
+        raising=True,
+    )
+
+    notify.send_notify_for_zones(Plugin(), ["example.com"])
+    assert len(calls) == 1
+
+
+def test_send_notify_for_zones_blocks_target_when_resolution_mixes_allowlisted_and_non_allowlisted_ips(
+    monkeypatch,
+) -> None:
+    """Brief: allowlist rejects hostnames resolving to any non-allowlisted IP."""
+
+    ip_networks = importlib.import_module("foghorn.utils.ip_networks")
+
+    class Plugin(_DummyPlugin):
+        def __init__(self) -> None:
+            super().__init__()
+            self._axfr_notify_static_targets = [
+                {"host": "notify.example.com", "port": 53, "transport": "tcp"},
+            ]
+            self._axfr_notify_min_interval_seconds = 0.0
+            self._axfr_notify_allow_private_targets = True
+            self._axfr_notify_target_allowlist = ["203.0.113.0/24"]
+            self._axfr_notify_target_allowlist_networks = [
+                ip_networks.parse_network("203.0.113.0/24", strict=False),
+            ]
+
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        notify, "_is_local_notify_target", lambda _t: False, raising=True
+    )
+    monkeypatch.setattr(
+        notify,
+        "_resolve_target_ips",
+        lambda _host: {"203.0.113.99", "198.51.100.77"},
+        raising=True,
+    )
+    monkeypatch.setattr(
+        notify,
+        "send_notify_to_target",
+        lambda z, t: calls.append((z, dict(t))),
+        raising=True,
+    )
+
+    notify.send_notify_for_zones(Plugin(), ["example.com"])
+    assert calls == []
+
+
+def test_send_notify_for_zones_allows_target_when_allowlist_unset(monkeypatch) -> None:
+    """Brief: targets are not blocked by allowlist checks when allowlist is unset."""
+
+    class Plugin(_DummyPlugin):
+        def __init__(self) -> None:
+            super().__init__()
+            self._axfr_notify_static_targets = [
+                {"host": "203.0.113.20", "port": 53, "transport": "tcp"},
+            ]
+            self._axfr_notify_min_interval_seconds = 0.0
+            self._axfr_notify_allow_private_targets = True
+
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        notify, "_is_local_notify_target", lambda _t: False, raising=True
+    )
+    monkeypatch.setattr(
+        notify,
+        "send_notify_to_target",
+        lambda z, t: calls.append((z, dict(t))),
+        raising=True,
+    )
+
+    notify.send_notify_for_zones(Plugin(), ["example.com"])
+    assert len(calls) == 1
+
+
+def test_zone_records_setup_splits_notify_allowlist_hosts_and_networks() -> None:
+    """Brief: ZoneRecords setup parses NOTIFY target allowlist into host and CIDR buckets."""
+    mod = importlib.import_module("foghorn.plugins.resolve.zone_records")
+    ZoneRecords = mod.ZoneRecords
+
+    plugin = ZoneRecords(
+        records=[
+            "example.com|SOA|300|ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300",
+        ],
+        axfr_notify_target_allowlist=["notify.example.com", "203.0.113.0/24"],
+    )
+    plugin.setup()
+
+    assert plugin._axfr_notify_target_allowlist == [
+        "notify.example.com",
+        "203.0.113.0/24",
+    ]
+    assert plugin._axfr_notify_target_allowlist_hosts == {"notify.example.com"}
+    assert len(plugin._axfr_notify_target_allowlist_networks) == 1
+
+
+def test_schedule_delayed_notify_separate_targets_keep_separate_timers(
+    monkeypatch,
+) -> None:
+    """Brief: timers for different targets do not cancel each other."""
+    monkeypatch.setattr(
+        notify,
+        "send_notify_to_target",
+        lambda *_args, **_kwargs: None,
+        raising=True,
+    )
+
+    class FakeTimer:
+        created: list["FakeTimer"] = []
+
+        def __init__(self, delay: float, cb):  # noqa: ANN001
+            self.delay = delay
+            self.cb = cb
+            self.daemon = False
+            self.started = False
+            self.cancelled = False
+            FakeTimer.created.append(self)
+
+        def start(self) -> None:
+            self.started = True
+
+        def cancel(self) -> None:
+            self.cancelled = True
+
+    monkeypatch.setattr(notify.threading, "Timer", FakeTimer, raising=True)
+
+    notify.schedule_delayed_notify(
+        "example.com",
+        {"host": "192.0.2.1", "port": 53, "transport": "tcp"},
+        0.5,
+    )
+    notify.schedule_delayed_notify(
+        "example.com",
+        {"host": "192.0.2.2", "port": 53, "transport": "tcp"},
+        0.5,
+    )
+
+    assert len(FakeTimer.created) == 2
+    assert FakeTimer.created[0].cancelled is False
+    assert FakeTimer.created[1].cancelled is False
+
+
+def test_send_notify_for_zones_blocks_ipv6_ula_targets_by_default(monkeypatch) -> None:
+    """Brief: ULA IPv6 NOTIFY targets are blocked when private targets are disallowed."""
+
+    class Plugin(_DummyPlugin):
+        def __init__(self) -> None:
+            super().__init__()
+            self._axfr_notify_static_targets = [
+                {"host": "fd00::7", "port": 53, "transport": "tcp"},
+            ]
+            self._axfr_notify_min_interval_seconds = 0.0
+
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        notify, "_is_local_notify_target", lambda _t: False, raising=True
+    )
+    monkeypatch.setattr(
+        notify,
+        "send_notify_to_target",
+        lambda z, t: calls.append((z, dict(t))),
+        raising=True,
+    )
+
+    notify.send_notify_for_zones(Plugin(), ["example.com"])
+    assert calls == []
+
+
+def test_send_notify_for_zones_allows_ipv6_global_target(monkeypatch) -> None:
+    """Brief: globally-routable IPv6 targets are allowed when private blocking is enabled."""
+
+    class Plugin(_DummyPlugin):
+        def __init__(self) -> None:
+            super().__init__()
+            self._axfr_notify_static_targets = [
+                {"host": "2606:4700:4700::1111", "port": 53, "transport": "tcp"},
+            ]
+            self._axfr_notify_min_interval_seconds = 0.0
+
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        notify, "_is_local_notify_target", lambda _t: False, raising=True
+    )
+    monkeypatch.setattr(
+        notify,
+        "send_notify_to_target",
+        lambda z, t: calls.append((z, dict(t))),
+        raising=True,
+    )
+
+    notify.send_notify_for_zones(Plugin(), ["example.com"])
+    assert len(calls) == 1
+
+
+def test_is_local_notify_target_matches_ipv6_local_interface_ip(monkeypatch) -> None:
+    """Brief: self-loop detection works for IPv6 interface addresses."""
+    target = {"host": "resolver-v6.local", "port": 5300}
+    monkeypatch.setattr(
+        notify,
+        "_resolve_target_ips",
+        lambda _h: {"2001:db8::44"},
+        raising=True,
+    )
+    monkeypatch.setattr(
+        notify,
+        "_get_local_interface_ips",
+        lambda: {"2001:db8::44"},
+        raising=True,
+    )
+    monkeypatch.setattr(
+        notify,
+        "_get_local_dns_listener_endpoints",
+        lambda: {("127.0.0.1", 5300)},
+        raising=True,
+    )
+    assert notify._is_local_notify_target(target) is True

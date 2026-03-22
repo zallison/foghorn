@@ -201,7 +201,7 @@ def start_polling(plugin: object) -> None:
     try:
         _ = have_files_changed(plugin)
     except Exception:  # pragma: no cover - defensive logging only
-        logger.debug("ZoneRecords: failed to establish polling baseline", exc_info=True)
+        logger.debug("failed to establish polling baseline", exc_info=True)
 
     thread = threading.Thread(
         target=_poll_loop, args=(plugin,), name="CustomRecordsPoller"
@@ -398,7 +398,7 @@ def reload_records_from_watchdog(
         )
     except Exception:  # pragma: no cover - defensive logging only
         logger.warning(
-            "ZoneRecords: failed to compute changed zones after reload",
+            "failed to compute changed zones after reload",
             exc_info=True,
         )
         return
@@ -407,6 +407,6 @@ def reload_records_from_watchdog(
         notify.send_notify_for_zones(plugin, changed_zones)
     except Exception:  # pragma: no cover - defensive logging only
         logger.warning(
-            "ZoneRecords: failed to send NOTIFY after records reload",
+            "failed to send NOTIFY after records reload",
             exc_info=True,
         )
