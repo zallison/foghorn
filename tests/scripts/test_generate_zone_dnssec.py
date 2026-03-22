@@ -253,6 +253,7 @@ $TTL 300
             str(signed2),
             "--keys-dir",
             str(keys_dir),
+            "--verbose",
         ],
         capture_output=True,
         text=True,
@@ -260,7 +261,6 @@ $TTL 300
     )
     assert result2.returncode == 0
 
-    # Check that key tags are the same (from stderr logs).
-    # The key tags are logged as "KSK key tag: <num>" and "ZSK key tag: <num>".
+    # Check that existing keys were reused (debug-level logs, enabled with --verbose).
     assert "Loaded existing KSK key" in result2.stderr
     assert "Loaded existing ZSK key" in result2.stderr
