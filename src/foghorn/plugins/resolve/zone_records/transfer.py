@@ -1,7 +1,7 @@
 """Brief: Zone transfer export for AXFR/IXFR.
 
 Inputs/Outputs:
-  - Export RRsets for zone transfers, with optional client learning.
+  - Export RRsets for zone transfers.
 """
 
 from __future__ import annotations
@@ -11,8 +11,6 @@ import logging
 from typing import List, Optional
 
 from dnslib import QTYPE, RCODE, RR, DNSHeader, DNSRecord
-
-from . import notify
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +25,7 @@ def iter_zone_rrs_for_transfer(
     Inputs:
       - plugin: ZoneRecords plugin instance with records and zone state.
       - zone_apex: Zone apex name (with or without trailing dot), case-insensitive.
-      - client_ip: Optional IP address of the AXFR/IXFR client; when
-        provided and axfr_notify_all is enabled, this is recorded as a
-        learned NOTIFY target for the zone.
+      - client_ip: Optional IP address of the AXFR/IXFR client.
 
     Outputs:
       - list[RR]: All RRs in the zone suitable for AXFR/IXFR transfer, or
@@ -49,19 +45,6 @@ def iter_zone_rrs_for_transfer(
     apex = dns_names.normalize_name(zone_apex) if zone_apex is not None else ""
     if not apex:
         return None
-
-    # Optionally remember the AXFR client as a NOTIFY target when
-    # axfr_notify_all is enabled.
-    if client_ip and getattr(plugin, "_axfr_notify_all", False):
-        try:
-            notify.record_axfr_client(plugin, apex, client_ip)
-        except Exception:  # pragma: no cover - defensive logging only
-            logger.warning(
-                "ZoneRecords: failed to record AXFR client %s for zone %s",
-                client_ip,
-                apex,
-                exc_info=True,
-            )
 
     lock = getattr(plugin, "_records_lock", None)
 

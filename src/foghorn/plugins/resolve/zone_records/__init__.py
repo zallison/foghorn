@@ -24,7 +24,7 @@ from foghorn.plugins.resolve.base import (
     plugin_aliases,
 )
 from foghorn.servers.dns_runtime_state import DNSRuntimeState
-from foghorn.utils import dns_names
+from foghorn.utils import dns_names, ip_networks
 from foghorn.utils.register_caches import registered_cached
 
 from . import (
@@ -739,6 +739,12 @@ class ZoneRecordsConfig(BaseModel):
       - merge_policy: "add" (default) to append unique values into existing
         RRsets, or "overwrite" to replace RRsets when the same (name,qtype)
         appears in a later source.
+      - max_file_size_bytes: Maximum bytes allowed for any file_path/bind_path.
+      - max_records: Maximum total record values accepted during one load cycle.
+      - max_record_value_length: Maximum allowed rdata value length in characters.
+      - auto_ptr_enabled: Enables/disables automatic PTR synthesis from A/AAAA.
+      - max_auto_ptr_records: Maximum number of auto-generated PTR values.
+      - soa_synthesis_enabled: Enables/disables fallback SOA synthesis when absent.
       - watchdog_enabled: Enable watchdog-based reloads.
       - watchdog_min_interval_seconds: Minimum seconds between reloads.
       - watchdog_poll_interval_seconds: Optional polling interval.
@@ -779,6 +785,43 @@ class ZoneRecordsConfig(BaseModel):
             "Controls conflict behaviour when the same (name,qtype) appears more "
             "than once: 'add' appends unique values (keeping the earlier TTL); "
             "'overwrite' replaces the RRset using the later source."
+        ),
+    )
+    max_file_size_bytes: int = Field(
+        default=16 * 1024 * 1024,
+        ge=1,
+        description=(
+            "Maximum allowed file size in bytes for entries loaded from file_paths "
+            "and bind_paths. Files larger than this limit are rejected."
+        ),
+    )
+    max_records: int = Field(
+        default=500000,
+        ge=1,
+        description=(
+            "Maximum total record values accepted during a single load pass "
+            "(across inline, file_paths, and bind_paths)."
+        ),
+    )
+    max_record_value_length: int = Field(
+        default=4096,
+        ge=1,
+        description="Maximum allowed length in characters for stored record values.",
+    )
+    auto_ptr_enabled: bool = Field(
+        default=True,
+        description="Enable automatic PTR generation from A/AAAA records.",
+    )
+    max_auto_ptr_records: int = Field(
+        default=100000,
+        ge=1,
+        description="Maximum number of PTR values auto-generated in one load cycle.",
+    )
+    soa_synthesis_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable fallback SOA synthesis from record-name suffix inference when "
+            "no explicit SOA is present."
         ),
     )
     watchdog_enabled: Optional[bool] = None
@@ -825,20 +868,43 @@ class ZoneRecordsConfig(BaseModel):
             "are supported for outbound NOTIFY."
         ),
     )
-    axfr_notify_all: bool = Field(
+    axfr_notify_allow_private_targets: bool = Field(
         default=False,
         description=(
-            "When true, automatically learn NOTIFY targets from AXFR/IXFR "
-            "clients by recording their source IPs as downstream secondaries."
+            "When false (default), outbound NOTIFY targets that resolve to "
+            "private/loopback/link-local/multicast/reserved addresses are blocked."
+        ),
+    )
+    axfr_notify_target_allowlist: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional allowlist for outbound NOTIFY targets. Entries can be "
+            "hostnames, IP literals, or CIDRs; when set, all NOTIFY targets "
+            "must match."
+        ),
+    )
+    axfr_notify_min_interval_seconds: float = Field(
+        default=1.0,
+        ge=0,
+        description=(
+            "Minimum elapsed seconds between consecutive NOTIFY sends to the "
+            "same configured target."
+        ),
+    )
+    axfr_notify_rate_limit_per_target_per_minute: int = Field(
+        default=60,
+        ge=1,
+        description=(
+            "Maximum NOTIFY messages sent to a single configured target in a "
+            "rolling 60-second window."
         ),
     )
     axfr_notify_scheduled: Optional[int] = Field(
         default=None,
         ge=0,
         description=(
-            "Optional delay in seconds after serving AXFR/IXFR to a client "
-            "before sending a follow-up NOTIFY for the transferred zone. "
-            "Ignored when null or zero."
+            "Deprecated compatibility field for legacy learned-target NOTIFY "
+            "behavior. Parsed but ignored."
         ),
     )
     dnssec_signing: Optional[ZoneDnssecSigningConfig] = None
@@ -1666,7 +1732,46 @@ class ZoneRecords(BasePlugin):
         self._axfr_notify_static_targets = helpers.normalize_axfr_notify_targets(
             self.config.get("axfr_notify")
         )
-        self._axfr_notify_all = bool(self.config.get("axfr_notify_all", False))
+        self._axfr_notify_allow_private_targets = bool(
+            self.config.get("axfr_notify_allow_private_targets", False)
+        )
+        allowlist_cfg = self.config.get("axfr_notify_target_allowlist")
+        allowlist_values: List[str] = []
+        if isinstance(allowlist_cfg, list):
+            for value in allowlist_cfg:
+                try:
+                    item = str(value or "").strip()
+                except Exception:
+                    item = ""
+                if item:
+                    allowlist_values.append(item)
+        self._axfr_notify_target_allowlist = list(allowlist_values)
+        self._axfr_notify_target_allowlist_hosts: Set[str] = set()
+        self._axfr_notify_target_allowlist_networks: List[ipaddress._BaseNetwork] = []
+        for item in allowlist_values:
+            net = ip_networks.parse_network(item, strict=False)
+            if net is not None:
+                self._axfr_notify_target_allowlist_networks.append(net)
+            else:
+                self._axfr_notify_target_allowlist_hosts.add(item.lower().rstrip("."))
+        try:
+            self._axfr_notify_min_interval_seconds = max(
+                0.0, float(self.config.get("axfr_notify_min_interval_seconds", 1.0))
+            )
+        except (TypeError, ValueError):
+            self._axfr_notify_min_interval_seconds = 1.0
+        try:
+            self._axfr_notify_rate_limit_per_target_per_minute = max(
+                1,
+                int(
+                    self.config.get(
+                        "axfr_notify_rate_limit_per_target_per_minute",
+                        60,
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            self._axfr_notify_rate_limit_per_target_per_minute = 60
         notify_delay_raw = self.config.get("axfr_notify_scheduled")
         try:
             notify_delay = (
@@ -1677,9 +1782,13 @@ class ZoneRecords(BasePlugin):
         if notify_delay is not None and notify_delay < 0:
             notify_delay = None
         self._axfr_notify_delay = notify_delay
-        self._axfr_notify_learned: Dict[str, Dict[str, Dict[str, object]]] = {}
-        self._axfr_notify_health: Dict[str, Dict[str, object]] = {}
         self._axfr_notify_lock = threading.RLock()
+        self._axfr_notify_send_history: Dict[str, List[float]] = {}
+        self._axfr_notify_last_sent: Dict[str, float] = {}
+        if "axfr_notify_all" in self.config:
+            logger.warning(
+                "ZoneRecords: axfr_notify_all is deprecated and ignored; use axfr_notify targets only."
+            )
 
         # Normalize DNS UPDATE configuration
         dns_update_cfg = self.config.get("dns_update")

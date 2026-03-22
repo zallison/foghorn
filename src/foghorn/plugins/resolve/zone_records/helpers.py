@@ -196,15 +196,14 @@ def normalize_zone_suffixes(raw: object) -> List[str]:
     for idx, entry in enumerate(items):
         if entry is None:
             continue
-        try:
-            text = str(entry).strip()
-        except Exception:
+        if not isinstance(entry, str):
             logger.warning(
-                "ZoneRecords nxdomain_zones[%d] ignored: could not coerce %r to str",
+                "ZoneRecords nxdomain_zones[%d] ignored: expected string, got %r",
                 idx,
                 entry,
             )
             continue
+        text = entry.strip()
         if not text:
             continue
         zones.append(dns_names.normalize_name(text))

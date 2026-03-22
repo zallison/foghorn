@@ -61,6 +61,12 @@ plugins:
       # Optional: load/reload behaviour
       load_mode: merge     # replace | merge | first
       merge_policy: add    # add | overwrite
+      max_file_size_bytes: 16777216
+      max_records: 500000
+      max_record_value_length: 4096
+      auto_ptr_enabled: true
+      max_auto_ptr_records: 100000
+      soa_synthesis_enabled: true
 
       # Automatic reload control
       watchdog_enabled: true
@@ -99,7 +105,9 @@ plugins:
           server_name: notify.example.com
           verify: true
           ca_file: ./keys/foghorn_ca.pem
-      axfr_notify_all: false
+      axfr_notify_allow_private_targets: false
+      axfr_notify_min_interval_seconds: 1.0
+      axfr_notify_rate_limit_per_target_per_minute: 60
       axfr_notify_scheduled: 5
 
       # Optional DNSSEC auto-signing

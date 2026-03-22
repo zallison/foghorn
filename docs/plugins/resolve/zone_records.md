@@ -217,6 +217,7 @@ Clients without DO=1 receive only the base RRsets without signatures.
 - `path_allowlist: list[str] | null`
   - Optional list of allowed directory prefixes for `file_paths` and `bind_paths`.
   - Paths outside these prefixes are ignored with a warning.
+  - Paths containing explicit `..` segments are rejected.
   - Protect the config file; without this allowlist, any readable path can be used.
 - `file_path: str | null`
   - Legacy single records file path; merged into `file_paths` when both are set.
@@ -243,6 +244,28 @@ Clients without DO=1 receive only the base RRsets without signatures.
     `(domain, qtype)`.
   - When `overwrite` overwrites any owners, ZoneRecords logs a single warning
     summarizing how many owners were overwritten per source.
+- `max_file_size_bytes: int`
+  - Maximum allowed size (bytes) for each configured file in `file_paths` and
+    `bind_paths`. Files larger than this are rejected during load.
+  - Default: `16777216` (16 MiB).
+- `max_records: int`
+  - Maximum total record values accepted in one load pass.
+  - Applies across inline records, `file_paths`, and `bind_paths`.
+  - Default: `500000`.
+- `max_record_value_length: int`
+  - Maximum allowed character length for each record value (rdata text).
+  - Oversized values are rejected during load.
+  - Default: `4096`.
+- `auto_ptr_enabled: bool`
+  - Enables/disables automatic PTR synthesis from loaded A/AAAA records.
+  - Default: `true`.
+- `max_auto_ptr_records: int`
+  - Maximum number of PTR values auto-generated in one load pass.
+  - Default: `100000`.
+- `soa_synthesis_enabled: bool`
+  - Enables/disables fallback SOA synthesis from inferred common suffixes when
+    no SOA is explicitly present.
+  - Default: `true`.
 - `axfr_zones: list[object] | null`
   - Optional list of zones fetched via AXFR at startup. Each entry should include:
     - `zone: str` – zone apex (e.g. `"example.com"`, `"0.0.10.in-addr.arpa"`).
@@ -274,6 +297,29 @@ Clients without DO=1 receive only the base RRsets without signatures.
 - `axfr_poll_min_interval_seconds: float`
   - Minimum polling interval enforced for AXFR polling. Defaults to `60.0`.
   - Values below the hard floor are clamped to `10.0`.
+- `axfr_notify: list[object] | null`
+  - Optional static list of downstream NOTIFY recipients. Each entry supports:
+    - `host`, `port`, `timeout_ms`
+    - `transport` (`tcp` or `dot`)
+    - `server_name`, `verify`, `ca_file` for DoT.
+  - Only configured targets are used; AXFR clients are not auto-learned.
+- `axfr_notify_allow_private_targets: bool`
+  - Default: `false`.
+  - When `false`, NOTIFY targets resolving to private/loopback/link-local/
+    multicast/reserved addresses are blocked.
+- `axfr_notify_target_allowlist: list[str] | null`
+  - Optional outbound NOTIFY target allowlist.
+  - Entries may be hostnames, IP literals, or CIDR ranges.
+  - When set, each NOTIFY target must match the hostname allowlist directly or
+    resolve only to allowlisted IP/CIDR addresses.
+- `axfr_notify_min_interval_seconds: float`
+  - Default: `1.0`.
+  - Minimum elapsed seconds between sends to the same NOTIFY target.
+- `axfr_notify_rate_limit_per_target_per_minute: int`
+  - Default: `60`.
+  - Maximum sends to the same target within a rolling 60-second window.
+- `axfr_notify_scheduled: int | null`
+  - Deprecated compatibility field; retained for config stability.
 - `watchdog_enabled: bool | null`
   - When `true`, and `watchdog` is present, start filesystem watchers for
 	configured files and reload on change.
