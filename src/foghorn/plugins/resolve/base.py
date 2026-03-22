@@ -1532,6 +1532,23 @@ class BasePlugin:
         """
         return None
 
+    def post_setup(self) -> None:
+        """Brief: Hook invoked after all setup() plugins have completed.
+
+        Inputs:
+          - None
+
+        Outputs:
+          - None
+
+        Notes:
+          - Base implementation is a no-op.
+          - post_setup() runs once after the setup phase has completed for
+            all plugins, allowing plugins to start optional background work that
+            should not run during setup().
+        """
+        return None
+
     def shutdown(self) -> None:
         """Brief: Best-effort teardown hook invoked during config reload or shutdown.
 

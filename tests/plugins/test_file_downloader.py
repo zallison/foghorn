@@ -924,6 +924,73 @@ def test_setup_calls_maybe_run_and_returns_none(monkeypatch, tmp_path):
     assert called["force"] is True
 
 
+def test_setup_defers_startup_check_until_post_setup(monkeypatch, tmp_path):
+    """Brief: setup defers delayed startup check until post_setup is called.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Temporary directory for downloader files.
+
+    Outputs:
+      - None; asserts delayed startup check is triggered only from post_setup().
+    """
+
+    url = "https://example.com/list.txt"
+    dl = FileDownloader(download_path=str(tmp_path), urls=[url], url_files=[])
+
+    # Ensure startup-delay condition is met: a fresh local file already exists.
+    existing = tmp_path / "list.txt"
+    existing.write_text("one.example\n")
+    now = time.time()
+    os.utime(existing, (now, now))
+
+    called = {"count": 0}
+
+    def fake_start_delayed_startup_check() -> None:
+        called["count"] += 1
+
+    monkeypatch.setattr(
+        dl,
+        "_start_delayed_startup_check",
+        fake_start_delayed_startup_check,
+    )
+
+    dl.setup()
+    assert dl._run_startup_check_on_post_setup is True
+    assert called["count"] == 0
+
+    dl.post_setup()
+    assert dl._run_startup_check_on_post_setup is False
+    assert called["count"] == 1
+
+
+def test_post_setup_noop_when_no_deferred_startup_check(monkeypatch, tmp_path):
+    """Brief: post_setup is a no-op when setup did not defer startup checks.
+
+    Inputs:
+      - monkeypatch: Pytest monkeypatch fixture.
+      - tmp_path: Temporary directory for downloader files.
+
+    Outputs:
+      - None; asserts no delayed startup check is started.
+    """
+
+    dl = FileDownloader(download_path=str(tmp_path), urls=[], url_files=[])
+    called = {"count": 0}
+
+    def fake_start_delayed_startup_check() -> None:
+        called["count"] += 1
+
+    monkeypatch.setattr(
+        dl,
+        "_start_delayed_startup_check",
+        fake_start_delayed_startup_check,
+    )
+
+    dl.post_setup()
+    assert called["count"] == 0
+
+
 def test_init_invalid_interval_days_disables_periodic_refresh(tmp_path, caplog):
     """Brief: Invalid interval_days value logs a warning and disables refresh.
 

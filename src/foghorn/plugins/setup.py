@@ -570,6 +570,33 @@ def run_setup_plugins(
                     bool(fallback_to_system),
                 )
 
+    # Notify plugins that the setup phase is complete. This runs after both
+    # provider and regular setup phases, so plugins can start background tasks
+    # that should not execute during setup().
+    finished_order: List[BasePlugin] = [p for _, p in provider_entries] + [
+        p for _, p in regular_entries
+    ]
+    seen_ids = {id(p) for p in finished_order}
+    for plugin in plugins or []:
+        if id(plugin) in seen_ids:
+            continue
+        seen_ids.add(id(plugin))
+        finished_order.append(plugin)
+
+    for plugin in finished_order:
+        abort_on_failure = _setup_abort_on_failure(plugin)
+        name = plugin.__class__.__name__
+        try:
+            plugin.post_setup()
+        except Exception as e:
+            logger.error("post_setup for plugin %s failed: %s", name, e, exc_info=True)
+            if abort_on_failure:
+                raise RuntimeError(f"post_setup for plugin {name} failed") from e
+            logger.warning(
+                "Continuing startup despite post_setup failure in plugin %s because abort_on_failure is False",
+                name,
+            )
+
 
 def run_shutdown_plugins(plugins: List[object]) -> None:
     """Brief: Run shutdown() on lifecycle objects that expose a callable hook.
