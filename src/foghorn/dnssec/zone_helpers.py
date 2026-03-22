@@ -97,7 +97,7 @@ def classify_local_zones_dnssec(
                 dnssec_state = "none"
             log.info(
                 (
-                    "ZoneRecords zone %s dnssec_state=%s "
+                    "ZoneRecords dnssec: '%s' dnssec_state=%s "
                     "(autosign_enabled=%s, "
                     "apex_has_dnskey=%s, "
                     "apex_has_rrsig=%s)"

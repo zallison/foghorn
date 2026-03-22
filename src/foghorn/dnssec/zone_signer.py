@@ -205,7 +205,7 @@ def load_key(key_dir: Path, zone_name: str, key_type: str) -> Optional[object]:
     pem_bytes = key_path.read_bytes()
     try:
         private_key = serialization.load_pem_private_key(pem_bytes, password=None)
-        logger.info("Loaded existing %s key from %s", key_type.upper(), key_path)
+        logger.debug("Loaded existing %s key from %s", key_type.upper(), key_path)
         return private_key
     except (
         Exception
@@ -397,19 +397,19 @@ def ensure_zone_keys(
             )
     else:
         if ksk_private is None:
-            logger.info("Generating new KSK with algorithm %s", algorithm)
+            logger.warn("Generating new KSK with algorithm %s", algorithm)
             ksk_private, _ = generate_keypair(algorithm, "ksk")
             save_key(ksk_private, keys_dir, zone_name_str, "ksk", algorithm)
         if zsk_private is None:
-            logger.info("Generating new ZSK with algorithm %s", algorithm)
+            logger.warn("Generating new ZSK with algorithm %s", algorithm)
             zsk_private, _ = generate_keypair(algorithm, "zsk")
             save_key(zsk_private, keys_dir, zone_name_str, "zsk", algorithm)
 
     ksk_dnskey = make_dnskey_rdata(ksk_private, alg_enum, flags=257)
     zsk_dnskey = make_dnskey_rdata(zsk_private, alg_enum, flags=256)
 
-    logger.info("KSK key tag: %d", dns.dnssec.key_id(ksk_dnskey))
-    logger.info("ZSK key tag: %d", dns.dnssec.key_id(zsk_dnskey))
+    logger.debug("KSK key tag: %d", dns.dnssec.key_id(ksk_dnskey))
+    logger.debug("ZSK key tag: %d", dns.dnssec.key_id(zsk_dnskey))
 
     return ksk_private, zsk_private, ksk_dnskey, zsk_dnskey
 
