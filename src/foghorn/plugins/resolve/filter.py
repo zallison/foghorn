@@ -741,71 +741,17 @@ class Filter(BasePlugin):
 
         # Check each answer record
         for rr in original_records:
-            if rr.rtype in (QTYPE.A, QTYPE.AAAA):
-                try:
-                    ip_addr = ip_networks.parse_ip(str(rr.rdata))
-                    if ip_addr is None:
-                        modified_records.append(rr)
-                        continue
-                    action_config = self._get_ip_action(ip_addr)
-
-                    if action_config:
-                        action = action_config.get("action")
-                        if action == "deny":
-                            blocked_ips_deny.append(str(ip_addr))
-                            logger.debug(
-                                "Blocked IP %s for domain %s (action: deny)",
-                                ip_addr,
-                                qname,
-                            )
-                            records_changed = True
-                        elif action == "remove":
-                            blocked_ips_remove.append(str(ip_addr))
-                            logger.debug(
-                                "Blocked IP %s for domain %s (action: remove)",
-                                ip_addr,
-                                qname,
-                            )
-                            records_changed = True
-                        elif action == "replace":
-                            replace_ip_str = action_config.get("replace_with")
-                            replacement_ip = ip_networks.parse_ip(replace_ip_str)
-                            if replacement_ip is None:  # pragma: no cover - defensive
-                                logger.error(
-                                    "Invalid replacement IP: %s", replace_ip_str
-                                )
-                                modified_records.append(rr)
-                            else:
-                                # Ensure IP versions are compatible
-                                if ip_addr.version == replacement_ip.version:
-                                    # Replace rdata with correct RDATA type
-                                    if rr.rtype == QTYPE.A:
-                                        rr.rdata = RDATA_A(str(replacement_ip))
-                                    elif rr.rtype == QTYPE.AAAA:
-                                        rr.rdata = RDATA_AAAA(str(replacement_ip))
-                                    modified_records.append(rr)
-                                    logger.info(
-                                        "Replaced IP %s with %s for domain %s",
-                                        ip_addr,
-                                        replacement_ip,
-                                        qname,
-                                    )
-                                else:
-                                    logger.warning(
-                                        "Cannot replace IP %s with %s due to version mismatch.",
-                                        ip_addr,
-                                        replacement_ip,
-                                    )
-                                    modified_records.append(rr)
-                                records_changed = True
-                        else:
-                            modified_records.append(rr)
-                    else:
-                        modified_records.append(rr)
-                except ValueError:
-                    modified_records.append(rr)  # Keep non-IP records
-            else:
-                modified_records.append(rr)  # Keep non-A/AAAA records
+            record, changed, denied_ip, removed_ip = self._resolve_post_record_action(
+                rr, qname
+            )
+            if record is not None:
+                modified_records.append(record)
+            if denied_ip is not None:
+                blocked_ips_deny.append(denied_ip)
+            if removed_ip is not None:
+                blocked_ips_remove.append(removed_ip)
+            if changed:
+                records_changed = True
 
         # If any IP has "deny" action, return a policy deny for the entire response
         if blocked_ips_deny:
@@ -841,6 +787,122 @@ class Filter(BasePlugin):
 
         return PluginDecision(action="skip")
 
+    def _resolve_post_record_action(
+        self, rr: RR, qname: str
+    ) -> Tuple[Optional[RR], bool, Optional[str], Optional[str]]:
+        """Brief: Apply post-resolve IP action rules to a single DNS answer record.
+
+        Inputs:
+            rr: DNS resource record from upstream response.
+            qname: Queried domain name (for logging context).
+
+        Outputs:
+            Tuple of:
+              - Optional[RR]: record to keep in response (None when removed/denied),
+              - bool: whether a rule changed the response handling,
+              - Optional[str]: denied IP string (for aggregated logging),
+              - Optional[str]: removed IP string (for aggregated tracking).
+        """
+        if rr.rtype not in (QTYPE.A, QTYPE.AAAA):
+            return rr, False, None, None
+
+        try:
+            ip_addr = ip_networks.parse_ip(str(rr.rdata))
+            if ip_addr is None:
+                return rr, False, None, None
+
+            action_config = self._get_ip_action(ip_addr)
+            if not action_config:
+                return rr, False, None, None
+
+            action = action_config.get("action")
+            if action == "deny":
+                logger.debug(
+                    "Blocked IP %s for domain %s (action: deny)",
+                    ip_addr,
+                    qname,
+                )
+                return None, True, str(ip_addr), None
+
+            if action == "remove":
+                logger.debug(
+                    "Blocked IP %s for domain %s (action: remove)",
+                    ip_addr,
+                    qname,
+                )
+                return None, True, None, str(ip_addr)
+
+            if action == "replace":
+                replace_ip_str = action_config.get("replace_with")
+                replacement_ip = ip_networks.parse_ip(replace_ip_str)
+                if replacement_ip is None:  # pragma: no cover - defensive
+                    logger.error("Invalid replacement IP: %s", replace_ip_str)
+                    return rr, False, None, None
+
+                # Ensure IP versions are compatible
+                if ip_addr.version == replacement_ip.version:
+                    # Replace rdata with correct RDATA type
+                    if rr.rtype == QTYPE.A:
+                        rr.rdata = RDATA_A(str(replacement_ip))
+                    elif rr.rtype == QTYPE.AAAA:
+                        rr.rdata = RDATA_AAAA(str(replacement_ip))
+                    logger.info(
+                        "Replaced IP %s with %s for domain %s",
+                        ip_addr,
+                        replacement_ip,
+                        qname,
+                    )
+                else:
+                    logger.warning(
+                        "Cannot replace IP %s with %s due to version mismatch.",
+                        ip_addr,
+                        replacement_ip,
+                    )
+                return rr, True, None, None
+
+            return rr, False, None, None
+        except ValueError:
+            return rr, False, None, None
+
+    def _build_override_decision_from_raw_request(
+        self,
+        raw_req: bytes,
+        mode: str,
+        *,
+        log_parse_failure: bool,
+    ) -> Optional[PluginDecision]:
+        """Brief: Build an override PluginDecision from raw DNS request bytes.
+
+        Inputs:
+            raw_req: Original DNS request wire bytes.
+            mode: Deny response mode ('refused', 'servfail', or NODATA style).
+            log_parse_failure: Whether parse failures should be logged as warnings.
+
+        Outputs:
+            PluginDecision(action='override', ...) on success, else None if request
+            parsing fails.
+        """
+        try:
+            request = DNSRecord.parse(raw_req)
+        except Exception as e:
+            if log_parse_failure:
+                logger.warning(
+                    "failed to parse request while building deny response: %s",
+                    e,
+                )
+            return None
+
+        reply = request.reply()
+        if mode == "refused":
+            reply.header.rcode = RCODE.REFUSED
+        elif mode == "servfail":
+            reply.header.rcode = RCODE.SERVFAIL
+        else:
+            reply.header.rcode = RCODE.NOERROR
+            # Produce NOERROR with no answers (NODATA-style response)
+            reply.rr = []
+        return PluginDecision(action="override", response=reply.pack())
+
     def _build_deny_decision_pre(
         self,
         qname: str,
@@ -873,27 +935,14 @@ class Filter(BasePlugin):
             return PluginDecision(action="drop")
 
         if mode in {"refused", "servfail", "noerror_empty", "nodata"}:
-            try:
-                request = DNSRecord.parse(raw_req)
-            except (
-                Exception
-            ) as e:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
-                logger.warning(
-                    "failed to parse request while building deny response: %s",
-                    e,
-                )
+            decision = self._build_override_decision_from_raw_request(
+                raw_req,
+                mode,
+                log_parse_failure=True,
+            )
+            if decision is None:
                 return PluginDecision(action="deny")
-
-            reply = request.reply()
-            if mode == "refused":
-                reply.header.rcode = RCODE.REFUSED
-            elif mode == "servfail":
-                reply.header.rcode = RCODE.SERVFAIL
-            else:
-                reply.header.rcode = RCODE.NOERROR
-                # Produce NOERROR with no answers (NODATA-style response)
-                reply.rr = []
-            return PluginDecision(action="override", response=reply.pack())
+            return decision
 
         if mode == "ip":
             if qtype not in (QTYPE.A, QTYPE.AAAA):
@@ -910,19 +959,14 @@ class Filter(BasePlugin):
                 if fallback_mode == "nxdomain":
                     return PluginDecision(action="deny")
                 if fallback_mode in {"refused", "servfail", "noerror_empty", "nodata"}:
-                    try:
-                        request = DNSRecord.parse(raw_req)
-                    except Exception:
+                    decision = self._build_override_decision_from_raw_request(
+                        raw_req,
+                        fallback_mode,
+                        log_parse_failure=False,
+                    )
+                    if decision is None:
                         return PluginDecision(action="deny")
-                    reply = request.reply()
-                    if fallback_mode == "refused":
-                        reply.header.rcode = RCODE.REFUSED
-                    elif fallback_mode == "servfail":
-                        reply.header.rcode = RCODE.SERVFAIL
-                    else:
-                        reply.header.rcode = RCODE.NOERROR
-                        reply.rr = []
-                    return PluginDecision(action="override", response=reply.pack())
+                    return decision
                 return PluginDecision(action="deny")
             ipaddr: Optional[str] = None
             if qtype == QTYPE.A and self.deny_response_ip4:
@@ -1726,6 +1770,25 @@ class Filter(BasePlugin):
         return [d for d in domains if d], True
 
     @staticmethod
+    def _normalize_list_token(token: str) -> str:
+        """
+        Brief: Normalize a domain token from list files.
+
+        Inputs:
+          - token: Raw domain token.
+        Outputs:
+          - Normalized token with AdGuard/Adblock-style wrappers removed.
+
+        Behaviour:
+          - Trims surrounding whitespace and trailing dots.
+          - Removes a leading '||' wrapper used by AdGuard/Adblock syntax.
+        """
+        normalized = token.strip()
+        if normalized.startswith("||"):
+            normalized = normalized[2:]
+        return normalized.strip().strip(".")
+
+    @staticmethod
     def _is_plain_domain_token(token: str) -> bool:
         """
         Brief: Heuristically validate a plain domain token.
@@ -1815,24 +1878,6 @@ class Filter(BasePlugin):
         logger.info("hashing list file %s", source_filename)
         content_fingerprint = self._file_content_fingerprint(source_filename)
 
-        def _normalize_token(token: str) -> str:
-            """
-            Brief: Normalize a domain token from list files.
-
-            Inputs:
-              - token: raw domain token
-            Outputs:
-              - normalized token with AdGuard/Adblock-style wrappers removed.
-
-            Behaviour:
-              - Trims surrounding whitespace and trailing dots.
-              - Removes a leading '||' wrapper used by AdGuard/Adblock syntax.
-            """
-            t = token.strip()
-            if t.startswith("||"):
-                t = t[2:]
-            return t.strip().strip(".")
-
         logger.debug("Opening %s for %s", filename, mode)
         matched_supported_format = False
         inserted_domains = 0
@@ -1877,7 +1922,7 @@ class Filter(BasePlugin):
                                 "JSON domain line not an object in %s", filename
                             )
                             continue
-                        domain_val = _normalize_token(
+                        domain_val = self._normalize_list_token(
                             str(obj.get("domain", "")).strip()
                         )
                         line_mode = obj.get("mode")
@@ -1896,7 +1941,7 @@ class Filter(BasePlugin):
                                 eff_mode = adguard_mode
                             if adguard_domain:
                                 domains_to_insert.append(
-                                    _normalize_token(adguard_domain)
+                                    self._normalize_list_token(adguard_domain)
                                 )
                         else:
                             host_domains, hosts_matched = self._extract_hosts_domains(
@@ -1905,11 +1950,14 @@ class Filter(BasePlugin):
                             if hosts_matched:
                                 matched_supported_format = True
                                 domains_to_insert.extend(
-                                    _normalize_token(domain) for domain in host_domains
+                                    self._normalize_list_token(domain)
+                                    for domain in host_domains
                                 )
                             elif self._is_plain_domain_token(line):
                                 matched_supported_format = True
-                                domains_to_insert.append(_normalize_token(line))
+                                domains_to_insert.append(
+                                    self._normalize_list_token(line)
+                                )
                             else:
                                 unsupported_lines += 1
                                 continue
