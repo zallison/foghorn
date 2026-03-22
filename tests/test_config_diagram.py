@@ -156,6 +156,68 @@ def test_ensure_config_diagram_png_skips_when_up_to_date(
     assert detail == "up-to-date"
 
 
+def test_ensure_config_diagram_png_skips_when_only_config_mtime_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Brief: ensure_config_diagram_png skips rewrites when generated dot text is unchanged.
+
+    Inputs:
+      - config file and generated diagram artifacts.
+      - config mtime updated without changing YAML content.
+
+    Outputs:
+      - second call returns up-to-date and does not invoke dot renderer again.
+    """
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
+
+    import foghorn.utils.config_diagram as cm
+
+    monkeypatch.setattr(
+        cm,
+        "generate_dot_text_from_config_path",
+        lambda _p, **_k: "digraph config_diagram {\n}\n",
+    )
+    monkeypatch.setattr(cm.shutil, "which", lambda _n: "/usr/bin/dot")
+
+    calls = {"n": 0}
+
+    def fake_run(cmd, check=False, stdout=None, stderr=None, text=None):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        out_path = Path(cmd[cmd.index("-o") + 1])
+        out_path.write_bytes(b"\x89PNG\r\n\x1a\nIDEM")
+        return types.SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(cm.subprocess, "run", fake_run)
+
+    ok1, detail1, out1 = ensure_config_diagram_png(config_path=str(cfg_path))
+    assert ok1 is True
+    assert detail1 == "rendered with dot"
+    assert out1 == str(tmp_path / "diagram.png")
+    assert calls["n"] == 2  # light + dark renders
+
+    light_png = tmp_path / "diagram.png"
+    dark_png = tmp_path / "diagram-dark.png"
+    light_mtime_ns_1 = light_png.stat().st_mtime_ns
+    dark_mtime_ns_1 = dark_png.stat().st_mtime_ns
+
+    import os
+    import time
+
+    now = time.time()
+    os.utime(cfg_path, (now + 10, now + 10))
+    time.sleep(1.1)
+
+    ok2, detail2, out2 = ensure_config_diagram_png(config_path=str(cfg_path))
+    assert ok2 is True
+    assert detail2 == "up-to-date"
+    assert out2 == str(tmp_path / "diagram.png")
+    assert calls["n"] == 2
+    assert light_png.stat().st_mtime_ns == light_mtime_ns_1
+    assert dark_png.stat().st_mtime_ns == dark_mtime_ns_1
+
+
 def test_config_diagram_endpoint_regenerates_when_stale_and_dot_available(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

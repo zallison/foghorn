@@ -35,7 +35,7 @@ def parse_ip(
         return None
 
 
-@registered_lru_cached()
+@registered_lru_cached(maxsize=4096)
 def parse_network(
     value: object,
     *,
@@ -70,6 +70,26 @@ def parse_network(
         return None
 
 
+@registered_lru_cached(maxsize=131072)
+def _ip_in_network(
+    ip: ipaddress._BaseAddress,
+    network: ipaddress._BaseNetwork,
+) -> bool:
+    """Brief: Cached IP membership check for one parsed network.
+
+    Inputs:
+      - ip: IPv4Address or IPv6Address instance.
+      - network: Parsed IPv4Network or IPv6Network.
+
+    Outputs:
+      - bool: True when the IP is contained in the network.
+    """
+    try:
+        return ip in network
+    except Exception:
+        return False
+
+
 def ip_in_any_network(
     ip: ipaddress._BaseAddress,
     networks: Iterable[ipaddress._BaseNetwork],
@@ -84,11 +104,8 @@ def ip_in_any_network(
       - bool: True when ip is in any network.
     """
     for net in networks or []:
-        try:
-            if ip in net:
-                return True
-        except Exception:
-            continue
+        if _ip_in_network(ip, net):
+            return True
     return False
 
 
@@ -109,6 +126,6 @@ def ip_string_in_cidrs(ip_str: str, cidrs: Iterable[str]) -> bool:
         net = parse_network(cidr, strict=False)
         if net is None:
             continue
-        if ip_obj in net:
+        if _ip_in_network(ip_obj, net):
             return True
     return False
