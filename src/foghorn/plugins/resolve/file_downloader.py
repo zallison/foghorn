@@ -198,6 +198,7 @@ class FileDownloader(BasePlugin):
         self._validated_list_meta: dict[str, dict[str, float | int]] = {}
         self._stop_event: threading.Event | None = None
         self._background_thread: threading.Thread | None = None
+        self._run_startup_check_on_post_setup: bool = False
 
         # Merge URLs from url_files early so callers see a unified, sorted list
         # immediately after construction.
@@ -296,7 +297,7 @@ class FileDownloader(BasePlugin):
         # Initial fetch at startup; failures propagate to caller so that
         # abort_on_failure semantics can be enforced by the setup runner.
         if self._should_delay_startup_check():
-            self._start_delayed_startup_check()
+            self._run_startup_check_on_post_setup = True
         else:
             self._maybe_run(force=True)
 
@@ -351,9 +352,23 @@ class FileDownloader(BasePlugin):
             name="FileDownloader-refresh",
             daemon=True,
         )
-        logger.info("FileDownloader starting background refresh thread")
+        logger.info("Starting FileDownloader background refresh thread")
         t.start()
         self._background_thread = t
+
+    def post_setup(self) -> None:
+        """Brief: Run deferred startup check after the global setup phase completes.
+
+        Inputs:
+          - None.
+
+        Outputs:
+          - None.
+        """
+        if not self._run_startup_check_on_post_setup:
+            return
+        self._run_startup_check_on_post_setup = False
+        self._start_delayed_startup_check()
 
     # Internal helpers
     def _maybe_run(self, force: bool) -> None:
@@ -406,7 +421,7 @@ class FileDownloader(BasePlugin):
         return True
 
     def _start_delayed_startup_check(self) -> None:
-        """Brief: Run startup refresh in a background thread after a short delay.
+        """Brief: Run startup refresh in a background thread after setup is complete.
 
         Inputs:
           - None.
@@ -416,7 +431,6 @@ class FileDownloader(BasePlugin):
         """
 
         def _delayed() -> None:
-            time.sleep(10)
             try:
                 self._maybe_run(force=False)
             except Exception as exc:  # pragma: no cover - defensive
@@ -427,7 +441,7 @@ class FileDownloader(BasePlugin):
             name="FileDownloader-startup-check",
             daemon=True,
         )
-        logger.info("FileDownloader starting delayed startup check thread")
+        logger.info("Starting FileDownloader post-setup startup-check thread")
         t.start()
 
     def _download_all(self, urls: Iterable[str]) -> None:
@@ -465,8 +479,9 @@ class FileDownloader(BasePlugin):
             path_to_url[fpath] = url
             planned.append((url, fpath, fname))
 
+        if planned:
+            logger.info("Checking for updates to (%i) upstream files", len(planned))
         for url, fpath, fname in planned:
-            logger.info("checking for updates: %s", url)
             # Try HEAD for last-modified; fall back to GET
             if self._needs_update(url, fpath):
                 logger.info("Downloading list %s to %s", url, fpath)
@@ -552,7 +567,7 @@ class FileDownloader(BasePlugin):
             pass
 
         try:
-            logger.info("FileDownloader checking upstream (HEAD) for %s", url)
+            logger.info("checking upstream (HEAD) for %s", url)
             res = requests.head(url, timeout=10)
             lm = res.headers.get("Last-Modified")
             if lm:

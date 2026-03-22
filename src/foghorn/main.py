@@ -28,7 +28,11 @@ from .config.config_parser import (
 from .config.logging_config import init_logging
 from .plugins.querylog import BaseStatsStore, load_stats_store_backend
 from .plugins.resolve.base import BasePlugin
-from .plugins.setup import run_setup_plugins, run_shutdown_plugins
+from .plugins.setup import (
+    _SetupDNSResolverContext,
+    run_setup_plugins,
+    run_shutdown_plugins,
+)
 from .main_config_helpers import (
     _apply_cache_overrides_from_config,
     _build_listener_configs,
@@ -259,14 +263,38 @@ def main(argv: List[str] | None = None) -> int:
         logger.error("Plugin setup failed: %s", e)
         return 1
 
-    stats_collector, stats_reporter, stats_persistence_store = (
-        _initialize_statistics_subsystem(
-            cfg=cfg,
-            logging_cfg=logging_cfg,
-            args=args,
-            logger=logger,
+    setup_dns_providers = [
+        plugin
+        for plugin in (plugins or [])
+        if bool(getattr(plugin, "setup_provides_dns", False))
+    ]
+    if setup_dns_providers:
+        with _SetupDNSResolverContext(
+            providers=setup_dns_providers,
+            upstreams=list(upstreams or []) + list(upstream_backups or []),
+            timeout_ms=int(timeout_ms),
+            resolver_mode=str(resolver_mode or "forward"),
+            upstream_max_concurrent=max(1, int(upstream_max_concurrent or 1)),
+            fallback_to_system=True,
+            logger_obj=logger,
+        ):
+            stats_collector, stats_reporter, stats_persistence_store = (
+                _initialize_statistics_subsystem(
+                    cfg=cfg,
+                    logging_cfg=logging_cfg,
+                    args=args,
+                    logger=logger,
+                )
+            )
+    else:
+        stats_collector, stats_reporter, stats_persistence_store = (
+            _initialize_statistics_subsystem(
+                cfg=cfg,
+                logging_cfg=logging_cfg,
+                args=args,
+                logger=logger,
+            )
         )
-    )
 
     # Initialize webserver log buffer (shared with admin HTTP API).
     web_cfg, web_enabled = _resolve_web_config(cfg=cfg, server_cfg=server_cfg)
@@ -801,7 +829,7 @@ def main(argv: List[str] | None = None) -> int:
         else:
             upstream_info = "(recursive mode; no forward upstreams)"
         logger.info(
-            "Resolver mode=%s, upstream_count=%s, timeout=%dms",
+            "Starting Resolver mode=%s, upstream_count=%s, timeout=%dms",
             resolver_mode,
             upstream_info,
             timeout_ms,
@@ -1710,12 +1738,12 @@ def _initialize_statistics_subsystem(
                 stats_persistence_store = None
 
             if stats_persistence_store is None:
-                logger.info(
+                logger.warn(
                     "Statistics persistence not configured; running in memory-only mode",
                 )
             else:
                 logger.info(
-                    "Initialized statistics backend %s",
+                    "Started statistics backend %s",
                     stats_persistence_store.__class__.__name__,
                 )
 
@@ -1787,7 +1815,7 @@ def _initialize_statistics_subsystem(
         if not logging_only_effective:
             try:
                 stats_collector.warm_load_from_store()
-                logger.info("Statistics warm-load from SQLite store completed")
+                logger.info("Started statistics warm-load")
             except (
                 Exception
             ) as exc:  # pragma: no cover - defensive: error-handling or log-only path that is not worth dedicated tests
@@ -1807,7 +1835,7 @@ def _initialize_statistics_subsystem(
         )
         stats_reporter.start()
         logger.info(
-            "Statistics collection enabled (interval=%ds)",
+            "Started statistics collection (interval=%ds)",
             stats_reporter.interval_seconds,
         )
 
