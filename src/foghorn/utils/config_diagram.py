@@ -1502,7 +1502,7 @@ def render_dot(
     else:
         lines.append("    Q -> Cache;")
 
-    lines.append('    Cache -> Resp [label="hit"];')
+    lines.append('    Cache -> Resp [label="hit", constraints="false"];')
     lines.append('    Cache -> Resolver [label="miss"];')
     lines.append("    Resolver -> Upstream;")
 
@@ -1692,7 +1692,7 @@ def render_dot(
 
         for tail in upstream_tails:
             if tail.startswith("RoutedUpstream"):
-                lines.append(f"    Upstream -> {tail} [style=dashed, splines=3];")
+                lines.append(f"    Upstream -> {tail} [style=dashed, splines=4];")
             else:
                 lines.append(f"    Upstream -> {tail};")
 
@@ -2033,6 +2033,24 @@ def _is_stale(input_path: str, output_path: str) -> bool:
     return float(in_stat.st_mtime) > float(out_stat.st_mtime)
 
 
+def _dot_text_matches_existing_file(*, path: str, dot_text: str) -> bool:
+    """Brief: Return True when an existing dot file already matches generated text.
+
+    Inputs:
+      - path: Target dot file path.
+      - dot_text: Newly generated dot text.
+
+    Outputs:
+      - bool: True when `path` exists and its UTF-8 contents equal `dot_text`.
+    """
+
+    try:
+        existing = Path(path).read_text(encoding="utf-8")
+    except Exception:
+        return False
+    return existing == dot_text
+
+
 def _find_dot_cmd() -> str | None:
     """Brief: Locate the GraphViz dot binary.
 
@@ -2211,6 +2229,8 @@ def ensure_config_diagram_png(
 
     if not stale_light and not stale_dark:
         return True, "up-to-date", output_png_path
+    needs_render_light = bool(stale_light)
+    needs_render_dark = bool(stale_dark)
 
     dot_text_light: str | None = None
     dot_text_dark: str | None = None
@@ -2228,18 +2248,24 @@ def ensure_config_diagram_png(
             )
         except Exception as exc:
             return False, f"failed to generate dot text: {exc}", None
-
-        # Best-effort: also write the .dot next to the PNG for debugging.
-        try:
-            Path(output_dot_path).write_text(dot_text_light, encoding="utf-8")
-        except Exception:
-            pass
-
-        ok_light, detail_light = _render_png_with_dot_atomic(
-            dot_text=dot_text_light, output_png_path=output_png_path
+        light_dot_matches = _dot_text_matches_existing_file(
+            path=output_dot_path,
+            dot_text=dot_text_light,
         )
-        if not ok_light:
-            return False, detail_light, None
+        if light_dot_matches and os.path.isfile(output_png_path):
+            needs_render_light = False
+        else:
+            # Best-effort: also write the .dot next to the PNG for debugging.
+            try:
+                Path(output_dot_path).write_text(dot_text_light, encoding="utf-8")
+            except Exception:
+                pass
+
+            ok_light, detail_light = _render_png_with_dot_atomic(
+                dot_text=dot_text_light, output_png_path=output_png_path
+            )
+            if not ok_light:
+                return False, detail_light, None
 
     if stale_dark:
         try:
@@ -2254,20 +2280,35 @@ def ensure_config_diagram_png(
             )
         except Exception as exc:
             return False, f"failed to generate dot text: {exc}", None
-
-        # Best-effort: also write the .dot next to the PNG for debugging.
-        try:
-            Path(str(output_dot_dark_path)).write_text(dot_text_dark, encoding="utf-8")
-        except Exception:
-            pass
-
-        ok_dark, detail_dark = _render_png_with_dot_atomic(
-            dot_text=dot_text_dark, output_png_path=str(output_png_dark_path)
+        dark_dot_matches = _dot_text_matches_existing_file(
+            path=str(output_dot_dark_path),
+            dot_text=dot_text_dark,
         )
-        if not ok_dark:
-            # If the light theme rendered successfully, treat this as best-effort.
-            if not stale_light:
-                return False, detail_dark, None
-            return True, f"rendered light; dark failed: {detail_dark}", output_png_path
+        if dark_dot_matches and os.path.isfile(str(output_png_dark_path)):
+            needs_render_dark = False
+        else:
+            # Best-effort: also write the .dot next to the PNG for debugging.
+            try:
+                Path(str(output_dot_dark_path)).write_text(
+                    dot_text_dark, encoding="utf-8"
+                )
+            except Exception:
+                pass
+
+            ok_dark, detail_dark = _render_png_with_dot_atomic(
+                dot_text=dot_text_dark, output_png_path=str(output_png_dark_path)
+            )
+            if not ok_dark:
+                # If the light theme rendered successfully, treat this as best-effort.
+                if not needs_render_light:
+                    return False, detail_dark, None
+                return (
+                    True,
+                    f"rendered light; dark failed: {detail_dark}",
+                    output_png_path,
+                )
+
+    if not needs_render_light and not needs_render_dark:
+        return True, "up-to-date", output_png_path
 
     return True, "rendered with dot", output_png_path

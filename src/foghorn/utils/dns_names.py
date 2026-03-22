@@ -9,6 +9,36 @@ from __future__ import annotations
 
 from typing import Iterable, List
 
+from foghorn.utils.register_caches import registered_lru_cached
+
+
+@registered_lru_cached(maxsize=16384)
+def _normalize_name_text(
+    text: str,
+    *,
+    lower: bool = True,
+    strip_trailing_dot: bool = True,
+    strip_whitespace: bool = True,
+) -> str:
+    """Brief: Cached core normalizer for DNS name-like strings.
+
+    Inputs:
+      - text: Input string to normalize.
+      - lower: When True, lower-case the result (default True).
+      - strip_trailing_dot: When True, remove a trailing '.' (default True).
+      - strip_whitespace: When True, strip surrounding whitespace (default True).
+
+    Outputs:
+      - str: Normalized name string.
+    """
+    if strip_whitespace:
+        text = text.strip()
+    if strip_trailing_dot:
+        text = text.rstrip(".")
+    if lower:
+        text = text.lower()
+    return text
+
 
 def normalize_name(
     value: object,
@@ -36,14 +66,12 @@ def normalize_name(
         text = str(value)
     except Exception:  # pragma: no cover - defensive
         text = ""
-
-    if strip_whitespace:
-        text = text.strip()
-    if strip_trailing_dot:
-        text = text.rstrip(".")
-    if lower:
-        text = text.lower()
-    return text
+    return _normalize_name_text(
+        text,
+        lower=lower,
+        strip_trailing_dot=strip_trailing_dot,
+        strip_whitespace=strip_whitespace,
+    )
 
 
 def normalize_name_list(values: Iterable[object]) -> List[str]:
@@ -63,6 +91,7 @@ def normalize_name_list(values: Iterable[object]) -> List[str]:
     return out
 
 
+@registered_lru_cached(maxsize=32768)
 def is_suffix_match(name: str, suffix: str) -> bool:
     """Brief: Check whether name matches suffix (exact or subdomain).
 
@@ -80,6 +109,7 @@ def is_suffix_match(name: str, suffix: str) -> bool:
     return name_norm == suffix_norm or name_norm.endswith("." + suffix_norm)
 
 
+@registered_lru_cached(maxsize=65536)
 def is_plain_domain_token(token: str) -> bool:
     """Brief: Validate a plain domain token (Filter list semantics).
 
