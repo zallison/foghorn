@@ -13,7 +13,9 @@ IGNORE_EXTS :=  .yaml .yml .pem .key .cert .srl
 PREFIX ?= ${USER}
 TAG ?= latest
 # Name to use for the container
-CONTAINER_NAME ?= foghorn
+CONTAINER_NAME=foghorn
+# prefix/image_name
+IMAGE_NAME ?= foghorn
 # Location of container config/data.
 CONTAINER_DATA ?= ./.docker
 # Only used if your config.yaml uses LISTEN as a variable
@@ -75,7 +77,7 @@ vars-make: vars-header-Make var-print-IGNORE_EXTS
 
 # Variables for Docker
 .PHONY: vars-docker
-vars-docker: vars-header-Docker var-print-PREFIX var-print-TAG var-print-CONTAINER_DATA var-print-CONTAINER_NAME var-print-LISTEN var-print-LISTEN_PORT var-print-FH_PRIORITY var-print-ADMINPORT var-print-TCPPORT var-print-UDPPORT
+vars-docker: vars-header-Docker var-print-PREFIX var-print-TAG var-print-CONTAINER_DATA var-print-IMAGE_NAME var-print-LISTEN var-print-LISTEN_PORT var-print-FH_PRIORITY var-print-ADMINPORT var-print-TCPPORT var-print-UDPPORT
 	@echo
 
 # Variables for openssl
@@ -282,24 +284,25 @@ docker: docker-build docker-run docker-logs
 .PHONY: docker-build
 docker-build:
 	rsync -qr --exclude='*/__pycache__/*' --delete-during LICENSE.txt ./entrypoint.sh ./src ./pyproject.toml ./Dockerfile ./docker-compose.yaml ./assets ./docs ./scripts docker-build/
-	docker build ./docker-build -t ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker build ./docker-build -t ${PREFIX}/${IMAGE_NAME}:${TAG}
 
 .PHONY: docker-clean
 docker-clean:
-	docker rmi -f ${PREFIX}/${CONTAINER_NAME}:${TAG} || true
+	docker rmi -f ${PREFIX}/${IMAGE_NAME}:${TAG} || true
 	rm -rf docker-build || true
 
 .PHONY: docker-run
 docker-run: docker-build
-	docker rm -f foghorn
+	docker rm -f ${CONTAINER_NAME}
 	docker run -d --net=host --name foghorn -v ${CONTAINER_DATA}:/foghorn/config/ \
         --privileged \
+		--name "${CONTAINER_NAME}" \
 		--label "com.foghorn.priority=${FH_PRIORITY}" \
 		-v /etc/hosts:/etc/hosts:ro \
 		-e LISTEN=${LISTEN} \
 		-e LISTEN_PORT=${LISTEN_PORT} \
         --restart unless-stopped \
-        ${PREFIX}/${CONTAINER_NAME}:${TAG}
+        ${PREFIX}/${IMAGE_NAME}:${TAG}
 
 # Port forwarding
 .PHONY: docker-run-not-host
@@ -307,24 +310,25 @@ docker-run-not-host: docker-build
 	docker rm -f foghorn
 	docker run -d --name foghorn \
         --privileged \
+		--name "${CONTAINER_NAME}" \
 	    -v ${CONTAINER_DATA}:/foghorn/config/ \
 		-p ${UDPPORT}:5335/udp \
 		-p ${TCPPORT}:5335/tcp \
 		-p ${ADMINPORT}:5380/tcp \
 	 	-v /etc/hosts:/etc/hosts:ro \
 		--restart unless-stopped \
-		${PREFIX}/${CONTAINER_NAME}:${TAG}
+		${PREFIX}/${IMAGE_NAME}:${TAG}
 
 .PHONY: docker-logs
 docker-logs:
-	docker logs -f foghorn
+	docker logs -f ${CONTAINER_NAME}
 
 .PHONY: docker-ship
 docker-ship: clean docker-build
-	docker push ${PREFIX}/${CONTAINER_NAME}:${TAG}
+	docker push ${PREFIX}/${IMAGE_NAME}:${TAG}
 
 # ---------------
-# :pypi|Packaging:
+# :pypi:Packaging:
 # ---------------
 
 .PHONY: package-build
@@ -352,34 +356,40 @@ help:
 	@echo "  run              - Execute foghorn --config config/config.yaml using $(VENV)"
 	@echo "  test             - Run pytest with coverage and update README coverage badge"
 	@echo "  schema           - Regenerate assets/config-schema.json"
+
 	@echo "DNSSEC helper:"
 	@echo "  dnssec-sign-zone - Sign a DNS zone file with DNSSEC records (see target for ZONE/INPUT/OUTPUT args)"
 	@echo "DNS UPDATE helpers:"
 	@echo "  gen-tsig-key     - Generate a TSIG key for DNS UPDATE (optional: NAME=dynamic-key.example.com ALGO=hmac-sha256)"
 	@echo "  gen-psk-token    - Generate a PSK token for DNS UPDATE"
+
 	@echo "Build and run containers:"
-	@echo "  docker-build     - Build docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
-	@echo "  docker-clean     - Remove docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
+	@echo "  docker-build     - Build docker image ${PREFIX}/${IMAGE_NAME}:${TAG}"
+	@echo "  docker-clean     - Remove docker image ${PREFIX}/${IMAGE_NAME}:${TAG}"
 	@echo "  docker-logs      - Follow docker container logs"
 	@echo "  docker-run       - Run docker container (ports 53/udp, 53/tcp, 5380/tcp)"
 	@echo "  docker-run-not-host - Run docker container with explicit port mappings instead of --net=host"
 	@echo "  docker           - Docker start to finish: clean → build → run → logs"
+
 	@echo "OpenSSL CA and signed certs:"
 	@echo "  ssl-ca           - Generate only the CA key and certificate under ${KEYDIR} (.crt)"
 	@echo "  ssl-ca-pem       - Generate a PEM-encoded CA certificate ${CA_PEM} for use as a trust anchor"
 	@echo "  ssl-cert         - Generate a CA and server certificate/key pair under ${KEYDIR} for CN=${CNAME} (.crt/.key)"
 	@echo "  ssl-cert-pem     - Generate a combined server PEM (${SERVER_PEM}) containing cert + key"
 	@echo "  ssl-clean-keys   - Remove generated CA and server key/cert files from ${KEYDIR}"
+
 	@echo "Git / GitHub helpers:"
 	@echo "  github-push      - Run clean/tests and push current branch, enforcing a clean git state"
 	@echo "  create-pr        - Create a GitHub PR for the current branch using the GitHub API"
+
 	@echo "Package targets:"
-	@echo "  docker-ship      - Clean, build, and push docker image ${PREFIX}/${CONTAINER_NAME}:${TAG}"
+	@echo "  docker-ship      - Clean, build, and push docker image ${PREFIX}/${IMAGE_NAME}:${TAG}"
 	@echo "  package-build    - Build the Python package into dist/"
 	@echo "  package-publish  - Publish the package to pypi"
 	@echo "  package-publish-dev - Publish the package to testpypi"
 	@echo "  ui-bundle        - Build embedded single-file admin UI JS bundle for CDN use"
 	@echo "  ui-bundle-runtime - Build runtime-only admin UI JS bundle (no embedded HTML/CSS)"
+
 	@echo "Variable inspection:"
 	@echo "  vars-print-all-all - Print all make variables (debug/introspection)"
 	@echo "  vars-print-all     - Print grouped Foghorn-related variables (make/docker/SSL/Python)"
